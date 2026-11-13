@@ -11,6 +11,13 @@
 export interface AdapterCapability {
   /** `int / int` returns an integer, dropping the fraction (7 / 2 = 3). */
   integerDivisionTruncates: boolean
+  /**
+   * A `table` model with an enforced contract and `on_table_exists='replace'`
+   * is replaced atomically. False = `create or replace` then `insert` as two
+   * statements (readers see an empty table), and `on_table_exists='drop'`
+   * leaves no table during the build. Undefined = not established.
+   */
+  contractTableReplaceAtomic?: boolean
   /** Documentation backing the entries above. */
   sources: string[]
 }
@@ -26,7 +33,14 @@ export const ADAPTER_CAPABILITIES: Record<string, AdapterCapability> = {
   },
   trino: {
     integerDivisionTruncates: true,
-    sources: ["https://trino.io/docs/current/functions/math.html"],
+    contractTableReplaceAtomic: false,
+    sources: [
+      "https://trino.io/docs/current/functions/math.html",
+      // create_table_as with an enforced contract: `create or replace table` then `insert`;
+      // on_table_exists='drop' drops the table before building it.
+      "https://github.com/starburstdata/dbt-trino/blob/master/dbt/include/trino/macros/adapters.sql",
+      "https://github.com/starburstdata/dbt-trino/blob/master/dbt/include/trino/macros/materializations/table.sql",
+    ],
   },
   athena: {
     // Athena SQL runs on Trino.

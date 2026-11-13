@@ -258,3 +258,23 @@ describe("unit tests that cannot exercise the model", () => {
     expect(detectUnitTestFixtures(file, yml("[]"), yml("[]"))).toHaveLength(0)
   })
 })
+
+describe("dialect packs apply to their own engine", () => {
+  const file = { path: "models/marts/fct_orders.sql", status: "added" as const }
+  const sql = "select count(distinct user_id) from `proj`.`ds`.`events_fct`"
+  const packs = (ctx?: { dialect: string; dialectKnown: boolean }) =>
+    evaluateCatalog(file, sql, [sql], [], DEFAULT_RUBRIC, ctx)
+      .map((f) => f.title)
+      .filter((t) => /: (BigQuery|Snowflake|Redshift|Databricks):/.test(t))
+
+  test("a DuckDB or Snowflake project gets no BigQuery advice", () => {
+    expect(packs({ dialect: "duckdb", dialectKnown: true })).toEqual([])
+    expect(packs({ dialect: "snowflake", dialectKnown: true })).toEqual([])
+  })
+
+  test("a BigQuery project, or an unknown engine, keeps it", () => {
+    expect(packs({ dialect: "bigquery", dialectKnown: true }).length).toBeGreaterThan(0)
+    expect(packs({ dialect: "snowflake", dialectKnown: false }).length).toBeGreaterThan(0)
+    expect(packs().length).toBeGreaterThan(0)
+  })
+})

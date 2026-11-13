@@ -16,6 +16,8 @@ import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope,
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
+import { selectListNames } from "./select-list"
+import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
 
 /**
@@ -144,6 +146,8 @@ export interface ReviewRunner {
   ): Promise<
     { exposures: Array<{ name: string; type?: string }>; contractEnforced: boolean; contractColumns: string[] } | undefined
   >
+  /** A model's or snapshot's merged dbt `config` from the manifest (project + yml + inline). */
+  modelConfig?(name: string): Promise<Record<string, unknown> | undefined>
   /** Column-lineage edges for a query: source `"table"."col"` → target output column. */
   columnLineage?(sql: string, dialect: string): Promise<Array<{ source: string; target: string }>>
   /** Classify a set of column names as PII (Email/SSN/…) with confidence + masking. */
@@ -622,13 +626,19 @@ async function columnBreakageLane(
   ]
 }
 
-/** A query's output columns from column lineage (lowercased); empty when unknown or `*`. */
+/**
+ * A query's output columns (lowercased); empty when unknown or `*`. Column
+ * lineage gives columns that read a source column; the final SELECT's own
+ * aliases add literal and function-only columns lineage can't see.
+ */
 async function outputColumns(runner: ReviewRunner, sql: string, dialect: string): Promise<Set<string>> {
   if (!runner.columnLineage) return new Set()
   const cols = (await runner.columnLineage(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean)
   // A star in the output means the list is incomplete: report nothing rather than guess.
   if (cols.some((c) => c === "*" || c.endsWith(".*"))) return new Set()
-  return new Set(cols)
+  // `*` in the final SELECT: keep lineage's own answer (it expands stars it can resolve).
+  const named = selectListNames(sql)
+  return new Set([...cols, ...(named ?? [])])
 }
 
 /** Output columns added and removed by the change (both empty when either side is unknown). */
@@ -770,6 +780,35 @@ async function consumerListLane(
     )
   }
   return out
+}
+
+/** Incremental / microbatch / table-replace semantics (incremental-semantics.ts). */
+async function incrementalSemanticsLane(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+  dialectKnown: boolean,
+  prText: string,
+  sliceVars: string[],
+): Promise<Finding[]> {
+  const { file, newSql, oldSql } = ctx
+  if (!newSql || file.status === "deleted") return []
+  const model = modelNameFromPath(file.path)
+  const consumers = await runner.modelConsumers?.(model)
+  return incrementalFindings({
+    file,
+    model,
+    newSql,
+    oldSql: hasOldSide(file) ? oldSql : undefined,
+    manifestConfig: await runner.modelConfig?.(model),
+    added: splitDiff(file.diff).added,
+    dialect,
+    dialectKnown,
+    prText,
+    hasExposures: !!consumers?.exposures.length,
+    sliceVars,
+    columnDelta: () => columnDelta(ctx, runner, dialect),
+  })
 }
 
 /**
@@ -1428,6 +1467,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
+  const prText = [input.prTitle, input.prBody].filter(Boolean).join("\n")
   // New content of the PR's changed schema files, read once and only if a lane asks.
   let ymlText: Promise<string[]> | undefined
   const changedYmlText = () =>
@@ -1520,6 +1560,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric, { dialect, dialectKnown: !!input.dialectKnown }))
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
+    if (lanes.has("dbt_patterns") || lanes.has("materialization")) {
+      tasks.push(incrementalSemanticsLane(ctx, input.runner, dialect, !!input.dialectKnown, prText, input.config.incrementalSliceVars))
+    }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its
     // own concerns, not just dbt_patterns, so it isn't silently dropped on a tier that
     // enables those concerns without dbt_patterns.
@@ -1560,6 +1603,24 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     all.push(await prLevel("topology_equivalence", topologyEquivalenceLane(modelFiles, input.runner, getCompiled, dialect)))
   }
 
+  // Snapshot definitions: a changed `check_cols`/strategy or query on an existing snapshot.
+  if (lanes.has("dbt_patterns") || lanes.has("materialization")) {
+    const snapshots = reviewable.filter((f) => f.kind === "snapshot" && f.status !== "deleted" && f.status !== "added")
+    const sets = await Promise.all(
+      snapshots.map(async (file) => {
+        try {
+          const [oldSql, newSql] = await Promise.all([getContent?.(file.oldPath ?? file.path, "old"), getContent?.(file.path, "new")])
+          if (!newSql) return []
+          return snapshotFindings({ file, model: modelNameFromPath(file.path), newSql, oldSql, prText })
+        } catch (err) {
+          failedFile(file, err)
+          return []
+        }
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+  }
+
   // schema.yml-level detectors (test removal) — run on changed YAML files
   // regardless of tier, since deleting a guardrail test is always worth flagging.
   // Pass old + new content when available so the detector diffs structural YAML
@@ -1593,6 +1654,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         return [
           ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
           ...detectUnitTestFixtures(file, oldContent, newContent),
+          ...snapshotYmlFindings(file, oldContent, newContent),
         ]
       }),
     )

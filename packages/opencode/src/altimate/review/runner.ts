@@ -225,7 +225,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // it unless the schema came from a complete catalog.json.
           hasTables
             ? asArray(data.validation?.errors)
-                .filter((e: any) => opts.schemaContext || e?.category?.type !== "TableNotFound")
+                .filter((e: any) => opts.schemaContext || e?.kind?.type !== "TableNotFound")
                 .map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
             : [],
         )
@@ -438,6 +438,19 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         return { exposures, contractEnforced, contractColumns }
       } catch (err) {
         fail("modelConsumers", err)
+        return undefined
+      }
+    },
+
+    async modelConfig(name: string) {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        const hit = Object.entries<any>(raw?.nodes ?? {}).find(
+          ([id, n]) => (id.startsWith("model.") || id.startsWith("snapshot.")) && n?.name === name,
+        )
+        return hit?.[1]?.config as Record<string, unknown> | undefined
+      } catch (err) {
+        fail("modelConfig", err)
         return undefined
       }
     },

@@ -216,7 +216,8 @@ describe("column lineage and consumers from the manifest", () => {
 })
 
 describe("validation against a partial schema", () => {
-  const notFound = { data: { validation: { errors: [{ message: "Table 'stg' not found", category: { type: "TableNotFound", table: "stg" } }] } } }
+  // The engine's real shape: the error type is under `kind`.
+  const notFound = { data: { validation: { errors: [{ code: "E001", message: "Table 'stg' not found", kind: { type: "TableNotFound", table: "stg" } }] } } }
 
   test("manifest-only schema: an undocumented table is not reported as missing", async () => {
     await using tmp = await tmpdir()

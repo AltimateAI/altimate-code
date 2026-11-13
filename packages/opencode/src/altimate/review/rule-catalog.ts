@@ -139,6 +139,19 @@ function gatedBody(rule: Rule, ctx: CatalogContext | undefined): string | null {
   return rule.portabilityBody?.replace("{dialect}", ctx.dialect) ?? null
 }
 
+const PACK_ENGINE: Record<string, string> = {
+  BigQuery: "bigquery",
+  Snowflake: "snowflake",
+  Redshift: "redshift",
+  Databricks: "databricks",
+}
+
+/** The engine a dialect-pack rule is about (from its `Engine:` title prefix), if any. */
+export function ruleEngine(rule: Rule): string | undefined {
+  const m = /^(BigQuery|Snowflake|Redshift|Databricks):/.exec(rule.title)
+  return m ? PACK_ENGINE[m[1]] : undefined
+}
+
 /** Evaluate the catalog against a changed file. */
 export function evaluateCatalog(
   file: ChangedFile,
@@ -152,6 +165,10 @@ export function evaluateCatalog(
   const model = modelName(file.path)
   const matched: { rule: Rule; finding: Finding }[] = []
   for (const rule of CATALOG) {
+    // A dialect pack (BigQuery partition filters, Snowflake VARIANT…) only
+    // applies to its own engine once the project's engine is known.
+    const engine = ruleEngine(rule)
+    if (engine && ctx?.dialectKnown && ctx.dialect.toLowerCase() !== engine) continue
     if (!ruleMatches(rule, input)) continue
     const body = gatedBody(rule, ctx)
     if (body === null) continue
