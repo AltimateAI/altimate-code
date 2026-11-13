@@ -150,7 +150,7 @@
         "altimate-dbt": "./bin/altimate-dbt",
       },
       "dependencies": {
-        "@altimateai/dbt-integration": "^0.3.17",
+        "@altimateai/dbt-integration": "^0.3.18",
       },
       "devDependencies": {
         "@tsconfig/bun": "catalog:",
@@ -657,7 +657,7 @@
 
     "@altimateai/altimate-core-win32-x64-msvc": ["@altimateai/altimate-core-win32-x64-msvc@0.9.0", "", { "os": "win32", "cpu": "x64" }, "sha512-MoELhLPzJGAxJMtL7C/g/gj464I9pbSmfJ6IamhFwsyz7nfUrKOkAnixVXuQrLEJ9I+sVZJuPMq2H1HUCkpOwA=="],
 
-    "@altimateai/dbt-integration": ["@altimateai/dbt-integration@0.3.17", "", { "dependencies": { "@altimateai/altimate-core": "0.5.0", "node-abort-controller": "^3.1.1", "node-fetch": "^3.3.2", "semver": "^7.6.3", "yaml": "^2.5.0" } }, "sha512-CbvI/NVv6fYbb7Tt4itLIh2L8wNVwBbLwCUrlDKBzRqLVn9HE9MD/Ml9oLfBuau7BY60SiDxZc8TE7uHidmMtQ=="],
+    "@altimateai/dbt-integration": ["@altimateai/dbt-integration@0.3.18", "", { "dependencies": { "@altimateai/altimate-core": "0.5.0", "node-abort-controller": "^3.1.1", "node-fetch": "^3.3.2", "semver": "^7.6.3", "yaml": "^2.5.0" } }, "sha512-3fUajiWUYxUOKb+w39+kegyu+xGhTw6bzQesNKIIirmiBdz2ZXWaj3kxsMt5wmZBax2v0QgdcLVBUzkRrZGElA=="],
 
     "@altimateai/dbt-tools": ["@altimateai/dbt-tools@workspace:packages/dbt-tools"],
 
