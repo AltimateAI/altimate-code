@@ -108,7 +108,7 @@ Options:
 
 | Flag | Description |
 |------|-------------|
-| `--base <ref>` | Base git ref. Defaults to the pull request's target branch in CI (GitHub `pull_request.base.ref` or `GITHUB_BASE_REF`, GitLab `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`), else the remote default branch. Always reduced to the merge-base with the head, so commits the base gained after the PR branched are never reviewed. In CI, a target branch that is not fetched is an error (use `fetch-depth: 0`). |
+| `--base <ref>` | Base git ref. Defaults to the pull request's target branch in CI (GitHub `pull_request.base.ref` or `GITHUB_BASE_REF`, GitLab `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`), else the remote default branch. Always reduced to the merge-base with the head, so commits the base gained after the PR branched are never reviewed. In CI, a shallow checkout is handled: the target branch is fetched and the history deepened until the merge-base is found. If that fails (no `origin`, no access), the review stops with an error rather than diffing against another branch. |
 | `--head <ref>` | Head git ref. Omit to review the working tree. |
 | `--manifest <path>` | Path to the compiled `manifest.json`. When omitted, the reviewer walks up from the current directory to find the nearest `dbt_project.yml` and uses its adjacent `target/manifest.json`; the discovered path is logged to stderr. |
 | `--mode comment\|gate` | `comment` never blocks; `gate` exits non-zero on `REQUEST_CHANGES`. |
@@ -203,7 +203,7 @@ jobs:
 
 | Input | How to produce it | Unlocks |
 |---|---|---|
-| Full git history of the PR's target branch | `actions/checkout` with `fetch-depth: 0` | Correct base: the diff starts at the merge-base with the PR's target branch. A target branch that is not fetched is an error, never a silent fallback to `main`. |
+| The PR's target branch and the merge-base | Fetched automatically from `origin` when the checkout is shallow; `fetch-depth: 0` avoids the extra fetches | Correct base: the diff starts at the merge-base with the PR's target branch. When it can't be fetched, the review stops with an error, never a silent fallback to `main`. |
 | `target/manifest.json` | `dbt compile` (or `dbt parse` for lint + lineage only) | Blast radius, lineage breakage, tiering. Without it the run is lint-only. |
 | `target/compiled/…` | `dbt compile` | Engine checks on the head (lint, grade, PII, grain). |
 | `target-base/compiled/…` | Compile the base ref into `target-base/` (below) | Equivalence proofs and column-breakage for modified models. |
@@ -296,6 +296,12 @@ rubric:
   rules) or `ai`. Only `engine` findings count toward REQUEST_CHANGES. A pattern
   rule you trust can be allowed to block by naming its id in
   `rubric.blockingRules`. The advisory AI lane never blocks.
+- **Upgrading a `gate` setup.** Before this policy, any critical finding in a
+  `blockOn` category could block, including pattern rules such as the regex
+  PII check. Now pattern-rule findings comment but don't block. To keep a
+  pattern rule blocking, add its id to `rubric.blockingRules`. A blocking
+  review is dismissed only by a later run that completed: when an engine call
+  or a file failed, the earlier block stays.
 
 ### What the PR comment shows
 
@@ -311,7 +317,14 @@ rubric:
   fingerprint, so a push does not repeat findings already on the PR, and a
   non-blocking rerun with nothing new only updates the summary.
 - **PII:** flagged only for PII columns the change newly exposes, not for
-  columns the base already surfaced.
+  columns the base already surfaced. A model the PII check could not analyse is
+  listed as not fully verified.
+- **Failures are never a clean pass:** if an engine check throws, the comment
+  names it and the verdict is at most COMMENT, never APPROVE (envelope
+  `engineErrors`). A failure on one file marks that file unverified and the rest
+  of the PR is still reviewed.
+- **The gate clears itself:** when a rerun no longer blocks, the earlier blocking
+  altimate review is dismissed (needs `pull-requests: write`).
 
 ### Risk-tier path tokens
 

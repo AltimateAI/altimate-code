@@ -194,7 +194,8 @@ export const ReviewCommand = cmd({
                 `Posted review to ${where}` +
                   (r.inlineFellBack ? " (inline comments fell back to summary-only)" : "") +
                   (r.inlineSkippedAsPosted ? ` (${r.inlineSkippedAsPosted} inline already on the PR)` : "") +
-                  (r.reviewSkipped ? " (summary updated; no new review needed)" : ""),
+                  (r.reviewSkipped ? " (summary updated; no new review needed)" : "") +
+                  (r.dismissedReviews ? ` (dismissed ${r.dismissedReviews} earlier blocking review(s))` : ""),
               )
             }
           }

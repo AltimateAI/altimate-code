@@ -101,6 +101,8 @@ export interface GradeResult {
 export interface CheckResult {
   issues?: Array<{ rule: string; message: string; line?: number; severity?: string; category?: string }>
   piiColumns?: string[]
+  /** Core's PII pass could not parse the SQL: `piiColumns` is unknown, not empty. */
+  piiAbstained?: boolean
   /**
    * True when the native core lint actually ran (parsed the SQL via the AST),
    * even if it found zero issues. Distinguishes "clean SQL" from "core
@@ -118,7 +120,10 @@ export interface ReviewRunner {
   grade(sql: string, dialect: string): Promise<GradeResult>
   check(sql: string, dialect: string, baseSql?: string): Promise<CheckResult>
   equivalence(oldSql: string, newSql: string, dialect?: string): Promise<EquivalenceResult>
-  detectPii(sql: string, dialect: string): Promise<{ columns: string[] }>
+  /** `abstained`: the PII pass could not analyse the SQL, so `columns` is unknown. */
+  detectPii(sql: string, dialect: string): Promise<{ columns: string[]; abstained?: boolean }>
+  /** Engine calls that threw during this review (method, first reason, count). */
+  failures?(): Array<{ method: string; reason: string; count: number }>
   /**
    * Lexical scan (reserved-word aliases + dialect operators) — the curated lists
    * and detection live in the compiled core; this passes raw added diff lines.
@@ -1147,35 +1152,55 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   if (input.runner.manifestAvailable) {
     anyManifest = await input.runner.manifestAvailable().catch(() => false)
   }
+  // PR-level lanes (across files) that threw: reported with the engine errors.
+  const laneErrors: Array<{ method: string; reason: string; count: number }> = []
+  const prLevel = (method: string, lane: Promise<Finding[]>) =>
+    lane.catch((err) => {
+      laneErrors.push({ method, reason: (err instanceof Error ? err.message : String(err)).slice(0, 200), count: 1 })
+      return [] as Finding[]
+    })
+  const failedFile = (file: { path: string }, err: unknown) =>
+    unverified.push({
+      path: file.path,
+      reason: `review failed for this file: ${(err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 160)}`,
+    })
   await Promise.all(
     modelFiles.map(async (file) => {
-      const model = modelNameFromPath(file.path)
-      // For renames the previous content lives at oldPath, not the new path.
-      const oldRef = file.oldPath ?? file.path
-      const withOld = hasOldSide(file)
-      const [newSql, oldSql, compiledNew, compiledOld] = await Promise.all([
-        file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
-        withOld ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
-        file.status !== "deleted" ? getCompiled?.(file.path, "new") : Promise.resolve(undefined),
-        withOld ? getCompiled?.(oldRef, "old") : Promise.resolve(undefined),
-      ])
-      // Engine lanes need dbt-compiled SQL. Raw SQL is used only when it holds
-      // no Jinja: the AST engine reads `{{ config() }}` as an injection attempt
-      // and a mixed raw-vs-compiled pair can never be proven equivalent, so a
-      // Jinja model without compiled output is marked unverified instead of
-      // producing warnings about its template syntax. The dbt-patterns lane
-      // always uses raw (it needs the Jinja).
-      const engineNewSql = compiledNew ?? (file.kind === "model_sql" && hasJinja(newSql) ? undefined : newSql)
-      const engineOldSql = compiledOld ?? (file.kind === "model_sql" && hasJinja(oldSql) ? undefined : oldSql)
-      if (file.status !== "deleted" && newSql && !engineNewSql)
-        unverified.push({ path: file.path, reason: "no compiled SQL for the head (run dbt compile)" })
-      else if (withOld && oldSql && !engineOldSql)
-        unverified.push({ path: file.path, reason: "no compiled SQL for the base (compile the base into target-base)" })
-      const impact = await input.runner.impact(model)
-      if (impact.hasManifest) anyManifest = true
-      const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect)).columns : []
-      const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
-      ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
+      try {
+        const model = modelNameFromPath(file.path)
+        // For renames the previous content lives at oldPath, not the new path.
+        const oldRef = file.oldPath ?? file.path
+        const withOld = hasOldSide(file)
+        const [newSql, oldSql, compiledNew, compiledOld] = await Promise.all([
+          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+          withOld ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+          file.status !== "deleted" ? getCompiled?.(file.path, "new") : Promise.resolve(undefined),
+          withOld ? getCompiled?.(oldRef, "old") : Promise.resolve(undefined),
+        ])
+        // Engine lanes need dbt-compiled SQL. Raw SQL is used only when it holds
+        // no Jinja: the AST engine reads `{{ config() }}` as an injection attempt
+        // and a mixed raw-vs-compiled pair can never be proven equivalent, so a
+        // Jinja model without compiled output is marked unverified instead of
+        // producing warnings about its template syntax. The dbt-patterns lane
+        // always uses raw (it needs the Jinja).
+        const engineNewSql = compiledNew ?? (file.kind === "model_sql" && hasJinja(newSql) ? undefined : newSql)
+        const engineOldSql = compiledOld ?? (file.kind === "model_sql" && hasJinja(oldSql) ? undefined : oldSql)
+        if (file.status !== "deleted" && newSql && !engineNewSql)
+          unverified.push({ path: file.path, reason: "no compiled SQL for the head (run dbt compile)" })
+        else if (withOld && oldSql && !engineOldSql)
+          unverified.push({ path: file.path, reason: "no compiled SQL for the base (compile the base into target-base)" })
+        const impact = await input.runner.impact(model)
+        if (impact.hasManifest) anyManifest = true
+        const piiRes = engineNewSql ? await input.runner.detectPii(engineNewSql, dialect) : { columns: [] }
+        if (piiRes.abstained) unverified.push({ path: file.path, reason: "the PII check could not analyse this model" })
+        const pii = piiRes.columns
+        const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
+        ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
+      } catch (err) {
+        // One file's failure (unreadable content, an engine crash) degrades that
+        // file only; it must not abort the whole review.
+        failedFile(file, err)
+      }
     }),
   )
 
@@ -1327,20 +1352,32 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     if (lanes.has("semantic_change") || lanes.has("dbt_patterns")) {
       tasks.push(structuralChangeLane(ctx, input.runner))
     }
-    all.push(...(await Promise.all(tasks)))
+    // A lane that throws drops only its own findings for this file, recorded
+    // as unverified — never the whole review.
+    let laneFailed = false
+    const settled = await Promise.all(
+      tasks.map((t) =>
+        t.catch((err) => {
+          if (!laneFailed) failedFile(ctx.file, err)
+          laneFailed = true
+          return [] as Finding[]
+        }),
+      ),
+    )
+    all.push(...settled)
   }
 
   // PR-level: cross-model sibling filter-consistency (divergent filters on a
   // shared upstream across the changed models).
   if (lanes.has("semantic_change")) {
-    all.push(await siblingConsistencyLane([...ctxByPath.values()], input.runner))
+    all.push(await prLevel("sibling_consistency", siblingConsistencyLane([...ctxByPath.values()], input.runner)))
   }
 
   // PR-level: topology-aware equivalence for merge refactors (N models deleted +
   // 1 added that supersedes them). Per-model equivalence can't see these because
   // the new model has no 1:1 base. Advisory only (capped at warning).
   if (lanes.has("semantic_change")) {
-    all.push(await topologyEquivalenceLane(modelFiles, input.runner, getCompiled, dialect))
+    all.push(await prLevel("topology_equivalence", topologyEquivalenceLane(modelFiles, input.runner, getCompiled, dialect)))
   }
 
   // schema.yml-level detectors (test removal) — run on changed YAML files
@@ -1393,7 +1430,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       [...ctxByPath.values()].map(async (ctx) => {
         if (!ctx.engineNewSql || ctx.file.status === "deleted") return
         // Cache hit: qualityLane already ran this exact check.
-        const cr = await input.runner.check(ctx.engineNewSql, dialect, ctx.engineOldSql)
+        const cr = await input.runner
+          .check(ctx.engineNewSql, dialect, ctx.engineOldSql)
+          .catch(() => ({ ran: false }) as CheckResult)
         if (cr.ran) coreRanFiles.add(ctx.file.path)
       }),
     )
@@ -1536,7 +1575,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // undecidable finding does not make the whole run lint-only; those findings
   // carry their own `degraded` flag and are counted separately in the summary.
   const degraded = runDegraded
+  const engineErrors = [...(input.runner.failures?.() ?? []), ...laneErrors]
   const envelope = buildEnvelope({
+    engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
     policy: input.policy,
     findings,

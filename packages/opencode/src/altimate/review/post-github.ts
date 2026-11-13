@@ -59,13 +59,31 @@ export interface PostResult {
   /** True when no review was submitted: nothing new to say and a previous
    *  non-blocking altimate review already exists (the summary comment was updated). */
   reviewSkipped?: boolean
+  /** Earlier blocking altimate reviews dismissed because this run no longer blocks. */
+  dismissedReviews?: number
 }
 
 /** Headline of a review this bot posted (see verdictHeadline). */
+/** True when no engine call and no file failed, so missing findings mean "fixed", not "not checked". */
+export function runCompleted(env: VerdictEnvelope): boolean {
+  if (env.engineErrors?.length) return false
+  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith("review failed for this file"))
+}
+
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
-export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarget): Promise<PostResult> {
-  const octo = new Octokit({ auth: target.token })
+/** The Octokit surface the poster uses; injectable so the posting rules
+ *  (dedup, dismissal, skip) are testable without the network. */
+export type GitHubClient = Pick<Octokit, "paginate"> & {
+  rest: Pick<Octokit["rest"], "issues" | "pulls">
+}
+
+export async function postGitHubReview(
+  env: VerdictEnvelope,
+  target: GitHubTarget,
+  client?: GitHubClient,
+): Promise<PostResult> {
+  const octo = client ?? new Octokit({ auth: target.token })
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
 
@@ -99,19 +117,46 @@ export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarge
   // ignores line numbers) is not posted again on the next push.
   let posted = new Set<string>()
   let priorBotReview = false
+  let staleBlocking: number[] = []
   try {
     const [reviewComments, reviews] = await Promise.all([
       octo.paginate(octo.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 }),
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    priorBotReview = reviews.some((r) => BOT_REVIEW_RE.test(r.body ?? ""))
+    const botReviews = reviews.filter((r) => BOT_REVIEW_RE.test(r.body ?? ""))
+    priorBotReview = botReviews.length > 0
+    staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
   } catch {
     /* listing failed: post everything rather than nothing */
   }
   const comments = inlineComments(env, posted)
   const withLine = env.findings.filter((f) => typeof f.startLine === "number").length
   result.inlineSkippedAsPosted = withLine - comments.length
+
+  // Gate lifecycle: when this run no longer blocks, an earlier blocking
+  // altimate review would keep the PR blocked forever. Dismiss it, pointing at
+  // the new verdict. (Requires `pull-requests: write`; a failure is non-fatal.)
+  // Only a run that actually completed may clear a block: when an engine call
+  // or a file failed, the blocking finding may simply not have been produced.
+  if (event === "COMMENT" && staleBlocking.length && runCompleted(env)) {
+    let dismissed = 0
+    for (const id of staleBlocking) {
+      try {
+        await octo.rest.pulls.dismissReview({
+          owner,
+          repo,
+          pull_number: prNumber,
+          review_id: id,
+          message: `Superseded by a newer altimate review: ${reviewBody}`,
+        })
+        dismissed++
+      } catch {
+        /* keep going; the summary still shows the current verdict */
+      }
+    }
+    result.dismissedReviews = dismissed
+  }
 
   // Nothing new inline, not blocking, and the PR already has an altimate
   // review: the updated summary comment says it all; another "Reviewed with
