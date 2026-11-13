@@ -1152,6 +1152,8 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVar
  * row per extra value lands; a `unique_key` missing a test column merges rows the
  * test treats as distinct.
  */
+const TIME_PARTITION_COLUMN = /(^|_)(date|day|week|month|quarter|year|period|hour|ts|time|timestamp)(_|$)|_at$/i
+
 async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.modelConfig || !runner.declaredUniqueKeys || ctx.file.status === "deleted") return []
   const model = modelNameFromPath(ctx.file.path)
@@ -1164,10 +1166,20 @@ async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner): P
   if (!uk.length || !declared.length) return []
   const same = (k: string[]) => k.length === uk.length && k.every((c) => uk.includes(c.toLowerCase()))
   if (declared.some(same)) return []
+  // A merge key that is a declared key plus date/partition columns (`block_month`,
+  // `effective_date`) is the common pruning pattern; those columns don't change which rows match.
+  const timeOnlyExtra = (k: string[]) => {
+    const lk = k.map((c) => c.toLowerCase())
+    return lk.every((c) => uk.includes(c)) && uk.filter((c) => !lk.includes(c)).every((c) => TIME_PARTITION_COLUMN.test(c))
+  }
+  if (declared.some(timeOnlyExtra)) return []
+  // A wider merge key only duplicates rows if an extra column changes for an existing row;
+  // a narrower or different key can collapse distinct rows into one.
+  const wider = declared.some((k) => k.every((c) => uk.includes(c.toLowerCase())))
   const tests = declared.map((k) => `[${k.join(", ")}]`).join(", ")
   return [
     makeFinding({
-      severity: "warning",
+      severity: wider ? "suggestion" : "warning",
       category: "materialization",
       title: `${model}: incremental unique_key differs from the declared uniqueness test`,
       body:

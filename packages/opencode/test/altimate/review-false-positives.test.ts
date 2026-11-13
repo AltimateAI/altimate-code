@@ -247,6 +247,12 @@ describe("incremental unique_key vs the declared uniqueness test", () => {
     expect(await review("id", [["ID"]])).toHaveLength(0)
     expect(await review(["a", "b"], [])).toHaveLength(0)
   })
+  test("declared key plus date/partition columns: silent; plus an entity column or a narrower key: reported", async () => {
+    expect(await review(["blockchain", "tx_hash", "evt_index", "block_month"], [["blockchain", "tx_hash", "evt_index"]])).toHaveLength(0)
+    expect(await review(["course_pk", "effective_date"], [["course_pk"]])).toHaveLength(0)
+    expect((await review(["address", "chain_id"], [["address"]]))[0].severity).toBe("suggestion")
+    expect((await review(["date_start", "operator"], [["blockchain", "date_start", "operator"]]))[0].severity).toBe("warning")
+  })
 })
 
 describe("OR in a join condition", () => {
