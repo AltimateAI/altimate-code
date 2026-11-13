@@ -1,9 +1,9 @@
 import z from "zod"
 import fs from "fs"
-import os from "os"
 import path from "path"
 import { parse as parseJsonc, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
+import { resolveEnvVars, resolveProfilesPath } from "../native/connections/dbt-profiles"
 
 // The Power User setting this tool reads: `dbt.deferConfigPerProject`, keyed by the dbt project's path
 // relative to its workspace folder.
@@ -20,11 +20,11 @@ export interface DeferSetting {
 export interface DeferStateResult {
   enabled: boolean
   favorState: boolean
-  /** "local" | "remote" | "none" (no entry for this project) */
+  /** "local" | "remote" | "none" (no entry for this project, or a manifest type this tool does not know) */
   mode: "local" | "remote" | "none"
-  /** Directory holding the manifest to defer to; set only when it can be used. */
+  /** Directory holding the manifest to defer to; set whenever the configured local one can be used, also while defer is off. */
   stateDir?: string
-  /** Why defer is configured on but cannot be applied. */
+  /** Why the configured defer cannot be used: no usable state directory, remote mode, an unknown manifest type. */
   reason?: string
   /** The settings key that matched, relative to the workspace folder. */
   settingsKey?: string
@@ -51,6 +51,8 @@ function readSettings(file: string): Record<string, unknown> | undefined {
   const errors: ParseError[] = []
   // .vscode/settings.json allows comments and trailing commas.
   const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
+  // A file that does not parse cannot be trusted to say defer is on.
+  if (errors.length > 0) return undefined
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
   return parsed as Record<string, unknown>
 }
@@ -84,13 +86,8 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
 }
 
 function profilesFile(projectDir: string): string | undefined {
-  const dirs = [process.env.DBT_PROFILES_DIR, projectDir, path.join(os.homedir(), ".dbt")]
-  for (const dir of dirs) {
-    if (!dir) continue
-    const file = path.join(dir, "profiles.yml")
-    if (fs.existsSync(file)) return file
-  }
-  return undefined
+  const file = resolveProfilesPath(undefined, projectDir)
+  return fs.existsSync(file) ? file : undefined
 }
 
 async function parseYaml(text: string): Promise<any> {
@@ -103,7 +100,8 @@ export async function readProfileTargets(projectDir: string) {
   const out: { profile?: string; defaultTarget?: string; targets: string[] } = { targets: [] }
   try {
     const project = await parseYaml(fs.readFileSync(path.join(projectDir, "dbt_project.yml"), "utf-8"))
-    if (typeof project?.profile === "string") out.profile = project.profile
+    const profile = resolveEnvVars(project?.profile)
+    if (typeof profile === "string" && profile !== "") out.profile = profile
   } catch {
     return out
   }
@@ -114,7 +112,8 @@ export async function readProfileTargets(projectDir: string) {
     const profiles = await parseYaml(fs.readFileSync(file, "utf-8"))
     const profile = profiles?.[out.profile]
     if (profile && typeof profile === "object") {
-      if (typeof profile.target === "string") out.defaultTarget = profile.target
+      const target = resolveEnvVars(profile.target)
+      if (typeof target === "string" && target !== "") out.defaultTarget = target
       if (profile.outputs && typeof profile.outputs === "object") out.targets = Object.keys(profile.outputs)
     }
   } catch {
@@ -145,16 +144,20 @@ export async function resolveDeferState(projectDir: string, workspaceDir?: strin
     settingsFile: found.file,
     favorState: entry.favorState === true,
   }
-  if (entry.deferToProduction !== true) return result
+  const wanted = entry.deferToProduction === true
 
-  // Power User reads the type as "local" or "remote"; an entry without one is local.
-  const remote = entry.manifestPathType === "remote"
-  result.mode = remote ? "remote" : "local"
-  if (remote) {
-    // The request that downloads the manifest is not implemented, so remote mode cannot supply a state dir.
-    return { ...result, reason: "Remote defer mode is not supported yet: download the manifest and use a local path." }
+  // Power User writes "local" or "remote"; an entry without a type is local. Anything else is not understood.
+  const type = entry.manifestPathType
+  if (type !== undefined && type !== "" && type !== "local" && type !== "remote") {
+    return { ...result, reason: `Unknown manifestPathType "${String(type)}": expected "local" or "remote".` }
   }
+  if (type === "remote") {
+    // The request that downloads the manifest is not implemented, so remote mode cannot supply a state dir.
+    return { ...result, mode: "remote", reason: "Remote defer mode is not supported yet: download the manifest and use a local path." }
+  }
+  result.mode = "local"
 
+  // The directory is resolved whether or not defer is on, so a session can still switch it on.
   const raw = entry.manifestPathForDeferral
   if (typeof raw !== "string" || raw.trim() === "") {
     return { ...result, reason: "manifestPathForDeferral is not set." }
@@ -164,12 +167,15 @@ export async function resolveDeferState(projectDir: string, workspaceDir?: strin
   if (!isDirectory(stateDir)) {
     return { ...result, reason: `manifestPathForDeferral is not a directory: ${stateDir}` }
   }
-  return { ...result, enabled: true, stateDir }
+  if (!fs.existsSync(path.join(stateDir, "manifest.json"))) {
+    return { ...result, reason: `No manifest.json in manifestPathForDeferral: ${stateDir}` }
+  }
+  return { ...result, enabled: wanted, stateDir }
 }
 
 export const DbtDeferStateTool = Tool.define("dbt_defer_state", {
   description:
-    "Read the dbt Power User defer setting for a dbt project (`dbt.deferConfigPerProject` in .vscode/settings.json) and the project's profile target. Returns whether defer is on, whether to favor state, the state directory to pass as `dbt --defer --state <dir>`, and the profile's default target and target names. Read-only.",
+    "Read the dbt Power User defer setting for a dbt project (`dbt.deferConfigPerProject` in .vscode/settings.json) and the project's profile target. Returns whether defer is on, whether to favor state, the state directory to pass as `dbt --defer --state <dir>` (use it only when `enabled` is true), and the profile's default target and target names. Read-only.",
   parameters: z.object({
     project_dir: z.string().describe("The dbt project directory (the folder holding dbt_project.yml)"),
     workspace_dir: z
@@ -184,7 +190,7 @@ export const DbtDeferStateTool = Tool.define("dbt_defer_state", {
         `defer: ${result.enabled ? "on" : "off"}${result.favorState ? " (favor state)" : ""}`,
         `mode: ${result.mode}`,
       ]
-      if (result.stateDir) lines.push(`state dir: ${result.stateDir}`)
+      if (result.stateDir) lines.push(`state dir${result.enabled ? "" : " (not used: defer is off)"}: ${result.stateDir}`)
       if (result.reason) lines.push(`note: ${result.reason}`)
       if (result.defaultTarget) lines.push(`default target: ${result.defaultTarget}`)
       if (result.targets.length) lines.push(`targets: ${result.targets.join(", ")}`)

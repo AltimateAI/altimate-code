@@ -30,6 +30,8 @@ const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
   dbt_cte_profile: { model: "customers" },
 }
 const FEATURE_TOOLS = Object.keys(MINIMAL_ARGS)
+// Tools that have their own implementation and test: they no longer answer as placeholders.
+const IMPLEMENTED = new Set(["dbt_defer_state"])
 
 const ctx: Tool.Context = {
   sessionID: SessionID.make("ses_dbt_adapter_access"),
@@ -82,7 +84,7 @@ describe("feature tools in the allow-list", () => {
   })
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
-    for (const id of FEATURE_TOOLS) {
+    for (const id of FEATURE_TOOLS.filter((id) => !IMPLEMENTED.has(id))) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
