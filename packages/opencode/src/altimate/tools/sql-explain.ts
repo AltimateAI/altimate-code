@@ -8,6 +8,7 @@ import * as Precedence from "../workspace/precedence"
 import { validateWarehouseName } from "./input-validation"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck, isSingleQuery } from "./sql-classify"
+import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 
 /**
  * Detect SQL input that cannot be meaningfully EXPLAIN'd.
@@ -90,14 +91,32 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         output: `Invalid input: ${sqlError}`,
       }
     }
-    // EXPLAIN ANALYZE executes the statement. Only a single read-only query may be analyzed,
-    // so a plan request can never perform a write on engines without a read-only transaction.
-    if (args.analyze) {
-      const dialect = Registry.canonicalType(args.warehouse ? Registry.getConfig(args.warehouse)?.type : undefined) ?? undefined
+    // EXPLAIN is prefixed to the text, and some drivers run every statement in it (Redshift, DuckDB),
+    // so only one statement is explained: a second one would run, not be planned. EXPLAIN ANALYZE
+    // executes the statement, so only a single read-only query may be analyzed.
+    {
+      const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
+      const dialect = Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? undefined
       const { queryType, blocked } = classifyAndCheck(args.sql, dialect)
-      if (blocked || queryType !== "read" || !isSingleQuery(args.sql, dialect)) {
-        const error =
+      const lexical = tokenizeSql(args.sql, dialect)
+      const statements = lexical.complete ? statementsOf(args.sql, dialect) : []
+      // The tool adds EXPLAIN itself: SQL starting with an EXPLAIN option (ANALYZE, VERBOSE, an option
+      // list such as ("analyze")) would turn the plan into EXPLAIN ANALYZE, which runs the statement. A
+      // leading "(" is a query only when a query keyword follows it, and a leading ";" would send the
+      // statement after it as a second one.
+      const option =
+        /^(EXPLAIN|ANALY[SZ]E|VERBOSE)\b|^\((?![(\s]*(SELECT|WITH|VALUES|TABLE|FROM)\b)/i.test(statements[0] ?? "") ||
+        (lexical.complete && /^\s*;/.test(maskSql(lexical.tokens)))
+      let error: string | undefined
+      if (blocked) error = "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
+      else if (!lexical.complete)
+        error = "The SQL's quotes or comments could not be read with certainty (for example an unterminated quote), so it is not explained."
+      else if (statements.length !== 1 || option)
+        error = "Only a single statement can be explained, without EXPLAIN or its options. Run each statement separately."
+      else if (args.analyze && (queryType !== "read" || !isSingleQuery(args.sql, dialect)))
+        error =
           "EXPLAIN ANALYZE executes the statement, so only a single read-only query can be analyzed. Use analyze: false for a plan of this statement."
+      if (error) {
         return {
           title: "Explain: INVALID INPUT",
           metadata: { success: false, analyzed: false, warehouse_type: "unknown", error, error_class: "input_validation" },

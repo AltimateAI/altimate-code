@@ -171,13 +171,13 @@ function otherIsReadOnly(sql: string, parsed: Array<{ category: string }>, diale
 // Hard-deny patterns — blocked regardless of permissions
 const HARD_DENY_TYPES = new Set(["DROP DATABASE", "DROP SCHEMA", "TRUNCATE", "TRUNCATE TABLE"])
 
-const HARD_DENY_PATTERN = /^\s*(DROP\s+(DATABASE|SCHEMA)\b|TRUNCATE(\s+TABLE)?\b)/i
+const HARD_DENY_PATTERN = /^\s*(DROP\s+((EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b|TRUNCATE(\s+TABLE)?\b)/i
 
 /**
  * Fail closed when the parser is unavailable or rejects the input. Lexical
  * statement boundaries still enforce hard denies without reading quoted text.
  */
-function classifyFallback(sql: string, dialect?: string): { queryType: "read" | "write"; blocked: boolean } {
+function classifyFallback(sql: string, dialect?: string, write = true): { queryType: "read" | "write"; blocked: boolean } {
   const statements = statementsOf(sql, dialect)
   // Executable comments can contain entire statements or fragments of a hard
   // deny. Reject them outright because generic parsers discard their bodies.
@@ -192,16 +192,20 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
   // comment), so the words alone decide; the TRUNCATE() function does not count.
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
-    if (mentionsHardDeny(sql)) blocked = true
+    // Escapes decoded too: dynamic SQL may run a literal such as '\x44ROP SCHEMA s'.
+    if (mentionsHardDenyAnywhere(sql)) blocked = true
   } else {
-    // Read with certainty: the statement words in code (literals, identifiers and comments masked,
-    // so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
+    // Read with certainty: the statement words in code (literals and comments masked, each quoted
+    // identifier a placeholder name, so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
     // as two statements with no ; and a parser may read a literal differently from the engine.
-    const masked = maskSql(lexical.tokens)
-    if (CODE_HARD_DENY.test(masked)) blocked = true
-    // Dynamic SQL (EXEC('...'), EXECUTE IMMEDIATE, PREPARE ... FROM, DO $$...$$) runs a string, so
-    // the words in its literals count too. A statement built by concatenation is not seen.
-    else if (DYNAMIC_SQL.test(masked) && mentionsHardDeny(sql)) blocked = true
+    const names = namesKept(lexical.tokens)
+    // Snowflake's ->> chains statements (elsewhere a JSON operator), and Snowflake Scripting's ASYNC (,
+    // := ( and DEFAULT ( hold one (elsewhere DEFAULT(col) is a function).
+    const chained =
+      (/^snowflake$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
+      /(->>|\bASYNC\s*\(|:=\s*\(|\bDEFAULT\s*\()\s*TRUNCATE\b(?!\s*\()/i.test(names)
+    if (CODE_HARD_DENY.test(names) || handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names)))
+      blocked = true
   }
   return { queryType: "write", blocked }
 }
@@ -217,10 +221,10 @@ function batchedStatement(masked: string, dialect?: string): boolean {
 // or clauses (USE, FETCH, OPEN, CLOSE, ENABLE, DISABLE, RENAME, THROW, ADD, MOVE, SEND, RECEIVE, END)
 // count only in their statement forms.
 const BATCH_STATEMENT = new RegExp(
-  "\\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE|GRANT|REVOKE|DENY|BACKUP|RESTORE|DBCC|KILL|SHUTDOWN|BULK|WAITFOR|DECLARE|SET|INTO|" +
+  "\\bTRUNCATE\\b(?!\\s*\\()|\\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|EXEC|EXECUTE|GRANT|REVOKE|DENY|BACKUP|RESTORE|DBCC|KILL|SHUTDOWN|BULK|WAITFOR|DECLARE|SET|INTO|" +
     "OPENROWSET|OPENQUERY|OPENDATASOURCE|OPENXML|CHECKPOINT|RECONFIGURE|RAISERROR|GOTO|BEGIN|COMMIT|ROLLBACK|SAVE|DEALLOCATE|" +
     "READTEXT|UPDATETEXT|WRITETEXT|SETUSER|REVERT|PRINT)\\b" +
-    "|\\b(ENABLE|DISABLE)\\s+TRIGGER\\b|\\bRENAME\\s+(OBJECT|DATABASE)\\b|\\bTHROW\\s*($|;|[\\d@])" +
+    "|\\b(ENABLE|DISABLE)\\s+TRIGGER\\b|\\bRENAME\\s+(OBJECT|DATABASE)\\b|\\bTHROW\\s+[\\d@]" +
     // USE except OPTION (USE HINT/PLAN) and USE INDEX; FETCH except OFFSET paging (FETCH NEXT 10 ROWS ONLY).
     "|\\bUSE\\b(?!\\s+(HINT|PLAN|INDEX|KEY)\\b)|\\bFETCH\\b(?!\\s+(FIRST|NEXT)\\s+([\\w@().+-]+\\s+)?(PERCENT\\s+)?ROWS?\\b)" +
     "|\\b(OPEN|CLOSE)\\s+(GLOBAL\\s+)?[\\w@#]+\\s*(;|\\b(SELECT|WITH)\\b)|\\bADD\\s+(SENSITIVITY|SIGNATURE|COUNTER)\\b" +
@@ -228,15 +232,108 @@ const BATCH_STATEMENT = new RegExp(
   "i",
 )
 
-const CODE_HARD_DENY = /\bDROP\s+(DATABASE|SCHEMA)\b|\bTRUNCATE\b(?!\s*\()/i
-const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
-// Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), s.NEXTVAL
-// (Oracle, Snowflake).
-const SEQUENCE_ADVANCE = /\bNEXT\s+VALUE\s+FOR\b|\.\s*NEXTVAL\b/i
+/** A literal's text as an engine may run it, one string per reading: numeric escapes (\xHH, \uHHHH,
+ * \UHHHHHHHH, octal \ooo, U&'...' \HHHH and \+HHHHHH) decoded, and a single-character escape read as a
+ * space when it stands for whitespace (\n \r \t \f, and \v in BigQuery) and as itself otherwise;
+ * and SQL Server's reading, where a backslash before a line break joins the two lines. */
+function escapeReadings(sql: string): string[] {
+  const char = (hex: string, base = 16) => String.fromCodePoint(Math.min(parseInt(hex, base), 0x10ffff))
+  let numeric = sql
+  if (/U&/i.test(numeric)) numeric = numeric.replace(/\\\+([0-9a-fA-F]{6})|\\([0-9a-fA-F]{4})/g, (_, six, four) => char(six ?? four))
+  const decode = (whitespace: RegExp) =>
+    numeric.replace(
+      /\\(?:x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|([0-7]{1,3})|([\s\S]))/g,
+      (_, x, u, U, octal, single) =>
+        single !== undefined ? (whitespace.test(single) ? " " : single) : octal ? char(octal, 8) : char(x ?? u ?? U),
+    )
+  return [sql, sql.replace(/\\\r?\n/g, ""), decode(/^[nrtf]$/), decode(/^[nrtfv]$/)]
+}
 
-/** The word DROP with DATABASE or SCHEMA anywhere after it, or TRUNCATE not directly followed by `(`
- * (the TRUNCATE() function; a comment before the `(` does not count, since where a comment ends is
- * part of what is uncertain). Only words count: quotes and comments are ignored, since how they read
+// TRUNCATE as a statement: TRUNCATE TABLE, or TRUNCATE starting a statement or a block (BEGIN [NOT
+// ATOMIC], DO, LOOP, REPEAT, a handler's condition). After THEN or ELSE it must be a name and the end
+// of the statement, since CASE ... THEN truncate ... is a column. In a read, a column or alias named truncate is not.
+const CODE_HARD_DENY = new RegExp(
+  "\\bDROP\\s+((EXTERNAL|PLUGGABLE)\\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\\b|\\bTRUNCATE\\s+TABLE\\b" +
+    // DuckDB accepts TRUNCATE after EXPLAIN (options), PREPARE p AS and as a CTE body, WITH x AS
+    // [[NOT] MATERIALIZED] (TRUNCATE t) ([^()] keeps the scan linear).
+    "|(^|;|\\bPREPARE\\s+\\w+\\s+AS\\b|\\bEXPLAIN\\s*\\([^()]*\\)|\\bAS\\s*((NOT\\s+)?MATERIALIZED\\s*)?\\()\\s*TRUNCATE\\b(?!\\s*\\()" +
+    // After a block or handler word (or EXPLAIN ANALYZE), a target must follow: these words are also
+    // column names, so `SELECT atomic truncate FROM t` is an alias.
+    "|\\b(BEGIN|NOT\\s+ATOMIC|DO|LOOP|REPEAT|SQLEXCEPTION|SQLWARNING|FOUND|ANALYZE|ANALYSE)\\s+TRUNCATE\\s+" +
+    "(?!(FROM|AS|WHERE|ORDER|GROUP|HAVING|UNION|LIMIT|WINDOW|INTO|JOIN|ON|AND|OR|END)\\b)[\\w\"`$\\u0080-\\uffff]" +
+    // After THEN/ELSE: [IF EXISTS] a (dotted, quoted or IDENTIFIER(...)) name, then the statement's end.
+    "|\\b(THEN|ELSE)\\s+TRUNCATE\\s+(IF\\s+EXISTS\\s+)?(?!END\\b)" +
+    "(IDENTIFIER\\s*\\([^()]*\\)|[^\\s;,().]+(\\s*\\.{1,2}\\s*[^\\s;,().]+)*)(\\s+(NOWAIT|WAIT\\s+\\d+))?\\s*(;|$)",
+  "i",
+)
+
+// In a write, TRUNCATE is a statement wherever it sits (a routine or task body, ALTER TABLE ... TRUNCATE
+// PARTITION), so any unqualified TRUNCATE not followed by `(` (the function) counts. A column named
+// truncate is exempt only in a read, which holds no statement body.
+const WRITE_TRUNCATE = /\bTRUNCATE\b(?<!\.\s*TRUNCATE)(?!\s*\()/i
+
+/** A handler's statement follows its conditions (a code, SQLSTATE '...', a name): a TRUNCATE after
+ * HANDLER FOR within the same statement counts. One pass over the statements. */
+function handlerTruncate(masked: string): boolean {
+  return masked.split(";").some((part) => {
+    const handler = part.search(/\bHANDLER\s+FOR\b/i)
+    return handler >= 0 && /\bTRUNCATE\b(?!\s*\()/i.test(part.slice(handler))
+  })
+}
+
+/** Code with literals and comments masked, and each quoted identifier as a placeholder name, so a
+ * statement keeps its target (TRUNCATE `t`) without the identifier's text reading as code. */
+function namesKept(tokens: ReturnType<typeof tokenizeSql>["tokens"]): string {
+  return tokens
+    .map(({ kind, text }) =>
+      kind === "code" ? text : kind === "identifier" ? ` ${"_".repeat(Math.max(text.length - 2, 1))} ` : text.replace(/[^\r\n]/g, " "),
+    )
+    .join("")
+}
+
+/** Whether a write's quoted text holds a hard-denied statement. A write can run its literals as SQL:
+ * dynamic SQL (EXEC('...'), sp_executesql N'...', EXECUTE IMMEDIATE, PREPARE ... FROM, dblink_exec),
+ * or a function, procedure or trigger body created and called in the same call. Each literal is read
+ * word by word with its escapes decoded, as uncertain SQL is, so nothing inside it (nested quotes,
+ * comments) can separate the words. Each literal is read alone here (classifyAndCheck reads dynamic SQL
+ * across its literals), and a custom UESCAPE character is not decoded, so it blocks. */
+function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialect?: string): boolean {
+  // UESCAPE counts with a U&'...' literal: U& in code right before a literal token.
+  const unicode = tokens.some(({ kind, text }, i) => kind === "code" && /\bU&$/i.test(text) && tokens[i + 1]?.kind === "literal")
+  if (unicode && /\bUESCAPE\b/i.test(maskSql(tokens))) return true
+  // "..." is a string in Spark, Databricks and Hive, under SQL Server's QUOTED_IDENTIFIER OFF and in
+  // MySQL without ANSI_QUOTES; other identifiers never are.
+  const quotedStrings =
+    /^(sqlserver|tsql|mssql|fabric|mysql|mariadb|spark|databricks|hive)$/i.test(dialect ?? "") || !isModeledDialect(dialect)
+  return tokens.some(
+    ({ kind, text }) =>
+      (kind === "literal" || (kind === "identifier" && quotedStrings && text[0] === '"')) &&
+      ((/\bUESCAPE\b/i.test(text) && /\bU&'/i.test(text)) || mentionsHardDenyAnywhere(text)),
+  )
+}
+
+const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
+
+// Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), and in Oracle,
+// Snowflake and MariaDB (Oracle mode) s.NEXTVAL, quoted or not (in Oracle a quoted name must be
+// uppercase). In other dialects s.nextval is a column.
+function advancesSequence(tokens: ReturnType<typeof tokenizeSql>["tokens"], masked: string, dialect?: string): boolean {
+  if (/\bNEXT\s+VALUE\s+FOR\b/i.test(masked)) return true
+  if (!/^(oracle|snowflake|mysql|mariadb)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return false
+  // Comments masked to spaces, and a quoted name counts only when it is the word NEXTVAL, so
+  // s./* c */"NEXTVAL" reads as s.NEXTVAL while "s.NEXTVAL" and t."NEXTVAL VALUE" are column names. Only
+  // Oracle always keeps the case of a quoted name; Snowflake (QUOTED_IDENTIFIERS_IGNORE_CASE) and
+  // MariaDB's Oracle mode can resolve s."nextval" as the sequence.
+  const nextval = /^oracle$/i.test(dialect ?? "") ? /^"NEXTVAL"$/ : /^["`]NEXTVAL["`]$/i
+  const names = tokens.map((token) =>
+    token.kind === "identifier" && !nextval.test(token.text) ? { ...token, text: '"_"' } : token,
+  )
+  return /\.\s*NEXTVAL\b/i.test(maskSql(names, true))
+}
+
+/** The word DROP with DATABASE, SCHEMA, CATALOG or NAMESPACE anywhere after it, or TRUNCATE not
+ * directly followed by `(` (the TRUNCATE() function; a comment before the `(` does not count, since
+ * where a comment ends is part of what is uncertain). Only words count: quotes and comments are ignored, since how they read
  * is what is uncertain, so no comment or quote placement can separate the words. One forward pass. */
 function mentionsHardDeny(sql: string): boolean {
   let drop = false
@@ -250,7 +347,7 @@ function mentionsHardDeny(sql: string): boolean {
     while (j < sql.length && /\w/.test(sql[j])) j++
     const word = sql.slice(i, j).toUpperCase()
     if (word === "DROP") drop = true
-    else if (drop && (word === "DATABASE" || word === "SCHEMA")) return true
+    else if (drop && (word === "DATABASE" || word === "SCHEMA" || word === "CATALOG" || word === "NAMESPACE")) return true
     else if (word === "TRUNCATE" && !/^[ \t\r\n]*\(/.test(sql.slice(j, j + 64))) return true
     i = j
   }
@@ -349,7 +446,25 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   blocked: boolean
   parseError?: string
 } {
-  return classifySql(sql, dialect, 0)
+  const result = classifySql(sql, dialect, 0)
+  if (result.queryType === "write" && !result.blocked) {
+    // SQL read with certainty: a write may still run the SQL in its literals. Otherwise the word scan
+    // of the whole text already covered them.
+    const lexical = tokenizeSql(sql, dialect)
+    if (lexical.complete && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
+    // Dynamic SQL can join literals into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
+    // adjacent constants), so its words count across literals too.
+    if (lexical.complete && DYNAMIC_SQL.test(maskSql(lexical.tokens)) && mentionsHardDenyAnywhere(sql))
+      return { ...result, blocked: true }
+  }
+  return result
+}
+
+/** Whether DROP DATABASE/SCHEMA/CATALOG/NAMESPACE or TRUNCATE appears anywhere in the text, read word by word
+ * with quotes and comments ignored and escapes decoded (for text another layer renders, such as dbt's
+ * Jinja). */
+export function mentionsHardDenyAnywhere(sql: string): boolean {
+  return escapeReadings(sql).some(mentionsHardDeny)
 }
 
 function classifySql(sql: string, dialect: string | undefined, depth: number): {
@@ -375,22 +490,27 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     const masked = maskSql(lexical.tokens)
     const blocked =
       functions.blocked ||
-      classifyFallback(sql, dialect).blocked ||
+      classifyFallback(sql, dialect, false).blocked ||
       result.statements.some(
         (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
       )
 
-    return {
-      queryType:
-        !functions.write &&
-        !blocked &&
-        !batchedStatement(masked, dialect) &&
-        !SEQUENCE_ADVANCE.test(masked) &&
-        otherIsReadOnly(sql, result.statements, dialect)
-          ? "read"
-          : "write",
-      blocked,
-    }
+    const queryType =
+      !functions.write &&
+      !blocked &&
+      !batchedStatement(masked, dialect) &&
+      // Snowflake's ->> runs the statements it chains, DML included.
+      !(/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) &&
+      // Spark/Hive SELECT TRANSFORM(...) USING 'cmd' runs a command on the cluster; any USING not
+      // followed by "(" counts (comments and the script masked), while JOIN ... USING (col) is a join.
+      !((/^(spark|databricks|hive)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
+        /\bTRANSFORM\s*\(/i.test(masked) &&
+        /\bUSING\b(?!\s*\()/i.test(masked)) &&
+      !advancesSequence(lexical.tokens, masked, dialect) &&
+      otherIsReadOnly(sql, result.statements, dialect)
+      ? "read"
+      : "write"
+    return { queryType, blocked: blocked || (queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))) }
   } catch (error) {
     return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }

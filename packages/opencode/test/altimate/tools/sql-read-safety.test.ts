@@ -106,7 +106,7 @@ describe("read-only SQL parser boundary", () => {
     expect(maskSql(tokenizeSql("SELECT $$-- ; DELETE$$ AS a -- actual comment", "postgres").tokens)).toMatch(/^SELECT\s+AS a\s+$/)
   })
 
-  for (const dialect of ["mysql", "sqlite", "bigquery", "clickhouse", "unknown", undefined]) {
+  for (const dialect of ["mysql", "sqlite", "bigquery", "unknown", undefined]) {
     test(`dollar delimiters leave statements visible for ${dialect ?? "omitted"} dialect`, () => {
       const sql = "SELECT $x$; DELETE FROM t; $x$"
       const { tokens, complete } = tokenizeSql(sql, dialect)
@@ -124,6 +124,10 @@ describe("read-only SQL parser boundary", () => {
     ["duckdb", "SELECT $x$ a; b $x$"],
     ["duckdb", "SELECT $$ ; DROP TABLE t $$"],
     ["snowflake", "SELECT $$ ; DROP TABLE t $$"],
+    ["clickhouse", "SELECT $x$ a; b $x$"],
+    ["clickhouse", "SELECT $$ ; DROP TABLE t $$"],
+    // The closing tag must be the opening one: $y$ inside $x$...$x$ does not end it.
+    ["clickhouse", "SELECT $x$ a $y$; DELETE FROM t; $x$"],
   ]) {
     test(`dollar literals mask statement delimiters for ${dialect}: ${sql}`, () => {
       const { tokens, complete } = tokenizeSql(sql, dialect)

@@ -501,7 +501,9 @@ describe("SqlExplainTool.execute", () => {
 
       expect(result.metadata.success).toBe(false)
       expect(result.metadata.error_class).toBe("input_validation")
-      expect(String(result.output)).toContain("only a single read-only query can be analyzed")
+      expect(String(result.output)).toMatch(
+        sql.includes(";") ? /single statement can be explained/ : /only a single read-only query can be analyzed/,
+      )
       expect(spy).not.toHaveBeenCalled()
       spy.mockRestore()
     })
