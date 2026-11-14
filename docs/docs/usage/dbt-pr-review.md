@@ -278,8 +278,10 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
-portability: false            # cross-engine advice; default off once the engine is known
-                              # (set true for packages that support several adapters)
+portability: false            # cross-engine advice; default off once the engine is known.
+                              # A project whose macros have variants for several adapters
+                              # (`postgres__x`, `snowflake__x`) still gets advice on constructs
+                              # one of those adapters lacks. Set true to see all of it.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false

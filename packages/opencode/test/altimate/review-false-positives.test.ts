@@ -255,6 +255,50 @@ describe("incremental unique_key vs the declared uniqueness test", () => {
   })
 })
 
+describe("LEFT JOIN key vs the joined model's declared unique key", () => {
+  const review = async (sql: string, declared: string[][]) => {
+    const runner = {
+      async impact() {
+        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: [], ran: true }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+      async modelConfig() {
+        return { materialized: "table" }
+      },
+      async declaredUniqueKeys(model: string) {
+        return model === "dim_course_run" ? declared : []
+      },
+    } as unknown as ReviewRunner
+    const env = await runReview({
+      changedFiles: [{ path: "models/fct.sql", status: "added", diff: sql.split("\n").map((l) => "+" + l).join("\n") }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => sql,
+    })
+    return env.findings.filter((f) => /declared unique key/.test(f.title))
+  }
+  const join = (kind: string) => `select * from e\n${kind} {{ ref('dim_course_run') }} as cr on e.courserun_readable_id = cr.courserun_readable_id`
+  test("an SCD2 dimension joined without is_current: reported", async () => {
+    const [f] = await review(join("left join"), [["courserun_pk"], ["courserun_readable_id", "is_current"]])
+    expect(f.body).toContain("[courserun_readable_id, is_current]")
+  })
+  test("join on the declared key, an inner join, or no declared key: silent", async () => {
+    expect(await review(join("left join"), [["courserun_readable_id"]])).toHaveLength(0)
+    expect(await review(join("join"), [["courserun_pk"]])).toHaveLength(0)
+    expect(await review(join("left join"), [])).toHaveLength(0)
+  })
+})
+
 describe("OR in a join condition", () => {
   const sql = (on: string) => `select * from a\njoin b\n  on ${on}`
   test("alternative keys or overlapping ranges: reported", () => {

@@ -215,6 +215,13 @@ describe("portability noise", () => {
     expect(isSuppressiblePortability(untagged, "snowflake")).toBe(true)
   })
 
+  test("a package with macros for several adapters keeps advice that fails on any of them", () => {
+    expect(isSuppressiblePortability(portability, "postgres", ["duckdb"])).toBe(true)
+    expect(isSuppressiblePortability(portability, "postgres", ["duckdb", "snowflake"])).toBe(false)
+    const untagged = { ...portability, evidence: { tool: "rule-catalog", result: { rule: "pivot-portability", portability: true } } }
+    expect(isSuppressiblePortability(untagged, "postgres", ["snowflake"])).toBe(true)
+  })
+
   test("catalog portability advice is recognised; core's dialect-aware check is not", () => {
     expect(isCatalogPortability(portability)).toBe(true)
     expect(isCatalogPortability(coreMissing)).toBe(false)

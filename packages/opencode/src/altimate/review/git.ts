@@ -167,6 +167,17 @@ export async function listFilesAt(cwd: string, ref?: string): Promise<string[] |
   }
 }
 
+/** Matches of `pattern` (extended regex) in tracked files at `ref` under the repo-root-relative `pathspec`, as `ref:path:match` lines; undefined when git fails. */
+export async function grepMatchesAt(cwd: string, ref: string | undefined, pattern: string, pathspec: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(["grep", "--full-name", "-o", "-E", "-e", pattern, ref || "HEAD", "--", `:(top)${pathspec}`], cwd)
+    return out.split("\n").filter(Boolean)
+  } catch (e) {
+    // git grep exits 1 when nothing matches
+    return (e as { code?: number }).code === 1 ? [] : undefined
+  }
+}
+
 /** Where the review's base came from, recorded on the verdict envelope. */
 export type BaseSource =
   | "flag" // --base

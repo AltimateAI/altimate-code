@@ -247,7 +247,8 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
     // A var() key renamed with no fallback: projects that set the old key lose their override silently.
     const oldVars = varNames(oldContent)
     const newVars = varNames(newContent)
-    const gone = [...oldVars].filter((v) => !newVars.has(v))
+    // A key still named as a string literal is usually still read (handed to a macro that reads it).
+    const gone = [...oldVars].filter((v) => !newVars.has(v) && !new RegExp(`['"]${v}['"]`).test(newContent))
     const fresh = [...newVars].filter((v) => !oldVars.has(v))
     if (gone.length && fresh.length)
       out.push(
@@ -450,6 +451,8 @@ export interface JoinTarget {
   keys: string[]
   /** The JOIN text, for the finding. */
   join: string
+  /** LEFT [OUTER] JOIN: a lookup that should keep each left row once. */
+  left: boolean
 }
 
 const REF = /\{\{\s*ref\(\s*['"]([^'"]+)['"]\s*\)\s*\}\}/
@@ -470,14 +473,27 @@ function passThroughCtes(sql: string): Map<string, string> {
 const ON_STOP = /^(?:join|left|right|inner|full|cross|where|group|order|qualify|having|union|limit|window|select|\{%)\b/i
 
 /** Joins whose ON clause or JOIN line is on an added line, with the joined model and its key columns. */
+/** The top-level `and`-separated conditions of an ON clause. */
+function conjuncts(on: string): string[] {
+  const top = topLevel(on)
+  const out: string[] = []
+  let from = 0
+  for (const m of top.matchAll(/\band\b/gi)) {
+    out.push(on.slice(from, m.index))
+    from = m.index! + m[0].length
+  }
+  out.push(on.slice(from))
+  return out
+}
+
 export function joinTargets(sql: string, added: string[]): JoinTarget[] {
   const ctes = passThroughCtes(sql)
   const changed = added.map((l) => l.replace(/--.*$/, "").trim()).filter((l) => /\w{2}/.test(l))
   const out: JoinTarget[] = []
-  const re = /\bjoin\s+(\{\{\s*ref\(\s*['"][^'"]+['"]\s*\)\s*\}\}|\w+)\s*(?:as\s+)?(\w+)?\s+on\b/gi
+  const re = /\b(left\s+(?:outer\s+)?)?join\s+(\{\{\s*ref\(\s*['"][^'"]+['"]\s*\)\s*\}\}|\w+)\s*(?:as\s+)?(\w+)?\s+on\b/gi
   for (const m of sql.matchAll(re)) {
-    const rel = m[1]
-    const alias = (m[2] && !/^on$/i.test(m[2]) ? m[2] : (REF.exec(rel)?.[1] ?? rel)).toLowerCase()
+    const rel = m[2]
+    const alias = (m[3] && !/^on$/i.test(m[3]) ? m[3] : (REF.exec(rel)?.[1] ?? rel)).toLowerCase()
     const model = REF.exec(rel)?.[1] ?? ctes.get(rel.toLowerCase())
     if (!model) continue
     // ON clause: up to the next clause keyword at paren depth 0.
@@ -495,12 +511,21 @@ export function joinTargets(sql: string, added: string[]): JoinTarget[] {
     const on = sql.slice(start, i)
     const text = sql.slice(sql.lastIndexOf("\n", m.index!) + 1, i)
     if (!changed.some((l) => text.includes(l))) continue
+    // Range conditions (`between`, `<`) and Jinja-generated conditions constrain the join
+    // in ways the equality keys don't show.
+    if (/\{\{|\bbetween\b|<|>|!=|\bor\b/i.test(on)) continue
     const keys = new Set<string>()
-    for (const e of on.matchAll(/(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)/g)) {
-      if (e[1].toLowerCase() === alias) keys.add(e[2].toLowerCase())
-      if (e[3].toLowerCase() === alias) keys.add(e[4].toLowerCase())
+    for (const conjunct of conjuncts(on)) {
+      const eq = conjunct.split("=")
+      if (eq.length !== 2) continue
+      for (const side of eq) {
+        // `alias.col`, also inside a wrapper: `cast(alias.col as varchar)`, `lower(alias.col)`.
+        const cols = [...side.matchAll(/\b(\w+)\.(\w+)\b/g)].filter((c) => c[1].toLowerCase() === alias)
+        if (cols.length === 1) keys.add(cols[0][2].toLowerCase())
+      }
     }
-    if (keys.size) out.push({ model, keys: [...keys], join: text.replace(/\s+/g, " ").trim().slice(0, 160) })
+    if (keys.size)
+      out.push({ model, keys: [...keys], join: text.replace(/\s+/g, " ").trim().slice(0, 160), left: !!m[1] })
   }
   return out
 }

@@ -238,6 +238,8 @@ export interface OrchestrateInput {
   scope?: Omit<ReviewScope, "unverified">
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
   suppressPortability?: boolean
+  /** Other adapters the project supports (from its adapter-specific macros); portability advice is kept when any of them lacks the construct. */
+  portabilityTargets?: string[]
   /** The dialect came from config or the manifest, not the default guess. */
   dialectKnown?: boolean
   /** Opt-in explicit column lists outside dbt (see consumer-lists.ts). */
@@ -253,13 +255,13 @@ export function isCatalogPortability(f: Finding): boolean {
 
 /**
  * Portability advice that is noise for a project on `dialect`: dropped unless
- * the rule names the engines that support the construct and `dialect` isn't
- * one of them — then it is an error on this project's own engine.
+ * the rule names the engines that support the construct and `dialect`, or one
+ * of the project's other supported adapters (`targets`), isn't among them.
  */
-export function isSuppressiblePortability(f: Finding, dialect: string): boolean {
+export function isSuppressiblePortability(f: Finding, dialect: string, targets: string[] = []): boolean {
   if (!isCatalogPortability(f)) return false
   const worksOn = (f.evidence?.result as { worksOn?: string[] })?.worksOn
-  return !worksOn || worksOn.includes(dialect.toLowerCase())
+  return !worksOn || [dialect.toLowerCase(), ...targets].every((d) => worksOn.includes(d))
 }
 
 /** Line numbers on the head side of a unified diff that GitHub accepts for an
@@ -1194,7 +1196,14 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVar
  * row per extra value lands; a `unique_key` missing a test column merges rows the
  * test treats as distinct.
  */
-/** A new join whose key isn't covered by any uniqueness test on the joined model: a duplicate key multiplies rows. */
+/**
+ * A new LEFT JOIN onto a model whose declared uniqueness tests don't cover the
+ * join key: the joined model has stated its grain and the join ignores it (an
+ * SCD2 dimension joined without `is_current`, a natural key instead of the
+ * declared one), so a repeated key multiplies the left rows. Inner joins are
+ * skipped, since they are often one-to-many on purpose, as are models with no
+ * declared key, where nothing says what one row means.
+ */
 async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.declaredUniqueKeys || !runner.modelConfig || !ctx.newSql || ctx.file.status === "deleted") return []
   const added = (ctx.file.diff ?? "").split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1))
@@ -1202,19 +1211,17 @@ async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): P
   const model = modelNameFromPath(ctx.file.path)
   for (const t of joinTargets(ctx.newSql, added)) {
     // Unknown to the manifest (a package model, a typo): nothing to compare against.
-    if (!(await runner.modelConfig(t.model))) continue
-    const declared = await runner.declaredUniqueKeys(t.model)
-    if (declared.some((k) => k.length && k.every((c) => t.keys.includes(c.toLowerCase())))) continue
+    if (!t.left || !(await runner.modelConfig(t.model))) continue
+    const declared = (await runner.declaredUniqueKeys(t.model)).filter((k) => k.length)
+    if (!declared.length || declared.some((k) => k.every((c) => t.keys.includes(c.toLowerCase())))) continue
     out.push(
       makeFinding({
         severity: "suggestion",
         category: "fanout",
-        title: `${model}: join key on \`${t.model}\` has no uniqueness test`,
+        title: `${model}: LEFT JOIN key on \`${t.model}\` isn't its declared unique key`,
         body:
-          `\`${t.join}\` matches \`${t.model}\` on [${t.keys.join(", ")}], but ` +
-          (declared.length
-            ? `its uniqueness tests cover ${declared.map((k) => `[${k.join(", ")}]`).join(", ")}, which the join doesn't fully constrain.`
-            : "it declares no uniqueness test.") +
+          `\`${t.join}\` matches \`${t.model}\` on [${t.keys.join(", ")}], but its uniqueness tests cover ` +
+          `${declared.map((k) => `[${k.join(", ")}]`).join(", ")}, which the join doesn't fully constrain.` +
           ` If a key repeats there, this join multiplies rows. Add a \`unique\` / \`unique_combination_of_columns\` test on the join key, or join on the declared key.`,
         file: ctx.file.path,
         model,
@@ -2076,7 +2083,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Cross-engine portability advice from the regex catalog is noise for a
   // project that runs on one known engine. Core's dialect-aware check (a
   // function missing on THIS engine) is a real error and is kept.
-  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect))
+  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
   findings = anchorToDiff(findings, input.changedFiles)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)

@@ -860,7 +860,7 @@ const MODEL_DETECTORS: Detector[] = [
  * default when `x` isn't set in dbt_project.yml (in a package, every project that
  * doesn't set it fails to compile).
  */
-const ADAPTERS = ["bigquery", "snowflake", "databricks", "spark", "redshift", "postgres", "trino", "athena", "duckdb", "exasol", "synapse", "sqlserver", "fabric", "oracle", "clickhouse"]
+export const ADAPTERS = ["bigquery", "snowflake", "databricks", "spark", "redshift", "postgres", "trino", "athena", "duckdb", "exasol", "synapse", "sqlserver", "fabric", "oracle", "clickhouse", "presto"]
 
 /** The adapter a macro file is specific to, from its directory or its macros' `<adapter>__` prefix. */
 function macroAdapter(p: string, sql: string): string | undefined {
