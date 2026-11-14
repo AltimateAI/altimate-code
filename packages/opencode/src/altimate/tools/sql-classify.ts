@@ -319,10 +319,11 @@ const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
 function advancesSequence(tokens: ReturnType<typeof tokenizeSql>["tokens"], masked: string, dialect?: string): boolean {
   if (/\bNEXT\s+VALUE\s+FOR\b/i.test(masked)) return true
   if (!/^(oracle|snowflake|mysql|mariadb)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return false
-  // Comments masked to spaces, and a quoted name counts only when it is exactly NEXTVAL, so
+  // Comments masked to spaces, and a quoted name counts only when it is exactly NEXTVAL ("..." names
+  // are case-sensitive; MySQL/MariaDB backtick names are not), so
   // s./* c */"NEXTVAL" reads as s.NEXTVAL while "s.NEXTVAL" and t."NEXTVAL VALUE" are column names.
   const names = tokens.map((token) =>
-    token.kind === "identifier" && !/^.NEXTVAL.$/i.test(token.text) ? { ...token, text: '"_"' } : token,
+    token.kind === "identifier" && token.text !== '"NEXTVAL"' && !/^`NEXTVAL`$/i.test(token.text) ? { ...token, text: '"_"' } : token,
   )
   return /\.\s*NEXTVAL\b/i.test(maskSql(names, true))
 }

@@ -698,7 +698,9 @@ describe("each engine's own literal and statement rules", () => {
     ['SELECT t."NEXTVAL$amount" FROM t', "snowflake", "read", false],
     ['SELECT t."NEXTVAL-count" FROM t', "oracle", "read", false],
     ['SELECT t."NEXTVAL " FROM t', "oracle", "read", false],
-    ['SELECT s."nextval" FROM dual', "oracle", "write", false],
+    ['SELECT s."nextval" FROM dual', "oracle", "read", false],
+    ['SELECT s."NEXTVAL" FROM dual', "oracle", "write", false],
+    ["SELECT s.`nextval`", "mariadb", "write", false],
   ]
   for (const [sql, dialect, queryType, blocked] of cases)
     test(`${dialect}: ${sql.replace(/\n/g, "\\n")}`, () => {
