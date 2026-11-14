@@ -231,6 +231,17 @@ describe("dbt_cost_estimate", () => {
     expect(calls.dryRuns).toEqual([])
   })
 
+  test("a call cancelled before the queued work runs starts no compile", async () => {
+    const abort = new AbortController()
+    useAdapter(calls, {})
+    const run = (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, { ...ctx, abort: abort.signal })
+    abort.abort(new Error("cancelled"))
+    await expect(run).rejects.toThrow("cancelled")
+    await Bun.sleep(20)
+    expect(calls.nodes).toEqual([])
+    expect(calls.dryRuns).toEqual([])
+  })
+
   test("reports a dry run the warehouse refused", async () => {
     useAdapter(calls, { dryRunFails: true })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1" }, ctx)
