@@ -2141,6 +2141,20 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       merged[i] = { ...f, severity: f.severity === "critical" ? "warning" : f.severity, confidence: "unknown" }
   }
 
+  // The findings a reader sees before the severity threshold: deduped, rubric
+  // exclusions and off-engine portability advice dropped, repeats merged, most
+  // severe first. The AI lane is grounded in this list (its prompt keeps the
+  // top 40), so dropped or repeated findings don't crowd out real ones.
+  const cleanFindings = (list: Finding[]): Finding[] => {
+    let out = dedupe(list).filter((f) => !exclusionReason(f, input.rubric))
+    // Cross-engine portability advice from the regex catalog is noise for a
+    // project that runs on one known engine. Core's dialect-aware check (a
+    // function missing on THIS engine) is a real error and is kept.
+    if (input.suppressPortability) out = out.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
+    out = mergeRepeats(out)
+    return out.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
+  }
+
   // AI reviewer lane — runs AFTER the deterministic lanes so it can be GROUNDED
   // in (and told not to duplicate) the engine findings. Advisory only: its
   // findings are clamped to ≤ warning upstream, so they enrich the review but
@@ -2172,7 +2186,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     try {
       const res = await input.aiReview({
         files: aiFiles,
-        grounding: merged,
+        grounding: cleanFindings(merged),
         prTitle: input.prTitle,
         prBody: input.prBody,
         model: input.aiModel,
@@ -2188,17 +2202,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   }
 
   // Flatten, drop excluded, dedupe, threshold-filter.
-  let findings = dedupe(merged)
-  findings = findings.filter((f) => !exclusionReason(f, input.rubric))
-  // Cross-engine portability advice from the regex catalog is noise for a
-  // project that runs on one known engine. Core's dialect-aware check (a
-  // function missing on THIS engine) is a real error and is kept.
-  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
-  findings = mergeRepeats(findings)
+  let findings = cleanFindings(merged)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
-  // Sort by severity desc, then file.
-  findings.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
