@@ -153,8 +153,26 @@ const isEnvReference = (value: string) => {
   return v.length === 0 || /^\$\{[^}]*\}$/.test(v) || /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(v)
 }
 
+/**
+ * Whether a GitHub token's surroundings name a host other than github.com (GitHub Enterprise). Only github.com is
+ * supported, and its validation goes to api.github.com, so such a token is never read: it would be sent to the wrong host.
+ */
+export function githubHostElsewhere(env: Record<string, unknown> | undefined, args: unknown[] = []): boolean {
+  const named: unknown[] = ["GITHUB_HOST", "GH_HOST", "GITHUB_API_URL", "GITHUB_SERVER_URL"].map((k) => env?.[k])
+  args.forEach((a, i) => {
+    if (a === "--gh-host") named.push(args[i + 1])
+    else if (typeof a === "string" && a.startsWith("--gh-host=")) named.push(a.slice("--gh-host=".length))
+  })
+  return named.some((v) => {
+    if (typeof v !== "string" || !v.trim() || isEnvReference(v)) return false
+    const host = v.trim().replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase()
+    return host !== "github.com" && host !== "api.github.com"
+  })
+}
+
 /** Whether an MCP server's environment holds a credential this flow reads for the provider, not just any value. */
-export function mcpEnvHasToken(id: ProviderId, env: Record<string, string> | undefined): boolean {
+export function mcpEnvHasToken(id: ProviderId, env: Record<string, string> | undefined, args: unknown[] = []): boolean {
+  if (id === "github" && githubHostElsewhere(env, args)) return false
   const patterns = core.BUILTIN_SECRET_FIELDS[id].flatMap((field) => FIELD_SOURCES[field]?.mcp ?? [])
   return Object.entries(env ?? {}).some(([key, value]) => typeof value === "string" && !isEnvReference(value) && patterns.some((p) => p.test(key)))
 }
@@ -165,6 +183,7 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
   for (const { scope, servers } of core.mcpServerMaps(core.homeDir(), process.cwd())) {
     for (const [name, server] of Object.entries(servers ?? {})) {
       if (!server || typeof server !== "object" || !core.providerMatchesMcp(id, name, server)) continue
+      if (id === "github" && githubHostElsewhere(server.env, server.args ?? [])) continue
       for (const [key, value] of Object.entries(server.env ?? {}))
         if (pattern.test(key) && typeof value === "string" && !isEnvReference(value)) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name}, ${scope})` } }
     }
@@ -172,6 +191,7 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
 }
 
 function fromEnv(field: string): Found | undefined {
+  if (field === "github_token" && githubHostElsewhere(process.env)) return undefined
   for (const name of FIELD_SOURCES[field]?.env ?? []) {
     const value = process.env[name]?.trim()
     if (value) return { value, source: { kind: "env", label: name } }

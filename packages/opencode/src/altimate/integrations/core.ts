@@ -344,7 +344,7 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
     for (const id of PROVIDER_IDS) {
       if (!MCP_MATCHERS[id].test(haystack)) continue
       const remote = Boolean(server.url) || server.type === "http" || server.type === "sse"
-      const hasToken = creds.mcpEnvHasToken(id, server.env)
+      const hasToken = creds.mcpEnvHasToken(id, server.env, server.args ?? [])
       if (remote) {
         found.push({
           id,
@@ -403,13 +403,13 @@ function onPath(bin: string): boolean {
 
 function detectGithub(): Detection | undefined {
   // Only github.com: GH_HOST may point gh at an enterprise host, whose token must never go to api.github.com.
-  const auth = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000 })
+  const auth = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: process.env })
   if (auth.status === 0) {
-    const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+    const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
     const login = who.status === 0 ? who.stdout.trim() : ""
     return { id: "github", source: { kind: "cli", label: "gh CLI" }, account: login || null, syncable: true, note: null }
   }
-  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) {
+  if ((process.env.GITHUB_TOKEN || process.env.GH_TOKEN) && !creds.githubHostElsewhere(process.env)) {
     return { id: "github", source: { kind: "env", label: process.env.GITHUB_TOKEN ? "GITHUB_TOKEN" : "GH_TOKEN" }, account: null, syncable: true, note: null }
   }
 }
@@ -1165,6 +1165,8 @@ async function syncReal(
   // A known expiry carries over only for the saved credential; a detected token may have been replaced since it was recorded.
   const expiresAt = check.expiresAt ?? (collected.saved ? rec?.expiresAt : null) ?? null
   const upload = expiresAt ? { ...collected.config, expires_at: expiresAt } : collected.config
+  // Set once the upload is done, so a failure after it (a progress callback, the lock release) still says who can use the connection.
+  let exposure: { notes: string[]; shared: boolean } = { notes: [], shared: false }
   try {
     // The blocked check, the record check and the upload share one lock with Keep local and Disconnect. The config was prepared before the lock, so the record is compared again here.
     return await withLock(async (): Promise<SyncOutcome> => {
@@ -1174,6 +1176,7 @@ async function syncReal(
       if (!sameRecord(cur, rec))
         return { id, result: "failed", reason: "the connection changed while syncing, run sync again", steps: [] }
       const res = await upsertManaged(cfg, id, upload, share)
+      exposure = exposureNotes(res)
       if (!res.isValid) {
         // A workspace that refuses a new connection keeps nothing of it; the local copy stays.
         let warning = ""
@@ -1204,7 +1207,6 @@ async function syncReal(
           }
         })
       } catch (e) {
-        const exposure = exposureNotes(res)
         return { id, result: "failed", reason: [RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), ...exposure.notes].join(" "), steps, ...(exposure.shared ? { shared: true as const } : {}) }
       }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
@@ -1218,7 +1220,8 @@ async function syncReal(
       return reportWorkspace(res.workspace ?? { notLinked: true }, res.shared === true)
     })
   } catch (e) {
-    return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
+    const reason = [e instanceof Error ? e.message : String(e), ...exposure.notes].join(" ")
+    return { id, result: "failed", reason, steps, ...(exposure.shared ? { shared: true as const } : {}) }
   }
 }
 

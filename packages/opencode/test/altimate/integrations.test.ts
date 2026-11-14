@@ -47,6 +47,19 @@ describe("sameRecord", () => {
   })
 })
 
+describe("githubHostElsewhere", () => {
+  test("only a host other than github.com counts, from env or --gh-host", () => {
+    for (const env of [{}, { GITHUB_HOST: "github.com" }, { GITHUB_API_URL: "https://api.github.com" }, { GH_HOST: "${GH_HOST}" }])
+      expect(creds.githubHostElsewhere(env)).toBe(false)
+    for (const env of [{ GITHUB_HOST: "https://ghe.corp" }, { GH_HOST: "ghe.corp" }, { GITHUB_API_URL: "https://ghe.corp/api/v3" }, { GITHUB_SERVER_URL: "https://ghe.corp" }])
+      expect(creds.githubHostElsewhere(env)).toBe(true)
+    expect(creds.githubHostElsewhere({}, ["stdio", "--gh-host", "ghe.corp"])).toBe(true)
+    expect(creds.githubHostElsewhere({}, ["--gh-host=https://github.com"])).toBe(false)
+    expect(creds.mcpEnvHasToken("github", { GITHUB_TOKEN: "x", GITHUB_HOST: "ghe.corp" })).toBe(false)
+    expect(core.detectFromMcpServers({ github: { command: "npx", args: ["@modelcontextprotocol/server-github", "--gh-host", "ghe.corp"], env: { GITHUB_TOKEN: "x" } } } as any, "user").find((d) => d.id === "github")?.syncable).not.toBe(true)
+  })
+})
+
 describe("detection parsing", () => {
   test("claude.json and .mcp.json servers", () => {
     const home = fs.mkdtempSync(path.join(tmp, "home-"))
@@ -1809,6 +1822,24 @@ describe("credentials flow", () => {
       fake("gh", '[ "$2" = token ] && [ "$3" = --hostname ] && [ "$4" = github.com ] && echo ' + GOOD + ' || echo ghe_enterprise_token')
       const r = await creds.connectCredentials({ id: "github", localOnly: true })
       expect([r.status, r.account]).toEqual(["connected", "octo"])
+    })
+
+    test("a GitHub token next to an enterprise host is never read from the environment or an MCP server", async () => {
+      process.env.GITHUB_TOKEN = GOOD
+      process.env.GH_HOST = "ghe.corp.example"
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+        expect(core.scan().find((d) => d.id === "github")).toBeUndefined()
+      } finally {
+        delete process.env.GITHUB_TOKEN
+        delete process.env.GH_HOST
+      }
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "github-mcp-server", args: ["stdio", "--gh-host", "https://ghe.corp.example"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } } }))
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+      } finally {
+        fs.rmSync(path.join(home, ".claude.json"), { force: true })
+      }
     })
 
     test("detected credentials are used without typing", async () => {
