@@ -7,6 +7,7 @@ import {
   ReviewCategory as ReviewCategoryEnum,
   makeFinding,
   dedupe,
+  mergeRepeats,
   SEVERITY_ORDER,
 } from "./finding"
 import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide } from "./diff-filter"
@@ -2193,6 +2194,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // project that runs on one known engine. Core's dialect-aware check (a
   // function missing on THIS engine) is a real error and is kept.
   if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
+  findings = mergeRepeats(findings)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.
