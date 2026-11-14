@@ -102,9 +102,14 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
   // The paths as given first, as VS Code builds the key; then with symlinks followed, for a workspace reached through a link.
   const lexical = [path.resolve(projectDir), workspaceDir ? path.resolve(workspaceDir) : undefined] as const
   const resolved = [real(projectDir), workspaceDir ? real(workspaceDir) : undefined] as const
-  for (const [start, workspace] of lexical[0] === resolved[0] && lexical[1] === resolved[1] ? [lexical] : [lexical, resolved]) {
+  const passes = lexical[0] === resolved[0] && lexical[1] === resolved[1] ? [lexical] : [lexical, resolved]
+  for (const [i, [start, workspace]] of passes.entries()) {
     const found = search(start, workspace)
-    if (found === UNREADABLE) return undefined
+    // An unreadable file ends the search of its own pass; the pass over the real paths may still reach a readable one.
+    if (found === UNREADABLE) {
+      if (i === passes.length - 1) return undefined
+      continue
+    }
     if (found) return found
   }
   return undefined

@@ -209,6 +209,24 @@ describe("dbt_defer_state", () => {
     }
   })
 
+  test("an unparseable settings file above a symlinked project does not hide the entry on the real path", () => {
+    const real = fs.mkdtempSync(path.join(path.dirname(root), "real-"))
+    fs.mkdirSync(path.join(real, "analytics"))
+    fs.mkdirSync(path.join(real, ".vscode"))
+    fs.writeFileSync(path.join(real, ".vscode", "settings.json"), JSON.stringify({ "dbt.deferConfigPerProject": { analytics: { deferToProduction: true } } }))
+    const holder = fs.mkdtempSync(path.join(path.dirname(root), "hold-"))
+    fs.mkdirSync(path.join(holder, ".vscode"))
+    fs.writeFileSync(path.join(holder, ".vscode", "settings.json"), "{ not json")
+    const link = path.join(holder, "analytics")
+    fs.symlinkSync(path.join(real, "analytics"), link)
+    try {
+      expect(findDeferSetting(link)?.entry.deferToProduction).toBe(true)
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true })
+      fs.rmSync(holder, { recursive: true, force: true })
+    }
+  })
+
   test("settings with comments and trailing commas parse", () => {
     settings({ analytics: { deferToProduction: true } })
     expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")
