@@ -67,6 +67,8 @@ export interface Rule {
    * balance, the final SELECT. ANDed with the other conditions.
    */
   check?: (sql: string) => boolean
+  /** Give `check` the string literals too (comments still blanked), for checks that compare literal text. */
+  checkKeepsStrings?: boolean
   /**
    * Matched against each JOIN's whole ON clause (comments and strings blanked),
    * so a predicate split across lines is seen whole. Relevant only when one of
@@ -134,7 +136,7 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   if (rule.absentNewSql) {
     if (rule.absentNewSql.test(stripComments(input.newSql))) return false
   }
-  if (rule.check && !rule.check(stripStrings(stripComments(input.newSql)))) return false
+  if (rule.check && !rule.check(rule.checkKeepsStrings ? stripComments(input.newSql) : stripStrings(stripComments(input.newSql)))) return false
   if (rule.onClause) {
     const changed = input.added.map((l) => stripStrings(stripComments(l)).trim()).filter((l) => /\w{2}/.test(l))
     const hit = onClauses(input.newSql).some((c) => rule.onClause!.test(c) && changed.some((l) => c.includes(l)))
@@ -149,7 +151,7 @@ const BEFORE_ON = /\b(join|on|where|select|from|group|having|qualify|order|merge
 
 
 /** Blank everything inside nested parentheses, keeping the top level of `s`. */
-function topLevel(s: string): string {
+export function topLevel(s: string): string {
   let depth = 0
   let out = ""
   for (const ch of s) {
@@ -161,7 +163,7 @@ function topLevel(s: string): string {
 }
 
 /** Text inside the parentheses that open at `start` (exclusive), or the rest of `s` if unbalanced. */
-function parenBody(s: string, start: number): string {
+export function parenBody(s: string, start: number): string {
   let depth = 0
   for (let i = start; i < s.length; i++) {
     if (s[i] === "(") depth++
@@ -393,10 +395,196 @@ const r = (
       | "check"
       | "onClause"
       | "macros"
+      | "checkKeepsStrings"
   >,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
+
+
+/** Columns named in a comma list, without qualifiers, lowercased. */
+const colList = (s: string) =>
+  s.split(",").map((c) => c.trim().replace(/\s+(asc|desc)(\s+nulls\s+(first|last))?$/i, "").replace(/^.*\./, "").toLowerCase()).filter(Boolean)
+
+/** An OVER clause whose ORDER BY repeats a PARTITION BY column (constant within each partition). */
+function windowOrderRepeatsPartition(sql: string): boolean {
+  for (const m of sql.matchAll(/\bover\s*\(/gi)) {
+    const body = topLevel(parenBody(sql, m.index! + m[0].length - 1))
+    const pm = /\bpartition\s+by\b([\s\S]*?)(?=\border\s+by\b|\brows\b|\brange\b|$)/i.exec(body)
+    const om = /\border\s+by\b([\s\S]*?)(?=\brows\b|\brange\b|$)/i.exec(body)
+    if (!pm || !om) continue
+    const parts = new Set(colList(pm[1]))
+    if (colList(om[1]).some((c) => /^\w+$/.test(c) && parts.has(c))) return true
+  }
+  return false
+}
+
+/** A CASE with two WHEN branches whose conditions are identical: the second is unreachable. */
+function duplicateCaseWhen(sql: string): boolean {
+  for (const m of sql.matchAll(/\bcase\b/gi)) {
+    // The CASE's own level: nested CASEs and calls are blanked by parens only, so cut at the matching END.
+    let depth = 0
+    const conds: string[] = []
+    const re = /\b(case|end|when)\b([\s\S]*?)(?=\b(?:case|end|when|then)\b)/gi
+    re.lastIndex = m.index!
+    for (let x = re.exec(sql); x; x = re.exec(sql)) {
+      const kw = x[1].toLowerCase()
+      if (kw === "case") depth++
+      else if (kw === "end") {
+        if (--depth === 0) break
+      } else if (depth === 1) conds.push(x[2].replace(/\s+/g, " ").trim().toLowerCase())
+    }
+    if (new Set(conds).size < conds.length) return true
+  }
+  return false
+}
+
+/** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER. */
+export function leftJoinNullifiedByWhere(sql: string): boolean {
+  const scopes = [topLevel(sql), ...[...sql.matchAll(/\(\s*select\b/gi)].map((m) => topLevel(parenBody(sql, m.index!)))]
+  for (const scope of scopes) {
+    for (const blk of scope.split(/\bunion(?:\s+all|\s+distinct)?\b/i)) {
+      const where = /\bwhere\b([\s\S]*?)(?=\b(?:group\s+by|having|qualify|order\s+by|limit|window)\b|$)/i.exec(blk)?.[1]
+      if (!where) continue
+      // The alias, or the relation's own name when it has none.
+      const aliases = [...blk.matchAll(/\bleft\s+(?:outer\s+)?join\s+(\{\{[^}]*\}\}|[\w."`]+)\s*(?:as\s+)?(\w+)?/gi)]
+        .map((m) => (m[2] && !/^(on|using|where|left|right|inner|full|cross|join)$/i.test(m[2]) ? m[2] : /^[\w."`]+$/.test(m[1]) ? m[1].replace(/[`"]/g, "").split(".").pop() : undefined))
+        .filter((a): a is string => !!a)
+      const conjuncts = where.split(/\band\b/i)
+      for (const a of aliases) {
+        const ref = new RegExp(`\\b${a}\\.\\w+`, "i")
+        if (
+          conjuncts.some(
+            (c) => ref.test(c) && !/\bor\b|coalesce|ifnull|nvl/i.test(c) && !new RegExp(`\\b${a}\\.\\w+\\s+is\\s+null\\b`, "i").test(c),
+          )
+        )
+          return true
+      }
+    }
+  }
+  return false
+}
+
+const FEASIBLE: Rule[] = [
+  r(
+    "left-join-filtered-in-where",
+    "join_risk",
+    "warning",
+    "LEFT JOIN filtered in WHERE acts as an INNER JOIN",
+    "A WHERE predicate on the right side of a LEFT JOIN drops the rows where that side is NULL, so the LEFT JOIN behaves as an INNER JOIN. Move the predicate into the ON clause to keep unmatched rows, or write INNER JOIN if dropping them is intended.",
+    { added: /\b(where|and)\b|\bleft\s+(outer\s+)?join\b/i, check: leftJoinNullifiedByWhere },
+    { add: "select a.id, b.x\nfrom a\nleft join b on a.id = b.id\nwhere b.status = 'active'" },
+    { add: "select a.id, b.x\nfrom a\nleft join b on a.id = b.id and b.status = 'active'\nwhere a.kind = 'x'" },
+  ),
+  r(
+    "join-case-folded-one-side",
+    "sql_correctness",
+    "suggestion",
+    "join compares a case-folded key to a raw one",
+    "`lower()`/`upper()` on one side of the join only: values on the other side with different casing never match. Fold both sides, or normalize the key upstream.",
+    {
+      onClause: /\b(lower|upper)\s*\(\s*[\w.]+\s*\)\s*=\s*(?!\s*(lower|upper)\s*\()[a-z_][\w.]*|(?:^|[\s(])(?<![(\w.])[a-z_]\w*\.\w+\s*=\s*(lower|upper)\s*\(/i,
+      macros: true,
+    },
+    { add: "join u\n  on lower(c.email) = u.email" },
+    { add: "join u\n  on lower(c.email) = lower(u.email)" },
+  ),
+  r(
+    "null-safe-join-removed",
+    "sql_correctness",
+    "warning",
+    "null-safe comparison replaced by `=`",
+    "This change removes `IS NOT DISTINCT FROM` (or `<=>`). With `=`, rows whose key is NULL on both sides no longer match, so a join drops them and a comparison treats them as different.",
+    { removed: /\bis\s+not\s+distinct\s+from\b|<=>/i, absentNewSql: /\bis\s+not\s+distinct\s+from\b|<=>/i, added: /=/ },
+    { remove: "on a.k is not distinct from b.k", add: "on a.k = b.k", newSql: "select 1 from a join b on a.k = b.k" },
+    { remove: "on a.k is not distinct from b.k", add: "on a.k is not distinct from b.k and a.x = b.x" },
+  ),
+  r(
+    "window-order-repeats-partition",
+    "warehouse_cost",
+    "suggestion",
+    "window ORDER BY repeats a PARTITION BY column",
+    "Within a partition the PARTITION BY columns are constant, so ordering by them changes nothing and only adds sort keys. Order by the columns that actually vary within the partition.",
+    { added: /\border\s+by\b|\bpartition\s+by\b/i, check: windowOrderRepeatsPartition },
+    { add: "sum(x) over (partition by account_id, source_relation order by account_id, source_relation, d) as r" },
+    { add: "sum(x) over (partition by account_id order by d) as r" },
+  ),
+  r(
+    "case-duplicate-when",
+    "sql_correctness",
+    "suggestion",
+    "CASE has a duplicate WHEN condition",
+    "Two WHEN branches test the same condition; CASE returns the first match, so the later branch never runs. Merge them, or fix the condition that was meant.",
+    { added: /\bwhen\b/i, check: duplicateCaseWhen, checkKeepsStrings: true },
+    { add: "case\n  when spend = 0 then 'no spend'\n  when clicks = 0 then 'no clicks'\n  when spend = 0 then 'zero'\nend" },
+    { add: "case\n  when spend = 0 then 'no spend'\n  when clicks = 0 then 'no clicks'\nend" },
+  ),
+  r(
+    "qualify-unsupported",
+    "sql_correctness",
+    "warning",
+    "QUALIFY isn't supported on every engine",
+    "Trino, Athena and Postgres have no QUALIFY clause, so the model fails to parse there. Filter on the window result in an outer SELECT instead.",
+    { added: /\bqualify\b/i, macros: true, portability: { worksOn: ["snowflake", "bigquery", "databricks", "spark", "duckdb", "redshift", "clickhouse", "teradata", "exasol"] } },
+    { add: "qualify row_number() over (partition by id order by d desc) = 1" },
+    { add: "where rn = 1" },
+  ),
+  r(
+    "ignore-nulls-inside-call",
+    "sql_correctness",
+    "warning",
+    "IGNORE NULLS inside the function call is BigQuery syntax",
+    "`f(x IGNORE NULLS)` parses on BigQuery only. Trino, Snowflake and others take it after the call: `last_value(x) IGNORE NULLS OVER (…)`.",
+    {
+      added: /\bignore\s+nulls\b/i,
+      check: (sql) => /\(\s*[^()]*?\bignore\s+nulls\s*\)/i.test(sql),
+      macros: true,
+      portability: { worksOn: ["bigquery"] },
+    },
+    { add: "last_value(x ignore nulls) over (partition by k order by d)" },
+    { add: "last_value(x) ignore nulls over (partition by k order by d)" },
+  ),
+  r(
+    "min-max-by-portability",
+    "sql_correctness",
+    "suggestion",
+    "MIN_BY/MAX_BY don't exist on Postgres or Redshift",
+    "`min_by`/`max_by` run on BigQuery, Snowflake, Databricks, Trino and DuckDB but not on Postgres or Redshift. In a package that supports those adapters, use a dispatched macro or a `row_number()` pick.",
+    { added: /\b(min_by|max_by)\s*\(/i, macros: true, portability: { worksOn: ["bigquery", "snowflake", "databricks", "spark", "trino", "athena", "duckdb"] } },
+    { add: "max_by(status, updated_at) as latest_status" },
+    { add: "max(updated_at) as latest_at" },
+  ),
+  r(
+    "clickhouse-mutation-async",
+    "sql_correctness",
+    "suggestion",
+    "ClickHouse ALTER … UPDATE/DELETE runs asynchronously",
+    "A ClickHouse mutation returns before it is applied unless `mutations_sync` is set, so the next statement can read the old rows. Add `SETTINGS mutations_sync = 2` (or 1) when later steps depend on the result.",
+    { added: /\balter\s+table\b[^;]*\b(update|delete)\b/i, absentNewSql: /mutations_sync/i, macros: true },
+    { add: "alter table {{ relation }} update col = null where col = ''" },
+    { add: "alter table {{ relation }} update col = null where col = '' settings mutations_sync = 2", newSql: "alter table t update col = null where col = '' settings mutations_sync = 2" },
+  ),
+  r(
+    "datename-language-dependent",
+    "sql_correctness",
+    "suggestion",
+    "DATENAME depends on the session language",
+    "SQL Server's `DATENAME(weekday|month, …)` returns names in the session's language, so comparisons against English names break on servers with another default. Use `DATEPART` with `@@DATEFIRST`-safe arithmetic.",
+    { added: /\bdatename\s*\(\s*(weekday|dw|month|mm|m)\b/i, macros: true },
+    { add: "datename(weekday, created_at) = 'Monday'" },
+    { add: "datepart(weekday, created_at) = 2" },
+  ),
+  r(
+    "hardcoded-year-filter",
+    "sql_correctness",
+    "suggestion",
+    "hardcoded year in a filter won't roll forward",
+    "A literal year in the filter freezes the model to that year. Read it from a var or derive it from the current date, or say in a comment why it is fixed.",
+    { added: /\b\w*(year|yr)\w*\s*(=|>=|<=|<|>)\s*20\d\d\b/i, unless: /var\s*\(/i },
+    { add: "where academic_year = 2024" },
+    { add: "where academic_year = {{ var('current_academic_year') }}" },
+  ),
+]
 
 export const CATALOG: Rule[] = []
 
@@ -2592,6 +2780,7 @@ CATALOG.push(
   ...STYLE,
   ...MISC,
   ...MISC2,
+  ...FEASIBLE,
 )
 // NOTE: the large generated families (dialect-specific functions, reserved
 // words, non-portable types, operators) used to live in `rule-generators.ts`.

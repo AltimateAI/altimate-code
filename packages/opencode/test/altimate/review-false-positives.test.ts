@@ -344,3 +344,12 @@ describe("window function without PARTITION BY", () => {
     expect(titles("select\n  row_number() over (\n    order by ts\n  ) as rn\nfrom t").some((t) => /PARTITION BY/.test(t))).toBe(true)
   })
 })
+
+describe("config dict with a nested dict", () => {
+  test("a BigQuery partition_by dict inside the splat dict keeps its own keys", () => {
+    const sql = `{% set meta_config = {\n  "materialized": "incremental",\n  "batch_size": batch_size,\n  "partition_by": {"field": "day", "granularity": "day"},\n} %}\n{{ config(meta=meta_config, **meta_config) }}\nselect 1`
+    const out = inlineConfigSplats(sql)
+    expect(out).toContain(`materialized= "incremental"`)
+    expect(out).toContain(`partition_by= {"field": "day", "granularity": "day"}`)
+  })
+})

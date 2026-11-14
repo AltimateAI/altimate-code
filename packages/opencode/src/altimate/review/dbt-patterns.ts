@@ -860,6 +860,16 @@ const MODEL_DETECTORS: Detector[] = [
  * default when `x` isn't set in dbt_project.yml (in a package, every project that
  * doesn't set it fails to compile).
  */
+const ADAPTERS = ["bigquery", "snowflake", "databricks", "spark", "redshift", "postgres", "trino", "athena", "duckdb", "exasol", "synapse", "sqlserver", "fabric", "oracle", "clickhouse"]
+
+/** The adapter a macro file is specific to, from its directory or its macros' `<adapter>__` prefix. */
+function macroAdapter(p: string, sql: string): string | undefined {
+  const seg = p.toLowerCase().split("/").find((s) => ADAPTERS.includes(s))
+  if (seg) return seg
+  const names = [...sql.matchAll(/\{%-?\s*macro\s+(\w+?)__\w+/g)].map((m) => m[1].toLowerCase())
+  return names.length && names.every((n) => n === names[0]) && ADAPTERS.includes(names[0]) ? names[0] : undefined
+}
+
 export function detectMacroPatterns(
   file: ChangedFile,
   newSql: string,
@@ -869,7 +879,14 @@ export function detectMacroPatterns(
 ): Finding[] {
   if (fileKind(file) !== "macro" || file.status === "deleted") return []
   const { added, removed } = splitDiff(file.diff)
-  const out = evaluateCatalog(file, newSql, added, removed, rubric, catalogCtx)
+  // An adapter's own variant (`macros/…/bigquery/x.sql`, `{% macro bigquery__x %}`) runs only on that
+  // adapter, so portability advice applies only where that adapter lacks the construct.
+  const adapter = macroAdapter(file.path, newSql)
+  const out = evaluateCatalog(file, newSql, added, removed, rubric, catalogCtx).filter((f) => {
+    if (!adapter || f.evidence?.tool !== "rule-catalog" || (f.evidence.result as { portability?: boolean })?.portability !== true) return true
+    const worksOn = (f.evidence.result as { worksOn?: string[] }).worksOn
+    return !!worksOn && !worksOn.includes(adapter)
+  })
   const model = modelNameFromPath(file.path)
   const seen = new Set<string>()
   for (const line of added) {

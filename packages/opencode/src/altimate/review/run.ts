@@ -1,5 +1,5 @@
 import path from "node:path"
-import { readFile, realpath, stat, access } from "node:fs/promises"
+import { readFile, realpath, stat, access, readdir } from "node:fs/promises"
 import { Installation } from "../../installation"
 import { loadReviewPolicy, resolveRubric } from "./config"
 import type { Severity } from "./finding"
@@ -9,6 +9,7 @@ import {
   resolveReviewBase,
   type ResolvedBase,
   gitRepoRoot,
+  listFilesAt,
   manifestHash,
   showAtRef,
 } from "./git"
@@ -398,6 +399,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     : []
 
   return runReview({
+    resourceNames: () => projectResourceNames(opts.cwd, opts.head, projectRootRel, dbtRoot),
     changedFiles,
     config,
     rubric,
@@ -518,4 +520,44 @@ async function repoRelative(gitRoot: string, dir: string, known: boolean): Promi
   const rel = path.relative(a, b).replace(/\\/g, "/")
   if (rel.startsWith("..") || path.isAbsolute(rel)) return undefined
   return rel
+}
+
+const RESOURCE_FILE = /\.(sql|py|csv)$/i
+const resourceName = (f: string) => path.basename(f).replace(RESOURCE_FILE, "").toLowerCase()
+
+/**
+ * Names `ref()` can resolve to: model/seed/snapshot files in the repo at head plus
+ * models of installed packages (`dbt_packages/`). Undefined when that can't be known:
+ * no project root, git can't list the tree, or packages are declared but not installed.
+ */
+async function projectResourceNames(
+  cwd: string,
+  head: string | undefined,
+  projectRootRel: string | undefined,
+  dbtRoot: string,
+): Promise<Set<string> | undefined> {
+  if (projectRootRel === undefined) return undefined
+  const files = await listFilesAt(cwd, head)
+  if (!files) return undefined
+  const prefix = projectRootRel ? projectRootRel + "/" : ""
+  const names = new Set<string>()
+  for (const f of files) if (f.startsWith(prefix) && RESOURCE_FILE.test(f)) names.add(resourceName(f))
+  if (files.includes(prefix + "packages.yml") || files.includes(prefix + "dependencies.yml")) {
+    const pkgDir = path.join(dbtRoot, "dbt_packages")
+    const walk = async (dir: string, depth: number): Promise<boolean> => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        return false
+      }
+      for (const e of entries) {
+        if (e.isDirectory() && depth < 12 && e.name !== ".git") await walk(path.join(dir, e.name), depth + 1)
+        else if (e.isFile() && RESOURCE_FILE.test(e.name)) names.add(resourceName(e.name))
+      }
+      return true
+    }
+    if (!(await walk(pkgDir, 0))) return undefined
+  }
+  return names
 }

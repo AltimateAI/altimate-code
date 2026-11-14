@@ -157,6 +157,16 @@ export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
   }
 }
 
+/** Every tracked file at `ref` (default HEAD), repo-root relative; undefined when git can't list it. */
+export async function listFilesAt(cwd: string, ref?: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(["ls-tree", "-r", "--full-tree", "--name-only", ref || "HEAD"], cwd)
+    return out.split("\n").filter(Boolean)
+  } catch {
+    return undefined
+  }
+}
+
 /** Where the review's base came from, recorded on the verdict envelope. */
 export type BaseSource =
   | "flag" // --base

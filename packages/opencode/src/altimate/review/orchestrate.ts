@@ -20,6 +20,7 @@ import { detectUnitTestFixtures } from "./unit-tests"
 import { selectListNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
+import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
 import { type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult } from "./ai-review"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
@@ -231,6 +232,8 @@ export interface OrchestrateInput {
   staleManifest?: boolean
   /** The dbt project's directories from dbt_project.yml (custom model-paths). */
   layout?: DbtProjectLayout
+  /** Names `ref()` can resolve to at head (repo resources + installed packages); undefined = unknown. */
+  resourceNames?: () => Promise<Set<string> | undefined>
   /** What the review covered: base resolution and files left out of scope. */
   scope?: Omit<ReviewScope, "unverified">
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
@@ -1110,8 +1113,34 @@ export function definedVars(projectYml?: string): Set<string> {
  */
 export function inlineConfigSplats(sql: string): string {
   const dicts = new Map<string, string>()
-  for (const m of sql.matchAll(/\{%-?\s*set\s+(\w+)\s*=\s*\{([^{}]*)\}\s*-?%\}/g)) {
-    dicts.set(m[1], m[2].replace(/["'](\w+)["']\s*:/g, "$1=").replace(/,\s*$/, ""))
+  for (const m of sql.matchAll(/\{%-?\s*set\s+(\w+)\s*=\s*\{/g)) {
+    // The dict body up to its matching brace; nested dicts (a BigQuery partition_by) stay as written.
+    const open = m.index! + m[0].length - 1
+    let depth = 0
+    let end = -1
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "{") depth++
+      else if (sql[i] === "}" && --depth === 0) {
+        end = i
+        break
+      }
+    }
+    if (end < 0 || !/^\s*-?%\}/.test(sql.slice(end + 1))) continue
+    const body = sql.slice(open + 1, end)
+    // Only top-level `"key":` becomes `key=`.
+    let out = ""
+    let d = 0
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i]
+      if ("{[(".includes(c)) d++
+      else if ("}])".includes(c)) d--
+      const key = d === 0 ? /^["'](\w+)["']\s*:/.exec(body.slice(i)) : null
+      if (key) {
+        out += key[1] + "="
+        i += key[0].length - 1
+      } else out += c
+    }
+    dicts.set(m[1], out.replace(/,\s*$/, ""))
   }
   if (!dicts.size) return sql
   return sql.replace(/\bconfig\s*\(([\s\S]*?)\)\s*\}\}/g, (whole) =>
@@ -1165,6 +1194,39 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVar
  * row per extra value lands; a `unique_key` missing a test column merges rows the
  * test treats as distinct.
  */
+/** A new join whose key isn't covered by any uniqueness test on the joined model: a duplicate key multiplies rows. */
+async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+  if (!runner.declaredUniqueKeys || !runner.modelConfig || !ctx.newSql || ctx.file.status === "deleted") return []
+  const added = (ctx.file.diff ?? "").split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1))
+  const out: Finding[] = []
+  const model = modelNameFromPath(ctx.file.path)
+  for (const t of joinTargets(ctx.newSql, added)) {
+    // Unknown to the manifest (a package model, a typo): nothing to compare against.
+    if (!(await runner.modelConfig(t.model))) continue
+    const declared = await runner.declaredUniqueKeys(t.model)
+    if (declared.some((k) => k.length && k.every((c) => t.keys.includes(c.toLowerCase())))) continue
+    out.push(
+      makeFinding({
+        severity: "suggestion",
+        category: "fanout",
+        title: `${model}: join key on \`${t.model}\` has no uniqueness test`,
+        body:
+          `\`${t.join}\` matches \`${t.model}\` on [${t.keys.join(", ")}], but ` +
+          (declared.length
+            ? `its uniqueness tests cover ${declared.map((k) => `[${k.join(", ")}]`).join(", ")}, which the join doesn't fully constrain.`
+            : "it declares no uniqueness test.") +
+          ` If a key repeats there, this join multiplies rows. Add a \`unique\` / \`unique_combination_of_columns\` test on the join key, or join on the declared key.`,
+        file: ctx.file.path,
+        model,
+        confidence: "medium",
+        evidence: { tool: "dbt.manifest", result: { joined: t.model, keys: t.keys, declared } },
+        ruleKey: `fanout:join-key-untested:${t.model}`,
+      }),
+    )
+  }
+  return out
+}
+
 const TIME_PARTITION_COLUMN = /(^|_)(date|day|week|month|quarter|year|period|hour|ts|time|timestamp)(_|$)|_at$/i
 
 async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
@@ -1691,6 +1753,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     if (lanes.has("dbt_patterns") || lanes.has("materialization") || lanes.has("contract_violation")) {
       tasks.push(dbtConfigLane(ctx, input.runner, projectVars))
       tasks.push(uniqueKeyMismatchLane(ctx, input.runner))
+      tasks.push(joinKeyUniquenessLane(ctx, input.runner))
+      tasks.push(
+        (input.runner.modelConfig?.(modelNameFromPath(ctx.file.path)) ?? Promise.resolve(undefined))
+          .catch(() => undefined)
+          .then((mc) => [
+            ...jinjaFindings(ctx.file, ctx.oldSql, ctx.newSql),
+            ...modelConfigFindings(ctx.file, ctx.newSql && inlineConfigSplats(ctx.newSql), dialect, mc),
+          ]),
+      )
     }
     // Base-vs-head structural diff is a `semantic_change` concern (DISTINCT/UNION/grain/
     // surrogate-key/predicate changes) — gate on semantic_change, keeping dbt_patterns
@@ -1750,8 +1821,45 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const sets = await Promise.all(
       macros.map(async (file) => {
         try {
-          const newSql = await getContent?.(file.path, "new")
-          return newSql ? detectMacroPatterns(file, newSql, input.rubric, projectVars, { dialect, dialectKnown: !!input.dialectKnown }) : []
+          const [newSql, oldSql] = await Promise.all([
+            getContent?.(file.path, "new"),
+            file.status === "added" ? Promise.resolve(undefined) : getContent?.(file.oldPath ?? file.path, "old")?.catch(() => undefined),
+          ])
+          if (!newSql) return []
+          return [
+            ...detectMacroPatterns(file, newSql, input.rubric, projectVars, { dialect, dialectKnown: !!input.dialectKnown }),
+            ...jinjaFindings(file, oldSql, newSql),
+          ]
+        } catch (err) {
+          failedFile(file, err)
+          return []
+        }
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+  }
+
+  // ref() to a name no model, seed or snapshot carries: dbt fails to parse the project.
+  if (lanes.has("dbt_patterns") && input.resourceNames) {
+    const models = [...ctxByPath.values()].filter((c) => c.file.status !== "deleted" && /\bref\s*\(/.test(c.file.diff ?? ""))
+    const names = models.length ? await input.resourceNames().catch(() => undefined) : undefined
+    if (names) for (const c of models) all.push(missingRefFindings(c.file, names))
+  }
+
+  // Singular tests and snapshots: Jinja structure. packages.yml / dbt_project.yml: pins and config.
+  if (lanes.has("dbt_patterns")) {
+    const others = reviewable.filter(
+      (f) => f.status !== "deleted" && ((f.kind === "test" || f.kind === "snapshot") || f.kind === "project_config"),
+    )
+    const sets = await Promise.all(
+      others.map(async (file) => {
+        try {
+          const [newContent, oldContent] = await Promise.all([
+            getContent?.(file.path, "new"),
+            file.status === "added" ? Promise.resolve(undefined) : getContent?.(file.oldPath ?? file.path, "old")?.catch(() => undefined),
+          ])
+          if (file.kind === "project_config") return [...packagesFindings(file, newContent), ...dbtProjectFindings(file, oldContent, newContent)]
+          return jinjaFindings(file, oldContent, newContent)
         } catch (err) {
           failedFile(file, err)
           return []
@@ -1783,6 +1891,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
@@ -1793,6 +1902,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ])
         return [
           ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
+          ...testsOnNullColumns(file, newContent, sqlByModel),
           ...detectUnitTestFixtures(file, oldContent, newContent),
           ...snapshotYmlFindings(file, oldContent, newContent),
           ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
