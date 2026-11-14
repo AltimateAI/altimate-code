@@ -1363,6 +1363,8 @@ export async function readRunResults(dbtRoot: string, targetPathOverride?: strin
   const targetPath = await resolveDbtTargetPath(dbtRoot, targetPathOverride)
   const path = join(targetPath, "run_results.json")
   try {
+    // The time keeps the plain stat's own rounding: every other caller compares it with mtimes read the same way, and a different rounding of equal timestamps would order them apart.
+    const plain = await fs.stat(path)
     const stat = await fs.stat(path, { bigint: true })
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
@@ -1375,7 +1377,7 @@ export async function readRunResults(dbtRoot: string, targetPathOverride?: strin
       after.ctimeNs !== stat.ctimeNs
     )
       return null
-    const mtimeMs = Number(stat.mtimeNs) / 1e6
+    const mtimeMs = plain.mtimeMs
     const parsed = JSON.parse(raw) as { results?: unknown; args?: unknown; metadata?: unknown; elapsed_time?: unknown }
     // A file that parses but carries no `results` array is not a run artifact.
     // Returning an empty one would read as "a build happened and recorded
