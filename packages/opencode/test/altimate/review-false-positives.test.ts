@@ -267,3 +267,80 @@ describe("OR in a join condition", () => {
     expect(fires("join-or-condition", sql("a.k = b.k or (a.k is null and b.k is null)"))).toBe(false)
   })
 })
+
+describe("engine check results in a dbt model", () => {
+  const review = async (issues: { rule: string; message: string; severity?: string }[]) => {
+    const runner = {
+      async impact() {
+        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: issues.map((i) => ({ severity: "error", ...i })), ran: true }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+    } as unknown as ReviewRunner
+    const env = await runReview({
+      changedFiles: [{ path: "models/m.sql", status: "modified", diff: "+select 1" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => "select 1",
+    })
+    return env.findings.filter((f) => f.evidence?.tool === "altimate_core.check")
+  }
+  test("injection rules and engine planner gaps: silent", async () => {
+    expect(
+      await review([
+        { rule: "union_injection", message: "UNION SELECT injection detected" },
+        { rule: "comment_injection", message: "Comment injection detected (line comment)" },
+        { rule: "unbalanced_quote", message: "Unbalanced string quote (possible injection breakout)" },
+        { rule: "validate", message: "Error during planning: Cannot coerce arithmetic expression Int64 * Interval(MonthDayNano)" },
+        { rule: "validate", message: "This feature is not implemented: Arrays with unspecified type is not supported" },
+      ]),
+    ).toHaveLength(0)
+  })
+  test("a parser syntax error is a suggestion; an unresolved column stays a warning", async () => {
+    const fs = await review([
+      { rule: "validate", message: "Syntax error: sql parser error: Expected: ), found: omit" },
+      { rule: "validate", message: "Column 'group_name' not found in table 'run_results'" },
+    ])
+    expect(fs.find((f) => /Syntax/.test(f.body))?.severity).toBe("suggestion")
+    expect(fs.find((f) => /not found/.test(f.body))?.severity).toBe("warning")
+  })
+})
+
+describe("whole-model shapes need the shape itself, not its words anywhere", () => {
+  test("SELECT * in a UNION: only a branch that is select *", () => {
+    expect(fires("union-select-star", "with a as (select id from x union all select id from y)\nselect * from a")).toBe(false)
+    expect(fires("union-select-star", "select * from {{ ref('a') }}\nunion all\nselect * from {{ ref('b') }}")).toBe(true)
+  })
+  test("ORDER BY in a CTE: not a window or aggregate ORDER BY, not a top-N", () => {
+    expect(fires("order-by-in-cte", "with x as (\n  select a, row_number() over (partition by k order by ts) as rn from t\n)\nselect * from x")).toBe(false)
+    expect(fires("order-by-in-cte", "with x as (\n  select a from t\n  order by a\n  limit 10\n)\nselect * from x")).toBe(false)
+    expect(fires("order-by-in-cte", "with x as (\n  select a from t\n  order by a\n)\nselect * from x")).toBe(true)
+  })
+  test("unqualified column: a bare column on a changed line of a joining SELECT", () => {
+    const sql = "select\n  a.id,\n  name\nfrom a\njoin b on a.k = b.k"
+    expect(fires("unqualified-column-multi-table", sql, ["  name"])).toBe(true)
+    expect(fires("unqualified-column-multi-table", "select\n  a.id,\n  b.name\nfrom a\njoin b on a.k = b.k", ["  b.name"])).toBe(false)
+    // A bare column in a SELECT without a join, while another block joins with qualified columns.
+    expect(fires("unqualified-column-multi-table", "with s as (select id, name from t)\nselect s.id, u.x from s join u on s.id = u.id", ["with s as (select id, name from t)"])).toBe(false)
+  })
+})
+
+describe("window function without PARTITION BY", () => {
+  const titles = (sql: string) =>
+    detectModelPatterns({ path: "models/m.sql", status: "modified", diff: sql.split("\n").map((l) => "+" + l).join("\n") }, sql, DEFAULT_RUBRIC).map((f) => f.title)
+  test("PARTITION BY on the line after `over (`: silent", () => {
+    expect(titles("select\n  row_number() over (\n    partition by k\n    order by ts\n  ) as rn\nfrom t").some((t) => /PARTITION BY/.test(t))).toBe(false)
+  })
+  test("a whole-table window: reported", () => {
+    expect(titles("select\n  row_number() over (\n    order by ts\n  ) as rn\nfrom t").some((t) => /PARTITION BY/.test(t))).toBe(true)
+  })
+})
