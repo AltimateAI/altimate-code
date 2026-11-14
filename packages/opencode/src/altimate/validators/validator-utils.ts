@@ -1363,13 +1363,19 @@ export async function readRunResults(dbtRoot: string, targetPathOverride?: strin
   const targetPath = await resolveDbtTargetPath(dbtRoot, targetPathOverride)
   const path = join(targetPath, "run_results.json")
   try {
-    const stat = await fs.stat(path)
+    const stat = await fs.stat(path, { bigint: true })
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
-    // A rewrite during the read leaves the time before and after unequal: the rows and the time would belong to different runs, so there is no evidence.
-    const after = await fs.stat(path)
-    if (after.mtimeMs !== stat.mtimeMs) return null
-    const mtimeMs = stat.mtimeMs
+    // A rewrite during the read changes the file's identity, size or times (nanosecond precision): the rows and the time would belong to different runs, so there is no evidence.
+    const after = await fs.stat(path, { bigint: true })
+    if (
+      after.ino !== stat.ino ||
+      after.size !== stat.size ||
+      after.mtimeNs !== stat.mtimeNs ||
+      after.ctimeNs !== stat.ctimeNs
+    )
+      return null
+    const mtimeMs = Number(stat.mtimeNs) / 1e6
     const parsed = JSON.parse(raw) as { results?: unknown; args?: unknown; metadata?: unknown; elapsed_time?: unknown }
     // A file that parses but carries no `results` array is not a run artifact.
     // Returning an empty one would read as "a build happened and recorded
