@@ -61,6 +61,22 @@ export interface Rule {
   portabilityBody?: string
   /** Match `added` outside quoted strings only (e.g. `'2024/01/15'` is not a division). */
   ignoreStrings?: boolean
+  /**
+   * Structural condition on the whole new file (comments and string contents
+   * blanked), for shapes a regex can't see: real nesting depth, CASE/END
+   * balance, the final SELECT. ANDed with the other conditions.
+   */
+  check?: (sql: string) => boolean
+  /** Give `check` the string literals too (comments still blanked), for checks that compare literal text. */
+  checkKeepsStrings?: boolean
+  /**
+   * Matched against each JOIN's whole ON clause (comments and strings blanked),
+   * so a predicate split across lines is seen whole. Relevant only when one of
+   * the clause's lines was added.
+   */
+  onClause?: RegExp
+  /** Also run on changed macros: the shape means the same thing in a SQL template. */
+  macros?: boolean
   example: RuleExample
   counter?: RuleExample
 }
@@ -92,7 +108,7 @@ export interface RuleInput {
 export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   const kind = fileKind(input.file)
   const wantKind = rule.kind ?? "model_sql"
-  if (wantKind !== "any" && kind !== wantKind) return false
+  if (wantKind !== "any" && kind !== wantKind && !(kind === "macro" && rule.macros)) return false
   if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return false
 
   // Relevance gate: a rule only fires when its signal is in THE DIFF, never on
@@ -120,7 +136,139 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   if (rule.absentNewSql) {
     if (rule.absentNewSql.test(stripComments(input.newSql))) return false
   }
+  if (rule.check && !rule.check(rule.checkKeepsStrings ? stripComments(input.newSql) : stripStrings(stripComments(input.newSql)))) return false
+  if (rule.onClause) {
+    const changed = input.added.map((l) => stripStrings(stripComments(l)).trim()).filter((l) => /\w{2}/.test(l))
+    const hit = onClauses(input.newSql).some((c) => rule.onClause!.test(c) && changed.some((l) => c.includes(l)))
+    if (!hit) return false
+    relevant = true
+  }
   return relevant
+}
+
+const ON_END = /^(?:join|where|group\s+by|order\s+by|qualify|having|union|limit|window|left|right|inner|full|cross|natural|lateral|select|from)\b|^;|^\{%/i
+const BEFORE_ON = /\b(join|on|where|select|from|group|having|qualify|order|merge|using|into)\b/gi
+
+
+/** Blank everything inside nested parentheses, keeping the top level of `s`. */
+export function topLevel(s: string): string {
+  let depth = 0
+  let out = ""
+  for (const ch of s) {
+    if (ch === "(") depth++
+    out += depth > 0 ? " " : ch
+    if (ch === ")") depth = Math.max(0, depth - 1)
+  }
+  return out
+}
+
+/** Text inside the parentheses that open at `start` (exclusive), or the rest of `s` if unbalanced. */
+export function parenBody(s: string, start: number): string {
+  let depth = 0
+  for (let i = start; i < s.length; i++) {
+    if (s[i] === "(") depth++
+    else if (s[i] === ")" && --depth === 0) return s.slice(start + 1, i)
+  }
+  return s.slice(start + 1)
+}
+
+/** Top level of each CTE body (`name as ( select … )`). */
+export function cteBodies(sql: string): string[] {
+  const out: string[] = []
+  for (const m of sql.matchAll(/\bas\s*(\()\s*select\b/gi)) out.push(topLevel(parenBody(sql, m.index! + m[0].indexOf("("))))
+  return out
+}
+
+/** Each SELECT block at one paren level: whether its FROM joins, and whether its select list has a bare column. */
+export function selectBlocks(sql: string): { joins: boolean; bareColumns: boolean }[] {
+  const scopes = [topLevel(sql), ...[...sql.matchAll(/\(\s*select\b/gi)].map((m) => topLevel(parenBody(sql, m.index!)))]
+  const out: { joins: boolean; bareColumns: boolean }[] = []
+  for (const scope of scopes) {
+    for (const blk of scope.split(/\bunion(?:\s+all|\s+distinct)?\b/i)) {
+      const m = /\bselect\b(?:\s+distinct\b)?([\s\S]*?)\bfrom\b([\s\S]*?)(?=\b(?:where|group\s+by|having|qualify|order\s+by|limit|window)\b|$)/i.exec(blk)
+      if (!m) continue
+      const items = m[1].split(",").map((x) => x.trim())
+      out.push({
+        joins: /\bjoin\b/i.test(m[2]),
+        bareColumns: items.some((x) => /^[a-z_]\w*(\s+as\s+[a-z_]\w*)?$/i.test(x) && !/^(\*|true|false|null)$/i.test(x)),
+      })
+    }
+  }
+  return out
+}
+
+/** The text of every JOIN's ON clause (comments and strings blanked), up to the next clause keyword at the same paren depth. */
+export function onClauses(sql: string): string[] {
+  const s = stripStrings(stripComments(sql))
+  const out: string[] = []
+  for (const m of s.matchAll(/\bon\b/gi)) {
+    const at = m.index!
+    const prior = [...s.slice(Math.max(0, at - 2000), at).matchAll(BEFORE_ON)].pop()
+    if (prior?.[1].toLowerCase() !== "join") continue
+    let depth = 0
+    let i = at + 2
+    for (; i < s.length; i++) {
+      const ch = s[i]
+      if (ch === "(") depth++
+      else if (ch === ")") {
+        if (depth === 0) break
+        depth--
+      } else if (depth === 0 && /\W/.test(s[i - 1]) && ON_END.test(s.slice(i, i + 12))) break
+    }
+    out.push(s.slice(at, i))
+  }
+  return out
+}
+
+/** Deepest stack of parenthesised subqueries: `(select … (select …))` is 2; sibling CTEs are 1 each. */
+export function subqueryDepth(sql: string): number {
+  const stack: boolean[] = []
+  let depth = 0
+  let max = 0
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]
+    if (ch === "(") {
+      const sub = /^\(\s*select\b/i.test(sql.slice(i, i + 40))
+      stack.push(sub)
+      if (sub) max = Math.max(max, ++depth)
+    } else if (ch === ")") {
+      if (stack.pop()) depth--
+    }
+  }
+  return max
+}
+
+const JINJA_BRANCH = /\{%-?\s*(if|for|elif|else)\b/i
+
+/** CASE…END nesting depth, or -1 when CASE and END don't balance. */
+export function caseDepth(sql: string): number {
+  let depth = 0
+  let max = 0
+  for (const m of sql.matchAll(/\b(case|end)\b/gi)) {
+    if (m[1].toLowerCase() === "case") max = Math.max(max, ++depth)
+    else if (depth > 0) depth--
+  }
+  return depth === 0 ? max : -1
+}
+
+/** True when the last top-level SELECT is `select *` reading a relation that is not a CTE of this file. */
+export function finalSelectStarFromRelation(sql: string): boolean {
+  const s = sql.replace(/\{%[\s\S]*?%\}/g, " ")
+  let depth = 0
+  let last = -1
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === "(") depth++
+    else if (ch === ")") depth = Math.max(0, depth - 1)
+    else if (depth === 0 && /^select\b/i.test(s.slice(i, i + 7)) && !/\w/.test(s[i - 1] ?? " ")) last = i
+  }
+  if (last < 0) return false
+  const m = /^select\s+(?:distinct\s+)?\*\s+from\s+([\w."`]+|\{\{[^}]*\}\})/i.exec(s.slice(last))
+  if (!m) return false
+  const target = m[1].replace(/["`]/g, "").toLowerCase()
+  if (target.startsWith("{{")) return true
+  const ctes = new Set([...s.matchAll(/\b(\w+)\s+as\s*\(/gi)].map((c) => c[1].toLowerCase()))
+  return !ctes.has(target)
 }
 
 /** The project's engine, for engine-dependent rules. Omitted = unknown. */
@@ -244,10 +392,199 @@ const r = (
       | "dialectGate"
       | "portabilityBody"
       | "ignoreStrings"
+      | "check"
+      | "onClause"
+      | "macros"
+      | "checkKeepsStrings"
   >,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
+
+
+/** Columns named in a comma list, without qualifiers, lowercased. */
+const colList = (s: string) =>
+  s.split(",").map((c) => c.trim().replace(/\s+(asc|desc)(\s+nulls\s+(first|last))?$/i, "").replace(/^.*\./, "").toLowerCase()).filter(Boolean)
+
+/** An OVER clause whose ORDER BY repeats a PARTITION BY column (constant within each partition). */
+function windowOrderRepeatsPartition(sql: string): boolean {
+  for (const m of sql.matchAll(/\bover\s*\(/gi)) {
+    const body = topLevel(parenBody(sql, m.index! + m[0].length - 1))
+    const pm = /\bpartition\s+by\b([\s\S]*?)(?=\border\s+by\b|\brows\b|\brange\b|$)/i.exec(body)
+    const om = /\border\s+by\b([\s\S]*?)(?=\brows\b|\brange\b|$)/i.exec(body)
+    if (!pm || !om) continue
+    const parts = new Set(colList(pm[1]))
+    if (colList(om[1]).some((c) => /^\w+$/.test(c) && parts.has(c))) return true
+  }
+  return false
+}
+
+/** A CASE with two WHEN branches whose conditions are identical: the second is unreachable. */
+function duplicateCaseWhen(sql: string): boolean {
+  for (const m of sql.matchAll(/\bcase\b/gi)) {
+    // The CASE's own level: nested CASEs and calls are blanked by parens only, so cut at the matching END.
+    let depth = 0
+    const conds: string[] = []
+    const re = /\b(case|end|when)\b([\s\S]*?)(?=\b(?:case|end|when|then)\b)/gi
+    re.lastIndex = m.index!
+    for (let x = re.exec(sql); x; x = re.exec(sql)) {
+      const kw = x[1].toLowerCase()
+      if (kw === "case") depth++
+      else if (kw === "end") {
+        if (--depth === 0) break
+      } else if (depth === 1) conds.push(x[2].replace(/\s+/g, " ").trim().toLowerCase())
+    }
+    if (new Set(conds).size < conds.length) return true
+  }
+  return false
+}
+
+/** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER. */
+export function leftJoinNullifiedByWhere(sql: string): boolean {
+  const scopes = [topLevel(sql), ...[...sql.matchAll(/\(\s*select\b/gi)].map((m) => topLevel(parenBody(sql, m.index!)))]
+  for (const scope of scopes) {
+    for (const blk of scope.split(/\bunion(?:\s+all|\s+distinct)?\b/i)) {
+      const where = /\bwhere\b([\s\S]*?)(?=\b(?:group\s+by|having|qualify|order\s+by|limit|window)\b|$)/i.exec(blk)?.[1]
+      if (!where) continue
+      // The alias, or the relation's own name when it has none.
+      const aliases = [...blk.matchAll(/\bleft\s+(?:outer\s+)?join\s+(\{\{[^}]*\}\}|[\w."`]+)\s*(?:as\s+)?(\w+)?/gi)]
+        .map((m) => (m[2] && !/^(on|using|where|left|right|inner|full|cross|join)$/i.test(m[2]) ? m[2] : /^[\w."`]+$/.test(m[1]) ? m[1].replace(/[`"]/g, "").split(".").pop() : undefined))
+        .filter((a): a is string => !!a)
+      const conjuncts = where.split(/\band\b/i)
+      for (const a of aliases) {
+        const ref = new RegExp(`\\b${a}\\.\\w+`, "i")
+        if (
+          conjuncts.some(
+            (c) => ref.test(c) && !/\bor\b|coalesce|ifnull|nvl/i.test(c) && !new RegExp(`\\b${a}\\.\\w+\\s+is\\s+null\\b`, "i").test(c),
+          )
+        )
+          return true
+      }
+    }
+  }
+  return false
+}
+
+const FEASIBLE: Rule[] = [
+  r(
+    "left-join-filtered-in-where",
+    "join_risk",
+    "warning",
+    "LEFT JOIN filtered in WHERE acts as an INNER JOIN",
+    "A WHERE predicate on the right side of a LEFT JOIN drops the rows where that side is NULL, so the LEFT JOIN behaves as an INNER JOIN. Move the predicate into the ON clause to keep unmatched rows, or write INNER JOIN if dropping them is intended.",
+    { added: /\b(where|and)\b|\bleft\s+(outer\s+)?join\b/i, check: leftJoinNullifiedByWhere },
+    { add: "select a.id, b.x\nfrom a\nleft join b on a.id = b.id\nwhere b.status = 'active'" },
+    { add: "select a.id, b.x\nfrom a\nleft join b on a.id = b.id and b.status = 'active'\nwhere a.kind = 'x'" },
+  ),
+  r(
+    "join-case-folded-one-side",
+    "sql_correctness",
+    "suggestion",
+    "join compares a case-folded key to a raw one",
+    "`lower()`/`upper()` on one side of the join only: values on the other side with different casing never match. Fold both sides, or normalize the key upstream.",
+    {
+      onClause: /\b(lower|upper)\s*\(\s*[\w.]+\s*\)\s*=\s*(?!\s*(lower|upper)\s*\()[a-z_][\w.]*|(?:^|[\s(])(?<![(\w.])[a-z_]\w*\.\w+\s*=\s*(lower|upper)\s*\(/i,
+      macros: true,
+    },
+    { add: "join u\n  on lower(c.email) = u.email" },
+    { add: "join u\n  on lower(c.email) = lower(u.email)" },
+  ),
+  r(
+    "null-safe-join-removed",
+    "sql_correctness",
+    "warning",
+    "null-safe comparison replaced by `=`",
+    "This change removes `IS NOT DISTINCT FROM` (or `<=>`). With `=`, rows whose key is NULL on both sides no longer match, so a join drops them and a comparison treats them as different.",
+    { removed: /\bis\s+not\s+distinct\s+from\b|<=>/i, absentNewSql: /\bis\s+not\s+distinct\s+from\b|<=>/i, added: /=/ },
+    { remove: "on a.k is not distinct from b.k", add: "on a.k = b.k", newSql: "select 1 from a join b on a.k = b.k" },
+    { remove: "on a.k is not distinct from b.k", add: "on a.k is not distinct from b.k and a.x = b.x" },
+  ),
+  r(
+    "window-order-repeats-partition",
+    "warehouse_cost",
+    "suggestion",
+    "window ORDER BY repeats a PARTITION BY column",
+    "Within a partition the PARTITION BY columns are constant, so ordering by them changes nothing and only adds sort keys. Order by the columns that actually vary within the partition.",
+    { added: /\border\s+by\b|\bpartition\s+by\b/i, check: windowOrderRepeatsPartition },
+    { add: "sum(x) over (partition by account_id, source_relation order by account_id, source_relation, d) as r" },
+    { add: "sum(x) over (partition by account_id order by d) as r" },
+  ),
+  r(
+    "case-duplicate-when",
+    "sql_correctness",
+    "suggestion",
+    "CASE has a duplicate WHEN condition",
+    "Two WHEN branches test the same condition; CASE returns the first match, so the later branch never runs. Merge them, or fix the condition that was meant.",
+    { added: /\bwhen\b/i, check: duplicateCaseWhen, checkKeepsStrings: true },
+    { add: "case\n  when spend = 0 then 'no spend'\n  when clicks = 0 then 'no clicks'\n  when spend = 0 then 'zero'\nend" },
+    { add: "case\n  when spend = 0 then 'no spend'\n  when clicks = 0 then 'no clicks'\nend" },
+  ),
+  r(
+    "qualify-unsupported",
+    "sql_correctness",
+    "warning",
+    "QUALIFY isn't supported on every engine",
+    "Trino, Athena and Postgres have no QUALIFY clause, so the model fails to parse there. Filter on the window result in an outer SELECT instead.",
+    { added: /\bqualify\b/i, macros: true, portability: { worksOn: ["snowflake", "bigquery", "databricks", "spark", "duckdb", "redshift", "clickhouse", "teradata", "exasol"] } },
+    { add: "qualify row_number() over (partition by id order by d desc) = 1" },
+    { add: "where rn = 1" },
+  ),
+  r(
+    "ignore-nulls-inside-call",
+    "sql_correctness",
+    "warning",
+    "IGNORE NULLS inside the function call is BigQuery syntax",
+    "`f(x IGNORE NULLS)` parses on BigQuery only. Trino, Snowflake and others take it after the call: `last_value(x) IGNORE NULLS OVER (…)`.",
+    {
+      added: /\bignore\s+nulls\b/i,
+      check: (sql) => /\(\s*[^()]*?\bignore\s+nulls\s*\)/i.test(sql),
+      macros: true,
+      portability: { worksOn: ["bigquery"] },
+    },
+    { add: "last_value(x ignore nulls) over (partition by k order by d)" },
+    { add: "last_value(x) ignore nulls over (partition by k order by d)" },
+  ),
+  r(
+    "min-max-by-portability",
+    "sql_correctness",
+    "suggestion",
+    "MIN_BY/MAX_BY don't exist on Postgres or Redshift",
+    "`min_by`/`max_by` run on BigQuery, Snowflake, Databricks, Trino and DuckDB but not on Postgres or Redshift. In a package that supports those adapters, use a dispatched macro or a `row_number()` pick.",
+    { added: /\b(min_by|max_by)\s*\(/i, macros: true, portability: { worksOn: ["bigquery", "snowflake", "databricks", "spark", "trino", "athena", "duckdb"] } },
+    { add: "max_by(status, updated_at) as latest_status" },
+    { add: "max(updated_at) as latest_at" },
+  ),
+  r(
+    "clickhouse-mutation-async",
+    "sql_correctness",
+    "suggestion",
+    "ClickHouse ALTER … UPDATE/DELETE runs asynchronously",
+    "A ClickHouse mutation returns before it is applied unless `mutations_sync` is set, so the next statement can read the old rows. Add `SETTINGS mutations_sync = 2` (or 1) when later steps depend on the result.",
+    { added: /\balter\s+table\b[^;]*\b(update|delete)\b/i, absentNewSql: /mutations_sync/i, macros: true },
+    { add: "alter table {{ relation }} update col = null where col = ''" },
+    { add: "alter table {{ relation }} update col = null where col = '' settings mutations_sync = 2", newSql: "alter table t update col = null where col = '' settings mutations_sync = 2" },
+  ),
+  r(
+    "datename-language-dependent",
+    "sql_correctness",
+    "suggestion",
+    "DATENAME depends on the session language",
+    "SQL Server's `DATENAME(weekday|month, …)` returns names in the session's language, so comparisons against English names break on servers with another default. Use `DATEPART` with `@@DATEFIRST`-safe arithmetic.",
+    { added: /\bdatename\s*\(\s*(weekday|dw|month|mm|m)\b/i, macros: true },
+    { add: "datename(weekday, created_at) = 'Monday'" },
+    { add: "datepart(weekday, created_at) = 2" },
+  ),
+  r(
+    "hardcoded-year-filter",
+    "sql_correctness",
+    "suggestion",
+    "hardcoded year in a filter won't roll forward",
+    "A literal year in the filter freezes the model to that year. Read it from a var or derive it from the current date, or say in a comment why it is fixed.",
+    { added: /\b\w*(year|yr)\w*\s*(=|>=|<=|<|>)\s*20\d\d\b/i, unless: /var\s*\(/i },
+    { add: "where academic_year = 2024" },
+    { add: "where academic_year = {{ var('current_academic_year') }}" },
+  ),
+]
 
 export const CATALOG: Rule[] = []
 
@@ -348,7 +685,7 @@ const CORRECTNESS: Rule[] = [
     "suggestion",
     "GROUP BY positional refs are fragile",
     "`GROUP BY 1,2` breaks silently when the SELECT list reorders; group by explicit names.",
-    { added: /\bgroup\s+by\s+\d+(\s*,\s*\d+)+/i },
+    { added: /\bgroup\s+by\s+\d+(\s*,\s*\d+)+/i, macros: true },
     { add: "group by 1, 2" },
     { add: "group by customer_id" },
   ),
@@ -588,20 +925,29 @@ const JOINS: Rule[] = [
     "join_risk",
     "suggestion",
     "join key wrapped in CAST/function",
-    "Casting a column inside the ON clause defeats key pruning and signals a type mismatch.",
-    { added: /\bon\b[^;]*\bcast\s*\(/i },
-    { add: "on cast(a.id as string) = b.id" },
-    { add: "on a.id = b.id" },
+    "A CAST or function around a column in the ON clause defeats partition and cluster pruning on that side and usually signals a type mismatch; convert once upstream, or on the smaller side.",
+    {
+      macros: true,
+      onClause:
+        /\b(?:cast|try_cast|safe_cast|date|datetime|timestamp|to_date|to_timestamp|to_char|to_varchar|date_trunc|lower|upper|trim|ltrim|rtrim|substr|substring)\s*\(\s*(?:''\s*,\s*)?[a-z_]\w*(?:\.[a-z_]\w*)?\s*(?:\)|,|\bas\b)/i,
+    },
+    { add: "left join b\n  on a.id = b.id\n  and a.code = cast(b.code as string)" },
+    { add: "join b on a.id = b.id and b.day >= cast('2024-01-01' as date)" },
   ),
   r(
     "join-or-condition",
     "join_risk",
     "warning",
     "OR in a join condition — explosive/slow",
-    "`JOIN … ON a=b OR c=d` often produces a near-cartesian and disables hash joins. Split into UNION.",
-    { added: /\bon\b[^;]*\bor\b/i },
-    { add: "on a.id=b.id or a.alt=b.alt" },
-    { add: "on a.id=b.id and a.k=b.k" },
+    "An OR in the ON clause can match one row through more than one alternative (duplicates downstream), and an OR between join keys leaves no single key to hash on. Add a uniqueness test on the output grain, or split into a UNION of one join per alternative.",
+    // An open-ended interval guard (`b.valid_to is null or a.d < b.valid_to`) matches each
+    // row once by design, so an OR whose disjunct is an IS [NOT] NULL test is excluded.
+    {
+      onClause: /(?<!\bis\s+(?:not\s+)?null\s*\)?\s*)\bor\b(?!\s*\(?\s*[\w.]+\s+is\s+(?:not\s+)?null\b)/i,
+      macros: true,
+    },
+    { add: "join b\n  on a.id = b.id\n  and (\n    a.d between b.s and b.e\n    or a.d2 between b.s and b.e\n  )" },
+    { add: "join b\n  on a.id = b.id\n  and a.d >= b.valid_from\n  and (b.valid_to is null\n    or a.d < b.valid_to)" },
   ),
   r(
     "lateral-join",
@@ -619,9 +965,11 @@ const JOINS: Rule[] = [
     "suggestion",
     "unqualified column with multiple tables",
     "With joins present, unqualified columns are ambiguous and break when both sides add the name.",
-    { newSql: /select\s+\w+\s*,[\s\S]*\bjoin\b/i },
-    { add: "select id, name from a join b on a.k=b.k" },
-    { add: "select a.id from a join b on a.k=b.k" },
+    // A changed line that is a bare column in a select list, in a model where some
+    // query block selects a bare column from a FROM that joins.
+    { added: /^\s*,?\s*[a-z_]\w*\s*,?\s*$/i, unless: /^\s*,?\s*(select|from|where|and|or|on|as|end|else|then|union|all|distinct|group|order|by|having|qualify|limit|with|join)\b/i, check: (sql) => selectBlocks(sql).some((b) => b.joins && b.bareColumns) },
+    { add: "select\n  a.id,\n  name\nfrom a\njoin b on a.k = b.k" },
+    { add: "select\n  a.id,\n  b.name\nfrom a\njoin b on a.k = b.k" },
   ),
   r(
     "self-join-no-inequality",
@@ -788,7 +1136,9 @@ const PERF: Rule[] = [
     "suggestion",
     "ORDER BY inside a CTE/subquery is ignored",
     "Ordering inside a CTE has no guaranteed effect downstream and just adds a sort cost.",
-    { newSql: /\bas\s*\(\s*select[\s\S]*?\border\s+by\b[\s\S]*?\)/i },
+    // ORDER BY at a CTE's own top level (window/aggregate ORDER BYs sit in nested parens),
+    // and not a top-N, where the order decides which rows are kept.
+    { added: /\border\s+by\b/i, check: (sql) => cteBodies(sql).some((b) => /\border\s+by\b/i.test(b) && !/\b(limit|top|qualify|fetch\s+first)\b/i.test(b)) },
     { add: "with x as (select a from t order by a) select * from x" },
     { add: "with x as (select a from t) select * from x" },
   ),
@@ -817,10 +1167,10 @@ const PERF: Rule[] = [
     "warehouse_cost",
     "suggestion",
     "SELECT * in final projection",
-    "A trailing `select *` carries every upstream column forward, bloating the model and storage.",
-    { added: /^\s*select\s+\*\s*$/i },
-    { add: "select *" },
-    { add: "select id, name" },
+    "The model's final `select *` reads straight from another relation, so every upstream column (including ones added later) lands in this model.",
+    { added: /\bselect\s+(distinct\s+)?\*/i, check: finalSelectStarFromRelation },
+    { add: "select * from {{ ref('orders') }}" },
+    { add: "with final as (select id from {{ ref('orders') }})\nselect * from final" },
   ),
   r(
     "large-in-list",
@@ -838,9 +1188,9 @@ const PERF: Rule[] = [
     "suggestion",
     "deeply nested subqueries hurt readability/plans",
     "Several nested `(select … (select …))` levels are hard to optimize; flatten into CTEs.",
-    { newSql: /\(\s*select[\s\S]*\(\s*select[\s\S]*\(\s*select/i },
+    { added: /\(\s*select\b/i, check: (s) => subqueryDepth(s) >= 3 },
     { add: "select (select (select (select 1)))" },
-    { add: "select a from t" },
+    { add: "with a as (select 1), b as (select 2), c as (select 3)\nselect * from a" },
   ),
   r(
     "distinct-star",
@@ -979,16 +1329,6 @@ const MATERIALIZATION: Rule[] = [
 ]
 
 const DBT_CONV: Rule[] = [
-  r(
-    "ref-double-quotes",
-    "sql_quality",
-    "suggestion",
-    "ref() uses double quotes",
-    "dbt convention is single-quoted `ref('model')`; double quotes are inconsistent and can confuse linters.",
-    { added: /\{\{\s*ref\(\s*"/i },
-    { add: 'from {{ ref("x") }}' },
-    { add: "from {{ ref('x') }}" },
-  ),
   r(
     "information-schema",
     "sql_quality",
@@ -1740,9 +2080,9 @@ const STYLE: Rule[] = [
     "suggestion",
     "deeply nested CASE expression",
     "Nested `CASE WHEN … CASE WHEN` is hard to verify; flatten with combined conditions or a mapping.",
-    { newSql: /case\s+when[\s\S]*\bcase\s+when/i },
+    { added: /\bcase\b/i, check: (s) => caseDepth(s) >= 2 },
     { add: "case when a then case when b then 1 end end" },
-    { add: "case when a then 1 end" },
+    { add: "case when a then 1 end as x,\ncase when b then 2 end as y" },
   ),
   r(
     "hardcoded-env-name",
@@ -1790,7 +2130,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "TOP n without ORDER BY",
     "`SELECT TOP n` without `ORDER BY` returns arbitrary rows; add an explicit order.",
-    { added: /select\s+top\s+\d+/i, unless: /order\s+by/i },
+    { added: /select\s+top\s+\d+/i, unless: /order\s+by/i, macros: true },
     { add: "select top 10 * from t" },
     { add: "select top 10 * from t order by d" },
   ),
@@ -2021,7 +2361,8 @@ const MISC: Rule[] = [
     "warning",
     "SELECT * in a UNION",
     "`select *` on either side of a UNION breaks (column count/order) the moment a column is added.",
-    { newSql: /select\s+\*[\s\S]*\bunion\b/i },
+    // A UNION branch that is itself `select *` (not a `select *` elsewhere in the model).
+    { newSql: /\bselect\s+\*\s+from\s+(?:(?!\bselect\b|\bunion\b)[\s\S])*?\bunion\b|\bunion(?:\s+all|\s+distinct)?\s*\(?\s*select\s+\*/i },
     { add: "select * from a union all select * from b" },
     { add: "select id from a union all select id from b" },
   ),
@@ -2130,10 +2471,12 @@ const MISC: Rule[] = [
     "sql_correctness",
     "warning",
     "CASE without END",
-    "A `CASE WHEN` with no matching `END` on the line/expression is a syntax error.",
-    { added: /\bcase\s+when\b[^;]*$/i, unless: /\bend\b|\{\{|\{%/i },
+    "The model has more `CASE` than `END` keywords, which is a syntax error.",
+    // Whole-file balance, not per line: a CASE whose END sits on a later line is fine.
+    // Jinja branches can emit different CASE/END counts per branch, so they abstain.
+    { added: /\bcase\s+when\b/i, check: (s) => caseDepth(s) === -1 && !JINJA_BRANCH.test(s) },
     { add: "case when x > 0 then 1" },
-    { add: "case when x > 0 then 1 end" },
+    { add: "case when x > 0\n  then 1\n  else 0\nend as flag" },
   ),
   r(
     "double-aggregation-alias",
@@ -2344,7 +2687,7 @@ const MISC2: Rule[] = [
     "suggestion",
     "GREATEST/LEAST NULL behavior varies",
     "Some warehouses return NULL if any GREATEST/LEAST argument is NULL — guard nullable inputs.",
-    { added: /\b(greatest|least)\s*\(/i, unless: /coalesce|nvl|ifnull/i },
+    { added: /\b(greatest|least)\s*\(/i, unless: /coalesce|nvl|ifnull/i, macros: true },
     { add: "greatest(a, b)" },
     { add: "greatest(coalesce(a,0), coalesce(b,0))" },
   ),
@@ -2437,6 +2780,7 @@ CATALOG.push(
   ...STYLE,
   ...MISC,
   ...MISC2,
+  ...FEASIBLE,
 )
 // NOTE: the large generated families (dialect-specific functions, reserved
 // words, non-portable types, operators) used to live in `rule-generators.ts`.

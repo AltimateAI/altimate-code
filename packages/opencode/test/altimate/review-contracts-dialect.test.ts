@@ -139,6 +139,21 @@ describe("consumers outside the DAG", () => {
     expect(plain.findings.some((x) => x.title.includes("declared consumers"))).toBe(false)
   })
 
+  test("nothing declared: a final-layer model still gets a suggestion, an intermediate model does not", async () => {
+    const none = { exposures: [], contractEnforced: false, contractColumns: [] }
+    const mart = (await review(none)).findings.find((x) => x.title.includes("final-layer"))
+    expect(mart?.severity).toBe("suggestion")
+    expect(mart?.body).toContain("`email`")
+    const inter = await review(none, {
+      changedFiles: [{ ...changed[0], path: "models/intermediate/int_x.sql" }],
+    })
+    expect(inter.findings.some((x) => x.title.includes("final-layer"))).toBe(false)
+    const nested = await review(none, {
+      changedFiles: [{ ...changed[0], path: "models/extracts/tableau/intermediate/int_roster.sql" }],
+    })
+    expect(nested.findings.some((x) => x.title.includes("final-layer"))).toBe(false)
+  })
+
   const optIn = { config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["lineage_breakage", "contract_violation"], checkContractColumns: true } }
 
   test("opt-in: a new column missing from the enforced contract is reported, and never blocks", async () => {

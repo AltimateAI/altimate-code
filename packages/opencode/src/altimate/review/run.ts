@@ -1,5 +1,6 @@
 import path from "node:path"
-import { readFile, realpath, stat, access } from "node:fs/promises"
+import { readFile, realpath, stat, access, readdir } from "node:fs/promises"
+import YAML from "yaml"
 import { Installation } from "../../installation"
 import { loadReviewPolicy, resolveRubric } from "./config"
 import type { Severity } from "./finding"
@@ -9,6 +10,8 @@ import {
   resolveReviewBase,
   type ResolvedBase,
   gitRepoRoot,
+  listFilesAt,
+  grepMatchesAt,
   manifestHash,
   showAtRef,
 } from "./git"
@@ -17,6 +20,7 @@ import { scopeToProject } from "./diff-filter"
 import { buildCatalogSchemaContext } from "./schema-context"
 import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
+import { ADAPTERS } from "./dbt-patterns"
 import { runAiReview } from "./ai-review"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
@@ -398,6 +402,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     : []
 
   return runReview({
+    resourceNames: () => projectResourceNames(opts.cwd, opts.head, projectRootRel, dbtRoot),
     changedFiles,
     config,
     rubric,
@@ -425,6 +430,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     staleManifest,
     layout,
     suppressPortability: config.portability === undefined ? dialectKnown : !config.portability,
+    portabilityTargets: await projectAdapters(opts.cwd, opts.head, projectRootRel),
     dialectKnown,
     consumerLists,
     policy: { source: policy.source, hash: policy.hash, changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined },
@@ -518,4 +524,80 @@ async function repoRelative(gitRoot: string, dir: string, known: boolean): Promi
   const rel = path.relative(a, b).replace(/\\/g, "/")
   if (rel.startsWith("..") || path.isAbsolute(rel)) return undefined
   return rel
+}
+
+const RESOURCE_FILE = /\.(sql|py|csv)$/i
+const resourceName = (f: string) => path.basename(f).replace(RESOURCE_FILE, "").toLowerCase()
+
+/**
+ * Adapters the project's own macros carry variants for (`postgres__x`,
+ * `snowflake__x`, ...). A project with variants for several adapters is meant
+ * to run on all of them, so portability advice is judged against each one,
+ * not just the adapter this checkout is configured for.
+ */
+export async function projectAdapters(
+  cwd: string,
+  head: string | undefined,
+  projectRootRel: string | undefined,
+): Promise<string[]> {
+  if (projectRootRel === undefined) return []
+  const prefix = projectRootRel ? projectRootRel + "/" : ""
+  const lines = await grepMatchesAt(cwd, head, `macro[[:space:]]+(${ADAPTERS.join("|")})__`, `${prefix}*.sql`)
+  const seen = new Set<string>()
+  for (const line of lines ?? []) {
+    if (line.includes("/dbt_packages/")) continue
+    const m = /macro\s+(\w+?)__$/.exec(line)
+    if (m) seen.add(m[1] === "presto" ? "trino" : m[1])
+  }
+  return [...seen].sort()
+}
+
+/**
+ * Names `ref()` can resolve to: model/seed/snapshot files in the repo at head, snapshots
+ * defined in YAML, and
+ * models of installed packages (`dbt_packages/`). Undefined when that can't be known:
+ * no project root, git can't list the tree, or packages are declared but not installed.
+ */
+export async function projectResourceNames(
+  cwd: string,
+  head: string | undefined,
+  projectRootRel: string | undefined,
+  dbtRoot: string,
+): Promise<Set<string> | undefined> {
+  if (projectRootRel === undefined) return undefined
+  const files = await listFilesAt(cwd, head)
+  if (!files) return undefined
+  const prefix = projectRootRel ? projectRootRel + "/" : ""
+  const names = new Set<string>()
+  for (const f of files) if (f.startsWith(prefix) && RESOURCE_FILE.test(f)) names.add(resourceName(f))
+  // dbt 1.9+ snapshots can be YAML-only (`snapshots: - name: x  relation: ...`), with no .sql file.
+  for (const line of (await grepMatchesAt(cwd, head, "^snapshots:", `${prefix}*.yml`)) ?? []) {
+    const rel = line.slice(line.indexOf(":") + 1, line.lastIndexOf(":snapshots:"))
+    if (rel.includes("/dbt_packages/")) continue
+    let doc: { snapshots?: { name?: unknown }[] } | null = null
+    try {
+      doc = YAML.parse((await showAtRef(cwd, head ?? "HEAD", rel)) ?? "")
+    } catch {
+      continue
+    }
+    for (const snap of Array.isArray(doc?.snapshots) ? doc.snapshots : []) if (typeof snap?.name === "string") names.add(snap.name.toLowerCase())
+  }
+  if (files.includes(prefix + "packages.yml") || files.includes(prefix + "dependencies.yml")) {
+    const pkgDir = path.join(dbtRoot, "dbt_packages")
+    const walk = async (dir: string, depth: number): Promise<boolean> => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        return false
+      }
+      for (const e of entries) {
+        if (e.isDirectory() && depth < 12 && e.name !== ".git") await walk(path.join(dir, e.name), depth + 1)
+        else if (e.isFile() && RESOURCE_FILE.test(e.name)) names.add(resourceName(e.name))
+      }
+      return true
+    }
+    if (!(await walk(pkgDir, 0))) return undefined
+  }
+  return names
 }

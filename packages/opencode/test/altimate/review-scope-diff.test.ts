@@ -163,6 +163,25 @@ describe("collectChangedFiles: only the PR's own changes", () => {
     expect(f.status).toBe("renamed")
     expect(f.similarity).toBe(100)
   })
+
+  test("run from a dbt project in a subdirectory, each file still gets its hunk diff", async () => {
+    const root = await newRepo()
+    await write(root, "src/dbt/shop/dbt_project.yml", "name: shop\n")
+    await write(root, "src/dbt/shop/models/a.sql", "select 1 as id\n")
+    await write(root, "src/dbt/shop/models/old.sql", "select 1 as id\nfrom src\nwhere true\n")
+    await commitAll(root, "seed")
+    const base = await g(root, "rev-parse", "HEAD")
+    await write(root, "src/dbt/shop/models/a.sql", "select 1 as id\ngroup by 1\n")
+    await g(root, "mv", "src/dbt/shop/models/old.sql", "src/dbt/shop/models/new.sql")
+    await write(root, "src/dbt/shop/models/new.sql", "select 1 as id\nfrom src\nwhere false\n")
+    await commitAll(root, "pr")
+    const files = await collectChangedFiles({ base, head: "HEAD", cwd: path.join(root, "src/dbt/shop") })
+    const byPath = Object.fromEntries(files.map((f) => [f.path, f]))
+    expect(byPath["src/dbt/shop/models/a.sql"].diff).toContain("+group by 1")
+    const moved = byPath["src/dbt/shop/models/new.sql"]
+    expect(moved.status).toBe("renamed")
+    expect(moved.diff).toContain("+where false")
+  })
 })
 
 describe("scopeToProject: the dbt project being reviewed, nothing else", () => {

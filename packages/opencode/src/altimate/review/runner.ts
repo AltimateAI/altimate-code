@@ -442,6 +442,29 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
     },
 
+    async declaredUniqueKeys(model: string): Promise<string[][]> {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw) return []
+        const nodes = Object.entries<any>(raw.nodes ?? {})
+        const uid = nodes.find(([id, n]) => id.startsWith("model.") && n?.name === model)?.[0]
+        if (!uid) return []
+        const keys: string[][] = []
+        for (const [, n] of nodes) {
+          if (n?.resource_type !== "test" || n.attached_node !== uid) continue
+          const name = String(n.test_metadata?.name ?? "")
+          const kw = n.test_metadata?.kwargs ?? {}
+          if (name === "unique" && n.column_name) keys.push([String(n.column_name)])
+          const combo = kw.combination_of_columns ?? kw.arguments?.combination_of_columns
+          if (name === "unique_combination_of_columns" && Array.isArray(combo)) keys.push(combo.map(String))
+        }
+        return keys
+      } catch (err) {
+        fail("declaredUniqueKeys", err)
+        return []
+      }
+    },
+
     async modelConfig(name: string) {
       try {
         const raw = loadRawManifest(opts.manifestPath)

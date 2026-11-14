@@ -1,4 +1,4 @@
-import { type Finding, type Severity } from "./finding"
+import { type Finding, type Severity, ruleTitle } from "./finding"
 import { type VerdictEnvelope } from "./verdict"
 
 /**
@@ -39,7 +39,7 @@ export function verdictHeadline(env: VerdictEnvelope): string {
 /** Default size budget for the posted PR comment (characters). */
 export const SUMMARY_BUDGET_CHARS = 5_000
 /** The same rule on this many models or more collapses into one bullet. */
-export const GROUP_MIN = 3
+export const GROUP_MIN = 2
 
 export interface RenderOptions {
   /** Character budget for the comment; findings beyond it are counted, not listed.
@@ -151,13 +151,6 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     )
   }
   return [...lines, ...tail].join("\n")
-}
-
-/** A finding's title without its leading `model: `, with backticked names
- *  blanked, so the same rule on different models/columns shares a key. */
-function ruleTitle(f: Finding): string {
-  const t = f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title
-  return t.replace(/`[^`]*`/g, "`…`")
 }
 
 /** Render findings of one severity as bullets; a rule repeated on GROUP_MIN or

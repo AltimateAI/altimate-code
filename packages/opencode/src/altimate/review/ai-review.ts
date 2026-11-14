@@ -19,11 +19,43 @@ const MAX_FILES = 20
 export interface AiReviewFile {
   path: string
   status: string
+  /** Model name for a model; the file's base name for any other dbt file. */
   model: string
+  /** dbt role of the file (`model_sql`, `macro`, `schema_yml`, `test`, …); omitted means a model. */
+  kind?: string
   /** Unified diff (added/removed lines) for this file. */
   diff?: string
-  /** dbt-compiled (preferred) or raw SQL for context. */
+  /** Current content: dbt-compiled (preferred) or raw SQL for a model, the file itself otherwise. */
   sql?: string
+}
+
+/** Order under the file cap: models first, then the files whose defects reach the most models. */
+const KIND_ORDER = ["model_sql", "python_model", "macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"]
+const KIND_LABEL: Record<string, string> = {
+  macro: "macro (Jinja; changes every model that calls it)",
+  test: "singular data test",
+  snapshot: "snapshot",
+  schema_yml: "schema yml (tests, contracts, descriptions)",
+  source_yml: "sources yml",
+  seed: "seed CSV",
+  project_config: "project config",
+  python_model: "Python model",
+}
+const FENCE: Record<string, string> = { schema_yml: "yaml", source_yml: "yaml", project_config: "yaml", seed: "csv", python_model: "python" }
+
+function kindRank(kind: string | undefined): number {
+  const i = KIND_ORDER.indexOf(kind ?? "model_sql")
+  return i < 0 ? KIND_ORDER.length : i
+}
+
+/** Files the lane sends, in priority order, capped at MAX_FILES. */
+export function selectAiFiles(files: AiReviewFile[]): AiReviewFile[] {
+  return files
+    .filter((f) => f.status !== "deleted" && (f.diff || f.sql))
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => kindRank(a.f.kind) - kindRank(b.f.kind) || a.i - b.i)
+    .map(({ f }) => f)
+    .slice(0, MAX_FILES)
 }
 
 export interface AiReviewInput {
@@ -81,7 +113,7 @@ function truncate(s: string | undefined, n: number): string {
 }
 
 /** Assemble the user message (mechanical formatting — not IP). */
-function buildUserMessage(input: AiReviewInput): string {
+export function buildUserMessage(input: AiReviewInput): string {
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
   if (input.prBody) parts.push(`PR description:\n${truncate(input.prBody, 1500)}`)
@@ -97,9 +129,13 @@ function buildUserMessage(input: AiReviewInput): string {
 
   parts.push("\n## CHANGED FILES (review for what the engine missed):")
   for (const f of input.files.slice(0, MAX_FILES)) {
-    parts.push(`\n### ${f.path} (${f.status})`)
+    const label = f.kind && KIND_LABEL[f.kind]
+    parts.push(`\n### ${f.path} (${f.status}${label ? `, ${label}` : ""})`)
     if (f.diff) parts.push("Diff:\n```diff\n" + truncate(f.diff, MAX_DIFF_CHARS) + "\n```")
-    if (f.sql) parts.push("Current SQL:\n```sql\n" + truncate(f.sql, MAX_DIFF_CHARS) + "\n```")
+    if (f.sql) {
+      const isModel = !f.kind || f.kind === "model_sql"
+      parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + truncate(f.sql, MAX_DIFF_CHARS) + "\n```")
+    }
   }
   parts.push("\nReturn ONLY the JSON array per the output contract.")
   return parts.join("\n")
@@ -118,8 +154,8 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     findings,
     status: { ...status, durationMs: Date.now() - startedAt },
   })
-  const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
-  if (!files.length) return done([], { state: "skipped", reason: "no changed model SQL to review" })
+  const files = selectAiFiles(input.files)
+  if (!files.length) return done([], { state: "skipped", reason: "no changed dbt files to review" })
 
   const message = buildUserMessage({ ...input, files })
   const controller = new AbortController()

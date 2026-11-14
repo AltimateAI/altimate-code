@@ -1,4 +1,5 @@
 import path from "node:path"
+import YAML from "yaml"
 import {
   type Finding,
   type ReviewCategory,
@@ -6,6 +7,7 @@ import {
   ReviewCategory as ReviewCategoryEnum,
   makeFinding,
   dedupe,
+  mergeRepeats,
   SEVERITY_ORDER,
 } from "./finding"
 import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide } from "./diff-filter"
@@ -13,13 +15,16 @@ import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
-import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
+import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
 import { selectListNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
-import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
+import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
+import { type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult } from "./ai-review"
+
+const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
 
 /**
  * The deterministic review recipe.
@@ -149,6 +154,8 @@ export interface ReviewRunner {
   >
   /** A model's or snapshot's merged dbt `config` from the manifest (project + yml + inline). */
   modelConfig?(name: string): Promise<Record<string, unknown> | undefined>
+  /** Column sets the model's `unique` / `unique_combination_of_columns` tests declare unique. */
+  declaredUniqueKeys?(model: string): Promise<string[][]>
   /** Column-lineage edges for a query: source `"table"."col"` → target output column. */
   columnLineage?(sql: string, dialect: string): Promise<Array<{ source: string; target: string }>>
   /** Classify a set of column names as PII (Email/SSN/…) with confidence + masking. */
@@ -226,10 +233,14 @@ export interface OrchestrateInput {
   staleManifest?: boolean
   /** The dbt project's directories from dbt_project.yml (custom model-paths). */
   layout?: DbtProjectLayout
+  /** Names `ref()` can resolve to at head (repo resources + installed packages); undefined = unknown. */
+  resourceNames?: () => Promise<Set<string> | undefined>
   /** What the review covered: base resolution and files left out of scope. */
   scope?: Omit<ReviewScope, "unverified">
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
   suppressPortability?: boolean
+  /** Other adapters the project supports (from its adapter-specific macros); portability advice is kept when any of them lacks the construct. */
+  portabilityTargets?: string[]
   /** The dialect came from config or the manifest, not the default guess. */
   dialectKnown?: boolean
   /** Opt-in explicit column lists outside dbt (see consumer-lists.ts). */
@@ -245,13 +256,13 @@ export function isCatalogPortability(f: Finding): boolean {
 
 /**
  * Portability advice that is noise for a project on `dialect`: dropped unless
- * the rule names the engines that support the construct and `dialect` isn't
- * one of them — then it is an error on this project's own engine.
+ * the rule names the engines that support the construct and `dialect`, or one
+ * of the project's other supported adapters (`targets`), isn't among them.
  */
-export function isSuppressiblePortability(f: Finding, dialect: string): boolean {
+export function isSuppressiblePortability(f: Finding, dialect: string, targets: string[] = []): boolean {
   if (!isCatalogPortability(f)) return false
   const worksOn = (f.evidence?.result as { worksOn?: string[] })?.worksOn
-  return !worksOn || worksOn.includes(dialect.toLowerCase())
+  return !worksOn || [dialect.toLowerCase(), ...targets].every((d) => worksOn.includes(d))
 }
 
 /** Line numbers on the head side of a unified diff that GitHub accepts for an
@@ -326,21 +337,6 @@ function mapCheckCategory(raw?: unknown): ReviewCategory {
   return "sql_quality"
 }
 
-/** Map an impact severity bucket to a finding severity. */
-function impactToSeverity(impact: ImpactResult): Severity | null {
-  switch (impact.severity) {
-    case "BREAKING":
-    case "HIGH":
-      return "critical"
-    case "MEDIUM":
-      return "warning"
-    case "LOW":
-      return "suggestion"
-    default:
-      return null // SAFE / UNKNOWN → no standalone finding
-  }
-}
-
 function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: ImpactResult, rubric: Rubric): Finding[] {
   const model = modelNameFromPath(file.path)
   const total = impact.directCount + impact.transitiveCount
@@ -379,33 +375,10 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
     ]
   }
 
-  const sev = impactToSeverity(impact)
-  if (!sev) return []
-  // For a MODIFIED model, blast radius alone is NOT a breaking change — a wide
-  // fan-out doesn't mean the edit broke anything (it may be additive/safe). Until
-  // a real column-drop classifier exists, cap modified-model lineage impact at
-  // `warning` so merely touching a popular model never blocks. Only delete/rename
-  // (handled above) is treated as a genuine break.
-  const capped: Severity = sev === "critical" ? "warning" : sev
-  const clamped = clampSeverity("lineage_breakage", capped, degraded ? "unknown" : "high")
-  return [
-    makeFinding({
-      severity: clamped,
-      category: "lineage_breakage",
-      title: `${model}: high downstream fan-out (${total} model${total !== 1 ? "s" : ""})`,
-      body:
-        `\`${model}\` has ${impact.directCount} direct and ${impact.transitiveCount} transitive` +
-        ` downstream models (+${impact.testCount} tests). Blast radius is informational — verify the` +
-        ` change is backward-compatible (no removed/renamed columns) for these consumers.` +
-        (degraded ? "\n\n_Lint-only: no manifest, blast radius unverified._" : ""),
-      file: file.path,
-      model,
-      confidence: degraded ? "unknown" : "high",
-      degraded,
-      evidence: { tool: "impact_analysis", result: impact },
-      ruleKey: "lineage_breakage:impact",
-    }),
-  ]
+  // A modified model's blast radius is not a defect: it feeds risk tiering
+  // (tier reasons name the downstream count), and concrete breakage on a
+  // modified model comes from the column-removal lanes.
+  return []
 }
 
 async function semanticChangeLane(
@@ -428,10 +401,11 @@ async function semanticChangeLane(
   if (eq.decided && eq.equivalent) return []
 
   if (!eq.decided) {
-    // Undecidable / no schema → WARNING with unknown confidence, never block.
+    // Undecidable / no schema → a suggestion to data-diff: the engine not knowing is
+    // not evidence of a change (1 of 426 such findings matched a real defect on replay).
     return [
       makeFinding({
-        severity: clampSeverity("semantic_change", "critical", "unknown"),
+        severity: "suggestion",
         category: "semantic_change",
         title: `${model}: refactor could not be proven equivalent`,
         body:
@@ -507,8 +481,17 @@ async function qualityLane(
     // (and false-fire on idiomatic dbt SQL like a correlated NOT EXISTS):
     if (rule === "correlated-subquery" || rule === "correlated_subquery") continue
     if (rule === "function-on-filter-column" || rule === "function-on-join-column") continue
+    // Injection rules target queries assembled from user input; a model's UNION or
+    // comment is ordinary SQL.
+    if (INJECTION_RULE.test(rule)) continue
+    // The engine's planner and parser cover less than the warehouses do: a type it can't
+    // coerce, a function it doesn't know, or syntax it can't parse is a gap in the engine,
+    // not an error in the model. Unresolved columns and tables are kept.
+    const msg = String(issue.message ?? "")
+    if (rule === "validate" && ENGINE_LIMIT_MESSAGE.test(msg)) continue
+    const parserGap = rule === "validate" && /^syntax error/i.test(msg)
     const cat = mapCheckCategory(issue.category)
-    const isError = issue.severity === "error"
+    const isError = issue.severity === "error" && !parserGap
     // Error-severity contract/PII issues are blockable; others are warning/suggestion.
     let sev: Severity = isError ? "warning" : "suggestion"
     if (isError && (cat === "contract_violation" || cat === "pii_exposure")) sev = "critical"
@@ -538,6 +521,9 @@ async function qualityLane(
  * compiled core's `review_lexical_scan` over the raw ADDED diff lines (these
  * are pre-parse lexical checks; the curated lists live in the binary). Advisory.
  */
+const INJECTION_RULE = /injection|^unbalanced_quote$/
+const ENGINE_LIMIT_MESSAGE = /^(error during planning|execution error|this feature is not implemented)/i
+
 async function lexicalLane(file: ChangedFile & { kind: string }, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.lexicalScan || file.status === "deleted") return []
   const added = splitDiff(file.diff).added
@@ -686,6 +672,10 @@ function rawSelectList(sql: string): Set<string> {
   return new Set(names)
 }
 
+const FINAL_LAYER = /(^|\/)(marts?|reporting|dimensional|presentation|extracts|exports)\//i
+// Intermediate/staging models nested under a final-layer folder are not read directly.
+const NOT_FINAL = /(^|\/)(intermediate|staging|base)\/|(^|\/)(int|stg|base)_[^/]*$/i
+
 const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
 
 /**
@@ -704,11 +694,33 @@ async function consumerContractLane(
   if (!runner.modelConsumers || !runner.columnLineage) return []
   const model = modelNameFromPath(ctx.file.path)
   const consumers = await runner.modelConsumers(model)
-  if (!consumers || (!consumers.exposures.length && !consumers.contractEnforced)) return []
+  if (!consumers) return []
+  const declared = consumers.exposures.length > 0 || consumers.contractEnforced
+  // A final-layer model is read outside dbt (BI, exports) even when nothing is declared.
+  const finalLayer = FINAL_LAYER.test(ctx.file.path) && !NOT_FINAL.test(ctx.file.path)
+  if (!declared && !(finalLayer && hasOldSide(ctx.file))) return []
   const { added, removed } = await columnDelta(ctx, runner, dialect)
   const out: Finding[] = []
 
-  if (removed.length) {
+  if (removed.length && !declared) {
+    out.push(
+      makeFinding({
+        severity: "suggestion",
+        category: "lineage_breakage",
+        title: `${model}: removed column(s) on a final-layer model`,
+        body:
+          `This change removes ${ticks(removed)} from \`${model}\`, a final-layer model that dashboards and exports usually read directly; ` +
+          `those readers aren't in the DAG. Keep the old column alongside the new one for a deprecation period, or declare the consumers as exposures.`,
+        file: ctx.file.path,
+        model,
+        confidence: "medium",
+        evidence: { tool: "dbt.manifest", result: { removed, finalLayer: true } },
+        ruleKey: "lineage_breakage:final-layer-column-removed",
+      }),
+    )
+  }
+
+  if (removed.length && declared) {
     const who: string[] = []
     if (consumers.exposures.length)
       who.push(`exposure(s) ${consumers.exposures.map((e) => `\`${e.name}\`${e.type ? ` (${e.type})` : ""}`).join(", ")}`)
@@ -1078,14 +1090,81 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
  * var-without-default, and materialization change (vs base). This replaces the regex
  * dbt-patterns config detectors — the parsing now lives in core.
  */
-async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+/** Var names defined under `vars:` in dbt_project.yml (top level and project-scoped). */
+export function definedVars(projectYml?: string): Set<string> {
+  const out = new Set<string>()
+  if (!projectYml) return out
+  let doc: any
+  try {
+    doc = YAML.parse(projectYml)
+  } catch {
+    return out
+  }
+  const vars = doc?.vars
+  if (!vars || typeof vars !== "object") return out
+  for (const [k, v] of Object.entries(vars)) {
+    out.add(k)
+    if (v && typeof v === "object" && !Array.isArray(v)) for (const k2 of Object.keys(v)) out.add(k2)
+  }
+  return out
+}
+
+/**
+ * `{% set cfg = {"materialized": "incremental", ...} %}` + `config(**cfg)` is a
+ * common way to share config; inline a flat literal dict's entries as kwargs so
+ * the config lint sees them.
+ */
+export function inlineConfigSplats(sql: string): string {
+  const dicts = new Map<string, string>()
+  for (const m of sql.matchAll(/\{%-?\s*set\s+(\w+)\s*=\s*\{/g)) {
+    // The dict body up to its matching brace; nested dicts (a BigQuery partition_by) stay as written.
+    const open = m.index! + m[0].length - 1
+    let depth = 0
+    let end = -1
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "{") depth++
+      else if (sql[i] === "}" && --depth === 0) {
+        end = i
+        break
+      }
+    }
+    if (end < 0 || !/^\s*-?%\}/.test(sql.slice(end + 1))) continue
+    const body = sql.slice(open + 1, end)
+    // Only top-level `"key":` becomes `key=`.
+    let out = ""
+    let d = 0
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i]
+      if ("{[(".includes(c)) d++
+      else if ("}])".includes(c)) d--
+      const key = d === 0 ? /^["'](\w+)["']\s*:/.exec(body.slice(i)) : null
+      if (key) {
+        out += key[1] + "="
+        i += key[0].length - 1
+      } else out += c
+    }
+    dicts.set(m[1], out.replace(/,\s*$/, ""))
+  }
+  if (!dicts.size) return sql
+  return sql.replace(/\bconfig\s*\(([\s\S]*?)\)\s*\}\}/g, (whole) =>
+    whole.replace(/\*\*(\w+)/g, (splat, name) => dicts.get(name) ?? splat),
+  )
+}
+
+async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVars: Set<string> = new Set()): Promise<Finding[]> {
   if (!runner.dbtConfigLint) return []
   const { file, newSql, oldSql } = ctx
   if (!newSql || file.status === "deleted") return []
   const model = modelNameFromPath(file.path)
-  const raw = await runner.dbtConfigLint(newSql, hasOldSide(file) ? oldSql : undefined)
+  const raw = await runner.dbtConfigLint(inlineConfigSplats(newSql), hasOldSide(file) && oldSql ? inlineConfigSplats(oldSql) : undefined)
   const out: Finding[] = []
   for (const f of raw) {
+    // A var defined in dbt_project.yml, or given a default elsewhere in the model, compiles fine.
+    if (f.rule === "var_no_default") {
+      const name = /var\(\s*['"]([^'"]+)['"]/.exec(f.message)?.[1]
+      const esc = name?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      if (name && (projectVars.has(name) || new RegExp(`var\\(\\s*['"]${esc}['"]\\s*,`).test(newSql))) continue
+    }
     const cat: ReviewCategory = /var_no_default|microbatch|incremental|materialization/.test(f.rule)
       ? "materialization"
       : /contract/.test(f.rule)
@@ -1110,6 +1189,92 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner): Promise<F
     )
   }
   return out
+}
+
+/**
+ * An incremental merge key that differs from every uniqueness test on the model:
+ * one of the two is wrong. A test key missing a `unique_key` column fails once a
+ * row per extra value lands; a `unique_key` missing a test column merges rows the
+ * test treats as distinct.
+ */
+/**
+ * A new LEFT JOIN onto a model whose declared uniqueness tests don't cover the
+ * join key: the joined model has stated its grain and the join ignores it (an
+ * SCD2 dimension joined without `is_current`, a natural key instead of the
+ * declared one), so a repeated key multiplies the left rows. Inner joins are
+ * skipped, since they are often one-to-many on purpose, as are models with no
+ * declared key, where nothing says what one row means.
+ */
+async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+  if (!runner.declaredUniqueKeys || !runner.modelConfig || !ctx.newSql || ctx.file.status === "deleted") return []
+  const added = (ctx.file.diff ?? "").split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1))
+  const out: Finding[] = []
+  const model = modelNameFromPath(ctx.file.path)
+  for (const t of joinTargets(ctx.newSql, added)) {
+    // Unknown to the manifest (a package model, a typo): nothing to compare against.
+    if (!t.left || !(await runner.modelConfig(t.model))) continue
+    const declared = (await runner.declaredUniqueKeys(t.model)).filter((k) => k.length)
+    if (!declared.length || declared.some((k) => k.every((c) => t.keys.includes(c.toLowerCase())))) continue
+    out.push(
+      makeFinding({
+        severity: "suggestion",
+        category: "fanout",
+        title: `${model}: LEFT JOIN key on \`${t.model}\` isn't its declared unique key`,
+        body:
+          `\`${t.join}\` matches \`${t.model}\` on [${t.keys.join(", ")}], but its uniqueness tests cover ` +
+          `${declared.map((k) => `[${k.join(", ")}]`).join(", ")}, which the join doesn't fully constrain.` +
+          ` If a key repeats there, this join multiplies rows. Add a \`unique\` / \`unique_combination_of_columns\` test on the join key, or join on the declared key.`,
+        file: ctx.file.path,
+        model,
+        confidence: "medium",
+        evidence: { tool: "dbt.manifest", result: { joined: t.model, keys: t.keys, declared } },
+        ruleKey: `fanout:join-key-untested:${t.model}`,
+      }),
+    )
+  }
+  return out
+}
+
+const TIME_PARTITION_COLUMN = /(^|_)(date|day|week|month|quarter|year|period|hour|ts|time|timestamp)(_|$)|_at$/i
+
+async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+  if (!runner.modelConfig || !runner.declaredUniqueKeys || ctx.file.status === "deleted") return []
+  const model = modelNameFromPath(ctx.file.path)
+  const cfg = await runner.modelConfig(model)
+  if (cfg?.materialized !== "incremental" || !cfg.unique_key) return []
+  const uk = (Array.isArray(cfg.unique_key) ? cfg.unique_key : String(cfg.unique_key).split(","))
+    .map((c) => String(c).trim().toLowerCase())
+    .filter(Boolean)
+  const declared = await runner.declaredUniqueKeys(model)
+  if (!uk.length || !declared.length) return []
+  const same = (k: string[]) => k.length === uk.length && k.every((c) => uk.includes(c.toLowerCase()))
+  if (declared.some(same)) return []
+  // A merge key that is a declared key plus date/partition columns (`block_month`,
+  // `effective_date`) is the common pruning pattern; those columns don't change which rows match.
+  const timeOnlyExtra = (k: string[]) => {
+    const lk = k.map((c) => c.toLowerCase())
+    return lk.every((c) => uk.includes(c)) && uk.filter((c) => !lk.includes(c)).every((c) => TIME_PARTITION_COLUMN.test(c))
+  }
+  if (declared.some(timeOnlyExtra)) return []
+  // A wider merge key only duplicates rows if an extra column changes for an existing row;
+  // a narrower or different key can collapse distinct rows into one.
+  const wider = declared.some((k) => k.every((c) => uk.includes(c.toLowerCase())))
+  const tests = declared.map((k) => `[${k.join(", ")}]`).join(", ")
+  return [
+    makeFinding({
+      severity: wider ? "suggestion" : "warning",
+      category: "materialization",
+      title: `${model}: incremental unique_key differs from the declared uniqueness test`,
+      body:
+        `\`${model}\` merges on \`unique_key\` [${uk.join(", ")}], but its uniqueness test${declared.length > 1 ? "s declare" : " declares"} ${tests}. ` +
+        `If the merge key is right the test fails as soon as two rows share the test key; if the test is right the merge collapses or duplicates rows. Make them the same column set.`,
+      file: ctx.file.path,
+      model,
+      confidence: "high",
+      evidence: { tool: "dbt.manifest", result: { unique_key: uk, declared } },
+      ruleKey: "materialization:unique-key-test-mismatch",
+    }),
+  ]
 }
 
 /**
@@ -1508,6 +1673,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const diffScopedPiiCompletedFiles = new Set<string>()
   const diffScopedPiiFindingFiles = new Set<string>()
   const classifiedPiiColumnsByFile = new Map<string, Set<string>>()
+  // The head's dbt_project.yml, read once: inherited test thresholds and defined vars.
+  const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
+  const projectYml = await getContent?.(projectYmlPath, "new").catch(() => undefined)
+  const projectVars = definedVars(projectYml)
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1590,7 +1759,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // own concerns, not just dbt_patterns, so it isn't silently dropped on a tier that
     // enables those concerns without dbt_patterns.
     if (lanes.has("dbt_patterns") || lanes.has("materialization") || lanes.has("contract_violation")) {
-      tasks.push(dbtConfigLane(ctx, input.runner))
+      tasks.push(dbtConfigLane(ctx, input.runner, projectVars))
+      tasks.push(uniqueKeyMismatchLane(ctx, input.runner))
+      tasks.push(joinKeyUniquenessLane(ctx, input.runner))
+      tasks.push(
+        (input.runner.modelConfig?.(modelNameFromPath(ctx.file.path)) ?? Promise.resolve(undefined))
+          .catch(() => undefined)
+          .then((mc) => [
+            ...jinjaFindings(ctx.file, ctx.oldSql, ctx.newSql),
+            ...modelConfigFindings(ctx.file, ctx.newSql && inlineConfigSplats(ctx.newSql), dialect, mc),
+          ]),
+      )
     }
     // Base-vs-head structural diff is a `semantic_change` concern (DISTINCT/UNION/grain/
     // surrogate-key/predicate changes) — gate on semantic_change, keeping dbt_patterns
@@ -1644,6 +1823,60 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     for (const findings of sets) all.push(findings)
   }
 
+  // Macros: the catalog rules that hold in a SQL template, and vars with no default.
+  if (lanes.has("dbt_patterns")) {
+    const macros = reviewable.filter((f) => f.kind === "macro" && f.status !== "deleted")
+    const sets = await Promise.all(
+      macros.map(async (file) => {
+        try {
+          const [newSql, oldSql] = await Promise.all([
+            getContent?.(file.path, "new"),
+            file.status === "added" ? Promise.resolve(undefined) : getContent?.(file.oldPath ?? file.path, "old")?.catch(() => undefined),
+          ])
+          if (!newSql) return []
+          return [
+            ...detectMacroPatterns(file, newSql, input.rubric, projectVars, { dialect, dialectKnown: !!input.dialectKnown }),
+            ...jinjaFindings(file, oldSql, newSql),
+          ]
+        } catch (err) {
+          failedFile(file, err)
+          return []
+        }
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+  }
+
+  // ref() to a name no model, seed or snapshot carries: dbt fails to parse the project.
+  if (lanes.has("dbt_patterns") && input.resourceNames) {
+    const models = [...ctxByPath.values()].filter((c) => c.file.status !== "deleted" && /\bref\s*\(/.test(c.file.diff ?? ""))
+    const names = models.length ? await input.resourceNames().catch(() => undefined) : undefined
+    if (names) for (const c of models) all.push(missingRefFindings(c.file, names))
+  }
+
+  // Singular tests and snapshots: Jinja structure. packages.yml / dbt_project.yml: pins and config.
+  if (lanes.has("dbt_patterns")) {
+    const others = reviewable.filter(
+      (f) => f.status !== "deleted" && ((f.kind === "test" || f.kind === "snapshot") || f.kind === "project_config"),
+    )
+    const sets = await Promise.all(
+      others.map(async (file) => {
+        try {
+          const [newContent, oldContent] = await Promise.all([
+            getContent?.(file.path, "new"),
+            file.status === "added" ? Promise.resolve(undefined) : getContent?.(file.oldPath ?? file.path, "old")?.catch(() => undefined),
+          ])
+          if (file.kind === "project_config") return [...packagesFindings(file, newContent), ...dbtProjectFindings(file, oldContent, newContent)]
+          return jinjaFindings(file, oldContent, newContent)
+        } catch (err) {
+          failedFile(file, err)
+          return []
+        }
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+  }
+
   // schema.yml-level detectors (test removal) — run on changed YAML files
   // regardless of tier, since deleting a guardrail test is always worth flagging.
   // Pass old + new content when available so the detector diffs structural YAML
@@ -1666,9 +1899,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
-  // The head's dbt_project.yml (test thresholds inherited by new tests), read once.
-  const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
-  const projectYml = schemaFiles.length ? await getContent?.(projectYmlPath, "new").catch(() => undefined) : undefined
+  const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
@@ -1679,6 +1910,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ])
         return [
           ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
+          ...testsOnNullColumns(file, newContent, sqlByModel),
           ...detectUnitTestFixtures(file, oldContent, newContent),
           ...snapshotYmlFindings(file, oldContent, newContent),
           ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
@@ -1811,13 +2043,23 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   } else if (!input.aiReview) {
     aiStatus = { state: "skipped", reason: input.aiDisabledReason ?? "disabled" }
   } else {
-    const aiFiles = [...ctxByPath.values()].map((ctx) => ({
+    const aiFiles: AiReviewFile[] = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
       model: modelNameFromPath(ctx.file.path),
+      kind: ctx.file.kind,
       diff: ctx.file.diff,
       sql: ctx.engineNewSql ?? ctx.newSql,
     }))
+    // Macros, data tests, snapshots, yml and seeds carry defects no model diff shows.
+    // Seeds go as a diff only: the full CSV is data, not logic.
+    const supporting = reviewable.filter((f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted")
+    const contents = await Promise.all(
+      supporting.map((f) => (f.kind === "seed" ? undefined : getContent?.(f.path, "new")?.catch(() => undefined))),
+    )
+    supporting.forEach((f, i) =>
+      aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
+    )
     try {
       const res = await input.aiReview({
         files: aiFiles,
@@ -1842,8 +2084,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Cross-engine portability advice from the regex catalog is noise for a
   // project that runs on one known engine. Core's dialect-aware check (a
   // function missing on THIS engine) is a real error and is kept.
-  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect))
+  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
   findings = anchorToDiff(findings, input.changedFiles)
+  findings = mergeRepeats(findings)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.

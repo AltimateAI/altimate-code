@@ -203,3 +203,46 @@ export function dedupe(findings: Finding[]): Finding[] {
   }
   return [...byId.values()]
 }
+
+/** A finding's title without its leading `<model or file>: `, with backticked
+ *  names blanked, so the same rule on different models/columns shares a key. */
+export function ruleTitle(f: Pick<Finding, "title">): string {
+  return f.title
+    .replace(/^[\w.\-/]+: /, "")
+    .replace(/ \(\+\d+ more\)$/, "")
+    .replace(/`[^`]*`/g, "`…`")
+}
+
+/**
+ * Merge repeats of one rule within one file (one finding per column of a grain
+ * test, one per join onto the same kind of key) into a single finding that
+ * lists every instance. Critical findings stay separate: each one can block.
+ */
+export function mergeRepeats(findings: Finding[]): Finding[] {
+  const groups = new Map<string, Finding[]>()
+  const out: Finding[] = []
+  for (const f of findings) {
+    if (f.severity === "critical") {
+      out.push(f)
+      continue
+    }
+    const key = [f.file, f.category, f.severity, !!f.degraded, ruleTitle(f)].join("|")
+    const g = groups.get(key)
+    if (g) g.push(f)
+    else groups.set(key, [f])
+  }
+  for (const g of groups.values()) {
+    if (g.length === 1) {
+      out.push(g[0])
+      continue
+    }
+    g.sort((a, b) => tieKey(a).localeCompare(tieKey(b)))
+    const [first, ...rest] = g
+    out.push({
+      ...first,
+      title: `${first.title} (+${rest.length} more)`,
+      body: `${first.body}\n\nSame rule, also here:\n${rest.map((f) => `- ${f.title.replace(/^[\w.\-/]+: /, "")}`).join("\n")}`,
+    })
+  }
+  return out
+}

@@ -278,8 +278,10 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
-portability: false            # cross-engine advice; default off once the engine is known
-                              # (set true for packages that support several adapters)
+portability: false            # cross-engine advice; default off once the engine is known.
+                              # A project whose macros have variants for several adapters
+                              # (`postgres__x`, `snowflake__x`) still gets advice on constructs
+                              # one of those adapters lacks. Set true to see all of it.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
@@ -357,8 +359,10 @@ consumerColumnLists:
   5,000 characters. Critical findings come first; anything that does not fit is
   counted, and the full list is always in the verdict envelope
   (`altimate review --json`). Local CLI output is never truncated.
-- **Repeated rules are grouped:** the same rule on three or more models is one
-  bullet listing the models.
+- **Repeated rules are grouped:** the same rule several times in one file (one
+  finding per column of a grain test, say) is one finding listing each
+  instance; critical findings stay separate. The same rule on two or more
+  models is one summary bullet listing the models.
 - **Inline comments only on lines of the PR's diff.** Findings computed on
   compiled SQL, or on unchanged lines, stay in the summary.
 - **No re-posting on reruns:** each inline comment carries the finding's
@@ -579,6 +583,9 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
 3. **AI reviewer lane (layer 3).** When a model is configured, the LLM reviewer
    runs **after** the deterministic lanes, grounded in their findings, and adds
    advisory contextual comments (intent, naming, business logic, test coverage).
+   It sees every changed dbt file, not only models: macros, singular data tests,
+   snapshots, schema/source yml, seeds (diff only) and project config, each
+   labeled with its role, with models first under the 20-file cap.
    Findings are clamped to ≤ warning and never block. Skipped (clean degrade) if
    no model is available.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
