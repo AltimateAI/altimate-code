@@ -21,7 +21,7 @@ import { WorkspaceApi, type ActAs, type DatamateRef } from "@/altimate/workspace
 import * as Manage from "@/altimate/workspace/manage"
 import { accountDigest, credentialDigest, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 import { ReviewApi } from "@/altimate/workspace/review-api"
-import { printable } from "@/altimate/rules/printable"
+import { printable, printableDeep } from "@/altimate/rules/printable"
 
 export const EXIT = { OK: 0, FAILED: 1, USAGE: 2, NOT_LINKED: 3 } as const
 
@@ -378,7 +378,13 @@ export async function runReviewStatus(directory: string, json: boolean, deps: Re
       out,
       json,
       EXIT.OK,
-      { workspace_id: binding.datamateId, workspace_name: binding.datamateName, ...listed },
+      {
+        workspace_id: binding.datamateId,
+        workspace_name: printable(binding.datamateName),
+        ...listed,
+        // Server text reaches terminals and agent context: made printable here, as the text form is.
+        items: printableDeep(listed.items),
+      },
       describeReviews(binding.datamateName, listed),
     )
   } catch (err) {
@@ -480,10 +486,70 @@ const ReviewStatusCommand = cmd({
   },
 })
 
+// For clients that show decisions themselves (the Claude Code plugin's toast): always JSON, always exit 0, so a client
+// can tell an older CLI (no such command, non-JSON) from an answer.
+const ReviewDecisionsCommand = cmd({
+  command: "decisions",
+  describe: "decisions on your skill and knowledge requests, as JSON (for editor and agent plugins)",
+  builder: (yargs) =>
+    yargs
+      .option("directory", DIRECTORY)
+      .option("json", JSON_FLAG)
+      .option("unseen", { type: "boolean", default: false, describe: "Only decisions not given to --host yet (last 14 days); the first ask answers none" })
+      .option("mark-seen", { type: "boolean", default: false, describe: "Remember the decisions returned as given to --host" })
+      .option("claim", { type: "boolean", default: false, describe: "Hold the decisions returned for --host until --ack (or 5 minutes)" })
+      .option("ack", { type: "string", array: true, describe: "Keys (from `key`) --host showed: remembered as given, nothing else is asked" })
+      .option("host", { type: "string", describe: "The client asking, e.g. claude-ui" }),
+  handler: async (args) => {
+    process.stdout.write(JSON.stringify(await reviewDecisions(args).catch(() => ({ ok: false, status: "failed" }))) + "\n")
+    process.exitCode = 0
+  },
+})
+
+/** `workspace review decisions` without the printing: the one JSON object it prints. Exported for its tests. */
+export async function reviewDecisions(args: {
+  directory?: string
+  host?: string
+  unseen: boolean
+  "mark-seen": boolean
+  claim: boolean
+  ack?: (string | number)[]
+}): Promise<object> {
+  const { ReviewNotices } = await import("@/altimate/workspace/review-notices")
+  const directory = args.directory ?? process.cwd()
+  // The per-client flags without the client would answer every kept decision, every time.
+  if (!args.host && (args.ack?.length || args.unseen || args["mark-seen"] || args.claim)) return { ok: false, status: "host_required" }
+  if (args.host && args.ack?.length) {
+    const acked = await ReviewNotices.ackHostDecisions(directory, args.host, args.ack.map(String))
+    return acked.ok ? { ok: true } : { ok: false, status: "failed" }
+  }
+  const result = await ReviewNotices.hostDecisions(directory, {
+    ...(args.host ? { host: args.host } : {}),
+    unseen: args.unseen,
+    markSeen: args["mark-seen"],
+    claim: args.claim,
+  })
+  if (!result.ok) return result
+  return {
+    ok: true,
+    decisions: result.decisions.map((d) => ({
+      key: ReviewNotices.decisionKey(d),
+      kind: d.kind,
+      public_id: d.public_id,
+      name: printable(d.name),
+      status: d.status,
+      at: d.at,
+      ...(d.reason ? { reason: printable(d.reason) } : {}),
+      ...(d.reviewer ? { reviewer: printable(d.reviewer) } : {}),
+    })),
+    waiting: result.waiting,
+  }
+}
+
 const ReviewCommand = cmd({
   command: "review",
   describe: "your review requests on the linked workspace (approve or reject them in the Altimate web app)",
-  builder: (yargs) => yargs.command(ReviewStatusCommand).demandCommand(),
+  builder: (yargs) => yargs.command(ReviewStatusCommand).command(ReviewDecisionsCommand).demandCommand(),
   async handler() {},
 })
 

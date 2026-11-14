@@ -1089,6 +1089,8 @@ export interface DbtLineageResult {
   confidence_factors: string[]
   /** unique_ids the model depends on (`depends_on.nodes`). */
   upstream?: string[]
+  /** The parents a `*` reads whose columns aren't known, by name: the only reason for "low" when set. */
+  unexpanded_stars?: string[]
   /** With include_graph: the graph a lineage viewer draws for the model. */
   graph?: import("./dbt/graph").LineageGraph
 }
