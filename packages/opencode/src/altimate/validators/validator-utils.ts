@@ -838,10 +838,15 @@ function collectDeliverableTokens(tokens: string[]): { models: string[]; files: 
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the project's artifact directory. Honours `DBT_TARGET_PATH` and a
- * `target-path:` key in `dbt_project.yml`; defaults to `target`.
+ * Resolve the project's artifact directory. A `targetPath` the caller names (the
+ * folder a `--target-path` run wrote to) wins; else `DBT_TARGET_PATH` and a
+ * `target-path:` key in `dbt_project.yml` are honoured; defaults to `target`.
  */
-export async function resolveDbtTargetPath(dbtRoot: string): Promise<string> {
+export async function resolveDbtTargetPath(dbtRoot: string, targetPath?: string): Promise<string> {
+  // A folder the caller names (the one a `--target-path` run wrote to) wins over the environment and the project file.
+  if (targetPath && targetPath.trim().length > 0) {
+    return isAbsolutePath(targetPath) ? targetPath : join(dbtRoot, targetPath)
+  }
   const fromEnv = process.env.DBT_TARGET_PATH
   if (fromEnv && fromEnv.trim().length > 0) {
     return isAbsolutePath(fromEnv) ? fromEnv : join(dbtRoot, fromEnv)
@@ -1191,6 +1196,8 @@ export interface RunResultNode {
   status: string
   /** dbt's message for the node, when present. */
   message: string | null
+  /** Seconds dbt spent on the node (`execution_time`), when it wrote a number. */
+  executionTimeSec: number | null
 }
 
 /** A parsed `run_results.json` plus its freshness. */
@@ -1212,6 +1219,10 @@ export interface RunResultsArtifact {
    * not evidence that anything was built.
    */
   command: string | null
+  /** `metadata.invocation_id`, when the file carries one. */
+  invocationId: string | null
+  /** The run's `elapsed_time` in seconds, when the file carries one. */
+  elapsedSec: number | null
 }
 
 /**
@@ -1348,14 +1359,26 @@ export function isFailedRunStatus(status: string): boolean {
  * Read and parse `<target>/run_results.json`. Returns null when the artifact
  * is absent or unparseable — callers decide what that means for their gate.
  */
-export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifact | null> {
-  const targetPath = await resolveDbtTargetPath(dbtRoot)
+export async function readRunResults(dbtRoot: string, targetPathOverride?: string): Promise<RunResultsArtifact | null> {
+  const targetPath = await resolveDbtTargetPath(dbtRoot, targetPathOverride)
   const path = join(targetPath, "run_results.json")
   try {
-    const stat = await fs.stat(path)
+    // The time keeps the plain stat's own rounding: every other caller compares it with mtimes read the same way, and a different rounding of equal timestamps would order them apart.
+    const plain = await fs.stat(path)
+    const stat = await fs.stat(path, { bigint: true })
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
-    const parsed = JSON.parse(raw) as { results?: unknown; args?: unknown }
+    // A rewrite during the read changes the file's identity, size or times (nanosecond precision): the rows and the time would belong to different runs, so there is no evidence.
+    const after = await fs.stat(path, { bigint: true })
+    if (
+      after.ino !== stat.ino ||
+      after.size !== stat.size ||
+      after.mtimeNs !== stat.mtimeNs ||
+      after.ctimeNs !== stat.ctimeNs
+    )
+      return null
+    const mtimeMs = plain.mtimeMs
+    const parsed = JSON.parse(raw) as { results?: unknown; args?: unknown; metadata?: unknown; elapsed_time?: unknown }
     // A file that parses but carries no `results` array is not a run artifact.
     // Returning an empty one would read as "a build happened and recorded
     // nothing", which lets an unbuilt model through; null means "no evidence".
@@ -1383,9 +1406,24 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
         version: versioned ? last : null,
         status: typeof r["status"] === "string" ? r["status"].toLowerCase() : "",
         message: typeof r["message"] === "string" ? r["message"] : null,
+        executionTimeSec:
+          typeof r["execution_time"] === "number" && Number.isFinite(r["execution_time"]) ? r["execution_time"] : null,
       })
     }
-    return { path, mtimeMs: stat.mtimeMs, results, command }
+    const meta =
+      typeof parsed.metadata === "object" && parsed.metadata !== null
+        ? (parsed.metadata as Record<string, unknown>)
+        : null
+    const invocation = meta && typeof meta["invocation_id"] === "string" ? meta["invocation_id"] : ""
+    const elapsed = typeof parsed.elapsed_time === "number" && Number.isFinite(parsed.elapsed_time) ? parsed.elapsed_time : null
+    return {
+      path,
+      mtimeMs,
+      results,
+      command,
+      invocationId: invocation || null,
+      elapsedSec: elapsed,
+    }
   } catch {
     return null
   }

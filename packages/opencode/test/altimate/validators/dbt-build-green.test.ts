@@ -113,6 +113,19 @@ describe("DbtBuildGreenValidator — fresh artifact", () => {
     expect(r.details!["verdict"]).toBe("fresh-build")
   })
 
+  test("a model and an artifact stamped with the same instant read as built, not edited after the build", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await writeRunResults([{ id: "model.t.stg_orders", status: "success" }])
+    // A coarse filesystem clock gives writes in one tick the same nanosecond timestamp.
+    const t = 1_800_000_000.004123
+    await fs.utimes(join(dir, "models", "stg_orders.sql"), t, t)
+    await fs.utimes(join(dir, "target", "run_results.json"), t, t)
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["verdict"]).toBe("fresh-build")
+  })
+
   test("treats warn as a clean build", async () => {
     await makeProject()
     await writeModel("stg_orders")
