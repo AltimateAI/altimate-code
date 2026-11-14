@@ -315,15 +315,18 @@ function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialec
 const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
 
 // Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), and in Oracle,
-// Snowflake and MariaDB (Oracle mode) s.NEXTVAL, quoted or not (elsewhere s.nextval is a column).
+// Snowflake and MariaDB (Oracle mode) s.NEXTVAL, quoted or not (in Oracle a quoted name must be
+// uppercase). In other dialects s.nextval is a column.
 function advancesSequence(tokens: ReturnType<typeof tokenizeSql>["tokens"], masked: string, dialect?: string): boolean {
   if (/\bNEXT\s+VALUE\s+FOR\b/i.test(masked)) return true
   if (!/^(oracle|snowflake|mysql|mariadb)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return false
-  // Comments masked to spaces, and a quoted name counts only when it is exactly NEXTVAL ("..." names
-  // are case-sensitive; MySQL/MariaDB backtick names are not), so
-  // s./* c */"NEXTVAL" reads as s.NEXTVAL while "s.NEXTVAL" and t."NEXTVAL VALUE" are column names.
+  // Comments masked to spaces, and a quoted name counts only when it is the word NEXTVAL, so
+  // s./* c */"NEXTVAL" reads as s.NEXTVAL while "s.NEXTVAL" and t."NEXTVAL VALUE" are column names. Only
+  // Oracle always keeps the case of a quoted name; Snowflake (QUOTED_IDENTIFIERS_IGNORE_CASE) and
+  // MariaDB's Oracle mode can resolve s."nextval" as the sequence.
+  const nextval = /^oracle$/i.test(dialect ?? "") ? /^"NEXTVAL"$/ : /^["`]NEXTVAL["`]$/i
   const names = tokens.map((token) =>
-    token.kind === "identifier" && token.text !== '"NEXTVAL"' && !/^`NEXTVAL`$/i.test(token.text) ? { ...token, text: '"_"' } : token,
+    token.kind === "identifier" && !nextval.test(token.text) ? { ...token, text: '"_"' } : token,
   )
   return /\.\s*NEXTVAL\b/i.test(maskSql(names, true))
 }

@@ -698,9 +698,14 @@ describe("each engine's own literal and statement rules", () => {
     ['SELECT t."NEXTVAL$amount" FROM t', "snowflake", "read", false],
     ['SELECT t."NEXTVAL-count" FROM t', "oracle", "read", false],
     ['SELECT t."NEXTVAL " FROM t', "oracle", "read", false],
+    // Only Oracle always keeps a quoted name's case; elsewhere s."nextval" may be the sequence.
     ['SELECT s."nextval" FROM dual', "oracle", "read", false],
     ['SELECT s."NEXTVAL" FROM dual', "oracle", "write", false],
+    ['SELECT s."nextval"', "snowflake", "write", false],
+    ['SELECT s."nextval" FROM dual', "mariadb", "write", false],
+    ['SELECT s."nextval" FROM dual', "mysql", "write", false],
     ["SELECT s.`nextval`", "mariadb", "write", false],
+    ["SELECT s.`nextval`", "mysql", "write", false],
   ]
   for (const [sql, dialect, queryType, blocked] of cases)
     test(`${dialect}: ${sql.replace(/\n/g, "\\n")}`, () => {
