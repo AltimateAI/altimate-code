@@ -359,8 +359,10 @@ consumerColumnLists:
   5,000 characters. Critical findings come first; anything that does not fit is
   counted, and the full list is always in the verdict envelope
   (`altimate review --json`). Local CLI output is never truncated.
-- **Repeated rules are grouped:** the same rule on three or more models is one
-  bullet listing the models.
+- **Repeated rules are grouped:** the same rule several times in one file (one
+  finding per column of a grain test, say) is one finding listing each
+  instance; critical findings stay separate. The same rule on two or more
+  models is one summary bullet listing the models.
 - **Inline comments only on lines of the PR's diff.** Findings computed on
   compiled SQL, or on unchanged lines, stay in the summary.
 - **No re-posting on reruns:** each inline comment carries the finding's

@@ -7,6 +7,7 @@ import {
   ReviewCategory as ReviewCategoryEnum,
   makeFinding,
   dedupe,
+  mergeRepeats,
   SEVERITY_ORDER,
 } from "./finding"
 import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide } from "./diff-filter"
@@ -2085,6 +2086,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // function missing on THIS engine) is a real error and is kept.
   if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
   findings = anchorToDiff(findings, input.changedFiles)
+  findings = mergeRepeats(findings)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.
