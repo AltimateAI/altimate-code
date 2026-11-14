@@ -1222,7 +1222,6 @@ async function syncReal(
         return { id, result: "failed", reason: [RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), ...exposure.notes].join(" "), steps, ...(exposure.shared ? { shared: true as const } : {}) }
       }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
-      // The workspace holds the connection and the record says so; only the local cleanup is left to redo, which running sync for this provider does.
       await purgeLocal(rec)
       return reportWorkspace(res.workspace ?? { notLinked: true }, res.shared === true)
     })
