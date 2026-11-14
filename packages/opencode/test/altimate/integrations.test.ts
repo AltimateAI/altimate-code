@@ -1805,6 +1805,12 @@ describe("credentials flow", () => {
       }
     })
 
+    test("the gh token is read for github.com only, not the host GH_HOST names", async () => {
+      fake("gh", '[ "$2" = token ] && [ "$3" = --hostname ] && [ "$4" = github.com ] && echo ' + GOOD + ' || echo ghe_enterprise_token')
+      const r = await creds.connectCredentials({ id: "github", localOnly: true })
+      expect([r.status, r.account]).toEqual(["connected", "octo"])
+    })
+
     test("detected credentials are used without typing", async () => {
       fake("gh", '[ "$2" = token ] && echo ' + GOOD)
       const r = await creds.connectCredentials({ id: "github", localOnly: true })
@@ -2435,10 +2441,24 @@ describe("credentials flow", () => {
         expect([viaSync.result, viaSync.shared]).toEqual(["synced", true])
         expect(update).toHaveBeenCalledTimes(1)
         await token("github", "github_token")
+        // A newly shared attach whose local record then cannot be written still says who can use the connection.
+        const rename = fs.renameSync
+        const disk = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+          if (String(to).endsWith("integrations.json")) throw new Error("disk full")
+          return rename(from, to)
+        }) as any)
+        try {
+          const unrecorded = await creds.connectCredentials({ id: "github", update: true, share: true })
+          expect([unrecorded.status, unrecorded.shared]).toEqual(["failed", true])
+          expect(unrecorded.message).toContain(core.SHARED_ATTACH_NOTE)
+        } finally {
+          disk.mockRestore()
+        }
+        await token("github", "github_token")
         const shared = await creds.connectCredentials({ id: "github", update: true, share: true })
         expect([shared.status, shared.shared]).toEqual(["connected", true])
         expect(shared.message).toContain("its members can use this connection")
-        expect(update).toHaveBeenCalledTimes(2)
+        expect(update).toHaveBeenCalledTimes(3)
         // Attaching widened the connection, as the backend does: its new credential reaches the members too, so an update needs --share again.
         const id = core.loadStore().providers.github!.connectionId
         api.state.rows.find((r) => r.id === id)!.privacy = "public"
@@ -2468,6 +2488,8 @@ describe("credentials flow", () => {
         await token("github", "github_token")
         const r = await creds.connectCredentials({ id: "github", update: true })
         expect([r.status, r.sync, r.shared, r.message]).toEqual(["failed", "synced", undefined, core.SHARED_CONNECTION_REFUSAL("github", "update")])
+        await token("github", "github_token")
+        expect((await creds.connectCredentials({ id: "github" })).message).toBe(core.SHARED_CONNECTION_REFUSAL("github", "connect"))
         expect(row.config).toBe(config)
         // Nothing to upload: the attach-only sync changes nothing, but no longer calls the connection private.
         const s = await core.syncProvider("github", undefined, 0, true)

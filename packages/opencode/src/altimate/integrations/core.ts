@@ -402,9 +402,10 @@ function onPath(bin: string): boolean {
 }
 
 function detectGithub(): Detection | undefined {
-  const auth = spawnSync("gh", ["auth", "status"], { stdio: "ignore", timeout: 5000 })
+  // Only github.com: GH_HOST may point gh at an enterprise host, whose token must never go to api.github.com.
+  const auth = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000 })
   if (auth.status === 0) {
-    const who = spawnSync("gh", ["api", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+    const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
     const login = who.status === 0 ? who.stdout.trim() : ""
     return { id: "github", source: { kind: "cli", label: "gh CLI" }, account: login || null, syncable: true, note: null }
   }
@@ -944,7 +945,7 @@ export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.cre
  * Saves the credential as this tool's own connection: updated in place when it exists (matched on
  * integration and name among the caller's own connections), created otherwise.
  */
-export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>, share = false, retry: "sync" | "update" = "sync"): Promise<UpsertResult> {
+export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>, share = false, retry: "sync" | "update" | "connect" = "sync"): Promise<UpsertResult> {
   const visible = await backend.listVisibleConnections(cfg)
   const existing = findManaged(backend.ownConnections(visible), id)
   // An update in place hands the new credential to everyone the connection is already shared with, so it needs the same consent as attaching to a shared workspace.
@@ -1010,7 +1011,7 @@ export function attachToIntegrations(
   })
 }
 
-export const SHARED_CONNECTION_REFUSAL = (id: ProviderId, command: "sync" | "update" = "sync") =>
+export const SHARED_CONNECTION_REFUSAL = (id: ProviderId, command: "sync" | "update" | "connect" = "sync") =>
   `the workspace connection is shared with other people, so updating it would let them use the new credential; nothing was changed. Run altimate integrations ${command} ${id} --share to update it`
 
 /** Appended to what a sync or connect reports when other people can use the connection. */
@@ -1018,6 +1019,13 @@ export const SHARED_AUDIENCE = "; its members can use this connection"
 export const SHARED_CONNECTION_AUDIENCE = "; the people it is shared with can use the new credential"
 /** Added to a failure after a shared connection was rewritten, so the text says who already has the new credential. */
 export const SHARED_REWRITE_NOTE = `The shared connection was updated${SHARED_CONNECTION_AUDIENCE}.`
+export const SHARED_ATTACH_NOTE = "It was attached to a shared workspace; its members can use this connection."
+/** What a failure after the upload still has to say about who can use the connection: a shared one rewritten, a shared workspace attached, or both. */
+export function exposureNotes(res: Pick<UpsertResult, "shared" | "workspace">): { notes: string[]; shared: boolean } {
+  const attached = res.workspace != null && "attached" in res.workspace && res.workspace.shared === true
+  const notes = [res.shared ? SHARED_REWRITE_NOTE : null, attached ? SHARED_ATTACH_NOTE : null].filter((n): n is string => n != null)
+  return { notes, shared: res.shared === true || attached }
+}
 
 export const SHARED_WORKSPACE_REFUSAL = (name: string, id: ProviderId) =>
   `workspace "${name}" is shared, so attaching would let its members use this connection; it stays saved to your account only. Run altimate integrations sync ${id} --share to attach it`
@@ -1196,7 +1204,8 @@ async function syncReal(
           }
         })
       } catch (e) {
-        return { id, result: "failed", reason: RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again") + (res.shared ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(res.shared ? { shared: true as const } : {}) }
+        const exposure = exposureNotes(res)
+        return { id, result: "failed", reason: [RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), ...exposure.notes].join(" "), steps, ...(exposure.shared ? { shared: true as const } : {}) }
       }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
       try {

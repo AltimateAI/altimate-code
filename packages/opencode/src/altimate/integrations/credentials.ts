@@ -194,7 +194,8 @@ function gitEmail(): string | undefined {
 function detectField(id: ProviderId, field: string): Found | undefined {
   if (core.demoMode()) return undefined
   if (field === "github_token") {
-    const r = spawnSync("gh", ["auth", "token"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
+    // The token for github.com only, the host it is validated against, whatever GH_HOST says.
+    const r = spawnSync("gh", ["auth", "token", "--hostname", "github.com"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
     if (r.status === 0 && r.stdout.trim()) return { value: r.stdout.trim(), source: { kind: "cli", label: "gh CLI" } }
   }
   const cli = jiraCliConfig()
@@ -747,15 +748,15 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const config: Record<string, unknown> = {}
   for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
   if (check.expiresAt) config.expires_at = check.expiresAt
-  // Set once a shared connection was rewritten, so a later failure still says who already has the new credential.
-  let sharedRewrite = false
+  // Set once the upload is done, so a later failure still says who can already use the connection.
+  let exposure: { notes: string[]; shared: boolean } = { notes: [], shared: false }
   try {
     // The blocked check and the upload share one lock with Keep local, so a move to this machine cannot interleave with an upload.
     return await core.withLock(async (): Promise<CredentialResult> => {
       if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: syncState(), message: CHANGED_WHILE_CONNECTING })
       if (core.isBlocked(id)) return local({ status: "failed", sync: syncState(), message: "Sync is blocked for this provider, kept local." })
-      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true, "update")
-      sharedRewrite = res.shared === true
+      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true, opts.update ? "update" : "connect")
+      exposure = core.exposureNotes(res)
       if (!res.isValid) {
         const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) + (res.shared ? ` ${core.SHARED_REWRITE_NOTE}` : ""), ...(res.shared ? { shared: true as const } : {}) })
         // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
@@ -783,7 +784,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       try {
         await record(true, { connectionId: res.connectionId })
       } catch (e) {
-        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message: [core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again"), res.shared ? core.SHARED_REWRITE_NOTE : null].filter(Boolean).join(" "), ...(res.shared ? { shared: true as const } : {}) }
+        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message: [core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again"), ...exposure.notes].join(" "), ...(exposure.shared ? { shared: true as const } : {}) }
       }
       let leftover: string | null = null
       try {
@@ -800,7 +801,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
-    if (sharedRewrite) return { ...local({ status: "failed", sync: syncState(), message: `${message} ${core.SHARED_REWRITE_NOTE}` }), shared: true }
+    if (exposure.shared) return { ...local({ status: "failed", sync: syncState(), message: [message, ...exposure.notes].join(" ") }), shared: true }
     return local({ status: "failed", sync: syncState(), message })
   }
 }
