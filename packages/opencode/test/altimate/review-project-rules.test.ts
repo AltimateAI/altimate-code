@@ -84,6 +84,10 @@ describe("Jinja structure", () => {
     const fallback = "{%- set concat = var('datavault4dbt.concat_string', var('concat_string', '||')) -%}"
     expect(titles(jinjaFindings(file("macros/hash.sql", renamed), old, renamed))).toContain("hash: var() key renamed without a fallback")
     expect(jinjaFindings(file("macros/hash.sql", fallback), old, fallback).some((f) => /renamed/.test(f.title))).toBe(false)
+
+    const old2 = "select * from {{ var('issue_merged') }}"
+    const handedOn = "{{ github_union_connections(connection_dictionary=var('github_sources'), single_table_name='issue_merged') }}"
+    expect(jinjaFindings(file("models/tmp/t.sql", handedOn), old2, handedOn).some((f) => /renamed/.test(f.title))).toBe(false)
   })
   test("code its own comment marks temporary", () => {
     const sql = "where mod(abs(xxhash64(address)), 1000) = 0 -- TEMP CI VALIDATION SAMPLE - remove before merge"
@@ -137,10 +141,21 @@ describe("join keys", () => {
   test("a ref joined directly and through a pass-through CTE", () => {
     const sql = `with dim_course_run as (\n  select courserun_pk, courserun_readable_id from {{ ref('dim_course_run') }}\n)\nselect *\nfrom e\nleft join dim_course_run as cr\n  on e.courserun_readable_id = cr.courserun_readable_id\njoin {{ ref('orders') }} o on o.order_id = e.order_id`
     const t = joinTargets(sql, ["left join dim_course_run as cr", "join {{ ref('orders') }} o on o.order_id = e.order_id"])
-    expect(t.map((x) => [x.model, x.keys])).toEqual([
-      ["dim_course_run", ["courserun_readable_id"]],
-      ["orders", ["order_id"]],
+    expect(t.map((x) => [x.model, x.keys, x.left])).toEqual([
+      ["dim_course_run", ["courserun_readable_id"], true],
+      ["orders", ["order_id"], false],
     ])
+  })
+  test("keys inside casts are read; range, OR and Jinja conditions skip the join", () => {
+    const cast = `select * from o\nleft join {{ ref('dim_product') }} as p on cast(o.product_id as varchar) = cast(p.source_product_id as varchar) and o.platform = p.platform`
+    expect(joinTargets(cast, ["left join {{ ref('dim_product') }} as p"]).map((x) => x.keys)).toEqual([["source_product_id", "platform"]])
+    const skipped = [
+      `select * from w\nleft join {{ ref('terms') }} as t on w.year = t.year and w.day between t.start_date and t.end_date`,
+      `select * from w\nleft join {{ ref('terms') }} as t on w.year = t.year and w.day >= t.start_date`,
+      `select * from w\nleft join {{ ref('terms') }} as t on w.id = t.id or w.alt_id = t.id`,
+      `select * from w\nleft join {{ ref('terms') }} as t on w.id = t.id and {{ union_dataset_join_clause('w', 't') }}`,
+    ]
+    for (const sql of skipped) expect(joinTargets(sql, ["left join {{ ref('terms') }} as t"])).toHaveLength(0)
   })
   test("a CTE that aggregates changes the grain, and an unchanged join is not this PR's: skipped", () => {
     const sql = `with o as (\n  select order_id, count(*) n from {{ ref('orders') }} group by 1\n)\nselect * from e join o on o.order_id = e.order_id\njoin {{ ref('users') }} u on u.id = e.user_id`

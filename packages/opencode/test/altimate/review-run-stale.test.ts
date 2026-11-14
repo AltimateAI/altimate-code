@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test"
-import { isManifestAffecting } from "../../src/altimate/review/run"
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { execFileSync } from "node:child_process"
+import { isManifestAffecting, projectAdapters } from "../../src/altimate/review/run"
 
 /**
  * Guards on `warnIfStale`'s changed-file filter. The stale warning gates on a
@@ -56,5 +60,70 @@ describe("isManifestAffecting", () => {
     "snapshots/README.md",
   ])("rejects: %s", (rel) => {
     expect(isManifestAffecting(rel)).toBe(false)
+  })
+})
+
+describe("projectAdapters", () => {
+  function repo(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), "adapters-"))
+    for (const [rel, body] of Object.entries(files)) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true })
+      writeFileSync(join(dir, rel), body)
+    }
+    const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" })
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    return dir
+  }
+
+  test("reads adapter variants from the project's own macros, mapping presto to trino", async () => {
+    const dir = repo({
+      "dbt/macros/first.sql": "{% macro postgres__first(x) %}{% endmacro %}\n{%- macro  snowflake__first(x) -%}{% endmacro %}",
+      "dbt/macros/other.sql": "{% macro presto__other() %}{% endmacro %}{% macro default__other() %}{% endmacro %}",
+      "elsewhere/macros/x.sql": "{% macro bigquery__x() %}{% endmacro %}",
+    })
+    expect(await projectAdapters(dir, "HEAD", "dbt")).toEqual(["postgres", "snowflake", "trino"])
+    expect(await projectAdapters(dir, "HEAD", undefined)).toEqual([])
+  })
+
+  test("a project without adapter-specific macros has none", async () => {
+    const dir = repo({ "macros/m.sql": "{% macro cents(x) %}{{ x }} / 100{% endmacro %}" })
+    expect(await projectAdapters(dir, "HEAD", "")).toEqual([])
+  })
+})
+
+describe("grepMatchesAt", () => {
+  test("paths are repo-root relative from a subdirectory", async () => {
+    const { grepMatchesAt } = await import("../../src/altimate/review/git")
+    const dir = mkdtempSync(join(tmpdir(), "grep-"))
+    mkdirSync(join(dir, "a/b"), { recursive: true })
+    writeFileSync(join(dir, "a/b/s.yml"), "snapshots:\n  - name: snap\n")
+    const git = (...x: string[]) => execFileSync("git", x, { cwd: dir, stdio: "ignore" })
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    expect(await grepMatchesAt(join(dir, "a"), "HEAD", "^snapshots:", "a/*.yml")).toEqual(["HEAD:a/b/s.yml:snapshots:"])
+    expect(await grepMatchesAt(dir, "HEAD", "^models:", "*.yml")).toEqual([])
+  })
+})
+
+describe("projectResourceNames", () => {
+  test("includes snapshots defined only in YAML", async () => {
+    const { projectResourceNames } = await import("../../src/altimate/review/run")
+    const dir = mkdtempSync(join(tmpdir(), "names-"))
+    for (const [rel, body] of Object.entries({
+      "p/models/stg_a.sql": "select 1",
+      "p/snapshots/kippadb.yml": "snapshots:\n  - name: snapshot_rollup\n    relation: source('s', 't')\n",
+      "p/models/props.yml": "models:\n  - name: stg_a\n",
+    })) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true })
+      writeFileSync(join(dir, rel), body)
+    }
+    const git = (...x: string[]) => execFileSync("git", x, { cwd: dir, stdio: "ignore" })
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    expect([...(await projectResourceNames(dir, "HEAD", "p", join(dir, "p")))!].sort()).toEqual(["snapshot_rollup", "stg_a"])
   })
 })

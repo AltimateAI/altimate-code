@@ -286,7 +286,9 @@ manifestPath: target/manifest.json
 dialect: snowflake
 # portability: true           # cross-engine advice. Unset: off once the engine is known
                               # (configured or detected). An explicit value applies even when
-                              # the engine is unknown. Set true for multi-adapter packages.
+                              # the engine is unknown. A project whose macros have variants for
+                              # several adapters (`postgres__x`, `snowflake__x`) still gets advice
+                              # on constructs one of those adapters lacks. Set true to see all of it.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
