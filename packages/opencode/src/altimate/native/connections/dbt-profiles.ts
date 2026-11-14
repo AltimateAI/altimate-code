@@ -53,7 +53,7 @@ const KEY_MAP: Record<string, string> = {
 }
 
 /** Resolve Jinja {{ env_var('NAME') }} and {{ env_var('NAME', 'default') }} patterns. */
-function resolveEnvVars(value: unknown): unknown {
+export function resolveEnvVars(value: unknown): unknown {
   if (typeof value !== "string") return value
   return value.replace(
     /\{\{\s*env_var\s*\(\s*'([^']+)'\s*(?:,\s*'([^']*)'\s*)?\)\s*\}\}/g,
@@ -102,7 +102,7 @@ function mapConfig(dbtType: string, dbtConfig: Record<string, unknown>): Connect
  * 3. Project-local profiles.yml (in dbt project root)
  * 4. ~/.dbt/profiles.yml (default)
  */
-function resolveProfilesPath(explicitPath?: string, projectDir?: string): string {
+export function resolveProfilesPath(explicitPath?: string, projectDir?: string): string {
   if (explicitPath) return explicitPath
 
   const envDir = process.env.DBT_PROFILES_DIR
