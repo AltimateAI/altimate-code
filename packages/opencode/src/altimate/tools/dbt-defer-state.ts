@@ -75,27 +75,37 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
       return path.resolve(p)
     }
   }
-  const start = real(projectDir)
-  const candidates: string[] = []
-  if (workspaceDir) candidates.push(real(workspaceDir))
-  else {
-    for (let dir = start; ; dir = path.dirname(dir)) {
-      candidates.push(dir)
-      if (path.dirname(dir) === dir) break
+  const search = (start: string, workspace?: string) => {
+    const candidates: string[] = []
+    if (workspace) candidates.push(workspace)
+    else {
+      for (let dir = start; ; dir = path.dirname(dir)) {
+        candidates.push(dir)
+        if (path.dirname(dir) === dir) break
+      }
     }
+    for (const folder of candidates) {
+      const file = path.join(folder, ".vscode", "settings.json")
+      const settings = readSettings(file)
+      // The nearest settings file that cannot be read ends the search: an outer folder's entry must not stand in for it.
+      if (settings === UNREADABLE) return UNREADABLE
+      const perProject = settings?.[SETTING]
+      if (!perProject || typeof perProject !== "object") continue
+      const key = path.relative(folder, start)
+      const entry = (perProject as Record<string, unknown>)[key]
+      if (entry && typeof entry === "object") {
+        return { entry: entry as DeferSetting, key, file, folder }
+      }
+    }
+    return undefined
   }
-  for (const folder of candidates) {
-    const file = path.join(folder, ".vscode", "settings.json")
-    const settings = readSettings(file)
-    // The nearest settings file that cannot be read ends the search: an outer folder's entry must not stand in for it.
-    if (settings === UNREADABLE) return undefined
-    const perProject = settings?.[SETTING]
-    if (!perProject || typeof perProject !== "object") continue
-    const key = path.relative(folder, start)
-    const entry = (perProject as Record<string, unknown>)[key]
-    if (entry && typeof entry === "object") {
-      return { entry: entry as DeferSetting, key, file, folder }
-    }
+  // The paths as given first, as VS Code builds the key; then with symlinks followed, for a workspace reached through a link.
+  const lexical = [path.resolve(projectDir), workspaceDir ? path.resolve(workspaceDir) : undefined] as const
+  const resolved = [real(projectDir), workspaceDir ? real(workspaceDir) : undefined] as const
+  for (const [start, workspace] of lexical[0] === resolved[0] && lexical[1] === resolved[1] ? [lexical] : [lexical, resolved]) {
+    const found = search(start, workspace)
+    if (found === UNREADABLE) return undefined
+    if (found) return found
   }
   return undefined
 }

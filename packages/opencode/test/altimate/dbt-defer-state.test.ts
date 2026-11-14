@@ -195,6 +195,20 @@ describe("dbt_defer_state", () => {
     }
   })
 
+  test("a symlinked project folder still finds the entry under its path in the workspace", () => {
+    settings({ analytics: { deferToProduction: true } })
+    const outside = fs.mkdtempSync(path.join(path.dirname(root), "ext-"))
+    fs.rmSync(path.join(root, "analytics"), { recursive: true, force: true })
+    fs.symlinkSync(outside, path.join(root, "analytics"))
+    try {
+      expect(findDeferSetting(path.join(root, "analytics"), root)?.key).toBe("analytics")
+      expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")
+    } finally {
+      fs.rmSync(path.join(root, "analytics"))
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   test("settings with comments and trailing commas parse", () => {
     settings({ analytics: { deferToProduction: true } })
     expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")
