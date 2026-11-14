@@ -177,6 +177,24 @@ describe("dbt_defer_state", () => {
     expect(result.defaultTarget).toBeUndefined()
   })
 
+  test("an empty settings file in the project does not hide the workspace entry", () => {
+    settings({ analytics: { deferToProduction: true } })
+    fs.mkdirSync(path.join(root, "analytics", ".vscode"), { recursive: true })
+    fs.writeFileSync(path.join(root, "analytics", ".vscode", "settings.json"), "")
+    expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")
+  })
+
+  test("a symlinked workspace path still finds the project's entry", () => {
+    settings({ analytics: { deferToProduction: true } })
+    const link = path.join(root, "..", path.basename(root) + "-link")
+    fs.symlinkSync(root, link)
+    try {
+      expect(findDeferSetting(path.join(root, "analytics"), link)?.key).toBe("analytics")
+    } finally {
+      fs.rmSync(link)
+    }
+  })
+
   test("settings with comments and trailing commas parse", () => {
     settings({ analytics: { deferToProduction: true } })
     expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")

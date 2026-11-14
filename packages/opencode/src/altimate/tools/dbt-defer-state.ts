@@ -51,6 +51,8 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ENOTDIR" ? undefined : UNREADABLE
   }
+  // An empty or whitespace-only file is a settings file with nothing in it.
+  if (text.trim() === "") return {}
   const errors: ParseError[] = []
   // .vscode/settings.json allows comments and trailing commas.
   const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
@@ -66,9 +68,16 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
  * file that cannot be read or parsed ends the search.
  */
 export function findDeferSetting(projectDir: string, workspaceDir?: string) {
-  const start = path.resolve(projectDir)
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(path.resolve(p))
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  const start = real(projectDir)
   const candidates: string[] = []
-  if (workspaceDir) candidates.push(path.resolve(workspaceDir))
+  if (workspaceDir) candidates.push(real(workspaceDir))
   else {
     for (let dir = start; ; dir = path.dirname(dir)) {
       candidates.push(dir)
