@@ -272,6 +272,23 @@ describe("portability noise", () => {
     expect((await runReview({ ...pg, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBe(0)
     // Snowflake doesn't: on a Snowflake project it is a real error and stays.
     expect((await runReview({ ...base, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBeGreaterThan(0)
+
+    // The AI lane is grounded in the same cleaned list: dropped advice never reaches it.
+    let grounding: Finding[] | undefined
+    const withAi = {
+      ...pg,
+      config: { ...pg.config, reviewers: ["dbt_patterns", "ai_review"] },
+      forceTier: "full" as const,
+      suppressPortability: true,
+      aiReview: async (input: { grounding: Finding[] }) => {
+        grounding = input.grounding
+        return []
+      },
+    }
+    const env = await runReview(withAi)
+    expect(grounding).toBeDefined()
+    expect(grounding!.filter(isCatalogPortability).length).toBe(0)
+    expect(grounding!.map((f) => f.title)).toEqual(env.findings.map((f) => f.title))
   })
 })
 
