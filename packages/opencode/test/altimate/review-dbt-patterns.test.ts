@@ -121,14 +121,14 @@ describe("dbt-patterns detectors", () => {
     expect(has(f, "sql_correctness", "warning")).toBe(true)
   })
 
-  test("fanout: new join into an aggregating model → fanout warning", () => {
+  test("fanout: new join into an aggregating model → fanout suggestion", () => {
     const sql = `select customer_id, sum(amount) from o left join {{ ref('items') }} i on i.oid = o.id group by 1`
     const f = detectModelPatterns(
       modelFile("models/marts/m.sql", sql, ["left join {{ ref('items') }} i on i.oid = o.id"]),
       sql,
       DEFAULT_RUBRIC,
     )
-    expect(has(f, "fanout", "warning")).toBe(true)
+    expect(has(f, "fanout", "suggestion")).toBe(true)
   })
 
   test("schema.yml: removed unique/not_null test → test_coverage finding", () => {

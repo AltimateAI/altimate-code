@@ -395,10 +395,11 @@ async function semanticChangeLane(
   if (eq.decided && eq.equivalent) return []
 
   if (!eq.decided) {
-    // Undecidable / no schema → WARNING with unknown confidence, never block.
+    // Undecidable / no schema → a suggestion to data-diff: the engine not knowing is
+    // not evidence of a change (1 of 426 such findings matched a real defect on replay).
     return [
       makeFinding({
-        severity: clampSeverity("semantic_change", "critical", "unknown"),
+        severity: "suggestion",
         category: "semantic_change",
         title: `${model}: refactor could not be proven equivalent`,
         body:
@@ -474,8 +475,17 @@ async function qualityLane(
     // (and false-fire on idiomatic dbt SQL like a correlated NOT EXISTS):
     if (rule === "correlated-subquery" || rule === "correlated_subquery") continue
     if (rule === "function-on-filter-column" || rule === "function-on-join-column") continue
+    // Injection rules target queries assembled from user input; a model's UNION or
+    // comment is ordinary SQL.
+    if (INJECTION_RULE.test(rule)) continue
+    // The engine's planner and parser cover less than the warehouses do: a type it can't
+    // coerce, a function it doesn't know, or syntax it can't parse is a gap in the engine,
+    // not an error in the model. Unresolved columns and tables are kept.
+    const msg = String(issue.message ?? "")
+    if (rule === "validate" && ENGINE_LIMIT_MESSAGE.test(msg)) continue
+    const parserGap = rule === "validate" && /^syntax error/i.test(msg)
     const cat = mapCheckCategory(issue.category)
-    const isError = issue.severity === "error"
+    const isError = issue.severity === "error" && !parserGap
     // Error-severity contract/PII issues are blockable; others are warning/suggestion.
     let sev: Severity = isError ? "warning" : "suggestion"
     if (isError && (cat === "contract_violation" || cat === "pii_exposure")) sev = "critical"
@@ -505,6 +515,9 @@ async function qualityLane(
  * compiled core's `review_lexical_scan` over the raw ADDED diff lines (these
  * are pre-parse lexical checks; the curated lists live in the binary). Advisory.
  */
+const INJECTION_RULE = /injection|^unbalanced_quote$/
+const ENGINE_LIMIT_MESSAGE = /^(error during planning|execution error|this feature is not implemented)/i
+
 async function lexicalLane(file: ChangedFile & { kind: string }, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.lexicalScan || file.status === "deleted") return []
   const added = splitDiff(file.diff).added

@@ -174,7 +174,8 @@ const detectFanout: Detector = (c) => {
   const newJoins = c.added.filter((l) => /\bjoin\b/i.test(stripComments(l)) && !/\bcross\s+join\b/i.test(l))
   if (newJoins.length < 1) return null
   return makeFinding({
-    severity: "warning",
+    // A "may": the join's cardinality is unknown here (1 partial match in 254 on replay).
+    severity: "suggestion",
     category: "fanout",
     title: `${c.model}: new join before an aggregate may fan out and inflate metrics`,
     body:
@@ -689,7 +690,26 @@ const detectSelfJoin: Detector = (c) => {
 
 // 39. Window function without PARTITION BY (whole-table window — often unintended).
 const detectWindowNoPartition: Detector = (c) => {
-  const hit = c.added.find((l) => /\bover\s*\(/i.test(stripComments(l)) && !/partition\s+by/i.test(l))
+  // Read each OVER clause whole: `over (` on one line and `partition by` on the next is partitioned.
+  const changed = c.added.map((l) => stripComments(l).trim()).filter((l) => /\bover\s*\(/i.test(l))
+  const whole = stripComments(c.newSql ?? "")
+  const sql = /\bover\s*\(/i.test(whole) ? whole : changed.join("\n")
+  const unpartitioned = [...sql.matchAll(/\bover\s*\(/gi)].some((m) => {
+    const open = m.index! + m[0].length - 1
+    let depth = 0
+    let end = sql.length
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "(") depth++
+      else if (sql[i] === ")" && --depth === 0) {
+        end = i
+        break
+      }
+    }
+    const lineStart = sql.lastIndexOf("\n", m.index!) + 1
+    const head = sql.slice(lineStart, open + 1).trim()
+    return changed.some((l) => l.includes(head)) && !/partition\s+by/i.test(sql.slice(open, end))
+  })
+  const hit = unpartitioned ? changed[0] : undefined
   if (!hit) return null
   return pattern(
     c,

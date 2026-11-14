@@ -147,6 +147,54 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
 const ON_END = /^(?:join|where|group\s+by|order\s+by|qualify|having|union|limit|window|left|right|inner|full|cross|natural|lateral|select|from)\b|^;|^\{%/i
 const BEFORE_ON = /\b(join|on|where|select|from|group|having|qualify|order|merge|using|into)\b/gi
 
+
+/** Blank everything inside nested parentheses, keeping the top level of `s`. */
+function topLevel(s: string): string {
+  let depth = 0
+  let out = ""
+  for (const ch of s) {
+    if (ch === "(") depth++
+    out += depth > 0 ? " " : ch
+    if (ch === ")") depth = Math.max(0, depth - 1)
+  }
+  return out
+}
+
+/** Text inside the parentheses that open at `start` (exclusive), or the rest of `s` if unbalanced. */
+function parenBody(s: string, start: number): string {
+  let depth = 0
+  for (let i = start; i < s.length; i++) {
+    if (s[i] === "(") depth++
+    else if (s[i] === ")" && --depth === 0) return s.slice(start + 1, i)
+  }
+  return s.slice(start + 1)
+}
+
+/** Top level of each CTE body (`name as ( select … )`). */
+export function cteBodies(sql: string): string[] {
+  const out: string[] = []
+  for (const m of sql.matchAll(/\bas\s*(\()\s*select\b/gi)) out.push(topLevel(parenBody(sql, m.index! + m[0].indexOf("("))))
+  return out
+}
+
+/** Each SELECT block at one paren level: whether its FROM joins, and whether its select list has a bare column. */
+export function selectBlocks(sql: string): { joins: boolean; bareColumns: boolean }[] {
+  const scopes = [topLevel(sql), ...[...sql.matchAll(/\(\s*select\b/gi)].map((m) => topLevel(parenBody(sql, m.index!)))]
+  const out: { joins: boolean; bareColumns: boolean }[] = []
+  for (const scope of scopes) {
+    for (const blk of scope.split(/\bunion(?:\s+all|\s+distinct)?\b/i)) {
+      const m = /\bselect\b(?:\s+distinct\b)?([\s\S]*?)\bfrom\b([\s\S]*?)(?=\b(?:where|group\s+by|having|qualify|order\s+by|limit|window)\b|$)/i.exec(blk)
+      if (!m) continue
+      const items = m[1].split(",").map((x) => x.trim())
+      out.push({
+        joins: /\bjoin\b/i.test(m[2]),
+        bareColumns: items.some((x) => /^[a-z_]\w*(\s+as\s+[a-z_]\w*)?$/i.test(x) && !/^(\*|true|false|null)$/i.test(x)),
+      })
+    }
+  }
+  return out
+}
+
 /** The text of every JOIN's ON clause (comments and strings blanked), up to the next clause keyword at the same paren depth. */
 export function onClauses(sql: string): string[] {
   const s = stripStrings(stripComments(sql))
@@ -729,9 +777,11 @@ const JOINS: Rule[] = [
     "suggestion",
     "unqualified column with multiple tables",
     "With joins present, unqualified columns are ambiguous and break when both sides add the name.",
-    { newSql: /select\s+\w+\s*,[\s\S]*\bjoin\b/i },
-    { add: "select id, name from a join b on a.k=b.k" },
-    { add: "select a.id from a join b on a.k=b.k" },
+    // A changed line that is a bare column in a select list, in a model where some
+    // query block selects a bare column from a FROM that joins.
+    { added: /^\s*,?\s*[a-z_]\w*\s*,?\s*$/i, unless: /^\s*,?\s*(select|from|where|and|or|on|as|end|else|then|union|all|distinct|group|order|by|having|qualify|limit|with|join)\b/i, check: (sql) => selectBlocks(sql).some((b) => b.joins && b.bareColumns) },
+    { add: "select\n  a.id,\n  name\nfrom a\njoin b on a.k = b.k" },
+    { add: "select\n  a.id,\n  b.name\nfrom a\njoin b on a.k = b.k" },
   ),
   r(
     "self-join-no-inequality",
@@ -898,7 +948,9 @@ const PERF: Rule[] = [
     "suggestion",
     "ORDER BY inside a CTE/subquery is ignored",
     "Ordering inside a CTE has no guaranteed effect downstream and just adds a sort cost.",
-    { newSql: /\bas\s*\(\s*select[\s\S]*?\border\s+by\b[\s\S]*?\)/i },
+    // ORDER BY at a CTE's own top level (window/aggregate ORDER BYs sit in nested parens),
+    // and not a top-N, where the order decides which rows are kept.
+    { added: /\border\s+by\b/i, check: (sql) => cteBodies(sql).some((b) => /\border\s+by\b/i.test(b) && !/\b(limit|top|qualify|fetch\s+first)\b/i.test(b)) },
     { add: "with x as (select a from t order by a) select * from x" },
     { add: "with x as (select a from t) select * from x" },
   ),
@@ -1089,16 +1141,6 @@ const MATERIALIZATION: Rule[] = [
 ]
 
 const DBT_CONV: Rule[] = [
-  r(
-    "ref-double-quotes",
-    "sql_quality",
-    "suggestion",
-    "ref() uses double quotes",
-    "dbt convention is single-quoted `ref('model')`; double quotes are inconsistent and can confuse linters.",
-    { added: /\{\{\s*ref\(\s*"/i },
-    { add: 'from {{ ref("x") }}' },
-    { add: "from {{ ref('x') }}" },
-  ),
   r(
     "information-schema",
     "sql_quality",
@@ -2131,7 +2173,8 @@ const MISC: Rule[] = [
     "warning",
     "SELECT * in a UNION",
     "`select *` on either side of a UNION breaks (column count/order) the moment a column is added.",
-    { newSql: /select\s+\*[\s\S]*\bunion\b/i },
+    // A UNION branch that is itself `select *` (not a `select *` elsewhere in the model).
+    { newSql: /\bselect\s+\*\s+from\s+(?:(?!\bselect\b|\bunion\b)[\s\S])*?\bunion\b|\bunion(?:\s+all|\s+distinct)?\s*\(?\s*select\s+\*/i },
     { add: "select * from a union all select * from b" },
     { add: "select id from a union all select id from b" },
   ),
