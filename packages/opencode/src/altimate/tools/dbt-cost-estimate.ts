@@ -37,7 +37,7 @@ export function parseBytesProcessed(display: unknown): { bytes: number; maxBytes
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
-function untilAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason)

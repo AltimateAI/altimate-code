@@ -9,7 +9,7 @@ import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
-import { DbtCostEstimateTool, parseBytesProcessed } from "@/altimate/tools/dbt-cost-estimate"
+import { DbtCostEstimateTool, parseBytesProcessed, untilAbort } from "@/altimate/tools/dbt-cost-estimate"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -231,15 +231,20 @@ describe("dbt_cost_estimate", () => {
     expect(calls.dryRuns).toEqual([])
   })
 
-  test("a call cancelled before the queued work runs starts no compile", async () => {
-    const abort = new AbortController()
-    useAdapter(calls, {})
-    const run = (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, { ...ctx, abort: abort.signal })
-    abort.abort(new Error("cancelled"))
-    await expect(run).rejects.toThrow("cancelled")
-    await Bun.sleep(20)
-    expect(calls.nodes).toEqual([])
-    expect(calls.dryRuns).toEqual([])
+  test("work queued before a cancellation is not started by it", async () => {
+    // The signal reads as live at the first check and cancelled once the queued work comes to run.
+    let reads = 0
+    const signal = {
+      get aborted() {
+        return ++reads > 1
+      },
+      reason: new Error("cancelled"),
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal
+    let started = 0
+    await expect(untilAbort(async () => void started++, signal)).rejects.toThrow("cancelled")
+    expect(started).toBe(0)
   })
 
   test("reports a dry run the warehouse refused", async () => {
