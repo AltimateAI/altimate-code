@@ -106,15 +106,15 @@ interface JinjaTag {
   end: number
 }
 
-const BLOCK_TAGS = new Set(["if", "for", "macro", "call", "filter", "with", "set", "raw"])
+const BLOCK_TAGS = new Set(["if", "for", "macro", "call", "filter", "with", "set", "raw", "block"])
 
 /** The block tag of the `{% … %}` that spans `at` to `close` (the offset of its `%}`); undefined for any other tag. */
 function parseTag(text: string, at: number, close: number): JinjaTag | undefined {
-  const head = /^\{%-?\s*(end)?(\w+)/.exec(text.substring(at, Math.min(close + 2, at + 200)))
+  const head = /^\{%[-+]?\s*(end)?(\w+)/.exec(text.substring(at, Math.min(close + 2, at + 200)))
   if (!head || !BLOCK_TAGS.has(head[2])) return undefined
   const closes = head[1] !== undefined
   // `{% set x = … %}` is an inline set; `{% set x %}` and `{% set x | filter %}` open a block.
-  const inline = head[2] === "set" && /^\{%-?\s*set\s+[\w.,\s]+=(?!=)/.test(text.substring(at, close + 2))
+  const inline = head[2] === "set" && /^\{%[-+]?\s*set\s+[\w.,\s()]+=(?!=)/.test(text.substring(at, close + 2))
   return { name: head[2], closes, opens: !closes && !inline, end: close + 2 }
 }
 
@@ -140,7 +140,7 @@ function* jinjaTags(text: string, from: number): Generator<JinjaTag> {
     if (!tag) continue
     if (tag.name === "raw" && tag.opens) {
       // Nothing inside `{% raw %}` is Jinja: the block runs to its end tag.
-      const end = /\{%-?\s*endraw\b/g
+      const end = /\{%[-+]?\s*endraw\b/g
       end.lastIndex = pos
       const found = end.exec(text)
       if (!found) {

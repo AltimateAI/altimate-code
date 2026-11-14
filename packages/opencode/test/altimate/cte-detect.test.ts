@@ -1521,6 +1521,9 @@ describe("count query edge cases", () => {
     expect(unclosedJinjaBlock(buildCountQuery(open, found, found[0])!)).toBe("if")
     expect(unclosedJinjaBlock("{% set q %}x")).toBe("set")
     expect(unclosedJinjaBlock("{% raw %}{% if x %}{% endraw %}")).toBeUndefined()
+    expect(unclosedJinjaBlock("{% block body %}with a as (select 1)")).toBe("block")
+    expect(unclosedJinjaBlock("{% if x %}a{%+ endif %}")).toBeUndefined()
+    expect(unclosedJinjaBlock("{% set (a, b) = (1, 2) %}x")).toBeUndefined()
   })
 
   it("matches nested set blocks to their own end tag", () => {
