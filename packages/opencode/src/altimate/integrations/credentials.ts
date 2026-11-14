@@ -158,17 +158,27 @@ const isEnvReference = (value: string) => {
  * supported, and its validation goes to api.github.com, so such a token is never read: it would be sent to the wrong host.
  */
 export function githubHostElsewhere(env: Record<string, unknown> | undefined, args: unknown[] = []): boolean {
-  const named: unknown[] = ["GITHUB_HOST", "GH_HOST", "GITHUB_API_URL", "GITHUB_SERVER_URL"].map((k) => env?.[k])
+  const keys = ["GITHUB_HOST", "GH_HOST", "GITHUB_API_URL", "GITHUB_SERVER_URL"]
+  const named: unknown[] = keys.map((k) => env?.[k])
+  // Arguments may name the host too: --gh-host, or KEY=value as in docker's -e or a shell wrapper.
+  const assignment = new RegExp(`(?:^|[\\s"'])(?:${keys.join("|")})=([^\\s"']*)`, "g")
   args.forEach((a, i) => {
     if (a === "--gh-host") named.push(args[i + 1])
     else if (typeof a === "string" && a.startsWith("--gh-host=")) named.push(a.slice("--gh-host=".length))
+    if (typeof a === "string") for (const m of a.matchAll(assignment)) named.push(m[1])
   })
   return named.some((v) => {
-    if (typeof v !== "string" || !v.trim() || isEnvReference(v)) return false
-    const host = v.trim().replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase()
+    if (typeof v !== "string" || !v.trim()) return false
+    // A reference is resolved from this environment; one that cannot be cannot be confirmed as github.com.
+    const value = isEnvReference(v) ? process.env[v.trim().replace(/^\$\{?|\}$/g, "")] : v
+    if (!value?.trim()) return true
+    const host = value.trim().replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase()
     return host !== "github.com" && host !== "api.github.com"
   })
 }
+
+/** gh hands out GH_TOKEN or GITHUB_TOKEN as the github.com token whatever host they belong to, so it is not asked while they sit beside another host. */
+export const ghMayReturnOtherHostToken = () => Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN) && githubHostElsewhere(process.env)
 
 /** Whether an MCP server's environment holds a credential this flow reads for the provider, not just any value. */
 export function mcpEnvHasToken(id: ProviderId, env: Record<string, string> | undefined, args: unknown[] = []): boolean {
@@ -213,7 +223,7 @@ function gitEmail(): string | undefined {
 
 function detectField(id: ProviderId, field: string): Found | undefined {
   if (core.demoMode()) return undefined
-  if (field === "github_token") {
+  if (field === "github_token" && !ghMayReturnOtherHostToken()) {
     // The token for github.com only, the host it is validated against, whatever GH_HOST says.
     const r = spawnSync("gh", ["auth", "token", "--hostname", "github.com"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
     if (r.status === 0 && r.stdout.trim()) return { value: r.stdout.trim(), source: { kind: "cli", label: "gh CLI" } }

@@ -403,8 +403,8 @@ function onPath(bin: string): boolean {
 
 function detectGithub(): Detection | undefined {
   // Only github.com: GH_HOST may point gh at an enterprise host, whose token must never go to api.github.com.
-  const auth = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: process.env })
-  if (auth.status === 0) {
+  const auth = creds.ghMayReturnOtherHostToken() ? null : spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: process.env })
+  if (auth?.status === 0) {
     const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
     const login = who.status === 0 ? who.stdout.trim() : ""
     return { id: "github", source: { kind: "cli", label: "gh CLI" }, account: login || null, syncable: true, note: null }

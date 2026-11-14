@@ -49,8 +49,13 @@ describe("sameRecord", () => {
 
 describe("githubHostElsewhere", () => {
   test("only a host other than github.com counts, from env or --gh-host", () => {
-    for (const env of [{}, { GITHUB_HOST: "github.com" }, { GITHUB_API_URL: "https://api.github.com" }, { GH_HOST: "${GH_HOST}" }])
+    for (const env of [{}, { GITHUB_HOST: "github.com" }, { GITHUB_API_URL: "https://api.github.com" }, { GITHUB_SERVER_URL: "https://github.com/" }])
       expect(creds.githubHostElsewhere(env)).toBe(false)
+    // A reference that does not resolve here cannot be confirmed as github.com.
+    expect(creds.githubHostElsewhere({ GH_HOST: "${ALTIMATE_TEST_UNSET_HOST}" })).toBe(true)
+    expect(creds.githubHostElsewhere({}, ["run", "-i", "-e", "GITHUB_HOST=https://ghe.corp", "ghcr.io/github/github-mcp-server"])).toBe(true)
+    expect(creds.githubHostElsewhere({}, ["-c", "GITHUB_HOST=ghe.corp github-mcp-server stdio"])).toBe(true)
+    expect(creds.githubHostElsewhere({}, ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"])).toBe(false)
     for (const env of [{ GITHUB_HOST: "https://ghe.corp" }, { GH_HOST: "ghe.corp" }, { GITHUB_API_URL: "https://ghe.corp/api/v3" }, { GITHUB_SERVER_URL: "https://ghe.corp" }])
       expect(creds.githubHostElsewhere(env)).toBe(true)
     expect(creds.githubHostElsewhere({}, ["stdio", "--gh-host", "ghe.corp"])).toBe(true)
@@ -1827,6 +1832,8 @@ describe("credentials flow", () => {
     test("a GitHub token next to an enterprise host is never read from the environment or an MCP server", async () => {
       process.env.GITHUB_TOKEN = GOOD
       process.env.GH_HOST = "ghe.corp.example"
+      // gh would hand back GITHUB_TOKEN as the github.com token, so it is not asked either.
+      fake("gh", "echo $GITHUB_TOKEN")
       try {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
         expect(core.scan().find((d) => d.id === "github")).toBeUndefined()
