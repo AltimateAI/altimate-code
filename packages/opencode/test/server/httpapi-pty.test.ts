@@ -216,6 +216,22 @@ describe("pty HttpApi bridge", () => {
     expect(response.status).toBe(404)
   })
 
+  // altimate_change start — upstream_fix: check origin and ticket before PTY existence (anomalyco/opencode@7b39a338a0)
+  test("rejects bad tickets and origins before revealing whether a PTY exists", async () => {
+    await using tmp = await tmpdir({ git: true, config: { formatter: false, lsp: false } })
+    const path = PtyPaths.connect.replace(":ptyID", PtyID.ascending())
+    const badTicket = await typedApp().request(`${path}?ticket=not-a-ticket`, {
+      headers: { "x-opencode-directory": tmp.path },
+    })
+    expect(badTicket.status).toBe(403)
+
+    const crossOrigin = await typedApp().request(path, {
+      headers: { "x-opencode-directory": tmp.path, origin: "https://evil.example" },
+    })
+    expect(crossOrigin.status).toBe(403)
+  })
+  // altimate_change end
+
   test("returns typed not found errors for missing PTY HTTP resources", async () => {
     await using tmp = await tmpdir({ git: true, config: { formatter: false, lsp: false } })
     const headers = { "x-opencode-directory": tmp.path }
