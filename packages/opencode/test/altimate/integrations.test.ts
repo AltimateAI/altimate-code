@@ -34,6 +34,8 @@ afterAll(() => {
 beforeEach(() => {
   for (const f of fs.readdirSync(tmp)) fs.rmSync(path.join(tmp, f), { recursive: true, force: true })
   delete process.env.ALTIMATE_INTEGRATIONS_DEMO
+  // A GitHub host exported on this machine would block GitHub tokens in every test.
+  for (const k of ["GITHUB_HOST", "GH_HOST", "GITHUB_API_URL", "GITHUB_SERVER_URL", "GITHUB_ENTERPRISE_URL"]) delete process.env[k]
 })
 
 describe("sameRecord", () => {
@@ -658,7 +660,7 @@ describe("workspace connections", () => {
     const update = spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any)
     try {
       const refused = await core.syncProvider("github", undefined, 0, true)
-      expect([refused.result, refused.reason]).toEqual(["failed", core.ATTACH_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS", "github")])
+      expect([refused.result, refused.reason]).toEqual(["failed", core.ATTACH_EXISTING_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS", "github")])
       expect(update).not.toHaveBeenCalled()
       const shared = await core.syncProvider("github", undefined, 0, true, true)
       expect([shared.result, shared.shared]).toEqual(["synced", true])
@@ -847,6 +849,23 @@ describe("workspace connections", () => {
       spy.mockRestore()
     }
     expect(core.isSynced("github")).toBe(true)
+    // The sync that the warning names has nothing left to upload, and removes the leftover while it attaches.
+    expect(await core.readSecret("github")).toBe("leftover_token")
+    delete process.env.GITHUB_TOKEN
+    // No gh either, so the retry has nothing to upload and takes the attach-only path.
+    const pathBefore = process.env.PATH
+    process.env.PATH = fs.mkdtempSync(path.join(tmp, "nobin-"))
+    const update = spyOn(backend, "updateConnection")
+    let retry: core.SyncOutcome
+    try {
+      retry = await core.syncProvider("github")
+      expect(update).not.toHaveBeenCalled()
+    } finally {
+      process.env.PATH = pathBefore
+      update.mockRestore()
+    }
+    expect([retry.result, retry.steps.some((st) => st.label.startsWith(core.LOCAL_CLEANUP_FAILED_PREFIX))]).toEqual(["synced", false])
+    expect(await core.readSecret("github")).toBeUndefined()
   })
 
   test("a record that cannot be written after the workspace accepted the upload is reported, and a retry updates the same connection", async () => {
@@ -2868,6 +2887,12 @@ describe("the CLI passes --share through and reports shared", () => {
       await (SyncCommand.handler as any)({ provider: "github", share: true, json: true })
       expect(sync.mock.calls[0][4]).toBe(true)
       expect(JSON.parse(logs[logs.length - 1]).results[0].shared).toBe(true)
+      // Text output shows a local cleanup warning on a failed sync too, as --json carries it.
+      const warning = `${core.LOCAL_CLEANUP_FAILED_PREFIX}disk full. Run altimate integrations sync github to remove it.`
+      sync.mockResolvedValue({ id: "github", result: "failed", reason: "boom", steps: [{ label: warning, ok: false }] })
+      logs.length = 0
+      await (SyncCommand.handler as any)({ provider: "github", json: false })
+      expect(logs.some((l) => clean(l).includes(warning))).toBe(true)
     } finally {
       for (const sp of [log, connect, sync, info]) sp.mockRestore()
       process.exitCode = 0
