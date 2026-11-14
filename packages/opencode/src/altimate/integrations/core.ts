@@ -1115,6 +1115,15 @@ async function syncReal(
     steps.push({ label: l, ok: true })
     onStep?.(l, true)
   }
+  // Removes what is left of the credential on this machine once the workspace holds it; a failure is a warning naming the sync that retries it.
+  const purgeLocal = async (record: StoredProvider | undefined) => {
+    try {
+      await purgeCredentialSecrets(id, record, false)
+      await deleteSecret(id)
+    } catch (e) {
+      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id} to remove it.`, ok: false })
+    }
+  }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false, rewritten = sharedConnection, uploaded = true): SyncOutcome => {
     // A shared connection that was rewritten stays reported as shared even when the attach after it fails.
     if ("error" in w) return { id, result: "failed", reason: (uploaded ? ATTACH_FAILED_PREFIX : ATTACH_EXISTING_FAILED_PREFIX) + w.error + (rewritten ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(sharedConnection ? { shared: true as const } : {}) }
@@ -1146,14 +1155,7 @@ async function syncReal(
         if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
         step("Connection already in the workspace")
         // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for.
-        if (known != null) {
-          try {
-            await purgeCredentialSecrets(id, store.providers[id], false)
-            await deleteSecret(id)
-          } catch (e) {
-            steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id} to remove it.`, ok: false })
-          }
-        }
+        if (known != null) await purgeLocal(store.providers[id])
         return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private", false, false)
       })
     } catch (e) {
@@ -1220,13 +1222,8 @@ async function syncReal(
         return { id, result: "failed", reason: [RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), ...exposure.notes].join(" "), steps, ...(exposure.shared ? { shared: true as const } : {}) }
       }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
-      try {
-        await purgeCredentialSecrets(id, rec, false)
-        await deleteSecret(id)
-      } catch (e) {
-        // The workspace holds the connection and the record says so; only the local cleanup is left to redo, which running sync for this provider does.
-        steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id} to remove it.`, ok: false })
-      }
+      // The workspace holds the connection and the record says so; only the local cleanup is left to redo, which running sync for this provider does.
+      await purgeLocal(rec)
       return reportWorkspace(res.workspace ?? { notLinked: true }, res.shared === true)
     })
   } catch (e) {
