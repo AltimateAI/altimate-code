@@ -48,18 +48,16 @@ describe("sameRecord", () => {
 })
 
 describe("githubHostElsewhere", () => {
-  test("only a host other than github.com counts, from env or --gh-host", () => {
-    for (const env of [{}, { GITHUB_HOST: "github.com" }, { GITHUB_API_URL: "https://api.github.com" }, { GITHUB_SERVER_URL: "https://github.com/" }])
+  test("only a host other than github.com counts; any host setting in arguments blocks", () => {
+    for (const env of [{}, { GITHUB_HOST: "github.com" }, { GITHUB_API_URL: "https://api.github.com" }, { GITHUB_SERVER_URL: "https://github.com/" }, { GITHUB_HOST: "${ALTIMATE_TEST_UNSET_HOST:-https://github.com}" }])
       expect(creds.githubHostElsewhere(env)).toBe(false)
+    for (const env of [{ GITHUB_HOST: "https://ghe.corp" }, { GH_HOST: "ghe.corp" }, { GITHUB_API_URL: "https://ghe.corp/api/v3" }, { GITHUB_SERVER_URL: "https://ghe.corp" }, { GITHUB_ENTERPRISE_URL: "https://ghe.corp" }])
+      expect(creds.githubHostElsewhere(env)).toBe(true)
     // A reference that does not resolve here cannot be confirmed as github.com.
     expect(creds.githubHostElsewhere({ GH_HOST: "${ALTIMATE_TEST_UNSET_HOST}" })).toBe(true)
-    expect(creds.githubHostElsewhere({}, ["run", "-i", "-e", "GITHUB_HOST=https://ghe.corp", "ghcr.io/github/github-mcp-server"])).toBe(true)
-    expect(creds.githubHostElsewhere({}, ["-c", "GITHUB_HOST=ghe.corp github-mcp-server stdio"])).toBe(true)
-    expect(creds.githubHostElsewhere({}, ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"])).toBe(false)
-    for (const env of [{ GITHUB_HOST: "https://ghe.corp" }, { GH_HOST: "ghe.corp" }, { GITHUB_API_URL: "https://ghe.corp/api/v3" }, { GITHUB_SERVER_URL: "https://ghe.corp" }])
-      expect(creds.githubHostElsewhere(env)).toBe(true)
-    expect(creds.githubHostElsewhere({}, ["stdio", "--gh-host", "ghe.corp"])).toBe(true)
-    expect(creds.githubHostElsewhere({}, ["--gh-host=https://github.com"])).toBe(false)
+    for (const args of [["stdio", "--gh-host", "ghe.corp"], ["run", "-e", "GITHUB_HOST=https://ghe.corp", "img"], ["run", "--env=GITHUB_HOST=ghe.corp", "img"], ["-c", 'GITHUB_HOST="ghe.corp" github-mcp-server stdio'], ["-c", "x;GITHUB_HOST=ghe.corp server"]])
+      expect(creds.githubHostElsewhere({}, args)).toBe(true)
+    expect(creds.githubHostElsewhere({}, ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"])).toBe(false)
     expect(creds.mcpEnvHasToken("github", { GITHUB_TOKEN: "x", GITHUB_HOST: "ghe.corp" })).toBe(false)
     expect(core.detectFromMcpServers({ github: { command: "npx", args: ["@modelcontextprotocol/server-github", "--gh-host", "ghe.corp"], env: { GITHUB_TOKEN: "x" } } } as any, "user").find((d) => d.id === "github")?.syncable).not.toBe(true)
   })
@@ -1845,6 +1843,15 @@ describe("credentials flow", () => {
       try {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
       } finally {
+        fs.rmSync(path.join(home, ".claude.json"), { force: true })
+      }
+      // A host exported in the shell applies to an MCP server's token as well.
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } } }))
+      process.env.GITHUB_HOST = "https://ghe.corp.example"
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+      } finally {
+        delete process.env.GITHUB_HOST
         fs.rmSync(path.join(home, ".claude.json"), { force: true })
       }
     })

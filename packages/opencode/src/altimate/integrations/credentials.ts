@@ -158,23 +158,25 @@ const isEnvReference = (value: string) => {
  * supported, and its validation goes to api.github.com, so such a token is never read: it would be sent to the wrong host.
  */
 export function githubHostElsewhere(env: Record<string, unknown> | undefined, args: unknown[] = []): boolean {
-  const keys = ["GITHUB_HOST", "GH_HOST", "GITHUB_API_URL", "GITHUB_SERVER_URL"]
-  const named: unknown[] = keys.map((k) => env?.[k])
-  // Arguments may name the host too: --gh-host, or KEY=value as in docker's -e or a shell wrapper.
-  const assignment = new RegExp(`(?:^|[\\s"'])(?:${keys.join("|")})=([^\\s"']*)`, "g")
-  args.forEach((a, i) => {
-    if (a === "--gh-host") named.push(args[i + 1])
-    else if (typeof a === "string" && a.startsWith("--gh-host=")) named.push(a.slice("--gh-host=".length))
-    if (typeof a === "string") for (const m of a.matchAll(assignment)) named.push(m[1])
-  })
-  return named.some((v) => {
-    if (typeof v !== "string" || !v.trim()) return false
-    // A reference is resolved from this environment; one that cannot be cannot be confirmed as github.com.
-    const value = isEnvReference(v) ? process.env[v.trim().replace(/^\$\{?|\}$/g, "")] : v
+  // Arguments are not parsed (quoting, docker -e/--env=, shell wrappers): any mention of a host setting there blocks the token.
+  if (args.some((a) => typeof a === "string" && GITHUB_HOST_MENTION.test(a))) return true
+  return Object.entries(env ?? {}).some(([key, v]) => {
+    if (!GITHUB_HOST_KEY.test(key) || typeof v !== "string" || !v.trim()) return false
+    // A reference is resolved from this environment, falling back to its ${NAME:-default}; one that resolves to nothing cannot be confirmed as github.com.
+    const value = isEnvReference(v) ? resolveReference(v) : v
     if (!value?.trim()) return true
     const host = value.trim().replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase()
     return host !== "github.com" && host !== "api.github.com"
   })
+}
+
+const GITHUB_HOST_KEY = /^(GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE_URL)$/i
+const GITHUB_HOST_MENTION = /GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE|gh-host/i
+
+function resolveReference(ref: string): string | undefined {
+  const inner = ref.trim().replace(/^\$\{?|\}$/g, "")
+  const [name, fallback] = inner.split(/:?-/, 2)
+  return process.env[name]?.trim() || fallback
 }
 
 /** gh hands out GH_TOKEN or GITHUB_TOKEN as the github.com token whatever host they belong to, so it is not asked while they sit beside another host. */
@@ -182,7 +184,7 @@ export const ghMayReturnOtherHostToken = () => Boolean(process.env.GH_TOKEN || p
 
 /** Whether an MCP server's environment holds a credential this flow reads for the provider, not just any value. */
 export function mcpEnvHasToken(id: ProviderId, env: Record<string, string> | undefined, args: unknown[] = []): boolean {
-  if (id === "github" && githubHostElsewhere(env, args)) return false
+  if (id === "github" && githubHostElsewhere({ ...process.env, ...env }, args)) return false
   const patterns = core.BUILTIN_SECRET_FIELDS[id].flatMap((field) => FIELD_SOURCES[field]?.mcp ?? [])
   return Object.entries(env ?? {}).some(([key, value]) => typeof value === "string" && !isEnvReference(value) && patterns.some((p) => p.test(key)))
 }
@@ -193,7 +195,8 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
   for (const { scope, servers } of core.mcpServerMaps(core.homeDir(), process.cwd())) {
     for (const [name, server] of Object.entries(servers ?? {})) {
       if (!server || typeof server !== "object" || !core.providerMatchesMcp(id, name, server)) continue
-      if (id === "github" && githubHostElsewhere(server.env, server.args ?? [])) continue
+      // The server runs with this environment plus its own, so a host set in either applies to its token.
+      if (id === "github" && githubHostElsewhere({ ...process.env, ...server.env }, server.args ?? [])) continue
       for (const [key, value] of Object.entries(server.env ?? {}))
         if (pattern.test(key) && typeof value === "string" && !isEnvReference(value)) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name}, ${scope})` } }
     }
