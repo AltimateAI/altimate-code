@@ -237,6 +237,31 @@ describe("dbt_health", () => {
     expect(python.calls).toHaveLength(0)
   })
 
+  test("does not run DataPilot when the rebuild returns with a compile error and only the last manifest is left", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {},
+      getDiagnostics: () => ({ rebuildManifestDiagnostics: [{ message: "Compilation Error: model 'x' depends on a node named 'y' which was not found" }] }),
+      parseManifest: async () => parsed,
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("depends on a node named 'y'")
+    expect(python.calls).toHaveLength(0)
+  })
+
+  test("the DataPilot script keeps the project folder off the module path", async () => {
+    let script = ""
+    dbtHealthInternals.runPython = async (_py, s) => {
+      script = s
+      return { stdout: python.stdout, stderr: "", code: 0 }
+    }
+    await run()
+    expect(script).toContain("sys.path = [p for p in sys.path if p not in (\"\", os.getcwd())]")
+    expect(script.indexOf("sys.path =")).toBeLessThan(script.indexOf("from datapilot"))
+  })
+
   test("an answer that isn't the script's (a log object, an empty list) or comes with a failing exit is not a clean report", async () => {
     for (const [stdout, code] of [['{"event":"starting"}\n', 1], ["[]\n", 0], [JSON.stringify(HEALTHCHECK) + "\n", 1]] as const) {
       python.stdout = stdout

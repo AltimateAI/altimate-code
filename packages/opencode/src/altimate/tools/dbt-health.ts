@@ -65,7 +65,9 @@ async function pythonFor(root: string): Promise<string> {
 // path, or none for the defaults). dbt-integration's own healthcheck entry point isn't implemented by
 // any of its integrations, and its `All` mode would run `dbt docs generate`.
 const SCRIPT = `
-import json, sys, logging
+import json, sys, logging, os
+# Python puts the working folder first on the path; keep the project files from shadowing modules.
+sys.path = [p for p in sys.path if p not in ("", os.getcwd())]
 try:
     from datapilot.config.config import load_config
     from datapilot.core.platforms.dbt.constants import MODEL
@@ -166,6 +168,13 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     if (typeof adapter.parseManifest === "function") {
       try {
         if (typeof adapter.rebuildManifest === "function") await adapter.rebuildManifest()
+        // A rebuild that fails to compile returns normally and leaves the last manifest: its diagnostics say so.
+        const diagnostics = (typeof adapter.getDiagnostics === "function" ? adapter.getDiagnostics() : undefined)?.rebuildManifestDiagnostics
+        if (Array.isArray(diagnostics) && diagnostics.length > 0)
+          return failure(
+            "parse failed",
+            `dbt_health can't run: dbt couldn't parse the project: ${diagnostics.map((d: { message?: string }) => d?.message).filter(Boolean).join("; ") || "the manifest rebuild failed"}`,
+          )
         const parsed = await adapter.parseManifest()
         if (parsed?.stale) {
           // The same shape the other dbt tools give a stale manifest.
