@@ -3,7 +3,7 @@ import { Tool } from "../../tool/tool"
 
 export const DbtDocsCoverageTool = Tool.define("dbt_docs_coverage", {
   description:
-    "Documentation coverage of a dbt model: which output columns have a description, and whether the model has one.",
+    "Not implemented yet: always returns an error. Documentation coverage of a dbt model: which output columns have a description, and whether the model has one.",
   parameters: z.object({
     model: z.string().describe("Model name"),
     manifest_path: z

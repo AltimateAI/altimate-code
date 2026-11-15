@@ -2,6 +2,7 @@ import fs from "fs"
 import path from "path"
 import type { Tool } from "../../tool/tool"
 import { projectRoot } from "../native/connections/registry"
+import { sessionProject } from "./dbt-lineage"
 
 /** Why a tool may not use the dbt adapter. */
 export type DbtAdapterRefusal = "read_only" | "other_project" | "no_project" | "not_started" | "not_loaded"
@@ -74,28 +75,4 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
     if (signal.aborted) throw e
     return { refusal: "not_started", reason: e instanceof Error ? e.message : String(e) }
   }
-}
-
-/**
- * The adapter's project root and, when the session's directory is in another dbt project, that one
- * (`other`, both links resolved). Undefined when the session's directory is in no dbt project: the
- * adapter's own discovery (a dbt.json, or a walk up from the working directory) decides then.
- */
-async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
-  const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
-  const found = findProjectRoot(projectRoot())
-  if (!found) return undefined
-  const { getDbtProjectRoot } = await import("../native/connections/register")
-  const root = await getDbtProjectRoot()
-  const real = (p: string) => {
-    try {
-      return fs.realpathSync(p)
-    } catch {
-      return path.resolve(p)
-    }
-  }
-  const here = real(found)
-  // path.relative ignores case on win32.
-  if (!root) return { other: here }
-  return path.relative(real(root), here) ? { root: real(root), other: here } : { root }
 }

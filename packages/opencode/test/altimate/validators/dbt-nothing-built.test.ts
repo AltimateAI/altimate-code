@@ -1,5 +1,5 @@
 // altimate_change start — tests for the nothing-built inverse completion gate
-import { describe, expect, test, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test"
 import { promises as fs } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -272,6 +272,25 @@ describe("run_results and inventory helpers", () => {
     await makeProject()
     process.env.DBT_TARGET_PATH = "alt_target"
     expect(await resolveDbtTargetPath(dir)).toBe(join(dir, "alt_target"))
+  })
+
+  test("readRunResults takes the time from between the two identity stats, so it describes the version the rows came from", async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), "rr-order-"))
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(join(dir, "target", "run_results.json"), JSON.stringify({ args: { which: "build" }, results: [] }))
+    const real = fs.stat
+    const kinds: string[] = []
+    const spy = spyOn(fs, "stat").mockImplementation(((p: any, o?: any) => {
+      if (String(p).endsWith("run_results.json")) kinds.push(o?.bigint ? "bigint" : "plain")
+      return real(p, o)
+    }) as any)
+    try {
+      await readRunResults(dir)
+    } finally {
+      spy.mockRestore()
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+    expect(kinds).toEqual(["bigint", "plain", "bigint"])
   })
 
   test("readRunResults returns null when the artifact is missing", async () => {

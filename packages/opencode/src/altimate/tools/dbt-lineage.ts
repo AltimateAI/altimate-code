@@ -366,7 +366,7 @@ async function defaultManifestPath(session: () => ReturnType<typeof sessionProje
  * directory is in no dbt project: the adapter's own discovery (a dbt.json, or a walk up from the
  * process's working directory) decides then.
  */
-async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
+export async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
   const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
   const found = findProjectRoot(projectRoot())
   if (!found) return undefined

@@ -1363,11 +1363,11 @@ export async function readRunResults(dbtRoot: string, targetPathOverride?: strin
   const targetPath = await resolveDbtTargetPath(dbtRoot, targetPathOverride)
   const path = join(targetPath, "run_results.json")
   try {
-    // The time keeps the plain stat's own rounding: every other caller compares it with mtimes read the same way, and a different rounding of equal timestamps would order them apart.
-    const plain = await fs.stat(path)
     const stat = await fs.stat(path, { bigint: true })
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
+    // The time keeps the plain stat's own rounding: every other caller compares it with mtimes read the same way, and a different rounding of equal timestamps would order them apart. It is taken between the two bigint stats, so the comparison below proves it describes the same file version as the rows.
+    const plain = await fs.stat(path)
     // A rewrite during the read changes the file's identity, size or times (nanosecond precision): the rows and the time would belong to different runs, so there is no evidence.
     const after = await fs.stat(path, { bigint: true })
     if (

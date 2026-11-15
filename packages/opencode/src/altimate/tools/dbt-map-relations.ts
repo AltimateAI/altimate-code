@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
-  description: "Map each table a raw SQL query reads to the dbt ref() or source() for it, from the manifest.",
+  description: "Not implemented yet: always returns an error. Map each table a raw SQL query reads to the dbt ref() or source() for it, from the manifest.",
   parameters: z.object({
     sql: z.string().describe("Raw SQL to map"),
     dialect: z.string().optional().describe("SQL dialect of the query"),

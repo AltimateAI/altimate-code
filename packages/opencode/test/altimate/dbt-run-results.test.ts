@@ -53,10 +53,13 @@ async function project(name: string, artifact?: unknown) {
   return dir
 }
 
+const savedTarget = process.env["DBT_TARGET_PATH"]
 beforeAll(async () => {
+  delete process.env["DBT_TARGET_PATH"]
   root = await mkdtemp(path.join(os.tmpdir(), "dbt-run-results-"))
 })
 afterAll(async () => {
+  if (savedTarget !== undefined) process.env["DBT_TARGET_PATH"] = savedTarget
   await rm(root, { recursive: true, force: true })
 })
 

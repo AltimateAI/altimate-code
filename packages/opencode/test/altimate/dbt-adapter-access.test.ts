@@ -239,6 +239,26 @@ describe("AltimateApi.apiRequest", () => {
     )
   })
 
+  test("sends a falsey body (false, 0, empty string, null) unchanged", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test/", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(init.body)
+      return new Response("{}", { status: 200 })
+    }) as unknown as typeof fetch
+    try {
+      for (const v of [false, 0, "", null]) await AltimateApi.apiRequest("POST", "/dbt/v1/x", v)
+      await AltimateApi.apiRequest("GET", "/dbt/v1/x")
+      expect(bodies).toEqual(["false", "0", '""', "null", undefined])
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
   test("sends the stored key and tenant and returns the JSON body", async () => {
     await Bun.write(
       path.join(home, ".altimate", "altimate.json"),
