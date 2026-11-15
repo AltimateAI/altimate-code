@@ -5,6 +5,7 @@ import path from "path"
 import { Effect } from "effect"
 import type { Tool } from "../../src/tool/tool"
 import { SessionID, MessageID } from "../../src/session/schema"
+import { resolveEnvVars } from "../../src/altimate/native/connections/dbt-profiles"
 import { DbtDeferStateTool, resolveDeferState, findDeferSetting } from "../../src/altimate/tools/dbt-defer-state"
 import { initTool } from "./tool-fixture"
 
@@ -195,6 +196,11 @@ describe("dbt_defer_state", () => {
     write("profiles/profiles.yml", "shop:\n  target: \"{{ env_var('DEFER_TEST_Q', 'say \\\"hi\\\"') }}\"\n  outputs:\n    dev:\n      type: duckdb\n")
     delete process.env.DEFER_TEST_Q
     expect((await resolveDeferState(path.join(root, "analytics"))).defaultTarget).toBe('say "hi"')
+  })
+
+  test("an env_var() default may span lines", () => {
+    delete process.env.DEFER_TEST_KEY
+    expect(resolveEnvVars("{{ env_var('DEFER_TEST_KEY', 'line1\nline2') }}")).toBe("line1\nline2")
   })
 
   test("a settings key naming the project through a symlink matches the real project path", () => {
