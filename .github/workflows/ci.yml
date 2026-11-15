@@ -202,12 +202,80 @@ jobs:
   # Main TypeScript tests — excludes driver E2E tests (separate job) and
   # cloud credential tests (local-only).
   # ---------------------------------------------------------------------------
+  # The main suite runs one bun process per job, one test file after another (test/preload.ts relies
+  # on that), so it is split by file across a matrix of shards. Suites that start a real CLI process
+  # run in `typescript-processes` beside them, and the SDK codegen check in `sdk-codegen`.
   typescript:
-    name: TypeScript
+    name: TypeScript (${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.typescript == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Configure git for tests
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@test.local"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install merge tooling deps (script/upstream)
+        # The script/upstream/ workspace is its own bun project (depends on
+        # minimatch). Root `bun install` doesn't reach it. Tests in
+        # test/upstream/bridge-merge-e2e.test.ts shell out to
+        # `bun run script/upstream/analyze.ts --branding` which requires this.
+        # Mirrors the install step in the marker-guard job below.
+        run: bun install
+        working-directory: script/upstream
+
+      - name: Run tests
+        working-directory: packages/opencode
+        # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when
+        # ALTIMATE_CODE_CONN_* env vars are not set. Docker E2E tests auto-skip
+        # when Docker is not available. No exclusion needed — skipIf handles it.
+        # --timeout 90000: under CPU contention a handful of slower tests (real
+        # fs/spawn/git-bootstrap work) get starved and exceed a tight timeout
+        # NON-deterministically. 90s gives ~3x headroom over the worst observed.
+        #
+        # OPENCODE_SKIP_SUBPROCESS=1 makes cliIt skip the subprocess tests, and the
+        # --path-ignore-patterns leave out the suites that start a CLI per test; both
+        # run in `typescript-processes`. Keep that list in sync with PROCESS_SUITES there.
+        shell: bash
+        run: |
+          # Redirect bun output to a file, then cat for CI visibility (avoids tee/SIGTERM-flush issues).
+          OPENCODE_SKIP_SUBPROCESS=1 bun test --timeout 90000 --shard=${{ matrix.shard }}/4 \
+            --path-ignore-patterns='test/altimate/learn/cli.test.ts' --path-ignore-patterns='test/altimate/learn/bootstrap-cli.test.ts' --path-ignore-patterns='test/altimate/tool-cli/cli.test.ts' --path-ignore-patterns='test/altimate/rules/host-cli.test.ts' --path-ignore-patterns='test/upstream/bridge-merge-e2e.test.ts' \
+            > /tmp/test-main.txt 2>&1 || true
+          cat /tmp/test-main.txt
+          bash ../../script/github/check-bun-test-summary.sh /tmp/test-main.txt
+
+  typescript-processes:
+    name: TypeScript (CLI processes)
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -254,6 +322,62 @@ jobs:
       # --timeout, not the general run+mock subprocess suite this NOTE is about — the load-triggered
       # hang needs sustained CPU pressure across many concurrent mock round-trips to manifest.
       # altimate_change end
+
+
+      - name: Run tests
+        working-directory: packages/opencode
+        shell: bash
+        run: |
+          # Two runs:
+          #  - SUBPROCESS: test/cli/{acp,smokes,serve} + run-process/mcp-add/help-snapshots, with
+          #    --max-concurrency=2 (default 20). These each spawn a real CLI + an in-process mock LLM
+          #    server; at 20-concurrent the runner is CPU-starved and the mock round-trips time out (the
+          #    load-variance flakes). NOTE: do NOT add --parallel=1 — a single worker hosts the mock
+          #    server AND runs the tests on one event loop, so the mock gets starved and round-trips
+          #    time out anyway. Default --parallel spreads the mocks across workers.
+          #  - PROCESS_SUITES: suites that start a fresh `bun run src` CLI per test; left out of the
+          #    `typescript` shards (keep the lists in sync).
+          # (Bun 1.3.x can segfault during cleanup after all tests pass — the summary is parsed, not the
+          # exit code.)
+          SUBPROCESS_PATHS="test/cli/acp/ test/cli/smokes/ test/cli/serve/ test/cli/run/run-process.test.ts test/cli/mcp-add.test.ts test/cli/help/help-snapshots.test.ts test/cli/auth-login-cancel.test.ts"
+          PROCESS_SUITES="test/altimate/learn/cli.test.ts test/altimate/learn/bootstrap-cli.test.ts test/altimate/tool-cli/cli.test.ts test/altimate/rules/host-cli.test.ts test/upstream/bridge-merge-e2e.test.ts"
+
+          bun test --timeout 90000 --max-concurrency=2 $SUBPROCESS_PATHS > /tmp/test-sub.txt 2>&1 || true
+          bun test --timeout 90000 $PROCESS_SUITES > /tmp/test-process.txt 2>&1 || true
+          echo "===== SUBPROCESS SUITE (bounded) ====="; cat /tmp/test-sub.txt
+          echo "===== CLI PROCESS SUITES ====="; cat /tmp/test-process.txt
+          bash ../../script/github/check-bun-test-summary.sh /tmp/test-sub.txt /tmp/test-process.txt
+
+  sdk-codegen:
+    name: SDK codegen
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Configure git for tests
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@test.local"
+
+      - name: Install dependencies
+        run: bun install
 
       - name: SDK codegen is reproducible
         # The v2 gen tree is committed AND regenerated on every release build
@@ -305,71 +429,6 @@ jobs:
             fi
           fi
           exit "$drift_rc"
-      - name: Run tests
-        working-directory: packages/opencode
-        # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when
-        # ALTIMATE_CODE_CONN_* env vars are not set. Docker E2E tests auto-skip
-        # when Docker is not available. No exclusion needed — skipIf handles it.
-        # --timeout 90000: the full suite (9500+ tests across 379 files) runs in
-        # one parallel bun process. Under CPU contention a handful of slower tests
-        # (real fs/spawn/git-bootstrap work) get starved and exceed a tight timeout
-        # NON-deterministically — different tests each run — failing CI with
-        # "timed out after Nms" (observed 32s/51s at the old 30s limit). 90s gives
-        # ~3x headroom over the worst observed, killing the resource-contention
-        # flakiness without masking genuinely-hung tests.
-        #
-        # Bun 1.3.x has a known segfault during process cleanup after all tests
-        # pass (exit code 143/SIGTERM or 134/SIGABRT). We capture test output and
-        # check for real failures vs Bun crashes to avoid false CI failures.
-        shell: bash
-        run: |
-          # Redirect bun output to files, then cat for CI visibility (avoids tee/SIGTERM-flush issues).
-          #
-          # Two passes:
-          #  - MAIN: the full suite EXCEPT the subprocess tests (OPENCODE_SKIP_SUBPROCESS=1 makes cliIt
-          #    skip them), at default parallelism — fast.
-          #  - SUBPROCESS: test/cli/{acp,smokes,serve} + run-process/mcp-add/help-snapshots, run in a
-          #    DEDICATED pass with --max-concurrency=2 (default 20). These each spawn a real CLI + an
-          #    in-process mock LLM server; at 20-concurrent the runner is CPU-starved and the mock
-          #    round-trips time out (the load-variance flakes). NOTE: do NOT add --parallel=1 — a single
-          #    worker hosts the mock server AND runs the tests on one event loop, so the mock gets starved
-          #    and round-trips time out anyway. Default --parallel spreads the mocks across workers; the
-          #    pass is isolated from the 11k main-suite tests so 2-per-worker is plenty bounded.
-          # (Bun 1.3.x can segfault during cleanup after all tests pass — we parse the summary, not the
-          # exit code. --timeout 90000 gives headroom for slow fs/spawn tests.)
-          SUBPROCESS_PATHS="test/cli/acp/ test/cli/smokes/ test/cli/serve/ test/cli/run/run-process.test.ts test/cli/mcp-add.test.ts test/cli/help/help-snapshots.test.ts test/cli/auth-login-cancel.test.ts"
-
-          OPENCODE_SKIP_SUBPROCESS=1 bun test --timeout 90000 > /tmp/test-main.txt 2>&1 || true
-          bun test --timeout 90000 --max-concurrency=2 $SUBPROCESS_PATHS > /tmp/test-sub.txt 2>&1 || true
-          echo "===== MAIN SUITE ====="; cat /tmp/test-main.txt
-          echo "===== SUBPROCESS SUITE (bounded) ====="; cat /tmp/test-sub.txt
-
-          # Sum pass/fail across both passes (one summary line each)
-          sum_field() { awk -v f="$1" '$0 ~ ("^ *[0-9]+ " f "$"){s+=$1} END{print s+0}' /tmp/test-main.txt /tmp/test-sub.txt; }
-          PASS_COUNT=$(sum_field pass)
-          FAIL_COUNT=$(sum_field fail)
-
-          echo ""
-          echo "--- Test Summary (main + subprocess) ---"
-          echo "pass=$PASS_COUNT fail=$FAIL_COUNT"
-
-          # Real test failures — always fail CI
-          if [ "$FAIL_COUNT" != "0" ]; then
-            echo "::error::$FAIL_COUNT test(s) failed"
-            exit 1
-          fi
-
-          # Each pass must have produced a summary, else Bun crashed before finishing
-          if ! grep -qE "^ *[0-9]+ pass$" /tmp/test-main.txt || ! grep -qE "^ *[0-9]+ pass$" /tmp/test-sub.txt; then
-            echo "::error::Missing test summary in a pass — Bun may have crashed before running tests"
-            exit 1
-          fi
-
-          if [ "$PASS_COUNT" -gt 0 ] 2>/dev/null; then
-            exit 0
-          fi
-          echo "::error::No test results found"
-          exit 1
 
   # ---------------------------------------------------------------------------
   # Driver E2E tests — only when driver code changes.
