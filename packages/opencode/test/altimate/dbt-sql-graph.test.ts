@@ -149,6 +149,20 @@ describe("mergeColumns", () => {
     expect(Object.keys(sf)).toEqual(["Foo", "foo"])
   })
 
+  test("Redshift folds to lower case like Postgres: FOO and foo stay distinct columns", () => {
+    const rs = mergeColumns(
+      {},
+      [
+        { column: "FOO", dtype: "int" },
+        { column: "foo", dtype: "text" },
+      ],
+      "redshift",
+    )
+    expect(Object.keys(rs)).toEqual(["FOO", "foo"])
+    expect(rs.FOO.data_type).toBe("int")
+    expect(rs.foo.data_type).toBe("text")
+  })
+
   test("a manifest column and the warehouse's name for it meet under one key in the adapter's case", () => {
     const merged = mergeColumns({ id: col("id") }, [{ column: "id", dtype: "BIGINT" }], "postgres")
     expect(Object.keys(merged)).toEqual(["id"])
@@ -603,18 +617,28 @@ describe("a cancel while the backend is answering", () => {
   test("ends the call at once, and a late answer is ignored", async () => {
     const controller = new AbortController()
     let release!: (r: SqlLineageResponse) => void
+    let reached!: () => void
+    const inBackend = new Promise<void>((resolve) => (reached = resolve))
     const slow = new Promise<SqlLineageResponse>((resolve) => (release = resolve))
     const call = buildSqlGraph(
       adapter(),
       "orders",
-      { fetchLineage: () => slow, readFile: (f) => f, projectRoot: "/proj", sessionId: "ses_1" },
+      {
+        fetchLineage: () => {
+          reached()
+          return slow
+        },
+        readFile: (f) => f,
+        projectRoot: "/proj",
+        sessionId: "ses_1",
+      },
       controller.signal,
     )
     const settled = call.then(
       () => "answered",
       () => "aborted",
     )
-    await Bun.sleep(10)
+    await inBackend
     controller.abort()
     expect(await settled).toBe("aborted")
     release(reply)

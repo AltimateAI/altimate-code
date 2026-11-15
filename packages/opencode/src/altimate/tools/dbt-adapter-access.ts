@@ -25,6 +25,8 @@ export const dbtAdapterAccessInternals = {
  */
 export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | "extra">): Promise<DbtAdapterAccess> {
   const signal = ctx.abort
+  // A cancelled call is cancelled, not refused.
+  signal.throwIfAborted()
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",

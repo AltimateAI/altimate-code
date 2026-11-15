@@ -75,7 +75,7 @@ export type SqlGraphDeps = {
 }
 
 /** Adapters whose unquoted identifiers fold to lower case; the rest fold to upper case. */
-const LOWER_FOLDING = new Set(["trino", "athena", "postgres", "duckdb", "risingwave"])
+const LOWER_FOLDING = new Set(["trino", "athena", "postgres", "redshift", "duckdb", "risingwave"])
 
 /** A name the warehouse would only keep as written if it were quoted: it is not in the adapter's own folding case. */
 function isQuotedIdentifier(name: string, adapter: string): boolean {

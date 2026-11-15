@@ -114,6 +114,15 @@ describe("dbtAdapterFor", () => {
     expect(created).toBe(0)
   })
 
+  test("a read-only call cancelled beforehand is cancelled, not refused", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      dbtAdapterFor({ ...ctx, abort: controller.signal, extra: { forceReadOnly: true } }),
+    ).rejects.toThrow()
+    expect(created).toBe(0)
+  })
+
   test("refuses a plan-mode call", async () => {
     const access = await dbtAdapterFor({ ...ctx, agent: "plan" })
     expect(access.refusal).toBe("read_only")
