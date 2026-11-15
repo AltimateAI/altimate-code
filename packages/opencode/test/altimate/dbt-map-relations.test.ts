@@ -529,6 +529,13 @@ describe("review regressions", () => {
     expect(bq[0].parts).toEqual(["main", "raw", "orders", "v1"])
   })
 
+  test("an explicit dialect decides the backtick split, and a null manifest does not throw", () => {
+    const node = { resource_type: "model", name: "orders", relation_name: "`p.ds.orders`", schema: "ds" }
+    const rel = manifestRelations({ nodes: { "model.p.orders": node } }, "bigquery")
+    expect(rel[0].parts).toEqual(["p", "ds", "orders"])
+    expect(manifestRelations(null)).toEqual([])
+  })
+
   test("the table list goes on after LATERAL", () => {
     const { refs } = scanTableReferences(
       "select * from db.one.orders a, lateral flatten(input => a.items) f, db.two.orders b",

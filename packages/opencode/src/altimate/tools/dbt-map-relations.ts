@@ -370,10 +370,10 @@ function jinjaString(value: string): string {
 
 /** The model, snapshot, seed and source nodes of a manifest, each with its relation's name parts. */
 // The manifest is parsed JSON of a shape dbt owns and versions; its fields are checked where they are read.
-export function manifestRelations(manifest: any): Relation[] {
+export function manifestRelations(manifest: any, dialect?: string): Relation[] {
   const rootProject: string | undefined = manifest?.metadata?.project_name
   // Only BigQuery names put dots inside backticks; elsewhere a dot in a quoted name is part of the name.
-  const splitDots = detectDialect(manifest).toLowerCase() === "bigquery"
+  const splitDots = (dialect ?? detectDialect(manifest ?? {})).toLowerCase() === "bigquery"
   const out: Relation[] = []
   const relationOf = (node: any): string | undefined => {
     if (typeof node?.relation_name === "string" && node.relation_name) return node.relation_name
@@ -546,7 +546,7 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
       const tables: string[] = Array.isArray(data.tables)
         ? data.tables.filter((t: unknown) => typeof t === "string")
         : []
-      const mappings = mapRelations(tables, args.sql, manifestRelations(manifest), dialect)
+      const mappings = mapRelations(tables, args.sql, manifestRelations(manifest, dialect), dialect)
       const count = (m: RelationMatch) => mappings.filter((r) => r.match === m).length
       return {
         title: `dbt Map Relations: ${mappings.length} tables, ${count("none")} unmatched`,
