@@ -64,7 +64,7 @@ If you need stronger guarantees — no training on your data, metadata-only rete
 [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)
 instead.
 
-Choose **Altimate Base** from the first-run picker or `/connect` — or do nothing at all: every
+Choose **Altimate Base** under **Search all providers…** in the first-run picker or `/connect` — or do nothing at all: every
 install that is not yet registered registers it automatically at startup, so it works the same way
 headlessly (`run`, `serve`, `acp`, `web`). Startup waits up to three seconds for this; a slower
 registration finishes in the background and applies from the next launch (a `serve` client can
@@ -154,6 +154,63 @@ identity.
 ```
 
 Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
+
+The Anthropic provider takes an API key. To use a Claude Pro or Max plan, use [Claude Agent](#claude-agent-claude-subscription). A Claude Pro/Max login saved by an earlier version's Anthropic sign-in no longer connects: run `/connect` and pick **Claude subscription**, or add an API key.
+
+## Subscriptions on the first-run picker
+
+The first-run picker and `/connect` suggest up to five providers: the Altimate LLM Gateway, then any subscription login already on this machine (marked "found on this machine"), then the Claude and ChatGPT subscriptions and the Anthropic and OpenAI API keys. Everything else, including Altimate Base, Google and the other providers, is under **Search all providers…**.
+
+A login counts as found even if it has expired. Altimate Code checks that these exist and does not send their contents anywhere:
+
+| Subscription | Found from | When you pick it |
+|---|---|---|
+| Claude Pro/Max | Claude Code's login (`~/.claude/.credentials.json`, `~/.claude.json`, or the macOS keychain item `Claude Code-credentials`) | Uses that login; nothing to sign in |
+| ChatGPT Plus/Pro | The Codex CLI's ChatGPT login (`~/.codex/auth.json`) | You sign in with ChatGPT once in Altimate Code |
+| GitHub Copilot | A Copilot editor login (`~/.config/github-copilot/`) | You sign in with GitHub once in Altimate Code |
+| Claude Pro/Max | Claude subscription connected earlier in Altimate Code | Checks your Claude Code login again; run `claude auth login` if it has ended |
+| ChatGPT, GitHub Copilot, SuperGrok or GitLab Duo | A login saved earlier in Altimate Code | Reconnects, signing in again if it expired |
+
+## Claude Agent (Claude subscription)
+
+Claude Agent runs Claude models through your own Claude Code login, so a Claude Pro or Max subscription covers usage. Altimate Code starts your installed `claude` program through Anthropic's Claude Agent SDK. It never reads or stores your Claude Code token.
+
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) (2.1.296 or later) and run `claude auth login`.
+2. In Altimate Code, run `/connect` and pick **Claude subscription**. The dialog checks your Claude Code login and connects once it finds one.
+3. Pick a model with `/models`. The list is what your Claude Code reports, such as `claude-agent/opus`, `claude-agent/sonnet` and `claude-agent/haiku`, and each model offers Claude Code's effort levels as variants.
+
+Any Claude Code login works: a subscription, an API key or a cloud account. A subscription shows $0 cost. An API key or cloud login is priced from that provider's catalog.
+
+How it behaves:
+
+- Claude uses Altimate Code's tools, permissions, agents, skills and `AGENTS.md` instructions. Claude Code's own tools, settings files, `CLAUDE.md`, hooks, MCP servers, memory and auto compaction are turned off.
+- Chats use Claude Code's system prompt plus the selected agent's prompt as its role. Temperature, top-p and top-k are not supported.
+- You can switch between Claude Agent and other models in the same session. Claude is sent the part of the conversation it has not seen.
+- Each session keeps one `claude` process, which stops after 5 minutes idle and resumes the saved Claude session on the next message.
+- `claude` must be installed on the same machine. Set `OPENCODE_CLAUDE_PATH` to run a specific `claude` binary instead of the one on `PATH`.
+
+Connection settings in config map to Claude Code variables:
+
+```json
+{
+  "provider": {
+    "claude-agent": {
+      "options": {
+        "baseURL": "https://gateway.example.com",
+        "headers": { "x-team": "data" }
+      }
+    }
+  }
+}
+```
+
+| Option | Claude Code variable |
+|--------|---------------------|
+| `baseURL` | `ANTHROPIC_BASE_URL` |
+| `apiKey` | `ANTHROPIC_API_KEY` |
+| `authToken` | `ANTHROPIC_AUTH_TOKEN` |
+| `headers` | `ANTHROPIC_CUSTOM_HEADERS` |
+| `body` | `CLAUDE_CODE_EXTRA_BODY` |
 
 ## OpenAI
 
