@@ -76,7 +76,7 @@ export const run = Effect.fn("ClaudeProbe.run")(function* (options: Options) {
         }).pipe(
           Effect.timeoutOrElse({
             duration: "30 seconds",
-            orElse: () => Effect.fail(new ProbeError({ cause: new Error("claude did not start within 30 seconds") })),
+            orElse: () => Effect.fail(new ProbeError({ cause: new Error("claude did not start within 30 seconds. Check the network, and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS) it needs") })),
           }),
         )
         // No prompt is sent here, so an old Claude Code can still list its models.

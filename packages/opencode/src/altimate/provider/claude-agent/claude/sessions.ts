@@ -192,7 +192,7 @@ export function registry() {
             attempt(() => process.session.ready).pipe(
               Effect.timeoutOrElse({
                 duration: "30 seconds",
-                orElse: () => Effect.fail(new Error("claude did not start within 30 seconds")),
+                orElse: () => Effect.fail(new Error("claude did not start within 30 seconds. Check the network, and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS) it needs")),
               }),
             ),
           ).pipe(Effect.onError(() => stop(entry).pipe(Effect.ignore)))

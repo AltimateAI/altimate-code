@@ -81,6 +81,22 @@ describe("cli.error", () => {
     expect(FormatError({ _tag: "ProviderModelNotFoundError", ...data })).toBe(expected)
   })
 
+  test("a missing Anthropic provider says how to connect a Claude plan", () => {
+    // 0.12.11 removed the Claude Pro/Max sign-in, so a saved `anthropic/...` model with only that login
+    // no longer resolves; the provider is missing, so there is nothing to suggest.
+    const output = FormatError({
+      name: "ProviderModelNotFoundError",
+      data: { providerID: "anthropic", modelID: "claude-sonnet-4-6", suggestions: [] },
+    })
+    expect(output).toContain("run /connect and pick Claude subscription")
+    expect(
+      FormatError({
+        name: "ProviderModelNotFoundError",
+        data: { providerID: "openai", modelID: "gpt-x", suggestions: [] },
+      }),
+    ).not.toContain("Claude subscription")
+  })
+
   test("formats legacy and tagged provider init errors the same way", () => {
     const data = { providerID: "anthropic" }
     const expected = 'Failed to initialize provider "anthropic". Check credentials and configuration.'

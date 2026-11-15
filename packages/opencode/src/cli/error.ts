@@ -1,6 +1,8 @@
 import { NamedError } from "@opencode-ai/core/util/error"
 import { errorFormat } from "@/util/error"
 import { isRecord } from "@/util/record"
+// altimate_change — explain a missing Anthropic provider (Claude Pro/Max sign-in removed)
+import { modelNotFoundHint } from "@/altimate/provider/model-hint"
 
 type ConfigIssue = { message: string; path: string[] }
 
@@ -67,6 +69,9 @@ export function FormatError(input: unknown): string | undefined {
     return [
       `Model not found: ${stringField(providerModelNotFound, "providerID")}/${stringField(providerModelNotFound, "modelID")}`,
       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
+      ...[modelNotFoundHint(stringField(providerModelNotFound, "providerID"), suggestions)].filter(
+        (x): x is string => !!x,
+      ),
       `Try: \`altimate models\` to list available models`,
       `Or check your config (altimate-code.json) provider/model names`,
     ].join("\n")

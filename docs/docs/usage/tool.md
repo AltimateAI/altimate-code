@@ -80,3 +80,7 @@ The daemon listens on a local socket (a named pipe on Windows) under the Altimat
 ## Claude Code routing
 
 For clients that cannot use the `altimate-code` MCP server, the Claude Code plugin adds CLI routing guidance at session start: `altimate-code tool context` followed by `altimate-code tool run` for data questions, and `altimate-code run` for long multi-step jobs. To persist the same guidance in the repository, run `altimate-code link --claude-md`; it writes a managed block to the project's `CLAUDE.md` and never changes content outside the `<!-- altimate-code:routing start -->` / `<!-- altimate-code:routing end -->` markers.
+
+## Plugin events
+
+`altimate-code tool report-event <action> --session claude:<id>` is called by the Claude Code plugin to record what a person did with its lineage report (shown, opened, built, failed to build). It sends one `lineage_report` usage event (see [Telemetry](../reference/telemetry.md)) and nothing when telemetry is off. It is not meant to be run by hand.

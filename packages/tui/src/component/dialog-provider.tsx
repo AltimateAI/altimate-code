@@ -462,7 +462,10 @@ function AutoMethod(props: AutoMethodProps) {
         variant: "error",
         message:
           "name" in result.error && result.error.name === "ProviderAuthOauthCallbackFailed"
-            ? "OAuth authorization failed. Try /connect again."
+            ? // A Claude subscription waits for a Claude Code login instead of running an OAuth flow.
+              props.providerID === "claude-agent"
+              ? "No Claude Code login was found. Run `claude auth login` in a terminal (Claude Code 2.1.296 or later, see `claude --version`), then /connect again."
+              : "OAuth authorization failed. Try /connect again."
             : JSON.stringify(result.error),
       })
       dialog.clear()

@@ -136,7 +136,13 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
         columnReach: reach,
         columnReachError: reachError,
       })
-      const output = answer ? `${report}\n${describeAnswer(answer)}` : report
+      // A failed column answer is said in the report, so it does not read as "no column impact". The same
+      // reason as column reach's is already in the report.
+      const output = answer
+        ? `${report}\n${describeAnswer(answer)}`
+        : answerError && answerError !== reachError
+          ? `${report}\nColumn answer unavailable: ${answerError}`
+          : report
 
       const totalAffected = downstream.length
       const severity =
