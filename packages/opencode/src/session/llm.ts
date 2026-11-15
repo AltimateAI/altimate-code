@@ -171,10 +171,15 @@ export namespace LLM {
     }
 
     const header = system[0]
+    // Claude Agent sends only the instruction sources (Claude Code supplies its own prompt and environment),
+    // so plugins transform that list, and their edits reach Claude.
+    const claudeInstructions = ClaudeAgent.matches(input.model)
+      ? [...input.system, input.user.system].filter((text): text is string => !!text)
+      : undefined
     await Plugin.trigger(
       "experimental.chat.system.transform",
       { sessionID: input.sessionID, model: input.model },
-      { system },
+      { system: claudeInstructions ?? system },
     )
     // rejoin to maintain 2-part structure for caching if header unchanged
     if (system.length > 2 && system[0] === header) {
@@ -222,7 +227,7 @@ export namespace LLM {
           agent: input.agent.name,
           agentPrompt: input.agent.prompt,
           small: input.small,
-          instructions: [...input.system, input.user.system],
+          instructions: claudeInstructions ?? [],
         })
       : undefined
     if (claudeAgent) Object.assign(options, claudeAgent.options)
@@ -282,11 +287,9 @@ export namespace LLM {
             "x-opencode-request": input.user.id,
             "x-opencode-client": Flag.OPENCODE_CLIENT,
           }
-        : input.model.providerID !== "anthropic"
-          ? {
-              "User-Agent": `altimate-code/${Installation.VERSION}`,
-            }
-          : undefined,
+        : {
+            "User-Agent": `altimate-code/${Installation.VERSION}`,
+          },
       input.model.headers,
       headers,
     )

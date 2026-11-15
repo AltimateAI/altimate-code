@@ -3,7 +3,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import * as Auth from "@/auth"
-import { detect } from "@/altimate/provider/subscriptions"
+import { detect, retiredAnthropicLogin } from "@/altimate/provider/subscriptions"
 
 const saved = { ...process.env }
 let root: string
@@ -58,8 +58,22 @@ describe("subscription detection", () => {
     await Auth.set("openai", { type: "oauth", refresh: "r", access: "a", expires: 1 })
     await Auth.set("xai", { type: "oauth", refresh: "r", access: "a", expires: 1 })
     await Auth.set("github-copilot", { type: "api", key: "k" })
-    await Auth.set("anthropic", { type: "oauth", refresh: "r", access: "a", expires: 1 })
+    await Auth.set("anthropic", { type: "api", key: "k" })
     expect(await names()).toEqual(["chatgpt", "supergrok"])
+  })
+
+  test("an old Anthropic Claude Pro/Max login marks a Claude plan, behind a Claude Code login", async () => {
+    await Auth.set("anthropic", { type: "oauth", refresh: "r", access: "a", expires: 1 })
+    expect(await detect()).toEqual([{ subscription: "claude", source: "anthropic-login" }])
+    await write("claude/.credentials.json", { claudeAiOauth: {} })
+    expect(await detect()).toEqual([{ subscription: "claude", source: "claude-code" }])
+    // Still reported for the reconnect notice.
+    expect(await retiredAnthropicLogin()).toBe(true)
+  })
+
+  test("an Anthropic API key is not an old Claude Pro/Max login", async () => {
+    await Auth.set("anthropic", { type: "api", key: "k" })
+    expect(await retiredAnthropicLogin()).toBe(false)
   })
 
   test("the result names subscriptions and sources only", async () => {

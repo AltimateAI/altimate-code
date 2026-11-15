@@ -325,7 +325,7 @@ describe("altimate features: anthropic provider stays bundled", () => {
 
   test("plugin/index.ts does not load opencode-anthropic-auth (Claude Pro/Max goes through Claude Agent)", async () => {
     const src = await readSrc("plugin", "index.ts")
-    expect(src).not.toContain('"opencode-anthropic-auth')
+    expect(src).not.toMatch(/["'`]opencode-anthropic-auth/)
   })
 })
 

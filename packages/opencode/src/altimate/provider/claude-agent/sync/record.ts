@@ -15,6 +15,8 @@ export type Record = typeof Record.Type
 export interface Storage {
   readonly get: (key: string) => Effect.Effect<unknown>
   readonly set: (key: string, value: Record) => Effect.Effect<void>
+  // altimate_change — a deleted chat's record is removed with it
+  readonly remove: (key: string) => Effect.Effect<void>
 }
 
 export function make(storage: Storage) {
@@ -24,5 +26,6 @@ export function make(storage: Storage) {
       return Option.getOrUndefined(saved)
     }),
     set: (sessionID: string, record: Record) => storage.set(`sessions/${sessionID}`, record),
+    remove: (sessionID: string) => storage.remove(`sessions/${sessionID}`),
   }
 }

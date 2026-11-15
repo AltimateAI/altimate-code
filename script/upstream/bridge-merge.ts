@@ -335,7 +335,8 @@ function buildPlan(upstreamFiles: Set<string>, ourFiles: Set<string>, config: Me
 
 // Reapplies the code-level edits PR #18186 wiped out that keep Anthropic a
 // supported API-key provider in the fork: the login hint in providers.ts and the
-// non-anthropic User-Agent guard in session/llm.ts.
+// Altimate Code User-Agent in session/llm.ts. Anthropic gets it too: the exception for it only
+// existed for the removed Claude Pro/Max login plugin, which set its own User-Agent.
 //
 // The BUILTIN `opencode-anthropic-auth` plugin (a direct Claude Pro/Max login)
 // and the claude-code-20250219 beta header are NOT restored: Anthropic does not
@@ -383,8 +384,8 @@ async function editSessionLlmTs(report: string[]): Promise<void> {
     return
   }
   const content = readUtf8(file)
-  if (content.includes(`input.model.providerID !== "anthropic"`)) {
-    report.push(`- session/llm.ts: anthropic User-Agent conditional already present, skipping`)
+  if (content.includes(`"User-Agent": \`altimate-code/`)) {
+    report.push(`- session/llm.ts: Altimate Code User-Agent already present, skipping`)
     return
   }
   const search = `        ...(input.model.providerID.startsWith("opencode") && {
@@ -397,7 +398,7 @@ async function editSessionLlmTs(report: string[]): Promise<void> {
     report.push(`- ⚠ session/llm.ts: headers block not in expected form; skipping User-Agent restore`)
     return
   }
-  const replacement = `        // altimate_change start — preserve User-Agent for non-anthropic providers (PR #18186 reverted)
+  const replacement = `        // altimate_change start — Altimate Code User-Agent for every provider outside opencode's own
         ...(input.model.providerID.startsWith("opencode")
           ? {
               "x-opencode-project": Instance.project.id,
@@ -405,15 +406,13 @@ async function editSessionLlmTs(report: string[]): Promise<void> {
               "x-opencode-request": input.user.id,
               "x-opencode-client": Flag.OPENCODE_CLIENT,
             }
-          : input.model.providerID !== "anthropic"
-            ? {
-                "User-Agent": \`opencode/\${Installation.VERSION}\`,
-              }
-            : undefined),
+          : {
+              "User-Agent": \`altimate-code/\${Installation.VERSION}\`,
+            }),
         // altimate_change end`
   const next = content.replace(search, replacement)
   if (!DRY_RUN) writeFileSync(file, next)
-  report.push(`- session/llm.ts: re-added User-Agent conditional for non-anthropic providers`)
+  report.push(`- session/llm.ts: re-added the Altimate Code User-Agent`)
 }
 
 // ---------------------------------------------------------------------------

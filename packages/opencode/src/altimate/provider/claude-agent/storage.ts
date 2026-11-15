@@ -1,5 +1,6 @@
 export * as ClaudeAgentStorage from "./storage"
 
+import fs from "fs/promises"
 import path from "path"
 import { Effect } from "effect"
 import { Global } from "@/global"
@@ -29,11 +30,19 @@ export async function write(key: string, value: unknown) {
   await Filesystem.writeJson(file(key), value)
 }
 
+export async function remove(key: string) {
+  await fs.rm(file(key), { force: true })
+}
+
 // The shape ClaudeSessions expects. A failed write must not fail a chat, so it is logged and dropped.
 export const sessions = {
   get: (key: string) => Effect.promise(() => read(key)),
   set: (key: string, value: unknown) =>
     Effect.promise(() =>
       write(key, value).catch((error) => log.warn("failed to save Claude session record", { key, error })),
+    ),
+  remove: (key: string) =>
+    Effect.promise(() =>
+      remove(key).catch((error) => log.warn("failed to remove Claude session record", { key, error })),
     ),
 }

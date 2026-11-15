@@ -39,12 +39,23 @@ function createWorkerFetch(client: RpcClient): typeof fetch {
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init)
     const body = request.body ? await request.text() : undefined
-    const result = await client.call("fetch", {
-      url: request.url,
-      method: request.method,
-      headers: Object.fromEntries(request.headers.entries()),
-      body,
-    })
+    // altimate_change start — forward cancellation: the worker aborts the request it is serving, so
+    // a long-running request (a /connect login check) stops when its dialog is dismissed
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    signal?.throwIfAborted()
+    const abortID = signal ? crypto.randomUUID() : undefined
+    const onAbort = () => void client.call("abort", { id: abortID! }).catch(() => {})
+    signal?.addEventListener("abort", onAbort, { once: true })
+    const result = await client
+      .call("fetch", {
+        url: request.url,
+        method: request.method,
+        headers: Object.fromEntries(request.headers.entries()),
+        body,
+        abortID,
+      })
+      .finally(() => signal?.removeEventListener("abort", onAbort))
+    // altimate_change end
     return new Response(result.body, {
       status: result.status,
       headers: result.headers,
@@ -314,6 +325,7 @@ export const TuiThreadCommand = cmd({
                   providerID?: string
                   modelID?: string
                   via_search?: boolean
+                  subscription?: string
                 }
                 const classified = searchAll
                   ? { provider: "search_all" as const }

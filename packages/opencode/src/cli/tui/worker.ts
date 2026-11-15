@@ -130,13 +130,30 @@ const altimateBaseRegistration = FreeTierConsent.createRegistrationGate({
 })
 // altimate_change end
 
+// altimate_change start — requests the TUI cancelled (dismissed dialogs): `fetch` registers each
+// request's controller under the client's `abortID`, and `abort` cancels it
+const pendingRequests = new Map<string, AbortController>()
+// altimate_change end
+
 export const rpc = {
   // altimate_change start — no consent token: an explicit picker selection always registers if needed
   async registerAltimateBase() {
     return altimateBaseRegistration.register()
   },
   // altimate_change end
-  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
+  // altimate_change start — a cancelled TUI request aborts the request the server is handling
+  abort(input: { id: string }) {
+    pendingRequests.get(input.id)?.abort()
+  },
+  // altimate_change end
+  async fetch(input: {
+    url: string
+    method: string
+    headers: Record<string, string>
+    body?: string
+    // altimate_change — set when the TUI request can be cancelled
+    abortID?: string
+  }) {
     // altimate_change start — no request is served until the datamate entry heal
     // completes (already-resolved after the first request; effectively free thereafter).
     await datamateSyncReady
@@ -146,13 +163,20 @@ export const rpc = {
     if (auth && !headers["authorization"] && !headers["Authorization"]) {
       headers["Authorization"] = auth
     }
+    // altimate_change start — cancellable requests carry their own signal
+    const controller = input.abortID ? new AbortController() : undefined
+    if (input.abortID && controller) pendingRequests.set(input.abortID, controller)
     const request = new Request(input.url, {
       method: input.method,
       headers,
       body: input.body,
+      signal: controller?.signal,
     })
+    // altimate_change end
     // altimate_change start — upstream_fix: Server.Default exposes fetch directly
-    const response = await Server.Default().fetch(request)
+    const response = await Promise.resolve(Server.Default().fetch(request)).finally(
+      () => input.abortID && pendingRequests.delete(input.abortID),
+    )
     // altimate_change end
     const body = await response.text()
     return {

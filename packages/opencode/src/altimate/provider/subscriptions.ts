@@ -13,7 +13,9 @@ export type Subscription = "claude" | "chatgpt" | "copilot" | "supergrok" | "git
 export interface Found {
   subscription: Subscription
   // Where the login was seen. Never holds a credential value.
-  source: "altimate" | "claude-code" | "codex" | "copilot"
+  // `anthropic-login`: a Claude Pro/Max login saved by the removed Anthropic sign-in. It no longer
+  // connects, so it only marks that the user has a Claude plan.
+  source: "altimate" | "claude-code" | "codex" | "copilot" | "anthropic-login"
 }
 
 const STORED: Record<string, Subscription> = {
@@ -33,11 +35,16 @@ export async function detect(): Promise<Found[]> {
     if (!found.has(subscription)) found.set(subscription, { subscription, source })
   }
 
+  let retired = false
   const stored = await Auth.all().catch((error) => {
     log.warn("could not read saved logins", { error })
     return {} as Record<string, Auth.Info>
   })
   for (const [providerID, info] of Object.entries(stored)) {
+    if (providerID === "anthropic" && info.type === "oauth") {
+      retired = true
+      continue
+    }
     const subscription = STORED[providerID]
     if (!subscription) continue
     // Claude Agent records an `api` marker; the others save the subscription login as `oauth`.
@@ -48,7 +55,16 @@ export async function detect(): Promise<Found[]> {
   if (claude) add("claude", "claude-code")
   if (codex) add("chatgpt", "codex")
   if (copilot) add("copilot", "copilot")
+  // Last, so a working Claude Code login is what the picker reports when both are present.
+  if (retired) add("claude", "anthropic-login")
   return [...found.values()]
+}
+
+// A Claude Pro/Max login saved by the removed Anthropic sign-in. Reported apart from `detect()`, which
+// keeps one entry per subscription and so hides it behind a Claude Code login.
+export async function retiredAnthropicLogin(): Promise<boolean> {
+  const stored = await Auth.all().catch(() => ({}) as Record<string, Auth.Info>)
+  return stored.anthropic?.type === "oauth"
 }
 
 const home = () => os.homedir()
@@ -87,19 +103,24 @@ async function claudeCode() {
   return keychainItem("Claude Code-credentials")
 }
 
+// The picker stops waiting after 300 ms, so a slow keychain only needs to be stopped, not waited for.
+const KEYCHAIN_TIMEOUT_MS = 1_000
+
 async function keychainItem(service: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const proc = Bun.spawn(["security", "find-generic-password", "-s", service], {
       stdout: "ignore",
       stderr: "ignore",
       stdin: "ignore",
     })
-    const timer = setTimeout(() => proc.kill(), 3_000)
-    const code = await proc.exited
-    clearTimeout(timer)
-    return code === 0
+    timer = setTimeout(() => proc.kill(), KEYCHAIN_TIMEOUT_MS)
+    timer.unref?.()
+    return (await proc.exited) === 0
   } catch {
     return false
+  } finally {
+    clearTimeout(timer)
   }
 }
 

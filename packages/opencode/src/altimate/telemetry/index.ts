@@ -1437,6 +1437,9 @@ export namespace Telemetry {
           | "google"
           | "search_all"
           | "other"
+        /** Which subscription row was picked, e.g. `chatgpt` for "ChatGPT subscription", which shares
+         *  provider `openai` with the API-key row. A fixed set of names. */
+        subscription?: "claude" | "chatgpt" | "copilot" | "supergrok" | "gitlab-duo"
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */

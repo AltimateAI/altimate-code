@@ -127,6 +127,12 @@ export async function idle(sessionID: string) {
   await Effect.runPromise(sessions.idle(sessionID))
 }
 
+// altimate_change — the chat was deleted, so its Claude Code transcript and saved record go too. Call within the instance.
+export async function remove(sessionID: string) {
+  const { sessions } = await instance()
+  await Effect.runPromise(sessions.remove(sessionID))
+}
+
 // The provider's merged options as Claude Code environment variables. The loader fills `apiKey`
 // from the saved /connect marker, which is not an Anthropic key; a configured apiKey still maps.
 export function connectionEnv(options: Readonly<Record<string, any>>) {

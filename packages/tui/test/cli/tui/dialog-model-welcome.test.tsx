@@ -43,12 +43,12 @@ async function mountPicker(
   {
     firstRun = true,
     registerOutcomes = [] as Array<"ok" | "error">,
-    subscriptions = [] as string[],
+    subscriptions = [] as Array<string | { subscription: string; source: string }>,
     subscriptionsDelayMs = 0,
   }: {
     firstRun?: boolean
     registerOutcomes?: Array<"ok" | "error">
-    subscriptions?: string[]
+    subscriptions?: Array<string | { subscription: string; source: string }>
     subscriptionsDelayMs?: number
   } = {},
 ) {
@@ -124,9 +124,9 @@ async function mountPicker(
     if (url.pathname === "/altimate/provider/subscriptions") {
       if (subscriptionsDelayMs)
         return Bun.sleep(subscriptionsDelayMs).then(() =>
-          Response.json({ ok: true, found: subscriptions.map((subscription) => ({ subscription, source: "altimate" })) }),
+          Response.json({ ok: true, found: subscriptions.map((item) => (typeof item === "string" ? { subscription: item, source: "altimate" } : item)) }),
         )
-      return Response.json({ ok: true, found: subscriptions.map((subscription) => ({ subscription, source: "altimate" })) })
+      return Response.json({ ok: true, found: subscriptions.map((item) => (typeof item === "string" ? { subscription: item, source: "altimate" } : item)) })
     }
     if (url.pathname === "/altimate/base/register") {
       registerCallCount++
@@ -434,16 +434,78 @@ test("slow detection holds the suggested rows, then shows the defaults without r
     const early = picker.app.captureCharFrame()
     expect(early).toContain("Checking for subscriptions")
     expect(suggested(early)).toEqual([])
-    // Enter on a hidden row does nothing.
+    // Arrows are ignored while the rows are hidden, and an Enter waits for them.
+    picker.app.mockInput.pressArrow("down")
     picker.app.mockInput.pressEnter()
-    await Bun.sleep(400)
+    await Bun.sleep(100)
+    expect(picker.events.some((event) => event.name === "provider_selected")).toBe(false)
+    await wait(() => picker.events.some((event) => event.name === "provider_selected"))
     await picker.app.renderOnce()
     const settled = picker.app.captureCharFrame()
     expect(settled).not.toContain("Checking for subscriptions")
     expect(settled).not.toContain("found on this machine")
     expect(suggested(settled)[0]).toBe("Altimate LLM Gateway")
-    expect(picker.events.filter((event) => event.name !== "model_picker_shown")).toEqual([])
+    // The queued Enter picked the first row, not the row the ignored arrow would have moved to.
+    expect(picker.events.find((event) => event.name === "provider_selected")).toMatchObject({
+      providerID: "altimate-backend",
+    })
+    // The late response (2 s) does not reorder the rows the user already sees.
+    await Bun.sleep(1_800)
+    await picker.app.renderOnce()
+    expect(picker.app.captureCharFrame()).not.toContain("found on this machine")
   } finally {
     await picker.cleanup()
   }
+})
+
+test("a Codex or Copilot editor login is suggested, but says the user signs in here", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent", "github-copilot"], {
+    subscriptions: [
+      { subscription: "chatgpt", source: "codex" },
+      { subscription: "copilot", source: "copilot" },
+      { subscription: "claude", source: "claude-code" },
+    ],
+  })
+  try {
+    await wait(() => picker.events.length > 0)
+    await Bun.sleep(50)
+    await picker.app.renderOnce()
+    const frame = picker.app.captureCharFrame()
+    expect(frame).toContain("Claude Pro/Max · found on this machine")
+    expect(frame).toContain("ChatGPT Plus/Pro · Codex login · sign in")
+    expect(frame).toContain("Copilot plan · editor login · sign in")
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("picking the ChatGPT subscription row records which subscription it was", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"])
+  try {
+    await wait(() => picker.events.length > 0)
+    await Bun.sleep(50)
+    await picker.app.renderOnce()
+    picker.app.mockInput.pressArrow("down")
+    picker.app.mockInput.pressArrow("down")
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.events.some((event) => event.name === "provider_selected"))
+    expect(picker.events.find((event) => event.name === "provider_selected")).toMatchObject({
+      providerID: "openai",
+      subscription: "chatgpt",
+    })
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("the selected tick for a shared provider follows the saved login", async () => {
+  const { tickRow } = await import("../../../src/component/altimate-onboarding")
+  const subscription = { providerID: "openai", subscription: "chatgpt" }
+  const apiKey = { providerID: "openai" }
+  expect(tickRow([subscription, apiKey], "openai")).toBe(apiKey)
+  const saved = { ...subscription, savedLogin: true }
+  expect(tickRow([saved, apiKey], "openai")).toBe(saved)
+  const claude = { providerID: "claude-agent", subscription: "claude" }
+  expect(tickRow([claude, apiKey], "claude-agent")).toBe(claude)
+  expect(tickRow([apiKey], "anthropic")).toBeUndefined()
 })

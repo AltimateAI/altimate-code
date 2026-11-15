@@ -155,20 +155,20 @@ identity.
 
 Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
 
-The Anthropic provider takes an API key. To use a Claude Pro or Max plan, use [Claude Agent](#claude-agent-claude-subscription).
+The Anthropic provider takes an API key. To use a Claude Pro or Max plan, use [Claude Agent](#claude-agent-claude-subscription). A Claude Pro/Max login saved by an earlier version's Anthropic sign-in no longer connects: run `/connect` and pick **Claude subscription**, or add an API key.
 
 ## Subscriptions on the first-run picker
 
 The first-run picker and `/connect` suggest up to five providers: the Altimate LLM Gateway, then any subscription login already on this machine (marked "found on this machine"), then the Claude and ChatGPT subscriptions and the Anthropic and OpenAI API keys. Everything else, including Altimate Base, Google and the other providers, is under **Search all providers…**.
 
-A login counts as found even if it has expired; connecting signs in again if needed. Altimate Code checks that these exist and does not send their contents anywhere:
+A login counts as found even if it has expired. Altimate Code checks that these exist and does not send their contents anywhere:
 
-| Subscription | Found from |
-|---|---|
-| Claude Pro/Max | Claude Code's login (`~/.claude/.credentials.json`, `~/.claude.json`, or the macOS keychain item `Claude Code-credentials`) |
-| ChatGPT Plus/Pro | The Codex CLI's ChatGPT login (`~/.codex/auth.json`) |
-| GitHub Copilot | A Copilot editor login (`~/.config/github-copilot/`) |
-| Any of these, SuperGrok or GitLab Duo | A login saved earlier in Altimate Code |
+| Subscription | Found from | When you pick it |
+|---|---|---|
+| Claude Pro/Max | Claude Code's login (`~/.claude/.credentials.json`, `~/.claude.json`, or the macOS keychain item `Claude Code-credentials`) | Uses that login; nothing to sign in |
+| ChatGPT Plus/Pro | The Codex CLI's ChatGPT login (`~/.codex/auth.json`) | You sign in with ChatGPT once in Altimate Code |
+| GitHub Copilot | A Copilot editor login (`~/.config/github-copilot/`) | You sign in with GitHub once in Altimate Code |
+| Any of these, SuperGrok or GitLab Duo | A login saved earlier in Altimate Code | Reconnects, signing in again if it expired |
 
 ## Claude Agent (Claude subscription)
 

@@ -413,8 +413,11 @@ function AutoMethod(props: AutoMethodProps) {
   // Guard against a late callback / auto-close firing after the dialog is dismissed.
   let disposed = false
   let closeTimer: ReturnType<typeof setTimeout> | undefined
+  // altimate_change — dismissing the dialog aborts the waiting callback request, which stops a polling login
+  const waiting = new AbortController()
   onCleanup(() => {
     disposed = true
+    waiting.abort()
     if (closeTimer) clearTimeout(closeTimer)
   })
 
@@ -439,11 +442,19 @@ function AutoMethod(props: AutoMethodProps) {
   }))
 
   onMount(async () => {
-    const result = await sdk.client.provider.oauth.callback({
-      providerID: props.providerID,
-      method: props.index,
-    })
-    if (disposed) return
+    const result = await sdk.client.provider.oauth
+      .callback(
+        {
+          providerID: props.providerID,
+          method: props.index,
+        },
+        { signal: waiting.signal },
+      )
+      .catch((error: unknown) => {
+        if (disposed) return undefined
+        throw error
+      })
+    if (disposed || !result) return
     if (result.error) {
       // altimate_change — surface the failure instead of clearing silently. The
       // precise reason is also logged server-side by the plugin callback.

@@ -66,6 +66,8 @@ export interface Interface {
   readonly run: (request: Request) => Effect.Effect<void, Error>
   // OpenCode stopped running the session, so a turn still waiting for tool results will not get them.
   readonly idle: (sessionID: string) => Effect.Effect<void>
+  // altimate_change — the chat was deleted: stop its process and delete Claude Code's transcript and our record
+  readonly remove: (sessionID: string) => Effect.Effect<void>
 }
 
 const launch = (request: Request) =>
@@ -469,7 +471,24 @@ export function registry() {
       yield* armIdle(entry)
     })
 
-    return { run, idle } satisfies Interface
+    const remove = Effect.fn("ClaudeSessions.remove")(function* (sessionID: string) {
+      const entry = entries.get(sessionID)
+      if (entry?.active) yield* Fiber.interrupt(entry.active)
+      // The interrupted turn's finalizer can install a new idle timer.
+      if (entry?.idle) yield* Fiber.interrupt(entry.idle)
+      const cleanup = Effect.gen(function* () {
+        if (entry) yield* stop(entry)
+        const record = entry?.record ?? (yield* records.get(sessionID))
+        if (record) yield* attempt(() => input.io.remove(record.claudeSessionID))
+        yield* records.remove(sessionID)
+      }).pipe(
+        Effect.catch((error) => Effect.logWarning(error)),
+        Effect.ensuring(Effect.sync(() => entries.delete(sessionID))),
+      )
+      yield* entry ? entry.lock.withPermit(cleanup) : cleanup
+    })
+
+    return { run, idle, remove } satisfies Interface
   })
 
   return { attach, close }

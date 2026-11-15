@@ -1188,15 +1188,23 @@ export namespace Server {
       // altimate_change start — GET /altimate/provider/subscriptions: subscription logins already on this
       // machine, for the welcome picker. Names the subscriptions only; no credential leaves the server.
       .get("/altimate/provider/subscriptions", async (c) => {
-        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        // Not the workspace guard: ALTIMATE_DISABLE_WORKSPACE must not turn off subscription suggestions.
+        const refused = browserOriginRefusal(
+          "Subscription detection",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
         if (refused) return c.json(refused.body, refused.status)
         try {
-          const { detect } = await import("../altimate/provider/subscriptions")
-          return c.json({ ok: true as const, found: await detect() })
+          const { detect, retiredAnthropicLogin } = await import("../altimate/provider/subscriptions")
+          const [found, retired] = await Promise.all([detect(), retiredAnthropicLogin()])
+          return c.json({ ok: true as const, found, retiredAnthropicLogin: retired })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.warn("subscription detection failed", { error })
-          return c.json({ ok: true as const, found: [] })
+          return c.json({ ok: true as const, found: [], retiredAnthropicLogin: false })
         }
       })
       // altimate_change end

@@ -156,6 +156,15 @@ type Subscription = "claude" | "chatgpt" | "copilot" | "supergrok" | "gitlab-duo
 // Order of found subscriptions; the first two are also shown when not found.
 const SUBSCRIPTION_ORDER: Subscription[] = ["claude", "chatgpt", "copilot", "supergrok", "gitlab-duo"]
 const SUBSCRIPTION_DEFAULTS: Subscription[] = ["claude", "chatgpt"]
+// Where the server saw a login. Only a Claude Code login is used as is; a Codex or Copilot editor login
+// means the user has the plan, but connecting still signs in once here.
+type FoundSource = "altimate" | "claude-code" | "codex" | "copilot" | "anthropic-login"
+type Found = { subscription: Subscription; source: FoundSource }
+const FOUND_NOTE: Partial<Record<FoundSource, string>> = {
+  codex: "Codex login · sign in",
+  copilot: "editor login · sign in",
+  "anthropic-login": "old sign-in · reconnect",
+}
 const SUBSCRIPTION_ROWS: Record<
   Subscription,
   { name: string; note: string; short: string; providerID: string; method?: RegExp }
@@ -201,24 +210,71 @@ const DETECT_WAIT_MS = 300
 
 // Asks the server which subscription logins are on this machine. A failure, or no answer within
 // DETECT_WAIT_MS, means none found, so the picker shows its default rows.
-function detectSubscriptions(sdk: ReturnType<typeof useSDK>): Promise<{ subscription: Subscription }[]> {
+function detectSubscriptions(sdk: ReturnType<typeof useSDK>): Promise<Found[]> {
   let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<[]>((resolve) => (timer = setTimeout(() => resolve([]), DETECT_WAIT_MS)))
-  return Promise.race([requestSubscriptions(sdk), timeout]).finally(() => clearTimeout(timer))
+  const timeout = new Promise<Found[]>((resolve) => (timer = setTimeout(() => resolve([]), DETECT_WAIT_MS)))
+  const found = requestSubscriptions(sdk).then((body) => body.found)
+  return Promise.race([found, timeout]).finally(() => clearTimeout(timer))
 }
 
-async function requestSubscriptions(sdk: ReturnType<typeof useSDK>): Promise<{ subscription: Subscription }[]> {
+async function requestSubscriptions(
+  sdk: ReturnType<typeof useSDK>,
+): Promise<{ found: Found[]; retiredAnthropicLogin: boolean }> {
   try {
     const response = await sdk.fetch(`${sdk.url}/altimate/provider/subscriptions`, {
       headers: new Headers(sdk.headers),
     })
-    const body = (await response.json().catch(() => undefined)) as { found?: { subscription?: string }[] } | undefined
-    return (body?.found ?? []).filter((item): item is { subscription: Subscription } =>
+    const body = (await response.json().catch(() => undefined)) as
+      | { found?: { subscription?: string; source?: string }[]; retiredAnthropicLogin?: boolean }
+      | undefined
+    const found = (body?.found ?? []).filter((item): item is Found =>
       SUBSCRIPTION_ORDER.includes(item.subscription as Subscription),
     )
+    return { found, retiredAnthropicLogin: body?.retiredAnthropicLogin === true }
   } catch {
-    return []
+    return { found: [], retiredAnthropicLogin: false }
   }
+}
+
+/**
+ * Which of the rows for `providerID` gets the "selected" tick. When a subscription row and an API-key
+ * row share a provider, the subscription row only when its login is saved here, else the API-key row.
+ */
+export function tickRow<Row extends { providerID?: string; subscription?: string; savedLogin?: boolean }>(
+  rows: readonly Row[],
+  providerID: string,
+): Row | undefined {
+  const shared = rows.filter((row) => row.providerID === providerID)
+  if (shared.length <= 1) return shared[0]
+  return shared.find((row) => row.savedLogin) ?? shared.find((row) => !row.subscription) ?? shared[0]
+}
+
+const RETIRED_ANTHROPIC_NOTICE_KEY = "retired_anthropic_login_notice_shown"
+
+/**
+ * Once per install: a saved Claude Pro/Max login from the removed Anthropic sign-in no longer
+ * connects, so say why the Anthropic provider is gone and where to reconnect.
+ */
+export function useRetiredAnthropicLoginNotice() {
+  const kv = useKV()
+  const sdk = useSDK()
+  const toast = useToast()
+  let checked = false
+  createEffect(() => {
+    if (!kv.ready || checked) return
+    checked = true
+    if (kv.get(RETIRED_ANTHROPIC_NOTICE_KEY, false)) return
+    void requestSubscriptions(sdk).then((body) => {
+      if (!body.retiredAnthropicLogin) return
+      kv.set(RETIRED_ANTHROPIC_NOTICE_KEY, true)
+      toast.show({
+        variant: "warning",
+        message:
+          "Claude Pro/Max sign-in through the Anthropic provider is no longer supported. Run /connect and pick Claude subscription, or add an Anthropic API key.",
+        duration: 15000,
+      })
+    })
+  })
 }
 // altimate_change end
 type WelcomeTone = "success" | "warning" | "muted"
@@ -235,6 +291,11 @@ interface WelcomeRow {
   // any model of that provider; add modelID to match a specific model.
   providerID?: string
   modelID?: string
+  // altimate_change start — subscription rows: which subscription, and whether its login is saved here,
+  // which decides the tick when a subscription row and an API-key row share a provider
+  subscription?: Subscription
+  savedLogin?: boolean
+  // altimate_change end
 }
 
 export function DialogModelWelcome(props: {
@@ -293,14 +354,17 @@ export function DialogModelWelcome(props: {
   // then the default rows. Altimate Base and everything else stay behind "Search all providers…".
   const rows = createMemo<WelcomeRow[]>(() => {
     const listed = (id: string) => providers().some((provider) => provider.value === id)
-    const detected = new Set((found() ?? []).map((item) => item.subscription))
+    const detected = new Map((found() ?? []).map((item) => [item.subscription, item.source]))
     const subscriptionRow = (subscription: Subscription): WelcomeRow => {
       const spec = SUBSCRIPTION_ROWS[subscription]
+      const source = detected.get(subscription)
       return {
         name: spec.name,
-        note: detected.has(subscription) ? `${spec.short} · found on this machine` : spec.note,
-        tone: detected.has(subscription) ? "success" : "muted",
+        note: source ? `${spec.short} · ${FOUND_NOTE[source] ?? "found on this machine"}` : spec.note,
+        tone: source ? "success" : "muted",
         providerID: spec.providerID,
+        subscription,
+        savedLogin: source === "altimate",
         activate: () => connectProvider(spec.providerID, spec.method),
       }
     }
@@ -343,8 +407,8 @@ export function DialogModelWelcome(props: {
   const isCurrent = (row: WelcomeRow) => {
     const c = current()
     if (!row.providerID || !c || c.providerID !== row.providerID) return false
-    // altimate_change — two rows can share a provider (ChatGPT subscription and OpenAI API key); tick the first
-    if (rows().find((other) => other.providerID === row.providerID) !== row) return false
+    // altimate_change — two rows can share a provider (ChatGPT subscription and OpenAI API key)
+    if (tickRow(rows(), row.providerID) !== row) return false
     return row.modelID ? c.modelID === row.modelID : true
   }
 
@@ -371,7 +435,7 @@ export function DialogModelWelcome(props: {
       name: "provider_selected",
       ...(row.analyticsSearchAll
         ? { searchAll: true }
-        : { providerID: row.providerID, modelID: row.modelID }),
+        : { providerID: row.providerID, modelID: row.modelID, subscription: row.subscription }),
       })
   }
 
@@ -385,14 +449,25 @@ export function DialogModelWelcome(props: {
     setSelected((prev) => (prev + direction + count) % count)
   }
 
+  // altimate_change start — while detection runs (at most DETECT_WAIT_MS) only Search is shown, so the
+  // cursor stays on the first row and an Enter waits for the rows to appear
+  let pendingEnter = false
+  createEffect(() => {
+    if (found.loading || !pendingEnter) return
+    pendingEnter = false
+    activateRow(rows()[selected()])
+  })
+  // altimate_change end
+
   useKeyboard((evt) => {
-    if (evt.name === "up" || (evt.ctrl && evt.name === "p")) return move(-1)
-    if (evt.name === "down" || (evt.ctrl && evt.name === "n")) return move(1)
+    if (evt.name === "up" || (evt.ctrl && evt.name === "p")) return found.loading ? undefined : move(-1)
+    if (evt.name === "down" || (evt.ctrl && evt.name === "n")) return found.loading ? undefined : move(1)
     if (evt.name === "return") {
       evt.preventDefault()
       evt.stopPropagation()
-      // altimate_change — the suggested rows are hidden until detection settles
-      if (!found.loading || selected() === searchIndex()) activateRow(rows()[selected()])
+      // altimate_change — an Enter during detection runs once the rows appear
+      if (found.loading) pendingEnter = true
+      else activateRow(rows()[selected()])
       return
     }
     // "/", ctrl+a, or any letter/number reveals the full searchable catalog.

@@ -10,6 +10,20 @@ const SETUP_URL = "https://code.claude.com/docs/en/setup"
 const RECHECK_MS = 3_000
 const RECHECK_LIMIT_MS = 5 * 60_000
 
+// Resolves after `ms`, or as soon as `signal` aborts.
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve()
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener("abort", done, { once: true })
+    function done() {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", done)
+      resolve()
+    }
+  })
+}
+
 // Ported from upstream's `ClaudeIntegration` and the plugin's session-idle subscription.
 // The login method only records that the user chose Claude Code. The login itself belongs to
 // `claude`, and the CLI never reads or stores its token.
@@ -19,6 +33,10 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
       await ClaudeAgent.configure(config.provider?.[ClaudeAgent.ID]?.options)
     },
     event: async ({ event }) => {
+      if (event.type === "session.deleted")
+        return ClaudeAgent.remove(event.properties.info.id).catch((error) =>
+          log.warn("failed to remove a deleted Claude session", { error }),
+        )
       if (event.type !== "session.idle") return
       await ClaudeAgent.idle(event.properties.sessionID).catch((error) =>
         log.warn("failed to release an idle Claude session", { error }),
@@ -42,19 +60,20 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
               instructions: blocker
                 ? `${blocker} This connects as soon as a supported Claude Code is logged in.`
                 : "Checking your Claude Code login. If you have not logged in yet, run `claude auth login` in a terminal; this connects as soon as it finds the login.",
-              async callback() {
-                // Bound to this instance; the dialog can be dismissed or the instance reloaded while this
-                // polls, and nothing cancels the callback, so it stops once the instance is disposed.
+              async callback(options?: { signal?: AbortSignal }) {
+                // Stops when the dialog is dismissed (the request's signal aborts), when the instance is
+                // disposed, or after RECHECK_LIMIT_MS.
+                const signal = options?.signal
                 const login = await ClaudeAgent.loginCheck()
                 const deadline = Date.now() + RECHECK_LIMIT_MS
-                while (!login.disposed()) {
+                while (!login.disposed() && !signal?.aborted) {
                   const reason = ClaudeAgent.problem(await login.run())
                   if (!reason) return { type: "success" as const, key: ClaudeAgent.AUTH_KEY }
                   if (Date.now() >= deadline) {
                     log.warn("Claude Code login was not found", { reason })
                     return { type: "failed" as const }
                   }
-                  await Bun.sleep(RECHECK_MS)
+                  await sleep(RECHECK_MS, signal)
                 }
                 return { type: "failed" as const }
               },

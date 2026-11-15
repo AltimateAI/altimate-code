@@ -48,6 +48,33 @@ describe("Claude sessions", () => {
     }),
   )
 
+  it.effect("deleting a chat stops its process and removes its Claude transcript and saved record", () =>
+    Effect.gen(function* () {
+      const claude = FakeClaude.make([FakeClaude.expectStartup(), FakeClaude.expectTurn(), FakeClaude.expectInterrupt()])
+      const test = yield* TestSessions.start(claude)
+      yield* TestSessions.reply(test.model, first)
+      const record = (yield* SessionRecord.make(test.storage).get("session-a"))!
+      yield* test.sessions.remove("session-a")
+      yield* Effect.promise(() => claude.runs[0]!.closed)
+      expect(claude.removed).toEqual([record.claudeSessionID])
+      expect(test.storage.data.has("sessions/session-a")).toBe(false)
+      claude.check()
+    }),
+  )
+
+  it.effect("deleting a chat with no live process still removes its saved transcript", () =>
+    Effect.gen(function* () {
+      const claude = FakeClaude.make([])
+      const saved = TestSessions.storage()
+      saved.data.set("sessions/session-b", { claudeSessionID: "claude-b" })
+      const test = yield* TestSessions.start(claude, saved)
+      yield* test.sessions.remove("session-b")
+      yield* test.sessions.remove("session-unknown")
+      expect(claude.removed).toEqual(["claude-b"])
+      expect(saved.data.has("sessions/session-b")).toBe(false)
+    }),
+  )
+
   it.effect("a missing Claude transcript is rebuilt from history, even after a rejected attachment", () =>
     Effect.gen(function* () {
       const claude = FakeClaude.make([

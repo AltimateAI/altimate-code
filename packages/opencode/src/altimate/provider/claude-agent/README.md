@@ -7,7 +7,7 @@
 
 <!-- AI-GENERATED: Start -->
 <!-- This section is automatically maintained by Claude Code. -->
-<!-- Last updated: 2026-11-13 by Claude Code -->
+<!-- Last updated: 2026-11-14 by Claude Code -->
 
 ## Purpose
 
@@ -47,14 +47,15 @@ Altimate-only integration (replaces upstream `index.ts`, `provider.ts`, `aisdk.t
 - `index.ts` — `ClaudeAgent`: session registry per instance, AI SDK factory, login check, request routing.
 - `catalog.ts` — saved model list from Claude Code, pricing by login type, `Provider.Model` entries.
 - `storage.ts` — JSON files under `<data>/claude-agent/` (model list, per-session Claude records).
-- `plugin.ts` — internal plugin: `/connect` login method, session-idle release, config connection.
+- `plugin.ts` — internal plugin: `/connect` login method, session-idle release, deleted-chat cleanup, config connection.
 
 ## Call sites (all inside `altimate_change` markers)
 
 - `provider/provider.ts` — bundled SDK factory, provider database entry, `haiku` as small model.
 - `provider/transform.ts` — `variants()` returns the effort levels Claude Code reported.
 - `session/llm.ts` — request kind and session headers, agent role and instructions as options, no default output cap
-  (a plugin's explicit `maxOutputTokens` still applies).
+  (a plugin's explicit `maxOutputTokens` still applies). `experimental.chat.system.transform` runs on the instruction
+  list Claude receives, so plugin edits reach Claude.
 - `session/message-v2.ts` — stopped Claude Agent tool calls carry `toolAborted` (see `tools/aborted.ts`).
 - `session/processor.ts` — a permission or question rejection that stops the session is recorded as
   `metadata.rejected`, so history conversion can flag it the same way.
@@ -93,8 +94,12 @@ as upstream did; `script/upstream/bridge-merge.ts` no longer restores them.
   list is keyed by the project's connection settings. The session registry stays process-wide, as upstream,
   because saved Claude sessions are keyed by chat session ID; a closed project's `claude` processes therefore
   close after their idle timeout while another project stays open.
-- **/connect polling:** the login check is bound to its instance and stops when that instance is disposed. It
-  cannot see the dialog being dismissed, so it keeps checking for up to 5 minutes and may still connect.- **MCP server:** built on `@modelcontextprotocol/sdk` 1.x (already bundled) instead of `@modelcontextprotocol/server` 2.x.
+- **/connect polling:** the login check is bound to its instance and stops when that instance is disposed, when the
+  dialog is dismissed (the callback request's signal aborts, through `provider/auth.ts` and the plugin `callback`
+  options), or after 5 minutes.
+- **Deleted chats:** `session.deleted` stops the chat's `claude` process and deletes its Claude Code transcript and
+  saved record (`ClaudeSessions.remove`). Upstream has no equivalent yet.
+- **MCP server:** built on `@modelcontextprotocol/sdk` 1.x (already bundled) instead of `@modelcontextprotocol/server` 2.x.
 - **Connection settings:** `headerTimeout` and `chunkTimeout` are consumed by the provider loader before
   the factory runs, so they do not reach Claude Code.
 - **Model list refresh:** a new list from a chat's `claude` start is saved and shown after the next
