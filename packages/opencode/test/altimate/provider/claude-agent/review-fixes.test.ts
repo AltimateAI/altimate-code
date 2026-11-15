@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk"
-import { generateObject, generateText, jsonSchema } from "ai"
+import { generateObject, generateText, jsonSchema, streamObject } from "ai"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ClaudeAgentCatalog } from "@/altimate/provider/claude-agent/catalog"
 import type { ClaudeSessions } from "@/altimate/provider/claude-agent/claude/sessions"
@@ -69,12 +69,41 @@ describe("Claude Agent generate calls", () => {
     // A side call uses the request's system messages as its whole system prompt.
     expect(String(requests[0]?.system)).toContain("Respond with only a JSON value")
   })
+
+  test("streamObject asks for JSON in the prompt too", async () => {
+    const { language, requests } = model('{"name":"orders","rows":3}')
+    const schema = jsonSchema<{ name: string; rows: number }>({
+      type: "object",
+      properties: { name: { type: "string" }, rows: { type: "number" } },
+      required: ["name", "rows"],
+    })
+    const result = streamObject({ model: language, schema, prompt: "describe the table" })
+    let last: unknown
+    for await (const partial of result.partialObjectStream) last = partial
+    expect(last).toEqual({ name: "orders", rows: 3 })
+    expect(String(requests[0]?.system)).toContain("Respond with only a JSON value")
+  })
+
+  test("a generate call asks for JSON once", async () => {
+    const { language, requests } = model('{"name":"orders","rows":3}')
+    const schema = jsonSchema<{ name: string; rows: number }>({ type: "object" })
+    await generateObject({ model: language, schema, prompt: "describe the table" })
+    expect(String(requests[0]?.system).split("Respond with only a JSON value").length).toBe(2)
+  })
 })
 
 describe("Claude Agent stopped tools", () => {
   const sessionID = SessionID.make("ses_claude")
-  const claude = ClaudeAgentCatalog.provider({ models: [{ id: "sonnet", name: "Sonnet", efforts: [] }] }, {}).models
-    .sonnet!
+  const catalog = ClaudeAgentCatalog.provider(
+    {
+      models: [
+        { id: "sonnet", name: "Sonnet", efforts: [] },
+        { id: "haiku", name: "Haiku", efforts: [] },
+      ],
+    },
+    {},
+  ).models
+  const claude = catalog.sonnet!
   const callMetadata = { [ClaudeAgentID.ID]: { sessionID: "claude-session", messageID: "claude-message" } }
 
   function history(state: Record<string, unknown>) {
@@ -108,8 +137,8 @@ describe("Claude Agent stopped tools", () => {
     ] as unknown as SessionV1.WithParts[]
   }
 
-  async function collected(state: Record<string, unknown>) {
-    const messages = await MessageV2.toModelMessages(history(state) as unknown as MessageV2.WithParts[], claude)
+  async function collected(state: Record<string, unknown>, model = claude) {
+    const messages = await MessageV2.toModelMessages(history(state) as unknown as MessageV2.WithParts[], model)
     // Results start after the assistant message that called the tool.
     return ToolResult.collect(messages as never, 2)
   }
@@ -124,6 +153,12 @@ describe("Claude Agent stopped tools", () => {
     })
     expect(result.aborted).toBe(true)
     expect(result.results.get("toolu_1")?.mcp.content).toEqual([{ type: "text", text: "partial" }])
+  })
+
+  test("a stopped tool still interrupts the Claude turn after a switch to another Claude model", async () => {
+    // The chat's Claude session is shared across Claude Agent models, so the waiting turn is the same one.
+    const result = await collected({ status: "running", input: { command: "sleep 100" }, time: { start: 0 } }, catalog.haiku!)
+    expect(result.aborted).toBe(true)
   })
 
   test("a tool stopped before it ran interrupts the waiting Claude turn", async () => {

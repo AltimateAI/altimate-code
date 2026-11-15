@@ -48,6 +48,22 @@ describe("login status", () => {
     }),
   )
 
+  // altimate_change — a dismissed /connect dialog aborts the check (Effect.runPromise with its signal)
+  it.effect("an interrupted check closes its claude process and leaves the state as it was", () =>
+    Effect.gen(function* () {
+      const hold = Promise.withResolvers<void>()
+      const step = FakeClaude.expectStartup({ hold: hold.promise })
+      const claude = FakeClaude.make([step])
+      const status = yield* ClaudeStatus.make(FakeIO.make({ claude }), () => Effect.succeed({}))
+
+      const check = yield* status.refresh().pipe(Effect.forkScoped)
+      yield* Effect.promise(() => claude.started(step))
+      yield* Fiber.interrupt(check)
+      yield* Effect.promise(() => claude.runs[0]!.closed)
+      expect(yield* SubscriptionRef.get(status.state)).toEqual({ type: "checking" })
+    }),
+  )
+
   it.effect("reports a failed startup and recovers on the next check", () =>
     Effect.gen(function* () {
       const claude = FakeClaude.make([FakeClaude.expectStartup({ exitCode: 1 }), FakeClaude.expectStartup()])

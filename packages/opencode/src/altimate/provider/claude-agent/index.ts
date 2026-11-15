@@ -89,8 +89,9 @@ export async function loginCheck() {
   const { status, settings } = await instance()
   return {
     disposed: () => settings.disposed,
-    run: async (): Promise<ClaudeStatus.State> => {
-      await Effect.runPromise(status.refresh())
+    // An abort interrupts the check, which closes its `claude` process.
+    run: async (signal?: AbortSignal): Promise<ClaudeStatus.State> => {
+      await Effect.runPromise(status.refresh(), { signal })
       const state = await Effect.runPromise(SubscriptionRef.get(status.state))
       await saveCatalog(state, settings.connection)
       return state
@@ -169,6 +170,11 @@ function kind(input: { readonly agent: string; readonly small?: boolean }) {
   if (input.small) return "utility"
   if (input.agent === "title" || input.agent === "summary" || input.agent === "compaction") return "utility"
   return "primary"
+}
+
+// Titles, summaries and compaction: Claude receives the request's own system messages as its prompt.
+export function isUtility(input: { readonly agent: string; readonly small?: boolean }) {
+  return kind(input) === "utility"
 }
 
 // What `session/llm.ts` adds to a Claude Agent request, standing in for upstream's

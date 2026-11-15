@@ -39,11 +39,9 @@ export class Model implements LanguageModelV3 {
   // (agent creation, learning reflection), so a generate call collects the streamed reply. Claude Code has no
   // structured-output mode, so a JSON request is asked for in the prompt and any markdown fence is removed.
   async doGenerate(options: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
-    const json = options.responseFormat?.type === "json" ? options.responseFormat : undefined
-    const prompt: LanguageModelV3Prompt = json
-      ? [{ role: "system", content: jsonInstruction(json.schema) }, ...options.prompt]
-      : options.prompt
-    const { stream } = await this.doStream({ ...options, prompt })
+    const json = options.responseFormat?.type === "json"
+    // doStream adds the JSON instruction to the prompt.
+    const { stream } = await this.doStream(options)
     const content: LanguageModelV3Content[] = []
     const open = new Map<string, { type: "text" | "reasoning"; text: string }>()
     let finishReason: LanguageModelV3FinishReason = { unified: "other", raw: undefined }
@@ -95,7 +93,9 @@ export class Model implements LanguageModelV3 {
   }
   // altimate_change end
 
-  async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
+  async doStream(input: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
+    // altimate_change — a JSON request is asked for in the prompt, for streamed and collected calls alike
+    const options = withJsonInstruction(input)
     const abort = new AbortController()
     const signal = options.abortSignal ? AbortSignal.any([abort.signal, options.abortSignal]) : abort.signal
     const tools =
@@ -175,6 +175,15 @@ function parseEffort(value: unknown): EffortLevel | undefined {
 }
 
 // altimate_change start — JSON output for generate calls (see doGenerate)
+function withJsonInstruction(options: LanguageModelV3CallOptions): LanguageModelV3CallOptions {
+  if (options.responseFormat?.type !== "json") return options
+  const prompt: LanguageModelV3Prompt = [
+    { role: "system", content: jsonInstruction(options.responseFormat.schema) },
+    ...options.prompt,
+  ]
+  return { ...options, prompt }
+}
+
 function jsonInstruction(schema: JSONSchema7 | undefined) {
   const shape = schema ? ` that matches this JSON schema:\n${JSON.stringify(schema)}` : ""
   return `Respond with only a JSON value${shape}\nDo not wrap it in a markdown code fence or add any other text.`

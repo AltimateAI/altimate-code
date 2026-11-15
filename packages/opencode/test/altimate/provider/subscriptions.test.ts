@@ -15,13 +15,15 @@ beforeEach(async () => {
   process.env.CLAUDE_CONFIG_DIR = path.join(root, "claude")
   process.env.CODEX_HOME = path.join(root, "codex")
   process.env.XDG_CONFIG_HOME = path.join(root, "config")
+  // Set, it replaces the saved logins (`Auth.all`), so an outer value would leak into every case.
+  delete process.env.OPENCODE_AUTH_CONTENT
   for (const dir of ["home", "claude", "codex", "config"]) await fs.mkdir(path.join(root, dir), { recursive: true })
   for (const key of Object.keys(await Auth.all())) await Auth.remove(key)
 })
 
 afterEach(async () => {
   for (const key of Object.keys(await Auth.all())) await Auth.remove(key)
-  for (const key of ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME"]) {
+  for (const key of ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "OPENCODE_AUTH_CONTENT"]) {
     if (saved[key] === undefined) delete process.env[key]
     else process.env[key] = saved[key]
   }

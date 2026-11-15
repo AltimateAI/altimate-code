@@ -840,6 +840,9 @@ export namespace MessageV2 {
 
       if (msg.info.role === "assistant") {
         const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
+        // altimate_change start — Claude Agent: a switch between Claude models keeps the stopped-call flag
+        const keepAborted = !differentModel || ToolAborted.sharedSession(model.providerID, msg.info.providerID)
+        // altimate_change end
         const media: Array<{ mime: string; url: string }> = []
 
         if (
@@ -951,7 +954,7 @@ export namespace MessageV2 {
                   toolCallId: replayCallID,
                   input: part.state.input,
                   output,
-                  ...(differentModel ? {} : { callProviderMetadata: callMetadata }),
+                  ...(keepAborted ? { callProviderMetadata: callMetadata } : {}),
                 })
               } else {
                 assistantMessage.parts.push({
@@ -960,7 +963,7 @@ export namespace MessageV2 {
                   toolCallId: replayCallID,
                   input: part.state.input,
                   errorText: part.state.error,
-                  ...(differentModel ? {} : { callProviderMetadata: callMetadata }),
+                  ...(keepAborted ? { callProviderMetadata: callMetadata } : {}),
                 })
               }
               // altimate_change end
@@ -977,7 +980,7 @@ export namespace MessageV2 {
                 input: part.state.input,
                 errorText: "[Tool execution was interrupted]",
                 // altimate_change start — Claude Agent: a stopped call interrupts its waiting Claude turn
-                ...(differentModel ? {} : { callProviderMetadata: ToolAborted.mark(part.metadata) }),
+                ...(keepAborted ? { callProviderMetadata: ToolAborted.mark(part.metadata) } : {}),
                 // altimate_change end
               })
           }

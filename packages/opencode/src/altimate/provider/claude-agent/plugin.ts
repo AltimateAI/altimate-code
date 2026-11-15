@@ -67,7 +67,13 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
                 const login = await ClaudeAgent.loginCheck()
                 const deadline = Date.now() + RECHECK_LIMIT_MS
                 while (!login.disposed() && !signal?.aborted) {
-                  const reason = ClaudeAgent.problem(await login.run())
+                  // A dismissed dialog also stops a check that is already running.
+                  const state = await login.run(signal).catch((error) => {
+                    if (signal?.aborted) return undefined
+                    throw error
+                  })
+                  if (!state) break
+                  const reason = ClaudeAgent.problem(state)
                   if (!reason) return { type: "success" as const, key: ClaudeAgent.AUTH_KEY }
                   if (Date.now() >= deadline) {
                     log.warn("Claude Code login was not found", { reason })

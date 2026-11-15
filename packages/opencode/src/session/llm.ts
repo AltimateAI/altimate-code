@@ -163,7 +163,11 @@ export namespace LLM {
     // altimate_change start — upstream_fix: keep per-session environment last. Providers with explicit
     // cache breakpoints get it as its own trailing message (after the marked prefix); others keep a
     // single system message with the environment at the end. Either way plugins still see it.
-    const environment = input.environment?.length ? input.environment.join("\n") : undefined
+    // Claude Agent: a utility request (title, summary) sends these system messages as Claude's prompt,
+    // so the environment block is left out there too.
+    const claudeUtility =
+      ClaudeAgent.matches(input.model) && ClaudeAgent.isUtility({ agent: input.agent.name, small: input.small })
+    const environment = !claudeUtility && input.environment?.length ? input.environment.join("\n") : undefined
     const splitEnvironment = environment !== undefined && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
     if (environment !== undefined) {
       if (splitEnvironment) system.push(environment)
@@ -171,9 +175,10 @@ export namespace LLM {
     }
 
     const header = system[0]
-    // Claude Agent sends only the instruction sources (Claude Code supplies its own prompt and environment),
-    // so plugins transform that list, and their edits reach Claude.
-    const claudeInstructions = ClaudeAgent.matches(input.model)
+    // Claude Agent chats send only the instruction sources (Claude Code supplies its own prompt and
+    // environment), so plugins transform that list, and their edits reach Claude. Utility requests send
+    // the system messages themselves, so plugins transform those, as for other providers.
+    const claudeInstructions = ClaudeAgent.matches(input.model) && !claudeUtility
       ? [...input.system, input.user.system].filter((text): text is string => !!text)
       : undefined
     await Plugin.trigger(
