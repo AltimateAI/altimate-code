@@ -19,24 +19,25 @@ export interface DocsShareRange {
 export interface DocsShareThread {
   conversation_group_id: number
   owner?: number
-  status: "Pending" | "Resolved"
-  meta: {
+  /** "Pending" is open; any other value (e.g. "Resolved") is closed. */
+  status: string
+  meta?: {
     field?: "description"
     column?: string
     highlight?: string
     uniqueId?: string
     filePath?: string
     resource_type?: string
-    range?: DocsShareRange
-  }
+    range?: DocsShareRange | null
+  } | null
   conversations: DocsShareMessage[]
 }
 
 export interface DocsShare {
   share_id: number
-  name: string
+  name?: string
   description?: string
-  project_name: string
+  project_name?: string
   conversation_group: DocsShareThread[]
 }
 
@@ -57,12 +58,12 @@ const Range = z.object({
 const SharesAnswer = z.array(
   z.object({
     share_id: z.number(),
-    name: z.string(),
-    project_name: z.string(),
+    name: z.string().nullish(),
+    project_name: z.string().nullish(),
     conversation_group: z.array(
       z.object({
         conversation_group_id: z.number(),
-        status: z.enum(["Pending", "Resolved"]),
+        status: z.string(),
         meta: z.object({ range: Range.nullish() }).passthrough().nullish(),
         conversations: z.array(
           z.object({ conversation_id: z.number(), message: z.string(), timestamp: z.string(), user_id: z.number() }),
@@ -77,7 +78,9 @@ export async function listSharedDocs(projects: string[]): Promise<DocsShare[]> {
   const params = new URLSearchParams()
   for (const project of projects) params.append("projects", project)
   const shares = await AltimateApi.apiRequest("GET", `/dbt/dbt_docs_share/all?${params.toString()}`)
-  const parsed = SharesAnswer.safeParse(shares)
+  // A paginated answer wraps the shares in `items`; a bare array is accepted too.
+  const list = shares && !Array.isArray(shares) && Array.isArray(shares.items) ? shares.items : shares
+  const parsed = SharesAnswer.safeParse(list)
   if (!parsed.success) throw new Error("The shared docs service returned an unexpected answer for the shares.")
   return parsed.data as DocsShare[]
 }

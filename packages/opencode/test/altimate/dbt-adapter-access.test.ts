@@ -172,6 +172,14 @@ describe("dbtAdapterFor", () => {
     await expect(pending).rejects.toThrow("cancelled")
   })
 
+  test("a cancelled read-only call throws rather than returning a refusal", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      dbtAdapterFor({ ...ctx, abort: controller.signal, extra: { forceReadOnly: true } }),
+    ).rejects.toThrow()
+  })
+
   test("a cancelled call throws rather than answering", async () => {
     const controller = new AbortController()
     controller.abort()

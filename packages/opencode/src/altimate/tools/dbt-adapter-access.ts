@@ -25,10 +25,12 @@ export const dbtAdapterAccessInternals = {
  */
 export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | "extra">): Promise<DbtAdapterAccess> {
   const signal = ctx.abort
+  // A call cancelled before it starts is cancelled, not refused.
+  signal.throwIfAborted()
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
-      reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
+      reason: "this needs the dbt adapter, which a read-only call (no write permission, or plan mode) doesn't start: re-run with --allow-write outside plan mode",
     }
   try {
     const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")

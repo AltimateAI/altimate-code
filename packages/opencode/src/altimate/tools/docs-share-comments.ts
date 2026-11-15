@@ -41,8 +41,8 @@ export function openThreads(shares: DocsShare[], users: DocsShareUser[]): OpenTh
       if (group.status !== "Pending") continue
       out.push({
         share_id: share.share_id,
-        share_name: share.name,
-        project: share.project_name,
+        share_name: share.name ?? "",
+        project: share.project_name ?? "",
         group_id: group.conversation_group_id,
         file_path: group.meta?.filePath,
         unique_id: group.meta?.uniqueId,
@@ -76,10 +76,13 @@ function failure(title: string, output: string, error: string) {
 }
 
 /** Comment text is written by other people: one line each, so it cannot pose as another thread or author. */
-function oneLine(text: string): string {
-  return String(text ?? "")
+function oneLine(text: string, max = 2000): string {
+  const clean = String(text ?? "")
+    // Control characters (ESC, C0/C1) and bidi overrides would reach the terminal and the model as-is.
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
+  return clean.length > max ? `${clean.slice(0, max)}…` : clean
 }
 
 function formatThreads(threads: OpenThread[]): string {
@@ -145,7 +148,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
     if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan") {
       return failure(
         `docs_share_comments: ${args.action} refused`,
-        `${args.action} posts to the shared docs, so it needs write permission: this call is read-only. Re-run with --allow-write.`,
+        `${args.action} posts to the shared docs, so it needs write permission and is not available in plan mode: this call is read-only. Re-run with --allow-write outside plan mode.`,
         "read_only",
       )
     }
@@ -179,7 +182,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
       const msg = e instanceof Error ? e.message : String(e)
       return failure(
         "docs_share_comments: ERROR",
-        `Could not ${args.action === "reply" ? "reply to" : "resolve"} the thread: ${msg}`,
+        `Could not ${args.action === "reply" ? "reply to" : "resolve"} the thread: ${msg}. The ${args.action} may already have been posted: run list to check before trying again.`,
         msg,
       )
     }

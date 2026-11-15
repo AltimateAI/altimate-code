@@ -146,7 +146,6 @@ describe("docs_share_comments list", () => {
     const broken = [
       [{ detail: "maintenance" }],
       [{ ...SHARES[0], conversation_group: null }],
-      [{ ...SHARES[0], conversation_group: [{ ...SHARES[0]!.conversation_group[0], status: "Archived" }] }],
       [{ ...SHARES[0], conversation_group: [{ ...SHARES[0]!.conversation_group[0], conversations: null }] }],
     ]
     for (const shares of broken) {
@@ -155,6 +154,51 @@ describe("docs_share_comments list", () => {
       expect(result.metadata.success).toBe(false)
       expect(result.output).toContain("unexpected answer")
     }
+  })
+
+  test("an unknown thread status does not fail the list and is not open", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? [{ ...SHARES[0], conversation_group: [{ ...group, status: "Archived" }, { ...group, conversation_group_id: 99 }] }]
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    expect(result.metadata.success).toBe(true)
+    expect((result.metadata as any).threads.map((t: any) => t.group_id)).toEqual([99])
+  })
+
+  test("a paginated answer is unwrapped, and a share without name or project_name still lists", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? { items: [{ ...SHARES[0], name: null, project_name: undefined }], total: 1 }
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    expect(result.metadata.success).toBe(true)
+    expect((result.metadata as any).count).toBe(2)
+  })
+
+  test("escape and control characters and overlong text in comments are neutralised", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    const evil = { conversation_id: 900, user_id: 1, timestamp: "t", message: `a\u001b[31mred\u202eb${"x".repeat(5000)}` }
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? [{ ...SHARES[0], conversation_group: [{ ...group, conversations: [evil] }] }]
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    expect(result.output).not.toMatch(/[\u001b\u202e]/)
+    expect(result.output.length).toBeLessThan(2500)
+  })
+
+  test("a failed reply says it may have been posted and to list first", async () => {
+    failOn = "/conversation"
+    const tool = await initTool(DocsShareCommentsTool)
+    const result = await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("may already have been posted")
+    expect(result.output).toContain("list")
   })
 
   test("comment text is one line and marked as data, so it cannot pose as another thread", async () => {
