@@ -1185,6 +1185,21 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — GET /altimate/provider/subscriptions: subscription logins already on this
+      // machine, for the welcome picker. Names the subscriptions only; no credential leaves the server.
+      .get("/altimate/provider/subscriptions", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { detect } = await import("../altimate/provider/subscriptions")
+          return c.json({ ok: true as const, found: await detect() })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.warn("subscription detection failed", { error })
+          return c.json({ ok: true as const, found: [] })
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/workspace/starter
       // The fixed "what this workspace has, what next?" message for the IDE extension's chat and the
       // TUI after a link: no model call, same data as the prompt's workspace section. A link that
