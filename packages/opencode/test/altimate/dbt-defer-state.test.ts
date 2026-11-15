@@ -181,6 +181,22 @@ describe("dbt_defer_state", () => {
     expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")
   })
 
+  test("a settings file holding a stray token is still unreadable", async () => {
+    write(".vscode/settings.json", "}")
+    expect(findDeferSetting(path.join(root, "analytics"))).toBeUndefined()
+    write(".vscode/settings.json", JSON.stringify({ "dbt.deferConfigPerProject": { analytics: { deferToProduction: true } } }))
+    fs.mkdirSync(path.join(root, "analytics", ".vscode"), { recursive: true })
+    fs.writeFileSync(path.join(root, "analytics", ".vscode", "settings.json"), "}")
+    expect(findDeferSetting(path.join(root, "analytics"))).toBeUndefined()
+  })
+
+  test("an env_var() default may hold the other quote character", async () => {
+    write("analytics/dbt_project.yml", "name: shop\nprofile: shop\n")
+    write("profiles/profiles.yml", "shop:\n  target: \"{{ env_var('DEFER_TEST_Q', 'say \\\"hi\\\"') }}\"\n  outputs:\n    dev:\n      type: duckdb\n")
+    delete process.env.DEFER_TEST_Q
+    expect((await resolveDeferState(path.join(root, "analytics"))).defaultTarget).toBe('say "hi"')
+  })
+
   test("a settings key naming the project through a symlink matches the real project path", () => {
     const outside = fs.mkdtempSync(path.join(path.dirname(root), "ext2-"))
     fs.symlinkSync(outside, path.join(root, "linked"))

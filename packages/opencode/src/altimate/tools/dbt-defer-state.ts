@@ -1,7 +1,7 @@
 import z from "zod"
 import fs from "fs"
 import path from "path"
-import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser"
+import { parse as parseJsonc, stripComments, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
 import { resolveEnvVars, resolveProfilesPath } from "../native/connections/dbt-profiles"
 
@@ -57,8 +57,8 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
   // .vscode/settings.json allows comments and trailing commas.
   const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
   // A file that does not parse cannot be trusted to say defer is on.
-  // A file holding only comments has no value to parse, which VS Code reads as empty settings.
-  if (parsed === undefined && errors.every((e) => printParseErrorCode(e.error) === "ValueExpected")) return {}
+  // A file holding only comments has no value to parse, which VS Code reads as empty settings; a stray token is not that.
+  if (parsed === undefined && stripComments(text).trim() === "") return {}
   if (errors.length > 0) return UNREADABLE
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return UNREADABLE
   return parsed as Record<string, unknown>
