@@ -330,12 +330,33 @@ function writeAll(text: string) {
   }
 }
 
+const ToolReportEventCommand = cmd({
+  command: "report-event <action>",
+  describe: "record what a person did with the Claude Code plugin's lineage report (usage telemetry; nothing is sent when telemetry is off)",
+  builder: (yargs: Argv) =>
+    yargs
+      .positional("action", { type: "string", describe: "what happened to the report", demandOption: true })
+      .option("session", { type: "string", describe: "the Claude Code session: claude:<id>", demandOption: true }),
+  handler: async (args) => {
+    const { reportEvent } = await import("../../altimate/tool-cli/report-event")
+    const event = reportEvent(args.action, args.session)
+    if ("error" in event) {
+      console.error(event.error)
+      process.exitCode = 1
+      return
+    }
+    // Flushed, or dropped under the opt-out, when the CLI exits.
+    const { Telemetry } = await import("../../altimate/telemetry")
+    Telemetry.track(event)
+  },
+})
+
 /** How long `writeAll` waits for a reader that has stopped taking output before it gives up. */
 const WRITE_STALL_MS = 60_000
 
 export const ToolCommand = cmd({
   command: "tool",
   describe: "run altimate-code data tools directly, without a model",
-  builder: (yargs: Argv) => yargs.command(ToolListCommand).command(ToolContextCommand).command(ToolSchemaCommand).command(ToolRunCommand).command(ToolDaemonCommand).demandCommand(),
+  builder: (yargs: Argv) => yargs.command(ToolListCommand).command(ToolContextCommand).command(ToolSchemaCommand).command(ToolRunCommand).command(ToolDaemonCommand).command(ToolReportEventCommand).demandCommand(),
   async handler() {},
 })

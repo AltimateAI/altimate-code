@@ -258,11 +258,13 @@ const ALL_EVENT_TYPES: Telemetry.Event["type"][] = [
   "rules_delivered",
   "rules_learning_changed",
   "rules_command",
+  "first_prompt_sent",
+  "first_job_completed",
 ]
 
 describe("telemetry.event-types", () => {
   test("all event types are valid", () => {
-    expect(ALL_EVENT_TYPES.length).toBe(55)
+    expect(ALL_EVENT_TYPES.length).toBe(57)
   })
 })
 

@@ -52,6 +52,8 @@ beforeEach(async () => {
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = typeof input === "string" ? input : input.url
     const method = (init?.method ?? "GET").toUpperCase()
+    // A server older than workspace review: its routes do not exist.
+    if (url.includes("/reviews")) return json({ detail: "Not Found" }, 404)
     if (method === "GET" && url.endsWith("/users/me")) return json({ id: 7 })
     if (method === "GET" && url.endsWith("/datamates/"))
       return json({ datamates: [{ id: 14, name: "quick", memory_enabled: false, user_id: 7 }] })

@@ -131,7 +131,7 @@ const compactionBoundary = Effect.fn("Test.compactionBoundary")(function* (sessi
   yield* addAssistant(sessionID, user, { summary: true, finish: "stop" })
 })
 
-const writePaths = (ledger: ReturnType<typeof SessionCompaction.buildLedger>) =>
+const writePaths = (ledger: SessionCompaction.Ledger) =>
   ledger.writes.map((w) => w.path).sort()
 
 describe("SessionCompaction.ledgerHistory", () => {
@@ -162,9 +162,11 @@ describe("SessionCompaction.ledgerHistory", () => {
 
         // The regression this fix closes: the filtered view has already lost the
         // pre-compaction write, so a ledger built from it forgets /early.sql.
-        expect(writePaths(SessionCompaction.buildLedger(filtered))).not.toContain("/early.sql")
+        const fromFiltered = yield* Effect.promise(() => SessionCompaction.buildLedger(filtered))
+        expect(writePaths(fromFiltered)).not.toContain("/early.sql")
         // The unfiltered history the ledger now uses keeps both.
-        expect(writePaths(SessionCompaction.buildLedger(full))).toEqual(["/early.sql", "/late.sql"])
+        const fromFull = yield* Effect.promise(() => SessionCompaction.buildLedger(full))
+        expect(writePaths(fromFull)).toEqual(["/early.sql", "/late.sql"])
       }),
     ),
   )

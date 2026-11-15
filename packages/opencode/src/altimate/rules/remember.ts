@@ -6,6 +6,7 @@
 
 import fs from "node:fs/promises"
 import { Log } from "@/util/log"
+import { WorkspaceRole } from "../workspace/role"
 
 const log = Log.create({ service: "rules.remember" })
 
@@ -288,8 +289,14 @@ export async function proposeFor(input: {
       metadata: { ...metadata, action: "error" },
       output: `Not proposed: a team rule must be one line of at most 140 characters with no commands, links or secrets (${result.reason}). Restate it as one short line and save it again.`,
     }
-  const owner = state.workspace.is_owner ? "you (the workspace owner)" : (state.workspace.owner_name ?? "the workspace owner")
-  const answer = state.workspace.is_owner ? "approve it now" : `send it to ${owner} for review`
+  const role = WorkspaceRole.roleOf(state.workspace)
+  const owner =
+    role === "owner"
+      ? "you (the workspace owner)"
+      : role === "admin"
+        ? "you (a workspace admin)"
+        : (state.workspace.owner_name ?? "the workspace owner")
+  const answer = role === "member" ? `send it to ${owner} for review` : "approve it now"
   if (stored) {
     const what = result.choose
       ? `Kept for the person to decide: save this as a memory (just for them) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or skip it.`

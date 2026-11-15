@@ -74,6 +74,18 @@ describe("first-event claim", () => {
     expect(await claim("first_prompt_sent", 7)).toBe(false)
   })
 
+  test("a claim given the turn's account is that tenant's, not the credential read at claim time", async () => {
+    // The turn resolved its workspace under acme; the machine has signed in to another tenant since.
+    restore.pop()?.()
+    signInTo("other")
+    expect(await claim("first_prompt_sent", 7, { tenant: "acme", apiUrl: "https://api.test" })).toBe(true)
+    // The same id under the credential read now is another tenant's workspace, still unclaimed.
+    expect(await claim("first_prompt_sent", 7)).toBe(true)
+    restore.pop()?.()
+    signInTo("acme")
+    expect(await claim("first_prompt_sent", 7)).toBe(false)
+  })
+
   test("nothing is claimed while telemetry is off, so opting back in can still send", async () => {
     const off = spyOn(Telemetry, "isEnabled").mockImplementation(() => false)
     expect(await claim("first_prompt_sent", 7)).toBe(false)

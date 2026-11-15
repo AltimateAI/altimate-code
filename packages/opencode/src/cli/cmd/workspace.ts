@@ -1,6 +1,6 @@
 // altimate_change - new file
 //
-// `altimate-code workspace list|status|refresh|sync|unlink`: the `/workspace` menu's actions for a shell,
+// `altimate-code workspace list|status|refresh|sync|unlink|review status`: the `/workspace` menu's actions for a shell,
 // so a setup script, a devcontainer, CI or another agent can manage a project's workspace without
 // the TUI. Thin wrappers over `altimate/workspace/manage.ts` — the same code the menu and the
 // `serve` routes run — with plain-text output, `--json` for scripts, and exit codes a caller can
@@ -17,9 +17,11 @@ import { bootstrap } from "../bootstrap"
 import { UI } from "../ui"
 import { SIGN_IN_COMMAND, stripControlChars } from "./link"
 import { AltimateApi } from "@/altimate/api/client"
-import { WorkspaceApi, type DatamateRef } from "@/altimate/workspace/api-client"
+import { WorkspaceApi, type ActAs, type DatamateRef } from "@/altimate/workspace/api-client"
 import * as Manage from "@/altimate/workspace/manage"
-import { resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
+import { ReviewApi } from "@/altimate/workspace/review-api"
+import { printable, printableDeep } from "@/altimate/rules/printable"
 
 export const EXIT = { OK: 0, FAILED: 1, USAGE: 2, NOT_LINKED: 3 } as const
 
@@ -299,6 +301,99 @@ export async function runUnlink(directory: string, json: boolean, yes: boolean, 
   }
 }
 
+/** What `workspace review status` needs; replaced in tests. Changes nothing on the server. */
+export interface ReviewStatusDeps {
+  isConfigured(): Promise<boolean>
+  /** The project's workspace, resolved like every other command: the local link while recently confirmed, else the
+   * service, which also reports an unlink or a rebind made elsewhere. */
+  binding(
+    directory: string,
+  ): Promise<{ status: "bound"; datamateId: number; datamateName: string; actAs: ActAs } | { status: "unbound" | "unknown" }>
+  /** With the credential the link was resolved for. */
+  listMine(datamateId: number, actAs: ActAs): Promise<Awaited<ReturnType<typeof ReviewApi.listMine>>>
+  print(line: string): void
+  printError(line: string): void
+  printJson(payload: unknown): void
+}
+
+export const reviewStatusDeps: ReviewStatusDeps = {
+  isConfigured: defaultDeps.isConfigured,
+  binding: async (directory) => {
+    // One credential for the link and the listing: captured first, and still the one signed in once the link is
+    // resolved (a sign-in switch in between would list one account's requests against another's link).
+    const actAs = await WorkspaceApi.captureCredentials()
+    if (!actAs) return { status: "unknown" }
+    const outcome = await resolveBindingOutcome(directory).catch((): BindingOutcome => ({ status: "unknown" }))
+    if (outcome.status !== "bound") return { status: outcome.status }
+    if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return { status: "unknown" }
+    return { status: "bound", datamateId: outcome.binding.datamateId, datamateName: outcome.binding.datamateName, actAs }
+  },
+  listMine: (datamateId, actAs) => ReviewApi.listMine(datamateId, actAs),
+  print: defaultDeps.print,
+  printError: defaultDeps.printError,
+  printJson: defaultDeps.printJson,
+}
+
+const REVIEW_STATUS: Record<ReviewApi.Contribution["status"], string> = {
+  pending: "pending review",
+  active: "approved",
+  rejected: "rejected",
+  superseded: "replaced by a newer request",
+  withdrawn: "withdrawn",
+  retired: "removed from the workspace",
+}
+
+/** One line per request for `workspace review status`. Pure, so the wording is testable. Server text is made printable. */
+export function describeReviews(workspaceName: string, listed: Awaited<ReturnType<typeof ReviewApi.listMine>>): string[] {
+  const workspace = printable(workspaceName)
+  if (!listed.items.length && !listed.skipped) return [`You have no review requests in "${workspace}".`]
+  const lines = [`Your review requests in "${workspace}", newest first:`]
+  for (const item of listed.items) {
+    const change = item.change === "edit" ? "update" : "new"
+    const reviewer = item.reviewed_by_name ? ` by ${printable(item.reviewed_by_name)}` : ""
+    const reason = item.review_reason ? `: ${printable(item.review_reason)}` : ""
+    const decided = item.status === "active" || item.status === "rejected" || item.status === "retired" ? `${reviewer}${reason}` : ""
+    // Expired requests stay pending and can still be approved: the label says they have waited past the window.
+    const expired = item.status === "pending" && item.expired ? " (expired: waiting longer than 14 days)" : ""
+    lines.push(`  ${item.kind} "${printable(item.name)}" (${change}): ${REVIEW_STATUS[item.status]}${decided}${expired}`)
+  }
+  if (listed.skipped)
+    lines.push(`${listed.skipped} request${listed.skipped === 1 ? "" : "s"} could not be read by this version of altimate-code.`)
+  if (!listed.complete) lines.push(`Showing the newest ${listed.items.length}; older requests are in the workspace's Reviews page.`)
+  return lines
+}
+
+/** `workspace review status`: the caller's own skill and knowledge submissions to the linked workspace. Changes nothing
+ * on the server. */
+export async function runReviewStatus(directory: string, json: boolean, deps: ReviewStatusDeps = reviewStatusDeps): Promise<number> {
+  const out = { ...defaultDeps, print: deps.print, printError: deps.printError, printJson: deps.printJson }
+  if (!(await deps.isConfigured())) return failure(out, json, EXIT.USAGE, NOT_SIGNED_IN)
+  const binding = await deps.binding(directory)
+  if (binding.status === "unbound") return report(out, json, EXIT.NOT_LINKED, { linked: false }, NOT_LINKED_LINES)
+  if (binding.status !== "bound")
+    return failure(out, json, EXIT.FAILED, "Could not reach the workspace service to check whether this project is linked. Try again.")
+  try {
+    const listed = await deps.listMine(binding.datamateId, binding.actAs)
+    return report(
+      out,
+      json,
+      EXIT.OK,
+      {
+        workspace_id: binding.datamateId,
+        workspace_name: printable(binding.datamateName),
+        ...listed,
+        // Server text reaches terminals and agent context: made printable here, as the text form is.
+        items: printableDeep(listed.items),
+      },
+      describeReviews(binding.datamateName, listed),
+    )
+  } catch (err) {
+    if (ReviewApi.unavailable(err))
+      return failure(out, json, EXIT.FAILED, "This workspace service does not support review requests yet.")
+    return failure(out, json, EXIT.FAILED, `Could not load your review requests: ${messageOf(err)}`)
+  }
+}
+
 function messageOf(err: unknown): string {
   return stripControlChars(err instanceof Error ? err.message : String(err))
 }
@@ -380,9 +475,87 @@ const UnlinkCommand = cmd({
   },
 })
 
+// Account-scoped like `list`: it does not open the project (no plugins, no background syncs) and changes nothing on the
+// server; resolving the link may refresh this machine's record of it, as `workspace status` does.
+const ReviewStatusCommand = cmd({
+  command: "status",
+  describe: "list your skill and knowledge review requests on the linked workspace",
+  builder: (yargs) => yargs.option("directory", DIRECTORY).option("json", JSON_FLAG),
+  handler: async (args) => {
+    process.exitCode = await runReviewStatus(args.directory ?? process.cwd(), args.json)
+  },
+})
+
+// For clients that show decisions themselves (the Claude Code plugin's toast): always JSON, always exit 0, so a client
+// can tell an older CLI (no such command, non-JSON) from an answer.
+const ReviewDecisionsCommand = cmd({
+  command: "decisions",
+  describe: "decisions on your skill and knowledge requests, as JSON (for editor and agent plugins)",
+  builder: (yargs) =>
+    yargs
+      .option("directory", DIRECTORY)
+      .option("json", JSON_FLAG)
+      .option("unseen", { type: "boolean", default: false, describe: "Only decisions not given to --host yet (last 14 days); the first ask answers none" })
+      .option("mark-seen", { type: "boolean", default: false, describe: "Remember the decisions returned as given to --host" })
+      .option("claim", { type: "boolean", default: false, describe: "Hold the decisions returned for --host until --ack (or 5 minutes)" })
+      .option("ack", { type: "string", array: true, describe: "Keys (from `key`) --host showed: remembered as given, nothing else is asked" })
+      .option("host", { type: "string", describe: "The client asking, e.g. claude-ui" }),
+  handler: async (args) => {
+    process.stdout.write(JSON.stringify(await reviewDecisions(args).catch(() => ({ ok: false, status: "failed" }))) + "\n")
+    process.exitCode = 0
+  },
+})
+
+/** `workspace review decisions` without the printing: the one JSON object it prints. Exported for its tests. */
+export async function reviewDecisions(args: {
+  directory?: string
+  host?: string
+  unseen: boolean
+  "mark-seen": boolean
+  claim: boolean
+  ack?: (string | number)[]
+}): Promise<object> {
+  const { ReviewNotices } = await import("@/altimate/workspace/review-notices")
+  const directory = args.directory ?? process.cwd()
+  // The per-client flags without the client would answer every kept decision, every time.
+  if (!args.host && (args.ack?.length || args.unseen || args["mark-seen"] || args.claim)) return { ok: false, status: "host_required" }
+  if (args.host && args.ack?.length) {
+    const acked = await ReviewNotices.ackHostDecisions(directory, args.host, args.ack.map(String))
+    return acked.ok ? { ok: true } : { ok: false, status: "failed" }
+  }
+  const result = await ReviewNotices.hostDecisions(directory, {
+    ...(args.host ? { host: args.host } : {}),
+    unseen: args.unseen,
+    markSeen: args["mark-seen"],
+    claim: args.claim,
+  })
+  if (!result.ok) return result
+  return {
+    ok: true,
+    decisions: result.decisions.map((d) => ({
+      key: ReviewNotices.decisionKey(d),
+      kind: d.kind,
+      public_id: d.public_id,
+      name: printable(d.name),
+      status: d.status,
+      at: d.at,
+      ...(d.reason ? { reason: printable(d.reason) } : {}),
+      ...(d.reviewer ? { reviewer: printable(d.reviewer) } : {}),
+    })),
+    waiting: result.waiting,
+  }
+}
+
+const ReviewCommand = cmd({
+  command: "review",
+  describe: "your review requests on the linked workspace (approve or reject them in the Altimate web app)",
+  builder: (yargs) => yargs.command(ReviewStatusCommand).command(ReviewDecisionsCommand).demandCommand(),
+  async handler() {},
+})
+
 export const WorkspaceCommand = cmd({
   command: "workspace",
-  describe: "manage this project's Altimate workspace (list, status, refresh, sync, unlink)",
+  describe: "manage this project's Altimate workspace (list, status, refresh, sync, unlink, review status)",
   builder: (yargs) =>
     yargs
       .command(ListCommand)
@@ -390,6 +563,7 @@ export const WorkspaceCommand = cmd({
       .command(RefreshCommand)
       .command(SyncCommand)
       .command(UnlinkCommand)
+      .command(ReviewCommand)
       .demandCommand(),
   async handler() {},
 })
