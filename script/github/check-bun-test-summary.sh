@@ -3,8 +3,9 @@
 #
 # Bun 1.3.x can segfault during process cleanup after every test passed (exit 143/SIGTERM or
 # 134/SIGABRT), so the CI steps ignore bun's exit code and parse its summary lines instead. Each
-# file must hold one run's output. Fails when any run reports failures, when a run printed no
-# summary (bun crashed before finishing), or when nothing passed at all.
+# file must hold one run's output. Fails when any run reports failures or errors outside a test
+# (bun's " N error(s)" line), when a run printed no summary (bun crashed before finishing), or when
+# nothing passed at all.
 #
 # Usage: check-bun-test-summary.sh <output-file>...
 set -euo pipefail
@@ -17,13 +18,19 @@ fi
 sum_field() { awk -v f="$1" '$0 ~ ("^ *[0-9]+ " f "$"){s+=$1} END{print s+0}' "${@:2}"; }
 PASS_COUNT=$(sum_field pass "$@")
 FAIL_COUNT=$(sum_field fail "$@")
+ERROR_COUNT=$(( $(sum_field error "$@") + $(sum_field errors "$@") ))
 
 echo ""
 echo "--- Test Summary ($# runs) ---"
-echo "pass=$PASS_COUNT fail=$FAIL_COUNT"
+echo "pass=$PASS_COUNT fail=$FAIL_COUNT error=$ERROR_COUNT"
 
 if [ "$FAIL_COUNT" != "0" ]; then
   echo "::error::$FAIL_COUNT test(s) failed"
+  exit 1
+fi
+
+if [ "$ERROR_COUNT" != "0" ]; then
+  echo "::error::$ERROR_COUNT error(s) outside a test"
   exit 1
 fi
 
