@@ -8,6 +8,7 @@ export type DbtAdapterRefusal = "read_only" | "other_project" | "no_project" | "
 
 /** The project's dbt adapter, or why this call may not use it (`reason` is a sentence for the user). */
 export type DbtAdapterAccess =
+  // The adapter is the untyped dbt integration object from the dbt-integration package.
   | { adapter: any; refusal?: undefined; reason?: undefined }
   | { adapter?: undefined; refusal: DbtAdapterRefusal; reason: string }
 

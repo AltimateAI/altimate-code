@@ -305,6 +305,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
   const readList = (start: number, strict: boolean) => {
     let i = start
     for (;;) {
+      // LATERAL prefixes a table expression in the list; the list goes on after it.
+      if (tokens[i]?.kind === "word" && tokens[i].text.toLowerCase() === "lateral") i++
       if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
       else {
         const first = tokens[i]
@@ -361,9 +363,17 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
   return { refs, ctes }
 }
 
+/** A single-quoted Jinja string literal. */
+function jinjaString(value: string): string {
+  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
+}
+
 /** The model, snapshot, seed and source nodes of a manifest, each with its relation's name parts. */
+// The manifest is parsed JSON of a shape dbt owns and versions; its fields are checked where they are read.
 export function manifestRelations(manifest: any): Relation[] {
   const rootProject: string | undefined = manifest?.metadata?.project_name
+  // Only BigQuery names put dots inside backticks; elsewhere a dot in a quoted name is part of the name.
+  const splitDots = detectDialect(manifest).toLowerCase() === "bigquery"
   const out: Relation[] = []
   const relationOf = (node: any): string | undefined => {
     if (typeof node?.relation_name === "string" && node.relation_name) return node.relation_name
@@ -392,8 +402,10 @@ export function manifestRelations(manifest: any): Relation[] {
       node.version === null || node.version === undefined || node.version === ""
         ? ""
         : `, v=${JSON.stringify(node.version)}`
-    const call = pkg ? `{{ ref('${pkg}', '${node.name}'${version}) }}` : `{{ ref('${node.name}'${version}) }}`
-    out.push({ kind, name: node.name, uniqueId, relationName, parts: splitQualified(relationName, true), call })
+    const call = pkg
+      ? `{{ ref(${jinjaString(pkg)}, ${jinjaString(node.name)}${version}) }}`
+      : `{{ ref(${jinjaString(node.name)}${version}) }}`
+    out.push({ kind, name: node.name, uniqueId, relationName, parts: splitQualified(relationName, splitDots), call })
   }
   const sources: Record<string, any> = manifest?.sources ?? {}
   for (const [uniqueId, node] of Object.entries(sources)) {
@@ -404,8 +416,8 @@ export function manifestRelations(manifest: any): Relation[] {
       name: node.name,
       uniqueId,
       relationName,
-      parts: splitQualified(relationName, true),
-      call: `{{ source('${node.source_name}', '${node.name}') }}`,
+      parts: splitQualified(relationName, splitDots),
+      call: `{{ source(${jinjaString(node.source_name)}, ${jinjaString(node.name)}) }}`,
     })
   }
   return out
@@ -418,7 +430,9 @@ export function matchParts(parts: string[], relation: string[]): Exclude<Relatio
   const same = parts.every((p, i) => p === tail[i])
   const fold = parts.every((p, i) => p.toLowerCase() === tail[i].toLowerCase())
   if (parts.length < relation.length) return fold ? "partial" : null
-  return same ? "exact" : fold ? "case_insensitive" : null
+  if (same) return "exact"
+  if (fold) return "case_insensitive"
+  return null
 }
 
 /** Map each table of `sql` to the manifest's ref() or source() call that builds it. */
@@ -429,7 +443,7 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
   const entries: Reference[] = []
   const seen = new Set<string>()
   const add = (r: Reference) => {
-    const key = r.raw.replace(/\s+/g, " ")
+    const key = r.raw
     if (seen.has(key)) return
     seen.add(key)
     entries.push(r)
@@ -552,7 +566,7 @@ async function defaultManifestPath(): Promise<string | null> {
   if (!root) return null
   let real = root
   try {
-    real = fs.realpathSync(root)
+    real = await fs.promises.realpath(root)
   } catch {}
   return path.join(real, "target", "manifest.json")
 }

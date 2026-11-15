@@ -510,3 +510,35 @@ describe("dbt_map_relations tool", () => {
     expect(result.output).toBe("No tables found in the SQL.")
   })
 })
+
+describe("review regressions", () => {
+  test("a name with a quote or backslash is escaped in the generated call", () => {
+    const rel = manifestRelations({
+      nodes: { "model.p.o'x": { resource_type: "model", name: "o'x", schema: "s", database: "d", package_name: "p" } },
+      sources: { "source.p.a.b": { source_name: "a\\b", name: "b'c", schema: "s", database: "d" } },
+    })
+    expect(rel.find((r) => r.kind === "model")?.call).toBe("{{ ref('o\\'x') }}")
+    expect(rel.find((r) => r.kind === "source")?.call).toBe("{{ source('a\\\\b', 'b\\'c') }}")
+  })
+
+  test("a dot inside backticks is split for BigQuery manifests only", () => {
+    const node = { resource_type: "model", name: "orders", relation_name: "`main`.`raw`.`orders.v1`", schema: "raw" }
+    const dbx = manifestRelations({ metadata: { adapter_type: "databricks" }, nodes: { "model.p.orders": node } })
+    expect(dbx[0].parts).toEqual(["main", "raw", "orders.v1"])
+    const bq = manifestRelations({ metadata: { adapter_type: "bigquery" }, nodes: { "model.p.orders": node } })
+    expect(bq[0].parts).toEqual(["main", "raw", "orders", "v1"])
+  })
+
+  test("the table list goes on after LATERAL", () => {
+    const { refs } = scanTableReferences(
+      "select * from db.one.orders a, lateral flatten(input => a.items) f, db.two.orders b",
+      "snowflake",
+    )
+    expect(refs.map((r) => r.raw)).toEqual(["db.one.orders", "db.two.orders"])
+  })
+
+  test("quoted names that differ only in inner whitespace are different tables", () => {
+    const rows = mapRelations(['"A  B"', '"A B"'], 'select * from "A  B", "A B"', [], "snowflake")
+    expect(rows.map((r) => r.raw)).toEqual(['"A  B"', '"A B"'])
+  })
+})

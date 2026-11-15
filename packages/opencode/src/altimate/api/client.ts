@@ -353,6 +353,7 @@ export namespace AltimateApi {
    * message naming the credentials file when none are stored or they can't be read.
    */
   export async function apiRequest(method: string, endpoint: string, body?: unknown): Promise<any> {
+    // The body is whatever JSON the endpoint returns; each endpoint function in other files types its own result.
     let creds: AltimateCredentials
     try {
       creds = await getCredentials()
