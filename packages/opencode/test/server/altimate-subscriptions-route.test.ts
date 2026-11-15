@@ -22,8 +22,12 @@ const get = (headers: Record<string, string> = {}) =>
 
 test("works with the workspace feature turned off", async () => {
   process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
-  spies.push(spyOn(Subscriptions, "detect").mockResolvedValue([{ subscription: "claude", source: "claude-code" }]))
-  spies.push(spyOn(Subscriptions, "retiredAnthropicLogin").mockResolvedValue(false))
+  spies.push(
+    spyOn(Subscriptions, "scan").mockResolvedValue({
+      found: [{ subscription: "claude", source: "claude-code" }],
+      retiredAnthropicLogin: false,
+    }),
+  )
   const response = await get()
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({
@@ -34,21 +38,25 @@ test("works with the workspace feature turned off", async () => {
 })
 
 test("reports an old Anthropic login even when a Claude Code login is found", async () => {
-  spies.push(spyOn(Subscriptions, "detect").mockResolvedValue([{ subscription: "claude", source: "claude-code" }]))
-  spies.push(spyOn(Subscriptions, "retiredAnthropicLogin").mockResolvedValue(true))
+  spies.push(
+    spyOn(Subscriptions, "scan").mockResolvedValue({
+      found: [{ subscription: "claude", source: "claude-code" }],
+      retiredAnthropicLogin: true,
+    }),
+  )
   const response = await get()
   expect(((await response.json()) as { retiredAnthropicLogin: boolean }).retiredAnthropicLogin).toBe(true)
 })
 
 test("a detection failure answers none found", async () => {
-  spies.push(spyOn(Subscriptions, "detect").mockRejectedValue(new Error("boom")))
+  spies.push(spyOn(Subscriptions, "scan").mockRejectedValue(new Error("boom")))
   const response = await get()
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({ ok: true, found: [], retiredAnthropicLogin: false })
 })
 
 test("a cross-site browser request is refused", async () => {
-  const detect = spyOn(Subscriptions, "detect").mockResolvedValue([])
+  const detect = spyOn(Subscriptions, "scan").mockResolvedValue({ found: [], retiredAnthropicLogin: false })
   spies.push(detect)
   const response = await get({ "sec-fetch-site": "cross-site" })
   expect(response.status).toBe(403)

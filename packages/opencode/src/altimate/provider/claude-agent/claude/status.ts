@@ -24,9 +24,12 @@ export const make = Effect.fn("ClaudeStatus.make")(function* (
 ) {
   const state = yield* SubscriptionRef.make<State>({ type: "checking" })
   const lock = yield* Semaphore.make(1)
+  // altimate_change — bumped by every check and report, so an older check cannot overwrite a newer result
+  let generation = 0
 
   // Serialized so a reconnect checks again after startup, rather than racing it with an older account snapshot.
   const refresh = Effect.fn("ClaudeStatus.refresh")(function* () {
+    const started = ++generation
     const executable = io.which()
     if (!executable) return yield* SubscriptionRef.set(state, { type: "missing" })
     const env = yield* connection()
@@ -41,10 +44,14 @@ export const make = Effect.fn("ClaudeStatus.make")(function* (
         ),
       ),
     )
-    yield* SubscriptionRef.set(state, next)
+    if (generation === started) yield* SubscriptionRef.set(state, next)
   }, lock.withPermit)
 
-  const report = (next: State) => SubscriptionRef.set(state, next)
+  const report = (next: State) =>
+    Effect.suspend(() => {
+      generation++
+      return SubscriptionRef.set(state, next)
+    })
 
   return { state, refresh, report } satisfies Interface
 })

@@ -26,10 +26,21 @@ const STORED: Record<string, Subscription> = {
   gitlab: "gitlab-duo",
 }
 
+export interface Scan {
+  found: Found[]
+  // A Claude Pro/Max login saved by the removed Anthropic sign-in. Reported apart from `found`, which
+  // keeps one entry per subscription and so hides it behind a Claude Code login.
+  retiredAnthropicLogin: boolean
+}
+
 // Lists subscription logins already on this machine, expired ones included: the point is to suggest
 // a login the user already has, and connecting refreshes or re-asks as needed. Only checks that a
 // login exists; no token is read into the result or leaves this process.
 export async function detect(): Promise<Found[]> {
+  return (await scan()).found
+}
+
+export async function scan(): Promise<Scan> {
   const found = new Map<Subscription, Found>()
   const add = (subscription: Subscription, source: Found["source"]) => {
     if (!found.has(subscription)) found.set(subscription, { subscription, source })
@@ -57,14 +68,7 @@ export async function detect(): Promise<Found[]> {
   if (copilot) add("copilot", "copilot")
   // Last, so a working Claude Code login is what the picker reports when both are present.
   if (retired) add("claude", "anthropic-login")
-  return [...found.values()]
-}
-
-// A Claude Pro/Max login saved by the removed Anthropic sign-in. Reported apart from `detect()`, which
-// keeps one entry per subscription and so hides it behind a Claude Code login.
-export async function retiredAnthropicLogin(): Promise<boolean> {
-  const stored = await Auth.all().catch(() => ({}) as Record<string, Auth.Info>)
-  return stored.anthropic?.type === "oauth"
+  return { found: [...found.values()], retiredAnthropicLogin: retired }
 }
 
 const home = () => os.homedir()

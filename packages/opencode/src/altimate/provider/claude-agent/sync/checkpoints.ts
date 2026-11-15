@@ -34,8 +34,9 @@ export function build(input: {
     history.push({ hash: group.hash, claudeMessageID })
   }
   if (input.reply.length > 0) {
-    const replyGroup = Fingerprint.groups([{ role: "assistant", content: input.reply }])[0]!
-    history.push({ hash: replyGroup.hash, claudeMessageID: input.messageID })
+    // altimate_change — an empty reply text has no group
+    const replyGroup = Fingerprint.groups([{ role: "assistant", content: input.reply }])[0]
+    if (replyGroup) history.push({ hash: replyGroup.hash, claudeMessageID: input.messageID })
   }
   return history
 }

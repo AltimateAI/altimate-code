@@ -39,8 +39,9 @@ export async function installedVersion(executable: string): Promise<string | und
     const proc = Bun.spawn([executable, "--version"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" })
     const timer = setTimeout(() => proc.kill(), 10_000)
     const output = await new Response(proc.stdout).text()
+    const code = await proc.exited
     clearTimeout(timer)
-    if ((await proc.exited) !== 0) return
+    if (code !== 0) return
     return output.match(/^\s*(\d+\.\d+\.\d+)/)?.[1]
   } catch {
     return

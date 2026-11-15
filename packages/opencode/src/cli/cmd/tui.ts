@@ -44,17 +44,26 @@ function createWorkerFetch(client: RpcClient): typeof fetch {
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
     signal?.throwIfAborted()
     const abortID = signal ? crypto.randomUUID() : undefined
-    const onAbort = () => void client.call("abort", { id: abortID! }).catch(() => {})
+    let onAbort = () => {}
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        void client.call("abort", { id: abortID! }).catch(() => {})
+        reject(signal!.reason)
+      }
+    })
     signal?.addEventListener("abort", onAbort, { once: true })
-    const result = await client
-      .call("fetch", {
-        url: request.url,
-        method: request.method,
-        headers: Object.fromEntries(request.headers.entries()),
-        body,
-        abortID,
-      })
-      .finally(() => signal?.removeEventListener("abort", onAbort))
+    const call = client.call("fetch", {
+      url: request.url,
+      method: request.method,
+      headers: Object.fromEntries(request.headers.entries()),
+      body,
+      abortID,
+    })
+    call.catch(() => {})
+    // Settles at once on cancel; the worker's own reply arrives later and is dropped.
+    const result = await (signal ? Promise.race([call, aborted]) : call).finally(() =>
+      signal?.removeEventListener("abort", onAbort),
+    )
     // altimate_change end
     return new Response(result.body, {
       status: result.status,

@@ -26,8 +26,9 @@ export async function read(key: string): Promise<unknown> {
   return Filesystem.readJson(file(key)).catch(() => undefined)
 }
 
+// Atomic, so a crash mid-write leaves the old record rather than a truncated one.
 export async function write(key: string, value: unknown) {
-  await Filesystem.writeJson(file(key), value)
+  Filesystem.writeJsonAtomic(file(key), value)
 }
 
 export async function remove(key: string) {

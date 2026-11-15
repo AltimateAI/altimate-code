@@ -103,9 +103,6 @@ describe("plugin.trigger", () => {
     ),
   )
 
-  // BUG: same root cause as above — index.ts ignores RuntimeFlags.disableDefaultPlugins,
-  // so the built-in anthropic plugin injects the Claude Code system prefix. Blocked on the
-  // v1.17.9 index.ts rewrite.
   it.instance("awaits asynchronous hooks", () =>
     withProject(
       [

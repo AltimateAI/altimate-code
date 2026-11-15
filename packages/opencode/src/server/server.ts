@@ -1198,9 +1198,8 @@ export namespace Server {
         )
         if (refused) return c.json(refused.body, refused.status)
         try {
-          const { detect, retiredAnthropicLogin } = await import("../altimate/provider/subscriptions")
-          const [found, retired] = await Promise.all([detect(), retiredAnthropicLogin()])
-          return c.json({ ok: true as const, found, retiredAnthropicLogin: retired })
+          const { scan } = await import("../altimate/provider/subscriptions")
+          return c.json({ ok: true as const, ...(await scan()) })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.warn("subscription detection failed", { error })

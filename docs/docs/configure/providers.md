@@ -168,7 +168,8 @@ A login counts as found even if it has expired. Altimate Code checks that these 
 | Claude Pro/Max | Claude Code's login (`~/.claude/.credentials.json`, `~/.claude.json`, or the macOS keychain item `Claude Code-credentials`) | Uses that login; nothing to sign in |
 | ChatGPT Plus/Pro | The Codex CLI's ChatGPT login (`~/.codex/auth.json`) | You sign in with ChatGPT once in Altimate Code |
 | GitHub Copilot | A Copilot editor login (`~/.config/github-copilot/`) | You sign in with GitHub once in Altimate Code |
-| Any of these, SuperGrok or GitLab Duo | A login saved earlier in Altimate Code | Reconnects, signing in again if it expired |
+| Claude Pro/Max | Claude subscription connected earlier in Altimate Code | Checks your Claude Code login again; run `claude auth login` if it has ended |
+| ChatGPT, GitHub Copilot, SuperGrok or GitLab Duo | A login saved earlier in Altimate Code | Reconnects, signing in again if it expired |
 
 ## Claude Agent (Claude subscription)
 

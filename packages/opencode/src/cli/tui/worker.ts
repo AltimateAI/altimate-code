@@ -154,6 +154,11 @@ export const rpc = {
     // altimate_change — set when the TUI request can be cancelled
     abortID?: string
   }) {
+    // altimate_change start — registered before any wait, so an early cancel is not lost
+    const controller = input.abortID ? new AbortController() : undefined
+    if (input.abortID && controller) pendingRequests.set(input.abortID, controller)
+    try {
+    // altimate_change end
     // altimate_change start — no request is served until the datamate entry heal
     // completes (already-resolved after the first request; effectively free thereafter).
     await datamateSyncReady
@@ -164,8 +169,6 @@ export const rpc = {
       headers["Authorization"] = auth
     }
     // altimate_change start — cancellable requests carry their own signal
-    const controller = input.abortID ? new AbortController() : undefined
-    if (input.abortID && controller) pendingRequests.set(input.abortID, controller)
     const request = new Request(input.url, {
       method: input.method,
       headers,
@@ -174,9 +177,7 @@ export const rpc = {
     })
     // altimate_change end
     // altimate_change start — upstream_fix: Server.Default exposes fetch directly
-    const response = await Promise.resolve(Server.Default().fetch(request)).finally(
-      () => input.abortID && pendingRequests.delete(input.abortID),
-    )
+    const response = await Server.Default().fetch(request)
     // altimate_change end
     const body = await response.text()
     return {
@@ -184,6 +185,11 @@ export const rpc = {
       headers: Object.fromEntries(response.headers.entries()),
       body,
     }
+    // altimate_change start — kept until the body is read, so a streamed response can still be cancelled
+    } finally {
+      if (input.abortID) pendingRequests.delete(input.abortID)
+    }
+    // altimate_change end
   },
   snapshot() {
     const result = writeHeapSnapshot("server.heapsnapshot")

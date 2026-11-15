@@ -60,6 +60,8 @@ interface Entry {
   record?: SessionRecord.Record
   idle?: Fiber.Fiber<void, never>
   active?: Fiber.Fiber<unknown, unknown>
+  // altimate_change — the chat was deleted; a request queued behind the delete must not start Claude
+  removed?: boolean
 }
 
 export interface Interface {
@@ -453,6 +455,8 @@ export function registry() {
       const entry = entryFor(request)
       yield* entry.lock.withPermit(
         Effect.gen(function* () {
+          // altimate_change — queued behind a delete of this chat
+          if (entry.removed) return yield* Effect.fail(new Error("This chat was deleted."))
           if (entry.idle) {
             yield* Fiber.interrupt(entry.idle)
             entry.idle = undefined
@@ -473,13 +477,18 @@ export function registry() {
 
     const remove = Effect.fn("ClaudeSessions.remove")(function* (sessionID: string) {
       const entry = entries.get(sessionID)
+      if (entry) entry.removed = true
       if (entry?.active) yield* Fiber.interrupt(entry.active)
       // The interrupted turn's finalizer can install a new idle timer.
       if (entry?.idle) yield* Fiber.interrupt(entry.idle)
       const cleanup = Effect.gen(function* () {
         if (entry) yield* stop(entry)
         const record = entry?.record ?? (yield* records.get(sessionID))
-        if (record) yield* attempt(() => input.io.remove(record.claudeSessionID))
+        // A failed transcript delete still removes our record.
+        if (record)
+          yield* attempt(() => input.io.remove(record.claudeSessionID)).pipe(
+            Effect.catch((error) => Effect.logWarning(error)),
+          )
         yield* records.remove(sessionID)
       }).pipe(
         Effect.catch((error) => Effect.logWarning(error)),

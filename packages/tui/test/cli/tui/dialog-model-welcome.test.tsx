@@ -22,6 +22,16 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createEventSource, createFetch, directory } from "../../fixture/tui-sdk"
 import type { OnboardingTelemetryEvent } from "../../../src/context/onboarding-telemetry"
 
+// altimate_change — the picker hides its suggested rows until subscription detection settles
+async function waitForRows(picker: { app: { renderOnce: () => Promise<void>; captureCharFrame: () => string } }) {
+  for (let i = 0; i < 100; i++) {
+    await picker.app.renderOnce()
+    if (!picker.app.captureCharFrame().includes("Checking for subscriptions")) return
+    await Bun.sleep(20)
+  }
+  throw new Error("subscription detection did not settle")
+}
+
 async function wait(fn: () => boolean, timeout = 2000) {
   const start = Date.now()
   while (!fn()) {
@@ -342,6 +352,7 @@ test("the Claude subscription row appears when the server lists Claude Agent, an
   const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"])
   try {
     await wait(() => picker.events.length > 0)
+    await waitForRows(picker)
     // Rows: gateway, Claude subscription, … — one Down press lands on it.
     picker.app.mockInput.pressKey("ARROW_DOWN")
     picker.app.mockInput.pressEnter()
@@ -483,8 +494,7 @@ test("picking the ChatGPT subscription row records which subscription it was", a
   const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"])
   try {
     await wait(() => picker.events.length > 0)
-    await Bun.sleep(50)
-    await picker.app.renderOnce()
+    await waitForRows(picker)
     picker.app.mockInput.pressArrow("down")
     picker.app.mockInput.pressArrow("down")
     picker.app.mockInput.pressEnter()

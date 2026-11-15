@@ -13,7 +13,7 @@ export function make(input: {
     spawn: input.claude.spawn,
     which: () => EXECUTABLE,
     env: () => input.env ?? {},
-    sessionExists: async () => true,
+    sessionExists: async (sessionID) => input.claude.transcripts.has(sessionID),
     fork: input.claude.fork,
     remove: input.claude.remove,
   }

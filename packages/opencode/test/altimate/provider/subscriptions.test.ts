@@ -3,7 +3,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import * as Auth from "@/auth"
-import { detect, retiredAnthropicLogin } from "@/altimate/provider/subscriptions"
+import { detect, scan } from "@/altimate/provider/subscriptions"
 
 const saved = { ...process.env }
 let root: string
@@ -68,12 +68,18 @@ describe("subscription detection", () => {
     await write("claude/.credentials.json", { claudeAiOauth: {} })
     expect(await detect()).toEqual([{ subscription: "claude", source: "claude-code" }])
     // Still reported for the reconnect notice.
-    expect(await retiredAnthropicLogin()).toBe(true)
+    expect((await scan()).retiredAnthropicLogin).toBe(true)
   })
 
   test("an Anthropic API key is not an old Claude Pro/Max login", async () => {
     await Auth.set("anthropic", { type: "api", key: "k" })
-    expect(await retiredAnthropicLogin()).toBe(false)
+    expect((await scan()).retiredAnthropicLogin).toBe(false)
+  })
+
+  test("a saved Claude subscription connection counts as a Claude login", async () => {
+    // Claude Agent saves an `api` marker, not an OAuth token.
+    await Auth.set("claude-agent", { type: "api", key: "claude-code" })
+    expect(await detect()).toEqual([{ subscription: "claude", source: "altimate" }])
   })
 
   test("the result names subscriptions and sources only", async () => {
