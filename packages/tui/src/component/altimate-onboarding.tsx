@@ -3,7 +3,7 @@
 // first-run readiness state, the curated welcome/provider picker, and the Altimate
 // Base disclosure. Imports back into dialog-model are runtime-only (used inside
 // callbacks/JSX), so the circular reference is safe.
-import { createEffect, createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useLocal, isLegacyBigPickleModel } from "../context/local"
 import { useDialog } from "../ui/dialog"
 import { useTheme, selectedForeground } from "../context/theme"
@@ -19,7 +19,7 @@ import { useKV } from "../context/kv"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 // altimate_change — the Base disclosure has one definition, shared with the HTTP route
-import { ALTIMATE_BASE_DISCLOSURE, ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
+import { ALTIMATE_BASE_DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
 // chooses Altimate Base, or finishes the gateway flow. Combined with
@@ -149,6 +149,78 @@ export function useSetupComplete() {
 // Claude subscription only when the server lists them) + a "Search all providers…" row that
 // hands off to the full DialogModel picker. The long tail stays behind search.
 const NAME_W = 24
+
+// altimate_change start — subscription rows for the welcome picker
+const MAX_SUGGESTED = 5
+type Subscription = "claude" | "chatgpt" | "copilot" | "supergrok" | "gitlab-duo"
+// Order of found subscriptions; the first two are also shown when not found.
+const SUBSCRIPTION_ORDER: Subscription[] = ["claude", "chatgpt", "copilot", "supergrok", "gitlab-duo"]
+const SUBSCRIPTION_DEFAULTS: Subscription[] = ["claude", "chatgpt"]
+const SUBSCRIPTION_ROWS: Record<
+  Subscription,
+  { name: string; note: string; short: string; providerID: string; method?: RegExp }
+> = {
+  claude: {
+    name: "Claude subscription",
+    note: "Claude Pro/Max · via Claude Code login",
+    short: "Claude Pro/Max",
+    providerID: "claude-agent",
+  },
+  chatgpt: {
+    name: "ChatGPT subscription",
+    note: "ChatGPT Plus/Pro · sign in with ChatGPT",
+    short: "ChatGPT Plus/Pro",
+    providerID: "openai",
+    method: /ChatGPT.*browser/i,
+  },
+  copilot: {
+    name: "GitHub Copilot",
+    note: "Copilot plan · GitHub login",
+    short: "Copilot plan",
+    providerID: "github-copilot",
+    method: /GitHub Copilot/i,
+  },
+  supergrok: {
+    name: "Grok subscription",
+    note: "SuperGrok · xAI login",
+    short: "SuperGrok",
+    providerID: "xai",
+    method: /SuperGrok/i,
+  },
+  "gitlab-duo": {
+    name: "GitLab Duo",
+    note: "GitLab Duo · GitLab login",
+    short: "GitLab Duo",
+    providerID: "gitlab",
+    method: /GitLab OAuth/i,
+  },
+}
+
+// The picker holds its suggested rows this long for detection, so they do not reorder under the user.
+const DETECT_WAIT_MS = 300
+
+// Asks the server which subscription logins are on this machine. A failure, or no answer within
+// DETECT_WAIT_MS, means none found, so the picker shows its default rows.
+function detectSubscriptions(sdk: ReturnType<typeof useSDK>): Promise<{ subscription: Subscription }[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<[]>((resolve) => (timer = setTimeout(() => resolve([]), DETECT_WAIT_MS)))
+  return Promise.race([requestSubscriptions(sdk), timeout]).finally(() => clearTimeout(timer))
+}
+
+async function requestSubscriptions(sdk: ReturnType<typeof useSDK>): Promise<{ subscription: Subscription }[]> {
+  try {
+    const response = await sdk.fetch(`${sdk.url}/altimate/provider/subscriptions`, {
+      headers: new Headers(sdk.headers),
+    })
+    const body = (await response.json().catch(() => undefined)) as { found?: { subscription?: string }[] } | undefined
+    return (body?.found ?? []).filter((item): item is { subscription: Subscription } =>
+      SUBSCRIPTION_ORDER.includes(item.subscription as Subscription),
+    )
+  } catch {
+    return []
+  }
+}
+// altimate_change end
 type WelcomeTone = "success" | "warning" | "muted"
 
 interface WelcomeRow {
@@ -197,33 +269,18 @@ export function DialogModelWelcome(props: {
    * providers via `enabled_providers` / `disabled_providers` while these five rows are hardcoded,
    * so a row can legitimately have no matching option and this would otherwise no-op in silence.
    */
-  function connectProvider(id: string): boolean {
+  function connectProvider(id: string, method?: RegExp): boolean {
     const option = providers().find((o) => o.value === id)
     if (!option?.onSelect) return false
-    option.onSelect()
+    // altimate_change — `method` sends a subscription row straight to that login method
+    option.onSelect(method)
     return true
   }
 
-  function chooseAltimateBase(): boolean {
-    if (!providers().some((provider) => provider.value === "altimate-free")) return false
-    // altimate_change — a failed selection must not permanently latch the row inert; only a
-    // SUCCESSFUL selection is meant to be one-shot (it closes the dialog). Returning `true`
-    // synchronously below keeps `activateRow`'s double-input guard active for the in-flight
-    // window; this resets it if the attempt turns out to have failed.
-    selectAltimateBase({
-      sdk,
-      sync,
-      local,
-      toast,
-      dialog,
-      onRegisterResult: (result) => {
-        if (firstRunActive()) trackOnboarding({ name: "altimate_base_register_result", result, origin: "welcome" })
-      },
-    }).then((selected) => {
-      if (!selected) activated = false
-    })
-    return true
-  }
+  // altimate_change start — subscription logins already on this machine (expired ones too), from the
+  // server, so the picker can suggest a subscription the user already has.
+  const [found] = createResource(() => detectSubscriptions(sdk))
+  // altimate_change end
 
   function openFullCatalog(): boolean {
     // altimate_change — viaSearch marks this as the genuine search path; the catalogue's other
@@ -232,61 +289,44 @@ export function DialogModelWelcome(props: {
     return true
   }
 
-  const rows = createMemo<WelcomeRow[]>(() => [
-    {
-      name: "Altimate LLM Gateway",
-      note: "Recommended · best for data work · 1M free tokens",
-      tone: "success",
-      providerID: "altimate-backend",
-      activate: () => connectProvider("altimate-backend"),
-    },
-    {
-      name: "Anthropic (Claude)",
+  // altimate_change start — up to five suggested rows: the gateway, then subscriptions found on this machine,
+  // then the default rows. Altimate Base and everything else stay behind "Search all providers…".
+  const rows = createMemo<WelcomeRow[]>(() => {
+    const listed = (id: string) => providers().some((provider) => provider.value === id)
+    const detected = new Set((found() ?? []).map((item) => item.subscription))
+    const subscriptionRow = (subscription: Subscription): WelcomeRow => {
+      const spec = SUBSCRIPTION_ROWS[subscription]
+      return {
+        name: spec.name,
+        note: detected.has(subscription) ? `${spec.short} · found on this machine` : spec.note,
+        tone: detected.has(subscription) ? "success" : "muted",
+        providerID: spec.providerID,
+        activate: () => connectProvider(spec.providerID, spec.method),
+      }
+    }
+    const apiRow = (name: string, providerID: string): WelcomeRow => ({
+      name,
       note: "bring your own API key",
       tone: "muted",
-      providerID: "anthropic",
-      activate: () => connectProvider("anthropic"),
-    },
-    // altimate_change start — Claude subscription row: the Claude Agent provider runs the user's own
-    // Claude Code login, so a Pro/Max plan covers usage. Shown only when the server lists it.
-    ...(providers().some((provider) => provider.value === "claude-agent")
-      ? [
-          {
-            name: "Claude subscription",
-            note: "Claude Pro/Max · via your Claude Code login",
-            tone: "muted" as const,
-            providerID: "claude-agent",
-            activate: () => connectProvider("claude-agent"),
-          },
-        ]
-      : []),
-    // altimate_change end
-    {
-      name: "OpenAI (GPT)",
-      note: "bring your own API key",
-      tone: "muted",
-      providerID: "openai",
-      activate: () => connectProvider("openai"),
-    },
-    {
-      name: "Google (Gemini)",
-      note: "bring your own API key",
-      tone: "muted",
-      providerID: "google",
-      activate: () => connectProvider("google"),
-    },
-    ...(providers().some((provider) => provider.value === "altimate-free")
-      ? [
-          {
-            name: "Altimate Base",
-            note: ALTIMATE_BASE_HINT,
-            tone: "warning" as const,
-            providerID: "altimate-free",
-            modelID: "altimate-base",
-            activate: chooseAltimateBase,
-          },
-        ]
-      : []),
+      providerID,
+      activate: () => connectProvider(providerID),
+    })
+    const candidates: WelcomeRow[] = [
+      {
+        name: "Altimate LLM Gateway",
+        note: "Recommended · best for data work · 1M free tokens",
+        tone: "success",
+        providerID: "altimate-backend",
+        activate: () => connectProvider("altimate-backend"),
+      },
+      ...SUBSCRIPTION_ORDER.filter((subscription) => detected.has(subscription)).map(subscriptionRow),
+      ...SUBSCRIPTION_DEFAULTS.filter((subscription) => !detected.has(subscription)).map(subscriptionRow),
+      apiRow("Anthropic (Claude)", "anthropic"),
+      apiRow("OpenAI (GPT)", "openai"),
+      apiRow("Google (Gemini)", "google"),
+    ]
+    return [
+      ...candidates.filter((row) => row.providerID && listed(row.providerID)).slice(0, MAX_SUGGESTED),
     {
       name: "Search all providers…",
       note: "/",
@@ -294,13 +334,17 @@ export function DialogModelWelcome(props: {
       activate: openFullCatalog,
       analyticsSearchAll: true,
     },
-  ])
+    ]
+  })
+  // altimate_change end
 
   // The currently active model → drives the green "selected" tick.
   const current = createMemo(() => local.model.current())
   const isCurrent = (row: WelcomeRow) => {
     const c = current()
     if (!row.providerID || !c || c.providerID !== row.providerID) return false
+    // altimate_change — two rows can share a provider (ChatGPT subscription and OpenAI API key); tick the first
+    if (rows().find((other) => other.providerID === row.providerID) !== row) return false
     return row.modelID ? c.modelID === row.modelID : true
   }
 
@@ -347,7 +391,8 @@ export function DialogModelWelcome(props: {
     if (evt.name === "return") {
       evt.preventDefault()
       evt.stopPropagation()
-      activateRow(rows()[selected()])
+      // altimate_change — the suggested rows are hidden until detection settles
+      if (!found.loading || selected() === searchIndex()) activateRow(rows()[selected()])
       return
     }
     // "/", ctrl+a, or any letter/number reveals the full searchable catalog.
@@ -427,10 +472,13 @@ export function DialogModelWelcome(props: {
           </span>
           <span style={{ fg: theme.textMuted }}> — you can change this anytime with /model</span>
         </text>
+        {/* altimate_change — hidden until subscription detection settles (at most DETECT_WAIT_MS) */}
         <box gap={0}>
-          <For each={rows().slice(0, searchIndex())}>
-            {(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}
-          </For>
+          <Show when={!found.loading} fallback={<text fg={theme.textMuted}>Checking for subscriptions…</text>}>
+            <For each={rows().slice(0, searchIndex())}>
+              {(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}
+            </For>
+          </Show>
         </box>
         <box border={["top"]} borderColor={theme.border} />
         <Row row={rows()[searchIndex()]} index={searchIndex()} onActivate={activateRow} />

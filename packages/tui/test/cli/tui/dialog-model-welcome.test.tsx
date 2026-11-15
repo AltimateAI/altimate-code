@@ -40,7 +40,17 @@ async function mountPicker(
   availableProviders: string[] = ALL_PROVIDER_IDS,
   // altimate_change — `registerOutcomes` scripts the Altimate Base register endpoint (consumed
   // one outcome per call, "ok" once exhausted) so the retry test below can force a failure.
-  { firstRun = true, registerOutcomes = [] as Array<"ok" | "error"> }: { firstRun?: boolean; registerOutcomes?: Array<"ok" | "error"> } = {},
+  {
+    firstRun = true,
+    registerOutcomes = [] as Array<"ok" | "error">,
+    subscriptions = [] as string[],
+    subscriptionsDelayMs = 0,
+  }: {
+    firstRun?: boolean
+    registerOutcomes?: Array<"ok" | "error">
+    subscriptions?: string[]
+    subscriptionsDelayMs?: number
+  } = {},
 ) {
   const [
     { DialogProvider },
@@ -109,6 +119,14 @@ async function mountPicker(
         default: {},
         connected: [],
       })
+    }
+    // altimate_change — subscription logins the server reports as already on this machine
+    if (url.pathname === "/altimate/provider/subscriptions") {
+      if (subscriptionsDelayMs)
+        return Bun.sleep(subscriptionsDelayMs).then(() =>
+          Response.json({ ok: true, found: subscriptions.map((subscription) => ({ subscription, source: "altimate" })) }),
+        )
+      return Response.json({ ok: true, found: subscriptions.map((subscription) => ({ subscription, source: "altimate" })) })
     }
     if (url.pathname === "/altimate/base/register") {
       registerCallCount++
@@ -290,52 +308,31 @@ test("outside a first run the picker records an impression but not a choice", as
 // the fix: the same row can be retried after a failure, and the register attempt actually re-fires.
 // It covers the re-fire only: the mocked `/provider` never lists Base's model, so the second
 // attempt cannot complete a selection here (selectAltimateBase's success path is tested directly).
-test("a failed Altimate Base selection on the welcome picker re-fires registration when retried", async () => {
-  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "altimate-free"], {
-    registerOutcomes: ["error", "ok"],
-  })
+test("Altimate Base is offered only under Search all providers, not on the welcome list", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "altimate-free"])
   try {
-    // Rows: gateway, anthropic, openai, google, Altimate Base, search — four Down presses lands on
-    // the Base row.
-    for (let i = 0; i < 4; i++) picker.app.mockInput.pressKey("ARROW_DOWN")
-    picker.app.mockInput.pressEnter()
-    await wait(() => picker.registerCallCount === 1)
-    // `chooseAltimateBase()` fires `selectAltimateBase()` without awaiting it, so the latch reset
-    // (on the failure branch) lands a beat after the register call itself resolves. Poll for the
-    // failure toast — the last thing `selectAltimateBase()` does before returning `false` — rather
-    // than a fixed sleep, so this doesn't race under load.
-    await wait(() => picker.toastShown)
-
-    // Before the fix, the row's one-shot latch stayed set after the failed attempt above, so this
-    // second Enter would silently no-op — registerCallCount would stay at 1 forever.
-    picker.app.mockInput.pressEnter()
-    await wait(() => picker.registerCallCount === 2)
-
-    expect(picker.registerCallCount).toBe(2)
+    await wait(() => picker.events.length > 0)
+    await picker.app.renderOnce()
+    const frame = picker.app.captureCharFrame()
+    expect(frame).toContain("Search all providers")
+    expect(frame).not.toContain("Altimate Base")
   } finally {
     await picker.cleanup()
   }
 })
 // altimate_change end
 
-test("a row for a provider the server filtered out does not brick the dialog", async () => {
-  // The server filters providers via enabled_providers/disabled_providers while this picker renders
-  // five hardcoded rows. Selecting a filtered-out row used to claim the double-submit latch before
-  // dispatching anything, leaving the first-run gate permanently inert.
+test("rows for providers the server filtered out are not shown, so the first row always works", async () => {
+  // The server filters providers via enabled_providers/disabled_providers. A row for a filtered-out
+  // provider used to render and do nothing on Enter; such rows are now left out.
   const picker = await mountPicker("first_run", ["anthropic"])
   try {
     await wait(() => picker.events.length > 0)
-    picker.app.mockInput.pressEnter() // row 1 = gateway, absent from the server list
-    await Bun.sleep(150)
-    expect(picker.events.some((e) => e.name === "provider_selected")).toBe(false)
-
-    // The dialog must still respond afterwards. Before the fix the latch was claimed on that
-    // failed press, so every later key returned early and the first-run gate was stuck for good.
-    picker.app.mockInput.pressKey("/")
+    await picker.app.renderOnce()
+    expect(picker.app.captureCharFrame()).not.toContain("Altimate LLM Gateway")
+    picker.app.mockInput.pressEnter()
     await wait(() => picker.events.some((e) => e.name === "provider_selected"))
-    expect(picker.events.filter((e) => e.name === "provider_selected")[0]).toMatchObject({
-      searchAll: true,
-    })
+    expect(picker.events.filter((e) => e.name === "provider_selected")[0]).toMatchObject({ providerID: "anthropic" })
   } finally {
     await picker.cleanup()
   }
@@ -345,13 +342,107 @@ test("the Claude subscription row appears when the server lists Claude Agent, an
   const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"])
   try {
     await wait(() => picker.events.length > 0)
-    // Rows: gateway, anthropic, Claude subscription, … — two Down presses land on it.
-    for (let i = 0; i < 2; i++) picker.app.mockInput.pressKey("ARROW_DOWN")
+    // Rows: gateway, Claude subscription, … — one Down press lands on it.
+    picker.app.mockInput.pressKey("ARROW_DOWN")
     picker.app.mockInput.pressEnter()
     await wait(() => picker.events.some((e) => e.name === "provider_selected"))
     expect(picker.events.filter((e) => e.name === "provider_selected")[0]).toMatchObject({
       providerID: "claude-agent",
     })
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+const suggested = (frame: string) =>
+  [
+    "Altimate LLM Gateway",
+    "Claude subscription",
+    "ChatGPT subscription",
+    "GitHub Copilot",
+    "Grok subscription",
+    "GitLab Duo",
+    "Anthropic (Claude)",
+    "OpenAI (GPT)",
+    "Google (Gemini)",
+  ]
+    .map((name) => ({ name, at: frame.indexOf(name) }))
+    .filter((row) => row.at >= 0)
+    .sort((a, b) => a.at - b.at)
+    .map((row) => row.name)
+
+test("with nothing found, the list is the gateway, both subscriptions and two API-key rows", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"])
+  try {
+    await wait(() => picker.events.length > 0)
+    await picker.app.renderOnce()
+    expect(suggested(picker.app.captureCharFrame())).toEqual([
+      "Altimate LLM Gateway",
+      "Claude subscription",
+      "ChatGPT subscription",
+      "Anthropic (Claude)",
+      "OpenAI (GPT)",
+    ])
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("subscriptions found on this machine come first, marked, and the list stays at five", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent", "github-copilot", "xai"], {
+    subscriptions: ["copilot", "supergrok", "claude"],
+  })
+  try {
+    await wait(() => picker.events.length > 0)
+    await Bun.sleep(50)
+    await picker.app.renderOnce()
+    const frame = picker.app.captureCharFrame()
+    expect(suggested(frame)).toEqual([
+      "Altimate LLM Gateway",
+      "Claude subscription",
+      "GitHub Copilot",
+      "Grok subscription",
+      "ChatGPT subscription",
+    ])
+    expect(frame).toContain("Copilot plan · found on this machine")
+    expect(frame).toContain("Search all providers")
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("a found subscription whose provider the server does not list is left out", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"], { subscriptions: ["copilot"] })
+  try {
+    await wait(() => picker.events.length > 0)
+    await Bun.sleep(50)
+    await picker.app.renderOnce()
+    expect(suggested(picker.app.captureCharFrame())).not.toContain("GitHub Copilot")
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("slow detection holds the suggested rows, then shows the defaults without reordering later", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"], {
+    subscriptions: ["chatgpt"],
+    subscriptionsDelayMs: 2_000,
+  })
+  try {
+    await wait(() => picker.events.length > 0)
+    await picker.app.renderOnce()
+    const early = picker.app.captureCharFrame()
+    expect(early).toContain("Checking for subscriptions")
+    expect(suggested(early)).toEqual([])
+    // Enter on a hidden row does nothing.
+    picker.app.mockInput.pressEnter()
+    await Bun.sleep(400)
+    await picker.app.renderOnce()
+    const settled = picker.app.captureCharFrame()
+    expect(settled).not.toContain("Checking for subscriptions")
+    expect(settled).not.toContain("found on this machine")
+    expect(suggested(settled)[0]).toBe("Altimate LLM Gateway")
+    expect(picker.events.filter((event) => event.name !== "model_picker_shown")).toEqual([])
   } finally {
     await picker.cleanup()
   }

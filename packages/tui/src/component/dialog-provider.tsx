@@ -190,7 +190,12 @@ export function createDialogProviderOptions() {
           footer: consoleManaged ? sync.data.console_state.activeOrgName : undefined,
           category: provider.category,
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
-          async onSelect() {
+          // altimate_change start — the welcome picker passes a label pattern that picks this provider's
+          // login method directly, so a subscription row skips the method list (the list still shows when
+          // nothing matches). DialogSelect passes its own context here, which is ignored.
+          async onSelect(choice?: unknown) {
+            const methodPattern = choice instanceof RegExp ? choice : undefined
+            // altimate_change end
             if (consoleManaged) return
             // altimate_change start — register (if needed) and select Altimate Base directly, no dialog
             if (providerID === "altimate-free") {
@@ -230,7 +235,11 @@ export function createDialogProviderOptions() {
               },
             ]
             let index: number | null = 0
-            if (methods.length > 1) {
+            // altimate_change start — a method chosen by the caller skips the method list
+            const preferred = methodPattern ? methods.findIndex((x) => methodPattern.test(x.label)) : -1
+            if (preferred >= 0) index = preferred
+            else if (methods.length > 1) {
+            // altimate_change end
               index = await new Promise<number | null>((resolve) => {
                 dialog.replace(
                   () => (

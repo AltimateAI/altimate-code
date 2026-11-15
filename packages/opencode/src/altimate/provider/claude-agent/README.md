@@ -7,7 +7,7 @@
 
 <!-- AI-GENERATED: Start -->
 <!-- This section is automatically maintained by Claude Code. -->
-<!-- Last updated: 2026-11-11 by Claude Code -->
+<!-- Last updated: 2026-11-13 by Claude Code -->
 
 ## Purpose
 
@@ -59,7 +59,14 @@ Altimate-only integration (replaces upstream `index.ts`, `provider.ts`, `aisdk.t
 - `session/processor.ts` — a permission or question rejection that stops the session is recorded as
   `metadata.rejected`, so history conversion can flag it the same way.
 - `plugin/index.ts` — registers `ClaudeAgentPlugin`.
-- `packages/tui/src/component/dialog-provider.tsx` — listed under Popular with a subscription hint.
+- `packages/tui/src/component/dialog-provider.tsx` — listed under Popular with a subscription hint; a caller can pick
+  the login method directly.
+- `packages/tui/src/component/altimate-onboarding.tsx` — the welcome picker's Claude subscription row.
+
+Related, outside this folder: `../subscriptions.ts` lists subscription logins already on the machine (Claude Code,
+Codex CLI, Copilot, saved logins) for `GET /altimate/provider/subscriptions`, which the welcome picker uses to suggest
+them. The direct Claude Pro/Max login (`opencode-anthropic-auth`) and the `claude-code-20250219` beta flag are removed,
+as upstream did; `script/upstream/bridge-merge.ts` no longer restores them.
 
 ## Differences from upstream
 
