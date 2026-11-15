@@ -62,6 +62,7 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   }),
   async execute(args, ctx) {
     if (!args.model && !args.sql) return failure("nothing to estimate", "Pass a model name or SQL.")
+    if (args.model && args.sql) return failure("ambiguous input", "Pass a model name or SQL, not both.")
     const access = await dbtAdapterFor(ctx)
     if (!access.adapter) return failure("not available", `No estimate: ${access.reason}.`, { refusal: access.refusal })
     const adapter = access.adapter

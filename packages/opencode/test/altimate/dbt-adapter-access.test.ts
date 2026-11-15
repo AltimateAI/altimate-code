@@ -111,6 +111,7 @@ describe("dbtAdapterFor", () => {
     expect(access.adapter).toBeUndefined()
     expect(access.refusal).toBe("read_only")
     expect(access.reason).toContain("--allow-write")
+    expect(access.reason).toContain("leave plan mode")
     expect(created).toBe(0)
   })
 

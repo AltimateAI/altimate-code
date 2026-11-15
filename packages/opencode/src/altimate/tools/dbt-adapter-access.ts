@@ -28,7 +28,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
-      reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
+      reason: "this needs the dbt adapter, which a read-only call doesn't start: it needs write permission (--allow-write on `tool run`, or leave plan mode)",
     }
   try {
     const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")

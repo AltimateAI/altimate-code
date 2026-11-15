@@ -192,6 +192,14 @@ describe("dbt_cost_estimate", () => {
     expect(result.output).toContain("--allow-write")
   })
 
+  test("rejects a call that passes both a model and SQL, estimating neither", async () => {
+    useAdapter(calls)
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", sql: "select 1" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("not both")
+    expect(calls).toEqual({ nodes: [], queries: [], dryRuns: [] })
+  })
+
   test("asks for something to estimate", async () => {
     useAdapter(calls)
     const result = await (await initTool(DbtCostEstimateTool)).execute({}, ctx)
