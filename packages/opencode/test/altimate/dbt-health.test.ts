@@ -458,20 +458,32 @@ describe("dbt_health", () => {
     expect(python.calls).toHaveLength(0)
   })
 
-  test("concurrent calls share one manifest rebuild", async () => {
+  test("a call that arrives while a rebuild runs gets a rebuild that starts after it; calls in that window share one", async () => {
+    const events: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
     let rebuilds = 0
     dbtAdapterInternals.create = async () => ({
       isInitialized: () => true,
       getProjectRoot: () => project,
       rebuildManifest: async () => {
-        rebuilds += 1
-        await new Promise((r) => setTimeout(r, 30))
+        const n = ++rebuilds
+        events.push(`start ${n}`)
+        if (n === 1) await gate
+        events.push(`end ${n}`)
       },
       parseManifest: async () => parsed,
     })
-    const results = await Promise.all([run(), run()])
-    expect(results.map((r) => r.metadata.success)).toEqual([true, true])
+    const first = run()
+    while (rebuilds < 1) await new Promise((r) => setTimeout(r, 5))
+    const later = [run(), run()]
+    await new Promise((r) => setTimeout(r, 20))
     expect(rebuilds).toBe(1)
+    release()
+    const results = await Promise.all([first, ...later])
+    expect(results.map((r) => r.metadata.success)).toEqual([true, true, true])
+    expect(rebuilds).toBe(2)
+    expect(events).toEqual(["start 1", "end 1", "start 2", "end 2"])
   })
 
   test.skipIf(!Bun.which("python3"))("the script reads a standard-library module from the standard library, not from the project folder, and says no insights when the model level is missing", async () => {

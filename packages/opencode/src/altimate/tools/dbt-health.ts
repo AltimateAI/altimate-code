@@ -56,15 +56,37 @@ export const dbtHealthInternals = {
   discoverPython: async (root: string) => (await import("../../../../dbt-tools/src/config")).discoverPython(root),
 }
 
-/** The rebuild in flight for an adapter: concurrent calls share it instead of each driving `dbt parse` over the same manifest. */
-const rebuilding = new WeakMap<object, Promise<unknown>>()
+/**
+ * The rebuilds of an adapter: one running and at most one queued. A call that arrives while one runs may have
+ * edited files after it read them, so it waits for a rebuild that starts after it arrived; calls that
+ * arrive in the same window share that one.
+ */
+const rebuilding = new WeakMap<object, { running: Promise<unknown>; queued?: Promise<unknown> }>()
 
-/** Waits for the shared manifest rebuild, bounded by a timeout and the call's abort. */
+function trackRebuild(adapter: object, slot: { running: Promise<unknown>; queued?: Promise<unknown> }) {
+  const next = () => {
+    if (slot.queued) {
+      slot.running = slot.queued
+      slot.queued = undefined
+      trackRebuild(adapter, slot)
+    } else rebuilding.delete(adapter)
+  }
+  slot.running.then(next, next)
+}
+
+/** Waits for a manifest rebuild that starts no earlier than this call, bounded by a timeout and the call's abort. */
 async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<void> {
-  let shared = rebuilding.get(adapter)
-  if (!shared) {
-    shared = Promise.resolve(adapter.rebuildManifest()).finally(() => rebuilding.delete(adapter))
-    rebuilding.set(adapter, shared)
+  signal.throwIfAborted()
+  let slot = rebuilding.get(adapter)
+  let shared: Promise<unknown>
+  if (!slot) {
+    shared = Promise.resolve().then(() => adapter.rebuildManifest())
+    slot = { running: shared }
+    rebuilding.set(adapter, slot)
+    trackRebuild(adapter, slot)
+  } else {
+    slot.queued ??= slot.running.catch(() => {}).then(() => adapter.rebuildManifest())
+    shared = slot.queued
   }
   let stop = () => {}
   let timer: ReturnType<typeof setTimeout> | undefined
