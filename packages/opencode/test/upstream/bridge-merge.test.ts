@@ -73,15 +73,16 @@ describe("bridge merge: PR #18186 stays reverted (Anthropic provider preserved)"
     expect(content).toContain('anthropic: "API key"')
   })
 
-  test("plugin/index.ts has BUILTIN anthropic-auth plugin", async () => {
+  // A bridge merge must not bring back the direct Claude Pro/Max login or the Claude Code beta flag,
+  // which upstream removed in "anthropic legal requests" (1ac1a0287c).
+  test("plugin/index.ts does not load opencode-anthropic-auth", async () => {
     const content = await readText(path.join(srcDir, "plugin", "index.ts"))
-    expect(content).toContain("opencode-anthropic-auth@0.0.13")
-    expect(content).toContain("BUILTIN")
+    expect(content).not.toContain('"opencode-anthropic-auth')
   })
 
-  test("provider/provider.ts has claude-code-20250219 in anthropic-beta header", async () => {
+  test("provider/provider.ts does not send claude-code-20250219 in anthropic-beta", async () => {
     const content = await readText(path.join(srcDir, "provider", "provider.ts"))
-    expect(content).toContain("claude-code-20250219")
+    expect(content).not.toContain("claude-code-20250219")
   })
 
   test("session/llm.ts has User-Agent conditional for non-anthropic providers", async () => {

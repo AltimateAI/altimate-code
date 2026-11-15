@@ -47,7 +47,11 @@ import { InstanceRef } from "../effect/instance-ref"
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
 
-  const BUILTIN = ["opencode-anthropic-auth@0.0.13"]
+  // altimate_change start — no default npm plugins. `opencode-anthropic-auth` offered a direct Claude Pro/Max
+  // login that Anthropic does not support for third-party tools (upstream removed it in "anthropic legal
+  // requests", 1ac1a0287c). Claude Pro/Max now goes through the Claude Agent provider (Claude Code's own login).
+  const BUILTIN: string[] = []
+  // altimate_change end
 
   // Built-in plugins that are directly imported (not installed from npm)
   // GitlabAuthPlugin uses a different version of @opencode-ai/plugin (from npm)

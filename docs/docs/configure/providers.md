@@ -155,6 +155,8 @@ identity.
 
 Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
 
+The Anthropic provider takes an API key. To use a Claude Pro or Max plan, use [Claude Agent](#claude-agent-claude-subscription).
+
 ## Claude Agent (Claude subscription)
 
 Claude Agent runs Claude models through your own Claude Code login, so a Claude Pro or Max subscription covers usage. Altimate Code starts your installed `claude` program through Anthropic's Claude Agent SDK. It never reads or stores your Claude Code token.

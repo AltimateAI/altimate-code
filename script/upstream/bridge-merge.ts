@@ -333,10 +333,14 @@ function buildPlan(upstreamFiles: Set<string>, ourFiles: Set<string>, config: Me
 // PR #18186 anthropic-provider fix reapplication
 // ---------------------------------------------------------------------------
 
-// Reapplies the four code-level edits PR #18186 wiped out, keeping Anthropic
-// as a fully-supported provider in the fork: BUILTIN plugin, login hint in
-// providers.ts, claude-code beta header, and the non-anthropic User-Agent
-// guard in session/llm.ts.
+// Reapplies the code-level edits PR #18186 wiped out that keep Anthropic a
+// supported API-key provider in the fork: the login hint in providers.ts and the
+// non-anthropic User-Agent guard in session/llm.ts.
+//
+// The BUILTIN `opencode-anthropic-auth` plugin (a direct Claude Pro/Max login)
+// and the claude-code-20250219 beta header are NOT restored: Anthropic does not
+// support that login for third-party tools. Claude Pro/Max goes through the
+// Claude Agent provider (packages/opencode/src/altimate/provider/claude-agent/).
 //
 // We deliberately do NOT restore prompt/anthropic-20250930.txt — it was an
 // unused legacy variant; the active prompt is anthropic.txt. The skipFiles
@@ -344,8 +348,6 @@ function buildPlan(upstreamFiles: Set<string>, ourFiles: Set<string>, config: Me
 async function reapplyPR18186AnthropicProviderFixes(report: string[]): Promise<void> {
   report.push("\n## PR #18186 anthropic-provider fix reapplication\n")
   await editProvidersTs(report)
-  await editPluginIndex(report)
-  await editProviderTs(report)
   await editSessionLlmTs(report)
 }
 
@@ -372,63 +374,6 @@ async function editProvidersTs(report: string[]): Promise<void> {
   )
   if (!DRY_RUN) writeFileSync(file, next)
   report.push(`- providers.ts: re-added anthropic hint`)
-}
-
-async function editPluginIndex(report: string[]): Promise<void> {
-  const file = path.join(ROOT, "packages/opencode/src/plugin/index.ts")
-  if (!existsSync(file)) {
-    report.push(`- ⚠ plugin/index.ts not found, skipping BUILTIN`)
-    return
-  }
-  let content = readUtf8(file)
-  if (content.includes("opencode-anthropic-auth")) {
-    report.push(`- plugin/index.ts: BUILTIN already present, skipping`)
-    return
-  }
-  const logDecl = `const log = Log.create({ service: "plugin" })`
-  if (!content.includes(logDecl)) {
-    report.push(`- ⚠ plugin/index.ts: log declaration not found; skipping BUILTIN insert`)
-    return
-  }
-  content = content.replace(
-    logDecl,
-    `${logDecl}\n\n  // altimate_change start — preserve anthropic auth plugin (PR #18186 reverted)\n  const BUILTIN = ["opencode-anthropic-auth@0.0.13"]\n  // altimate_change end`,
-  )
-  const anchor = `if (plugins.length) await Config.waitForDependencies()`
-  if (content.includes(anchor)) {
-    content = content.replace(
-      anchor,
-      `${anchor}\n    // altimate_change start — preserve anthropic auth plugin auto-load (PR #18186 reverted)\n    if (!Flag.OPENCODE_DISABLE_DEFAULT_PLUGINS) {\n      plugins = [...BUILTIN, ...plugins]\n    }\n    // altimate_change end`,
-    )
-  } else {
-    report.push(`- ⚠ plugin/index.ts: waitForDependencies anchor not found; skipping BUILTIN load`)
-  }
-  if (!DRY_RUN) writeFileSync(file, content)
-  report.push(`- plugin/index.ts: re-added BUILTIN anthropic-auth plugin`)
-}
-
-async function editProviderTs(report: string[]): Promise<void> {
-  const file = path.join(ROOT, "packages/opencode/src/provider/provider.ts")
-  if (!existsSync(file)) {
-    report.push(`- ⚠ provider/provider.ts not found, skipping anthropic-beta header`)
-    return
-  }
-  const content = readUtf8(file)
-  if (content.includes("claude-code-20250219")) {
-    report.push(`- provider/provider.ts: claude-code-20250219 already present, skipping`)
-    return
-  }
-  const old = `"anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",`
-  if (!content.includes(old)) {
-    report.push(`- ⚠ provider/provider.ts: anthropic-beta header not in expected form; skipping`)
-    return
-  }
-  const next = content.replace(
-    old,
-    `// altimate_change start — preserve claude-code anthropic-beta header (PR #18186 reverted)\n            "anthropic-beta":\n              "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",\n            // altimate_change end`,
-  )
-  if (!DRY_RUN) writeFileSync(file, next)
-  report.push(`- provider/provider.ts: re-added claude-code-20250219 in anthropic-beta header`)
 }
 
 async function editSessionLlmTs(report: string[]): Promise<void> {

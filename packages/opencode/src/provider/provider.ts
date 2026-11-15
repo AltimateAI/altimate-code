@@ -532,8 +532,9 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "anthropic-beta":
-              "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            // altimate_change start — no Claude Code beta flag: an API key is not Claude Code (upstream 1ac1a0287c)
+            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            // altimate_change end
           },
         },
       }
