@@ -8,6 +8,7 @@ import { ClaudeAgentID } from "@/altimate/provider/claude-agent/id"
 import { ClaudeAgentLanguageModel } from "@/altimate/provider/claude-agent/language-model/claude-agent-language-model"
 import { ToolAborted } from "@/altimate/provider/claude-agent/tools/aborted"
 import { ToolResult } from "@/altimate/provider/claude-agent/tools/result"
+import { RequestKind } from "@/altimate/provider/claude-agent/language-model/request-kind"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { MessageV2 } from "@/session/message-v2"
 import { ClaudeAgentError } from "@/altimate/provider/claude-agent/language-model/claude-agent-error"
@@ -82,6 +83,18 @@ describe("Claude Agent generate calls", () => {
     for await (const partial of result.partialObjectStream) last = partial
     expect(last).toEqual({ name: "orders", rows: 3 })
     expect(String(requests[0]?.system)).toContain("Respond with only a JSON value")
+  })
+
+  test("a chat request with a JSON response format asks for JSON in Claude's instructions", async () => {
+    // Chat requests build Claude's prompt from the instructions option, not the prompt's system messages.
+    const { language, requests } = model('{"name":"orders"}')
+    const { stream } = await language.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "describe the table" }] }],
+      responseFormat: { type: "json" },
+      headers: { [RequestKind.HEADER]: "primary", [RequestKind.SESSION_HEADER]: "ses_json" },
+    })
+    for await (const _ of stream as unknown as AsyncIterable<unknown>);
+    expect(JSON.stringify(requests[0]?.system)).toContain("Respond with only a JSON value")
   })
 
   test("a generate call asks for JSON once", async () => {

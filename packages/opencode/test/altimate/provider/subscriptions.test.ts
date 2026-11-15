@@ -3,7 +3,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import * as Auth from "@/auth"
-import { detect, scan } from "@/altimate/provider/subscriptions"
+import { scan } from "@/altimate/provider/subscriptions"
 
 const saved = { ...process.env }
 let root: string
@@ -31,6 +31,7 @@ afterEach(async () => {
 })
 
 const write = (file: string, value: unknown) => fs.writeFile(path.join(root, file), JSON.stringify(value))
+const detect = async () => (await scan()).found
 const names = async () => (await detect()).map((item) => item.subscription).sort()
 
 describe("subscription detection", () => {

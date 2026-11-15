@@ -109,7 +109,11 @@ export class Model implements LanguageModelV3 {
     const role = settings?.[ClaudeSystemPrompt.AGENT_OPTION]
     const agent = typeof role === "string" ? role : undefined
     const loaded = settings?.[ClaudeSystemPrompt.INSTRUCTIONS_OPTION]
-    const instructions = typeof loaded === "string" ? loaded : undefined
+    // altimate_change — chat requests take Claude's prompt from these instructions, not the prompt's
+    // system messages, so a JSON request's instruction goes here too
+    const json = input.responseFormat?.type === "json" ? jsonInstruction(input.responseFormat.schema) : undefined
+    const instructions =
+      [typeof loaded === "string" ? loaded : undefined, json].filter((text) => text).join("\n\n") || undefined
     const effort = parseEffort(settings?.effort)
     const primary = kind === "primary"
     const branch = kind === "generate" || kind === "compaction"

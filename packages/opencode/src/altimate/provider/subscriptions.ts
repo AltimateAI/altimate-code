@@ -36,10 +36,6 @@ export interface Scan {
 // Lists subscription logins already on this machine, expired ones included: the point is to suggest
 // a login the user already has, and connecting refreshes or re-asks as needed. Only checks that a
 // login exists; no token is read into the result or leaves this process.
-export async function detect(): Promise<Found[]> {
-  return (await scan()).found
-}
-
 export async function scan(): Promise<Scan> {
   const found = new Map<Subscription, Found>()
   const add = (subscription: Subscription, source: Found["source"]) => {

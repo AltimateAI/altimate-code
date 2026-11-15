@@ -52,15 +52,21 @@ describe("login status", () => {
   it.effect("an interrupted check closes its claude process and leaves the state as it was", () =>
     Effect.gen(function* () {
       const hold = Promise.withResolvers<void>()
-      const step = FakeClaude.expectStartup({ hold: hold.promise })
-      const claude = FakeClaude.make([step])
+      const done = FakeClaude.expectStartup()
+      const held = FakeClaude.expectStartup({ recording: "startup-logged-out", hold: hold.promise })
+      const claude = FakeClaude.make([done, held])
       const status = yield* ClaudeStatus.make(FakeIO.make({ claude }), () => Effect.succeed({}))
 
+      yield* status.refresh()
+      const before = yield* SubscriptionRef.get(status.state)
+      expect(before.type).toBe("ready")
+
+      // The re-check would find a logged-out account; interrupting it must not publish anything.
       const check = yield* status.refresh().pipe(Effect.forkScoped)
-      yield* Effect.promise(() => claude.started(step))
+      yield* Effect.promise(() => claude.started(held))
       yield* Fiber.interrupt(check)
-      yield* Effect.promise(() => claude.runs[0]!.closed)
-      expect(yield* SubscriptionRef.get(status.state)).toEqual({ type: "checking" })
+      yield* Effect.promise(() => claude.runs[1]!.closed)
+      expect(yield* SubscriptionRef.get(status.state)).toBe(before)
     }),
   )
 

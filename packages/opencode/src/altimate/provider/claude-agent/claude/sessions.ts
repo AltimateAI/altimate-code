@@ -462,6 +462,9 @@ export function registry() {
             entry.idle = undefined
           }
           entry.active = yield* Effect.withFiber(Effect.succeed)
+          // altimate_change — a delete can land while the idle timer above is being stopped, before
+          // this turn is recorded as active, so `remove` could not interrupt it
+          if (entry.removed) return yield* Effect.fail(new Error("This chat was deleted."))
           const prepared = yield* prepare(entry, request)
           yield* turn(entry, request, prepared.start, prepared.continuation)
         }).pipe(Effect.ensuring(release(entry, request))),
