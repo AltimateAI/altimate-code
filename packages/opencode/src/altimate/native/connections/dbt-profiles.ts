@@ -56,8 +56,8 @@ const KEY_MAP: Record<string, string> = {
 export function resolveEnvVars(value: unknown): unknown {
   if (typeof value !== "string") return value
   return value.replace(
-    /\{\{\s*env_var\s*\(\s*'([^']+)'\s*(?:,\s*'([^']*)'\s*)?\)\s*\}\}/g,
-    (_match, envName: string, defaultValue?: string) => {
+    /\{\{\s*env_var\s*\(\s*(['"])([^'"]+)\1\s*(?:,\s*(['"])([^'"]*)\3\s*)?\)\s*\}\}/g,
+    (_match, _q1: string, envName: string, _q2?: string, defaultValue?: string) => {
       return process.env[envName] ?? defaultValue ?? ""
     },
   )

@@ -1,7 +1,7 @@
 import z from "zod"
 import fs from "fs"
 import path from "path"
-import { parse as parseJsonc, type ParseError } from "jsonc-parser"
+import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
 import { resolveEnvVars, resolveProfilesPath } from "../native/connections/dbt-profiles"
 
@@ -57,6 +57,8 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
   // .vscode/settings.json allows comments and trailing commas.
   const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
   // A file that does not parse cannot be trusted to say defer is on.
+  // A file holding only comments has no value to parse, which VS Code reads as empty settings.
+  if (parsed === undefined && errors.every((e) => printParseErrorCode(e.error) === "ValueExpected")) return {}
   if (errors.length > 0) return UNREADABLE
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return UNREADABLE
   return parsed as Record<string, unknown>
@@ -95,6 +97,12 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
       const entry = (perProject as Record<string, unknown>)[key]
       if (entry && typeof entry === "object") {
         return { entry: entry as DeferSetting, key, file, folder }
+      }
+      // A key naming the project through a symlink: compare the real paths.
+      const target = real(start)
+      for (const [k, v] of Object.entries(perProject as Record<string, unknown>)) {
+        if (!v || typeof v !== "object") continue
+        if (real(path.resolve(folder, k)) === target) return { entry: v as DeferSetting, key: k, file, folder }
       }
     }
     return undefined

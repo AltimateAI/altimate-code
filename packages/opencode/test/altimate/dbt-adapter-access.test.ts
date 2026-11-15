@@ -95,6 +95,14 @@ describe("feature tools in the allow-list", () => {
   })
 })
 
+describe("dbtAdapterFor abort", () => {
+  test("a read-only call that is already cancelled is cancelled, not refused", async () => {
+    const ac = new AbortController()
+    ac.abort()
+    await expect(dbtAdapterFor({ abort: ac.signal, agent: "plan", extra: { forceReadOnly: true } } as any)).rejects.toBeDefined()
+  })
+})
+
 describe("dbtAdapterFor", () => {
   let created: number
   beforeEach(() => {

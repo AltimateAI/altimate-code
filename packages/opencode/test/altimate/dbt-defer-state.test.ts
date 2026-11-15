@@ -131,15 +131,20 @@ describe("dbt_defer_state", () => {
   })
 
   test("${env:NAME} in the state path is expanded, and an unset one is left as written", async () => {
+    const saved = { set: process.env.DEFER_TEST_STATE, unset: process.env.DEFER_TEST_UNSET }
     process.env.DEFER_TEST_STATE = path.join(root, "analytics", "prod-state")
+    delete process.env.DEFER_TEST_UNSET
     try {
       settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${env:DEFER_TEST_STATE}" } })
       expect((await resolveDeferState(path.join(root, "analytics"))).stateDir).toBe(path.join(root, "analytics", "prod-state"))
+      settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${env:DEFER_TEST_UNSET}" } })
+      expect((await resolveDeferState(path.join(root, "analytics"))).reason).toContain("${env:DEFER_TEST_UNSET}")
     } finally {
-      delete process.env.DEFER_TEST_STATE
+      if (saved.set === undefined) delete process.env.DEFER_TEST_STATE
+      else process.env.DEFER_TEST_STATE = saved.set
+      if (saved.unset === undefined) delete process.env.DEFER_TEST_UNSET
+      else process.env.DEFER_TEST_UNSET = saved.unset
     }
-    settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${env:DEFER_TEST_UNSET}" } })
-    expect((await resolveDeferState(path.join(root, "analytics"))).reason).toContain("${env:DEFER_TEST_UNSET}")
   })
 
   test("an explicit workspace folder and an absolute state path are used", async () => {
@@ -161,6 +166,33 @@ describe("dbt_defer_state", () => {
     expect((await resolveDeferState(path.join(root, "analytics"))).defaultTarget).toBe("dev")
   })
 
+  test("double-quoted env_var() names and defaults are resolved too", async () => {
+    write("analytics/dbt_project.yml", "name: shop\nprofile: '{{ env_var(\"DEFER_TEST_PROFILE\", \"shop\") }}'\n")
+    write("profiles/profiles.yml", "shop:\n  target: '{{ env_var(\"DEFER_TEST_TARGET2\", \"dev\") }}'\n  outputs:\n    dev:\n      type: duckdb\n")
+    delete process.env.DEFER_TEST_PROFILE
+    delete process.env.DEFER_TEST_TARGET2
+    expect(await resolveDeferState(path.join(root, "analytics"))).toMatchObject({ profile: "shop", defaultTarget: "dev" })
+  })
+
+  test("a settings file holding only a comment does not hide the workspace entry", () => {
+    settings({ analytics: { deferToProduction: true } })
+    fs.mkdirSync(path.join(root, "analytics", ".vscode"), { recursive: true })
+    fs.writeFileSync(path.join(root, "analytics", ".vscode", "settings.json"), "// nothing yet\n")
+    expect(findDeferSetting(path.join(root, "analytics"))?.key).toBe("analytics")
+  })
+
+  test("a settings key naming the project through a symlink matches the real project path", () => {
+    const outside = fs.mkdtempSync(path.join(path.dirname(root), "ext2-"))
+    fs.symlinkSync(outside, path.join(root, "linked"))
+    try {
+      settings({ linked: { deferToProduction: true } })
+      expect(findDeferSetting(outside, root)?.key).toBe("linked")
+    } finally {
+      fs.rmSync(path.join(root, "linked"))
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   test("remote mode is reported as unsupported with no state dir", async () => {
     settings({ analytics: { deferToProduction: true, manifestPathType: "remote", dbtCoreIntegrationId: 7 } })
     const result = await resolveDeferState(path.join(root, "analytics"))
@@ -171,7 +203,8 @@ describe("dbt_defer_state", () => {
 
   test("missing settings file and unreadable profiles give defaults", async () => {
     fs.rmSync(path.join(root, ".vscode"), { recursive: true, force: true })
-    fs.rmSync(path.join(root, "profiles"), { recursive: true, force: true })
+    // An invalid file in place (not a removed directory) keeps the lookup off the developer's ~/.dbt/profiles.yml.
+    write("profiles/profiles.yml", "shop: [unclosed\n")
     const result = await resolveDeferState(path.join(root, "analytics"))
     expect(result).toMatchObject({ enabled: false, mode: "none", targets: [] })
     expect(result.defaultTarget).toBeUndefined()

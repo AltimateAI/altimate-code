@@ -25,6 +25,8 @@ export const dbtAdapterAccessInternals = {
  */
 export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | "extra">): Promise<DbtAdapterAccess> {
   const signal = ctx.abort
+  // A call cancelled before it starts is a cancellation, not a refusal.
+  signal.throwIfAborted()
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
@@ -81,7 +83,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
  * (`other`, both links resolved). Undefined when the session's directory is in no dbt project: the
  * adapter's own discovery (a dbt.json, or a walk up from the working directory) decides then.
  */
-async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
+export async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
   const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
   const found = findProjectRoot(projectRoot())
   if (!found) return undefined
