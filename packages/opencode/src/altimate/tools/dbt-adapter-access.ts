@@ -18,14 +18,19 @@ export const dbtAdapterAccessInternals = {
 }
 
 /**
- * The dbt adapter for a tool call, which every adapter-backed tool goes through. Starting the adapter
+ * The dbt adapter for a tool call, the gate `dbt_health` goes through (other adapter-backed tools call the adapter directly). Starting the adapter
  * runs dbt deps and writes target/, and compiling renders Jinja, which can run SQL: a read-only call
  * (no write permission, or plan mode) never starts or uses it. Nor does a session in a dbt project the
  * adapter isn't set up for. The wait for the adapter to start is bounded and follows the call's abort.
  */
 export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | "extra">): Promise<DbtAdapterAccess> {
   const signal = ctx.abort
-  if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
+  if (ctx.agent === "plan" && ctx.extra?.forceReadOnly !== true)
+    return {
+      refusal: "read_only",
+      reason: "this needs the dbt adapter, which plan mode doesn't start: switch to the build agent",
+    }
+  if (ctx.extra?.forceReadOnly === true)
     return {
       refusal: "read_only",
       reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",

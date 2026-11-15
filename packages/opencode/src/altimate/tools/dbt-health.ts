@@ -50,8 +50,37 @@ export const dbtHealthInternals = {
       )
       child.stdin?.end()
     }),
+  /** How long a call waits for the manifest rebuild; the rebuild itself goes on and the next call joins it. */
+  rebuildTimeoutMs: 120_000,
   /** The Python found for a project when the dbt config names none. */
   discoverPython: async (root: string) => (await import("../../../../dbt-tools/src/config")).discoverPython(root),
+}
+
+/** The rebuild in flight for an adapter: concurrent calls share it instead of each driving `dbt parse` over the same manifest. */
+const rebuilding = new WeakMap<object, Promise<unknown>>()
+
+/** Waits for the shared manifest rebuild, bounded by a timeout and the call's abort. */
+async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<void> {
+  let shared = rebuilding.get(adapter)
+  if (!shared) {
+    shared = Promise.resolve(adapter.rebuildManifest()).finally(() => rebuilding.delete(adapter))
+    rebuilding.set(adapter, shared)
+  }
+  let stop = () => {}
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const waited = new Promise<never>((_, reject) => {
+    stop = () => reject(signal.reason)
+    signal.addEventListener("abort", stop, { once: true })
+    timer = setTimeout(
+      () => reject(new Error(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`)),
+      dbtHealthInternals.rebuildTimeoutMs,
+    )
+  })
+  waited.catch(() => {})
+  await Promise.race([shared, waited]).finally(() => {
+    signal.removeEventListener("abort", stop)
+    clearTimeout(timer)
+  })
 }
 
 /** The Python dbt runs under: the one the dbt config names (the adapter uses it), else one found for the project. */
@@ -65,9 +94,11 @@ async function pythonFor(root: string): Promise<string> {
 // path, or none for the defaults). dbt-integration's own healthcheck entry point isn't implemented by
 // any of its integrations, and its `All` mode would run `dbt docs generate`.
 const SCRIPT = `
-import json, sys, logging, os
-# Python puts the working folder first on the path; keep the project files from shadowing modules.
+import sys, os
+# Python puts the working folder first on the path; keep the project files from shadowing modules,
+# the standard library ones imported below included.
 sys.path = [p for p in sys.path if p not in ("", os.getcwd())]
+import json, logging
 try:
     from datapilot.config.config import load_config
     from datapilot.core.platforms.dbt.constants import MODEL
@@ -88,7 +119,7 @@ try:
         config=config,
     )
     reports = generator.run()
-    out = {k: [json.loads(i.json()) for i in v] for k, v in reports[MODEL].items()}
+    out = {k: [json.loads(i.json()) for i in v] for k, v in reports.get(MODEL, {}).items()}
     with open(manifest_path) as f:
         raw = json.load(f)
     nodes = {
@@ -167,7 +198,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
     if (typeof adapter.parseManifest === "function") {
       try {
-        if (typeof adapter.rebuildManifest === "function") await adapter.rebuildManifest()
+        if (typeof adapter.rebuildManifest === "function") await rebuildManifest(adapter, ctx.abort)
         // A rebuild that fails to compile returns normally and leaves the last manifest: its diagnostics say so.
         const diagnostics = (typeof adapter.getDiagnostics === "function" ? adapter.getDiagnostics() : undefined)?.rebuildManifestDiagnostics
         if (Array.isArray(diagnostics) && diagnostics.length > 0)
@@ -178,7 +209,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         const parsed = await adapter.parseManifest()
         if (parsed?.stale) {
           // The same shape the other dbt tools give a stale manifest.
-          const writtenAt = typeof parsed.stale.writtenAt === "number" ? parsed.stale.writtenAt : undefined
+          const writtenAt = typeof parsed.stale.writtenAt === "number" && Number.isFinite(parsed.stale.writtenAt) ? parsed.stale.writtenAt : undefined
           stale = {
             message: `The dbt project check failed, so these insights come from the manifest of the last successful parse${writtenAt === undefined ? "" : `, written ${new Date(writtenAt).toISOString()}`}. They may not match the project as it is now.`,
             manifest_path: parsed.stale.manifestPath,
@@ -217,13 +248,14 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     }
     // DataPilot may log to stdout: the answer is the last line that parses as the script's answer.
     let parsed: { error?: string; detail?: string; model_insights?: unknown; nodes?: Record<string, NodeFiles>; project?: string } | undefined
-    for (const line of run.stdout.split("\n").reverse()) {
+    let end = run.stdout.length
+    while (end > 0 && !parsed) {
+      const start = run.stdout.lastIndexOf("\n", end - 1) + 1
+      const line = run.stdout.slice(start, end)
+      end = start - 1
       try {
         const value = JSON.parse(line)
-        if (value && typeof value === "object" && !Array.isArray(value) && ("error" in value || "model_insights" in value)) {
-          parsed = value
-          break
-        }
+        if (value && typeof value === "object" && !Array.isArray(value) && ("error" in value || "model_insights" in value)) parsed = value
       } catch {}
     }
     if (!parsed)
@@ -235,7 +267,9 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         { missing: "altimate-datapilot-cli", python },
       )
     if (parsed.error) return failure("failed", `DataPilot failed: ${parsed.detail ?? parsed.error}`)
-    if (run.code !== 0 || !parsed.model_insights || typeof parsed.model_insights !== "object")
+    const insightsShape = (v: unknown) =>
+      !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((list) => Array.isArray(list))
+    if (run.code !== 0 || !insightsShape(parsed.model_insights))
       return failure("failed", `DataPilot gave no insights (exit ${run.code}).${run.stderr ? `\n${run.stderr.slice(-2000)}` : ""}`)
     // Paths from the folder as the system names it (`/tmp` is `/private/tmp` on macOS), the way an editor's cwd is.
     let realRoot = root

@@ -342,9 +342,9 @@ describe("dbt_health", () => {
     expect(python.calls).toHaveLength(1)
   })
 
-  test("the script says \"not installed\" only when the datapilot package itself can't be found", async () => {
-    const py = Bun.which("python3")
-    if (!py) return
+  test.skipIf(!Bun.which("python3"))("the script says \"not installed\" only when the datapilot package itself can't be found", async () => {
+    const py = Bun.which("python3")!
+    const hostHasDatapilot = Bun.spawnSync([py, "-c", "import datapilot"]).exitCode === 0
     const stubs = await mkdtemp(path.join(os.tmpdir(), "dbt-health-stub-"))
     const originalRun = originals.runPython
     const classify = async (pythonPath: string) => {
@@ -359,8 +359,8 @@ describe("dbt_health", () => {
       }
     }
     try {
-      // Nothing named datapilot on the path: not installed.
-      expect((await classify(stubs)).metadata.missing).toBe("altimate-datapilot-cli")
+      // Nothing named datapilot on the path: not installed (not checkable where the host's Python has it).
+      if (!hostHasDatapilot) expect((await classify(stubs)).metadata.missing).toBe("altimate-datapilot-cli")
       // datapilot there, but one of its own imports can't be satisfied: a failure, not a missing package.
       await mkdir(path.join(stubs, "datapilot", "config"), { recursive: true })
       await writeFile(path.join(stubs, "datapilot", "__init__.py"), "")
@@ -416,6 +416,97 @@ describe("dbt_health", () => {
     expect(result.output).toContain("--allow-write")
     expect(created).toBe(0)
     expect(python.calls).toHaveLength(0)
+  })
+
+  test("plan mode says to switch agents, and --allow-write is kept for the forced read-only call", async () => {
+    const plan = await run({}, { agent: "plan" })
+    expect(plan.metadata).toMatchObject({ success: false, refusal: "read_only" })
+    expect(plan.output).toContain("build agent")
+    expect(plan.output).not.toContain("--allow-write")
+  })
+
+  test("an answer whose model_insights is an array, or holds a non-list, is a failure, not an empty report", async () => {
+    for (const bad of [[], { "model.shop.orders": { not: "a list" } }, { "model.shop.orders": "x" }]) {
+      python.stdout = JSON.stringify({ model_insights: bad })
+      const result = await run()
+      expect([JSON.stringify(bad), result.metadata.success]).toEqual([JSON.stringify(bad), false])
+    }
+  })
+
+  test("an unreadable written-at time of the old manifest is left out, not a throw", async () => {
+    parsed = { stale: { writtenAt: Number.NaN, manifestPath: "x" } }
+    const result = await run()
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.stale_manifest.written_at).toBeUndefined()
+  })
+
+  test("a rebuild that never finishes stops at the timeout, and a cancelled call stops at once", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: () => new Promise(() => {}),
+      parseManifest: async () => parsed,
+    })
+    dbtHealthInternals.rebuildTimeoutMs = 20
+    const timedOut = await run()
+    expect(timedOut.metadata.success).toBe(false)
+    expect(timedOut.output).toContain("didn't finish within")
+    const abort = new AbortController()
+    setTimeout(() => abort.abort(new Error("cancelled")), 5)
+    dbtHealthInternals.rebuildTimeoutMs = 60_000
+    await expect(run({}, { abort: abort.signal })).rejects.toThrow("cancelled")
+    expect(python.calls).toHaveLength(0)
+  })
+
+  test("concurrent calls share one manifest rebuild", async () => {
+    let rebuilds = 0
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {
+        rebuilds += 1
+        await new Promise((r) => setTimeout(r, 30))
+      },
+      parseManifest: async () => parsed,
+    })
+    const results = await Promise.all([run(), run()])
+    expect(results.map((r) => r.metadata.success)).toEqual([true, true])
+    expect(rebuilds).toBe(1)
+  })
+
+  test.skipIf(!Bun.which("python3"))("the script reads a standard-library module from the standard library, not from the project folder, and says no insights when the model level is missing", async () => {
+    const py = Bun.which("python3")!
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-health-shadow-"))
+    try {
+      await writeFile(path.join(dir, "json.py"), "raise SystemExit('project json.py was imported')\n")
+      const pkg = path.join(dir, "stub")
+      const sub = (...p: string[]) => path.join(pkg, "datapilot", ...p)
+      await mkdir(sub("config"), { recursive: true })
+      await mkdir(sub("core", "platforms", "dbt"), { recursive: true })
+      for (const f of [["__init__.py"], ["config", "__init__.py"], ["core", "__init__.py"], ["core", "platforms", "__init__.py"], ["core", "platforms", "dbt", "__init__.py"]])
+        await writeFile(sub(...f), "")
+      await writeFile(sub("config", "config.py"), "def load_config(p):\n    return None\n")
+      await writeFile(sub("core", "platforms", "dbt", "constants.py"), "MODEL = 'model'\n")
+      await writeFile(sub("core", "platforms", "dbt", "executor.py"), "class DBTInsightGenerator:\n    def __init__(self, **k):\n        pass\n    def run(self):\n        return {}\n")
+      await writeFile(sub("core", "platforms", "dbt", "utils.py"), "def load_manifest(p):\n    return None\n\ndef load_catalog(p):\n    return None\n")
+      await mkdir(path.join(dir, "target"), { recursive: true })
+      await writeFile(path.join(dir, "target", "manifest.json"), "{}")
+      const saved = process.env.PYTHONPATH
+      process.env.PYTHONPATH = pkg
+      try {
+        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originals.runPython(py, script, args, cwd, signal)
+        dbtAdapterInternals.create = async () => ({ isInitialized: () => true, getProjectRoot: () => dir, parseManifest: async () => parsed })
+        const result = await run()
+        expect(result.output).not.toContain("json.py")
+        expect([result.output, result.metadata.success]).toEqual([result.output, true])
+        expect(result.output).toContain("No health insights.")
+      } finally {
+        if (saved === undefined) delete process.env.PYTHONPATH
+        else process.env.PYTHONPATH = saved
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("says to run dbt when there is no manifest", async () => {
