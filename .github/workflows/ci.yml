@@ -81,6 +81,8 @@ jobs:
               - 'script/check-tracker-leaks.ts'
               - 'script/upstream/**'
               # altimate_change end
+              # The test jobs decide pass/fail with this script.
+              - 'script/github/check-bun-test-summary.sh'
             # altimate_change start — a change to this workflow runs the Typecheck job on
             # its own PR, without also starting the 60-minute TypeScript test job.
             typecheck:
