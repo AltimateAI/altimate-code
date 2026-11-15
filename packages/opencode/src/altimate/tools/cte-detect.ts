@@ -21,8 +21,6 @@ export interface CteInfo {
   index: number
   /** Offset of the WITH keyword that opens this CTE's clause. */
   withClauseStart: number
-  /** The clause is `WITH RECURSIVE`. */
-  recursive?: boolean
 }
 
 /** Position just past the string literal, quoted identifier or comment (`--`, block, Jinja) that starts at `pos`; `pos` itself when none does. An unterminated one runs to the end of the text. */
@@ -68,9 +66,7 @@ function skipTrivia(text: string, pos: number, jinja: boolean): number {
       continue
     }
     if (jinja && text[pos] === "{" && text[pos + 1] === "%") {
-      const close = text.indexOf("%}", pos + 2)
-      if (close === -1) return text.length
-      pos = close + 2
+      pos = skipJinjaBlock(text, pos)
       continue
     }
     return pos
@@ -219,7 +215,7 @@ function readIdentifier(text: string, pos: number): number {
       if (close === end || text[close - 1] !== char || close - end < 2) return -1
       end = close
     } else if (char === "[") {
-      const bracketed = /\[[^\]\n]{1,256}\]/y
+      const bracketed = /\[(?:[^\]\n]|\]\]){1,256}\]/y
       bracketed.lastIndex = end
       if (!bracketed.test(text)) return -1
       end = bracketed.lastIndex
@@ -256,8 +252,7 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
   let pos = skipTrivia(text, withPos + 4, true)
   const keyword = /recursive\b/iy
   keyword.lastIndex = pos
-  const recursive = keyword.test(text)
-  if (recursive) pos = skipTrivia(text, pos + "recursive".length, true)
+  if (keyword.test(text)) pos = skipTrivia(text, pos + "recursive".length, true)
 
   for (let index = 0; ; index++) {
     const nameStart = pos
@@ -287,7 +282,6 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
       queryEnd: close,
       index,
       withClauseStart: withPos,
-      ...(recursive && { recursive }),
     })
     pos = skipTrivia(text, close + 1, true)
     if (text[pos] !== ",") return

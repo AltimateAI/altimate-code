@@ -172,7 +172,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     if (args.position !== undefined) {
       target = ctes[args.position]
       if (!target) return failure("CTE not found", `${args.model} has ${ctes.length} CTEs: there is none at position ${args.position}.`, { model: args.model })
-      if (args.cte !== undefined && bareName(target.name) !== bareName(args.cte))
+      if (args.cte !== undefined && bareName(target.name) !== bareName(args.cte) && bareName(target.name).toLowerCase() !== bareName(args.cte).toLowerCase())
         return failure("CTE not found", `The CTE at position ${args.position} of ${args.model} is ${stripColumnList(target.name)}, not ${args.cte}.`, { model: args.model })
     } else {
       // The name as typed wins; letter case only decides when nothing matches it exactly.

@@ -587,11 +587,11 @@ select * from renamed`
     })
   })
 
-  describe("MAX_QUOTED_IDENTIFIER_LENGTH Edge Cases", () => {
-    it("should handle comments with quoted strings longer than MAX_QUOTED_IDENTIFIER_LENGTH", () => {
+  describe("Long quoted strings inside comments", () => {
+    it("should ignore a long quoted string inside a comment", () => {
       // Create a quoted string in comment that's longer than 500 chars
       const veryLongQuotedString = '"' + "a".repeat(600) + '"'
-      const commentWithLongQuotedString = `/* This comment contains a very long quoted string: ${veryLongQuotedString} that exceeds the MAX_QUOTED_IDENTIFIER_LENGTH limit */`
+      const commentWithLongQuotedString = `/* This comment contains a very long quoted string: ${veryLongQuotedString} that is long */`
 
       const sql = `with ${commentWithLongQuotedString} "real_cte" as (select 1 as id) select * from "real_cte"`
       const document = sql
@@ -603,11 +603,11 @@ select * from renamed`
         ctes[0],
         '"real_cte"',
         0,
-        "CTE with comment containing quoted string longer than MAX_QUOTED_IDENTIFIER_LENGTH",
+        "CTE with comment containing quoted string longer than 500 characters",
       )
     })
 
-    it("should handle quoted CTE name approaching MAX_QUOTED_IDENTIFIER_LENGTH limit", () => {
+    it("should handle quoted CTE name approaching 500 characters", () => {
       // Create a quoted CTE name that's close to but under the 500 char limit
       const longCTEName = '"' + "very_long_cte_name_" + "x".repeat(450) + '"'
 
@@ -617,10 +617,10 @@ select * from renamed`
       const ctes = detectCtes(document)
 
       expect(ctes).toHaveLength(1)
-      assertCTE(ctes[0], longCTEName, 0, "CTE with quoted name approaching MAX_QUOTED_IDENTIFIER_LENGTH limit")
+      assertCTE(ctes[0], longCTEName, 0, "CTE with quoted name approaching 500 characters")
     })
 
-    it("should handle quoted CTE name exactly at MAX_QUOTED_IDENTIFIER_LENGTH limit", () => {
+    it("should handle quoted CTE name exactly at 500 characters", () => {
       // Create a quoted CTE name that's exactly at the 500 char limit (498 chars inside quotes + 2 quotes = 500)
       const exactLimitCTEName = '"' + "x".repeat(498) + '"'
 
@@ -630,7 +630,7 @@ select * from renamed`
       const ctes = detectCtes(document)
 
       expect(ctes).toHaveLength(1)
-      assertCTE(ctes[0], exactLimitCTEName, 0, "CTE with quoted name exactly at MAX_QUOTED_IDENTIFIER_LENGTH limit")
+      assertCTE(ctes[0], exactLimitCTEName, 0, "CTE with quoted name exactly at 500 characters")
     })
 
     it("should handle comment with multiple long quoted strings and real CTE", () => {
@@ -649,7 +649,7 @@ select * from renamed`
         ctes[0],
         '"actual_cte"',
         0,
-        "CTE with comment containing multiple quoted strings longer than MAX_QUOTED_IDENTIFIER_LENGTH",
+        "CTE with comment containing multiple quoted strings longer than 500 characters",
       )
     })
 
@@ -688,7 +688,7 @@ select * from renamed`
         ctes[0],
         '"real_cte"',
         0,
-        "CTE with line comment containing quoted string longer than MAX_QUOTED_IDENTIFIER_LENGTH",
+        "CTE with line comment containing quoted string longer than 500 characters",
       )
     })
 
@@ -707,7 +707,7 @@ select * from renamed`
         ctes[0],
         '"real_cte"',
         0,
-        "CTE with Jinja comment containing quoted string longer than MAX_QUOTED_IDENTIFIER_LENGTH",
+        "CTE with Jinja comment containing quoted string longer than 500 characters",
       )
     })
 
@@ -1410,6 +1410,12 @@ select * from last`
   it("a quoted name keeps its escaped quote", () => {
     const sql = 'with "a""b" as (select 1), `c``d` as (select 2) select * from "a""b"'
     expect(detectCtesInText(sql).map((c) => c.name)).toEqual(['"a""b"', "`c``d`"])
+  })
+
+  it("skips a captured {% set %} block between CTEs and reads a bracket name with an escaped ]]", () => {
+    const sql = "with a as (select 1),\n{% set helper %}select 2{% endset %}\nb as (select 2)\nselect * from b"
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["a", "b"])
+    expect(detectCtesInText("with [we]]ird] as (select 1) select * from [we]]ird]").map((c) => c.name)).toEqual(["[we]]ird]"])
   })
 
   it("keeps CTEs that follow a Jinja tag between them, and reads WITH RECURSIVE and MATERIALIZED", () => {

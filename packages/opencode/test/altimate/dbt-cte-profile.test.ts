@@ -260,11 +260,13 @@ describe("dbt_cte_profile same-named CTEs", () => {
     const tool = await initTool(DbtCteProfileTool)
     const result = await tool.execute({ model: "twins", position: 2 }, ctx)
     expect(result.metadata.cte).toBe("keep")
+    const cased = await tool.execute({ model: "twins", cte: "KEEP", position: 2 }, ctx)
+    expect(cased.metadata.success).toBe(true)
     const wrong = await tool.execute({ model: "twins", cte: "foo", position: 2 }, ctx)
     expect(wrong.metadata.success).toBe(false)
     const missing = await tool.execute({ model: "twins", position: 9 }, ctx)
     expect(missing.metadata.success).toBe(false)
-    expect(queries).toHaveLength(1)
+    expect(queries).toHaveLength(2)
   })
 
   test("a CTE of a second WITH clause has no query of its own and runs nothing", async () => {
@@ -392,7 +394,7 @@ describe("dbt_cte_profile run", () => {
     const controller = new AbortController()
     controller.abort()
     const tool = await initTool(DbtCteProfileTool)
-    await expect(tool.execute({ model: "customers", cte: "orders" }, { ...ctx, abort: controller.signal })).rejects.toBeDefined()
+    await expect(tool.execute({ model: "customers", cte: "orders" }, { ...ctx, abort: controller.signal })).rejects.toMatchObject({ name: "AbortError" })
     expect(queries).toEqual([])
   })
 })
