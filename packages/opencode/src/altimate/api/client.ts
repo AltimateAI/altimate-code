@@ -318,7 +318,13 @@ export namespace AltimateApi {
     return data.auth_token
   }
 
-  async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
+  async function request(
+    creds: AltimateCredentials,
+    method: string,
+    endpoint: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ) {
     const url = `${creds.altimateUrl}${endpoint}`
     // altimate_change start — upstream_fix: bound every API request. Without a
     // signal a stalled server holds the caller indefinitely. The abort stays
@@ -327,7 +333,7 @@ export namespace AltimateApi {
     const timeout = setTimeout(() => controller.abort(), 15_000)
     try {
       const res = await fetch(url, {
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
         method,
         headers: {
           "Content-Type": "application/json",
@@ -335,7 +341,8 @@ export namespace AltimateApi {
           "x-tenant": creds.altimateInstanceName,
           ...clientHeaders(),
         },
-        ...(body ? { body: JSON.stringify(body) } : {}),
+        // Any body but undefined is sent: null, false, 0 and "" are JSON values too.
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       })
       if (!res.ok) {
         throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
@@ -350,9 +357,15 @@ export namespace AltimateApi {
   /**
    * Calls an Altimate API endpoint with the stored credentials (Bearer key and x-tenant headers) and
    * returns the parsed JSON body. Endpoint functions in other files go through this. Fails with a
-   * message naming the credentials file when none are stored or they can't be read.
+   * message naming the credentials file when none are stored or they can't be read. `signal` (a tool
+   * call's `ctx.abort`) cancels the request as well as the 15 s timeout.
    */
-  export async function apiRequest(method: string, endpoint: string, body?: unknown): Promise<any> {
+  export async function apiRequest(
+    method: string,
+    endpoint: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<any> {
     let creds: AltimateCredentials
     try {
       creds = await getCredentials()
@@ -364,7 +377,7 @@ export namespace AltimateApi {
         )
       throw new Error(`The Altimate credentials in ${p} can't be used: ${e instanceof Error ? e.message : String(e)}`)
     }
-    return request(creds, method, endpoint, body)
+    return request(creds, method, endpoint, body, signal)
   }
 
   export async function listDatamates(creds?: AltimateCredentials) {

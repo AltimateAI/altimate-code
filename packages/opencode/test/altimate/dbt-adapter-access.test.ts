@@ -125,6 +125,18 @@ describe("dbtAdapterFor", () => {
     expect(created).toBe(1)
   })
 
+  test("returns the adapter to a session inside the adapter's own project", async () => {
+    try {
+      const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
+      expect(access.refusal).toBeUndefined()
+      expect(access.reason).toBeUndefined()
+      expect(access.adapter?.isInitialized()).toBe(true)
+      expect(created).toBe(1)
+    } finally {
+      await disposeInstance(project)
+    }
+  })
+
   test("says when the adapter didn't load the project", async () => {
     dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
     const access = await dbtAdapterFor(ctx)
@@ -177,6 +189,15 @@ describe("dbtAdapterFor", () => {
     const controller = new AbortController()
     controller.abort()
     await expect(dbtAdapterFor({ ...ctx, abort: controller.signal })).rejects.toThrow()
+    expect(created).toBe(0)
+  })
+
+  test("a cancelled read-only or plan-mode call throws rather than being refused", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const abort = controller.signal
+    await expect(dbtAdapterFor({ ...ctx, abort, extra: { forceReadOnly: true } })).rejects.toThrow()
+    await expect(dbtAdapterFor({ ...ctx, abort, agent: "plan" })).rejects.toThrow()
     expect(created).toBe(0)
   })
 
@@ -255,6 +276,48 @@ describe("AltimateApi.apiRequest", () => {
       expect(headers.Authorization).toBe("Bearer k1")
       expect(headers["x-tenant"]).toBe("acme")
       expect(seen[0].init.body).toBe(JSON.stringify({ a: 1 }))
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("sends a falsy JSON body rather than dropping it", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(init.body)
+      return new Response("{}", { status: 200 })
+    }) as unknown as typeof fetch
+    try {
+      for (const body of [null, false, 0, ""]) await AltimateApi.apiRequest("POST", "/dbt/v1/x", body)
+      await AltimateApi.apiRequest("GET", "/dbt/v1/x")
+      expect(bodies).toEqual(["null", "false", "0", '""', undefined])
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("a cancelled call stops the request", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise((_, reject) => {
+        // Like fetch: a signal already aborted rejects at once, else the abort does.
+        if (init.signal?.aborted) return reject(init.signal.reason)
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      })) as unknown as typeof fetch
+    const controller = new AbortController()
+    try {
+      const pending = AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal)
+      controller.abort(new Error("cancelled by the user"))
+      await expect(pending).rejects.toThrow("cancelled by the user")
     } finally {
       globalThis.fetch = original
     }
