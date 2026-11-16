@@ -140,7 +140,7 @@ export async function act(
 }
 
 /** The workspace the project is linked to, with one captured credential that is still the one signed in. */
-async function context(
+export async function context(
   directory: string,
 ): Promise<
   | { ready: false; status: "signed_out" | "not_linked" | "account_changed" | "unconfirmed" }

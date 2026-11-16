@@ -501,10 +501,33 @@ function installCards(api: TuiPluginApi) {
     replay()
     void load()
   }, 4_000)
+  // altimate_change start — workspace activity: what changed in the workspace since this TUI last looked, once, after
+  // the startup replay. The TUI shows one toast at a time, so it waits while a decision toast is still up.
+  let activityTimer: ReturnType<typeof setTimeout> | undefined
+  const showActivity = async () => {
+    if (disposed) return
+    const answer = await get<{ ok: boolean; status?: string; line?: string }>(api, "/altimate/workspace/activity?host=tui")
+    if (disposed || typeof answer?.line !== "string") return
+    const line = printable(answer.line)
+    const announce = (tries: number) => {
+      if (disposed) return
+      if (tries < ACTIVITY_WAITS && toasterOf(api).shownSince(Date.now() - DECISION_TOAST_MS)) {
+        activityTimer = setTimeout(() => announce(tries + 1), ACTIVITY_RETRY_MS)
+        activityTimer.unref?.()
+        return
+      }
+      api.ui.toast({ variant: "info", message: line, duration: 12_000 })
+    }
+    announce(0)
+  }
+  activityTimer = setTimeout(() => void showActivity(), 6_000)
+  activityTimer.unref?.()
+  // altimate_change end
   api.lifecycle?.onDispose?.(() => {
     disposed = true
     if (leaseTimer) clearTimeout(leaseTimer)
     clearTimeout(startup)
+    if (activityTimer) clearTimeout(activityTimer)
     disposeToaster(api)
     for (const off of offs.splice(0)) off()
     disposeEffects()
@@ -548,6 +571,12 @@ export function decisionToast(raw: Shown): DecisionToast | undefined {
   if (p.status === "retired") return { variant: "info", message: `Retired${who}: ${quoted}`, duration: 10000 }
   return undefined
 }
+
+/** The longest a decision toast stays up: the activity line waits for it. */
+const DECISION_TOAST_MS = 15_000
+const ACTIVITY_RETRY_MS = 5_000
+/** How many times the activity line waits for a decision toast before showing anyway. */
+const ACTIVITY_WAITS = 4
 
 /** How many decisions a combined toast names. */
 const COMBINED_NAMED = 5

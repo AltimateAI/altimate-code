@@ -1460,6 +1460,26 @@ export namespace Server {
           return c.json({ ok: false, error }, 500)
         }
       })
+      // altimate_change start — workspace activity: what changed in the workspace's skills and knowledge since this
+      // client (`host`) last looked, as one line to show when a session starts. Marks it seen; the first look says nothing.
+      .get("/altimate/workspace/activity", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const host = c.req.query("host") ?? ""
+        if (!/^[a-z][a-z0-9-]{0,31}$/.test(host)) return c.json({ ok: false, error: "host must name the client, e.g. vscode." }, 400)
+        try {
+          const { WorkspaceActivity } = await import("../altimate/workspace/workspace-activity")
+          const changes = await WorkspaceActivity.changesSince(Instance.directory, host)
+          // `status`: ok, first (nothing said the first time), signed_out, not_linked, account_changed, unconfirmed,
+          // unsupported, failed.
+          return c.json({ ok: true as const, ...changes })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace activity failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       .post("/altimate/workspace/requests/:id/:action", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
