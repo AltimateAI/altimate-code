@@ -190,7 +190,7 @@ How it behaves:
 - `claude` must be installed on the same machine. Set `OPENCODE_CLAUDE_PATH` to run a specific `claude` binary instead of the one on `PATH`, for example the full path to `claude.exe` on Windows if the login check does not finish.
 - `claude` runs with your environment, as it does when you start it yourself. An `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set in your shell is therefore used instead of your subscription and billed to that key; unset it to use the subscription. Proxy settings (`HTTPS_PROXY`, and `NODE_EXTRA_CA_CERTS` for a company certificate) reach `claude` the same way.
 - The model list comes from Claude Code, so it appears after the first successful connect. If `claude` cannot reach Anthropic, `/connect` keeps checking and then says no login was found.
-- Deleting a chat in Altimate Code also deletes Claude Code's copy of that conversation, so it no longer appears in `claude --resume`.
+- Deleting a chat in Altimate Code also deletes Claude Code's copy of that conversation, so it no longer appears in `claude --resume`. If that delete fails, the error is logged and the chat is still removed.
 
 Connection settings in config map to Claude Code variables:
 

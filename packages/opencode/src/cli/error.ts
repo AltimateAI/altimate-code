@@ -59,7 +59,7 @@ export function FormatError(input: unknown): string | undefined {
     return stringField(input, "message") ?? ""
   }
 
-  // ProviderModelNotFoundError: { providerID: string, modelID: string, suggestions?: string[] }
+  // ProviderModelNotFoundError: { providerID: string, modelID: string, suggestions?: string[], providerMissing?: boolean }
   const providerModelNotFound = configData(input, "ProviderModelNotFoundError")
   if (providerModelNotFound) {
     const suggestions = Array.isArray(providerModelNotFound.suggestions)
@@ -69,9 +69,12 @@ export function FormatError(input: unknown): string | undefined {
     return [
       `Model not found: ${stringField(providerModelNotFound, "providerID")}/${stringField(providerModelNotFound, "modelID")}`,
       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      ...[modelNotFoundHint(stringField(providerModelNotFound, "providerID"), suggestions)].filter(
-        (x): x is string => !!x,
-      ),
+      ...[
+        modelNotFoundHint(
+          stringField(providerModelNotFound, "providerID"),
+          providerModelNotFound.providerMissing === true,
+        ),
+      ].filter((x): x is string => !!x),
       `Try: \`altimate models\` to list available models`,
       `Or check your config (altimate-code.json) provider/model names`,
     ].join("\n")

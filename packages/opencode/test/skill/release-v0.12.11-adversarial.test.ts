@@ -92,14 +92,18 @@ describe("v0.12.11: subscription detection against hostile login files", () => {
     expect(JSON.stringify(result)).not.toContain("secret-")
   })
 
-  test("a symlinked credentials file counts, and its target's contents never appear", async () => {
-    const outside = path.join(root, "outside.json")
-    await fs.writeFile(outside, JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat-leak" } }))
-    await fs.symlink(outside, path.join(root, "claude/.credentials.json"))
-    const result = await scan()
-    expect(result.found).toEqual([{ subscription: "claude", source: "claude-code" }])
-    expect(JSON.stringify(result)).not.toContain("sk-ant-oat-leak")
-  })
+  // Creating a symlink on Windows needs Developer Mode or elevation.
+  test.skipIf(process.platform === "win32")(
+    "a symlinked credentials file counts, and its target's contents never appear",
+    async () => {
+      const outside = path.join(root, "outside.json")
+      await fs.writeFile(outside, JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat-leak" } }))
+      await fs.symlink(outside, path.join(root, "claude/.credentials.json"))
+      const result = await scan()
+      expect(result.found).toEqual([{ subscription: "claude", source: "claude-code" }])
+      expect(JSON.stringify(result)).not.toContain("sk-ant-oat-leak")
+    },
+  )
 
   test("only a saved Anthropic OAuth login is flagged as the removed sign-in", async () => {
     await Auth.set("anthropic", { type: "api", key: "sk-ant-api-not-oauth" })
@@ -123,18 +127,27 @@ describe("v0.12.11: subscription detection against hostile login files", () => {
 })
 
 describe("v0.12.11: the Model not found hint for a missing Anthropic provider", () => {
-  test("shows only for the anthropic provider with nothing to suggest", () => {
-    expect(modelNotFoundHint("anthropic")).toContain("/connect and pick Claude subscription")
-    expect(modelNotFoundHint("anthropic", [])).toContain("Claude subscription")
+  test("shows only when the anthropic provider itself is missing", () => {
+    expect(modelNotFoundHint("anthropic", true)).toContain("/connect and pick Claude subscription")
   })
 
-  test("a likely model typo (suggestions present) gets no hint", () => {
-    expect(modelNotFoundHint("anthropic", ["claude-sonnet-4-6"])).toBeUndefined()
+  test("an Anthropic provider that is there, with an unknown model, gets no hint", () => {
+    expect(modelNotFoundHint("anthropic", false)).toBeUndefined()
+    expect(modelNotFoundHint("anthropic", undefined)).toBeUndefined()
   })
 
   test("other or malformed provider ids get no hint", () => {
-    for (const id of [undefined, "", "Anthropic", " anthropic", "anthropic ", "claude-agent", "openai", "anthropic/claude"])
-      expect(modelNotFoundHint(id, [])).toBeUndefined()
+    for (const id of [
+      undefined,
+      "",
+      "Anthropic",
+      " anthropic",
+      "anthropic ",
+      "claude-agent",
+      "openai",
+      "anthropic/claude",
+    ])
+      expect(modelNotFoundHint(id, true)).toBeUndefined()
   })
 })
 
@@ -179,7 +192,10 @@ describe("v0.12.11: source guards", () => {
 
   test("removing a workspace request asks again, opening on No", async () => {
     const rules = await read("plugin/tui/altimate/rules.tsx")
-    const confirm = rules.slice(rules.indexOf("function confirmRemove"), rules.indexOf("async function runRequestAction"))
+    const confirm = rules.slice(
+      rules.indexOf("function confirmRemove"),
+      rules.indexOf("async function runRequestAction"),
+    )
     expect(confirm).toContain('current="no"')
     expect(confirm).toContain('runRequestAction(api, request, what, "remove")')
   })

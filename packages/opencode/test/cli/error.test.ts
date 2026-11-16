@@ -83,16 +83,28 @@ describe("cli.error", () => {
 
   test("a missing Anthropic provider says how to connect a Claude plan", () => {
     // 0.12.11 removed the Claude Pro/Max sign-in, so a saved `anthropic/...` model with only that login
-    // no longer resolves; the provider is missing, so there is nothing to suggest.
+    // no longer resolves. Suggestions for a missing provider are other provider names, so they do not hide it.
     const output = FormatError({
       name: "ProviderModelNotFoundError",
-      data: { providerID: "anthropic", modelID: "claude-sonnet-4-6", suggestions: [] },
+      data: {
+        providerID: "anthropic",
+        modelID: "claude-sonnet-4-6",
+        suggestions: ["altimate-backend"],
+        providerMissing: true,
+      },
     })
     expect(output).toContain("run /connect and pick Claude subscription")
+    // An Anthropic provider that is there with an unknown model name gets no key advice.
     expect(
       FormatError({
         name: "ProviderModelNotFoundError",
-        data: { providerID: "openai", modelID: "gpt-x", suggestions: [] },
+        data: { providerID: "anthropic", modelID: "gpt-4", suggestions: [] },
+      }),
+    ).not.toContain("Claude subscription")
+    expect(
+      FormatError({
+        name: "ProviderModelNotFoundError",
+        data: { providerID: "openai", modelID: "gpt-x", suggestions: [], providerMissing: true },
       }),
     ).not.toContain("Claude subscription")
   })

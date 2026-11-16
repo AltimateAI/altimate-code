@@ -1316,7 +1316,7 @@ export namespace SessionPrompt {
         if (Provider.ModelNotFoundError.isInstance(e)) {
           const hint = e.data.suggestions?.length ? ` Did you mean: ${e.data.suggestions.join(", ")}?` : ""
           // altimate_change — explain a missing Anthropic provider
-          const guidance = modelNotFoundHint(e.data.providerID, e.data.suggestions)
+          const guidance = modelNotFoundHint(e.data.providerID, e.data.providerMissing)
           Bus.publish(Session.Event.Error, {
             sessionID,
             error: new NamedError.Unknown({
@@ -4886,7 +4886,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const { providerID, modelID, suggestions } = e.data
         const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
         // altimate_change — explain a missing Anthropic provider
-        const guidance = modelNotFoundHint(providerID, suggestions)
+        const guidance = modelNotFoundHint(providerID, e.data.providerMissing)
         Bus.publish(Session.Event.Error, {
           sessionID: input.sessionID,
           error: new NamedError.Unknown({

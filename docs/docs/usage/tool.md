@@ -83,4 +83,4 @@ For clients that cannot use the `altimate-code` MCP server, the Claude Code plug
 
 ## Plugin events
 
-`altimate-code tool report-event <action> --session claude:<id>` is called by the Claude Code plugin to record what a person did with its lineage report (shown, opened, built, failed to build). It sends one `lineage_report` usage event (see [Telemetry](../reference/telemetry.md)) and nothing when telemetry is off. It is not meant to be run by hand.
+`altimate-code tool report-event <action> --session claude:<id>` is called by the Claude Code plugin to record what a person did with its lineage report. `<action>` is one of `summary_shown`, `open_pressed`, `command_run`, `built`, `build_failed` or `no_browser`. It sends one `lineage_report` usage event (see [Telemetry](../reference/telemetry.md)) and nothing when telemetry is off. It is not meant to be run by hand.

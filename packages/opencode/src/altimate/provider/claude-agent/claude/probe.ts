@@ -4,6 +4,10 @@ import type { AccountInfo, ModelInfo, Options, Query } from "@anthropic-ai/claud
 import { Effect, Schema } from "effect"
 import { ClaudeSDK } from "./sdk"
 
+/** Why `claude` may not start in time; the probe and a chat turn both show it. */
+export const START_TIMEOUT_MESSAGE =
+  "claude did not start within 30 seconds. Check the network, and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS) it needs"
+
 export interface Model extends ModelInfo {
   contextWindow?: number
 }
@@ -76,7 +80,7 @@ export const run = Effect.fn("ClaudeProbe.run")(function* (options: Options) {
         }).pipe(
           Effect.timeoutOrElse({
             duration: "30 seconds",
-            orElse: () => Effect.fail(new ProbeError({ cause: new Error("claude did not start within 30 seconds. Check the network, and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS) it needs") })),
+            orElse: () => Effect.fail(new ProbeError({ cause: new Error(START_TIMEOUT_MESSAGE) })),
           }),
         )
         // No prompt is sent here, so an old Claude Code can still list its models.

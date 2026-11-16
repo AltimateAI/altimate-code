@@ -20,6 +20,7 @@ import { ConvertToClaudeMessage } from "../language-model/convert-to-claude-mess
 import { PendingTools } from "../tools/pending"
 import { ToolNames } from "../tools/names"
 import { ToolResult } from "../tools/result"
+import { START_TIMEOUT_MESSAGE } from "./probe"
 
 export const HANDOVER_MS = 10_000
 export const IDLE_MS = 5 * 60_000
@@ -192,7 +193,7 @@ export function registry() {
             attempt(() => process.session.ready).pipe(
               Effect.timeoutOrElse({
                 duration: "30 seconds",
-                orElse: () => Effect.fail(new Error("claude did not start within 30 seconds. Check the network, and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS) it needs")),
+                orElse: () => Effect.fail(new Error(START_TIMEOUT_MESSAGE)),
               }),
             ),
           ).pipe(Effect.onError(() => stop(entry).pipe(Effect.ignore)))
