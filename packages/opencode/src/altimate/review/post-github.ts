@@ -4,7 +4,9 @@ import { type VerdictEnvelope, VCS_EVENT, reviewIncomplete } from "./verdict"
 import {
   commentableLines,
   inlineComments,
+  inlineEligible,
   postedFindingIds,
+  postingPolicy,
   renderSummary,
   REVIEW_MARKER,
   verdictHeadline,
@@ -69,6 +71,9 @@ export interface PostResult {
   reviewSkipped?: boolean
   /** Earlier blocking altimate reviews dismissed because this run no longer blocks. */
   dismissedReviews?: number
+  /** True when a clean run under `silentWhenClean` posted no review (and no
+   *  summary, unless one from an earlier run needed replacing). Implies `reviewSkipped`. */
+  silent?: boolean
 }
 
 /** True when every check ran (no engine error, no failed file, no abstained
@@ -154,58 +159,20 @@ export async function postGitHubReview(
   const octo = client ?? new Octokit({ auth: target.token })
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
-
-  // 1. Upsert the summary comment (dedup by marker). Paginate ALL comments —
-  //    on a busy PR the prior marker comment can be past the first page, and
-  //    missing it would post a duplicate summary on every rerun.
-  const summary = renderSummary(env)
-  const existing = await octo.paginate(octo.rest.issues.listComments, {
-    owner,
-    repo,
-    issue_number: prNumber,
-    per_page: 100,
-  })
-  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
-  const upserted = prior
-    ? await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
-    : await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
-  result.summaryCommentId = upserted.data.id
-  // The account this token posts as: the summary comment's author.
-  const botLogin = upserted.data.user?.login
-
-  // 2. Post a review. `env.verdict` arrives already mode-gated from
-  //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
-  //    this map only translates verdict → GitHub event. APPROVE always maps to a
-  //    COMMENT event — the bot must never submit a formal GitHub approval.
-  const event = VCS_EVENT[env.verdict]
-  const headline = verdictHeadline(env)
   const projectRoot = env.scope?.projectRoot || undefined
-  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot)}`
 
-  // Rerun dedup: a finding already commented inline (same fingerprint, which
-  // ignores line numbers) is not posted again on the next push.
+  // 1. Read what is already on the PR. Rerun dedup: a finding already
+  //    commented inline (same fingerprint, which ignores line numbers) is not
+  //    posted again on the next push.
   let posted = new Set<string>()
-  let lastBotHeadline: string | undefined
-  let staleBlocking: number[] = []
+  let reviews: Array<{ id: number; body?: string | null; state?: string; user?: { type?: string; login?: string } | null }> = []
   try {
-    const [reviewComments, reviews] = await Promise.all([
+    const [reviewComments, listed] = await Promise.all([
       octo.paginate(octo.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 }),
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    // Reviews are listed oldest first; only this bot's own reviews count. The
-    // summary comment's author is the token's login; when it is unknown, ask
-    // the API (only needed for a marked review by a non-bot author), match on
-    // bot authorship alone for dismissal, and never skip (no own-review
-    // headline to compare).
-    const needsLogin =
-      !botLogin && reviews.some((r) => r.user?.type !== "Bot" && BOT_REVIEW_MARKER_RE.test(r.body ?? ""))
-    const selfLogin = botLogin ?? (needsLogin ? await tokenLogin(octo) : undefined)
-    const botReviews = reviews.filter(
-      (r) => isBotReview(r, projectRoot, selfLogin) && (!botLogin || r.user?.login === botLogin),
-    )
-    lastBotHeadline = botLogin ? botReviews.at(-1)?.body?.replace(BOT_REVIEW_MARKER_RE, "").trim() : undefined
-    staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
+    reviews = listed
   } catch {
     /* listing failed: post everything rather than nothing */
   }
@@ -220,8 +187,59 @@ export async function postGitHubReview(
   } catch {
     /* fall back to the positioning retry below */
   }
-  const comments = inlineComments(env, posted, commentable)
-  result.inlineSkippedAsPosted = inlineComments(env, new Set(), commentable).length - comments.length
+
+  // 2. Upsert the summary comment (dedup by marker). Paginate ALL comments —
+  //    on a busy PR the prior marker comment can be past the first page, and
+  //    missing it would post a duplicate summary on every rerun. A silent clean
+  //    run posts nothing, but still overwrites an earlier summary so it does
+  //    not keep showing findings that are gone.
+  const summary = renderSummary(env, { alreadyPosted: posted, commentable })
+  const silent = summary === ""
+  const existing = await octo.paginate(octo.rest.issues.listComments, {
+    owner,
+    repo,
+    issue_number: prNumber,
+    per_page: 100,
+  })
+  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
+  let botLogin: string | undefined
+  if (prior) {
+    const body = silent ? renderSummary(env, { alreadyPosted: posted, commentable, allowSilent: false }) : summary
+    const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body })
+    result.summaryCommentId = r.data.id
+    botLogin = r.data.user?.login
+  } else if (!silent) {
+    const r = await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
+    result.summaryCommentId = r.data.id
+    botLogin = r.data.user?.login
+  }
+  // `botLogin`: the account this token posts as (the summary comment's author).
+
+  // Reviews are listed oldest first; only this bot's own reviews count. When
+  // the summary author is unknown, ask the API (only needed for a marked
+  // review by a non-bot author), match on bot authorship alone for dismissal,
+  // and never skip (no own-review headline to compare).
+  const needsLogin =
+    !botLogin && reviews.some((r) => r.user?.type !== "Bot" && BOT_REVIEW_MARKER_RE.test(r.body ?? ""))
+  const selfLogin = botLogin ?? (needsLogin ? await tokenLogin(octo) : undefined)
+  const botReviews = reviews.filter(
+    (r) => isBotReview(r, projectRoot, selfLogin) && (!botLogin || r.user?.login === botLogin),
+  )
+  const lastBotHeadline = botLogin ? botReviews.at(-1)?.body?.replace(BOT_REVIEW_MARKER_RE, "").trim() : undefined
+  const staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
+
+  // 3. Post a review. `env.verdict` arrives already mode-gated from
+  //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
+  //    this map only translates verdict → GitHub event. APPROVE always maps to a
+  //    COMMENT event — the bot must never submit a formal GitHub approval.
+  const event = VCS_EVENT[env.verdict]
+  const headline = verdictHeadline(env)
+  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot)}`
+  const { comments } = inlineComments(env, posted, commentable)
+  const posting = postingPolicy(env)
+  result.inlineSkippedAsPosted = env.findings.filter(
+    (f) => inlineEligible(f, posting, commentable) && posted.has(f.id),
+  ).length
 
   // Anchor inline comments to the PR head commit. Without commit_id, GitHub's
   // line-positioning is fragile and can 422 even on valid lines.
@@ -260,6 +278,14 @@ export async function postGitHubReview(
       }
     }
     result.dismissedReviews = dismissed
+  }
+
+  // A silent clean run adds no review: the check status records the run.
+  if (silent) {
+    result.silent = true
+    result.reviewSkipped = true
+    await dismissStale()
+    return result
   }
 
   // Nothing new inline, not blocking, and this bot's latest review already says

@@ -31,6 +31,10 @@ import { DEFAULT_RULE_TIERS, ruleTier, type RuleTier } from "../../src/altimate/
  * portability advice is dropped for a single-engine project.
  */
 
+/** An inline-eligible finding: inline-tier rule at the default severity floor. */
+const inlineFinding = (over: Partial<Parameters<typeof makeFinding>[0]> = {}): Finding =>
+  finding({ tier: "inline", severity: "warning", ...over })
+
 function finding(over: Partial<Parameters<typeof makeFinding>[0]> = {}): Finding {
   return makeFinding({
     severity: "suggestion",
@@ -72,13 +76,13 @@ describe("inline anchors", () => {
   })
 
   test("a line outside the diff is not posted inline but keeps its location in the envelope", () => {
-    const inDiff = finding({ startLine: 3, endLine: 3, title: "m: a" })
-    const outside = finding({ startLine: 40, endLine: 40, title: "m: b" })
+    const inDiff = inlineFinding({ startLine: 3, endLine: 3, title: "m: a" })
+    const outside = inlineFinding({ startLine: 40, endLine: 40, title: "m: b" })
     const env = buildEnvelope({ findings: [inDiff, outside], tier: "lite", mode: "comment" })
     const commentable = new Map([["models/m.sql", commentableLines(DIFF)]])
-    expect(inlineComments(env, new Set(), commentable).map((c) => c.line)).toEqual([3])
+    expect(inlineComments(env, new Set(), commentable).comments.map((c) => c.line)).toEqual([3])
     // Without diff information every line is attempted (the 422 fallback covers it).
-    expect(inlineComments(env).map((c) => c.line)).toEqual([3, 40])
+    expect(inlineComments(env).comments.map((c) => c.line)).toEqual([3, 40])
     expect(env.findings.find((f) => f.title === "m: b")!.startLine).toBe(40)
     expect(renderSummary(env, { maxChars: Infinity })).toContain("`models/m.sql:40`")
   })
@@ -118,20 +122,20 @@ describe("inline anchors", () => {
 
 describe("inline dedup across pushes", () => {
   test("inline bodies carry the finding fingerprint, which ignores the line", () => {
-    const a = finding({ startLine: 3 })
-    const moved = finding({ startLine: 9 })
+    const a = finding({ startLine: 3, severity: "warning", tier: "inline" })
+    const moved = finding({ startLine: 9, severity: "warning", tier: "inline" })
     expect(a.id).toBe(moved.id)
     const env = buildEnvelope({ findings: [a], tier: "lite", mode: "comment" })
-    expect(inlineComments(env)[0].body).toContain(findingMarker(a.id))
+    expect(inlineComments(env).comments[0].body).toContain(findingMarker(a.id))
   })
 
   test("findings already commented on the PR are not posted again", () => {
-    const a = finding({ startLine: 3, title: "m: a" })
-    const b = finding({ startLine: 4, title: "m: b" })
+    const a = finding({ startLine: 3, title: "m: a", severity: "warning", tier: "inline" })
+    const b = finding({ startLine: 4, title: "m: b", severity: "warning", tier: "inline" })
     const env = buildEnvelope({ findings: [a, b], tier: "lite", mode: "comment" })
     const posted = postedFindingIds(["🛑 old\n\n" + findingMarker(a.id), null, "human comment"])
     expect([...posted]).toEqual([a.id])
-    expect(inlineComments(env, posted).map((c) => c.line)).toEqual([4])
+    expect(inlineComments(env, posted).comments.map((c) => c.line)).toEqual([4])
   })
 
   test("a skipped repeat review counts as a full post in telemetry", () => {
@@ -449,7 +453,7 @@ describe("postGitHubReview", () => {
 
   test("inline comments go only to lines inside the PR diff", async () => {
     const env = buildEnvelope({
-      findings: [finding({ startLine: 3, title: "m: a" }), finding({ startLine: 40, title: "m: b" })],
+      findings: [inlineFinding({ startLine: 3, title: "m: a" }), inlineFinding({ startLine: 40, title: "m: b" })],
       tier: "lite",
       mode: "comment",
     })
@@ -464,9 +468,9 @@ describe("postGitHubReview", () => {
     // are attempted (the 422 fallback covers a miss) instead of all dropped.
     const env = buildEnvelope({
       findings: [
-        finding({ startLine: 3, title: "m: a" }),
-        finding({ startLine: 40, title: "m: b" }),
-        finding({ file: "models/big.sql", startLine: 900, title: "big: c" }),
+        inlineFinding({ startLine: 3, title: "m: a" }),
+        inlineFinding({ startLine: 40, title: "m: b" }),
+        inlineFinding({ file: "models/big.sql", startLine: 900, title: "big: c" }),
       ],
       tier: "lite",
       mode: "comment",
@@ -476,14 +480,14 @@ describe("postGitHubReview", () => {
     })
     await postGitHubReview(env, target, octo)
     expect(reviewCalls[0].comments.map((c: { path: string; line: number }) => `${c.path}:${c.line}`)).toEqual([
-      "models/m.sql:3",
       "models/big.sql:900",
+      "models/m.sql:3",
     ])
   })
 
   test("when listing fails, everything is posted and nothing is skipped", async () => {
     const env = buildEnvelope({
-      findings: [finding({ startLine: 3, title: "m: a" }), finding({ startLine: 40, title: "m: b" })],
+      findings: [inlineFinding({ startLine: 3, title: "m: a" }), inlineFinding({ startLine: 40, title: "m: b" })],
       tier: "lite",
       mode: "comment",
     })
@@ -494,7 +498,7 @@ describe("postGitHubReview", () => {
   })
 
   test("a positioning 422 retries the review without inline comments", async () => {
-    const env = buildEnvelope({ findings: [finding({ startLine: 3 })], tier: "lite", mode: "comment" })
+    const env = buildEnvelope({ findings: [inlineFinding({ startLine: 3 })], tier: "lite", mode: "comment" })
     const { octo, reviewCalls } = fakeOcto({
       createReview: (call) => {
         if (call === 1)
@@ -735,5 +739,105 @@ describe("per-rule tiers", () => {
       expect(ruleTier(k)).toBe("summary")
     for (const p of ["altimate-core.equivalence:", "impact-analysis:", "schema.detect-pii:", "contract-check:", "data.diff:"])
       expect(keys.filter((k) => k.startsWith(p) && DEFAULT_RULE_TIERS[k] === "off")).toEqual([])
+  })
+})
+
+describe("inline posting policy", () => {
+  const inlineAt = (i: number, over: Partial<Parameters<typeof makeFinding>[0]> = {}) =>
+    finding({
+      severity: "warning",
+      category: "sql_quality",
+      tier: "inline",
+      model: `m${i}`,
+      file: `models/m${i}.sql`,
+      startLine: 3,
+      title: `m${i}: inline issue ${i}`,
+      ...over,
+    })
+
+  test("at most inlineBudget new comments; the rest are deferred and stay in the summary", () => {
+    const env = buildEnvelope({ findings: Array.from({ length: 12 }, (_, i) => inlineAt(i)), tier: "lite", mode: "comment" })
+    const { comments, deferred } = inlineComments(env)
+    expect(comments).toHaveLength(10)
+    expect(deferred).toHaveLength(2)
+    const md = renderSummary(env)
+    expect(md).toContain("### Inline (10)")
+    for (const f of deferred) expect(md).toContain(`**${f.title}**`)
+  })
+
+  test("the budget counts only comments new this run", () => {
+    const fs = Array.from({ length: 12 }, (_, i) => inlineAt(i))
+    const env = buildEnvelope({ findings: fs, tier: "lite", mode: "comment" })
+    const posted = new Set(fs.slice(0, 5).map((f) => f.id))
+    const { comments, deferred } = inlineComments(env, posted)
+    expect(comments).toHaveLength(7)
+    expect(deferred).toHaveLength(0)
+  })
+
+  test("findings below the severity floor, summary-tier rules and pre-existing lines are never inline", () => {
+    const env = buildEnvelope({
+      findings: [
+        inlineAt(1, { severity: "suggestion" }),
+        inlineAt(2, { tier: "summary" }),
+        inlineAt(3, { preExisting: true }),
+        inlineAt(4, { startLine: undefined }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    expect(inlineComments(env).comments).toHaveLength(0)
+    const md = renderSummary(env)
+    expect(md).not.toContain("### Inline")
+    expect(md).toContain("<details><summary>Pre-existing (1)</summary>")
+    expect(md).toContain("m3: inline issue 3")
+  })
+
+  test("AI-lane findings are inline-eligible without a tier", () => {
+    const ai = finding({
+      severity: "warning",
+      category: "sql_quality",
+      startLine: 3,
+      title: "m: ai finding",
+      evidence: { tool: "ai-review", result: {} },
+    })
+    const env = buildEnvelope({ findings: [ai], tier: "lite", mode: "comment" })
+    expect(inlineComments(env).comments).toHaveLength(1)
+  })
+
+  test("most severe, then most confident, then file and line first", () => {
+    const env = buildEnvelope({
+      findings: [
+        inlineAt(1, { confidence: "low", file: "models/a.sql" }),
+        inlineAt(2, { file: "models/b.sql", startLine: 9 }),
+        inlineAt(3, { file: "models/b.sql", startLine: 2 }),
+        inlineAt(4, { severity: "critical", category: "lineage_breakage", file: "models/z.sql" }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    expect(inlineComments(env).comments.map((c) => `${c.path}:${c.line}`)).toEqual([
+      "models/z.sql:3",
+      "models/b.sql:2",
+      "models/b.sql:9",
+      "models/a.sql:3",
+    ])
+  })
+
+  test("the envelope's posting policy sets the budget and floor", () => {
+    const env = buildEnvelope({
+      findings: [inlineAt(1), inlineAt(2), inlineAt(3, { severity: "suggestion" })],
+      tier: "lite",
+      mode: "comment",
+      policy: { source: "base", hash: "h", posting: { inlineBudget: 1, inlineSeverityFloor: "suggestion", silentWhenClean: true } },
+    })
+    const { comments, deferred } = inlineComments(env)
+    expect(comments).toHaveLength(1)
+    expect(deferred).toHaveLength(2)
+  })
+
+  test("local output renders every finding in full", () => {
+    const env = buildEnvelope({ findings: [inlineAt(1, { body: "the detail" })], tier: "lite", mode: "comment" })
+    expect(renderSummary(env)).not.toContain("the detail")
+    expect(renderSummary(env, { inline: false })).toContain("the detail")
   })
 })

@@ -2248,10 +2248,11 @@ describe("orchestrate", () => {
       expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
       expect(env.verdict).not.toBe("REQUEST_CHANGES")
     }
-    // Control: the same head with a base that lacked `ssn` still gets both twins.
+    // Control: the same head with a base that lacked `ssn` still gets both twins
+    // (`pii_into_mart` is off by default, so turn it on for the control).
     const added = await runReview({
       changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+    ssn\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"], rules: { "dbt-patterns:pii-into-mart": "summary" } },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner: piiRunner(["ssn"]),
@@ -2264,7 +2265,7 @@ describe("orchestrate", () => {
   test("a new PII column next to a reindented base one keeps its own critical twin", async () => {
     const env = await runReview({
       changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+    ssn,\n+    passport\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"], rules: { "dbt-patterns:pii-into-mart": "summary" } },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner: piiRunner(["ssn", "passport"]),
@@ -2386,7 +2387,7 @@ describe("orchestrate", () => {
     for (const reviewers of [[], ["dbt_patterns"]]) {
       const env = await runReview({
         changedFiles: files,
-        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers, rules: { "dbt-patterns:pii-into-mart": "summary" } },
         rubric: DEFAULT_RUBRIC,
         mode: "gate",
         runner: piiRunner(["ssn"]),
@@ -2790,7 +2791,8 @@ describe("orchestrate", () => {
         "`both-ends`", // both leading + trailing backticks — symmetric padding
       ],
     })
-    const summary = renderSummary(env)
+    // A clean run is silent by default; render it to check the tier line.
+    const summary = renderSummary(env, { allowSilent: false })
     // Sanity: the tier line exists
     expect(summary).toContain("Tier: full")
     // A path with `single` inside must be wrapped by a fence longer than the
@@ -2818,6 +2820,7 @@ describe("orchestrate", () => {
           file: "models/x.sql",
           startLine: 5,
           ruleKey: "r",
+          tier: "inline",
         }),
       ],
       tier: "lite",
@@ -2827,7 +2830,7 @@ describe("orchestrate", () => {
     const summary = renderSummary(env)
     expect(summary).toContain("altimate-code-review")
     expect(summary).toContain("Reviewed with comments")
-    const inline = inlineComments(env)
+    const inline = inlineComments(env).comments
     expect(inline.length).toBe(1)
     expect(inline[0]).toMatchObject({ path: "models/x.sql", line: 5, side: "RIGHT" })
   })

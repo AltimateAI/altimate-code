@@ -186,7 +186,7 @@ export function makeFinding(input: Omit<z.input<typeof Finding>, "id"> & { id?: 
   const rule =
     input.rule ??
     (input.evidence?.tool
-      ? ruleId(input.evidence.tool, String(result?.rule ?? result?.code ?? ruleTitle(input)))
+      ? ruleId(input.evidence.tool, String(result?.rule ?? result?.code ?? groupKeyTitle(input)))
       : undefined)
   const id =
     input.id ??

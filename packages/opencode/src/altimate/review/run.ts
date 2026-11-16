@@ -462,7 +462,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     portabilityTargets: await projectAdapters(opts.cwd, opts.head, projectRootRel),
     dialectKnown,
     consumerLists,
-    policy: { source: policy.source, hash: policy.hash, changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined },
+    policy: {
+      source: policy.source,
+      hash: policy.hash,
+      changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined,
+      posting: config.posting,
+    },
     scope: {
       baseRef: resolved?.ref ?? opts.base,
       baseSha: resolved?.sha,

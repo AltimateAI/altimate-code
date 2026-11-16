@@ -1,6 +1,6 @@
 import z from "zod"
 import { createHmac, createHash } from "node:crypto"
-import { Finding, type Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
+import { Finding, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
 
 /**
@@ -103,6 +103,22 @@ export const EngineVersions = z.object({
 })
 export type EngineVersions = z.infer<typeof EngineVersions>
 
+/** How findings reach the PR: at most `inlineBudget` new inline comments per
+ *  run, none below `inlineSeverityFloor`, and no comment at all on a clean run
+ *  when `silentWhenClean` is set. */
+export const PostingPolicy = z.object({
+  inlineBudget: z.number().int().min(0),
+  inlineSeverityFloor: Severity,
+  silentWhenClean: z.boolean(),
+})
+export type PostingPolicy = z.infer<typeof PostingPolicy>
+
+export const DEFAULT_POSTING_POLICY: PostingPolicy = {
+  inlineBudget: 10,
+  inlineSeverityFloor: "warning",
+  silentWhenClean: true,
+}
+
 /** What the review looked at: the resolved base, and files it deliberately
  *  did not review. Signed with the rest of the envelope so a verdict computed
  *  against the wrong base, or with models left unverified, is auditable. */
@@ -187,6 +203,9 @@ export const VerdictEnvelope = z.object({
       source: z.enum(["base", "working_tree", "default"]),
       hash: z.string(),
       changedInPr: z.array(z.string()).optional(),
+      /** Posting policy applied to this run (see PostingPolicy). Absent on
+       *  envelopes from older releases; renderers then use the defaults. */
+      posting: PostingPolicy.optional(),
     })
     .optional(),
   /** Advisory AI lane outcome: ran, skipped, timed out or failed, and why. */
