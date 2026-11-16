@@ -686,6 +686,11 @@ describe("each engine's own literal and statement rules", () => {
     ["EXECUTE IMMEDIATE CONCAT('DROP ', 'SCHEMA victim CASCADE')", "bigquery", "write", true],
     ["SET @s = CONCAT('DROP ', 'DATABASE victim'); PREPARE p FROM @s; EXECUTE p", "mysql", "write", true],
     ["DO 'BEGIN DROP '\n'SCHEMA victim CASCADE; END'", "postgres", "write", true],
+    // A read that calls a SQL-running helper runs its literal too.
+    ["SELECT exec('DROP ' || 'SCHEMA victim CASCADE')", "duckdb", "read", true],
+    ["SELECT exec('DROP SCHEMA victim')", "snowflake", "read", true],
+    ["SELECT exec('DROP DATABASE victim')", "mysql", "read", true],
+    ["SELECT execute('DROP SCHEMA victim CASCADE')", "postgres", "read", true],
     // A dot inside one quoted name is not a sequence advance.
     ['SELECT "s.NEXTVAL" FROM metrics', "snowflake", "read", false],
     ['SELECT "s.NEXTVAL" FROM metrics', "oracle", "read", false],

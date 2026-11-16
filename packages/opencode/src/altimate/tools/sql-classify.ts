@@ -447,16 +447,15 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   parseError?: string
 } {
   const result = classifySql(sql, dialect, 0)
-  if (result.queryType === "write" && !result.blocked) {
-    // SQL read with certainty: a write may still run the SQL in its literals. Otherwise the word scan
-    // of the whole text already covered them.
-    const lexical = tokenizeSql(sql, dialect)
-    if (lexical.complete && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
-    // Dynamic SQL can join literals into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
-    // adjacent constants), so its words count across literals too.
-    if (lexical.complete && DYNAMIC_SQL.test(maskSql(lexical.tokens)) && mentionsHardDenyAnywhere(sql))
-      return { ...result, blocked: true }
-  }
+  if (result.blocked) return result
+  // SQL read with certainty (otherwise the word scan of the whole text already covered its literals).
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) return result
+  // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
+  // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write.
+  if (DYNAMIC_SQL.test(maskSql(lexical.tokens)) && mentionsHardDenyAnywhere(sql)) return { ...result, blocked: true }
+  // A write may also run the SQL in its literals: a routine body created and called in the same call.
+  if (result.queryType === "write" && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
   return result
 }
 
