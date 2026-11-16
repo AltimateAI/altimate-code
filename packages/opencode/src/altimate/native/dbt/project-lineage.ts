@@ -181,11 +181,17 @@ export function itemName(item: string): string | null {
 /** The column a SELECT item casts, unaliased (`amount::numeric`, `cast(t.amount as numeric)`); null otherwise. */
 function castColumn(item: string): string | null {
   const ref = `(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)`
-  // A type name: words, a size (`numeric(10, 2)`), array marks (`int[]`), a quoted name, a further `::` cast.
-  const type = `(?:[\\w\\s(),:]|\\[\\]|"(?:[^"]|"")*")+`
+  // A type name: words (`double precision`, `pg_catalog.int4`), a size (`numeric(10, 2)`), array marks (`int[]`,
+  // `int[3]`), a quoted name, a further `::` cast.
+  const type = `((?:[\\w\\s(),:.]|\\[\\d*\\]|"(?:[^"]|"")*")+)`
   const m = new RegExp(`^${ref}\\s*::\\s*${type}$`, "i").exec(item) ?? new RegExp(`^cast\\s*\\(\\s*${ref}\\s+as\\s+${type}\\)$`, "i").exec(item)
-  return m ? unquoteName(m[1]!) : null
+  if (!m || NOT_TYPE.test(m[2]!.replace(new RegExp(QUOTED, "g"), " "))) return null
+  return unquoteName(m[1]!)
 }
+
+/** Words that make the rest of an item more than a type (`amount::numeric is not null`, `amount::int as x`). */
+const NOT_TYPE =
+  /(?<![\w$])(?:as|is|not|isnull|notnull|null|true|false|between|in|like|ilike|similar|and|or|div|mod|xor|collate|at|over|filter|case|when|then|else|end|escape)(?![\w$])/i
 
 /**
  * The alias templates `COLUMNS(...) AS "…"` items give (DuckDB's `"col_\0"`, which hold a `\N` marker), lower-cased.
@@ -775,7 +781,8 @@ export class ProjectLineage {
     if (this.dialect === "postgres" || this.dialect === "redshift") {
       const items = selectItems(stripped)
       for (const e of edges) {
-        const n = /^_col_(\d+)$/.exec(e.to)?.[1]
+        // A `_col_N` the SQL writes itself (`amount::numeric as _col_1`) is that output's name: keep it.
+        const n = engineMade(e.to, stripped) ? /^_col_(\d+)$/.exec(e.to)?.[1] : undefined
         const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
         if (name && !edges.some((o) => o.from === e.from && o.fromCol === e.fromCol && o.to === name)) e.to = name
       }

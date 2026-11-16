@@ -1268,7 +1268,9 @@ describe("both tools: names at the edges", () => {
 
   test("on Postgres and Redshift a cast of a column is named after it, so the trace goes on", () => {
     for (const dialect of ["postgres", "redshift"]) {
-      for (const cast of ["amount::numeric", "cast(amount as numeric)", "amount::int[]", "cast(amount as int[])", `amount::"numeric"`, "amount::numeric::int"]) {
+      for (const cast of ["amount::numeric", "cast(amount as numeric)", "amount::int[]", "cast(amount as int[])", `amount::"numeric"`, "amount::numeric::int",
+        "amount::int[3]", "amount::pg_catalog.numeric", "amount::double precision", "amount::numeric(10, 2)"]) {
+        if (dialect === "redshift" && cast.includes("[")) continue // Redshift has no array types
         const path = write(nodes(dialect, [
           model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
           model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`),
@@ -1298,6 +1300,16 @@ describe("both tools: names at the edges", () => {
       model("r", ["orders"], `select order_id, amount::decimal(10,2) from ${T("orders")}`),
     ]))
     expect(carried(columnAnswer(duck, "orders", "amount"))).toEqual(["r._col_1"])
+  })
+
+  test("an expression that only starts with a cast isn't named after the column, and a _col_N the SQL writes stays", () => {
+    for (const item of ["amount::numeric is not null", "amount::int in (1, 2)", "cast(amount as int) between 1 and 2", "amount::numeric as _col_1"]) {
+      const path = write(nodes("postgres", [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select order_id, ${item} from ${T("orders")}`),
+      ]))
+      expect(carried(columnAnswer(path, "orders", "amount"))).toEqual(["r._col_1"])
+    }
   })
 
   test("DuckDB names a repeated output from a join val_1, and a select * child lists it", () => {
