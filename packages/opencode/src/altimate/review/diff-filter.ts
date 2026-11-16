@@ -222,18 +222,45 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`)
 }
 
+/** A changed file the review did not look at, and why. */
+export interface NotReviewed {
+  path: string
+  reason: string
+}
+
+/** Split changed files into the reviewable set (with their dbt kind) and the
+ *  files dropped before review, each with the reason it was dropped. */
+export function partitionChangedFiles(
+  files: ChangedFile[],
+  extraExcludeGlobs: string[] = [],
+  layout?: DbtProjectLayout,
+): { reviewable: Array<ChangedFile & { kind: DbtFileKind }>; dropped: NotReviewed[] } {
+  // Normalize to forward slashes so `/`-based glob semantics hold on Windows paths.
+  const excluders = extraExcludeGlobs.map((g) => ({ glob: g, re: globToRegExp(g) }))
+  const reviewable: Array<ChangedFile & { kind: DbtFileKind }> = []
+  const dropped: NotReviewed[] = []
+  for (const f of files) {
+    if (!shouldReview(f.path)) {
+      dropped.push({ path: f.path, reason: "not a dbt file (extension or generated path)" })
+      continue
+    }
+    const hit = excluders.find(({ re }) => re.test(norm(f.path)))
+    if (hit) {
+      dropped.push({ path: f.path, reason: `excluded by glob ${hit.glob}` })
+      continue
+    }
+    reviewable.push({ ...f, kind: classifyDbtFile(f.path, layout) })
+  }
+  return { reviewable, dropped }
+}
+
 /** Filter changed files down to the reviewable set, with their dbt kind. */
 export function filterChangedFiles(
   files: ChangedFile[],
   extraExcludeGlobs: string[] = [],
   layout?: DbtProjectLayout,
 ): Array<ChangedFile & { kind: DbtFileKind }> {
-  const excluders = extraExcludeGlobs.map(globToRegExp)
-  // Normalize to forward slashes so `/`-based glob semantics hold on Windows paths.
-  return files
-    .filter((f) => shouldReview(f.path))
-    .filter((f) => !excluders.some((re) => re.test(norm(f.path))))
-    .map((f) => ({ ...f, kind: classifyDbtFile(f.path, layout) }))
+  return partitionChangedFiles(files, extraExcludeGlobs, layout).reviewable
 }
 
 /** The first folder under the file's role directory (`staging` for
@@ -258,6 +285,10 @@ export interface ScopeResult {
   outOfScope: number
   /** Non-model renames with identical content that keep the name, role and layer (a pure move). */
   movedUnchanged: number
+  /** Paths behind `outOfScope`. */
+  outOfScopePaths: string[]
+  /** Paths behind `movedUnchanged`. */
+  movedUnchangedPaths: string[]
 }
 
 const isModel = (p: string, layout?: DbtProjectLayout) => {
@@ -289,8 +320,8 @@ export function scopeToProject(
   root: string | undefined,
   layout?: DbtProjectLayout,
 ): ScopeResult {
-  let outOfScope = 0
-  let movedUnchanged = 0
+  const outOfScopePaths: string[] = []
+  const movedUnchangedPaths: string[] = []
   const inScope: ChangedFile[] = []
   const basename = (p: string) => norm(p).split("/").pop()
   const layoutDirs = layout ? resolvedLayoutDirs(layout).map((d) => d.dir) : []
@@ -301,7 +332,7 @@ export function scopeToProject(
     // A rename moving a file into or out of the project still concerns it.
     const oldInside = !!f.oldPath && isInside(f.oldPath)
     if (!inside && !oldInside) {
-      outOfScope++
+      outOfScopePaths.push(f.path)
       continue
     }
     if (f.oldPath && inside !== oldInside) {
@@ -318,12 +349,18 @@ export function scopeToProject(
       classifyDbtFile(f.oldPath, layout) === classifyDbtFile(f.path, layout) &&
       layerOf(f.oldPath, root, layout) === layerOf(f.path, root, layout)
     ) {
-      movedUnchanged++
+      movedUnchangedPaths.push(f.path)
       continue
     }
     inScope.push(f)
   }
-  return { inScope, outOfScope, movedUnchanged }
+  return {
+    inScope,
+    outOfScope: outOfScopePaths.length,
+    movedUnchanged: movedUnchangedPaths.length,
+    outOfScopePaths,
+    movedUnchangedPaths,
+  }
 }
 
 /** Heuristic: does a yml diff declare dbt `sources:`? Tolerates unified-diff

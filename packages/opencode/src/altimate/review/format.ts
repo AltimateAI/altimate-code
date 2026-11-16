@@ -279,9 +279,14 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     const list = env.engineErrors.map((e) => `${e.method} ×${e.count} (${e.reason})`).join("; ")
     notes.push(`Some engine checks failed and did not run: ${list}. This verdict is not a clean approval.`)
   }
-  if (env.scope?.outOfScopeFiles)
+  // The ledger lists out-of-scope and moved files by path; the count lines are
+  // for envelopes that carry only the counts.
+  const ledger = notReviewedLedger(env)
+  const listed = new Set(ledger.map((e) => e.path))
+  const scopePaths = env.scope?.notReviewed ?? []
+  if (env.scope?.outOfScopeFiles && !scopePaths.some((e) => /^outside the dbt project/.test(e.reason) && listed.has(e.path)))
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
-  if (env.scope?.movedUnchangedFiles)
+  if (env.scope?.movedUnchangedFiles && !scopePaths.some((e) => /^moved without edits/.test(e.reason) && listed.has(e.path)))
     notes.push(
       `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
         "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
@@ -296,7 +301,37 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
     notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
   }
-  return notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
+  const out = notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
+  return [...out, ...ledgerBlock(ledger)]
+}
+
+/** Paths shown in the "Not reviewed" block at most; the rest are counted. */
+export const LEDGER_MAX_PATHS = 30
+
+/** The coverage ledger minus the `unverified` entries, which have their own
+ *  note above it. */
+function notReviewedLedger(env: VerdictEnvelope): Array<{ path: string; reason: string }> {
+  const unverified = new Set((env.scope?.unverified ?? []).map((u) => `${u.path}\0${u.reason}`))
+  return (env.scope?.notReviewed ?? []).filter((e) => !unverified.has(`${e.path}\0${e.reason}`))
+}
+
+/** Collapsed "Not reviewed: n file(s)" block, grouped by reason. */
+function ledgerBlock(ledger: Array<{ path: string; reason: string }>): string[] {
+  if (!ledger.length) return []
+  const byReason = new Map<string, string[]>()
+  for (const e of ledger) byReason.set(e.reason, [...(byReason.get(e.reason) ?? []), e.path])
+  const lines = [`<details><summary>Not reviewed: ${ledger.length} file(s)</summary>`, ""]
+  let shown = 0
+  for (const [reason, paths] of byReason) {
+    if (shown >= LEDGER_MAX_PATHS) break
+    const take = paths.slice(0, LEDGER_MAX_PATHS - shown)
+    shown += take.length
+    // Escape Markdown emphasis so a glob like `**/*.md` in a reason renders literally.
+    lines.push(`${reason.replace(/([*_])/g, "\\$1")} (${paths.length}):`, ...take.map((p) => `- \`${p}\``), "")
+  }
+  if (ledger.length > shown) lines.push(`… and ${ledger.length - shown} more`, "")
+  lines.push("</details>", "")
+  return lines
 }
 
 /** GitHub `pulls.createReview` inline comments — only findings with a line. */

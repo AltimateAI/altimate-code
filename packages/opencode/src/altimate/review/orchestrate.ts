@@ -10,7 +10,7 @@ import {
   mergeRepeats,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide } from "./diff-filter"
+import { type ChangedFile, type DbtProjectLayout, type NotReviewed, partitionChangedFiles, hasOldSide } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
@@ -257,7 +257,7 @@ export interface OrchestrateInput {
   /** Names `ref()` can resolve to at head (repo resources + installed packages); undefined = unknown. */
   resourceNames?: () => Promise<Set<string> | undefined>
   /** What the review covered: base resolution and files left out of scope. */
-  scope?: Omit<ReviewScope, "unverified">
+  scope?: Omit<ReviewScope, "unverified" | "notReviewed"> & { notReviewed?: NotReviewed[] }
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
   suppressPortability?: boolean
   /** Other adapters the project supports (from its adapter-specific macros); portability advice is kept when any of them lacks the construct. */
@@ -1713,7 +1713,16 @@ interface ModelContext {
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
-  const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs, input.layout)
+  const { reviewable, dropped } = partitionChangedFiles(
+    input.changedFiles,
+    input.rubric.exclusions.excludeGlobs,
+    input.layout,
+  )
+  // Files some lane received (the coverage ledger lists the rest).
+  const touched = new Set<string>()
+  const touch = (files: Array<{ path: string }>) => {
+    for (const f of files) touched.add(f.path)
+  }
   const dialect = input.config.dialect
   const getContent = input.getContent
   const getCompiled = input.getCompiled
@@ -1722,11 +1731,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // tiering + lineage), PII columns (hard-floor → must precede tiering), and
   // both SQL sides. This avoids duplicate engine calls and lets tiering see PII.
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
+  // Every model gets at least the PII check; one that fails is recorded as unverified.
+  touch(modelFiles)
   const ctxByPath = new Map<string, ModelContext>()
   const unverified: NonNullable<ReviewScope["unverified"]> = []
   let anyManifest = false
+  let manifestMissing = false
   if (input.runner.manifestAvailable) {
     anyManifest = await input.runner.manifestAvailable().catch(() => false)
+    manifestMissing = !anyManifest
   }
   // PR-level lanes (across files) that threw: reported with the engine errors.
   const laneErrors: Array<{ method: string; reason: string; count: number }> = []
@@ -2031,6 +2044,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Snapshot definitions: a changed `check_cols`/strategy or query on an existing snapshot.
   if (lanes.has("dbt_patterns") || lanes.has("materialization")) {
     const snapshots = reviewable.filter((f) => f.kind === "snapshot" && f.status !== "deleted" && f.status !== "added")
+    touch(snapshots)
     const sets = await Promise.all(
       snapshots.map(async (file) => {
         try {
@@ -2051,6 +2065,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Macros: the catalog rules that hold in a SQL template, and vars with no default.
   if (lanes.has("dbt_patterns")) {
     const macros = reviewable.filter((f) => f.kind === "macro" && f.status !== "deleted")
+    touch(macros)
     const sets = await Promise.all(
       macros.map(async (file) => {
         try {
@@ -2084,6 +2099,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const others = reviewable.filter(
       (f) => f.status !== "deleted" && ((f.kind === "test" || f.kind === "snapshot") || f.kind === "project_config"),
     )
+    touch(others)
     const sets = await Promise.all(
       others.map(async (file) => {
         try {
@@ -2124,6 +2140,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  touch(schemaFiles)
   const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
@@ -2153,6 +2170,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A dbt_project.yml change that loosens test thresholds for a whole path.
   for (const file of reviewable.filter((f) => f.kind === "project_config" && /(^|\/)dbt_project\.ya?ml$/.test(f.path))) {
     if (file.status !== "modified") continue
+    touch([file])
     const [oldContent, newContent] = await Promise.all([getContent?.(file.path, "old"), getContent?.(file.path, "new")])
     all.push(detectThresholdLoosening(file, oldContent, newContent))
   }
@@ -2355,6 +2373,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     supporting.forEach((f, i) =>
       aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
     )
+    touch(aiFiles)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     try {
       const res = await input.aiReview({
@@ -2386,6 +2405,26 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // carry their own `degraded` flag and are counted separately in the summary.
   const degraded = runDegraded
   const engineErrors = [...(input.runner.failures?.() ?? []), ...laneErrors]
+
+  // Coverage ledger: every changed file the review did not look at, and why.
+  // First reason per path wins; `unverified` entries are always kept.
+  const sortedUnverified = unverified.sort((a, b) => a.path.localeCompare(b.path))
+  const ledger: NotReviewed[] = [
+    ...(input.scope?.notReviewed ?? []),
+    ...dropped,
+    ...reviewable
+      .filter((f) => f.kind === "other" || f.kind === "analysis")
+      .map((f) => ({ path: f.path, reason: "not a dbt model/macro/test/yml/seed file" })),
+    ...reviewable
+      .filter((f) => !touched.has(f.path))
+      .map((f) => ({ path: f.path, reason: `no checks run for ${f.kind} files at the ${tier} tier` })),
+    ...(manifestMissing && !anyManifest
+      ? modelFiles.map((f) => ({ path: f.path, reason: "no dbt manifest: lineage, config and graph checks skipped" }))
+      : []),
+  ]
+  const seen = new Set<string>()
+  const notReviewed = ledger.filter((e) => !seen.has(e.path) && !!seen.add(e.path))
+  notReviewed.push(...sortedUnverified)
   const envelope = buildEnvelope({
     engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
@@ -2401,8 +2440,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     generatedAt: input.generatedAt,
     degraded,
     scope:
-      input.scope || unverified.length
-        ? { ...input.scope, unverified: unverified.length ? unverified.sort((a, b) => a.path.localeCompare(b.path)) : undefined }
+      input.scope || notReviewed.length
+        ? { ...input.scope, unverified: sortedUnverified.length ? sortedUnverified : undefined, notReviewed }
         : undefined,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
     // when a riskTierPathTokens config error was caught above, OR when the

@@ -155,6 +155,10 @@ export const ReviewScope = z.object({
       }),
     )
     .optional(),
+  /** Every changed file the review did not look at (excluded, outside the
+   *  project, moved, not a dbt file, no check at this tier, no manifest), with
+   *  the reason; also repeats the `unverified` entries. */
+  notReviewed: z.array(z.object({ path: z.string(), reason: z.string() })).default([]),
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
@@ -278,7 +282,7 @@ export interface BuildEnvelopeInput {
   tierClassified?: RiskTier
   /** True when mtime signals the manifest predates a change-affecting file. */
   staleManifest?: boolean
-  scope?: ReviewScope
+  scope?: z.input<typeof ReviewScope>
   ai?: VerdictEnvelope["ai"]
   policy?: VerdictEnvelope["policy"]
   engineErrors?: VerdictEnvelope["engineErrors"]
