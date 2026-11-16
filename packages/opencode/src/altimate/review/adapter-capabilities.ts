@@ -18,6 +18,11 @@ export interface AdapterCapability {
    * leaves no table during the build. Undefined = not established.
    */
   contractTableReplaceAtomic?: boolean
+  /**
+   * A microbatch model's `batch_size` must equal its `partition_by`
+   * granularity, or the run fails. Undefined = the adapter has no such rule.
+   */
+  microbatchBatchSizeMatchesPartition?: boolean
   /** Documentation backing the entries above. */
   sources: string[]
 }
@@ -61,7 +66,12 @@ export const ADAPTER_CAPABILITIES: Record<string, AdapterCapability> = {
   },
   bigquery: {
     integerDivisionTruncates: false,
-    sources: ["https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#arithmetic_operators"],
+    microbatchBatchSizeMatchesPartition: true,
+    sources: [
+      "https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#arithmetic_operators",
+      "https://docs.getdbt.com/docs/build/incremental-microbatch",
+      "https://github.com/dbt-labs/dbt-adapters/blob/main/dbt-bigquery/src/dbt/include/bigquery/macros/materializations/incremental_strategy/microbatch.sql",
+    ],
   },
   databricks: {
     integerDivisionTruncates: false,

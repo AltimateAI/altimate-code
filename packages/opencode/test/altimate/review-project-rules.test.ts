@@ -129,6 +129,16 @@ describe("model config combinations", () => {
     expect(run(sql, "unknown")).toContain("m: microbatch `batch_size` differs from the partition granularity")
     expect(run(sql.replace("'year' if flags.FULL_REFRESH else 'day'", "'day'"))).not.toContain("m: microbatch `batch_size` differs from the partition granularity")
   })
+  test("microbatch granularity mismatch is a BigQuery rule: silent on other known adapters", () => {
+    const sql = `{{ config(materialized='incremental', incremental_strategy='microbatch', event_time='paid_at',\n  batch_size='hour',\n  partition_by={'field': 'paid_at', 'data_type': 'timestamp', 'granularity': 'day'}) }}\nselect 1`
+    const title = "m: microbatch `batch_size` differs from the partition granularity"
+    const at = (dialect: string, known = true) => titles(modelConfigFindings(file("models/m.sql", sql), sql, dialect, undefined, known))
+    expect(at("bigquery")).toContain(title)
+    for (const d of ["duckdb", "postgres", "snowflake", "databricks"]) expect(at(d)).not.toContain(title)
+    // A guessed dialect: the BigQuery `granularity` dict still identifies the adapter.
+    expect(at("snowflake", false)).toContain(title)
+    expect(titles(modelConfigFindings(file("models/m.sql", sql), sql.replace("'hour'", "'day'"), "bigquery"))).not.toContain(title)
+  })
   test("partition column missing from the merge key, and an incremental filter that doesn't prune", () => {
     const sql = `{{ config(materialized='incremental', incremental_strategy='merge', partition_by=['block_month'], unique_key=['tx_hash', 'evt_index']) }}\nselect * from t\n{% if is_incremental() %}\nwhere block_time >= now() - interval '1' day\n{% endif %}`
     const t = run(sql, "trino")

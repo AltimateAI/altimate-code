@@ -2071,7 +2071,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           .catch(() => undefined)
           .then((mc) => [
             ...jinjaFindings(ctx.file, ctx.oldSql, ctx.newSql),
-            ...modelConfigFindings(ctx.file, ctx.newSql && inlineConfigSplats(ctx.newSql), dialect, mc),
+            ...modelConfigFindings(ctx.file, ctx.newSql && inlineConfigSplats(ctx.newSql), dialect, mc, !!input.dialectKnown),
           ]),
       )
     }
