@@ -429,8 +429,9 @@ export function modelConfigFindings(
           "materialization",
           "incremental filter reads new rows only, not updated ones",
           `The \`is_incremental()\` filter keys on a creation timestamp while ${/\b\w*(updated|modified|changed)(_at|_on|_date|_ts|_time)\b/i.test(newSql) ? "the model also carries an update timestamp" : "the model merges on \`unique_key\`, so existing rows are expected to change"}. Rows created before the last run and changed since are never picked up again. Filter on the update timestamp, or explain why rows never change.`,
-          // The added line of the filter that names the creation timestamp.
-          addedLines(file.diff).find((l) => l.includes(created) && filter.includes(l.trim())),
+          // The first added line that compares the creation timestamp. `filter` is
+          // tokenised, so the raw line is matched on the column and a comparison.
+          addedLines(file.diff).find((l) => new RegExp(`\\b${created}\\b`, "i").test(l) && /[<>]=?|\bbetween\b/i.test(l)),
         ),
       )
   }

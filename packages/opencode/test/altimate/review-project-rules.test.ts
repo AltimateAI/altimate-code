@@ -130,6 +130,11 @@ describe("model config combinations", () => {
     expect(run(sql, "trino")).toContain("m: incremental filter reads new rows only, not updated ones")
     expect(run(sql.replace(/enrollment_created_on/g, "enrollment_updated_on"), "trino")).not.toContain("m: incremental filter reads new rows only, not updated ones")
   })
+  test("the creation-time filter finding quotes the added filter line", () => {
+    const sql = `{{ config(materialized='incremental', unique_key='enrollment_key') }}\nselect * from e\n{% if is_incremental() %}\n  WHERE   Enrollment_Created_On > (select max(enrollment_created_on) from {{ this }})\n{% endif %}`
+    const f = modelConfigFindings(file("models/m.sql", sql), sql, "trino").find((x) => x.rule === "dbt-project-rules:incremental-filter-created-only")
+    expect((f?.evidence?.result as { line?: string } | undefined)?.line).toBe("  WHERE   Enrollment_Created_On > (select max(enrollment_created_on) from {{ this }})")
+  })
 })
 
 describe("ref() targets", () => {
