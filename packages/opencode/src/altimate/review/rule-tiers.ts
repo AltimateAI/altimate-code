@@ -93,7 +93,6 @@ const OFF = [
 /** Summary rules listed explicitly: the high-volume ones, and rules judged
  *  mostly wrong that still produced a real catch in the benchmark. */
 const SUMMARY = [
-  "altimate-core.equivalence:undecided",
   "dbt.manifest:new-model-no-grain-test",
   "rule-catalog:union-select-star",
   "rule-catalog:multiple-left-joins",

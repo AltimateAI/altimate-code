@@ -502,6 +502,7 @@ async function semanticChangeLane(
   dialect: string,
   impact: ImpactResult,
   rubric: Rubric,
+  unverified: Array<{ path: string; reason: string }>,
 ): Promise<Finding[]> {
   if (!hasOldSide(file)) return []
   if (!oldSql || !newSql || oldSql.trim() === newSql.trim()) return []
@@ -514,25 +515,14 @@ async function semanticChangeLane(
   if (eq.decided && eq.equivalent) return []
 
   if (!eq.decided) {
-    // Undecidable / no schema → a suggestion to data-diff: the engine not knowing is
-    // not evidence of a change (1 of 426 such findings matched a real defect on replay).
-    return [
-      makeFinding({
-        severity: "suggestion",
-        category: "semantic_change",
-        title: `${model}: refactor could not be proven equivalent`,
-        body:
-          `The logic of \`${model}\` changed and equivalence could not be decided` +
-          ` (no schema, or unsupported SQL). Treat as a potential behavior change and verify with a data-diff.`,
-        file: file.path,
-        model,
-        confidence: "unknown",
-        degraded: true,
-        evidence: { tool: "altimate_core.equivalence", result: { decided: false } },
-        ruleKey: "semantic_change:undecidable",
-        rule: "altimate-core.equivalence:undecided",
-      }),
-    ]
+    // Undecidable / no schema: the engine not knowing is not evidence of a change
+    // (1 of 426 such findings matched a real defect on replay), so it goes to the
+    // coverage ledger instead of the findings.
+    unverified.push({
+      path: file.path,
+      reason: "equivalence could not be proven (no schema or unsupported SQL); verify with a data-diff",
+    })
+    return []
   }
 
   // Decided NOT equivalent. THE FUSION: a proven behavior change to a model with
@@ -1985,6 +1975,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           dialect,
           ctx.impact,
           input.rubric,
+          unverified,
         ),
       )
     }
