@@ -458,14 +458,31 @@ describe("dbt_health", () => {
     expect(python.calls).toHaveLength(0)
   })
 
+  test("a rebuild that never finishes does not block a later call: it starts a fresh rebuild", async () => {
+    let rebuilds = 0
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: () => (++rebuilds === 1 ? new Promise(() => {}) : Promise.resolve()),
+      parseManifest: async () => parsed,
+    })
+    dbtHealthInternals.rebuildTimeoutMs = 20
+    const hung = await run()
+    expect(hung.metadata.success).toBe(false)
+    const next = await run()
+    expect(next.metadata.success).toBe(true)
+    expect(rebuilds).toBe(2)
+  })
+
   test("a call that arrives while a rebuild runs gets a rebuild that starts after it; calls in that window share one", async () => {
     const events: string[] = []
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
     let rebuilds = 0
+    let rootReads = 0
     dbtAdapterInternals.create = async () => ({
       isInitialized: () => true,
-      getProjectRoot: () => project,
+      getProjectRoot: () => (rootReads++, project),
       rebuildManifest: async () => {
         const n = ++rebuilds
         events.push(`start ${n}`)
@@ -477,7 +494,8 @@ describe("dbt_health", () => {
     const first = run()
     while (rebuilds < 1) await new Promise((r) => setTimeout(r, 5))
     const later = [run(), run()]
-    await new Promise((r) => setTimeout(r, 20))
+    // each call reads the project root, then enters the rebuild with no await in between
+    while (rootReads < 3) await new Promise((r) => setTimeout(r, 1))
     expect(rebuilds).toBe(1)
     release()
     const results = await Promise.all([first, ...later])

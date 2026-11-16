@@ -50,7 +50,7 @@ export const dbtHealthInternals = {
       )
       child.stdin?.end()
     }),
-  /** How long a call waits for the manifest rebuild; the rebuild itself goes on and the next call joins it. */
+  /** How long a call waits for the manifest rebuild. The rebuild itself goes on; a call that times out abandons it, so the next call starts a fresh one. */
   rebuildTimeoutMs: 120_000,
   /** The Python found for a project when the dbt config names none. */
   discoverPython: async (root: string) => (await import("../../../../dbt-tools/src/config")).discoverPython(root),
@@ -65,6 +65,7 @@ const rebuilding = new WeakMap<object, { running: Promise<unknown>; queued?: Pro
 
 function trackRebuild(adapter: object, slot: { running: Promise<unknown>; queued?: Promise<unknown> }) {
   const next = () => {
+    if (rebuilding.get(adapter) !== slot) return
     if (slot.queued) {
       slot.running = slot.queued
       slot.queued = undefined
@@ -93,10 +94,11 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
   const waited = new Promise<never>((_, reject) => {
     stop = () => reject(signal.reason)
     signal.addEventListener("abort", stop, { once: true })
-    timer = setTimeout(
-      () => reject(new Error(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`)),
-      dbtHealthInternals.rebuildTimeoutMs,
-    )
+    timer = setTimeout(() => {
+      // A rebuild that never settles must not hold the queue: drop this slot so the next call starts a fresh one.
+      if (rebuilding.get(adapter) === slot) rebuilding.delete(adapter)
+      reject(new Error(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`))
+    }, dbtHealthInternals.rebuildTimeoutMs)
   })
   waited.catch(() => {})
   await Promise.race([shared, waited]).finally(() => {
