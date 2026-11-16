@@ -697,11 +697,15 @@ describe("each engine's own literal and statement rules", () => {
     ["SELECT `execute`('DROP DATABASE victim')", "mysql", "read", true],
     ['SELECT "exec"($$DROP SCHEMA victim$$)', "clickhouse", "read", true],
     ["SELECT exec /* c */ ('DROP SCHEMA victim')", "postgres", "write", true],
-    // A column or alias named execute is not dynamic SQL.
-    ["SELECT 'DROP NAMESPACE analytics' AS execute", "postgres", "read", false],
-    ["SELECT execute FROM audit_log WHERE s = 'DROP CATALOG x'", "postgres", "read", false],
-    ["SELECT 1 AS execute /* DROP CATALOG analytics */", "postgres", "read", false],
-    ["SELECT E'\\x44ROP SCHEMA analytics' AS execute", "postgres", "read", false],
+    // Any EXEC/EXECUTE word makes dynamic SQL's literals count, as on main: qualified helpers, bodies after
+    // AS, quoted procedure names. A column named execute is refused too (Known limits).
+    ["SELECT util.exec('DROP SCHEMA victim')", "duckdb", "read", true],
+    ["SELECT public.execute('DROP ' || 'SCHEMA x')", "postgres", "read", true],
+    ["CREATE PROCEDURE p AS EXEC('DROP ' + 'DATABASE x')", "sqlserver", "write", true],
+    ["CREATE TASK k WAREHOUSE = w SCHEDULE = '1 minute' AS EXECUTE IMMEDIATE 'DROP ' || 'SCHEMA x'", "snowflake", "write", true],
+    ["DECLARE @s nvarchar(max) = 'DROP ' + 'SCHEMA x'; EXEC [from] @s", "sqlserver", "write", true],
+    ["SELECT 'DROP SCHEMA analytics' AS execute", "postgres", "read", true],
+    ["SELECT 'TRUNCATE' AS v FROM t ORDER BY v", "postgres", "read", false],
     // A dot inside one quoted name is not a sequence advance.
     ['SELECT "s.NEXTVAL" FROM metrics', "snowflake", "read", false],
     ['SELECT "s.NEXTVAL" FROM metrics', "oracle", "read", false],

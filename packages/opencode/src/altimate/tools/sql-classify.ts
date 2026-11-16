@@ -312,12 +312,10 @@ function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialec
   )
 }
 
-// Dynamic SQL: EXEC or EXECUTE as a call or statement (EXEC('...'), EXEC sp_executesql, EXECUTE IMMEDIATE,
-// SELECT exec('...')), not as a column or alias (SELECT execute FROM t, 1 AS execute, t.execute), which is
-// followed by a clause word, an operator, `,`, `)` or the end. PREPARE and DO start a statement. The
-// lookbehind runs only after EXEC matched, so each run of whitespace is scanned once.
-const DYNAMIC_SQL =
-  /\bEXEC(UTE)?\b(?<!\bAS\s+EXEC(UTE)?|\.\s*EXEC(UTE)?)(?!\s*($|[,);=<>!|+*\/%-]|(FROM|WHERE|AS|IS|IN|AND|OR|ORDER|GROUP|HAVING|LIMIT|UNION)\b))|(^|;)\s*(PREPARE|DO)\b/i
+// Dynamic SQL: the word EXEC or EXECUTE anywhere in code (as on main: a call, a statement, a body after
+// AS, a qualified helper), or a statement starting with PREPARE or DO. A column named execute counts too,
+// since no context rule can tell it from a call that runs SQL.
+const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
 
 // Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), and in Oracle,
 // Snowflake and MariaDB (Oracle mode) s.NEXTVAL, quoted or not (in Oracle a quoted name must be
