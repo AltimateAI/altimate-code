@@ -78,6 +78,8 @@ export interface VerifierStatus {
   /** Findings with no verdict (omitted, unparsable, timeout, budget, error). */
   unreviewed: number
   dropped?: DroppedFinding[]
+  /** Every finding's triage inputs and outcome (uncapped), for offline re-triage with `retriage`. */
+  decisions?: VerifierDecision[]
 }
 
 /** Whether the verifier runs: opt-in until the decision run says otherwise. */
@@ -423,7 +425,7 @@ const LOCAL_CLAIMS = new Set<ModelFeatures["claimType"]>(["code_fact", "conventi
  * decides: open keeps the finding unchanged, closed discards it.
  */
 export function triage(
-  f: Finding,
+  f: Pick<Finding, "category">,
   ts: TsFeatures,
   m: ModelFeatures | undefined,
   knobs: TriageKnobs,
@@ -459,6 +461,75 @@ export function triage(
   return { decision: "keep", rule: "verified" }
 }
 
+/**
+ * One finding's triage record: the deterministic features, the model's verdict
+ * (without the evidence text; `hasEvidence` keeps what triage reads) and the
+ * outcome. Unreviewed findings have no `model`. Enough to re-run triage with
+ * other knobs without calling the model again.
+ */
+export interface VerifierDecision {
+  id: string
+  category: Finding["category"]
+  decision: Decision
+  rule: string
+  ts: TsFeatures
+  model?: Omit<ModelFeatures, "evidence"> & { hasEvidence: boolean }
+}
+
+function compactDecision(
+  f: Finding,
+  ts: TsFeatures,
+  m: ModelFeatures | undefined,
+  decision: Decision,
+  rule: string,
+): VerifierDecision {
+  const model = m
+    ? {
+        claimType: m.claimType,
+        verdict: m.verdict,
+        value: m.value,
+        requiresAssumedInput: m.requiresAssumedInput,
+        toolsUsed: m.toolsUsed,
+        hasEvidence: !!m.evidence.trim(),
+      }
+    : undefined
+  return { id: f.id, category: f.category, decision, rule, ts, ...(model ? { model } : {}) }
+}
+
+/** Knobs for offline re-triage: the live knobs plus hypothetical rules not in `triage`. */
+export interface RetriageKnobs extends TriageKnobs {
+  /** Treat a finding whose text names another model or source (`claimsOtherFile`) as a cross-file claim (rule 3). */
+  claimsOtherFileAsCrossFile?: boolean
+}
+
+/**
+ * Re-run triage over recorded decisions with other knobs (pure, no model
+ * call): what one run's envelopes would have kept and dropped.
+ */
+export function retriage(
+  decisions: VerifierDecision[],
+  knobs: RetriageKnobs,
+): {
+  decisions: Array<{ id: string; decision: Decision; rule: string }>
+  counts: { kept: number; discarded: number; summary: number; unreviewed: number }
+} {
+  const counts = { kept: 0, discarded: 0, summary: 0, unreviewed: 0 }
+  const out = decisions.map((d) => {
+    let m: ModelFeatures | undefined
+    if (d.model) {
+      const { hasEvidence, ...rest } = d.model
+      m = { ...rest, evidence: hasEvidence ? "(recorded)" : "" }
+      if (knobs.claimsOtherFileAsCrossFile && d.ts.claimsOtherFile) m.claimType = "cross_file"
+    } else counts.unreviewed++
+    const { decision, rule } = triage(d, d.ts, m, knobs)
+    if (decision === "discard") counts.discarded++
+    else if (decision === "summary") counts.summary++
+    else counts.kept++
+    return { id: d.id, decision, rule }
+  })
+  return { decisions: out, counts }
+}
+
 /** Most discarded findings listed on the envelope. */
 export const DROPPED_MAX = 20
 
@@ -489,16 +560,19 @@ export function applyTriage(
 ): {
   findings: Finding[]
   dropped: DroppedFinding[]
+  decisions: VerifierDecision[]
   counts: Pick<VerifierStatus, "reviewed" | "kept" | "discarded" | "summary" | "unreviewed">
 } {
   const out: Finding[] = []
   const dropped: DroppedFinding[] = []
+  const decisions: VerifierDecision[] = []
   const counts = { reviewed: 0, kept: 0, discarded: 0, summary: 0, unreviewed: 0 }
   findings.forEach((f, i) => {
     const m = model[i]
     if (m) counts.reviewed++
     else counts.unreviewed++
     const { decision, rule } = triage(f, ts[i], m, knobs)
+    decisions.push(compactDecision(f, ts[i], m, decision, rule))
     if (decision === "discard") {
       counts.discarded++
       if (dropped.length < DROPPED_MAX)
@@ -539,7 +613,7 @@ export function applyTriage(
       ...(decision === "summary" ? { tier: "summary" as const } : {}),
     })
   })
-  return { findings: out, dropped, counts }
+  return { findings: out, dropped, decisions, counts }
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,6 +1178,7 @@ export async function runAiVerify(
         toolCalls: outcomes.reduce((n, o) => n + o.toolCalls, 0),
         ...triaged.counts,
         ...(triaged.dropped.length ? { dropped: triaged.dropped } : {}),
+        decisions: triaged.decisions,
       }),
     }
   } catch (err) {
