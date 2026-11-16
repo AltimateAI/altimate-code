@@ -695,6 +695,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             providerID: parsed.providerID,
             modelID: parsed.modelID,
             suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
+            providerMissing: !provider,
           })
         }
       }

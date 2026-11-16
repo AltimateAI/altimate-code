@@ -168,7 +168,7 @@ A login counts as found even if it has expired. Altimate Code checks that these 
 | Claude Pro/Max | Claude Code's login (`~/.claude/.credentials.json`, `~/.claude.json`, or the macOS keychain item `Claude Code-credentials`) | Uses that login; nothing to sign in |
 | ChatGPT Plus/Pro | The Codex CLI's ChatGPT login (`~/.codex/auth.json`) | You sign in with ChatGPT once in Altimate Code |
 | GitHub Copilot | A Copilot editor login (`~/.config/github-copilot/`) | You sign in with GitHub once in Altimate Code |
-| Claude Pro/Max | Claude subscription connected earlier in Altimate Code | Checks your Claude Code login again; run `claude auth login` if it has ended |
+| Claude subscription already connected | Claude subscription connected earlier in Altimate Code | Checks your Claude Code login again; run `claude auth login` if it has ended |
 | ChatGPT, GitHub Copilot, SuperGrok or GitLab Duo | A login saved earlier in Altimate Code | Reconnects, signing in again if it expired |
 
 ## Claude Agent (Claude subscription)
@@ -187,7 +187,10 @@ How it behaves:
 - Chats use Claude Code's system prompt plus the selected agent's prompt as its role. Temperature, top-p and top-k are not supported.
 - You can switch between Claude Agent and other models in the same session. Claude is sent the part of the conversation it has not seen.
 - Each session keeps one `claude` process, which stops after 5 minutes idle and resumes the saved Claude session on the next message.
-- `claude` must be installed on the same machine. Set `OPENCODE_CLAUDE_PATH` to run a specific `claude` binary instead of the one on `PATH`.
+- `claude` must be installed on the same machine. Set `OPENCODE_CLAUDE_PATH` to run a specific `claude` binary instead of the one on `PATH`, for example the full path to `claude.exe` on Windows if the login check does not finish.
+- `claude` runs with your environment, as it does when you start it yourself. An `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set in your shell is therefore used instead of your subscription and billed to that key; unset it to use the subscription. Proxy settings (`HTTPS_PROXY`, and `NODE_EXTRA_CA_CERTS` for a company certificate) reach `claude` the same way.
+- The model list comes from Claude Code, so it appears after the first successful connect. If `claude` cannot reach Anthropic, `/connect` keeps checking and then says no login was found.
+- Deleting a chat in Altimate Code also deletes Claude Code's copy of that conversation, so it no longer appears in `claude --resume`. If that delete fails, the error is logged and the chat is still removed.
 
 Connection settings in config map to Claude Code variables:
 

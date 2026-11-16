@@ -458,13 +458,16 @@ function AutoMethod(props: AutoMethodProps) {
     if (result.error) {
       // altimate_change — surface the failure instead of clearing silently. The
       // precise reason is also logged server-side by the plugin callback.
-      toast.show({
-        variant: "error",
-        message:
-          "name" in result.error && result.error.name === "ProviderAuthOauthCallbackFailed"
-            ? "OAuth authorization failed. Try /connect again."
-            : JSON.stringify(result.error),
-      })
+      let message = JSON.stringify(result.error)
+      if ("name" in result.error && result.error.name === "ProviderAuthOauthCallbackFailed") {
+        // A Claude subscription waits for a Claude Code login instead of running an OAuth flow, and the
+        // check also fails when `claude` cannot start or reach Anthropic.
+        message =
+          props.providerID === "claude-agent"
+            ? "No Claude Code login was found, or Claude Code could not start. Run `claude auth login` in a terminal (Claude Code 2.1.296 or later, see `claude --version`). If you are logged in, check the network and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS), then /connect again."
+            : "OAuth authorization failed. Try /connect again."
+      }
+      toast.show({ variant: "error", message })
       dialog.clear()
       return
     }
