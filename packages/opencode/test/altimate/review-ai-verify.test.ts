@@ -9,6 +9,7 @@ import {
   applyTriage,
   batchFindings,
   runAiVerify,
+  toolsChars,
   verifierTools,
   type AiVerifyEvidence,
   type VerifierLlm,
@@ -922,8 +923,17 @@ describe("runAiVerify: the bounded tool loop", () => {
     ])
   })
 
-  test("verifierTools: equivalence needs a base side; grain needs the engine", async () => {
+  test("tool declarations stay small: under 3,000 chars sent with every call", () => {
     const defs = verifierTools(evidence())
+    const tools = Object.fromEntries(
+      Object.entries(defs).map(([n, d]) => [n, tool({ description: d.description, inputSchema: d.input })]),
+    )
+    expect(toolsChars(tools as any)).toBeLessThan(3_000)
+  })
+
+  test("verifierTools: equivalence needs a base side; grain needs the engine; grep needs 2 chars", async () => {
+    const defs = verifierTools(evidence())
+    expect(await defs.grep_project.run({ pattern: "a" })).toBe("not available: pattern needs at least 2 characters")
     expect(await defs.equivalence.run({ path: "models/fct.sql" })).toBe(
       "not available: models/fct.sql has no compiled base SQL",
     )
