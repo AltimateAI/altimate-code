@@ -687,18 +687,17 @@ export function verifierTools(
     ev.files.find((f) => f.model === name && MODEL_KINDS.has(f.kind))?.path ??
     graph.parents.find((p) => p.name === name && (p.kind === "model" || p.kind === "snapshot"))?.path ??
     graph.downstream.find((d) => d.name === name)?.path
-  const side = z.enum(["old", "new"]).optional().describe("old = base branch, new = PR head (default)")
+  const side = z.enum(["old", "new"]).optional().describe("old=base, new=head (default)")
   const scope = NA("outside review scope (changed files, their dbt parents and direct downstream models only)")
 
   return {
     read_file: {
-      description:
-        "Read up to 200 numbered lines of a changed file, a dbt parent of one, or a direct downstream model.",
+      description: "Up to 200 numbered lines of a changed file, its dbt parents or direct children.",
       input: z.object({
         path: z.string(),
         side,
-        start: z.number().int().positive().optional(),
-        end: z.number().int().positive().optional(),
+        start: z.number().optional(),
+        end: z.number().optional(),
       }),
       async run({ path, side, start, end }) {
         const p = resolve(path)
@@ -710,7 +709,7 @@ export function verifierTools(
       },
     },
     compiled_sql: {
-      description: "dbt-compiled SQL of a model file (raw SQL when it has no Jinja).",
+      description: "Compiled SQL of a model file.",
       input: z.object({ path: z.string(), side }),
       async run({ path, side }) {
         const p = resolve(path)
@@ -719,8 +718,7 @@ export function verifierTools(
       },
     },
     model_columns: {
-      description:
-        "Output columns of a model (column lineage of its compiled SQL, plus contract columns) or declared columns of a source (`source_name.table`).",
+      description: "Output columns of a model, or columns of a source (`source.table`).",
       input: z.object({ model: z.string() }),
       async run({ model }) {
         const name = String(model)
@@ -739,7 +737,7 @@ export function verifierTools(
       },
     },
     column_reach: {
-      description: "Downstream models and exposures that read one column of a model (manifest + compiled SQL).",
+      description: "Downstream models and exposures that read a column of a model.",
       input: z.object({ model: z.string(), column: z.string() }),
       async run({ model, column }) {
         if (!ev.runner.columnReach) return NA("no dbt manifest")
@@ -756,7 +754,7 @@ export function verifierTools(
       },
     },
     model_config: {
-      description: "A model's merged dbt config, its declared unique keys (tests) and primary key.",
+      description: "A model's dbt config, unique keys and primary key.",
       input: z.object({ model: z.string() }),
       async run({ model }) {
         const name = String(model)
@@ -770,7 +768,7 @@ export function verifierTools(
       },
     },
     downstream: {
-      description: "Direct downstream models of a model, its exposures, and whether it has an enforced contract.",
+      description: "A model's direct child models, exposures and contract.",
       input: z.object({ model: z.string() }),
       async run({ model }) {
         const name = String(model)
@@ -784,7 +782,7 @@ export function verifierTools(
       },
     },
     equivalence: {
-      description: "Whether a changed model's compiled SQL is semantically equivalent before and after the PR.",
+      description: "Whether a changed model's SQL is equivalent before and after the PR.",
       input: z.object({ path: z.string() }),
       async run({ path }) {
         const p = resolve(path)
@@ -795,7 +793,7 @@ export function verifierTools(
       },
     },
     grain: {
-      description: "A model's grain from its compiled SQL: the final GROUP BY and dedup PARTITION BY columns.",
+      description: "A model's grain: final GROUP BY and dedup PARTITION BY columns.",
       input: z.object({ path: z.string() }),
       async run({ path }) {
         const p = resolve(path)
@@ -806,17 +804,17 @@ export function verifierTools(
       },
     },
     grep_project: {
-      description:
-        "Fixed-string search of the dbt project at the PR head (models, macros, seeds, snapshots, tests). At most 50 hits.",
-      input: z.object({ pattern: z.string().min(2), glob: z.string().optional() }),
+      description: "Fixed-string search of the project's dbt files at head (max 50 hits).",
+      input: z.object({ pattern: z.string(), glob: z.string().optional() }),
       async run({ pattern, glob }) {
         if (!ev.grepProject) return NA("project search unavailable")
+        if (String(pattern).length < 2) return NA("pattern needs at least 2 characters")
         const hits = await ev.grepProject(String(pattern), glob as string | undefined)
         return hits.length ? hits.map((h) => `${h.path}:${h.line}: ${h.text}`).join("\n") : "no matches"
       },
     },
     pr_description: {
-      description: "The PR title and description.",
+      description: "PR title and description.",
       input: z.object({}),
       async run() {
         const text = `${ev.prTitle ?? ""}\n\n${ev.prBody ?? ""}`.trim()
