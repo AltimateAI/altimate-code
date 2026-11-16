@@ -39,12 +39,39 @@ function project(root: string): Status {
   return { ok: true }
 }
 
-export async function all(cfg: Config) {
-  const checks = {
-    python: await python(cfg.pythonPath),
-    dbt: cfg.pythonPath && existsSync(cfg.pythonPath) ? await dbt(cfg.pythonPath) : { ok: false as const, error: "Skipped (Python not found)", fix: "Fix Python first" },
-    project: project(cfg.projectRoot),
+type FusionLookup = { pythonPath?: string; cwd?: string; env?: Record<string, string | undefined> }
+
+/** How the Fusion check finds dbt: dbt-integration's own lookup, loaded only in Fusion mode.
+ * A field so tests can replace it. */
+export const fusionBinary = {
+  find: async (options: FusionLookup) => (await import("@altimateai/dbt-integration")).findDbtV2Binary(options),
+}
+
+async function fusion(cfg: Config): Promise<Status> {
+  const binary = await fusionBinary.find({
+    pythonPath: cfg.pythonPath || undefined,
+    cwd: cfg.projectRoot || undefined,
+    env: process.env,
+  })
+  if (binary) return { ok: true }
+  const nextTo = cfg.pythonPath ? `next to ${cfg.pythonPath}, ` : ""
+  return {
+    ok: false,
+    error: `dbt Fusion was not found: no dbt 2.x binary ${nextTo}in ~/.local/bin or on PATH`,
+    fix: "Install dbt Fusion so that `dbt --version` reports 2.x, or set dbtIntegration to core in the altimate-dbt config",
   }
+}
+
+export async function all(cfg: Config) {
+  // dbt Fusion is a native binary: it needs no Python, and no dbt-core in one.
+  const checks: Record<string, Status> =
+    cfg.dbtIntegration === "fusion"
+      ? { fusion: await fusion(cfg), project: project(cfg.projectRoot) }
+      : {
+          python: await python(cfg.pythonPath),
+          dbt: cfg.pythonPath && existsSync(cfg.pythonPath) ? await dbt(cfg.pythonPath) : { ok: false as const, error: "Skipped (Python not found)", fix: "Fix Python first" },
+          project: project(cfg.projectRoot),
+        }
   const passed = Object.values(checks).every((c) => c.ok)
   return { passed, checks }
 }

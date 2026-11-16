@@ -84,7 +84,8 @@ function terminal(): DBTTerminal {
 function env(cfg: Config): RuntimePythonEnvironment {
   const vars = { ...process.env }
   return {
-    pythonPath: cfg.pythonPath,
+    // A Fusion config may have none: dbt-integration runs Fusion with an empty one.
+    pythonPath: cfg.pythonPath ?? "",
     getEnvironmentVariables: () => vars,
   }
 }
