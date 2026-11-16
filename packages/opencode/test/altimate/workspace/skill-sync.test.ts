@@ -9,6 +9,7 @@
 // where discovery can load them.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   utimesSync,
@@ -164,14 +165,14 @@ function serve(
   }))
   globalThis.fetch = (async (input: string | URL) => {
     const url = String(input)
-    const files = url.match(/skills\/([^/]+)\/files\/(.+)$/)
+    const files = url.split("?")[0].match(/skills\/([^/]+)\/files\/(.+)$/)
     if (files) {
       const id = decodeURIComponent(files[1])
       const rel = files[2].split("/").map(decodeURIComponent).join("/")
       return json({ path: rel, content: skills[id][rel] })
     }
     const detail = url.match(/skills\/([^/?]+)(?:\?|$)/)
-    if (detail && !url.includes("datamate_id")) {
+    if (detail && !isList(url)) {
       const id = decodeURIComponent(detail[1])
       return json({
         skill: {
@@ -186,6 +187,12 @@ function serve(
     }
     return json({ items, total: items.length, page: 1, size: 50, pages: 1 })
   }) as unknown as typeof fetch
+}
+
+/** The list call (`GET /skills?datamate_id=…`). Detail and file reads carry `datamate_id` too (the version the workspace
+ * serves), so the query alone does not tell them apart: the list has no path after `/skills`. */
+function isList(url: string) {
+  return /\/skills\?/.test(url)
 }
 
 function json(body: unknown) {
@@ -324,7 +331,7 @@ describe("workspace skill sync", () => {
     const inner = globalThis.fetch
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
       // The list answers; every skill download fails, so nothing is published.
-      if (/skills\/[^/?]+(\/files\/|\?|$)/.test(String(input)) && !String(input).includes("datamate_id"))
+      if (/skills\/[^/?]+(\/files\/|\?|$)/.test(String(input)) && !isList(String(input)))
         throw new Error("offline")
       return inner(input as never, init as never)
     }) as unknown as typeof fetch
@@ -342,7 +349,7 @@ describe("workspace skill sync", () => {
     const inner = globalThis.fetch
     let unlinked = false
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
-      if (!unlinked && String(input).includes("datamate_id")) {
+      if (!unlinked && isList(String(input))) {
         unlinked = true
         unbind()
       }
@@ -368,7 +375,7 @@ describe("workspace skill sync", () => {
     let replaced = false
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
       const url = String(input)
-      if (!unlinked && url.includes("datamate_id")) {
+      if (!unlinked && isList(url)) {
         unlinked = true
         unbind()
       }
@@ -453,7 +460,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md", content: "short" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-02-02T00:00:00Z" }],
           total: 1,
@@ -475,7 +482,7 @@ describe("workspace skill sync", () => {
   test("a partial sync names the dropped skill and why, and still publishes the rest", async () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [
             { public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-03-01T00:00:00Z" },
@@ -511,7 +518,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md", content: "short" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-02-02T00:00:00Z" }],
           total: 1,
@@ -681,7 +688,7 @@ describe("workspace skill sync", () => {
           },
           datamate: { id: datamateId, name: `ws-${datamateId}` },
         })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: Object.entries(spec).map(([id, s]) => ({
             public_id: id,
@@ -780,7 +787,7 @@ describe("workspace skill sync", () => {
       // Binding revalidation is not a detail or file fetch; this test is about
       // not re-downloading an unchanged workspace.
       if (url.includes("/datamate-project-bindings/by-")) return json({ detail: "not found" })
-      if (url.includes("/files/") || !url.includes("datamate_id")) detailOrFile++
+      if (url.includes("/files/") || !isList(url)) detailOrFile++
       return json({
         items: [{ public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-01-01T00:00:00Z" }],
         total: 1,
@@ -820,7 +827,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "../escape.md", content: escape })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-01-01T00:00:00Z" }],
           total: 1,
@@ -871,7 +878,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-3", name: "p3", file_count: 1, updated_at: "2026-04-04T00:00:00Z" }],
           total: 1,
@@ -1092,7 +1099,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md", content: "x" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "../../escape", name: "e", file_count: 1, updated_at: "2026-06-06T00:00:00Z" }],
           total: 1,
@@ -1493,7 +1500,7 @@ describe("workspace skill sync", () => {
       const url = String(input)
       // Same length, different file — undetectable without checking the path.
       if (url.includes("/files/")) return json({ path: "OTHER.md", content: "abc" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-7", name: "p7", file_count: 1, updated_at: "2026-07-07T00:00:00Z" }],
           total: 1,
@@ -1538,7 +1545,7 @@ describe("workspace skill sync", () => {
         const rel = url.split("/files/")[1]
         return json({ path: decodeURIComponent(rel), content: "x" })
       }
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-many", name: "m", file_count: many.length, updated_at: "2026-08-08T00:00:00Z" }],
           total: 1,
@@ -1578,7 +1585,7 @@ describe("workspace skill sync", () => {
         const rel = url.split("/files/")[1]
         return json({ path: decodeURIComponent(rel), content: "x" })
       }
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-huge", name: "h", file_count: huge.length, updated_at: "2026-08-08T00:00:00Z" }],
           total: 1,
@@ -1720,7 +1727,7 @@ describe("workspace skill sync", () => {
         const id = /skills\/([^/]+)\/files/.exec(url)![1]
         return json({ path: "SKILL.md", content: bodies[id] })
       }
-      if (url.includes("datamate_id")) {
+      if (isList(url)) {
         const page = Number(/page=(\d+)/.exec(url)?.[1] ?? 1)
         return json({
           items: [row(page === 1 ? "p1-a" : "p2-b")],
@@ -1826,7 +1833,7 @@ describe("workspace skill sync", () => {
       let listRequests = 0
       globalThis.fetch = (async (input: string | URL) => {
         const url = String(input)
-        if (url.includes("datamate_id")) {
+        if (isList(url)) {
           listRequests++
           const page = Number(new URL(url, "http://x").searchParams.get("page") ?? "1")
           return json({ items: [], total: 0, page, size: 50, pages })
@@ -1857,7 +1864,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md", content: "one" })
-      if (url.includes("datamate_id")) return url.includes("page=2") ? page(2, "pub-2", 2) : page(1, "pub-1", 2)
+      if (isList(url)) return url.includes("page=2") ? page(2, "pub-2", 2) : page(1, "pub-1", 2)
       return files(url.includes("pub-2") ? "pub-2" : "pub-1")
     }) as unknown as typeof fetch
     await syncSkills(project)
@@ -1867,7 +1874,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md", content: "one" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return url.includes("page=2")
           ? json({ items: [], total: 0, page: 2, size: 1, pages: 0 })
           : page(1, "pub-1", 2)
@@ -1890,7 +1897,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ path: "SKILL.md", content: "x" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-1", updated_at: "2026-01-01T00:00:00Z" }],
           total: 0,
@@ -1912,7 +1919,7 @@ describe("workspace skill sync", () => {
       (async (input: string | URL) => {
         const url = String(input)
         if (url.includes("/files/")) return json({ path: "SKILL.md", content: "x" })
-        if (url.includes("datamate_id")) {
+        if (isList(url)) {
           const page = Number(new URL(url, "http://x").searchParams.get("page") ?? "1")
           if (page === 1) return json({ items: [row("pub-1")], total: 3, page: 1, size: 1, pages: 3 })
           if (page === 2) return json({ items: [row("pub-2")], total: 3, page: 2, size: 1, pages: pagesOnP2 })
@@ -1952,7 +1959,7 @@ describe("workspace skill sync", () => {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
       if (url.includes("/files/")) return json({ content: "abc" })
-      if (url.includes("datamate_id"))
+      if (isList(url))
         return json({
           items: [{ public_id: "pub-np", name: "n", file_count: 1, updated_at: "2026-09-10T00:00:00Z" }],
           total: 1,
@@ -2760,7 +2767,7 @@ describe("sync state", () => {
   const onList = (during: () => void) => {
     const inner = globalThis.fetch
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
-      if (String(input).includes("datamate_id")) during()
+      if (isList(String(input))) during()
       return inner(input as never, init as never)
     }) as unknown as typeof fetch
   }
@@ -2805,7 +2812,7 @@ describe("sync state", () => {
     const inner = globalThis.fetch
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes("datamate_id")) {
+      if (isList(url)) {
         // By the time the record is written there is no local row, and the server cannot be
         // asked: the binding resolves as unknown.
         unbind()
@@ -2849,6 +2856,380 @@ describe("sync state", () => {
     serve({ "pub-1": { "SKILL.md": "one, edited" } }, "2026-02-01T00:00:00Z")
     await syncSkills(project)
     expect(await read()).toMatchObject({ status: "ok", changes: { added: [], removed: [], updated: ["pub-1"] } })
+  })
+})
+// altimate_change end
+
+// altimate_change start — workspace review: the version the workspace serves
+describe("the served version", () => {
+  /** A server with review: each skill has a `revision` and a body; reads are recorded. */
+  function serveReviewed(skills: Record<string, { revision?: string; updatedAt: string; body: string }>) {
+    const reads: string[] = []
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      reads.push(url)
+      if (isList(url))
+        return json({
+          items: Object.entries(skills).map(([id, s]) => ({
+            public_id: id,
+            name: id,
+            file_count: 1,
+            updated_at: s.updatedAt,
+            ...(s.revision ? { revision: s.revision } : {}),
+          })),
+          total: Object.keys(skills).length,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      const bare = url.split("?")[0]
+      const file = bare.match(/skills\/([^/]+)\/files\/(.+)$/)
+      if (file) return json({ path: decodeURIComponent(file[2]), content: skills[decodeURIComponent(file[1])].body })
+      const id = decodeURIComponent(bare.split("/skills/")[1])
+      return json({ skill: { public_id: id, files: [{ path: "SKILL.md", size: Buffer.from(skills[id].body).byteLength }] } })
+    }) as unknown as typeof fetch
+    return reads
+  }
+
+  test("detail and file reads ask for the version the bound workspace serves to this caller", async () => {
+    const reads = serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "approved" } })
+    await syncSkills(project)
+    const perSkill = reads.filter((url) => url.includes("/skills/pub-1"))
+    expect(perSkill.length).toBe(2)
+    for (const url of perSkill) expect(new URL(url).searchParams.get("datamate_id")).toBe("1")
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("approved")
+  })
+
+  test("a new revision is fetched again; a library edit that leaves the revision alone is not", async () => {
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    await syncSkills(project)
+    // The author edited their library copy: `updated_at` moved, the served (pinned) version did not.
+    let reads = serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-02-01T00:00:00Z", body: "edited, not approved" } })
+    await syncSkills(project)
+    expect(reads.filter((url) => url.includes("/skills/pub-1"))).toEqual([])
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
+    // The owner approved the edit: a new revision.
+    reads = serveReviewed({ "pub-1": { revision: "r2", updatedAt: "2026-02-01T00:00:00Z", body: "v2 approved" } })
+    await syncSkills(project)
+    expect(reads.some((url) => url.includes("/skills/pub-1/files/"))).toBe(true)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v2 approved")
+  })
+
+  test("a server without revisions is followed by updated_at, as before", async () => {
+    serveReviewed({ "pub-1": { updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    await syncSkills(project)
+    serveReviewed({ "pub-1": { updatedAt: "2026-02-01T00:00:00Z", body: "v2" } })
+    await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v2")
+  })
+
+  test("a snapshot from before revisions is fetched once at the served version", async () => {
+    serveReviewed({ "pub-1": { updatedAt: "2026-01-01T00:00:00Z", body: "library copy" } })
+    await syncSkills(project)
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "pinned copy" } })
+    await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("pinned copy")
+  })
+
+  test("a skill no longer served (rejected, superseded) leaves the snapshot; the others stay", async () => {
+    serveReviewed({
+      "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "kept" },
+      "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "pending, then rejected" },
+    })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "kept" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("kept")
+  })
+
+  test("reads are bound to the listed revision", async () => {
+    const reads = serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    await syncSkills(project)
+    const perSkill = reads.filter((url) => url.includes("/skills/pub-1"))
+    expect(perSkill.length).toBe(2)
+    for (const url of perSkill) expect(new URL(url).searchParams.get("revision")).toBe("r1")
+  })
+
+  test("an approval between the detail and a file read installs nothing from the mix", async () => {
+    // The list and the detail name the pending version p1 (two files); the owner approves a1 before the second file is
+    // read, so the server refuses that read with 409 revision_changed.
+    const files: Record<string, string> = { "SKILL.md": "pending body", "notes.md": "pending notes" }
+    const reads: string[] = []
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      reads.push(url)
+      if (isList(url))
+        return json({ items: [{ public_id: "pub-1", name: "pub-1", file_count: 2, updated_at: "2026-01-01T00:00:00Z", revision: "p1" }], total: 1, page: 1, size: 50, pages: 1 })
+      const bare = url.split("?")[0]
+      const file = bare.match(/skills\/([^/]+)\/files\/(.+)$/)
+      if (file) {
+        const rel = decodeURIComponent(file[2])
+        if (rel === "notes.md")
+          return new Response(JSON.stringify({ detail: { code: "revision_changed", message: "changed", revision: "a1" } }), { status: 409, headers: { "content-type": "application/json" } })
+        return json({ path: rel, content: files[rel] })
+      }
+      return json({ skill: { public_id: "pub-1", revision: "p1", files: Object.entries(files).map(([p, c]) => ({ path: p, size: Buffer.from(c).byteLength })) } })
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(reads.some((url) => url.includes("/files/notes.md"))).toBe(true)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(result.skipped).toEqual([{ skill: "pub-1", reason: "it changed in the workspace while downloading; it is fetched again on the next sync" }])
+    // Not stamped: the next sync tries again.
+    expect(await recentlySynced(project)).toBe(false)
+  })
+
+  test("a detail answering for another revision than the list is discarded", async () => {
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (!isList(url) && !url.includes("/files/"))
+        return json({ skill: { public_id: "pub-1", revision: "r2", files: [{ path: "SKILL.md", size: 2 }] } })
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("a rejected pending version is not kept when the approved one fails to download", async () => {
+    // The author's own pending version was delivered to them...
+    serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+    await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("pending")
+    // ...then rejected: the workspace serves the approved a1, whose download fails. Every skill failed, and still the
+    // pending copy is not left in delivery.
+    serveReviewed({ "pub-1": { revision: "a1", updatedAt: "2026-01-01T00:00:00Z", body: "approved" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/files/")) return new Response("unauthorized", { status: 401 })
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(result.skipped[0].reason).toContain("no longer the version the workspace serves")
+  })
+
+  test("a copy recorded without a revision is kept over a failed download once the server sends revisions", async () => {
+    // Synced against a server that sent no revision (or by an older client): the manifest entry has none.
+    serveReviewed({ "pub-1": { updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    await syncSkills(project)
+    // The server now lists a revision, and the whole download fails (an outage on the first sync after the upgrade).
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/files/")) throw new TypeError("network down")
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
+    expect(result.skipped[0].reason).toContain("kept the previous copy")
+    expect(result.skipped[0].reason).not.toContain("no longer the version")
+  })
+
+  test("a skill the list no longer names is withdrawn even when every remaining download fails", async () => {
+    serveReviewed({ "pub-a": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending a" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-a", "SKILL.md"))).toBe(true)
+    // pub-a was rejected (the list drops it); pub-b is new and its download fails.
+    serveReviewed({ "pub-b": { revision: "b1", updatedAt: "2026-01-01T00:00:00Z", body: "b" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/files/")) throw new TypeError("network down")
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-a", "SKILL.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-b", "SKILL.md"))).toBe(false)
+  })
+
+  test("a 409 naming a newer revision withdraws a copy the list still named", async () => {
+    serveReviewed({
+      "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" },
+      "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+    })
+    await syncSkills(project)
+    // The list still names p1 for pub-1 (pub-2 changed, so the snapshot is fetched again); before pub-1's file is read,
+    // the owner approves a1 and the read is refused.
+    serveReviewed({
+      "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" },
+      "pub-2": { revision: "r2", updatedAt: "2026-01-02T00:00:00Z", body: "two v2" },
+    })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-1/files/"))
+        return new Response(JSON.stringify({ detail: { code: "revision_changed", message: "changed", revision: "a1" } }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        })
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(readFileSync(skillFile("pub-2", "SKILL.md"), "utf8")).toBe("two v2")
+    expect(result.skipped[0].reason).toContain("no longer the version the workspace serves")
+  })
+
+  test("a run whose snapshot another process replaced while it downloaded does not swap its older result in", async () => {
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+    await syncSkills(project)
+    serveReviewed({
+      "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" },
+      "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+    })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-2/files/")) {
+        // Another process installs pub-1 at its approved revision meanwhile.
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"))
+        m.skills["pub-1"].revision = "a1"
+        writeFileSync(manifestPath, JSON.stringify(m))
+        writeFileSync(skillFile("pub-1", "SKILL.md"), "approved")
+      }
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("approved")
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+    expect(result.error).toBeUndefined()
+  })
+
+  test("an empty list does not remove a snapshot another process installed after this run read the live one", async () => {
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "one" } })
+    await syncSkills(project)
+    serveReviewed({})
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (isList(String(input))) {
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"))
+        m.skills["pub-1"].revision = "r2"
+        writeFileSync(manifestPath, JSON.stringify(m))
+      }
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a failed download keeps a copy recorded with a revision when the list names none", async () => {
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    await syncSkills(project)
+    serveReviewed({ "pub-1": { updatedAt: "2026-01-02T00:00:00Z", body: "v2" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-1/files/")) throw new TypeError("network down")
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
+  })
+
+  test("a run whose snapshot was removed as empty by another process does not bring its skills back", async () => {
+    const { emptyRecordPath } = await import("../../../src/altimate/workspace/empty-record-path")
+    // No snapshot yet; this run lists pub-1, and while it downloads another process finds the workspace empty.
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "one" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-1/files/")) {
+        const file = emptyRecordPath(path.resolve(project))
+        mkdirSync(path.dirname(file), { recursive: true })
+        writeFileSync(file, "another\nwriter")
+      }
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  // A read-only directory is what makes the swap fail here; it does not stop root, and Windows has no such mode.
+  const readOnlyDirsWork = process.platform !== "win32" && process.getuid?.() !== 0
+  test.skipIf(!readOnlyDirsWork)("an abandoned run withdraws a stale copy, but never one another process has replaced since", async () => {
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    // The swap cannot happen (the parent of the live tree is read-only), so the run is abandoned after downloading.
+    const parent = path.dirname(path.join(project, MANAGED))
+    try {
+      for (const replacedMeanwhile of [false, true]) {
+        mkdirSync(parent, { recursive: true })
+        chmodSync(parent, 0o755)
+        rmSync(path.join(project, MANAGED), { recursive: true, force: true })
+        serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+        await syncSkills(project)
+        // pub-1 is now served at a1 and its download fails; pub-2 is new and downloads.
+        serveReviewed({
+          "pub-1": { revision: "a1", updatedAt: "2026-01-02T00:00:00Z", body: "approved" },
+          "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+        })
+        const ok = globalThis.fetch
+        globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+          const url = String(input)
+          if (url.includes("/skills/pub-1/files/")) throw new TypeError("network down")
+          if (url.includes("/skills/pub-2/files/")) {
+            if (replacedMeanwhile) {
+              // Another process published pub-1 at a1 in the meantime.
+              const m = JSON.parse(readFileSync(manifestPath, "utf8"))
+              m.skills["pub-1"].revision = "a1"
+              writeFileSync(manifestPath, JSON.stringify(m))
+              writeFileSync(skillFile("pub-1", "SKILL.md"), "approved")
+            }
+            chmodSync(parent, 0o555)
+          }
+          return ok(input as never, init as never)
+        }) as unknown as typeof fetch
+        await syncSkills(project)
+        chmodSync(parent, 0o755)
+        expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+        if (replacedMeanwhile) expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("approved")
+        else expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+      }
+    } finally {
+      if (existsSync(parent)) chmodSync(parent, 0o755)
+    }
+  })
+
+  test.skipIf(!readOnlyDirsWork)("an abandoned run withdraws a replaced copy even when its replacement downloaded fine", async () => {
+    const parent = path.dirname(path.join(project, MANAGED))
+    try {
+      serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+      await syncSkills(project)
+      serveReviewed({ "pub-1": { revision: "a1", updatedAt: "2026-01-02T00:00:00Z", body: "approved" } })
+      const ok = globalThis.fetch
+      globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+        // The new revision downloads; the swap then cannot happen.
+        if (String(input).includes("/skills/pub-1/files/")) chmodSync(parent, 0o555)
+        return ok(input as never, init as never)
+      }) as unknown as typeof fetch
+      const result = await syncSkills(project)
+      chmodSync(parent, 0o755)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+      expect(result.changed).toBe(true)
+    } finally {
+      if (existsSync(parent)) chmodSync(parent, 0o755)
+    }
+  })
+
+  test("a failed download keeps the previous copy when the list still names its revision, or names none (older servers)", async () => {
+    for (const revision of ["r1", undefined]) {
+      rmSync(path.join(project, MANAGED), { recursive: true, force: true })
+      serveReviewed({ "pub-1": { revision, updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+      await syncSkills(project)
+      // Another skill is new, so the snapshot is fetched again, and pub-1's download fails.
+      serveReviewed({
+        "pub-1": { revision, updatedAt: "2026-01-01T00:00:00Z", body: "v1" },
+        "pub-2": { revision, updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+      })
+      const ok = globalThis.fetch
+      globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+        if (String(input).includes("/skills/pub-1/files/")) throw new TypeError("network down")
+        return ok(input as never, init as never)
+      }) as unknown as typeof fetch
+      const result = await syncSkills(project)
+      expect(result.skipped[0].reason).toContain("kept the previous copy")
+      expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
+      expect(readFileSync(skillFile("pub-2", "SKILL.md"), "utf8")).toBe("two")
+    }
   })
 })
 // altimate_change end

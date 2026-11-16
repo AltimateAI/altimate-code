@@ -30,7 +30,9 @@ export const ToolLookupTool = Tool.define("tool_lookup", {
     // Upstream's Tool rewrite made `init()` an Effect (was a Promise) and `parameters`
     // an Effect Schema (was a zod schema). Describe from the JSON Schema instead — it's
     // populated for both native tools and our legacy zod tools (via tool-zod-compat).
-    const tool = await Effect.runPromise(info.init())
+    // The registry shapes task.background and its description by the background flag; describe
+    // the same contract the model is offered.
+    const tool = ToolRegistry.applyRuntimeToolSchemaFlags(info.id, await Effect.runPromise(info.init()))
     const params = describeJsonSchema(tool.jsonSchema)
     const lines = [info.id, `  ${tool.description}`, ""]
     if (params.length) {

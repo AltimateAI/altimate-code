@@ -918,6 +918,16 @@ export namespace Telemetry {
         command: string
       }
     // altimate_change end
+    // altimate_change start — the Claude Code plugin's lineage report, sent through `tool report-event`
+    | {
+        /** What a person did with the Claude Code plugin's lineage report. No model, column, file or project names. */
+        type: "lineage_report"
+        timestamp: number
+        /** The host agent's session: `claude:<id>`. */
+        session_id: string
+        action: "summary_shown" | "open_pressed" | "command_run" | "built" | "build_failed" | "no_browser"
+      }
+    // altimate_change end
     | {
         // Sent before connecting, so an attempt that hangs or ends the process is still counted.
         type: "warehouse_connect_started"
@@ -1427,8 +1437,19 @@ export namespace Telemetry {
         session_id: string
         /** `search_all` means the user opened the full catalogue; the provider they then chose
          *  arrives as a second event with `via_search`. `other` is any provider outside the
-         *  curated five. */
-        provider: "altimate_gateway" | "altimate_base" | "anthropic" | "openai" | "google" | "search_all" | "other"
+         *  curated rows. */
+        provider:
+          | "altimate_gateway"
+          | "altimate_base"
+          | "anthropic"
+          | "claude_subscription"
+          | "openai"
+          | "google"
+          | "search_all"
+          | "other"
+        /** Which subscription row was picked, e.g. `chatgpt` for "ChatGPT subscription", which shares
+         *  provider `openai` with the API-key row. A fixed set of names. */
+        subscription?: "claude" | "chatgpt" | "copilot" | "supergrok" | "gitlab-duo"
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */
@@ -1530,6 +1551,9 @@ export namespace Telemetry {
         type: "first_job_completed"
         /** altimate_change — the turn's workspace, named by the emitter */
         workspace_id?: number
+        /** altimate_change — which rule sent the row: an onboarding session's selected job, or the
+         *  workspace's first job on this machine. Rows from older clients have none and are onboarding rows. */
+        origin: "onboarding" | "workspace"
         timestamp: number
         session_id: string
         job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
@@ -1554,6 +1578,9 @@ export namespace Telemetry {
         type: "first_prompt_sent"
         /** altimate_change — the turn's workspace, named by the emitter */
         workspace_id?: number
+        /** altimate_change — which rule sent the row: `onboarding` for an onboarding session's first typed
+         *  prompt, bound or not, else `workspace`. Rows from older clients have none and are onboarding rows. */
+        origin: "onboarding" | "workspace"
         timestamp: number
         session_id: string
       }
@@ -1651,6 +1678,7 @@ export namespace Telemetry {
     "lmstudio",
     "snowflake-cortex",
     "databricks",
+    "claude-agent",
   ])
 
   /** The curated picker's own rows map to named enum values; everything else is `other`. */
@@ -1662,6 +1690,7 @@ export namespace Telemetry {
     "altimate-backend": "altimate_gateway",
     "altimate-free": "altimate_base",
     anthropic: "anthropic",
+    "claude-agent": "claude_subscription",
     openai: "openai",
     google: "google",
   })

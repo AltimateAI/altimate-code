@@ -168,6 +168,27 @@ describe("proposal card", () => {
     expect(flagged.ok && flagged.card?.weakens_verification).toBe("mentions skipping or disabling verification")
   })
 
+  test("a workspace admin is offered approve like the owner; a member, or an older server's non-owner, send", async () => {
+    const cases: [Partial<NonNullable<RulesStore.State["workspace"]>>, "approve" | "send"][] = [
+      [{ is_owner: false, role: "admin" }, "approve"],
+      [{ is_owner: true, role: "owner" }, "approve"],
+      [{ is_owner: false, role: "member" }, "send"],
+      // A server older than workspace roles sends no role: `is_owner` decides.
+      [{ is_owner: false }, "send"],
+      [{ is_owner: true }, "approve"],
+      // A role this version does not know reads as `is_owner` too.
+      [{ is_owner: false, role: "reviewer" }, "send"],
+    ]
+    for (const [workspace, expected] of cases) {
+      const root = await tmp()
+      await RulesStore.update(root, (s) => Object.assign(s, linked(), { workspace: { name: "Team", owner_name: "Olive", ...workspace } }))
+      const card = (await RuleProposal.ask({ sessionID: "r1", root, directory: root, learn: undefined, draft: { ...draft, text: "Prefix seeds with seed_ everywhere." } }))!
+      expect(card.actions).toContain(expected)
+      expect(card.actions).not.toContain(expected === "approve" ? "send" : "approve")
+      RuleProposal.drop(root)
+    }
+  })
+
   test("a flagged card is approved only with approve_anyway; a plain approve is refused", async () => {
     const root = await tmp()
     await RulesStore.update(root, (s) => Object.assign(s, linked(), { workspace: { name: "Team", owner_name: "Olive", is_owner: true } }))

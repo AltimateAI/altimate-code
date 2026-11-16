@@ -98,3 +98,92 @@ describe("rule proposal routes", () => {
     expect((await request("POST", "/altimate/rules/learning", {})).status).toBe(400)
   })
 })
+
+describe("workspace request routes", () => {
+  test("a browser origin is refused", async () => {
+    const origin = { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    for (const [method, url, body] of [
+      ["GET", "/altimate/workspace/requests"],
+      ["POST", "/altimate/workspace/requests/c-1/withdraw", { expected_version: 1 }],
+      ["POST", "/altimate/workspace/requests/c-1/remove", { expected_version: 1 }],
+    ] as const) {
+      const response = await request(method, url, body, origin)
+      expect([403, 409]).toContain(response.status)
+      expect(await response.json()).toMatchObject({ ok: false })
+    }
+  })
+
+  test("an action is validated before anything is asked", async () => {
+    expect((await request("POST", "/altimate/workspace/requests/c-1/approve", { expected_version: 1 })).status).toBe(404)
+    for (const body of [{}, { expected_version: 0 }, { expected_version: "1" }, { expected_version: 1, reason: 5 }]) {
+      const response = await request("POST", "/altimate/workspace/requests/c-1/withdraw", body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ ok: false })
+    }
+  })
+
+  test("without a link, the list still answers with the person's rules and says why skills and knowledge are missing", async () => {
+    await using dir = await tmpdir({ git: true })
+    const response = await Server.Default().request("/altimate/workspace/requests", { headers: { "x-opencode-directory": dir.path } })
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toMatchObject({ ok: true, requests: [] })
+    expect(["signed_out", "not_linked"]).toContain(body.review_status)
+  })
+
+  test("the list joins the person's rule requests to their skill and knowledge requests, and says when it is partial", async () => {
+    const { ReviewRequests } = await import("../../src/altimate/workspace/review-requests")
+    const { spyOn } = await import("bun:test")
+    const rule = { kind: "rule" as const, public_id: "r-1", name: "Use cents", status: "pending", actions: [] }
+    const listed = spyOn(ReviewRequests, "listReview").mockResolvedValue({
+      status: "ok",
+      workspace: { id: 42, name: "Growth" },
+      items: [],
+      complete: false,
+    })
+    const rules = spyOn(ReviewRequests, "ruleRequests").mockResolvedValue([rule])
+    try {
+      const response = await request("GET", "/altimate/workspace/requests")
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ ok: true, requests: [rule], review_status: "ok", review_complete: false })
+      // The rule rows are asked for the workspace the skill listing resolved.
+      expect(rules.mock.calls[0][2]).toBe(42)
+    } finally {
+      listed.mockRestore()
+      rules.mockRestore()
+    }
+  })
+})
+
+describe("rules sync route", () => {
+  test("Sync now also checks skill and knowledge decisions", async () => {
+    const { RulesService } = await import("../../src/altimate/rules/service")
+    const { spyOn } = await import("bun:test")
+    const sync = spyOn(RulesService, "syncNow").mockResolvedValue({ context: { status: "skipped", reason: "not linked" } } as never)
+    const poll = spyOn(RulesService, "pollReviewDecisions").mockResolvedValue({ status: "done", recorded: [] } as never)
+    try {
+      const response = await request("POST", "/altimate/rules/sync")
+      expect(response.status).toBe(200)
+      expect(poll).toHaveBeenCalledTimes(1)
+    } finally {
+      sync.mockRestore()
+      poll.mockRestore()
+    }
+  })
+
+  test("Sync now answers when the decision check is slow: the check is bounded", async () => {
+    const { RulesService } = await import("../../src/altimate/rules/service")
+    const { spyOn } = await import("bun:test")
+    const sync = spyOn(RulesService, "syncNow").mockResolvedValue({ context: { status: "skipped", reason: "not linked" } } as never)
+    const poll = spyOn(RulesService, "pollReviewDecisions").mockReturnValue(new Promise(() => {}) as never)
+    try {
+      const began = Date.now()
+      const response = await request("POST", "/altimate/rules/sync")
+      expect(response.status).toBe(200)
+      expect(Date.now() - began).toBeLessThan(RulesService.SYNC_REVIEW_POLL_MS + 2_000)
+    } finally {
+      sync.mockRestore()
+      poll.mockRestore()
+    }
+  }, 15_000)
+})

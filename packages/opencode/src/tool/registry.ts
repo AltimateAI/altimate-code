@@ -11,7 +11,14 @@ import { GrepTool } from "./grep"
 import { BatchTool } from "./batch"
 // altimate_change end
 import { ReadTool } from "./read"
-import { TaskTool } from "./task"
+// altimate_change start — upstream_fix: the task tool owns the background schema, description and env fallback.
+import {
+  TaskTool,
+  backgroundSubagentsEnabled as backgroundSubagentsFromEnv,
+  backgroundTaskDescription,
+  taskBackgroundJsonSchema,
+} from "./task"
+// altimate_change end
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -343,9 +350,7 @@ export namespace ToolRegistry {
 
   function backgroundSubagentsEnabled(flags?: ToolRuntimeFlags) {
     if (flags) return flags.experimentalBackgroundSubagents
-    const value = process.env["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"]
-    if (value !== undefined) return ["1", "true", "yes"].includes(value.toLowerCase())
-    return Flag.OPENCODE_EXPERIMENTAL
+    return backgroundSubagentsFromEnv()
   }
 
   // altimate_change start — upstream_fix: allow Parallel-enabled websearch for non-opencode providers.
@@ -360,19 +365,40 @@ export namespace ToolRegistry {
   }
   // altimate_change end
 
-  function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(id: string, tool: T, flags?: ToolRuntimeFlags): T {
-    if (id !== "task" || backgroundSubagentsEnabled(flags)) return tool
-    const schema = tool.jsonSchema
+  /** Shapes a tool definition by the runtime flags; tool_lookup describes `task` through it too. */
+  export function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(
+    id: string,
+    tool: T,
+    flags?: ToolRuntimeFlags,
+  ): T {
+    if (id !== "task") return tool
+    // Execution reads the same decision that shapes the schema, so the two gates cannot disagree.
+    const enabled = backgroundSubagentsEnabled(flags)
+    const execute = tool.execute
+    const gated: T = {
+      ...tool,
+      execute: (args, ctx) => execute(args, { ...ctx, extra: { ...ctx.extra, backgroundSubagents: enabled } }),
+      ...(enabled ? { description: backgroundTaskDescription(tool.description) } : {}),
+    }
+    const schema = gated.jsonSchema
     if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") {
-      return tool
+      return gated
     }
 
     const properties = { ...(schema.properties as Record<string, unknown>) }
-    if (!("background" in properties)) return tool
+    // The task tool's default contract omits `background`; the experiment flag publishes it.
+    if (enabled) {
+      if ("background" in properties || !taskBackgroundJsonSchema) return gated
+      return {
+        ...gated,
+        jsonSchema: { ...schema, properties: { ...properties, background: taskBackgroundJsonSchema } },
+      }
+    }
+    if (!("background" in properties)) return gated
     delete properties.background
 
     return {
-      ...tool,
+      ...gated,
       jsonSchema: {
         ...schema,
         properties,
@@ -608,8 +634,9 @@ export namespace ToolRegistry {
         .map(async (t) => {
           using _ = log.time(t.id)
           // altimate_change start — v1.17.9: Tool.Info.init() returns an Effect of DefWithoutID
-          // altimate_change start — upstream_fix: pass caller agent through deferred tool init.
-          const tool = await Effect.runPromise(t.init({ agent }))
+          // altimate_change start — upstream_fix: pass caller agent through deferred tool init; runtime
+          // flags shape the definition before plugins see it.
+          const tool = applyRuntimeToolSchemaFlags(t.id, await Effect.runPromise(t.init({ agent })), runtimeFlags)
           // altimate_change end
           // altimate_change end
           const output = {
@@ -623,7 +650,7 @@ export namespace ToolRegistry {
             registrySource: t.registrySource,
             // altimate_change end
             // altimate_change start — upstream_fix: hide disabled runtime-gated tool schema fields.
-            ...applyRuntimeToolSchemaFlags(t.id, tool, runtimeFlags),
+            ...tool,
             // altimate_change end
             description: output.description,
             parameters: output.parameters,

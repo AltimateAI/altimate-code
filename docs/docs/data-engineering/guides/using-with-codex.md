@@ -31,7 +31,7 @@ altimate
 
 ### 2. Run /connect
 
-In the TUI, type `/connect` and select **Codex** as your provider.
+In the TUI, type `/connect` and select **ChatGPT subscription**. For the headless sign-in, select **OpenAI (GPT)** and then **ChatGPT Pro/Plus (headless)**.
 
 ### 3. Authenticate
 

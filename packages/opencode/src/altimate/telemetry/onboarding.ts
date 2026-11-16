@@ -211,6 +211,10 @@ type SessionRecord = {
 
 const sessions = new Map<string, SessionRecord>()
 
+/** Slash commands in sessions with no record. Apart from `sessions`, so an ordinary command still
+ *  can't evict an onboarding session, and capped the same way. */
+const untrackedCommands = new Set<string>()
+
 function record(sessionID: string): SessionRecord {
   const existing = sessions.get(sessionID)
   if (existing) return existing
@@ -264,12 +268,25 @@ function claim(
  * the capped map and evict genuine onboarding sessions — after which `isOnboardingSession()`
  * returns false and the rest of that user's activation events are silently dropped.
  *
- * An untracked session has no onboarding state to protect, so skipping it loses nothing:
- * `first_prompt_sent` is gated on `isOnboardingSession` anyway.
+ * An untracked session has no onboarding state to protect, so it goes in `untrackedCommands`.
  */
 export function noteCommandSubmission(sessionID: string) {
   const entry = sessions.get(sessionID)
-  if (entry) entry.commandSubmission = true
+  if (entry) {
+    entry.commandSubmission = true
+    return
+  }
+  untrackedCommands.add(sessionID)
+  if (untrackedCommands.size > MAX_TRACKED_SESSIONS) {
+    const oldest = untrackedCommands.values().next()
+    if (!oldest.done) untrackedCommands.delete(oldest.value)
+  }
+}
+
+/** True (once) if an untracked session's pending user message was command-submitted. A workspace's
+ *  first prompt is counted in any session, so it needs what the record above can't hold. */
+export function consumeUntrackedCommand(sessionID: string): boolean {
+  return untrackedCommands.delete(sessionID)
 }
 
 /** True (once) if this session's pending user message was command-submitted. */
@@ -334,5 +351,6 @@ export function resetForTest() {
   abandonedEmitted = false
   funnelStarted = false
   sessions.clear()
+  untrackedCommands.clear()
 }
 // altimate_change end

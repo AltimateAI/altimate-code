@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test"
+import { beforeAll, describe, test, expect } from "bun:test"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "../../src/util/token"
 import type { MessageV2 } from "../../src/session/message-v2"
@@ -92,21 +92,21 @@ function summaryMsg(text: string): MessageV2.WithParts {
 // ─── 5a: buildLedger ────────────────────────────────────────────────────────
 
 describe("SessionCompaction.buildLedger", () => {
-  test("records write/edit tool events with event-time mtimes (no fs access)", () => {
+  test("records write/edit tool events with event-time mtimes (no fs access)", async () => {
     const messages = [
       assistantMsg([
         toolPart({ tool: "write", input: { filePath: "/repo/a.ts", content: "x" }, end: 5000 }),
         toolPart({ tool: "edit", input: { filePath: "/repo/b.sql", oldString: "x", newString: "y" }, end: 6000 }),
       ]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes).toEqual([
       { path: "/repo/b.sql", mtime: 6000, tool: "edit" },
       { path: "/repo/a.ts", mtime: 5000, tool: "write" },
     ])
   })
 
-  test("last write wins per path and newest-first ordering is deterministic", () => {
+  test("last write wins per path and newest-first ordering is deterministic", async () => {
     const messages = [
       assistantMsg([
         toolPart({ tool: "write", input: { filePath: "/repo/a.ts" }, end: 5000 }),
@@ -114,21 +114,21 @@ describe("SessionCompaction.buildLedger", () => {
         toolPart({ tool: "write", input: { filePath: "/repo/z.ts" }, end: 9000 }),
       ]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes).toEqual([
       { path: "/repo/a.ts", mtime: 9000, tool: "edit" },
       { path: "/repo/z.ts", mtime: 9000, tool: "write" },
     ])
   })
 
-  test("captures bash exit codes from metadata, command-agnostic", () => {
+  test("captures bash exit codes from metadata, command-agnostic", async () => {
     const messages = [
       assistantMsg([
         toolPart({ tool: "bash", input: { command: "bun test" }, metadata: { exit: 0 } }),
         toolPart({ tool: "bash", input: { command: "some-arbitrary-cmd --flag" }, metadata: { exit: 1 } }),
       ]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.sawBash).toBe(true)
     expect(ledger.calls).toEqual([
       { tool: "bash", detail: "bun test", exit: 0, errored: false },
@@ -136,28 +136,28 @@ describe("SessionCompaction.buildLedger", () => {
     ])
   })
 
-  test("bash does NOT produce verified write entries (shell writes are unverifiable)", () => {
+  test("bash does NOT produce verified write entries (shell writes are unverifiable)", async () => {
     const messages = [
       assistantMsg([toolPart({ tool: "bash", input: { command: "sed -i s/a/b/ /repo/a.ts" }, metadata: { exit: 0 } })]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes).toEqual([])
     expect(ledger.sawBash).toBe(true)
   })
 
-  test("errored tool calls are recorded as errored and never count as writes", () => {
+  test("errored tool calls are recorded as errored and never count as writes", async () => {
     const messages = [assistantMsg([toolPart({ tool: "edit", status: "error", input: { filePath: "/repo/a.ts" } })])]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes).toEqual([])
     expect(ledger.calls[0]).toEqual({ tool: "edit", detail: "/repo/a.ts", exit: undefined, errored: true })
   })
 
-  test("errored bash still sets sawBash (it may have written before failing)", () => {
+  test("errored bash still sets sawBash (it may have written before failing)", async () => {
     const messages = [assistantMsg([toolPart({ tool: "bash", status: "error", input: { command: "cp a b" } })])]
-    expect(SessionCompaction.buildLedger(messages).sawBash).toBe(true)
+    expect((await SessionCompaction.buildLedger(messages)).sawBash).toBe(true)
   })
 
-  test("apply_patch writes come from result metadata files", () => {
+  test("apply_patch writes come from result metadata files", async () => {
     const messages = [
       assistantMsg([
         toolPart({
@@ -168,12 +168,12 @@ describe("SessionCompaction.buildLedger", () => {
         }),
       ]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes.map((w) => w.path).sort()).toEqual(["/repo/c.py", "/repo/d.py"])
     expect(ledger.writes.every((w) => w.mtime === 7000 && w.tool === "apply_patch")).toBe(true)
   })
 
-  test("apply_patch moves record the DESTINATION, and deletes record nothing", () => {
+  test("apply_patch moves record the DESTINATION, and deletes record nothing", async () => {
     // `filePath` is the move SOURCE; the content lands at `movePath`. Naming the
     // source sends the continuing agent back to the path that was removed.
     const messages = [
@@ -192,11 +192,11 @@ describe("SessionCompaction.buildLedger", () => {
         }),
       ]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes.map((w) => w.path).sort()).toEqual(["/repo/kept.py", "/repo/new.py"])
   })
 
-  test("later deletes and moves remove stale source paths from earlier writes", () => {
+  test("later deletes and moves remove stale source paths from earlier writes", async () => {
     const messages = [
       assistantMsg([
         toolPart({ tool: "write", input: { filePath: "/repo/old.py" }, end: 5000 }),
@@ -215,10 +215,10 @@ describe("SessionCompaction.buildLedger", () => {
         }),
       ]),
     ]
-    expect(SessionCompaction.buildLedger(messages).writes.map((w) => w.path)).toEqual(["/repo/new.py"])
+    expect((await SessionCompaction.buildLedger(messages)).writes.map((w) => w.path)).toEqual(["/repo/new.py"])
   })
 
-  test("absolute apply_patch metadata invalidates earlier relative write paths", () => {
+  test("absolute apply_patch metadata invalidates earlier relative write paths", async () => {
     const messages = [
       assistantMsg([
         toolPart({ tool: "write", input: { filePath: "src/old.ts" }, end: 5000 }),
@@ -237,23 +237,25 @@ describe("SessionCompaction.buildLedger", () => {
         }),
       ]),
     ]
-    expect(SessionCompaction.buildLedger(messages, "/repo").writes.map((w) => w.path)).toEqual(["/repo/src/new.ts"])
+    expect((await SessionCompaction.buildLedger(messages, "/repo")).writes.map((w) => w.path)).toEqual([
+      "/repo/src/new.ts",
+    ])
   })
 
-  test("pending and running parts are ignored (facts only)", () => {
+  test("pending and running parts are ignored (facts only)", async () => {
     const messages = [
       assistantMsg([
         toolPart({ tool: "write", status: "pending", input: { filePath: "/repo/a.ts" } }),
         toolPart({ tool: "bash", status: "running", input: { command: "sleep 5" } }),
       ]),
     ]
-    const ledger = SessionCompaction.buildLedger(messages)
+    const ledger = await SessionCompaction.buildLedger(messages)
     expect(ledger.writes).toEqual([])
     expect(ledger.calls).toEqual([])
     expect(ledger.sawBash).toBe(false)
   })
 
-  test("deterministic: identical input yields identical ledger and rendering", () => {
+  test("deterministic: identical input yields identical ledger and rendering", async () => {
     const make = () => [
       assistantMsg([
         toolPart({ tool: "write", input: { filePath: "/repo/a.ts" }, end: 5000 }),
@@ -261,8 +263,8 @@ describe("SessionCompaction.buildLedger", () => {
         toolPart({ tool: "read", input: { filePath: "/repo/a.ts" } }),
       ]),
     ]
-    const first = SessionCompaction.buildLedger(make())
-    const second = SessionCompaction.buildLedger(make())
+    const first = await SessionCompaction.buildLedger(make())
+    const second = await SessionCompaction.buildLedger(make())
     expect(second).toEqual(first)
     expect(SessionCompaction.renderLedger(second)).toBe(SessionCompaction.renderLedger(first))
   })
@@ -279,20 +281,20 @@ describe("SessionCompaction.renderLedger", () => {
       ]),
     ])
 
-  test("empty ledger renders empty string", () => {
-    expect(SessionCompaction.renderLedger({ writes: [], calls: [], sawBash: false })).toBe("")
+  test("empty ledger renders empty string", async () => {
+    expect(SessionCompaction.renderLedger({ writes: [], calls: [], sawBash: false, sawSnapshot: false })).toBe("")
   })
 
-  test("a budget too small for even the header renders nothing, not a bare header", () => {
+  test("a budget too small for even the header renders nothing, not a bare header", async () => {
     // `ledger_max_tokens: 0` is accepted by the schema; truncation used to stop
     // at the header and return it, injecting text the tail calculation had
     // budgeted at zero.
-    expect(SessionCompaction.renderLedger(sample(), { maxTokens: 0 })).toBe("")
-    expect(SessionCompaction.renderLedger(sample(), { maxTokens: 3 })).toBe("")
+    expect(SessionCompaction.renderLedger(await sample(), { maxTokens: 0 })).toBe("")
+    expect(SessionCompaction.renderLedger(await sample(), { maxTokens: 3 })).toBe("")
   })
 
-  test("contains verified writes with ISO event time, advisory wording, and unverified-shell note", () => {
-    const text = SessionCompaction.renderLedger(sample())
+  test("contains verified writes with ISO event time, advisory wording, and unverified-shell note", async () => {
+    const text = SessionCompaction.renderLedger(await sample())
     expect(text).toContain("/repo/models/orders.sql")
     expect(text).toContain(new Date(1_700_000_000_000).toISOString())
     expect(text).toContain("last written by you at")
@@ -303,11 +305,11 @@ describe("SessionCompaction.renderLedger", () => {
     expect(text).not.toMatch(/never re-read|do not read/i)
   })
 
-  test("lists at most recentCalls tool calls, newest first", () => {
+  test("lists at most recentCalls tool calls, newest first", async () => {
     const parts = []
     for (let i = 1; i <= 15; i++)
       parts.push(toolPart({ tool: "bash", input: { command: `cmd-${i}` }, metadata: { exit: 0 } }))
-    const ledger = SessionCompaction.buildLedger([assistantMsg(parts)])
+    const ledger = await SessionCompaction.buildLedger([assistantMsg(parts)])
     const text = SessionCompaction.renderLedger(ledger, { recentCalls: 10 })
     expect(text).toContain("cmd-15")
     expect(text).toContain("cmd-6")
@@ -320,19 +322,19 @@ describe("SessionCompaction.renderLedger", () => {
 
   // altimate_change start — PR #1171 review: `slice(-0)` is `slice(0)`, so a
   // configured recentCalls of 0 rendered EVERY call instead of none.
-  test("a recentCalls limit of 0 lists no calls at all", () => {
+  test("a recentCalls limit of 0 lists no calls at all", async () => {
     const parts = []
     for (let i = 1; i <= 15; i++)
       parts.push(toolPart({ tool: "bash", input: { command: `cmd-${i}` }, metadata: { exit: 0 } }))
-    const ledger = SessionCompaction.buildLedger([assistantMsg(parts)])
+    const ledger = await SessionCompaction.buildLedger([assistantMsg(parts)])
     const text = SessionCompaction.renderLedger(ledger, { recentCalls: 0 })
     expect(text).not.toContain("cmd-15")
     expect(text).not.toContain("cmd-1")
     expect(text).not.toContain("Recent tool calls")
   })
 
-  test("a recentCalls limit of 0 still renders the writes section", () => {
-    const ledger = SessionCompaction.buildLedger([
+  test("a recentCalls limit of 0 still renders the writes section", async () => {
+    const ledger = await SessionCompaction.buildLedger([
       assistantMsg([
         toolPart({ tool: "write", input: { filePath: "/repo/kept.sql" }, end: 1_000 }),
         toolPart({ tool: "bash", input: { command: "noisy" }, metadata: { exit: 0 } }),
@@ -344,29 +346,29 @@ describe("SessionCompaction.renderLedger", () => {
   })
   // altimate_change end
 
-  test("tail-truncates to the token cap, preserving the header and writes section", () => {
+  test("tail-truncates to the token cap, preserving the header and writes section", async () => {
     const parts = [toolPart({ tool: "write", input: { filePath: "/repo/first.ts" }, end: 1000 })]
     for (let i = 0; i < 50; i++)
       parts.push(toolPart({ tool: "bash", input: { command: `x`.repeat(90) + `-${i}` }, metadata: { exit: 0 } }))
-    const ledger = SessionCompaction.buildLedger([assistantMsg(parts)])
+    const ledger = await SessionCompaction.buildLedger([assistantMsg(parts)])
     const capped = SessionCompaction.renderLedger(ledger, { maxTokens: 120, recentCalls: 50 })
     expect(Token.estimate(capped)).toBeLessThanOrEqual(120)
     expect(capped.split("\n")[0]).toContain("Session state ledger")
     expect(capped).toContain("/repo/first.ts")
   })
 
-  test("default cap is 500 tokens (config default, plan provenance)", () => {
+  test("default cap is 500 tokens (config default, plan provenance)", async () => {
     const parts = []
     for (let i = 0; i < 200; i++)
       parts.push(toolPart({ tool: "bash", input: { command: "y".repeat(95) + i }, metadata: { exit: 0 } }))
-    const ledger = SessionCompaction.buildLedger([assistantMsg(parts)])
+    const ledger = await SessionCompaction.buildLedger([assistantMsg(parts)])
     const text = SessionCompaction.renderLedger(ledger, { recentCalls: 200 })
     expect(SessionCompaction.LEDGER_MAX_TOKENS).toBe(500)
     expect(Token.estimate(text)).toBeLessThanOrEqual(500)
   })
 
-  test("null exit code renders as unknown, error state as errored", () => {
-    const ledger = SessionCompaction.buildLedger([
+  test("null exit code renders as unknown, error state as errored", async () => {
+    const ledger = await SessionCompaction.buildLedger([
       assistantMsg([
         toolPart({ tool: "bash", input: { command: "killed-cmd" }, metadata: { exit: null } }),
         toolPart({ tool: "glob", status: "error", input: { pattern: "**/*.ts" } }),
@@ -377,7 +379,7 @@ describe("SessionCompaction.renderLedger", () => {
     expect(text).toContain("glob (errored) — **/*.ts")
   })
 
-  test("redacts prefixed credentials, short headers, and signed URL material", () => {
+  test("redacts prefixed credentials, short headers, and signed URL material", async () => {
     const sensitive = [
       "AWS_SECRET_ACCESS_KEY=dummy-assignment",
       "OPENAI_API_KEY=dummy-openai",
@@ -419,7 +421,7 @@ describe("SessionCompaction.renderLedger", () => {
     expect(SessionCompaction.redactLedgerDetail("curl -u alice https://example.com")).not.toContain("alice")
   })
 
-  test("recognizes curl through .exe and path spellings", () => {
+  test("recognizes curl through .exe and path spellings", async () => {
     // A bare `-u user password` is only redacted because the shell segment is
     // recognized as curl. `curl.exe` (Windows) and path-qualified spellings
     // previously missed that check and leaked the credential into the ledger.
@@ -439,7 +441,7 @@ describe("SessionCompaction.renderLedger", () => {
     expect(SessionCompaction.redactLedgerDetail("curlywurly -u alice script.py")).toBe("curlywurly -u alice script.py")
   })
 
-  test("does not leak credentials via a path-qualified curl and the space-separated -u idiom (regression, #1117)", () => {
+  test("does not leak credentials via a path-qualified curl and the space-separated -u idiom (regression, #1117)", async () => {
     // #1117 added a filesystem-path masking rule to Telemetry.maskString.
     // redactLedgerDetail used to call maskString BEFORE its own curl-context
     // lookback, so `/usr/bin/curl` collapsed to `<path>` first. The `curl`
@@ -458,7 +460,7 @@ describe("SessionCompaction.renderLedger", () => {
     }
   })
 
-  test("keeps non-credential colon-shaped values outside a curl context", () => {
+  test("keeps non-credential colon-shaped values outside a curl context", async () => {
     // `1000:1000` has no alphabetic character before the colon, so it is a
     // UID:GID pair rather than user:password and must survive in the ledger.
     for (const command of [
@@ -490,7 +492,7 @@ describe("SessionCompaction.renderLedger", () => {
 // ─── 5b: extractAccomplished / corroborateCarry / renderCarryAnchors ────────
 
 describe("SessionCompaction.extractAccomplished", () => {
-  test("parses bullets under ## Accomplished only, stopping at the next heading", () => {
+  test("parses bullets under ## Accomplished only, stopping at the next heading", async () => {
     const summary = [
       "## Goal",
       "- not this",
@@ -507,7 +509,7 @@ describe("SessionCompaction.extractAccomplished", () => {
     ])
   })
 
-  test("preserves prior carry tags", () => {
+  test("preserves prior carry tags", async () => {
     const summary = ["## Accomplished", "- [verified] created a.sql", "- [claimed, unverified] fixed the test"].join(
       "\n",
     )
@@ -517,25 +519,28 @@ describe("SessionCompaction.extractAccomplished", () => {
     ])
   })
 
-  test("returns empty for summaries without the section", () => {
+  test("returns empty for summaries without the section", async () => {
     expect(SessionCompaction.extractAccomplished("## Goal\n- stuff")).toEqual([])
   })
 })
 
 describe("SessionCompaction.corroborateCarry", () => {
-  const ledger = SessionCompaction.buildLedger([
-    assistantMsg([
-      toolPart({ tool: "write", input: { filePath: "/repo/models/orders.sql" }, end: 5000 }),
-      toolPart({
-        tool: "bash",
-        input: { command: "python scripts/export.py --out report.csv" },
-        metadata: { exit: 0 },
-      }),
-      toolPart({ tool: "bash", input: { command: "validate broken_thing.json" }, metadata: { exit: 1 } }),
-    ]),
-  ])
+  let ledger: SessionCompaction.Ledger
+  beforeAll(async () => {
+    ledger = await SessionCompaction.buildLedger([
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/repo/models/orders.sql" }, end: 5000 }),
+        toolPart({
+          tool: "bash",
+          input: { command: "python scripts/export.py --out report.csv" },
+          metadata: { exit: 0 },
+        }),
+        toolPart({ tool: "bash", input: { command: "validate broken_thing.json" }, metadata: { exit: 1 } }),
+      ]),
+    ])
+  })
 
-  test("item naming a verified-written file carries as verified", () => {
+  test("item naming a verified-written file carries as verified", async () => {
     const out = SessionCompaction.corroborateCarry([{ text: "created models/orders.sql with dedup logic" }], ledger)
     expect(out).toEqual([{ text: "created models/orders.sql with dedup logic", status: "verified" }])
   })
@@ -544,12 +549,12 @@ describe("SessionCompaction.corroborateCarry", () => {
   // `./models/orders.sql` looked directory-qualified (so the basename fallback
   // was correctly suppressed) but matched no ledger path either, leaving a
   // genuinely written artifact unverified.
-  test("a leading ./ on a qualified path still corroborates", () => {
+  test("a leading ./ on a qualified path still corroborates", async () => {
     const out = SessionCompaction.corroborateCarry([{ text: "created ./models/orders.sql" }], ledger)
     expect(out[0]!.status).toBe("verified")
   })
 
-  test("the ./ normalization does not resurrect the basename fallback", () => {
+  test("the ./ normalization does not resurrect the basename fallback", async () => {
     // `./other/orders.sql` names a DIFFERENT directory; it must stay unverified
     // even though a file named orders.sql was written elsewhere.
     const out = SessionCompaction.corroborateCarry([{ text: "created ./other/orders.sql" }], ledger)
@@ -557,12 +562,12 @@ describe("SessionCompaction.corroborateCarry", () => {
   })
   // altimate_change end
 
-  test("item with no corroborating event carries as claimed, unverified", () => {
+  test("item with no corroborating event carries as claimed, unverified", async () => {
     const out = SessionCompaction.corroborateCarry([{ text: "generated final_report.pdf and emailed it" }], ledger)
     expect(out[0]!.status).toBe("claimed, unverified")
   })
 
-  test("a directory-qualified artifact is not corroborated by a same-basename write elsewhere", () => {
+  test("a directory-qualified artifact is not corroborated by a same-basename write elsewhere", async () => {
     // Basename fallback exists for bare filenames. Applying it to a qualified
     // token lets an unrelated `test/orders.sql` verify `src/orders.sql`, and
     // because carry status is append-only that wrong fact never gets corrected.
@@ -570,12 +575,12 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("claimed, unverified")
   })
 
-  test("a bare filename still matches the write's basename", () => {
+  test("a bare filename still matches the write's basename", async () => {
     const out = SessionCompaction.corroborateCarry([{ text: "created orders.sql" }], ledger)
     expect(out[0]!.status).toBe("verified")
   })
 
-  test("every artifact in a multi-file claim must be corroborated", () => {
+  test("every artifact in a multi-file claim must be corroborated", async () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "created models/orders.sql and reports/missing.csv" }],
       ledger,
@@ -583,7 +588,7 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("claimed, unverified")
   })
 
-  test("URLs and version identifiers do not demote an otherwise corroborated artifact", () => {
+  test("URLs and version identifiers do not demote an otherwise corroborated artifact", async () => {
     const out = SessionCompaction.corroborateCarry(
       [
         {
@@ -595,7 +600,7 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("verified")
   })
 
-  test("filtering URL and version noise does not corroborate a missing real artifact", () => {
+  test("filtering URL and version noise does not corroborate a missing real artifact", async () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "created reports/missing.csv for package@2.1.0; see https://example.com/changelog" }],
       ledger,
@@ -603,7 +608,7 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("claimed, unverified")
   })
 
-  test("commands alone never corroborate an artifact, even with exit zero", () => {
+  test("commands alone never corroborate an artifact, even with exit zero", async () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "exported report.csv" }, { text: "validated broken_thing.json" }],
       ledger,
@@ -612,18 +617,19 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[1]!.status).toBe("claimed, unverified")
   })
 
-  test("a destructive zero-exit command cannot verify a removed artifact", () => {
+  test("a destructive zero-exit command cannot verify a removed artifact", async () => {
     const destructive = {
       writes: [],
       calls: [{ tool: "bash", detail: "rm report.csv", exit: 0, errored: false }],
       sawBash: true,
+      sawSnapshot: false,
     }
     expect(SessionCompaction.corroborateCarry([{ text: "exported report.csv" }], destructive)[0]!.status).toBe(
       "claimed, unverified",
     )
   })
 
-  test("append-only: a prior [verified] tag is preserved even without current evidence", () => {
+  test("append-only: a prior [verified] tag is preserved even without current evidence", async () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "shipped ancient_artifact.xyz", priorStatus: "verified" }],
       ledger,
@@ -631,7 +637,7 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("verified")
   })
 
-  test("a prior unverified claim can be promoted when evidence appears", () => {
+  test("a prior unverified claim can be promoted when evidence appears", async () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "created models/orders.sql", priorStatus: "claimed, unverified" }],
       ledger,
@@ -639,18 +645,18 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("verified")
   })
 
-  test("prose without artifact tokens never matches spuriously", () => {
+  test("prose without artifact tokens never matches spuriously", async () => {
     const out = SessionCompaction.corroborateCarry([{ text: "discussed the approach with the user" }], ledger)
     expect(out[0]!.status).toBe("claimed, unverified")
   })
 })
 
 describe("SessionCompaction.renderCarryAnchors", () => {
-  test("empty items render empty string", () => {
+  test("empty items render empty string", async () => {
     expect(SessionCompaction.renderCarryAnchors([])).toBe("")
   })
 
-  test("renders tagged items with carry-forward instructions", () => {
+  test("renders tagged items with carry-forward instructions", async () => {
     const text = SessionCompaction.renderCarryAnchors([
       { text: "built a.sql", status: "verified" },
       { text: "wrote docs", status: "claimed, unverified" },
@@ -661,7 +667,7 @@ describe("SessionCompaction.renderCarryAnchors", () => {
     expect(text).toContain("keep the tag")
   })
 
-  test("over budget drops the OLDEST items first and stays under the cap", () => {
+  test("over budget drops the OLDEST items first and stays under the cap", async () => {
     const items = []
     for (let i = 0; i < 60; i++) items.push({ text: `item-${i} ` + "z".repeat(80), status: "verified" as const })
     const text = SessionCompaction.renderCarryAnchors(items, 300)
@@ -670,7 +676,7 @@ describe("SessionCompaction.renderCarryAnchors", () => {
     expect(text).toContain("item-59 ")
   })
 
-  test("a single oversized anchor is dropped rather than exceeding the cap", () => {
+  test("a single oversized anchor is dropped rather than exceeding the cap", async () => {
     const text = SessionCompaction.renderCarryAnchors(
       [{ text: "oversized " + "z".repeat(20_000), status: "verified" }],
       100,
@@ -679,7 +685,7 @@ describe("SessionCompaction.renderCarryAnchors", () => {
     expect(Token.estimate(text)).toBeLessThanOrEqual(100)
   })
 
-  test("deterministic rendering", () => {
+  test("deterministic rendering", async () => {
     const items = [
       { text: "one", status: "verified" as const },
       { text: "two", status: "claimed, unverified" as const },
@@ -691,7 +697,7 @@ describe("SessionCompaction.renderCarryAnchors", () => {
 // ─── latestSummaryText ──────────────────────────────────────────────────────
 
 describe("SessionCompaction.latestSummaryText", () => {
-  test("returns the most recent finished, non-errored summary", () => {
+  test("returns the most recent finished, non-errored summary", async () => {
     const messages = [
       summaryMsg("## Accomplished\n- old item"),
       assistantMsg([toolPart({ tool: "read", input: { filePath: "/x" } })]),
@@ -700,7 +706,7 @@ describe("SessionCompaction.latestSummaryText", () => {
     expect(SessionCompaction.latestSummaryText(messages)).toContain("new item")
   })
 
-  test("skips errored or unfinished summaries", () => {
+  test("skips errored or unfinished summaries", async () => {
     const errored = summaryMsg("## Accomplished\n- bad") as any
     errored.info.error = { name: "x" }
     const unfinished = summaryMsg("## Accomplished\n- incomplete") as any
@@ -709,7 +715,7 @@ describe("SessionCompaction.latestSummaryText", () => {
     expect(SessionCompaction.latestSummaryText(messages)).toContain("good")
   })
 
-  test("undefined when no summary exists", () => {
+  test("undefined when no summary exists", async () => {
     expect(SessionCompaction.latestSummaryText([assistantMsg([])])).toBeUndefined()
   })
 })
@@ -717,16 +723,406 @@ describe("SessionCompaction.latestSummaryText", () => {
 // ─── Leak guard: no vertical tokens in the generic mechanism (hard requirement) ─
 
 describe("leak guard", () => {
-  test("ledger output for a dbt-style command is treated identically to any other command", () => {
-    const mk = (cmd: string) =>
+  test("ledger output for a dbt-style command is treated identically to any other command", async () => {
+    const mk = async (cmd: string) =>
       SessionCompaction.renderLedger(
-        SessionCompaction.buildLedger([
+        await SessionCompaction.buildLedger([
           assistantMsg([toolPart({ tool: "bash", input: { command: cmd }, metadata: { exit: 0 } })]),
         ]),
       )
-    const a = mk("dbt build --select orders")
-    const b = mk("qqq build --select orders".replace("build", "frobnicate"))
+    const a = await mk("dbt build --select orders")
+    const b = await mk("qqq build --select orders".replace("build", "frobnicate"))
     // Same structure: swapping the command text is the ONLY difference (no classifier).
     expect(a.replace("dbt build --select orders", "CMD")).toBe(b.replace("qqq frobnicate --select orders", "CMD"))
+  })
+})
+
+// ─── Snapshot diffs: files changed by shell commands ─────────────────────────
+
+function patchPart(files: string[]): any {
+  partCounter++
+  return { id: `part-p-${partCounter}`, sessionID: "session-1", messageID: "m", type: "patch", hash: "h", files }
+}
+
+describe("SessionCompaction.buildLedger — snapshot diffs", () => {
+  const onDisk = (paths: string[]) => (file: string) => paths.includes(file)
+
+  test("a file written by a bash command is listed from the step's patch part", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "echo hi >> notes.md" }, metadata: { exit: 0 }, end: 7000 }),
+        patchPart(["/repo/notes.md"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/notes.md"]))
+    expect(ledger.writes).toEqual([
+      { path: "/repo/notes.md", mtime: 7000, tool: "snapshot", step: 1, shell: true, toolWritten: false },
+    ])
+    expect(ledger.sawSnapshot).toBe(true)
+    const text = SessionCompaction.renderLedger(ledger)
+    expect(text).toContain("/repo/notes.md")
+    expect(text).toContain("via shell")
+    expect(text).not.toContain("Shell commands also ran this session")
+  })
+
+  test("a file written by a write tool in the same step keeps the tool attribution", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/repo/a.sql" }, end: 5000 }),
+        toolPart({ tool: "bash", input: { command: "python gen.py" }, metadata: { exit: 0 }, end: 6000 }),
+        patchPart(["/repo/a.sql", "/repo/out/report.md"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(
+      messages,
+      undefined,
+      onDisk(["/repo/a.sql", "/repo/out/report.md"]),
+    )
+    expect(ledger.writes).toEqual([
+      { path: "/repo/out/report.md", mtime: 6000, tool: "snapshot", step: 1, shell: true, toolWritten: false },
+      { path: "/repo/a.sql", mtime: 5000, tool: "write" },
+    ])
+  })
+
+  test("a later shell change updates an earlier write-tool entry", async () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/a.sql" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "sed -i s/x/y/ a.sql" }, metadata: { exit: 0 }, end: 8000 }),
+        patchPart(["/repo/a.sql"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/a.sql"]))
+    expect(ledger.writes).toEqual([
+      { path: "/repo/a.sql", mtime: 8000, tool: "snapshot", step: 1, shell: true, toolWritten: true },
+    ])
+  })
+
+  test("a listed file that no longer exists is dropped, including an earlier write", async () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/tmp.txt" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "rm tmp.txt" }, metadata: { exit: 0 }, end: 6000 }),
+        patchPart(["/repo/tmp.txt"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, onDisk([]))
+    expect(ledger.writes).toEqual([])
+  })
+
+  test("without patch parts the shell note stays unverified", async () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "bash", input: { command: "echo hi >> notes.md" }, metadata: { exit: 0 } })]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/notes.md"]))
+    expect(ledger.writes).toEqual([])
+    expect(ledger.sawSnapshot).toBe(false)
+    expect(SessionCompaction.renderLedger(ledger)).toContain("possible but unverified")
+  })
+})
+
+// ─── Snapshot diffs: review follow-ups ───────────────────────────────────────
+
+describe("SessionCompaction.renderLedger — snapshot entries cannot crowd out the ledger", () => {
+  test("120 shell-changed files keep the write-tool entry, the note, the advisory and the recent calls", async () => {
+    const shellFiles = Array.from(
+      { length: 120 },
+      (_, i) => `/repo/models/staging/stg_model_${String(i).padStart(3, "0")}.sql`,
+    )
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/reports/summary.md" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "sqlfluff fix models" }, metadata: { exit: 0 }, end: 9000 }),
+        patchPart(shellFiles),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, "/repo", () => true)
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 500 })
+    expect(Token.estimate(text)).toBeLessThanOrEqual(500)
+    expect(text).toContain("reports/summary.md")
+    expect(text).toContain("files outside the project directory")
+    expect(text).toContain("Advisory:")
+    expect(text).toContain("Recent tool calls")
+    expect(text).toContain("sqlfluff fix models")
+    expect(text).toMatch(/and 11\d more files changed during your step/)
+    // Write-tool entries come before snapshot entries.
+    expect(text.indexOf("reports/summary.md")).toBeLessThan(text.indexOf("stg_model_"))
+  })
+
+  test("snapshot entries across many steps are capped overall with a count of the rest", async () => {
+    const messages = Array.from({ length: 30 }, (_, step) =>
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: `gen ${step}` }, metadata: { exit: 0 }, end: 1000 + step }),
+        patchPart([`/repo/out/a_${step}.sql`, `/repo/out/b_${step}.sql`]),
+      ]),
+    )
+    const ledger = await SessionCompaction.buildLedger(messages, "/repo", () => true)
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 2000 })
+    const listed = text.split("\n").filter((line) => line.startsWith("- out/"))
+    expect(listed.length).toBeLessThan(60)
+    expect(text).toMatch(/and \d+ more files changed during \d+ earlier steps/)
+  })
+
+  test("paths inside the project root render relative to it", async () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/src/a.ts" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "x" }, end: 6000 }),
+        patchPart(["/repo/src/b.ts", "/elsewhere/c.ts"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(await SessionCompaction.buildLedger(messages, "/repo", () => true))
+    expect(text).toContain("- src/a.ts — last written by you")
+    expect(text).toContain("- src/b.ts — changed during your step")
+    expect(text).toContain("- /elsewhere/c.ts — changed during your step")
+    expect(text).not.toMatch(/^- \/repo\/src\//m)
+  })
+})
+
+describe("SessionCompaction ledger — snapshot entry wording and lifecycle", () => {
+  test("a patch-only step without bash reads as changed during the step, not written by you via shell", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "read", input: { filePath: "/r/x.md" }, end: 4000 }),
+        patchPart(["/r/secrets/acquisition.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(await SessionCompaction.buildLedger(messages, undefined, () => true))
+    const line = text.split("\n").find((l) => l.includes("acquisition.md"))!
+    expect(line).toContain("changed during your step at")
+    expect(line).toContain("(snapshot)")
+    expect(line).not.toContain("via shell")
+    expect(line).not.toContain("last written by you")
+  })
+
+  test("a step that ran bash says via shell", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "python scan.py" }, end: 4000 }),
+        patchPart(["/r/out.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(await SessionCompaction.buildLedger(messages, undefined, () => true))
+    expect(text.split("\n").find((l) => l.includes("/r/out.md"))).toContain("(snapshot, via shell)")
+  })
+
+  test("the snapshot note names files outside the project directory and new files over 2 MB", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "python scan.py > /tmp/scan.md" }, end: 4000 }),
+        patchPart(["/r/a.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(await SessionCompaction.buildLedger(messages, undefined, () => true))
+    expect(text).toContain("files outside the project directory")
+    expect(text).toContain("new files over 2 MB")
+    expect(text).toContain("steps without a snapshot diff")
+  })
+
+  test("a shell rename drops the old path the patch no longer lists", async () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/r/old.ts" }, end: 4000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "mv old.ts new.ts" }, end: 5000 }),
+        patchPart(["/r/new.ts"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, (f) => f === "/r/new.ts")
+    expect(ledger.writes.map((w) => w.path)).toEqual(["/r/new.ts"])
+  })
+
+  test("a file written and deleted in the same step is not listed", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/r/tmp.txt" }, end: 4000 }),
+        toolPart({ tool: "bash", input: { command: "rm /r/tmp.txt" }, end: 5000 }),
+        patchPart(["/r/tmp.txt"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, () => false)
+    expect(ledger.writes).toEqual([])
+  })
+
+  test("a step with no completed tool uses the message completion time", async () => {
+    const messages = [assistantMsg([patchPart(["/r/a.md"])], { time: { created: 1000, completed: 3000 } })]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, () => true)
+    expect(ledger.writes[0]?.mtime).toBe(3000)
+  })
+})
+
+describe("SessionCompaction.corroborateCarry — snapshot entries", () => {
+  test("a patch-only entry does not promote a carried claim to verified", async () => {
+    const ledger = await SessionCompaction.buildLedger(
+      [
+        assistantMsg([
+          toolPart({ tool: "bash", input: { command: "x" }, end: 4000 }),
+          patchPart(["/r/secrets/acquisition.md"]),
+        ]),
+      ],
+      undefined,
+      () => true,
+    )
+    const [item] = SessionCompaction.corroborateCarry([{ text: "Wrote acquisition.md" }], ledger)
+    expect(item?.status).toBe("claimed, unverified")
+  })
+
+  test("a write-tool file later changed by shell still corroborates", async () => {
+    const ledger = await SessionCompaction.buildLedger(
+      [
+        assistantMsg([toolPart({ tool: "write", input: { filePath: "/r/report.md" }, end: 4000 })]),
+        assistantMsg([
+          toolPart({ tool: "bash", input: { command: "sed -i s/a/b/ report.md" }, end: 5000 }),
+          patchPart(["/r/report.md"]),
+        ]),
+      ],
+      undefined,
+      () => true,
+    )
+    const [item] = SessionCompaction.corroborateCarry([{ text: "Wrote report.md" }], ledger)
+    expect(item?.status).toBe("verified")
+  })
+})
+
+// ─── Snapshot diffs: second review round ─────────────────────────────────────
+
+function stepStart(): any {
+  partCounter++
+  return { id: `part-ss-${partCounter}`, sessionID: "session-1", messageID: "m", type: "step-start" }
+}
+
+function stepFinish(): any {
+  partCounter++
+  return { id: `part-sf-${partCounter}`, sessionID: "session-1", messageID: "m", type: "step-finish", reason: "stop" }
+}
+
+describe("SessionCompaction.buildLedger — bounded snapshot history", () => {
+  test("many snapshot-listed files: retention is capped, tool writes survive, existence checks are bounded", async () => {
+    const shellFiles = Array.from({ length: 500 }, (_, i) => `/repo/gen/file_${String(i).padStart(3, "0")}.sql`)
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/models/orders.sql" }, end: 1000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "python gen.py" }, metadata: { exit: 0 }, end: 2000 }),
+        patchPart(["/repo/models/orders.sql", ...shellFiles]),
+      ]),
+    ]
+    const checked: string[] = []
+    const ledger = await SessionCompaction.buildLedger(messages, "/repo", async (file) => {
+      checked.push(file)
+      return true
+    })
+    expect(checked.length).toBeLessThanOrEqual(64)
+    expect(ledger.writes.length).toBeLessThanOrEqual(201)
+    const orders = ledger.writes.find((w) => w.path === "/repo/models/orders.sql")
+    expect(orders?.toolWritten).toBe(true)
+    expect(ledger.snapshotOmitted).toBe(300)
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 2000 })
+    expect(text).toContain("older file changes not retained")
+  })
+
+  test("deleted files are skipped when choosing the displayed paths of a step", async () => {
+    const files = Array.from({ length: 10 }, (_, i) => `/r/out/f_${i}.md`)
+    const gone = new Set(files.slice(0, 3))
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "gen" }, metadata: { exit: 0 }, end: 3000 }),
+        patchPart(files),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, (f) => !gone.has(f))
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 2000 })
+    for (const f of files.slice(0, 3)) expect(text).not.toContain(`- ${f} —`)
+    for (const f of files.slice(3, 8)) expect(text).toContain(`- ${f} —`)
+  })
+})
+
+describe("SessionCompaction.buildLedger — per-step state resets at each step start", () => {
+  test("a bash-only step does not make the next step's snapshot entry read via shell", async () => {
+    const messages = [
+      assistantMsg(
+        [
+          stepStart(),
+          toolPart({ tool: "bash", input: { command: "ls" }, metadata: { exit: 0 }, end: 4000 }),
+          stepFinish(),
+          stepStart(),
+          stepFinish(),
+          patchPart(["/r/notes.md"]),
+        ],
+        { time: { created: 1000, completed: 9000 } },
+      ),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, () => true)
+    expect(ledger.writes).toEqual([
+      { path: "/r/notes.md", mtime: 9000, tool: "snapshot", step: 1, shell: false, toolWritten: false },
+    ])
+    const line = SessionCompaction.renderLedger(ledger)
+      .split("\n")
+      .find((l) => l.includes("/r/notes.md"))!
+    expect(line).toContain("(snapshot)")
+    expect(line).not.toContain("via shell")
+  })
+
+  test("a write in an earlier step without a patch part does not keep an outdated write time", async () => {
+    const messages = [
+      assistantMsg([
+        stepStart(),
+        toolPart({ tool: "write", input: { filePath: "/r/a.md" }, end: 3000 }),
+        stepFinish(),
+        stepStart(),
+        toolPart({ tool: "bash", input: { command: "sed -i s/x/y/ a.md" }, metadata: { exit: 0 }, end: 7000 }),
+        stepFinish(),
+        patchPart(["/r/a.md"]),
+      ]),
+    ]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, () => true)
+    expect(ledger.writes).toEqual([
+      { path: "/r/a.md", mtime: 7000, tool: "snapshot", step: 1, shell: true, toolWritten: true },
+    ])
+  })
+})
+
+describe("SessionCompaction.renderLedger — advisory scope and snapshot filenames under pressure", () => {
+  test("snapshot-only entries get no 'last written by you' advisory", async () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "python scan.py" }, metadata: { exit: 0 }, end: 4000 }),
+        patchPart(["/r/secrets/acquisition.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(await SessionCompaction.buildLedger(messages, undefined, () => true))
+    expect(text).toContain("acquisition.md")
+    expect(text).not.toContain("Advisory:")
+    expect(text).not.toContain("last written by you")
+  })
+
+  test("with write-tool and snapshot entries, the advisory names only the write-tool entries", async () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/r/a.sql" }, end: 3000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "fmt" }, metadata: { exit: 0 }, end: 4000 }),
+        patchPart(["/r/b.sql"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(await SessionCompaction.buildLedger(messages, undefined, () => true))
+    const advisory = text.split("\n").find((l) => l.startsWith("Advisory:"))!
+    expect(advisory).toContain('the files marked "last written by you"')
+    expect(advisory).not.toMatch(/^Advisory: these files/)
+  })
+
+  test("long recent calls truncate before the last snapshot filename is dropped", async () => {
+    const calls = Array.from({ length: 20 }, (_, i) =>
+      toolPart({
+        tool: "bash",
+        input: { command: `run-step-${i} ` + "x".repeat(90) },
+        metadata: { exit: 0 },
+        end: 1000 + i,
+      }),
+    )
+    const messages = [assistantMsg([...calls, patchPart(["/r/notes.md"])])]
+    const ledger = await SessionCompaction.buildLedger(messages, undefined, () => true)
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 500, recentCalls: 20 })
+    expect(Token.estimate(text)).toBeLessThanOrEqual(500)
+    expect(text).toContain("- /r/notes.md — changed during your step")
+    expect(text).toContain("Recent tool calls")
+    expect(text).toContain("run-step-19")
   })
 })

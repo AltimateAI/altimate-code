@@ -21,7 +21,7 @@ export const TrainingSaveTool = Tool.define("training_save", {
     "- pattern: A coding pattern learned from an example file (e.g., how staging models should look)",
     "- rule: A specific rule from a correction (e.g., 'never use FLOAT for financial columns')",
     "  A rule is an instruction for how work must be done in this repository, for everyone. In a project linked",
-    "  to an Altimate workspace it becomes a proposed team rule the person sends for the owner's review.",
+    "  to an Altimate workspace it becomes a proposed team rule the person sends for review by the workspace owner or an admin.",
     "  A personal preference ('I prefer...', 'for me...') or a fact ('our warehouse is...') is not a rule:",
     "  save it with altimate_memory_write instead.",
     "- glossary: A domain-specific term definition (e.g., 'ARR means Annual Recurring Revenue')",

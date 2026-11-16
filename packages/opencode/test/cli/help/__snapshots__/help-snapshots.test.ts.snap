@@ -82,7 +82,6 @@ Options:
                                                                                             [string]"
 `;
 
-// altimate_change start — document the committed-answer echo allowance in run help
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode run --help 1`] = `
 "altimate-code run [message..]
 
@@ -144,7 +143,6 @@ Options:
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;
-// altimate_change end
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode debug --help 1`] = `
 "altimate-code debug
@@ -531,13 +529,16 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 run altimate-code data tools directly, without a model
 
 Commands:
-  altimate-code tool list             list the data tools available to \`tool run\`
-  altimate-code tool context          print the analyst method and the connections known at startup
-                                      (what \`mcp serve\` sends as instructions)
-  altimate-code tool schema <name>    print one tool's description and JSON input schema
-  altimate-code tool run <name>       run one data tool without a model and print its result
-  altimate-code tool daemon [action]  run, inspect or stop the long-running tool process for a
-                                      project
+  altimate-code tool list                   list the data tools available to \`tool run\`
+  altimate-code tool context                print the analyst method and the connections known at
+                                            startup (what \`mcp serve\` sends as instructions)
+  altimate-code tool schema <name>          print one tool's description and JSON input schema
+  altimate-code tool run <name>             run one data tool without a model and print its result
+  altimate-code tool daemon [action]        run, inspect or stop the long-running tool process for a
+                                            project
+  altimate-code tool report-event <action>  record what a person did with the Claude Code plugin's
+                                            lineage report (usage telemetry; nothing is sent when
+                                            telemetry is off)
 
 Options:
   -h, --help          show help                                                            [boolean]

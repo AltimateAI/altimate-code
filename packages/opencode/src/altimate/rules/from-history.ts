@@ -145,7 +145,7 @@ export async function sendStaged(input: {
   const why = report.context.status !== "ready"
     ? report.context.reason
     : report.push?.error ?? "behind older queued proposals"
-  const message = `${sent} ${sent === 1 ? "rule" : "rules"} sent for ${owner}'s review in ${name}` +
+  const message = `${sent} ${sent === 1 ? "rule" : "rules"} sent for review in ${name} (${owner} or an admin decides)` +
     (queued ? `; ${queued} kept queued (${why}) and sent on a later sync` : "") +
     (refused ? `; ${refused} refused by the workspace` : "") +
     (lost ? `; ${lost} not sent (${RulesStore.scopeDropNote(state) ?? "the account or workspace changed"})` : "") + heldNote + "." +

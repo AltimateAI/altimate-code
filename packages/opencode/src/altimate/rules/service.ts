@@ -11,6 +11,8 @@
 // - The learn config is read on each refresh and each check, so `learn disable` takes effect without a restart.
 // - After each turn (session idle), check the session's new corrections (`RuleTrigger.afterTurn`).
 // - Review notices from a pull are published as `rule.proposal.reviewed` by the sync run itself (`RulesSync`).
+// - On the same timer, decisions on the person's own skill and knowledge submissions (`ReviewNotices`), published the
+//   same way with their `kind`.
 import fs from "node:fs/promises"
 import { Effect } from "effect"
 import { Bus } from "@/bus"
@@ -102,6 +104,50 @@ function triggerDeps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerD
   }
 }
 
+/** How long "Sync now" waits for the skill and knowledge check before it answers. */
+export const SYNC_REVIEW_POLL_MS = 5_000
+
+/** Per directory, the scope's state file and its newest kept decision, as this process last saw them. Dropped when the
+ * directory's instance is disposed. */
+const lastKept = new Map<string, string>()
+
+/** Check the person's skill and knowledge requests now: each new decision is published as `rule.proposal.reviewed`
+ * (with its `kind`) to clients listening, and `altimate.rules.changed` asks them to replay when anything was recorded
+ * (or `announceChange`). For the refresh timer and "Sync now"; nothing is published once `live` answers false (the
+ * instance was disposed while the poll ran). Throws only what the poll does not swallow. */
+export async function pollReviewDecisions(directory: string, opts: { announceChange?: boolean; live?: () => boolean } = {}) {
+  const live = opts.live ?? (() => true)
+  const { ReviewNotices } = await import("../workspace/review-notices")
+  const result = await ReviewNotices.poll(directory, {
+    announce: async (notice) => {
+      if (!live()) return
+      await Bus.publish(RuleEvents.Event.Reviewed, {
+        public_id: notice.public_id,
+        text: notice.name,
+        status: notice.status,
+        kind: notice.kind,
+        ...(notice.reason ? { reason: notice.reason } : {}),
+        ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
+      })
+    },
+  })
+  // A decision another process recorded (a plugin's session start, `workspace review decisions`) is not announced by
+  // it, and this poll then finds it already seen: a change in what is kept (or in whose it is) still asks clients to
+  // replay, as does this process's first look. A state that cannot be read now changes nothing.
+  let keptChanged = false
+  const scope = result.status === "done" ? await ReviewNotices.storedScope(directory) : undefined
+  const state = scope ? await ReviewNotices.read(scope) : undefined
+  if (scope && state) {
+    const newest = state.notices.at(-1)
+    const key = `${ReviewNotices.stateFile(scope)}\0${newest ? ReviewNotices.decisionKey(newest) : ""}`
+    keptChanged = lastKept.get(directory) !== key
+    lastKept.set(directory, key)
+  }
+  if (live() && result.status === "done" && (opts.announceChange || result.recorded.length || keptChanged))
+    await Bus.publish(RuleEvents.Event.Changed, { directory }).catch(() => {})
+  return result
+}
+
 /** Sync now, or join the sync already running. Its notices and change event are published by the run itself, once.
  * Shared with routes and the TUI menu. */
 export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2], trigger: RulesTelemetry.SyncTrigger = "refresh") {
@@ -174,8 +220,19 @@ export async function start(ctx: InstanceContext): Promise<void> {
       RuleProposal.list(ctx.directory)
       await RulesRemember.recoverRequests(root, ctx.directory)
     })
+    // Decisions on the person's own skill and knowledge submissions, on the same timer. Not tied to learning: only
+    // workspaces must be on (checked by the poll). A decision is kept in the person's review state and announced to
+    // clients listening now; one not listening shows it from the summary (`review_notices`) when it replays, which the
+    // change event below asks for after the first poll and after every poll that recorded something.
+    let reviewsPolled = false
+    const reviewNotices = Instance.bind(async () => {
+      if (disposed) return
+      const result = await pollReviewDecisions(ctx.directory, { announceChange: !reviewsPolled, live: () => !disposed })
+      if (result.status === "done") reviewsPolled = true
+    })
     const refresh = Instance.bind(async () => {
       if (disposed) return
+      await reviewNotices().catch((error) => log.warn("workspace review notices failed", { error: error instanceof Error ? error.message : String(error) }))
       await recover().catch((error) => log.warn("rules remember recovery failed", { error: error instanceof Error ? error.message : String(error) }))
       const learn = await learnConfig(ctx)
       if (!RulesSync.rulesEnabled(learn) || !(await linked(root, ctx.directory))) return void (await followLearning(learn))
@@ -216,6 +273,7 @@ export async function start(ctx: InstanceContext): Promise<void> {
     const unregister = registerDisposer(async (directory) => {
       if (directory !== ctx.directory) return
       disposed = true
+      lastKept.delete(ctx.directory)
       clearInterval(timer)
       stop()
       unregister()
