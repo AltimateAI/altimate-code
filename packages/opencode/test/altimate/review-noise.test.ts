@@ -1128,4 +1128,51 @@ describe("anchoring rule findings by their matched line", () => {
       expect(f!.startLine).toBeUndefined()
     }
   })
+
+  describe("non-deterministic-dedup whose compiled text is not in the raw diff", () => {
+    const MSG = "ROW_NUMBER() orders only by time/date column(s) [_airbyte_extracted_at] with no unique tiebreaker."
+    const review = (raw: string, diff: string, compiled: string, line: number, message = MSG) =>
+      runReview({
+        changedFiles: [{ path: "models/m.sql", status: "added", diff }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          ...runner,
+          async check() {
+            return { issues: [{ rule: "non_deterministic_dedup", message, line, severity: "warning" }], ran: true }
+          },
+        } as ReviewRunner,
+        getContent: async () => raw,
+        getCompiled: async () => compiled,
+        forceTier: "full",
+      }).then((env) => env.findings.find((x) => x.rule === "altimate-core.check:non-deterministic-dedup")!)
+    const added = (raw: string) => {
+      const rows = raw.trimEnd().split("\n")
+      return `@@ -0,0 +1,${rows.length} @@\n` + rows.map((l) => `+${l}`).join("\n") + "\n"
+    }
+    const compiled =
+      "with source as (\n  select * from raw.t\n)\n, most_recent_source as (\n  select *\n  , row_number() over ( partition by id order by _airbyte_extracted_at desc) as row_num\n  from source\n)\nselect * from most_recent_source where row_num = 1\n"
+
+    test("a dedup macro call: the added line that orders by the named column", async () => {
+      const raw =
+        "with source as (\n  select * from {{ source('raw', 't') }}\n)\n\n-- dedupe the raw table\n{{ deduplicate_raw_table(order_by='_airbyte_extracted_at' , partition_columns = 'id') }}\n\nselect * from most_recent_source\n"
+      const f = await review(raw, added(raw), compiled, 6)
+      expect(f.startLine).toBe(6)
+    })
+
+    test("a Jinja-built window: the added row_number line naming the column wins over a later order by", async () => {
+      const raw =
+        "select *,\n  row_number() over (partition by {{ key }} order by _airbyte_extracted_at desc) as rn\nfrom t\norder by _airbyte_extracted_at\n"
+      const f = await review(raw, added(raw), compiled, 6)
+      expect(f.startLine).toBe(2)
+    })
+
+    test("no added line names the column: no line", async () => {
+      const raw = "{{ deduplicate_raw_table(partition_columns = 'id') }}\nselect * from most_recent_source\n"
+      expect((await review(raw, added(raw), compiled, 6)).startLine).toBeUndefined()
+      const named = "{{ deduplicate_raw_table(order_by='_airbyte_extracted_at') }}\n"
+      expect((await review(named, added(named), compiled, 6, "ROW_NUMBER() orders only by time")).startLine).toBeUndefined()
+    })
+  })
 })
