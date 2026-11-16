@@ -361,6 +361,20 @@ describe("coverage ledger: what the review did not look at", () => {
     expect(notes).toContain("… and 10 more")
   })
 
+  test("moved files in the ledger keep the folder-level config hint", () => {
+    const env = {
+      ...signEnvelope(buildEnvelope({ findings: [], tier: "lite", mode: "comment" })),
+      scope: {
+        movedUnchangedFiles: 1,
+        notReviewed: [{ path: "models/new_home/m.sql", reason: "moved without edits; not re-reviewed" }],
+      },
+    }
+    const notes = coverageNotes(env).join("\n")
+    expect(notes).not.toContain("their SQL was not re-reviewed")
+    expect(notes).toContain("moved without edits; not re-reviewed (1):\n- `models/new_home/m.sql`\n\nFolder-level config")
+    expect(notes).toContain("`+schema`, `+materialized`")
+  })
+
   test("envelopes from older releases without a ledger still parse and keep the count line", () => {
     const env = VerdictEnvelope.parse({
       ...buildEnvelope({ findings: [], tier: "lite", mode: "comment" }),

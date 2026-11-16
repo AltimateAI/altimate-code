@@ -274,8 +274,7 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
   if (env.scope?.movedUnchangedFiles && !scopePaths.some((e) => /^moved without edits/.test(e.reason) && listed.has(e.path)))
     notes.push(
-      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
-        "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
+      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ${MOVED_HINT}`,
     )
   if (env.policy?.changedInPr?.length) {
     notes.push(
@@ -301,6 +300,9 @@ function notReviewedLedger(env: VerdictEnvelope): Array<{ path: string; reason: 
   return (env.scope?.notReviewed ?? []).filter((e) => !unverified.has(`${e.path}\0${e.reason}`))
 }
 
+const MOVED_HINT =
+  "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds."
+
 /** Collapsed "Not reviewed: n file(s)" block, grouped by reason. */
 function ledgerBlock(ledger: Array<{ path: string; reason: string }>): string[] {
   if (!ledger.length) return []
@@ -313,7 +315,9 @@ function ledgerBlock(ledger: Array<{ path: string; reason: string }>): string[] 
     const take = paths.slice(0, LEDGER_MAX_PATHS - shown)
     shown += take.length
     // Escape Markdown emphasis so a glob like `**/*.md` in a reason renders literally.
-    lines.push(`${reason.replace(/([*_])/g, "\\$1")} (${paths.length}):`, ...take.map((p) => `- \`${p}\``), "")
+    lines.push(`${reason.replace(/([*_])/g, "\\$1")} (${paths.length}):`, ...take.map((p) => `- \`${p}\``))
+    if (/^moved without edits/.test(reason)) lines.push("", MOVED_HINT)
+    lines.push("")
   }
   if (ledger.length > shown) lines.push(`… and ${ledger.length - shown} more`, "")
   lines.push("</details>", "")
