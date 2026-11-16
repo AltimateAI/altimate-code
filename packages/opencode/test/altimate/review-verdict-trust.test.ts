@@ -4,7 +4,8 @@ import path from "node:path"
 import { tmpdir } from "node:os"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { makeFinding, findingOrigin, type Finding } from "../../src/altimate/review/finding"
+import { makeFinding, findingOrigin, fingerprint, ruleId, type Finding } from "../../src/altimate/review/finding"
+import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_RUBRIC, Rubric } from "../../src/altimate/review/rubric"
 import { buildEnvelope, computeIdealVerdict, signEnvelope, verdictEligible, verifyEnvelope } from "../../src/altimate/review/verdict"
 import { DEFAULT_REVIEW_CONFIG, policyChanges, policyHash } from "../../src/altimate/review/config"
@@ -219,4 +220,75 @@ describe("policy comes from the base branch", () => {
       /force-tier is disabled/,
     )
   }, 60_000)
+})
+
+describe("every finding carries a stable rule id", () => {
+  const RULE_ID = /^[a-z0-9.-]+:[a-z0-9.-]+$/
+
+  test("ruleId normalises both halves", () => {
+    expect(ruleId("altimate_core.equivalence", "Not Equivalent")).toBe("altimate-core.equivalence:not-equivalent")
+    expect(ruleId("ai-review", "sql_correctness")).toBe("ai-review:sql-correctness")
+    expect(ruleId(" rule-catalog ", "--a/b__c--")).toBe("rule-catalog:a-b--c")
+  })
+
+  test("a review touching several lanes stamps a well-formed rule on each finding, ids unchanged", async () => {
+    const sql = "select id, email, amount\nfrom {{ ref('orders') }} o, {{ ref('customers') }} c\nwhere o.id = c.id\n"
+    const compiled = "select id, email, amount\nfrom db.orders o, db.customers c\nwhere o.id = c.id\n"
+    const runner: ReviewRunner = {
+      async impact(model) {
+        const n = model === "gone" ? 3 : 0
+        return { hasManifest: true, severity: n ? "BREAKING" : "SAFE", directCount: n, transitiveCount: n, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: [{ rule: "select_star", message: "avoid select *", severity: "warning" }], ran: true }
+      },
+      async equivalence() {
+        return { decided: true, equivalent: false, differences: ["row count differs"], confidence: "high" } as any
+      },
+      async detectPii(sql) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
+      },
+    }
+    const env = await runReview({
+      changedFiles: [
+        { path: "models/marts/m.sql", status: "modified", diff: sql.split("\n").map((l) => `+${l}`).join("\n") },
+        { path: "models/staging/gone.sql", status: "deleted", diff: "" },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, dialect: "snowflake" },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      forceTier: "full",
+      runner,
+      getContent: async (p, side) =>
+        p.endsWith("gone.sql") ? "select 1 as id\n" : side === "old" ? "select id, amount from {{ ref('orders') }}\n" : sql,
+      getCompiled: async (p, side) =>
+        p.endsWith("gone.sql") ? undefined : side === "old" ? "select id, amount from db.orders\n" : compiled,
+    })
+    const tools = new Set(env.findings.map((x) => x.evidence?.tool))
+    // Engine (impact, equivalence, check, PII) and pattern lanes all fired.
+    for (const t of ["impact_analysis", "altimate_core.equivalence", "altimate_core.check", "schema.detect_pii"]) {
+      expect(tools.has(t)).toBe(true)
+    }
+    expect(env.findings.some((x) => findingOrigin(x) === "catalog")).toBe(true)
+    for (const x of env.findings) expect(x.rule ?? "").toMatch(RULE_ID)
+
+    const byTool = (t: string) => env.findings.find((x) => x.evidence?.tool === t)!
+    expect(byTool("impact_analysis").rule).toBe("impact-analysis:downstream-consumers")
+    expect(byTool("altimate_core.equivalence").rule).toBe("altimate-core.equivalence:not-equivalent")
+    expect(byTool("altimate_core.check").rule).toBe("altimate-core.check:select-star")
+    expect(byTool("schema.detect_pii").rule).toBe("schema.detect-pii:exposes")
+    // The fingerprint ignores `rule`: this id was produced before the field existed.
+    expect(byTool("impact_analysis").id).toBe(
+      fingerprint({ category: "lineage_breakage", file: "models/staging/gone.sql", model: "gone", ruleKey: "lineage_breakage:deleted" }),
+    )
+    expect(byTool("impact_analysis").id).toBe("f_c13e1671eb1b007a")
+  })
+
+  test("findings without evidence carry no rule", () => {
+    const x = makeFinding({ severity: "suggestion", category: "sql_quality", title: "t", body: "b", file: "a.sql" })
+    expect(x.rule).toBeUndefined()
+  })
 })

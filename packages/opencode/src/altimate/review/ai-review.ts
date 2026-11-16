@@ -7,7 +7,7 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
-import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
+import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
 
 const log = Log.create({ service: "ai-review" })
@@ -385,6 +385,7 @@ async function reviewBatch(
             confidence: item.confidence === "high" ? "high" : item.confidence === "low" ? "low" : "medium",
             evidence: { tool: "ai-review", result: { confidence: item.confidence } },
             ruleKey: `ai:${item.category}:${String(item.title).slice(0, 60)}`,
+            rule: ruleId("ai-review", String(item.category)),
           }),
         )
       } catch (err) {

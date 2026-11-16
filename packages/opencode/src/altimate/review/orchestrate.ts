@@ -390,6 +390,7 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
         degraded,
         evidence: { tool: "impact_analysis", result: impact },
         ruleKey: `lineage_breakage:${file.status}`,
+        rule: "impact-analysis:downstream-consumers",
       }),
     ]
   }
@@ -436,6 +437,7 @@ async function semanticChangeLane(
         degraded: true,
         evidence: { tool: "altimate_core.equivalence", result: { decided: false } },
         ruleKey: "semantic_change:undecidable",
+        rule: "altimate-core.equivalence:undecided",
       }),
     ]
   }
@@ -465,6 +467,7 @@ async function semanticChangeLane(
       confidence: eq.confidence ?? "medium",
       evidence: { tool: "altimate_core.equivalence", result: { equivalent: false, differences: diffs } },
       ruleKey: "semantic_change:not-equivalent",
+      rule: "altimate-core.equivalence:not-equivalent",
     }),
   ]
 }
@@ -633,6 +636,7 @@ async function columnBreakageLane(
       confidence: "high",
       evidence: { tool: "altimate_core.column_lineage", result: { removed, brokenBy: Object.fromEntries([...brokenBy].map(([k, v]) => [k, [...v]])) } },
       ruleKey: `lineage_breakage:column-removed`,
+      rule: "altimate-core.column-lineage:removed-columns",
     }),
   ]
 }
@@ -787,6 +791,7 @@ async function consumerContractLane(
         confidence: "medium",
         evidence: { tool: "dbt.manifest", result: { removed, finalLayer: true } },
         ruleKey: "lineage_breakage:final-layer-column-removed",
+        rule: "dbt.manifest:removed-final-layer-columns",
       }),
     )
   }
@@ -812,6 +817,7 @@ async function consumerContractLane(
           result: { removed, exposures: consumers.exposures.map((e) => e.name), contractEnforced: consumers.contractEnforced },
         },
         ruleKey: "lineage_breakage:consumer-column-removed",
+        rule: "dbt.manifest:removed-columns-declared-consumers",
       }),
     )
   }
@@ -836,6 +842,7 @@ async function consumerContractLane(
           confidence: "high",
           evidence: { tool: "contract-check", result: { missing } },
           ruleKey: "contract_violation:contract-missing-column",
+          rule: "contract-check:missing-columns",
         }),
       )
   }
@@ -881,6 +888,7 @@ async function consumerListLane(
         confidence: "high",
         evidence: { tool: "consumer-column-list", result: { list: list.path, missing, stale } },
         ruleKey: `lineage_breakage:consumer-list:${list.path}`,
+        rule: "consumer-column-list:stale",
       }),
     )
   }
@@ -959,6 +967,7 @@ async function dataDiffLane(
       confidence: "high",
       evidence: { tool: "data.diff", result: diff },
       ruleKey: "semantic_change:data-diff",
+      rule: "data.diff:row-delta",
     }),
   ]
 }
@@ -1067,6 +1076,7 @@ async function topologyEquivalenceLane(
           },
         },
         ruleKey: `semantic_change:topology-merge:${wName}`,
+        rule: "altimate-core.equivalence:not-equivalent",
       }),
     )
   }
@@ -1112,6 +1122,7 @@ async function grainMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promi
       confidence: "medium",
       evidence: { tool: "altimate_core.grain", result: { grain: actual, declared: pk, extra } },
       ruleKey: "sql_correctness:grain-mismatch",
+      rule: "altimate-core.grain:conflicts-declared-uniqueness",
     }),
   ]
 }
@@ -1149,6 +1160,7 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
       confidence: "medium",
       evidence: { tool: "dbt.manifest", result: { hasGrainTest: false } },
       ruleKey: "test_coverage:missing-grain-test",
+      rule: "dbt.manifest:new-model-no-grain-test",
     }),
   ]
 }
@@ -1360,6 +1372,7 @@ async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): P
         confidence: "medium",
         evidence: { tool: "dbt.manifest", result: { joined: t.model, keys: t.keys, declared } },
         ruleKey: `fanout:join-key-untested:${t.model}`,
+        rule: "dbt.manifest:left-join-key-not-unique",
       }),
     )
   }
@@ -1416,6 +1429,7 @@ async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner, un
       confidence: "high",
       evidence: { tool: "dbt.manifest", result: { unique_key: uk, declared } },
       ruleKey: "materialization:unique-key-test-mismatch",
+      rule: "dbt.manifest:unique-key-differs-from-test",
     }),
   ]
 }
@@ -1546,6 +1560,7 @@ async function siblingConsistencyLane(ctxs: ModelContext[], runner: ReviewRunner
           confidence: "medium",
           evidence: { tool: "altimate_core.source_filters", result: { upstream: u, missing } },
           ruleKey: `sql_correctness:sibling-filter:${u}`,
+          rule: "altimate-core.source-filters:sibling-mismatch",
         }),
       )
     }
@@ -1632,6 +1647,7 @@ async function piiClassifyLane(
         confidence: highConfidence ? "high" : "medium",
         evidence: { tool: "altimate_core.classify_pii", result: p },
         ruleKey: `pii_exposure:${col}`,
+        rule: "altimate-core.classify-pii:exposes",
       }),
     )
   }
@@ -1660,6 +1676,7 @@ function piiLane(file: ChangedFile & { kind: string }, columns: string[], baseUn
       confidence: baseUnknown ? "medium" : "high",
       evidence: { tool: "schema.detect_pii", result: { columns } },
       ruleKey: "pii:exposure",
+      rule: "schema.detect-pii:exposes",
     }),
   ]
 }
