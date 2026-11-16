@@ -3,7 +3,15 @@ import { streamText, tool, type ModelMessage } from "ai"
 import { MockLanguageModelV3 } from "ai/test"
 import z from "zod"
 import { readStreamStep } from "../../src/altimate/llm/stream-text"
-import { aiVerifyEnabled, extractFeatures, numberedSlice } from "../../src/altimate/review/ai-verify"
+import {
+  aiVerifyEnabled,
+  buildVerifyMessage,
+  extractFeatures,
+  hunkAround,
+  numberedSlice,
+  parseVerifierOutput,
+  VERIFY_SYSTEM_PROMPT,
+} from "../../src/altimate/review/ai-verify"
 import { makeFinding, type Finding } from "../../src/altimate/review/finding"
 import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
@@ -196,5 +204,84 @@ describe("extractFeatures (deterministic, free)", () => {
   test("lowConfidence and hedgedDataDiff", () => {
     expect(feats(aiFinding({ confidence: "low" })).lowConfidence).toBe(true)
     expect(feats(aiFinding({ body: "We recommend a data diff before merging." })).hedgedDataDiff).toBe(true)
+  })
+})
+
+describe("verifier prompt and parser", () => {
+  const ids = new Set(["c1", "c2"])
+  const item = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    claim_type: "code_fact",
+    verdict: "confirmed",
+    value: "actionable",
+    requires_assumed_input: false,
+    evidence: "line 11 divides an integer",
+    tools_used: ["compiled_sql"],
+    ...over,
+  })
+
+  test("the prompt carries the contract and the injection guard", () => {
+    expect(VERIFY_SYSTEM_PROMPT).toContain("adversarial verifier")
+    expect(VERIFY_SYSTEM_PROMPT).toContain("UNTRUSTED DATA")
+    expect(VERIFY_SYSTEM_PROMPT).toContain("At most 3 rounds of tool calls")
+    expect(VERIFY_SYSTEM_PROMPT).toContain('"requires_assumed_input"')
+  })
+
+  test("a fenced array with prose and a think block around it", () => {
+    const text = `<think>is [this] it?</think>Here you go:\n\`\`\`json\n${JSON.stringify([item("c1"), item("c2", { verdict: "refuted" })])}\n\`\`\`\nDone [1].`
+    const out = parseVerifierOutput(text, ids)
+    expect(out.get("c1")).toEqual({
+      claimType: "code_fact",
+      verdict: "confirmed",
+      value: "actionable",
+      requiresAssumedInput: false,
+      evidence: "line 11 divides an integer",
+      toolsUsed: ["compiled_sql"],
+    })
+    expect(out.get("c2")?.verdict).toBe("refuted")
+  })
+
+  test("brackets inside strings and a leading non-JSON bracket do not break extraction", () => {
+    const text = `See [note]. ${JSON.stringify([item("c1", { evidence: "uses arr[0] ] here" })])}`
+    expect(parseVerifierOutput(text, ids).get("c1")?.evidence).toBe("uses arr[0] ] here")
+  })
+
+  test("bad enums are coerced, unknown ids ignored, evidence clamped, tools filtered", () => {
+    const text = JSON.stringify([
+      item("c1", { claim_type: "vibes", verdict: "probably", value: "huge", evidence: "x".repeat(500), tools_used: ["grep_project", 3, null] }),
+      item("c9"),
+      "junk",
+    ])
+    const out = parseVerifierOutput(text, ids)
+    expect([...out.keys()]).toEqual(["c1"])
+    const c1 = out.get("c1")!
+    expect([c1.claimType, c1.verdict, c1.value]).toEqual(["code_fact", "unverifiable", "actionable"])
+    expect(c1.evidence).toHaveLength(240)
+    expect(c1.toolsUsed).toEqual(["grep_project"])
+  })
+
+  test("no array, malformed JSON, or an object yields nothing (all unreviewed)", () => {
+    expect(parseVerifierOutput("I could not decide.", ids).size).toBe(0)
+    expect(parseVerifierOutput('[{"id": "c1", "verdict": ', ids).size).toBe(0)
+    expect(parseVerifierOutput('{"id": "c1"}', ids).size).toBe(0)
+  })
+
+  test("the hunk is the diff around the line, numbered on the head side", () => {
+    const h = hunkAround(DIFF, 11)
+    expect(h).toContain("  11 +  coalesce(amount_cents, 0) / 100 as amount,")
+    expect(h).toContain("  10  select order_id,")
+    const far = "@@ -1,1 +1,1 @@\n-a\n+b\n@@ -100,1 +100,1 @@\n-c\n+d\n"
+    expect(hunkAround(far, 100)).not.toContain("+b")
+    expect(hunkAround(far, 100)).toContain(" 100 +d")
+    expect(hunkAround(undefined, 1)).toBe("(no diff)")
+  })
+
+  test("the batch message has each candidate's fields and hunk, not the file or grounding", () => {
+    const msg = buildVerifyMessage("Fix revenue", [{ id: "c1", finding: aiFinding(), diff: DIFF }])
+    expect(msg.startsWith("PR: Fix revenue")).toBe(true)
+    for (const line of ["id: c1", "file: models/fct.sql", "line: 11", "category: sql_correctness", "severity: warning", "title: fct: Division drops cents"])
+      expect(msg).toContain(line)
+    expect(msg).toContain("```diff")
+    expect(msg).not.toContain("GROUNDING")
   })
 })
