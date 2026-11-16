@@ -10,7 +10,7 @@
 import type { Provider } from "@/provider/provider"
 import type { Finding } from "./finding"
 import type { AiReviewFile, AiTokens } from "./ai-review"
-import type { ReviewRunner } from "./orchestrate"
+import { type ReviewRunner, scanDiffLines, walkDiffLines } from "./orchestrate"
 
 /** What the verifier may read: the PR's files, the engine, and the dbt project. */
 export interface AiVerifyEvidence {
@@ -123,4 +123,120 @@ export function numberedSlice(text: string | undefined, start?: number, end?: nu
     .slice(from - 1, to)
     .map((l, i) => `${from + i}: ${l}`)
     .join("\n")
+}
+
+/** Deterministic facts about a finding, computed without a model. */
+export interface TsFeatures {
+  /** The finding's line is on the diff; null when it has no line. */
+  evidenceLineValid: boolean | null
+  /** It points at code the PR did not add. */
+  targetsUnchangedCode: boolean
+  /** It repeats a deterministic engine finding on the same file. */
+  restatesGrounding: boolean
+  /** It makes a claim about another model or source. */
+  claimsOtherFile: boolean
+  /** A style or naming remark with no correctness signal. */
+  styleOnly: boolean
+  lowConfidence: boolean
+  /** It defers to a data diff instead of stating a defect. */
+  hedgedDataDiff: boolean
+}
+
+/** Backticked or quoted identifiers in a finding's text, lower-cased. */
+function quotedNames(text: string): string[] {
+  const out = new Set<string>()
+  for (const m of text.matchAll(/`([^`\n]{2,80})`|'([A-Za-z_][\w.]{1,79})'|"([A-Za-z_][\w.]{1,79})"/g)) {
+    const name = (m[1] ?? m[2] ?? m[3]).trim().toLowerCase()
+    if (name.length >= 2) out.add(name)
+  }
+  return [...out]
+}
+
+function backticked(text: string): Set<string> {
+  return new Set([...text.matchAll(/`([^`\n]{1,80})`/g)].map((m) => m[1].trim().toLowerCase()))
+}
+
+/** Title words of three or more characters, without the model name. */
+function titleWords(title: string, model?: string): Set<string> {
+  const skip = model?.toLowerCase()
+  return new Set(
+    title
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/)
+      .filter((w) => w.length >= 3 && w !== skip),
+  )
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0
+  let inter = 0
+  for (const w of a) if (b.has(w)) inter++
+  return inter / (a.size + b.size - inter)
+}
+
+const STYLE = /alias|naming|readab|format|uppercase|trailing|consisten(t|cy) style|rename/i
+const SUBSTANCE = /null|dup|fan.?out|grain|join|filter|timezone|currency|unit|incremental/i
+
+/**
+ * Deterministic features of one AI finding (pure). `added` holds the head-side
+ * lines the PR added in the finding's file; `names` the dbt parents and
+ * downstream models of the changed files. Findings reach the verifier before
+ * `anchorToDiff` tags `preExisting`, so a line on the diff that the PR did not
+ * add counts as unchanged code here.
+ */
+export function extractFeatures(
+  f: Finding,
+  file: AiReviewFile | undefined,
+  grounding: Finding[],
+  names: { parents: string[]; downstream: string[] },
+  added: Set<number>,
+): TsFeatures {
+  const text = `${f.title}\n${f.body}`
+  const { commentable } = scanDiffLines(file?.diff)
+  const line = f.startLine
+  const onDiff = typeof line === "number" && commentable.has(line)
+
+  let targetsUnchangedCode = f.preExisting === true || (onDiff && !added.has(line!))
+  if (!onDiff && f.preExisting !== true) {
+    // No usable line: unchanged unless something the finding names appears on an added line.
+    const addedText = [...walkDiffLines(file?.diff)]
+      .filter((l) => l.kind === "+" || added.has(l.line))
+      .map((l) => l.text.toLowerCase())
+    const ids = quotedNames(text)
+    targetsUnchangedCode = !ids.some((id) => addedText.some((t) => t.includes(id)))
+  }
+
+  const words = titleWords(f.title, f.model)
+  const cols = quotedNames(text)
+  const restatesGrounding = grounding.some((g) => {
+    if (g.file !== f.file) return false
+    if (jaccard(words, titleWords(g.title, g.model)) >= 0.5) return true
+    if (g.category !== f.category) return false
+    const gCols = new Set([...backticked(g.title), ...(g.column ? [g.column.toLowerCase()] : [])])
+    return cols.some((c) => gCols.has(c))
+  })
+
+  const self = f.model?.toLowerCase()
+  const graph = new Set(
+    [...names.parents, ...names.downstream].flatMap((n) => {
+      const low = n.toLowerCase()
+      // A source is `source.table`; a reference to either part counts.
+      return low.includes(".") ? [low, low.split(".").pop()!] : [low]
+    }),
+  )
+  const refs = [...text.matchAll(/\bref\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1].toLowerCase())
+  const claimsOtherFile =
+    /\bsource\(/.test(text) ||
+    refs.some((r) => r !== self) ||
+    [...backticked(text)].some((n) => n !== self && graph.has(n))
+
+  return {
+    evidenceLineValid: typeof line === "number" ? onDiff : null,
+    targetsUnchangedCode,
+    restatesGrounding,
+    claimsOtherFile,
+    styleOnly: f.category === "sql_quality" && STYLE.test(text) && !SUBSTANCE.test(text),
+    lowConfidence: f.confidence === "low",
+    hedgedDataDiff: /recommend.*data.?diff/i.test(f.body),
+  }
 }

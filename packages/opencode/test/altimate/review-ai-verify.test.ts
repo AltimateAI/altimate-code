@@ -3,7 +3,9 @@ import { streamText, tool, type ModelMessage } from "ai"
 import { MockLanguageModelV3 } from "ai/test"
 import z from "zod"
 import { readStreamStep } from "../../src/altimate/llm/stream-text"
-import { aiVerifyEnabled, numberedSlice } from "../../src/altimate/review/ai-verify"
+import { aiVerifyEnabled, extractFeatures, numberedSlice } from "../../src/altimate/review/ai-verify"
+import { makeFinding, type Finding } from "../../src/altimate/review/finding"
+import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
 import { LLM } from "../../src/session/llm"
@@ -112,5 +114,87 @@ describe("wiring", () => {
     } finally {
       if (prev !== undefined) process.env.ALTIMATE_REVIEW_AI_VERIFY = prev
     }
+  })
+})
+
+// models/fct.sql at head: line 10 context, 11 added, 12 context.
+const DIFF = "@@ -10,2 +10,3 @@\n select order_id,\n+  coalesce(amount_cents, 0) / 100 as amount,\n from {{ ref('stg_orders') }}\n"
+const FILE: AiReviewFile = { path: "models/fct.sql", status: "modified", model: "fct", diff: DIFF }
+const ADDED = new Set([11])
+const NAMES = { parents: ["stg_orders", "raw.payments"], downstream: ["rpt_revenue"] }
+
+function aiFinding(over: Partial<Parameters<typeof makeFinding>[0]> = {}): Finding {
+  return makeFinding({
+    severity: "warning",
+    category: "sql_correctness",
+    title: "fct: Division drops cents",
+    body: "Integer division truncates `amount`.",
+    file: "models/fct.sql",
+    model: "fct",
+    startLine: 11,
+    endLine: 11,
+    confidence: "medium",
+    evidence: { tool: "ai-review", result: { confidence: "medium" } },
+    ...over,
+  })
+}
+
+describe("extractFeatures (deterministic, free)", () => {
+  const feats = (f: Finding, grounding: Finding[] = []) => extractFeatures(f, FILE, grounding, NAMES, ADDED)
+
+  test("a finding on an added line: valid line, changed code, nothing else", () => {
+    expect(feats(aiFinding())).toEqual({
+      evidenceLineValid: true,
+      targetsUnchangedCode: false,
+      restatesGrounding: false,
+      claimsOtherFile: false,
+      styleOnly: false,
+      lowConfidence: false,
+      hedgedDataDiff: false,
+    })
+  })
+
+  test("evidenceLineValid: off the diff is false, no line is null", () => {
+    expect(feats(aiFinding({ startLine: 40, endLine: 40 })).evidenceLineValid).toBe(false)
+    expect(feats(aiFinding({ startLine: undefined, endLine: undefined })).evidenceLineValid).toBeNull()
+  })
+
+  test("targetsUnchangedCode: a context line, a pre-existing tag, or no line and nothing it names was added", () => {
+    expect(feats(aiFinding({ startLine: 10, endLine: 10 })).targetsUnchangedCode).toBe(true)
+    expect(feats({ ...aiFinding(), preExisting: true }).targetsUnchangedCode).toBe(true)
+    const noLine = { startLine: undefined, endLine: undefined }
+    expect(feats(aiFinding({ ...noLine, body: "`amount_cents` may be null" })).targetsUnchangedCode).toBe(false)
+    expect(feats(aiFinding({ ...noLine, body: "`order_id` is not unique" })).targetsUnchangedCode).toBe(true)
+  })
+
+  test("restatesGrounding: similar title on the same file, or same category and column", () => {
+    const g = makeFinding({
+      severity: "warning", category: "sql_correctness", title: "fct: division drops cents in amount",
+      body: "x", file: "models/fct.sql", model: "fct", evidence: { tool: "rule-catalog", result: { rule: "r" } },
+    })
+    expect(feats(aiFinding(), [g]).restatesGrounding).toBe(true)
+    expect(feats(aiFinding(), [{ ...g, file: "models/other.sql" }]).restatesGrounding).toBe(false)
+    const col = { ...g, title: "fct: unrelated wording", column: "amount" }
+    expect(feats(aiFinding(), [col]).restatesGrounding).toBe(true)
+    expect(feats(aiFinding(), [{ ...col, category: "join_risk" as const }]).restatesGrounding).toBe(false)
+  })
+
+  test("claimsOtherFile: a ref to another model, a source, or a graph neighbour by name", () => {
+    expect(feats(aiFinding({ body: "`stg_orders` has no `amount_cents`" })).claimsOtherFile).toBe(true)
+    expect(feats(aiFinding({ body: "{{ ref('rpt_revenue') }} reads it" })).claimsOtherFile).toBe(true)
+    expect(feats(aiFinding({ body: "comes from source('raw', 'payments')" })).claimsOtherFile).toBe(true)
+    expect(feats(aiFinding({ body: "`payments` is a source table" })).claimsOtherFile).toBe(true)
+    expect(feats(aiFinding({ body: "`fct` divides" })).claimsOtherFile).toBe(false)
+  })
+
+  test("styleOnly: sql_quality naming remarks without a correctness word", () => {
+    expect(feats(aiFinding({ category: "sql_quality", title: "fct: Alias naming", body: "Use snake_case aliases." })).styleOnly).toBe(true)
+    expect(feats(aiFinding({ category: "sql_quality", title: "fct: Alias naming", body: "The alias hides a null." })).styleOnly).toBe(false)
+    expect(feats(aiFinding({ title: "fct: Alias naming", body: "Use snake_case aliases." })).styleOnly).toBe(false)
+  })
+
+  test("lowConfidence and hedgedDataDiff", () => {
+    expect(feats(aiFinding({ confidence: "low" })).lowConfidence).toBe(true)
+    expect(feats(aiFinding({ body: "We recommend a data diff before merging." })).hedgedDataDiff).toBe(true)
   })
 })
