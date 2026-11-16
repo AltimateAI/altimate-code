@@ -299,7 +299,7 @@ function namesKept(tokens: ReturnType<typeof tokenizeSql>["tokens"]): string {
  * dynamic SQL (EXEC('...'), sp_executesql N'...', EXECUTE IMMEDIATE, PREPARE ... FROM, dblink_exec),
  * or a function, procedure or trigger body created and called in the same call. Each literal is read
  * word by word with its escapes decoded, as uncertain SQL is, so nothing inside it (nested quotes,
- * comments) can separate the words. Each literal is read alone here (classifyAndCheck reads dynamic SQL
+ * comments) can separate the words. Each literal is read alone here (classifyFallback reads dynamic SQL
  * across its literals), and a custom UESCAPE character is not decoded, so it blocks. */
 function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialect?: string): boolean {
   // UESCAPE counts with a U&'...' literal: U& in code right before a literal token.
