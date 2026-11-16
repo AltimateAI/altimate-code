@@ -6,6 +6,7 @@ import { type Finding, type ReviewCategory, type Severity, makeFinding } from ".
 import type { ChangedFile } from "./diff-filter"
 import { incrementalFilter, inlineConfig } from "./incremental-semantics"
 import { parenBody, topLevel } from "./rule-catalog"
+import { capabilityFor } from "./adapter-capabilities"
 
 const nameOf = (p: string) => path.basename(p).replace(/\.(sql|py|ya?ml|csv)$/i, "")
 
@@ -342,6 +343,8 @@ export function modelConfigFindings(
   dialect: string,
   /** The manifest's config for the model: fills what the file leaves to project defaults. */
   manifestConfig?: Record<string, unknown>,
+  /** False when `dialect` is a default guess, not read from config or the manifest. */
+  dialectKnown = true,
 ): Finding[] {
   if (!newSql || file.status === "deleted") return []
   const cfg = inlineConfig(newSql)
@@ -366,8 +369,13 @@ export function modelConfigFindings(
     )
 
   // dbt-bigquery requires microbatch `batch_size` to equal the partition granularity.
-  // A `partition_by` dict with `granularity` is BigQuery's syntax, so it identifies the adapter too.
-  if (strategy === "microbatch" && (/bigquery/i.test(dialect) || /['"]granularity['"]\s*:/.test(cfg.partition_by ?? ""))) {
+  // On a known adapter its capability decides; otherwise a `partition_by` dict with
+  // `granularity` (BigQuery's syntax) identifies the adapter.
+  const cap = dialectKnown ? capabilityFor(dialect) : undefined
+  const batchMustMatchPartition = cap
+    ? !!cap.microbatchBatchSizeMatchesPartition
+    : /bigquery/i.test(dialect) || /['"]granularity['"]\s*:/.test(cfg.partition_by ?? "")
+  if (strategy === "microbatch" && batchMustMatchPartition) {
     const sizes = valueLiterals(cfg.batch_size, newSql).filter((s) => ["hour", "day", "month", "year"].includes(s))
     const gran = /['"]granularity['"]\s*:\s*['"](\w+)['"]/i.exec(cfg.partition_by ?? "")?.[1]?.toLowerCase() ?? (cfg.partition_by ? "day" : undefined)
     const off = gran ? sizes.filter((s) => s !== gran) : []
