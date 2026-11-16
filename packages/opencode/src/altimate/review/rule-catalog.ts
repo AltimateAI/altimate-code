@@ -2267,7 +2267,11 @@ const MISC: Rule[] = [
     "suggestion",
     "<>/!= silently excludes NULL rows",
     "`col <> 'x'` drops rows where col IS NULL; add `or col is null` if those should remain.",
-    { added: /\b[\w.]+\s*(<>|!=)\s*'/i },
+    // Only a filter drops rows: in a CASE or a select-list expression `<>` yields NULL, not fewer rows.
+    {
+      added: /(^\s*(where|and|or|on|having)\b|\bwhere\b).*\b[\w.]+\s*(<>|!=)\s*'/i,
+      unless: /\b(case|when|then|iff?)\b/i,
+    },
     { add: "where status <> 'cancelled'" },
     { add: "where status is distinct from 'cancelled'" },
   ),
