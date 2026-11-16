@@ -1,8 +1,22 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn, mock, afterEach } from "bun:test"
 import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
-import { aiInputBudget, batchAiFiles, buildUserMessage, selectAiFiles, type AiReviewFile, type AiReviewInput } from "../../src/altimate/review/ai-review"
+import {
+  addUsage,
+  aiInputBudget,
+  batchAiFiles,
+  buildUserMessage,
+  laneUsage,
+  selectAiFiles,
+  streamUsage,
+  type AiLaneStatus,
+  type AiReviewFile,
+  type AiReviewInput,
+} from "../../src/altimate/review/ai-review"
+import { renderSummary } from "../../src/altimate/review/format"
+import { emitReviewRun } from "../../src/altimate/review/telemetry"
+import { Telemetry } from "../../src/altimate/telemetry"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
 import { writeFileSync } from "node:fs"
 import path from "node:path"
@@ -237,5 +251,81 @@ describe("graph context: the changed files' unchanged dbt parents", () => {
     expect(seen?.context).toBeUndefined()
     await run(true)
     expect(seen?.context?.map((c) => [c.path, c.content])).toEqual([["models/stg.sql", "select id from raw"]])
+  })
+})
+
+describe("token and cost accounting", () => {
+  afterEach(() => mock.restore())
+
+  const model = { api: { npm: "@ai-sdk/openai" }, cost: { input: 1, output: 4, cache: { read: 0.5, write: 0 } } } as any
+  const fakeStream = (usage: unknown, metadata: unknown = undefined) => ({
+    totalUsage: Promise.resolve(usage),
+    providerMetadata: Promise.resolve(metadata),
+  })
+
+  test("a drained stream's usage becomes tokens and cost with the session's rules", async () => {
+    const u = await streamUsage(
+      fakeStream({ inputTokens: 1_000, outputTokens: 200, totalTokens: 1_200, reasoningTokens: 50, cachedInputTokens: 400 }),
+      model,
+    )
+    // OpenAI-style input includes cached tokens: input = 1000 - 400.
+    expect(u!.tokens).toEqual({ input: 600, inputTotal: 1_000, output: 200, reasoning: 50, cacheRead: 400 })
+    // (600·1 + 200·4 + 400·0.5 + 50·4) / 1e6
+    expect(u!.cost).toBeCloseTo(0.0018, 10)
+  })
+
+  test("missing or failing usage never fails the lane", async () => {
+    expect(await streamUsage(fakeStream(undefined), model)).toBeUndefined()
+    const rejected = { totalUsage: Promise.reject(new Error("no usage")), providerMetadata: Promise.resolve(undefined) }
+    expect(await streamUsage(rejected, model)).toBeUndefined()
+  })
+
+  test("batches sum; calls count every batch, even one without usage", () => {
+    const a = { tokens: { input: 1, inputTotal: 2, output: 3, reasoning: 0, cacheRead: 1 }, cost: 0.1 }
+    const b = { tokens: { input: 10, inputTotal: 20, output: 30, reasoning: 5, cacheRead: 10 }, cost: 0.2 }
+    const sum = addUsage(a, b)
+    expect(sum.tokens).toEqual({ input: 11, inputTotal: 22, output: 33, reasoning: 5, cacheRead: 11 })
+    expect(sum.cost).toBeCloseTo(0.3, 10)
+    const lane = laneUsage([{ usage: a }, { usage: b }, {}])
+    expect(lane.calls).toBe(3)
+    expect(lane.tokens).toEqual({ input: 11, inputTotal: 22, output: 33, reasoning: 5, cacheRead: 11 })
+    expect(laneUsage([{}, {}])).toEqual({ calls: 2 })
+  })
+
+  test("the lane's tokens reach the envelope, the footer and the review_run event", async () => {
+    const status: AiLaneStatus = {
+      state: "ok",
+      model: "anthropic/claude",
+      tokens: { input: 900, inputTotal: 1_500, output: 300, reasoning: 0, cacheRead: 600 },
+      cost: 0.0123,
+      calls: 2,
+    }
+    const env = await runReview({
+      changedFiles: [mod("models/marts/m.sql")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async (f, side) => (side === "old" ? undefined : FILES[f]),
+      generatedAt: "2026-11-14T00:00:00Z",
+      forceTier: "full",
+      aiReview: async () => ({ findings: [], status }),
+    })
+    expect(env.ai).toMatchObject({ tokens: status.tokens, cost: 0.0123, calls: 2 })
+    expect(renderSummary(env, { allowSilent: false })).toContain("· tokens 1,800")
+
+    const events: Telemetry.Event[] = []
+    spyOn(Telemetry, "track").mockImplementation((e: Telemetry.Event) => {
+      events.push(e)
+    })
+    emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: env })
+    expect(events[0]).toMatchObject({
+      type: "review_run",
+      ai_tokens_total: 1_800,
+      ai_tokens_input: 1_500,
+      ai_tokens_output: 300,
+      ai_cost: 0.0123,
+      ai_calls: 2,
+    })
   })
 })

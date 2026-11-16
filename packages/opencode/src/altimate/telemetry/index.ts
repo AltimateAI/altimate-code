@@ -1661,6 +1661,14 @@ export namespace Telemetry {
         /** Advisory AI lane outcome: ok | skipped | timeout | error. */
         ai_state?: string
         ai_duration_ms?: number
+        /** AI lane tokens: input (including cached) plus output. Output includes reasoning. */
+        ai_tokens_total?: number
+        ai_tokens_input?: number
+        ai_tokens_output?: number
+        /** Estimated USD cost of the AI lane from the model's price table. */
+        ai_cost?: number
+        /** Model calls the AI lane made. */
+        ai_calls?: number
         /** Where the review base came from (flag, github_event, default_branch, …). */
         base_source?: string
         out_of_scope_files?: number
