@@ -456,10 +456,9 @@ async function qualityLane(
     // coerce, a function it doesn't know, or syntax it can't parse is a gap in the engine,
     // not an error in the model. Unresolved columns and tables are kept.
     const msg = String(issue.message ?? "")
-    if (rule === "validate" && ENGINE_LIMIT_MESSAGE.test(msg)) continue
-    const parserGap = rule === "validate" && /^syntax error/i.test(msg)
+    if (rule === "validate" && (ENGINE_LIMIT_MESSAGE.test(msg) || /^syntax error/i.test(msg))) continue
     const cat = mapCheckCategory(issue.category)
-    const isError = issue.severity === "error" && !parserGap
+    const isError = issue.severity === "error"
     // Error-severity contract/PII issues are blockable; others are warning/suggestion.
     let sev: Severity = isError ? "warning" : "suggestion"
     if (isError && (cat === "contract_violation" || cat === "pii_exposure")) sev = "critical"
@@ -1165,6 +1164,40 @@ export function inlineConfigSplats(sql: string): string {
   )
 }
 
+const MATERIALIZED = /\bmaterialized\s*=\s*['"](\w+)['"]/i
+const MICROBATCH = /\bincremental_strategy\s*=\s*['"]microbatch['"]/i
+
+/**
+ * An unguarded incremental model is this PR's problem only when the PR creates it: a model
+ * whose SQL a macro generates carries its guard in the macro, and a model that was already
+ * incremental without a guard (same materialization, no `is_incremental()`) predates the PR.
+ */
+function introducesUnguardedIncremental(newSql: string, oldSql: string | undefined): boolean {
+  const outsideJinja = newSql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, " ")
+  if (!/\bselect\b/i.test(outsideJinja)) return false
+  if (oldSql === undefined) return true
+  const sameMaterialization = MATERIALIZED.exec(oldSql)?.[1]?.toLowerCase() === MATERIALIZED.exec(newSql)?.[1]?.toLowerCase()
+  return !(sameMaterialization && !/\bis_incremental\s*\(/.test(oldSql))
+}
+
+/**
+ * A `unique_key` change moves the merge grain, except under microbatch (which replaces by
+ * `event_time` batch and ignores `unique_key`) and when the only added key columns are the
+ * model's partition columns (a coarser column derived from the row, added for pruning).
+ */
+function changesMergeGrain(message: string, newSql: string, oldSql: string | undefined): boolean {
+  if (MICROBATCH.test(newSql) || (oldSql && MICROBATCH.test(oldSql))) return false
+  const m = /\[([^\]]*)\]\s*→\s*\[([^\]]*)\]/.exec(message)
+  if (!m) return true
+  const cols = (s: string) => s.split(",").map((c) => c.trim().toLowerCase()).filter(Boolean)
+  const before = cols(m[1])
+  const after = cols(m[2])
+  const added = after.filter((c) => !before.includes(c))
+  if (!before.length || !before.every((c) => after.includes(c)) || !added.length) return true
+  const partition = /\bpartition_by\s*=\s*(\[[^\]]*\]|\{[^}]*\}|['"][^'"]*['"])/i.exec(newSql)?.[1]?.toLowerCase() ?? ""
+  return !added.every((c) => new RegExp(`['"]${c.replace(/\W/g, "")}['"]`).test(partition))
+}
+
 async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVars: Set<string> = new Set()): Promise<Finding[]> {
   if (!runner.dbtConfigLint) return []
   const { file, newSql, oldSql } = ctx
@@ -1179,6 +1212,8 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVar
       const esc = name?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
       if (name && (projectVars.has(name) || new RegExp(`var\\(\\s*['"]${esc}['"]\\s*,`).test(newSql))) continue
     }
+    if (f.rule === "incremental_no_guard" && !introducesUnguardedIncremental(newSql, hasOldSide(file) ? oldSql : undefined)) continue
+    if (f.rule === "unique_key_change" && !changesMergeGrain(f.message, newSql, hasOldSide(file) ? oldSql : undefined)) continue
     const cat: ReviewCategory = /var_no_default|microbatch|incremental|materialization/.test(f.rule)
       ? "materialization"
       : /contract/.test(f.rule)

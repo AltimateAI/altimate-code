@@ -349,12 +349,12 @@ describe("engine check results in a dbt model", () => {
       ]),
     ).toHaveLength(0)
   })
-  test("a parser syntax error is a suggestion; an unresolved column stays a warning", async () => {
+  test("a parser syntax error is dropped (the model compiled); an unresolved column stays a warning", async () => {
     const fs = await review([
       { rule: "validate", message: "Syntax error: sql parser error: Expected: ), found: omit" },
       { rule: "validate", message: "Column 'group_name' not found in table 'run_results'" },
     ])
-    expect(fs.find((f) => /Syntax/.test(f.body))?.severity).toBe("suggestion")
+    expect(fs.find((f) => /Syntax/.test(f.body))).toBeUndefined()
     expect(fs.find((f) => /not found/.test(f.body))?.severity).toBe("warning")
   })
 })
@@ -395,5 +395,114 @@ describe("config dict with a nested dict", () => {
     const out = inlineConfigSplats(sql)
     expect(out).toContain(`materialized= "incremental"`)
     expect(out).toContain(`partition_by= {"field": "day", "granularity": "day"}`)
+  })
+})
+
+describe("join, CASE and range detectors need the risky shape, not a look-alike", () => {
+  const titles = (sql: string, added = sql.split("\n")) =>
+    detectModelPatterns({ path: "models/m.sql", status: "modified", diff: added.map((l) => "+" + l).join("\n") }, sql, DEFAULT_RUBRIC).map(
+      (f) => f.title,
+    )
+  const has = (sql: string, frag: string, added?: string[]) => titles(sql, added).some((t) => t.includes(frag))
+
+  test("fan-out: MIN/MAX and COUNT(DISTINCT) can't inflate; SUM and COUNT can", () => {
+    const join = "left join {{ ref('items') }} i on i.oid = o.id"
+    const q = (agg: string) => `select o.customer_id, ${agg} from o\n${join}\ngroup by 1`
+    expect(has(q("count(distinct i.id) as n"), "fan out", [join])).toBe(false)
+    expect(has(q("max(i.created_at) as last_at"), "fan out", [join])).toBe(false)
+    expect(has(q("sum(i.amount) as amount"), "fan out", [join])).toBe(true)
+    expect(has(q("count(*) as n"), "fan out", [join])).toBe(true)
+  })
+
+  test("CASE without ELSE: pivots, conditional counts and coalesce fallbacks are intended NULLs", () => {
+    expect(has("select max(case when field = 'status' then value end) as status from t", "CASE without ELSE")).toBe(false)
+    expect(has("select count(case when opened then 1 end) as opens from t", "CASE without ELSE")).toBe(false)
+    expect(has("select coalesce(case when is_parent then amount end, 0) as a from t", "CASE without ELSE")).toBe(false)
+    expect(has("select case when a > 0 then 'pos' end as sign from t", "CASE without ELSE")).toBe(true)
+  })
+
+  test("self-join: the same ref in two CTEs or two UNION branches is not a self-join", () => {
+    const ctes =
+      "with a as (select * from {{ ref('cert') }} where x),\nb as (select * from {{ ref('cert') }} where y)\nselect * from a join b on a.id = b.id"
+    expect(has(ctes, "self-join")).toBe(false)
+    const union = "select * from {{ ref('s') }} join t1 on 1=1\nunion all\nselect * from {{ ref('s') }} join t2 on 1=1"
+    expect(has(union, "self-join")).toBe(false)
+    expect(has("select * from {{ ref('o') }} a\njoin {{ ref('o') }} b on a.parent_id = b.id", "self-join")).toBe(true)
+    expect(has("with o as (select * from x)\nselect * from o a\njoin o b on a.parent_id = b.id", "self-join")).toBe(true)
+  })
+
+  test("BETWEEN: inclusive on a date column is correct; on a timestamp it double-counts", () => {
+    expect(has("select * from t where entrydate between '2024-01-01' and '2024-06-30'", "BETWEEN")).toBe(false)
+    expect(has("select * from t where report_date between a and b", "BETWEEN")).toBe(false)
+    expect(has("select * from t where created_at between '2024-01-01' and '2024-12-31'", "BETWEEN")).toBe(true)
+  })
+})
+
+describe("dbt-config lint: only what this PR changes about incremental behaviour", () => {
+  const runner = (rule: string, message: string) =>
+    ({
+      async impact() {
+        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: [], ran: true }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+      async dbtConfigLint() {
+        return [{ rule, message, code: "DBT000", severity: "warning" }]
+      },
+    }) as unknown as ReviewRunner
+  const review = async (rule: string, message: string, newSql: string, oldSql?: string) => {
+    const env = await runReview({
+      changedFiles: [{ path: "models/m.sql", status: oldSql === undefined ? "added" : "modified", diff: "+select 1" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: runner(rule, message),
+      getContent: async (f, side) => (f === "dbt_project.yml" ? "name: x\n" : side === "old" ? oldSql : newSql),
+    })
+    return env.findings.filter((f) => f.title.includes(rule.replace(/_/g, " ")))
+  }
+  const NO_GUARD = "Incremental model has no `is_incremental()` guard"
+  const inc = "{{ config(materialized='incremental') }}\n"
+
+  test("incremental no guard: a macro-generated model carries its guard in the macro", async () => {
+    expect(await review("incremental_no_guard", NO_GUARD, inc + "{{ amm_base_trades(blockchain='x') }}")).toHaveLength(0)
+  })
+  test("incremental no guard: already unguarded before the PR is not this PR's finding", async () => {
+    const before = inc + "select * from {{ ref('a') }}"
+    expect(await review("incremental_no_guard", NO_GUARD, before + "\nwhere x > 1", before)).toHaveLength(0)
+  })
+  test("incremental no guard: a new model, a removed guard, or a switch to incremental is reported", async () => {
+    const sql = inc + "select * from {{ ref('a') }}"
+    expect(await review("incremental_no_guard", NO_GUARD, sql)).toHaveLength(1)
+    expect(await review("incremental_no_guard", NO_GUARD, sql, sql + "\n{% if is_incremental() %} where ts > 1 {% endif %}")).toHaveLength(1)
+    expect(await review("incremental_no_guard", NO_GUARD, sql, "{{ config(materialized='table') }}\nselect * from {{ ref('a') }}")).toHaveLength(1)
+  })
+
+  test("unique key change: microbatch ignores unique_key; adding the partition column keeps the grain", async () => {
+    const mb = "{{ config(materialized='incremental', incremental_strategy='microbatch') }}\nselect 1"
+    expect(await review("unique_key_change", "`m` changed [day, account_id] → []. The incremental merge target differs", mb, mb)).toHaveLength(0)
+    const part = "{{ config(materialized='incremental', partition_by=['block_month'], unique_key=['block_month','tx_hash']) }}\nselect 1"
+    expect(await review("unique_key_change", "`m` changed [tx_hash] → [block_month, tx_hash]. The merge target differs", part, part)).toHaveLength(0)
+  })
+  test("unique key change: a different grain is still reported", async () => {
+    const sql = "{{ config(materialized='incremental', unique_key=['order_id']) }}\nselect 1"
+    expect(await review("unique_key_change", "`m` changed [order_id, line_id] → [order_id]. The merge target differs", sql, sql)).toHaveLength(1)
+    expect(await review("unique_key_change", "`m` changed [order_id] → [customer_id]. The merge target differs", sql, sql)).toHaveLength(1)
+  })
+})
+
+describe("<> drops NULLs only in a filter", () => {
+  test("a CASE or select-list comparison filters nothing", () => {
+    expect(fires("not-equal-drops-null", "select case when kind != 'x' then 1 end from t", ["select case when kind != 'x' then 1 end from t"])).toBe(false)
+    expect(fires("not-equal-drops-null", "select\n  status <> 'void' as is_live\nfrom t", ["  status <> 'void' as is_live"])).toBe(false)
+    expect(fires("not-equal-drops-null", "select * from t\nwhere status <> 'cancelled'", ["where status <> 'cancelled'"])).toBe(true)
+    expect(fires("not-equal-drops-null", "select * from t\nwhere a\n  and status != 'x'", ["  and status != 'x'"])).toBe(true)
   })
 })

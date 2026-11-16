@@ -166,10 +166,63 @@ const detectCrossJoin: Detector = (c) => {
   })
 }
 
+const INFLATING_AGGREGATE = /\b(sum|avg)\s*\(|\bcount\s*\(\s*(?!distinct\b)/i
+const NULL_CONSUMING_CALL =
+  /\b(sum|count|avg|min|max|any_value|array_agg|listagg|string_agg|count_if|bool_or|bool_and|coalesce|ifnull|nvl|nullif)\s*\(\s*(distinct\s+)?$/i
+
+/** The SELECT bodies of a query: each CTE body and each UNION branch, split at top level. */
+function selectScopes(sql: string): string[] {
+  const scopes: string[] = []
+  let depth = 0
+  let start = 0
+  const cut = (end: number) => {
+    const s = sql.slice(start, end).trim()
+    if (s) scopes.push(s)
+  }
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]
+    if (ch === "(") {
+      depth++
+      if (depth === 1 && /\bas\s*$/i.test(sql.slice(Math.max(0, i - 8), i))) {
+        cut(i)
+        start = i + 1
+      }
+    } else if (ch === ")") {
+      if (depth === 1) {
+        cut(i)
+        start = i + 1
+      }
+      depth = Math.max(0, depth - 1)
+    } else if (depth <= 1 && /^\bunion\b/i.test(sql.slice(i, i + 6)) && /\W/.test(sql[i - 1] ?? " ")) {
+      cut(i)
+      start = i + 5
+    }
+  }
+  cut(sql.length)
+  return scopes
+}
+
+/** True when one relation is read twice in a scope's own FROM … JOIN chain. */
+function scopeJoinsItself(scope: string): boolean {
+  // Mask nested parentheses so a subquery's FROM counts as its own scope.
+  let depth = 0
+  let flat = ""
+  for (const ch of scope) {
+    if (ch === "(") depth++
+    if (depth === 0) flat += ch
+    else flat += ch === "\n" ? "\n" : " "
+    if (ch === ")") depth = Math.max(0, depth - 1)
+  }
+  const rels = [...flat.matchAll(/\b(?:from|join)\s+(\{\{[^}]*\}\}|[\w."`]+)/gi)].map((m) => m[1].replace(/\s+/g, "").toLowerCase())
+  return /\bjoin\b/i.test(flat) && rels.some((r, i) => rels.indexOf(r) !== i)
+}
+
 // 7. A new JOIN added into a model that aggregates → likely fan-out inflating SUM/COUNT.
 const detectFanout: Detector = (c) => {
   const sql = stripComments(c.newSql)
-  const aggregates = /\b(sum|count|avg|min|max)\s*\(/i.test(sql) && /\bgroup\s+by\b/i.test(sql)
+  // MIN/MAX and COUNT(DISTINCT …) return the same value however often a row repeats;
+  // only SUM, AVG and a plain COUNT inflate under a fan-out join.
+  const aggregates = INFLATING_AGGREGATE.test(sql) && /\bgroup\s+by\b/i.test(sql)
   if (!aggregates) return null
   const newJoins = c.added.filter((l) => /\bjoin\b/i.test(stripComments(l)) && !/\bcross\s+join\b/i.test(l))
   if (newJoins.length < 1) return null
@@ -667,8 +720,13 @@ const detectHavingNoGroupBy: Detector = (c) => {
 // 34. CASE expression with no ELSE → silent NULLs for unmatched rows.
 const detectCaseNoElse: Detector = (c) => {
   const joined = stripComments(c.added.join("\n"))
-  const m = /\bcase\b[\s\S]*?\bend\b/i.exec(joined)
-  if (!m || /\belse\b/i.test(m[0])) return null
+  // NULL for unmatched rows is the point of a CASE inside an aggregate or a null-handling
+  // call: the `max(case when k = 'x' then v end)` pivot, `count(case when … then 1 end)`,
+  // `coalesce(case … end, fallback)`. Only a bare CASE leaks NULLs unintentionally.
+  const bare = [...joined.matchAll(/\bcase\b[\s\S]*?\bend\b/gi)].find(
+    (m) => !/\belse\b/i.test(m[0]) && !NULL_CONSUMING_CALL.test(joined.slice(0, m.index)),
+  )
+  if (!bare) return null
   return pattern(
     c,
     "sql_correctness",
@@ -712,11 +770,12 @@ const detectNaturalJoin: Detector = (c) => {
 // 38. Self-join: same ref()/source() appears 2+ times.
 const detectSelfJoin: Detector = (c) => {
   if (!addedHit(c, /\bjoin\b/i)) return null
-  const refs = [...stripComments(c.newSql).matchAll(/\{\{\s*(ref|source)\([^)]*\)\s*\}\}/gi)].map((m) =>
-    m[0].replace(/\s+/g, ""),
+  // A self-join reads one relation twice in the same FROM … JOIN chain. The same ref in two
+  // CTEs, or in two UNION branches, is two separate reads, not a self-join.
+  const sql = stripComments(c.newSql).replace(/\{\{\s*(ref|source)\s*\(([^)]*)\)\s*\}\}/gi, (_, kind, args) =>
+    `__${kind}_${String(args).replace(/\W+/g, "_")}__`.toLowerCase(),
   )
-  const dup = refs.find((r, i) => refs.indexOf(r) !== i)
-  if (!dup) return null
+  if (!selectScopes(sql).some(scopeJoinsItself)) return null
   return pattern(
     c,
     "join_risk",
@@ -763,7 +822,8 @@ const detectWindowNoPartition: Detector = (c) => {
 
 // 40. BETWEEN on a timestamp/date — inclusive upper bound off-by-one.
 const detectBetweenTimestamp: Detector = (c) => {
-  const hit = c.added.find((l) => /\bbetween\b/i.test(stripComments(l)) && /(_at|_ts|date|timestamp|_time)\b/i.test(l))
+  // On a DATE column BETWEEN is the right inclusive range; the off-by-one needs a time part.
+  const hit = c.added.find((l) => /\b[\w.]*(_at|_ts|timestamp|datetime|_time)\s+between\b/i.test(stripComments(l)))
   if (!hit) return null
   return pattern(
     c,

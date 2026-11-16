@@ -287,6 +287,24 @@ describe("validation against a partial schema", () => {
     expect((await runner.check("select id from stg", "duckdb")).issues?.some((i) => i.rule === "validate")).toBe(false)
   })
 
+  test("manifest-only schema: an undocumented column is not reported as missing", async () => {
+    await using tmp = await tmpdir()
+    const manifestPath = path.join(tmp.path, "manifest.json")
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        nodes: {
+          "model.d.fct": { resource_type: "model", name: "fct", depends_on: { nodes: [] }, columns: { id: { name: "id", data_type: "int" } } },
+        },
+        sources: {},
+      }),
+    )
+    const colNotFound = { data: { validation: { errors: [{ message: "Column 'name' not found in table 'fct'" }] } } }
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => colNotFound) as any)
+    const runner = createDispatcherRunner({ manifestPath })
+    expect((await runner.check("select id, name from fct", "duckdb")).issues?.some((i) => i.rule === "validate")).toBe(false)
+  })
+
   test("catalog schema: a missing table is still reported", async () => {
     await using tmp = await tmpdir()
     dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => notFound) as any)
