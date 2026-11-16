@@ -1214,13 +1214,38 @@ describe("both tools: names at the edges", () => {
   })
 
   test("a repeated name beside a * doesn't settle: the warehouse renames it", () => {
+    // With AS, without AS, and after a quoted name that is a keyword.
+    for (const item of ["val as id", "val id", `val as "from", val as id`]) {
+      const path = write(nodes("duckdb", [
+        model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        model("r", ["f"], `select *, ${item} from ${T("f")}`),
+        model("child", ["r"], `select id_1 as x from ${T("r")}`),
+      ]))
+      expect(columnReach(path, "r", "id_1").models.map((one) => one.name)).toEqual(["child"])
+      expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+    }
+  })
+
+  test("a COLUMNS() alias without a \\N marker is the output's name, not a template", () => {
     const path = write(nodes("duckdb", [
-      model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
-      model("r", ["f"], `select *, val as id from ${T("f")}`),
-      model("child", ["r"], `select id_1 as x from ${T("r")}`),
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, columns('amount') as total, columns('amount') as "x_\\0" from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
     ]))
-    expect(columnReach(path, "r", "id_1").models.map((one) => one.name)).toEqual(["child"])
-    expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    const names = Object.keys((lineage.raw_lineage as any).column_dict ?? {})
+    expect(names).toContain("total")
+    expect(names).not.toContain("x_\\0")
+  })
+
+  test("a quoted name holding a paren doesn't hide a COLUMNS() template", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], `select 1 as id, 2.5 as "amount)"`, ["id", "amount)"]),
+      model("r", ["f"], `select id, columns("amount)") as "x_\\0" from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).not.toContain("x_\\0")
   })
 
   test("a COLUMNS() call elsewhere in the SQL leaves a real backslash alias a column", () => {
@@ -1246,6 +1271,12 @@ describe("both tools: names at the edges", () => {
         expect(up.may_carry.map((m) => m.name)).not.toContain("orders")
       }
     }
+    // A quoted name that is a keyword doesn't end the SELECT list, so the cast after it is still read.
+    const quoted = write(nodes("postgres", [
+      model("orders", [], `select 1 as "order", 2.5 as amount`, ["order", "amount"]),
+      model("r", ["orders"], `select "order", amount::numeric from ${T("orders")}`),
+    ]))
+    expect(carried(columnAnswer(quoted, "orders", "amount"))).toEqual(["r.amount"])
     // Elsewhere the warehouse picks another name: the engine's label stays.
     const duck = write(nodes("duckdb", [
       model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),

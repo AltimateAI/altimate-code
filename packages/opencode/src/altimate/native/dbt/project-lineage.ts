@@ -120,7 +120,8 @@ const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowe
  * top-level commas, from literal- and comment-stripped SQL; [] when there is none.
  */
 export function selectItems(stripped: string): string[] {
-  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => q.replace(/[(),]/g, " "))
+  // A quoted name is blanked whole, so `"from"` or `"a,b"` ends no item.
+  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
   let depth = 0
   let start = -1
   const items: string[] = []
@@ -154,13 +155,27 @@ export function selectItems(stripped: string): string[] {
   return items.filter((one) => one !== "")
 }
 
-/** A SELECT item's output name when the SQL gives one (`x as name`, a bare `t.col`), `*` for a star, else null. */
+/** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
+const ENDS_EXPRESSION = /^(?:null|true|false|end)$/i
+/** Words after which the next word is an operand (`a and b`, `sum(x) over w`), not an alias. */
+const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|between|case|when|then|else|over|collate|escape|interval|distinct|by|as|at|zone|any|all|some|exists)$/i
+
+/**
+ * A SELECT item's output name when the SQL gives one (`x as name`, `x name`, a bare `t.col`), `*` for a star,
+ * else null.
+ */
 export function itemName(item: string): string | null {
   if (/^(?:[\w$]+\.)*\*(?:\s|$)/.test(item)) return "*"
   const as = new RegExp(`\\s+as\\s+(${QUOTED}|[\\w$]+)$`, "i").exec(item)
   if (as) return unquoteName(as[1]!)
   const bare = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(item)
-  return bare ? unquoteName(bare[1]!) : null
+  if (bare) return unquoteName(bare[1]!)
+  // An alias without AS: the last word, after an expression that ends in a name, a `)`, a quote or a literal.
+  const plain = new RegExp(`^([\\s\\S]*?[\\w$)"\`\\]'])\\s+(${QUOTED}|[\\w$]+)$`).exec(item)
+  if (!plain) return null
+  const before = /([\w$]+)\s*$/.exec(plain[1]!)?.[1]
+  if ((before && TAKES_OPERAND.test(before)) || /(?<![\w$])interval\s+''$/i.test(plain[1]!)) return null
+  return ENDS_EXPRESSION.test(plain[2]!) ? null : unquoteName(plain[2]!)
 }
 
 /** The column a SELECT item casts, unaliased (`amount::numeric`, `cast(t.amount as numeric)`); null otherwise. */
@@ -170,19 +185,24 @@ function castColumn(item: string): string | null {
   return m ? unquoteName(m[1]!) : null
 }
 
-/** The names `COLUMNS(...) AS "…"` items give (DuckDB alias templates such as `"col_\0"`), lower-cased. */
+/**
+ * The alias templates `COLUMNS(...) AS "…"` items give (DuckDB's `"col_\0"`, which hold a `\N` marker), lower-cased.
+ * An alias without a marker is the output's own name.
+ */
 function columnsTemplates(stripped: string): Set<string> {
   const out = new Set<string>()
   const call = new RegExp(COLUMNS_CALL.source, "gi")
-  for (let m = call.exec(stripped); m; m = call.exec(stripped)) {
+  // A quoted name is blanked whole, so a `)` or `columns(` inside one neither ends nor starts a call.
+  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+  for (let m = call.exec(text); m; m = call.exec(text)) {
     let depth = 0
     let i = m.index + m[0].length - 1
-    for (; i < stripped.length; i++) {
-      if (stripped[i] === "(") depth++
-      else if (stripped[i] === ")" && --depth === 0) break
+    for (; i < text.length; i++) {
+      if (text[i] === "(") depth++
+      else if (text[i] === ")" && --depth === 0) break
     }
     const alias = new RegExp(`^\\s*as\\s+(${QUOTED}|[\\w$]+)`, "i").exec(stripped.slice(i + 1))
-    if (alias) out.add(unquoteName(alias[1]!))
+    if (alias && /\\\d/.test(alias[1]!)) out.add(unquoteName(alias[1]!))
   }
   return out
 }
