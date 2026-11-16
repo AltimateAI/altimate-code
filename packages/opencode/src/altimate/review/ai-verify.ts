@@ -7,7 +7,7 @@
 // not the model — decides what is kept. Opt-in (`ALTIMATE_REVIEW_AI_VERIFY=1`)
 // and fail-open: any error, timeout or exhausted budget leaves the findings it
 // did not review unchanged.
-import { tool, type ModelMessage, type Tool } from "ai"
+import { asSchema, tool, type ModelMessage, type Tool } from "ai"
 import z from "zod"
 import type { Provider } from "@/provider/provider"
 import { LLM } from "@/session/llm"
@@ -547,7 +547,9 @@ export function applyTriage(
 // ---------------------------------------------------------------------------
 
 /** Tokens (input incl. cached + output) one PR's verifier may spend before it must answer. */
-export const VERIFY_MAX_TOKENS = 20_000
+export const VERIFY_MAX_TOKENS = 12_000
+/** Output tokens reserved for each model call when planning the budget. */
+export const VERIFY_OUTPUT_RESERVE = 1_000
 /** Tool-output characters one batch may accumulate before it must answer. */
 export const VERIFY_MAX_TOOL_CHARS = 16_000
 /** Tool calls run per round; extra calls get a refusal. */
@@ -845,9 +847,20 @@ function answeredCalls(messages: ModelMessage[]): Set<string> {
   return out
 }
 
-/** Rough token count for a step whose provider reported no usage (4 characters per token). */
-function estimateTokens(req: VerifierStepRequest, text: string): number {
-  return Math.ceil((req.system.length + JSON.stringify(req.messages).length + text.length) / 4)
+/** Characters of the tool declarations as sent (descriptions plus JSON schemas). */
+export function toolsChars(tools: Record<string, Tool>): number {
+  return JSON.stringify(
+    Object.entries(tools).map(([name, t]) => ({
+      name,
+      description: t.description,
+      parameters: asSchema(t.inputSchema as Parameters<typeof asSchema>[0]).jsonSchema,
+    })),
+  ).length
+}
+
+/** Input characters of one request: system prompt, tool declarations and messages. */
+function requestChars(fixedChars: number, messages: ModelMessage[]): number {
+  return fixedChars + JSON.stringify(messages).length
 }
 
 interface BatchOutcome {
@@ -861,8 +874,9 @@ interface BatchOutcome {
 
 /**
  * One batch's conversation: up to 3 tool rounds, then a forced answer. The
- * answer is forced early (toolChoice "none") once the batch's token share or
- * the tool-output budget is spent.
+ * answer is forced early (toolChoice "none") when another tool round plus the
+ * answer after it would not fit the batch's token share, or the tool-output
+ * budget is spent; the forced answer is thereby budgeted for.
  */
 async function verifyBatch(
   message: string,
@@ -874,6 +888,8 @@ async function verifyBatch(
     tools: Record<string, Tool>
     abort: AbortSignal
     maxTokens: number
+    /** Characters every request repeats: system prompt plus tool declarations. */
+    fixedChars: number
   },
 ): Promise<BatchOutcome> {
   const messages: ModelMessage[] = [{ role: "user", content: message }]
@@ -881,11 +897,21 @@ async function verifyBatch(
   let tokens = 0
   let toolChars = 0
   let rounds = 0
+  // Characters per input token, calibrated from reported usage.
+  let charsPerToken = 4
   try {
     for (;;) {
-      const overBudget = tokens > ctx.maxTokens || toolChars > VERIFY_MAX_TOOL_CHARS
+      // Budget planning: another tool round costs one call now, then the forced
+      // answer costs at least as much again plus that round's tool output. Take
+      // the round only if all of it fits, so the answer itself stays in budget.
+      const nextCall = (extra = 0) =>
+        Math.ceil((requestChars(ctx.fixedChars, messages) + ANSWER_NOW.length + extra) / charsPerToken) +
+        VERIFY_OUTPUT_RESERVE
+      const roundOutput = Math.min(VERIFY_MAX_CALLS_PER_ROUND * TOOL_OUTPUT_MAX, VERIFY_MAX_TOOL_CHARS - toolChars)
+      const roomForRound = tokens + nextCall() + nextCall(roundOutput) <= ctx.maxTokens
+      const overBudget = !roomForRound || toolChars > VERIFY_MAX_TOOL_CHARS
       const force = rounds >= VERIFY_MAX_ROUNDS || overBudget
-      if (overBudget) out.state = "budget"
+      if (overBudget && rounds < VERIFY_MAX_ROUNDS) out.state = "budget"
       if (force && rounds > 0) messages.push({ role: "user", content: ANSWER_NOW })
       const req: VerifierStepRequest = {
         system: ctx.system,
@@ -897,7 +923,11 @@ async function verifyBatch(
       const step = await ctx.llm(req)
       out.turns++
       if (step.usage) out.usage = out.usage ? addUsage(out.usage, step.usage) : step.usage
-      tokens += step.usage ? step.usage.tokens.inputTotal + step.usage.tokens.output : estimateTokens(req, step.text)
+      const sentChars = requestChars(ctx.fixedChars, req.messages)
+      if (step.usage?.tokens.inputTotal) {
+        tokens += step.usage.tokens.inputTotal + step.usage.tokens.output
+        charsPerToken = Math.min(8, Math.max(1.5, sentChars / step.usage.tokens.inputTotal))
+      } else tokens += Math.ceil((sentChars + step.text.length) / charsPerToken)
       if (ctx.abort.aborted) throw ctx.abort.reason ?? new Error("aborted")
       if (force || step.finishReason !== "tool-calls" || !step.toolCalls.length) {
         out.verdicts = parseVerifierOutput(step.text, ids)
@@ -1027,12 +1057,15 @@ export async function runAiVerify(
     const tools = Object.fromEntries(
       Object.entries(defs).map(([name, d]) => [name, tool({ description: d.description, inputSchema: d.input })]),
     ) as Record<string, Tool>
+    const system = input.system ?? VERIFY_SYSTEM_PROMPT
     const ctx = {
-      system: input.system ?? VERIFY_SYSTEM_PROMPT,
+      system,
+      fixedChars: system.length + toolsChars(tools),
       llm,
       defs,
       tools,
       abort: controller.signal,
+      // Each batch gets an equal share of the PR's budget.
       maxTokens: maxTokensFrom(env) / batches.length,
     }
     const outcomes: BatchOutcome[] = []
@@ -1058,7 +1091,7 @@ export async function runAiVerify(
     if (timeout) [state, reason] = ["timeout", timeout.reason]
     else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
     else if (outcomes.some((o) => o.state === "budget"))
-      [state, reason] = ["budget", "token or tool-output budget reached; answered early"]
+      [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
     if (errors.length && state !== "error")
       reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`]
         .filter(Boolean)
