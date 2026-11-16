@@ -271,8 +271,29 @@ export namespace ProviderTransform {
     return msgs
   }
 
+  // altimate_change start — upstream_fix: per-step system text keeps its place but never takes a cache mark.
+  // The marks go on the first two system messages that are not flagged; the flag is removed before sending.
+  const UNMARKED = "altimateUnmarked"
+  export function unmarkedSystem(content: string): ModelMessage {
+    return { role: "system", content, providerOptions: { [UNMARKED]: {} } }
+  }
+  function isUnmarked(msg: ModelMessage): boolean {
+    return msg.role === "system" && msg.providerOptions?.[UNMARKED] !== undefined
+  }
+  function stripUnmarked(msgs: ModelMessage[]): ModelMessage[] {
+    return msgs.map((msg) => {
+      if (!isUnmarked(msg)) return msg
+      const { [UNMARKED]: _, ...rest } = msg.providerOptions!
+      const { providerOptions: __, ...plain } = msg
+      return (Object.keys(rest).length ? { ...plain, providerOptions: rest } : plain) as ModelMessage
+    })
+  }
+  // altimate_change end
+
   function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
-    const system = msgs.filter((msg) => msg.role === "system").slice(0, 2)
+    // altimate_change start — upstream_fix: a flagged system message is never one of the two marked
+    const system = msgs.filter((msg) => msg.role === "system" && !isUnmarked(msg)).slice(0, 2)
+    // altimate_change end
     const final = msgs.filter((msg) => msg.role !== "system").slice(-2)
 
     const providerOptions = {
@@ -559,6 +580,9 @@ export namespace ProviderTransform {
     if (usesExplicitCacheBreakpoints(model)) {
       msgs = applyCaching(msgs, model)
     }
+    // altimate_change start — upstream_fix: the never-marked flag is ours, not the provider's
+    msgs = stripUnmarked(msgs)
+    // altimate_change end
 
     // Remap providerOptions keys from stored providerID to expected SDK key
     const key = sdkKey(model.api.npm)

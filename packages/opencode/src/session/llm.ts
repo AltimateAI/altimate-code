@@ -208,6 +208,10 @@ export namespace LLM {
       system.length = 0
       system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...kept)
     }
+    // The reminders message is sent flagged, so it never takes one of the two system cache marks:
+    // with no environment message it would otherwise be the second system message and be marked.
+    const reminderText = splitEnvironment && input.reminders?.length ? input.reminders.join("\n") : undefined
+    const reminderAt = reminderText === undefined ? -1 : system.lastIndexOf(reminderText)
     // altimate_change end
 
     const variant =
@@ -486,12 +490,17 @@ export namespace LLM {
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
+        // altimate_change start — upstream_fix: the reminders message is never a cache-marked one
         ...system.map(
-          (x): ModelMessage => ({
-            role: "system",
-            content: x,
-          }),
+          (x, index): ModelMessage =>
+            index > 0 && index === reminderAt
+              ? ProviderTransform.unmarkedSystem(x)
+              : {
+                  role: "system",
+                  content: x,
+                },
         ),
+        // altimate_change end
         // altimate_change start — a request that declares no tools must not carry tool-call
         // messages. The toolless agents (compaction, title, summary) summarize a session's own
         // history, so they would otherwise send tool calls referencing functions the request

@@ -201,8 +201,14 @@ it.live("after a compaction the task pin is its own message after the marked env
       // Header and environment are byte-identical and keep their cache marks.
       expect(text(after[0].content)).toBe(text(before[0].content))
       expect(text(after[1].content)).toBe(text(before[1].content))
+      expect(marked(before[0])).toBe(true)
+      expect(marked(after[0])).toBe(true)
       expect(marked(before[1])).toBe(true)
       expect(marked(after[1])).toBe(true)
+      // The layout the gateway A/B measured: header, environment, pin; the marked pair is
+      // byte-identical on the wire, marks included, and the internal never-marked flag is not sent.
+      expect(JSON.stringify(after.slice(0, 2))).toBe(JSON.stringify(before))
+      expect(JSON.stringify(after[2])).not.toContain("altimateUnmarked")
       // The pin is a separate, unmarked, trailing system message.
       expect(after.length).toBe(3)
       expect(text(after[2].content)).toContain(PIN_MARK)

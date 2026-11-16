@@ -20,6 +20,57 @@ const NPM: Record<string, string> = {
   google: "@ai-sdk/google",
 }
 
+function testModel(providerID: string, explicit: boolean): Provider.Model {
+  return {
+    id: ModelID.make(explicit ? "claude-test" : "plain-test"),
+    providerID: ProviderID.make(providerID),
+    api: {
+      id: explicit ? "claude-test" : "plain-test",
+      url: "https://example.invalid",
+      npm: NPM[providerID],
+    },
+    name: "Test model",
+    capabilities: {
+      temperature: false,
+      reasoning: false,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 200_000, output: 4096 },
+    status: "active",
+    options: {},
+    headers: {},
+    release_date: "2026-01-01",
+  }
+}
+
+function finishingLanguage(model: Provider.Model) {
+  return new MockLanguageModelV3({
+    provider: model.providerID,
+    modelId: model.api.id,
+    doStream: async () => ({
+      stream: simulateReadableStream({
+        chunks: [
+          {
+            type: "finish" as const,
+            finishReason: { unified: "stop" as const, raw: "stop" },
+            usage: {
+              inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 0, text: 0, reasoning: 0 },
+            },
+          },
+        ],
+        initialDelayInMs: null,
+        chunkDelayInMs: null,
+      }),
+    }),
+  })
+}
+
 describe("session system cache prefix", () => {
   for (const providerID of ["anthropic", "amazon-bedrock", "openai", "google"]) {
     const explicit = providerID === "anthropic" || providerID === "amazon-bedrock"
@@ -27,51 +78,8 @@ describe("session system cache prefix", () => {
       const reminders = reminder ? ["<system-reminder>\nOriginal task: count the rows.\n</system-reminder>"] : undefined
       const named = `plugin instructions ${pluginInstructions}${reminder ? " and a hoisted reminder" : ""}`
       test(`${providerID} keeps a marked prefix across directories with ${named}`, async () => {
-        const model: Provider.Model = {
-          id: ModelID.make(explicit ? "claude-test" : "plain-test"),
-          providerID: ProviderID.make(providerID),
-          api: {
-            id: explicit ? "claude-test" : "plain-test",
-            url: "https://example.invalid",
-            npm: NPM[providerID],
-          },
-          name: "Test model",
-          capabilities: {
-            temperature: false,
-            reasoning: false,
-            attachment: false,
-            toolcall: true,
-            input: { text: true, audio: false, image: false, video: false, pdf: false },
-            output: { text: true, audio: false, image: false, video: false, pdf: false },
-            interleaved: false,
-          },
-          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-          limit: { context: 200_000, output: 4096 },
-          status: "active",
-          options: {},
-          headers: {},
-          release_date: "2026-01-01",
-        }
-        const language = new MockLanguageModelV3({
-          provider: providerID,
-          modelId: model.api.id,
-          doStream: async () => ({
-            stream: simulateReadableStream({
-              chunks: [
-                {
-                  type: "finish" as const,
-                  finishReason: { unified: "stop" as const, raw: "stop" },
-                  usage: {
-                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-                    outputTokens: { total: 0, text: 0, reasoning: 0 },
-                  },
-                },
-              ],
-              initialDelayInMs: null,
-              chunkDelayInMs: null,
-            }),
-          }),
-        })
+        const model = testModel(providerID, explicit)
+        const language = finishingLanguage(model)
         const mocks = [
           spyOn(Provider, "getLanguage").mockResolvedValue(language),
           spyOn(Provider, "getProvider").mockResolvedValue({
@@ -200,5 +208,74 @@ describe("session system cache prefix", () => {
         }
       })
     }
+  }
+
+  // The marks go on the first two system messages. A reminder is per-step text, so it must never
+  // be one of them, including when there is no environment message to carry the second mark.
+  for (const providerID of ["anthropic", "amazon-bedrock"]) {
+    test(`${providerID} never marks a reminder sent without an environment`, async () => {
+      const model = testModel(providerID, true)
+      const language = finishingLanguage(model)
+      const reminder = "<system-reminder>\nOriginal task: count the rows.\n</system-reminder>"
+      const mocks = [
+        spyOn(Provider, "getLanguage").mockResolvedValue(language),
+        spyOn(Provider, "getProvider").mockResolvedValue({
+          id: model.providerID,
+          name: "Test provider",
+          source: "config",
+          env: [],
+          options: {},
+          models: {},
+        }),
+        spyOn(Config, "get").mockResolvedValue({}),
+        spyOn(Auth, "get").mockResolvedValue(undefined),
+        spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output),
+      ]
+      try {
+        await using dir = await tmpdir()
+        await Instance.restore(
+          {
+            directory: dir.path,
+            worktree: dir.path,
+            project: { id: ProjectID.global, worktree: dir.path, time: { created: 0, updated: 0 }, sandboxes: [] },
+          },
+          async () => {
+            const sessionID = SessionID.make("ses_reminder_only")
+            const result = await LLM.stream({
+              sessionID,
+              model,
+              agent: { name: "test", mode: "primary", options: {}, permission: [] },
+              user: {
+                id: MessageID.make("msg_reminder_only"),
+                sessionID,
+                role: "user",
+                agent: "test",
+                model: { providerID: model.providerID, modelID: model.id },
+                time: { created: 0 },
+              },
+              system: ["Project instructions."],
+              environment: [],
+              reminders: [reminder],
+              messages: [{ role: "user", content: "Inspect the project." }],
+              tools: {},
+              abort: new AbortController().signal,
+            })
+            await result.consumeStream({
+              onError: (error) => {
+                throw error
+              },
+            })
+          },
+        )
+        const system = language.doStreamCalls[0].prompt.filter((message) => message.role === "system")
+        expect(system).toHaveLength(2)
+        expect(system[0].content).toContain("Project instructions.")
+        expect(system[0].providerOptions).toBeDefined()
+        expect(system[1].content).toBe(reminder)
+        expect(system[1].providerOptions).toBeUndefined()
+      } finally {
+        for (const mock of mocks) mock.mockRestore()
+      }
+    })
   }
 })
