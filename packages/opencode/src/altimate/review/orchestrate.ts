@@ -615,6 +615,24 @@ function checkEvidence(issue: { line?: number }, sql: string, linesMatchFile: bo
   return { ...issue, line: text, compiledLine: issue.line }
 }
 
+/**
+ * Fallback line for a non-deterministic-dedup issue on compiled SQL whose
+ * compiled text is not in the raw diff (the window came from a macro, or a
+ * Jinja-built line): the added line that opens a `row_number()` over the
+ * named time column, else the added line ordering by it (`order by col`,
+ * a macro's `order_by='col'`). No added line names the column → no line.
+ */
+function anchorDedupIssue(f: Finding, file: ChangedFile): Finding {
+  if (typeof anchorByEvidence([f], [file])[0].startLine === "number") return f
+  const cols = (/\[([^\]]+)\]/.exec(f.body)?.[1] ?? "").split(",").map((c) => c.trim()).filter(Boolean)
+  const names = (t: string) => cols.some((c) => new RegExp(`(^|[^\\w])${escapeRe(c)}([^\\w]|$)`, "i").test(t))
+  const added = [...walkDiffLines(file.diff)].filter((r) => r.kind === "+")
+  const hit =
+    added.find((r) => /\brow_number\s*\(/i.test(r.text) && names(r.text)) ??
+    added.find((r) => /\border(\s+by|_by)\b/i.test(r.text) && names(r.text))
+  return hit ? { ...f, startLine: hit.line, endLine: hit.line } : f
+}
+
 async function qualityLane(
   file: ChangedFile & { kind: string },
   runner: ReviewRunner,
@@ -665,23 +683,22 @@ async function qualityLane(
     let sev: Severity = isError ? "warning" : "suggestion"
     if (isError && (cat === "contract_violation" || cat === "pii_exposure")) sev = "critical"
     sev = syntax ? "suggestion" : clampSeverity(cat, sev, "high")
-    findings.push(
-      makeFinding({
-        severity: sev,
-        category: cat,
-        title: `${model}: ${issue.rule}`,
-        body: issue.message,
-        file: file.path,
-        model,
-        startLine: linesMatchFile ? issue.line : undefined,
-        endLine: linesMatchFile ? issue.line : undefined,
-        ...(syntax ? { confidence: "unknown" as const } : {}),
-        evidence: { tool: "altimate_core.check", result: checkEvidence(issue, sql, linesMatchFile) },
-        // Include the message so distinct instances of the same rule (e.g. two
-        // different non-portable functions) don't collapse under one fingerprint.
-        ruleKey: `quality:${issue.rule}:${(issue.message ?? "").slice(0, 60)}`,
-      }),
-    )
+    const f = makeFinding({
+      severity: sev,
+      category: cat,
+      title: `${model}: ${issue.rule}`,
+      body: issue.message,
+      file: file.path,
+      model,
+      startLine: linesMatchFile ? issue.line : undefined,
+      endLine: linesMatchFile ? issue.line : undefined,
+      ...(syntax ? { confidence: "unknown" as const } : {}),
+      evidence: { tool: "altimate_core.check", result: checkEvidence(issue, sql, linesMatchFile) },
+      // Include the message so distinct instances of the same rule (e.g. two
+      // different non-portable functions) don't collapse under one fingerprint.
+      ruleKey: `quality:${issue.rule}:${(issue.message ?? "").slice(0, 60)}`,
+    })
+    findings.push(!linesMatchFile && rule === "non_deterministic_dedup" ? anchorDedupIssue(f, file) : f)
   }
   return findings
 }
