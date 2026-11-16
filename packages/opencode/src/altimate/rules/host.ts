@@ -318,7 +318,7 @@ function noticeLines(start: Start, ws: string): string[] {
     const sentBack = notice.status === "changes_requested"
     const status = notice.status === "active" ? "approved" : sentBack ? "sent back for changes" : printable(notice.status)
     const by = notice.reviewer ? ` by ${printable(notice.reviewer)}` : ""
-    const next = sentBack ? " (a new wording can be sent from /rules in the TUI)" : ""
+    const next = sentBack ? " (it can be reworded or withdrawn from /rules in the TUI)" : ""
     return `- ${status}${by}: "${printable(notice.text)}"${notice.reason ? ` — ${printable(notice.reason)}` : ""}${next}`
     // altimate_change end
   }

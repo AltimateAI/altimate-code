@@ -49,7 +49,7 @@ describe("rules TUI", () => {
       duration: 20000,
     })
     expect(decisionToast({ public_id: "r", text: "Name tables", status: "changes_requested", reviewer: "Olive", reason: "Which schema?" })?.message).toBe(
-      'Changes requested on your rule by Olive: "Name tables" — Which schema? Open /rules to send a new wording.',
+      'Changes requested on your rule by Olive: "Name tables" — Which schema? Open /rules to reword or withdraw it.',
     )
     expect(combinedToast([approved, sentBack])).toMatchObject({ variant: "warning" })
     expect(combinedToast([approved, sentBack])?.message).toContain('skill "cost-guard" sent back for changes by Olive — Name the table')

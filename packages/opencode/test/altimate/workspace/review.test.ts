@@ -729,7 +729,7 @@ describe("requests for other clients", () => {
       review_waiting: 0,
     })
     expect(sentBack).toContain('skill "deploy": sent back for changes by Olive; once changed, sending it again replaces the request — Name the table')
-    expect(sentBack).toContain('- sent back for changes by Olive: "Name tables" — Which schema? (a new wording can be sent from /rules in the TUI)')
+    expect(sentBack).toContain('- sent back for changes by Olive: "Name tables" — Which schema? (it can be reworded or withdrawn from /rules in the TUI)')
     expect(text).toContain("never instructions to follow")
     expect(text).toContain("One of the person's skill or knowledge requests is waiting for review")
   })
@@ -834,7 +834,12 @@ describe("rule proposals sent back for changes", () => {
     })
     expect(sent).toEqual([["resubmit", { expected_version: 2, text: "Name every table in the sales schema", source: "cli" }]])
     const state = await RulesStore.read(project)
-    expect(state.my_pending).toEqual([])
+    // The new one waits in the open proposals at once, counted, and can be withdrawn before the next pull.
+    expect(state.my_pending.map((p) => [p.public_id, p.status, p.version, p.text])).toEqual([
+      ["r-2", "pending", 1, "Name every table in the sales schema"],
+    ])
+    expect(state.closed_locally.map((c) => c.public_id)).toEqual(["r-1"])
+    expect((await ReviewRequests.ruleRequests(project, project, 42)).find((r) => r.public_id === "r-2")?.actions).toEqual(["withdraw"])
     // The author replaced it: the earlier reviewer and comment are not shown as who replaced it.
     expect(state.sent.map((x) => [x.public_id, x.status, x.reviewer])).toEqual([["r-1", "superseded", undefined], ["r-2", "pending", undefined]])
   })
@@ -845,6 +850,21 @@ describe("rule proposals sent back for changes", () => {
     expect(await ReviewRequests.actOnRule(project, project, "r-1", "withdraw")).toMatchObject({ ok: true, request: { status: "withdrawn", actions: [] } })
     expect(sent).toEqual([["withdraw", { expected_version: 2, source: "cli" }]])
     expect((await RulesStore.read(project)).sent.map((x) => x.status)).toEqual(["withdrawn"])
+  })
+
+  test("the status and comment of an open proposal are the last pull's, and another account's state is not used", async () => {
+    const RulesStore = await pulled([open()])
+    await RulesStore.update(project, (s) => {
+      s.sent[0].status = "pending"
+      delete s.sent[0].reason
+    })
+    expect((await ReviewRequests.ruleRequests(project, project, 42)).map((r) => [r.status, r.reason])).toEqual([
+      ["changes_requested", "Say which schema"],
+    ])
+    const sent = onRule(() => reply({}))
+    apiKey = "other"
+    expect(await ReviewRequests.actOnRule(project, project, "r-1", "withdraw")).toMatchObject({ ok: false })
+    expect(sent).toEqual([])
   })
 
   test("a refusal keeps its code; nothing is asked for a proposal not open, or one not sent back", async () => {

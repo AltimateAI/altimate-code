@@ -561,7 +561,7 @@ export function decisionToast(raw: Shown): DecisionToast | undefined {
   if (p.status === "retired") return { variant: "info", message: `Retired${who}: ${quoted}`, duration: 10000 }
   // altimate_change start — workspace review: request changes
   if (p.status === "changes_requested")
-    return { variant: "warning", message: `${sentence(`Changes requested on your rule${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`)} Open /rules to send a new wording.`, duration: 20000 }
+    return { variant: "warning", message: `${sentence(`Changes requested on your rule${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`)} Open /rules to reword or withdraw it.`, duration: 20000 }
   // altimate_change end
   return undefined
 }

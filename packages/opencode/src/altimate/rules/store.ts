@@ -195,6 +195,11 @@ export const State = z.object({
   /** The person's own proposals still waiting for review, from the last pull (`my_pending`), with the same scope and
    * credential binding as `rules`: delivered to this person only (`vouched`). Replaced by every pull. */
   my_pending: z.array(MyPending).default([]),
+  // altimate_change start — workspace review: request changes
+  /** The person's own proposals they withdrew or replaced from here (`actOnRule`), with when: a pull that started
+   * before then answers from before it, so it neither brings them back nor overwrites what was recorded. */
+  closed_locally: z.array(z.object({ public_id: z.string(), at: z.string() })).default([]),
+  // altimate_change end
   outbox: z.array(OutboxItem).default([]),
   sent: z.array(Sent).default([]),
   notices: z.array(Notice).default([]),

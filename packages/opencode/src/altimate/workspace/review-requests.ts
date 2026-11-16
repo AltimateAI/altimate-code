@@ -97,12 +97,15 @@ export async function ruleRequests(root: string, directory: string, workspaceId?
   const open = new Map(state.my_pending.map((p) => [p.public_id, p]))
   return (await RulesSummary.rows(root, "mine")).map((row) => {
     const pending = open.get(row.public_id)
+    // Still open on the server: its status and comment are the last pull's (the local row may not have heard yet).
+    const status = pending?.status ?? (pending ? "pending" : row.status)
+    const reason = pending ? (pending.review_reason ?? undefined) : row.reason
     return {
       kind: "rule" as const,
       public_id: row.public_id,
       name: printable(row.text),
-      status: row.status,
-      ...(row.reason ? { reason: printable(row.reason) } : {}),
+      status,
+      ...(reason ? { reason: printable(reason) } : {}),
       ...(row.reviewer ? { reviewer: printable(row.reviewer) } : {}),
       ...(pending?.version ? { version: pending.version } : {}),
       actions: pending?.version ? ruleActions(pending.status ?? "pending", pending.change) : [],
@@ -148,6 +151,12 @@ export async function act(
   }
 }
 
+/** Out of the open proposals now, and remembered against a pull already on its way (`closed_locally`). */
+function closeLocally(s: { my_pending: { public_id: string }[]; closed_locally: { public_id: string; at: string }[] }, publicId: string, at: string) {
+  s.my_pending = s.my_pending.filter((p) => p.public_id !== publicId)
+  s.closed_locally.push({ public_id: publicId, at })
+}
+
 /** The author closed it: the reviewer and comment of the earlier decision are not who closed it, or why. */
 function authorClosed(sent: { status: string; updated_at: string; reason?: string; reviewer?: string }, status: string, at: string) {
   Object.assign(sent, { status, updated_at: at })
@@ -188,7 +197,10 @@ export async function actOnRule(
     if (!ctx.ready) return notReady(ctx.status)
     const [{ RulesStore }, { RulesApi }] = await Promise.all([import("../rules/store"), import("../rules/api")])
     const state = await RulesStore.read(root)
-    const pending = state.scope?.datamateId === ctx.datamateId ? state.my_pending.find((p) => p.public_id === publicId) : undefined
+    // The rules state must be the one pulled for this workspace with the credential signed in now.
+    const ours = (s: typeof state) => s.scope?.datamateId === ctx.datamateId
+    const pending =
+      ours(state) && (await RulesStore.verified(state)) ? state.my_pending.find((p) => p.public_id === publicId) : undefined
     if (!pending?.version)
       return { ok: false, status: 409, code: "not_open", error: "This proposal is not waiting for review in the last sync. Sync rules and try again." }
     const actions = ruleActions(pending.status ?? "pending", pending.change)
@@ -198,8 +210,9 @@ export async function actOnRule(
     if (action === "withdraw") {
       await RulesApi.withdraw(ctx.actAs, ctx.datamateId, publicId, { expected_version: pending.version })
       await RulesStore.update(root, (s) => {
-        if (s.scope?.datamateId !== ctx.datamateId) return
-        s.my_pending = s.my_pending.filter((p) => p.public_id !== publicId)
+        if (!ours(s)) return
+        closeLocally(s, publicId, now)
+        if ((pending.status ?? "pending") === "pending") s.pending_count = Math.max(0, s.pending_count - 1)
         const sent = s.sent.find((x) => x.public_id === publicId)
         if (sent) authorClosed(sent, "withdrawn", now)
       })
@@ -212,8 +225,22 @@ export async function actOnRule(
       return { ok: false, status: 422, code: result.error_code ?? result.status, error: printable(result.error_detail || result.error_code || result.status) }
     const newId = result.public_id
     await RulesStore.update(root, (s) => {
-      if (s.scope?.datamateId !== ctx.datamateId) return
-      s.my_pending = s.my_pending.filter((p) => p.public_id !== publicId)
+      if (!ours(s)) return
+      closeLocally(s, publicId, now)
+      // The new proposal waits for review: it can be withdrawn, and reaches the person's sessions, before the next pull.
+      if (result.version && !s.my_pending.some((p) => p.public_id === newId)) {
+        s.my_pending.push({
+          ...pending,
+          public_id: newId,
+          rule_key: result.rule_key ?? pending.rule_key,
+          text: wording,
+          created_at: now,
+          status: "pending",
+          version: result.version,
+          review_reason: null,
+        })
+        s.pending_count += 1
+      }
       const sent = s.sent.find((x) => x.public_id === publicId)
       if (sent) authorClosed(sent, "superseded", now)
       if (!s.sent.some((x) => x.public_id === newId))

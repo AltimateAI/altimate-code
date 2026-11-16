@@ -150,10 +150,18 @@ export async function adopt(root: string, ctx: Ready): Promise<{ state: State; s
 /** The state belongs to this run's account and workspace, or to none yet. */
 const ownedBy = (state: State, ctx: Ready) => !state.scope || RulesStore.sameScope(state.scope, ctx.scope)
 
+// altimate_change start — workspace review: request changes
+/** How long a proposal closed from here is remembered against pulls that started before it (well past any pull). */
+const CLOSED_LOCALLY_MS = 10 * 60_000
+// altimate_change end
+
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
   const { credentialDigest } = await import("../workspace/state")
   const pulledWith = credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey)
   const { state: before, same } = await adopt(root, ctx)
+  // altimate_change start — workspace review: request changes
+  const started = new Date().toISOString()
+  // altimate_change end
   try {
     const response = await RulesApi.sync(ctx.actAs, ctx.scope.datamateId, {
       repo_remote: ctx.scope.repoRemote,
@@ -198,7 +206,11 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.last_error = unreadable.length ? unreadable.join("; ") : undefined
       if (!response.unchanged) state.rules = response.rules
       // Always in the answer, `unchanged` or not (none from a server older than workspace review).
-      state.my_pending = response.my_pending
+      // altimate_change start — workspace review: request changes (closed here after this pull started: not back)
+      const closed = new Set(state.closed_locally.filter((c) => c.at >= started).map((c) => c.public_id))
+      state.my_pending = response.my_pending.filter((p) => !closed.has(p.public_id))
+      state.closed_locally = state.closed_locally.filter((c) => Date.now() - Date.parse(c.at) < CLOSED_LOCALLY_MS)
+      // altimate_change end
       for (const reviewed of response.my_reviewed) {
         if (state.notices.some((n) => n.public_id === reviewed.public_id && n.status === reviewed.status)) continue
         const notice = {
@@ -212,7 +224,7 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
         state.notices.push(notice)
         fresh.push(notice)
         const sent = state.sent.find((s) => s.public_id === reviewed.public_id)
-        if (sent) Object.assign(sent, { status: reviewed.status, reason: notice.reason, reviewer: notice.reviewer, updated_at: notice.at })
+        if (sent && !closed.has(sent.public_id)) Object.assign(sent, { status: reviewed.status, reason: notice.reason, reviewer: notice.reviewer, updated_at: notice.at })
       }
     })
     if (!applied) log.info("rules pull answer superseded; not applied")
