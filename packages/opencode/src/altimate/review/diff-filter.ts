@@ -7,6 +7,8 @@
  * snapshots, macros, schema.yml contract blocks, seeds.
  */
 
+import { posix } from "node:path"
+
 /** Paths that are build output / vendored and carry no review signal. */
 const SKIP_DIR_PATTERNS = [
   /(^|\/)target\//,
@@ -86,20 +88,41 @@ export function relativeToRoot(p: string, root: string): string | undefined {
   return f.startsWith(r + "/") ? f.slice(r.length + 1) : undefined
 }
 
-/** The role of a project-relative path from the configured directories; the
+/**
+ * The layout's directories as repo-relative paths. Each `*-paths` entry is
+ * relative to the project root and may climb out of it (`../../dbt_macros`
+ * in a monorepo of sub-projects sharing one macro dir); entries that resolve
+ * outside the repository are dropped.
+ */
+export function resolvedLayoutDirs(layout: DbtProjectLayout): Array<{ role: DbtRole; dir: string }> {
+  const root = norm(layout.root).replace(/^\.\/?/, "").replace(/\/+$/, "")
+  const out: Array<{ role: DbtRole; dir: string }> = []
+  for (const [role, list] of Object.entries(layout.dirs) as Array<[DbtRole, string[]]>) {
+    for (const d of list) {
+      const dir = posix.normalize(posix.join(root || ".", norm(d))).replace(/\/+$/, "")
+      // The project root itself (`model-paths: ["."]` with the project at the repo root).
+      if (dir === ".") {
+        out.push({ role, dir: "" })
+        continue
+      }
+      if (!dir || dir === ".." || dir.startsWith("../") || dir.startsWith("/")) continue
+      out.push({ role, dir })
+    }
+  }
+  return out
+}
+
+/** The role of a repo-relative path from the configured directories; the
  *  longest matching directory wins so `models/tests/x.sql` is a model when
  *  `models` is a model path. */
-function roleFromLayout(rel: string, dirs: Record<DbtRole, string[]>): DbtRole | undefined {
-  const p = rel.toLowerCase()
+function roleFromLayout(path: string, layout: DbtProjectLayout): DbtRole | undefined {
+  const p = norm(path).toLowerCase()
   let best: { role: DbtRole; len: number } | undefined
-  for (const [role, list] of Object.entries(dirs) as Array<[DbtRole, string[]]>) {
-    for (const d of list) {
-      const dir = norm(d).toLowerCase().replace(/^\.\/?/, "").replace(/\/+$/, "")
-      // `model-paths: ["."]` normalises to "": it matches every path at length 0,
-      // so a more specific directory still wins.
-      const matches = dir === "" || p.startsWith(dir + "/")
-      if (matches && (!best || dir.length > best.len)) best = { role, len: dir.length }
-    }
+  for (const { role, dir } of resolvedLayoutDirs(layout)) {
+    const d = dir.toLowerCase()
+    // "" (`model-paths: ["."]` at the repo root) matches every path at length 0,
+    // so a more specific directory still wins.
+    if ((d === "" || p.startsWith(d + "/")) && (!best || d.length > best.len)) best = { role, len: d.length }
   }
   return best?.role
 }
@@ -123,8 +146,12 @@ export function classifyDbtFile(path: string, layout?: DbtProjectLayout): DbtFil
   const p = norm(path).toLowerCase()
   const isYaml = p.endsWith(".yml") || p.endsWith(".yaml")
   if (/(^|\/)(dbt_project|profiles|packages|dependencies)\.ya?ml$/.test(p)) return "project_config"
-  const rel = layout ? relativeToRoot(norm(path), layout.root) : undefined
-  const role = rel !== undefined && layout ? roleFromLayout(rel, layout.dirs) : roleFromConvention(p)
+  // A layout dir decides wherever it points, including outside the project
+  // root; other files outside the root fall back to conventional names.
+  const role = layout
+    ? (roleFromLayout(path, layout) ??
+      (relativeToRoot(norm(path), layout.root) === undefined ? roleFromConvention(p) : undefined))
+    : roleFromConvention(p)
   if (role === "macro") return "macro"
   // Snapshots split by extension: `.sql` files are snapshot definitions
   // (tier-forcing, catalog-scoped), YAML property files under `snapshots/`
@@ -243,7 +270,9 @@ const isModel = (p: string, layout?: DbtProjectLayout) => {
  *
  * - Files outside `root` belong to another project or to non-dbt code: they
  *   are counted, never reviewed (a monorepo with several dbt projects must not
- *   review its siblings).
+ *   review its siblings). The exception is a layout dir that points outside
+ *   the root (`macro-paths: ["../../dbt_macros"]`): files there are part of
+ *   the project and stay in scope.
  * - Every model move stays in scope, even a same-name 100% rename: a model's
  *   folder can carry config in `dbt_project.yml` (materialization, schema,
  *   tags) and match risk paths, so moving it can change how it builds.
@@ -264,7 +293,9 @@ export function scopeToProject(
   let movedUnchanged = 0
   const inScope: ChangedFile[] = []
   const basename = (p: string) => norm(p).split("/").pop()
-  const isInside = (p: string) => root === undefined || relativeToRoot(p, root) !== undefined
+  const layoutDirs = layout ? resolvedLayoutDirs(layout).map((d) => d.dir) : []
+  const isInside = (p: string) =>
+    root === undefined || relativeToRoot(p, root) !== undefined || layoutDirs.some((d) => relativeToRoot(p, d) !== undefined)
   for (const f of files) {
     const inside = isInside(f.path)
     // A rename moving a file into or out of the project still concerns it.
