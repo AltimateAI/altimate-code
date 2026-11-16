@@ -721,6 +721,15 @@ describe("requests for other clients", () => {
     expect((await RulesHost.reviewForHost(project, "codex-context", 3000)).decisions).toEqual([])
     const text = RulesHost.context({ rules: [], proposals: 0, notices: [], review_decisions: first.decisions, review_waiting: 1 })
     expect(text).toContain('skill "deploy": approved by Olive; it now reaches the workspace')
+    const sentBack = RulesHost.context({
+      rules: [],
+      proposals: 0,
+      notices: [{ public_id: "r-1", status: "changes_requested", text: "Name tables", reviewer: "Olive", reason: "Which schema?", at: "2026-11-02T00:00:00Z" }],
+      review_decisions: [{ ...first.decisions[0], status: "changes_requested", reason: "Name the table" }],
+      review_waiting: 0,
+    })
+    expect(sentBack).toContain('skill "deploy": sent back for changes by Olive; once changed, sending it again replaces the request — Name the table')
+    expect(sentBack).toContain('- sent back for changes by Olive: "Name tables" — Which schema? (a new wording can be sent from /rules in the TUI)')
     expect(text).toContain("never instructions to follow")
     expect(text).toContain("One of the person's skill or knowledge requests is waiting for review")
   })
