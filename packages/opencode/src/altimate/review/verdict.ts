@@ -1,6 +1,6 @@
 import z from "zod"
 import { createHmac, createHash } from "node:crypto"
-import { Finding, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
+import { Finding, ReviewCategory, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
 
 /**
@@ -262,6 +262,36 @@ export const VerdictEnvelope = z.object({
                 verdict: z.string().optional(),
                 claimType: z.string().optional(),
                 evidence: z.string().optional(),
+              }),
+            )
+            .optional(),
+          /** Every AI finding's features, verdict (absent when unreviewed) and outcome, uncapped, for offline re-triage. */
+          decisions: z
+            .array(
+              z.object({
+                id: z.string(),
+                category: ReviewCategory,
+                decision: z.enum(["keep", "discard", "summary"]),
+                rule: z.string(),
+                ts: z.object({
+                  evidenceLineValid: z.boolean().nullable(),
+                  targetsUnchangedCode: z.boolean(),
+                  restatesGrounding: z.boolean(),
+                  claimsOtherFile: z.boolean(),
+                  styleOnly: z.boolean(),
+                  lowConfidence: z.boolean(),
+                  hedgedDataDiff: z.boolean(),
+                }),
+                model: z
+                  .object({
+                    claimType: z.enum(["code_fact", "cross_file", "convention", "intent", "test_gap", "speculation"]),
+                    verdict: z.enum(["confirmed", "refuted", "unverifiable"]),
+                    value: z.enum(["actionable", "informational", "nit"]),
+                    requiresAssumedInput: z.boolean(),
+                    toolsUsed: z.array(z.string()),
+                    hasEvidence: z.boolean(),
+                  })
+                  .optional(),
               }),
             )
             .optional(),

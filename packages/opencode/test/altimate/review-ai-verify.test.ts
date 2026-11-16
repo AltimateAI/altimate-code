@@ -8,6 +8,7 @@ import {
   ANSWER_NOW,
   applyTriage,
   batchFindings,
+  retriage,
   runAiVerify,
   toolsChars,
   verifierTools,
@@ -34,6 +35,9 @@ import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
 import { LLM } from "../../src/session/llm"
+import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
+import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { Provider } from "../../src/provider/provider"
 
 /**
@@ -994,5 +998,115 @@ describe("runAiReview with the verifier on (harness path, scripted LLM.stream)",
       if (prev === undefined) delete process.env.ALTIMATE_REVIEW_AI_VERIFY
       else process.env.ALTIMATE_REVIEW_AI_VERIFY = prev
     }
+  })
+})
+
+describe("decisions[]: offline re-triage from one run's envelope", () => {
+  // Five findings covering the knobs: a nit, an unverifiable local claim, a cross-file
+  // wording the model called a code fact, a verified one, and one the model skipped.
+  const findings = [
+    aiFinding({ title: "fct: Prefer a CTE", ruleKey: "nit" }),
+    aiFinding({ title: "fct: Cents may be negative", ruleKey: "local" }),
+    aiFinding({ title: "fct: Breaks the report", body: "`rpt_revenue` sums `amount`.", ruleKey: "xfile" }),
+    aiFinding({ title: "fct: Integer division", ruleKey: "ok" }),
+    aiFinding({ title: "fct: Skipped", ruleKey: "skip" }),
+  ]
+  const answer = JSON.stringify([
+    verdict("c1", { value: "nit" }),
+    verdict("c2", { verdict: "unverifiable", evidence: "" }),
+    verdict("c3"),
+    verdict("c4"),
+  ])
+  const run = (env: Record<string, string> = {}) =>
+    verify(findings, scripted(() => ({ text: answer })).llm, {}, { env })
+
+  test("every finding is recorded, uncapped, with features, verdict and outcome; dropped[] is unchanged", async () => {
+    const { status } = await run()
+    const d = status.decisions!
+    expect(d.map((x) => [x.decision, x.rule])).toEqual([
+      ["discard", "low_value"],
+      ["keep", "plausible_local"],
+      ["keep", "verified"],
+      ["keep", "verified"],
+      ["keep", "unreviewed"],
+    ])
+    expect(d[2].ts.claimsOtherFile).toBe(true)
+    expect(d[1].model).toEqual({
+      claimType: "code_fact",
+      verdict: "unverifiable",
+      value: "actionable",
+      requiresAssumedInput: false,
+      toolsUsed: ["compiled_sql"],
+      hasEvidence: false,
+    })
+    expect(d[4].model).toBeUndefined()
+    expect(status.dropped!.map((x) => x.rule)).toEqual(["low_value"])
+  })
+
+  test("retriage with the live knobs reproduces the run; with other knobs it matches a live run with them", async () => {
+    const { status } = await run()
+    const recorded = status.decisions!
+    expect(retriage(recorded, DEFAULT_TRIAGE_KNOBS).decisions).toEqual(
+      recorded.map((d) => ({ id: d.id, decision: d.decision, rule: d.rule })),
+    )
+    const env = {
+      ALTIMATE_REVIEW_AI_VERIFY_DROP_NITS: "0",
+      ALTIMATE_REVIEW_AI_VERIFY_KEEP_LOCAL: "0",
+      ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed",
+    }
+    const live = (await run(env)).status.decisions!
+    const offline = retriage(recorded, triageKnobs(env))
+    expect(offline.decisions).toEqual(live.map((d) => ({ id: d.id, decision: d.decision, rule: d.rule })))
+    expect(offline.counts).toEqual({ kept: 3, discarded: 2, summary: 0, unreviewed: 1 })
+  })
+
+  test("the hypothetical claimsOtherFile→rule 3 knob drops cross-file wording verified without tools", async () => {
+    const { status } = await verify(
+      findings,
+      scripted(() => ({ text: JSON.stringify([verdict("c3", { tools_used: [] })]) })).llm,
+    )
+    const base = retriage(status.decisions!, DEFAULT_TRIAGE_KNOBS).decisions[2]
+    const hyp = retriage(status.decisions!, { ...DEFAULT_TRIAGE_KNOBS, claimsOtherFileAsCrossFile: true }).decisions[2]
+    expect(base).toMatchObject({ decision: "keep", rule: "verified" })
+    expect(hyp).toMatchObject({ decision: "discard", rule: "unverifiable_cross_file" })
+  })
+
+  test("decisions survive the envelope and re-triage from it without casts", async () => {
+    const { status } = await run()
+    const env = await runReview({
+      changedFiles: [{ path: "models/fct.sql", status: "modified", diff: DIFF }],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return { grade: "B" }
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: true, equivalent: true }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+      } as ReviewRunner,
+      forceTier: "full",
+      getContent: async () => "select 1",
+      generatedAt: "2026-11-17T00:00:00Z",
+      aiReview: async () => ({ findings: [], status: { state: "ok", verifier: status } }),
+    })
+    const decisions = env.ai!.verifier!.decisions!
+    expect(decisions).toEqual(status.decisions!)
+    expect(retriage(decisions, DEFAULT_TRIAGE_KNOBS).counts).toEqual({
+      kept: 4,
+      discarded: 1,
+      summary: 0,
+      unreviewed: 1,
+    })
   })
 })
