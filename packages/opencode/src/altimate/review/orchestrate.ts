@@ -10,7 +10,19 @@ import {
   mergeRepeats,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, type DbtProjectLayout, type NotReviewed, partitionChangedFiles, hasOldSide } from "./diff-filter"
+import {
+  type ChangedFile,
+  type DbtProjectLayout,
+  type DiffLine,
+  type DiffRow,
+  type NotReviewed,
+  partitionChangedFiles,
+  hasOldSide,
+  walkDiffLines,
+  walkDiffRows,
+} from "./diff-filter"
+
+export { type DiffLine, walkDiffLines } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
@@ -286,36 +298,6 @@ export function isSuppressiblePortability(f: Finding, dialect: string, targets: 
   return !worksOn || [dialect.toLowerCase(), ...targets].every((d) => worksOn.includes(d))
 }
 
-/** A head-side line inside a diff hunk: an added (`+`) or a context (` `) line. */
-export interface DiffLine {
-  line: number
-  text: string
-  kind: "+" | " "
-}
-
-/** Walk a unified diff's hunks, yielding each added and context line with its head-side line number. */
-export function* walkDiffLines(diff: string | undefined): Generator<DiffLine> {
-  if (!diff) return
-  let right = 0
-  let inHunk = false
-  const rows = diff.split("\n")
-  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
-  for (const row of rows) {
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
-    if (h) {
-      right = Number(h[1])
-      inHunk = true
-      continue
-    }
-    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
-    if (!inHunk || row.startsWith("\\")) continue
-    // A blank context line may have lost its leading space in transit.
-    if (row.startsWith("+")) yield { line: right++, text: row.slice(1), kind: "+" }
-    else if (row.startsWith(" ") || row === "") yield { line: right++, text: row.slice(1), kind: " " }
-    else if (!row.startsWith("-")) inHunk = false
-  }
-}
-
 /** Head-side line numbers of a unified diff: `commentable` holds the lines
  *  GitHub accepts for an inline comment (added and context lines inside a
  *  hunk); `added` holds only the `+` lines the PR introduced. */
@@ -402,9 +384,64 @@ export function anchorByEvidence(findings: Finding[], files: ChangedFile[]): Fin
   })
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+/** The head line nearest a removed row: the `+` row at the same position in
+ *  its change block, else the nearest `+` row in its hunk, else (a pure
+ *  deletion) the context row after it, else the one before it. */
+function headSiteOfRemoved(rows: DiffRow[], i: number): number | undefined {
+  const hunk = rows[i].hunk
+  let lo = i
+  let hi = i
+  while (lo > 0 && rows[lo - 1].hunk === hunk && rows[lo - 1].kind !== " ") lo--
+  while (hi < rows.length - 1 && rows[hi + 1].hunk === hunk && rows[hi + 1].kind !== " ") hi++
+  const block = rows.slice(lo, hi + 1)
+  const plus = block.filter((r) => r.kind === "+")
+  if (plus.length) {
+    const k = block.filter((r) => r.kind === "-").indexOf(rows[i])
+    return plus[Math.min(k, plus.length - 1)].line
+  }
+  const inHunk = rows.map((r, j) => ({ r, j })).filter(({ r }) => r.hunk === hunk)
+  const nearest = (kind: DiffRow["kind"]) =>
+    inHunk.filter(({ r }) => r.kind === kind).sort((a, b) => Math.abs(a.j - i) - Math.abs(b.j - i))[0]?.r
+  const added = nearest("+")
+  if (added) return added.line
+  return (
+    inHunk.find(({ r, j }) => j > i && r.kind === " ")?.r.line ??
+    inHunk.filter(({ r, j }) => j < i && r.kind === " ").at(-1)?.r.line
+  )
+}
+
+/**
+ * Anchor for a finding about removed output columns: the head-side site of
+ * the base line that defined the first removed column the diff shows. The
+ * defining line is the last removed line whose select item ends in the column
+ * (`x.col`, `expr as col`), else the first removed line naming it. The site is
+ * a `deletionSite`: the finding is about the PR's removal, not pre-existing
+ * code. No removed line names a column → no anchor (the finding stays in the
+ * summary).
+ */
+export function removedColumnAnchor(
+  diff: string | undefined,
+  columns: string[],
+): Pick<Finding, "startLine" | "endLine" | "deletionSite"> {
+  const rows = [...walkDiffRows(diff)]
+  const removed = rows.map((r, i) => ({ r, i, code: r.text.replace(/--.*$/, "").trim() })).filter((x) => x.r.kind === "-")
+  for (const col of columns) {
+    const id = `["\`\\[]?${escapeRe(col)}["\`\\]]?`
+    const defines = new RegExp(`^,?\\s*(?:.*\\s+as\\s+|(?:[\\w"\`\\[\\]]+\\.)*)${id}\\s*,?$`, "i")
+    const names = new RegExp(`(^|[^\\w])${escapeRe(col)}([^\\w]|$)`, "i")
+    const def = removed.filter((x) => defines.test(x.code)).at(-1) ?? removed.find((x) => names.test(x.code))
+    const line = def && headSiteOfRemoved(rows, def.i)
+    if (line !== undefined) return { startLine: line, endLine: line, deletionSite: true }
+  }
+  return {}
+}
+
 /**
  * Mark a finding anchored on a diff context line (one the PR did not add) as
- * `preExisting`. Lines are never removed here: the envelope keeps every
+ * `preExisting`, unless the line is a `deletionSite` standing in for code the
+ * PR removed. Lines are never removed here: the envelope keeps every
  * finding's line, and posting filters inline comments to the lines GitHub
  * accepts. Every line of a newly added file counts as added.
  */
@@ -413,7 +450,8 @@ export function markPreExisting(findings: Finding[], files: ChangedFile[]): Find
   return findings.map((f) => {
     if (typeof f.startLine !== "number") return f
     const file = lines.get(f.file)
-    if (!file || file.isNew || !file.commentable.has(f.startLine) || file.added.has(f.startLine)) return f
+    if (!file || file.isNew || !file.commentable.has(f.startLine) || file.added.has(f.startLine) || f.deletionSite)
+      return f
     return { ...f, preExisting: true }
   })
 }
@@ -890,6 +928,7 @@ async function consumerContractLane(
         evidence: { tool: "dbt.manifest", result: { removed, finalLayer: true } },
         ruleKey: "lineage_breakage:final-layer-column-removed",
         rule: "dbt.manifest:removed-final-layer-columns",
+        ...removedColumnAnchor(ctx.file.diff, removed),
       }),
     )
   }
@@ -916,6 +955,7 @@ async function consumerContractLane(
         },
         ruleKey: "lineage_breakage:consumer-column-removed",
         rule: "dbt.manifest:removed-columns-declared-consumers",
+        ...removedColumnAnchor(ctx.file.diff, removed),
       }),
     )
   }

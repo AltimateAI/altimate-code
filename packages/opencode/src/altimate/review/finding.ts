@@ -94,6 +94,10 @@ export const Finding = z.object({
   rule: z.string().optional(),
   /** True when the finding sits on a line the PR did not add. */
   preExisting: z.boolean().optional(),
+  /** True when the line stands in for code the PR removed (the head-side site
+   *  of a deletion): the finding concerns the PR's own change, so a context
+   *  line does not make it pre-existing. */
+  deletionSite: z.boolean().optional(),
   /** Where the finding is posted: inline on the diff, or in the summary only. */
   tier: z.enum(["inline", "summary"]).optional(),
   /** The source line the finding points at, quoted as evidence. */

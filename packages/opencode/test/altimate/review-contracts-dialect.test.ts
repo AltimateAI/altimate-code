@@ -5,7 +5,16 @@ import { tmpdir } from "node:os"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
-import { isCatalogPortability, runReview, ymlModelColumns, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import {
+  markPreExisting,
+  isCatalogPortability,
+  removedColumnAnchor,
+  runReview,
+  ymlModelColumns,
+  type ReviewRunner,
+} from "../../src/altimate/review/orchestrate"
+import { inlineComments } from "../../src/altimate/review/format"
+import { buildEnvelope, verdictEligible } from "../../src/altimate/review/verdict"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { extractColumnList, extractColumnLists, listMirrorsModel, loadConsumerLists } from "../../src/altimate/review/consumer-lists"
@@ -222,6 +231,103 @@ describe("consumers outside the DAG", () => {
       { getCompiled: async (_f, side) => (side === "old" ? "select * from src" : NEW) },
     )
     expect(env.findings.some((x) => x.title.includes("declared consumers"))).toBe(false)
+  })
+})
+
+describe("removed-column findings anchor where the column was removed", () => {
+  const hunk = (start: number, rows: string[]) => `@@ -${start},${rows.length} +${start},${rows.length} @@\n` + rows.join("\n") + "\n"
+
+  test("rename: the added line that replaced the removed one in the same change block", () => {
+    const diff = hunk(10, [
+      "     select",
+      "         s.first_name,",
+      "-        c.mclass_period,",
+      "-        c.mclass_measure_year_growth,",
+      "+        c.period,",
+      "+        c.measure_year_growth,",
+      "     from s",
+    ])
+    expect(removedColumnAnchor(diff, ["mclass_measure_year_growth"])).toEqual({ startLine: 13, endLine: 13, deletionSite: true })
+    expect(removedColumnAnchor(diff, ["mclass_period"]).startLine).toBe(12)
+    // An alias rename: `expr as old` -> `expr as new`.
+    const alias = hunk(4, [" select", "-    sum(amount) as customer_lifetime_value", "+    sum(amount) as lifetime_value", " from p"])
+    expect(removedColumnAnchor(alias, ["customer_lifetime_value"]).startLine).toBe(5)
+  })
+
+  test("the select-list line that defined the column wins over a later mention", () => {
+    const diff = hunk(1, [
+      " select",
+      "-    platform",
+      "+    platform_fk",
+      "     , user_id",
+      " from t",
+      "-group by platform, user_id",
+      "+group by platform_fk, user_id",
+    ])
+    expect(removedColumnAnchor(diff, ["platform"]).startLine).toBe(2)
+  })
+
+  test("pure deletion: the next head line in the hunk, marked as a deletion site", () => {
+    const diff = hunk(5, ["     id,", "-    email,", "     amount", " from src"])
+    expect(removedColumnAnchor(diff, ["email"])).toEqual({ startLine: 6, endLine: 6, deletionSite: true })
+    // A deletion at the end of a hunk falls back to the line before it.
+    const tail = hunk(5, ["     id,", "     amount,", "-    email"])
+    expect(removedColumnAnchor(tail, ["email"]).startLine).toBe(6)
+  })
+
+  test("multi-hunk: the anchor is in the hunk that removed the column; the first removed column found wins", () => {
+    const diff =
+      hunk(1, [" with a as (", "-  select x from t", "+  select y from t", " )"]) +
+      hunk(20, [" select", "     id,", "-    email,", "     amount", " from a"])
+    expect(removedColumnAnchor(diff, ["email"]).startLine).toBe(22)
+    expect(removedColumnAnchor(diff, ["not_in_diff", "email", "x"]).startLine).toBe(22)
+    expect(removedColumnAnchor(diff, ["x"]).startLine).toBe(2)
+  })
+
+  test("a column the diff never removes, or a diff without hunks, stays unanchored", () => {
+    const diff = hunk(1, [" select", "-    a,", "+    b,", " from t"])
+    expect(removedColumnAnchor(diff, ["c"])).toEqual({})
+    expect(removedColumnAnchor(diff, ["ab"])).toEqual({})
+    expect(removedColumnAnchor("-select a from t\n+select b from t\n", ["a"])).toEqual({})
+    expect(removedColumnAnchor(undefined, ["a"])).toEqual({})
+  })
+
+  test("a deletion site on a context line is the PR's change: not pre-existing, inline-eligible, verdict-eligible", () => {
+    const diff = hunk(5, ["     id,", "-    email,", "     amount", " from src"])
+    const file = { path: "models/marts/fct.sql", status: "modified" as const, diff }
+    const base = {
+      id: "f1",
+      severity: "warning" as const,
+      category: "lineage_breakage" as const,
+      title: "fct: removed column(s) on a model with declared consumers",
+      body: "b",
+      file: file.path,
+      confidence: "high" as const,
+      degraded: false,
+      tier: "inline" as const,
+      evidence: { tool: "dbt.manifest", result: { removed: ["email"] } },
+    }
+    const [site] = markPreExisting([{ ...base, ...removedColumnAnchor(diff, ["email"]) }], [file])
+    expect(site.startLine).toBe(6)
+    expect(site.preExisting).toBeUndefined()
+    expect(verdictEligible(site)).toBe(true)
+    expect(inlineComments(buildEnvelope({ findings: [site], tier: "lite", mode: "comment" })).comments.map((c) => c.line)).toEqual([6])
+    // The same context line without the marker is pre-existing.
+    const [plain] = markPreExisting([{ ...base, startLine: 6, endLine: 6 }], [file])
+    expect(plain.preExisting).toBe(true)
+  })
+
+  test("end to end: both removed-column rules carry the anchor", async () => {
+    const diff = hunk(1, ["-select id, email, amount from src", "+select id, amount, region from src"])
+    const files = [{ ...changed[0], diff }]
+    const declared = await review({ exposures: [], contractEnforced: true, contractColumns: ["id", "amount", "region"] }, { changedFiles: files })
+    const d = declared.findings.find((x) => x.rule === "dbt.manifest:removed-columns-declared-consumers")
+    expect(d?.startLine).toBe(1)
+    expect(d?.preExisting).toBeUndefined()
+    const none = await review({ exposures: [], contractEnforced: false, contractColumns: [] }, { changedFiles: files })
+    const f = none.findings.find((x) => x.rule === "dbt.manifest:removed-final-layer-columns")
+    expect(f?.startLine).toBe(1)
+    expect(f?.body).toContain("`email`")
   })
 })
 
