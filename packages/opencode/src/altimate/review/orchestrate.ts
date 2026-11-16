@@ -285,11 +285,13 @@ export function isSuppressiblePortability(f: Finding, dialect: string, targets: 
   return !worksOn || [dialect.toLowerCase(), ...targets].every((d) => worksOn.includes(d))
 }
 
-/** Line numbers on the head side of a unified diff that GitHub accepts for an
- *  inline comment: added lines and context lines inside a hunk. */
-export function commentableLines(diff: string | undefined): Set<number> {
-  const out = new Set<number>()
-  if (!diff) return out
+/** Head-side line numbers of a unified diff: `commentable` holds the lines
+ *  GitHub accepts for an inline comment (added and context lines inside a
+ *  hunk); `added` holds only the `+` lines the PR introduced. */
+export function scanDiffLines(diff: string | undefined): { commentable: Set<number>; added: Set<number> } {
+  const commentable = new Set<number>()
+  const added = new Set<number>()
+  if (!diff) return { commentable, added }
   let right = 0
   let inHunk = false
   const rows = diff.split("\n")
@@ -304,23 +306,45 @@ export function commentableLines(diff: string | undefined): Set<number> {
     // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
     if (!inHunk || line.startsWith("\\")) continue
     // A blank context line may have lost its leading space in transit.
-    if (line.startsWith("+") || line.startsWith(" ") || line === "") out.add(right++)
+    if (line.startsWith("+")) added.add(right)
+    if (line.startsWith("+") || line.startsWith(" ") || line === "") commentable.add(right++)
     else if (!line.startsWith("-")) inHunk = false
   }
-  return out
+  return { commentable, added }
+}
+
+/** Line numbers on the head side of a unified diff that GitHub accepts for an
+ *  inline comment: added lines and context lines inside a hunk. */
+export function commentableLines(diff: string | undefined): Set<number> {
+  return scanDiffLines(diff).commentable
+}
+
+/** Head-side line numbers each changed file's diff adds. A newly added file
+ *  counts every line of its diff as added. */
+export function addedLinesByFile(files: ChangedFile[]): Map<string, Set<number>> {
+  return new Map(
+    files.map((f) => {
+      const { commentable, added } = scanDiffLines(f.diff)
+      return [f.path, f.status === "added" ? commentable : added]
+    }),
+  )
 }
 
 /**
  * Keep a finding's line only when it can be commented on: inside the file's
  * diff hunks on the head side. Anything else (a line from compiled SQL, an
  * unchanged region) moves to the summary instead of making GitHub reject the
- * whole batch of inline comments.
+ * whole batch of inline comments. A finding anchored on a context line (one
+ * the PR did not add) keeps its line and is marked `preExisting`.
  */
 export function anchorToDiff(findings: Finding[], files: ChangedFile[]): Finding[] {
-  const lines = new Map(files.map((f) => [f.path, commentableLines(f.diff)]))
+  const lines = new Map(files.map((f) => [f.path, { ...scanDiffLines(f.diff), isNew: f.status === "added" }]))
   return findings.map((f) => {
     if (typeof f.startLine !== "number") return f
-    if (lines.get(f.file)?.has(f.startLine)) return f
+    const file = lines.get(f.file)
+    if (file?.commentable.has(f.startLine)) {
+      return file.isNew || file.added.has(f.startLine) ? f : { ...f, preExisting: true }
+    }
     const { startLine: _s, endLine: _e, ...rest } = f
     return rest as Finding
   })

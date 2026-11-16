@@ -43,8 +43,10 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
 
 /** Whether a finding may influence the verdict: deterministic engine
  *  findings always; catalog (pattern) findings only when the rubric names the
- *  rule in `blockingRules`; advisory AI findings never. */
+ *  rule in `blockingRules`; advisory AI findings never. A finding on a line the
+ *  PR did not add (`preExisting`) never does: the PR did not introduce it. */
 export function verdictEligible(f: Finding, rubric: Rubric = DEFAULT_RUBRIC): boolean {
+  if (f.preExisting) return false
   const origin = findingOrigin(f)
   if (origin === "engine") return true
   if (origin === "ai") return false

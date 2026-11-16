@@ -7,7 +7,9 @@ import { promisify } from "node:util"
 import { collectChangedFiles, resolveReviewBase } from "../../src/altimate/review/git"
 import { classifyDbtFile, scopeToProject, type ChangedFile } from "../../src/altimate/review/diff-filter"
 import { dbtProjectLayout } from "../../src/altimate/review/compiled"
-import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { runReview, anchorToDiff, addedLinesByFile, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { makeFinding, mergeRepeats, type Finding } from "../../src/altimate/review/finding"
+import { computeIdealVerdict } from "../../src/altimate/review/verdict"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { reviewPullRequest } from "../../src/altimate/review/run"
@@ -582,4 +584,68 @@ describe("a shallow CI checkout without the target branch", () => {
     const resolved = await resolveReviewBase({ cwd: clone, head: "origin/pr", env: { GITHUB_BASE_REF: "main" } })
     expect(resolved.sha).toBe(branchPoint)
   }, 60_000)
+})
+
+describe("changed-line awareness: findings on lines the PR did not add", () => {
+  // Head lines: 10 and 11 are context, 12 is added, 13 is context.
+  const diff = [
+    "diff --git a/models/m.sql b/models/m.sql",
+    "--- a/models/m.sql",
+    "+++ b/models/m.sql",
+    "@@ -10,3 +10,4 @@",
+    " select a,",
+    "   b,",
+    "+  c,",
+    "   d",
+    "",
+  ].join("\n")
+  const file: ChangedFile = { path: "models/m.sql", status: "modified", diff }
+  const at = (line: number, title = `m: risky join on line ${line}`): Finding =>
+    makeFinding({
+      category: "sql_quality",
+      severity: "warning",
+      confidence: "high",
+      file: "models/m.sql",
+      startLine: line,
+      title,
+      body: "body",
+      evidence: { tool: "dbt.manifest", result: { rule: "risky-join" } },
+    })
+
+  test("a finding on a context line is marked pre-existing and keeps its line", () => {
+    const [ctx, added] = anchorToDiff([at(11), at(12)], [file])
+    expect(ctx.preExisting).toBe(true)
+    expect(ctx.startLine).toBe(11)
+    expect(added.preExisting).toBeUndefined()
+    expect(added.startLine).toBe(12)
+  })
+
+  test("a line outside the hunks still loses its anchor and is not marked", () => {
+    const [far] = anchorToDiff([at(40)], [file])
+    expect(far.startLine).toBeUndefined()
+    expect(far.preExisting).toBeUndefined()
+  })
+
+  test("every line of a newly added file counts as added", () => {
+    const fresh: ChangedFile = { path: "models/m.sql", status: "added", diff: "@@ -0,0 +1,2 @@\n+select 1\n+from x\n" }
+    expect([...addedLinesByFile([fresh]).get("models/m.sql")!]).toEqual([1, 2])
+    expect([...addedLinesByFile([file]).get("models/m.sql")!]).toEqual([12])
+    const [f] = anchorToDiff([at(1)], [fresh])
+    expect(f.preExisting).toBeUndefined()
+  })
+
+  test("pre-existing warnings do not count toward the verdict", () => {
+    const pre = anchorToDiff([at(10, "m: a"), at(11, "m: b"), at(13, "m: c")], [file])
+    expect(pre.every((f) => f.preExisting)).toBe(true)
+    // Three engine warnings meet the default risk-pattern threshold; pre-existing ones must not.
+    expect(computeIdealVerdict(pre, DEFAULT_RUBRIC)).toBe("COMMENT")
+    const fresh = pre.map(({ preExisting: _p, ...f }) => f as Finding)
+    expect(computeIdealVerdict(fresh, DEFAULT_RUBRIC)).toBe("REQUEST_CHANGES")
+  })
+
+  test("mergeRepeats keeps pre-existing and new instances of one rule apart", () => {
+    const merged = mergeRepeats(anchorToDiff([at(11, "m: risky join on `a`"), at(12, "m: risky join on `c`")], [file]))
+    expect(merged).toHaveLength(2)
+    expect(merged.filter((f) => f.preExisting)).toHaveLength(1)
+  })
 })
