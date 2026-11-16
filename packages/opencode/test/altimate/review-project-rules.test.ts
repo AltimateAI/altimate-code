@@ -105,6 +105,17 @@ describe("Jinja structure", () => {
     const ok = "where mod(abs(xxhash64(address)), 1000) = 0 -- one in a thousand, as a template example"
     expect(jinjaFindings(file("models/m.sql", ok), "select 1", ok).some((f) => /temporary/.test(f.title))).toBe(false)
   })
+  test("temporary-code phrasing: take this out, while debugging, remove it before release", () => {
+    const temp = (sql: string) => jinjaFindings(file("models/m.sql", sql), "select 1", sql).some((f) => /temporary/.test(f.title))
+    expect(temp("    where order_id < 50  -- sample while debugging locally, take this out before release")).toBe(true)
+    expect(temp("    limit 100  -- take it out once the backfill finishes")).toBe(true)
+    expect(temp("    and region = 'eu'  {# remove this before deploying #}")).toBe(true)
+    expect(temp("    where amount > 0  -- zero-amount rows are voided payments from the card processor")).toBe(false)
+    expect(temp("    where released_at < current_date  -- orders placed before release are pre-orders")).toBe(false)
+    expect(temp("    -- take this out before release")).toBe(true)
+    // Only comments count: the phrase in code or a string literal is not a marker.
+    expect(temp("    select 'take this out' as label")).toBe(false)
+  })
 })
 
 describe("model config combinations", () => {
