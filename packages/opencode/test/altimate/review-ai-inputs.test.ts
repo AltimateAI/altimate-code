@@ -2,7 +2,11 @@ import { describe, test, expect } from "bun:test"
 import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
-import { buildUserMessage, selectAiFiles, type AiReviewFile, type AiReviewInput } from "../../src/altimate/review/ai-review"
+import { aiInputBudget, batchAiFiles, buildUserMessage, selectAiFiles, type AiReviewFile, type AiReviewInput } from "../../src/altimate/review/ai-review"
+import { createDispatcherRunner } from "../../src/altimate/review/runner"
+import { writeFileSync } from "node:fs"
+import path from "node:path"
+import { tmpdir } from "../fixture/fixture"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
 
 /**
@@ -121,5 +125,117 @@ describe("selection and prompt layout", () => {
     expect(msg).toContain("### macros/m.sql (modified, macro (Jinja; changes every model that calls it))")
     expect(msg).toContain("### models/_s.yml (added, schema yml (tests, contracts, descriptions))\nCurrent file:\n```yaml")
     expect(msg).toContain("### models/a.sql (modified)\nCurrent SQL:\n```sql")
+  })
+})
+
+
+describe("input budget: more of the PR, split across calls instead of cut", () => {
+  const file = (p: string, n: number): AiReviewFile => ({ path: p, status: "modified", model: p, sql: "x".repeat(n) })
+
+  test("defaults keep one bounded call; the env widens files, length and splits calls", () => {
+    expect(aiInputBudget({})).toEqual({ maxFiles: 20, maxFileChars: 6_000, batchChars: Infinity })
+    expect(
+      aiInputBudget({ ALTIMATE_REVIEW_AI_MAX_FILES: "200", ALTIMATE_REVIEW_AI_MAX_FILE_CHARS: "40000", ALTIMATE_REVIEW_AI_BATCH_CHARS: "60000" }),
+    ).toEqual({ maxFiles: 200, maxFileChars: 40_000, batchChars: 60_000 })
+    expect(aiInputBudget({ ALTIMATE_REVIEW_AI_MAX_FILES: "nope" }).maxFiles).toBe(20)
+  })
+
+  test("a file longer than the default limit is sent whole under a wider limit", () => {
+    const f = file("models/big.sql", 10_000)
+    expect(buildUserMessage({ grounding: [], files: [f] })).toContain("… (truncated)")
+    expect(buildUserMessage({ grounding: [], files: [f] }, 40_000)).not.toContain("… (truncated)")
+  })
+
+  test("files are grouped in order under the per-call size; an oversized file goes alone", () => {
+    const budget = { maxFiles: 100, maxFileChars: 40_000, batchChars: 25_000 }
+    const batches = batchAiFiles([file("a", 10_000), file("b", 10_000), file("c", 10_000), file("d", 30_000), file("e", 1_000)], budget)
+    expect(batches.map((b) => b.map((f) => f.path))).toEqual([["a", "b"], ["c"], ["d"], ["e"]])
+    expect(batchAiFiles([file("a", 10), file("b", 10)], { ...budget, batchChars: Infinity })).toHaveLength(1)
+  })
+})
+
+describe("graph context: the changed files' unchanged dbt parents", () => {
+  test("the related section lists only parents of the files in this call", () => {
+    const msg = buildUserMessage({
+      grounding: [],
+      files: [{ path: "models/fct.sql", status: "modified", model: "fct", sql: "select 1" }],
+      context: [
+        { path: "models/stg.sql", kind: "model", name: "stg", forPaths: ["models/fct.sql"], content: "select id, closed_at from raw" },
+        { path: "seeds/codes.csv", kind: "seed", name: "codes", forPaths: ["models/other.sql"], content: "code\nUS" },
+      ],
+    })
+    expect(msg).toContain("## RELATED FILES")
+    expect(msg).toContain("### models/stg.sql (model `stg`, used by models/fct.sql)")
+    expect(msg).not.toContain("seeds/codes.csv")
+    expect(buildUserMessage({ grounding: [], files: [{ path: "models/fct.sql", status: "modified", model: "fct" }] })).not.toContain(
+      "RELATED FILES",
+    )
+  })
+
+  test("graphParents: models, seeds, sources (with columns) and project macros; a yml maps through its tests", async () => {
+    await using tmp = await tmpdir()
+    const manifestPath = path.join(tmp.path, "manifest.json")
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        metadata: { project_name: "shop" },
+        nodes: {
+          "model.shop.fct": {
+            resource_type: "model", name: "fct", original_file_path: "models/fct.sql",
+            depends_on: { nodes: ["model.shop.stg", "seed.shop.codes", "source.shop.raw.orders"], macros: ["macro.shop.cents", "macro.dbt_utils.star"] },
+          },
+          "model.shop.stg": { resource_type: "model", name: "stg", original_file_path: "models/stg.sql", depends_on: { nodes: [] } },
+          "seed.shop.codes": { resource_type: "seed", name: "codes", original_file_path: "seeds/codes.csv", depends_on: { nodes: [] } },
+          "test.shop.unique_stg_id": {
+            resource_type: "test", name: "unique_stg_id", original_file_path: "models/_schema.yml", depends_on: { nodes: ["model.shop.stg"] },
+          },
+        },
+        sources: {
+          "source.shop.raw.orders": { source_name: "raw", name: "orders", original_file_path: "models/_sources.yml", columns: { id: {}, status: {} } },
+        },
+        macros: {
+          "macro.shop.cents": { name: "cents", package_name: "shop", original_file_path: "macros/cents.sql" },
+          "macro.dbt_utils.star": { name: "star", package_name: "dbt_utils", original_file_path: "macros/sql/star.sql" },
+        },
+      }),
+    )
+    const runner = createDispatcherRunner({ manifestPath })
+    const parents = await runner.graphParents!(["proj/models/fct.sql", "proj/models/_schema.yml"])
+    const byName = Object.fromEntries(parents.map((p) => [p.name, p]))
+    expect(Object.keys(byName).sort()).toEqual(["cents", "codes", "raw.orders", "stg"])
+    expect(byName.stg.path).toBe("proj/models/stg.sql")
+    expect(byName.stg.forPaths.sort()).toEqual(["proj/models/_schema.yml", "proj/models/fct.sql"])
+    expect(byName["raw.orders"].columns).toEqual(["id", "status"])
+    expect(byName.codes.kind).toBe("seed")
+  })
+
+  test("the orchestrator sends parents only when graph context is on", async () => {
+    let seen: AiReviewInput | undefined
+    const withGraph = {
+      ...runner,
+      async graphParents() {
+        return [{ path: "models/stg.sql", kind: "model", name: "stg", forPaths: ["models/marts/m.sql"] }]
+      },
+    } as ReviewRunner
+    const run = (aiGraphContext: boolean) =>
+      runReview({
+        changedFiles: [mod("models/marts/m.sql")],
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: withGraph,
+        aiGraphContext,
+        forceTier: "full",
+        getContent: async (f, side) => (side === "old" ? undefined : f === "models/stg.sql" ? "select id from raw" : FILES[f]),
+        generatedAt: "2026-11-14T00:00:00Z",
+        aiReview: async (input) => {
+          seen = input
+          return { findings: [], status: { state: "ok" } }
+        },
+      })
+    await run(false)
+    expect(seen?.context).toBeUndefined()
+    await run(true)
+    expect(seen?.context?.map((c) => [c.path, c.content])).toEqual([["models/stg.sql", "select id from raw"]])
   })
 })

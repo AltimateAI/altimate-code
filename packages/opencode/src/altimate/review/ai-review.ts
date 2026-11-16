@@ -16,6 +16,33 @@ const AI_TIMEOUT_BASE_MS = 60_000
 const AI_TIMEOUT_MAX_MS = 300_000
 const MAX_DIFF_CHARS = 6_000 // per file, keep the prompt bounded
 const MAX_FILES = 20
+const CONTEXT_FILE_CHARS = 8_000
+const CONTEXT_TOTAL_CHARS = 40_000
+const BATCH_CONCURRENCY = 2
+
+/**
+ * How much of the PR the lane sends. Defaults keep one bounded call; the
+ * `ALTIMATE_REVIEW_AI_*` variables widen it for experiments: more files, longer
+ * files, and a per-call size above which files are split across several calls
+ * instead of being cut.
+ */
+export interface AiInputBudget {
+  maxFiles: number
+  maxFileChars: number
+  /** Characters of file sections per call; Infinity keeps a single call. */
+  batchChars: number
+}
+export function aiInputBudget(env: Record<string, string | undefined> = process.env): AiInputBudget {
+  const num = (v: string | undefined, d: number) => {
+    const n = Number(v)
+    return v && Number.isFinite(n) && n > 0 ? n : d
+  }
+  return {
+    maxFiles: num(env.ALTIMATE_REVIEW_AI_MAX_FILES, MAX_FILES),
+    maxFileChars: num(env.ALTIMATE_REVIEW_AI_MAX_FILE_CHARS, MAX_DIFF_CHARS),
+    batchChars: num(env.ALTIMATE_REVIEW_AI_BATCH_CHARS, Infinity),
+  }
+}
 
 export interface AiReviewFile {
   path: string
@@ -49,18 +76,62 @@ function kindRank(kind: string | undefined): number {
   return i < 0 ? KIND_ORDER.length : i
 }
 
-/** Files the lane sends, in priority order, capped at MAX_FILES. */
-export function selectAiFiles(files: AiReviewFile[]): AiReviewFile[] {
+/** Files the lane sends, in priority order, capped at `maxFiles`. */
+export function selectAiFiles(files: AiReviewFile[], maxFiles = MAX_FILES): AiReviewFile[] {
   return files
     .filter((f) => f.status !== "deleted" && (f.diff || f.sql))
     .map((f, i) => ({ f, i }))
     .sort((a, b) => kindRank(a.f.kind) - kindRank(b.f.kind) || a.i - b.i)
     .map(({ f }) => f)
-    .slice(0, MAX_FILES)
+    .slice(0, maxFiles)
+}
+
+/** One changed file as it appears in the prompt. */
+function fileSection(f: AiReviewFile, maxChars: number): string {
+  const label = f.kind && KIND_LABEL[f.kind]
+  const parts = [`\n### ${f.path} (${f.status}${label ? `, ${label}` : ""})`]
+  if (f.diff) parts.push("Diff:\n```diff\n" + truncate(f.diff, maxChars) + "\n```")
+  if (f.sql) {
+    const isModel = !f.kind || f.kind === "model_sql"
+    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + truncate(f.sql, maxChars) + "\n```")
+  }
+  return parts.join("\n")
+}
+
+/** Split files, in order, into groups whose sections fit `batchChars` (an oversized file goes alone). */
+export function batchAiFiles(files: AiReviewFile[], budget: AiInputBudget): AiReviewFile[][] {
+  const batches: AiReviewFile[][] = []
+  let cur: AiReviewFile[] = []
+  let size = 0
+  for (const f of files) {
+    const n = fileSection(f, budget.maxFileChars).length
+    if (cur.length && size + n > budget.batchChars) {
+      batches.push(cur)
+      cur = []
+      size = 0
+    }
+    cur.push(f)
+    size += n
+  }
+  if (cur.length) batches.push(cur)
+  return batches
+}
+
+/** An unchanged file the changed ones depend on (dbt DAG parent), sent as read-only context. */
+export interface AiContextFile {
+  path: string
+  /** dbt resource type: `model`, `seed`, `snapshot`, `source`, `macro`. */
+  kind: string
+  name: string
+  /** Changed files that depend on it. */
+  forPaths: string[]
+  content: string
 }
 
 export interface AiReviewInput {
   files: AiReviewFile[]
+  /** Unchanged parents of the changed files, for cross-file checks (columns, seeds, macro signatures). */
+  context?: AiContextFile[]
   /** Deterministic engine findings — grounding the AI must NOT duplicate. */
   grounding: Finding[]
   prTitle?: string
@@ -116,8 +187,23 @@ function truncate(s: string | undefined, n: number): string {
   return s.length > n ? s.slice(0, n) + "\n… (truncated)" : s
 }
 
+/** Context sections for the parents of the files in this call, within the context budget. */
+function relatedContext(input: AiReviewInput): string[] {
+  const paths = new Set(input.files.map((f) => f.path))
+  const out: string[] = []
+  let used = 0
+  for (const c of input.context ?? []) {
+    if (paths.has(c.path) || !c.forPaths.some((p) => paths.has(p))) continue
+    const section = `\n### ${c.path} (${c.kind} \`${c.name}\`, used by ${c.forPaths.filter((p) => paths.has(p)).join(", ")})\n\`\`\`${c.kind === "source" || c.path.endsWith(".yml") ? "yaml" : c.path.endsWith(".csv") ? "csv" : "sql"}\n${truncate(c.content, CONTEXT_FILE_CHARS)}\n\`\`\``
+    if (used + section.length > CONTEXT_TOTAL_CHARS) break
+    out.push(section)
+    used += section.length
+  }
+  return out
+}
+
 /** Assemble the user message (mechanical formatting — not IP). */
-export function buildUserMessage(input: AiReviewInput): string {
+export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_CHARS): string {
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
   if (input.prBody) parts.push(`PR description:\n${truncate(input.prBody, 1500)}`)
@@ -132,14 +218,13 @@ export function buildUserMessage(input: AiReviewInput): string {
   }
 
   parts.push("\n## CHANGED FILES (review for what the engine missed):")
-  for (const f of input.files.slice(0, MAX_FILES)) {
-    const label = f.kind && KIND_LABEL[f.kind]
-    parts.push(`\n### ${f.path} (${f.status}${label ? `, ${label}` : ""})`)
-    if (f.diff) parts.push("Diff:\n```diff\n" + truncate(f.diff, MAX_DIFF_CHARS) + "\n```")
-    if (f.sql) {
-      const isModel = !f.kind || f.kind === "model_sql"
-      parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + truncate(f.sql, MAX_DIFF_CHARS) + "\n```")
-    }
+  for (const f of input.files) parts.push(fileSection(f, maxFileChars))
+  const context = relatedContext(input)
+  if (context.length) {
+    parts.push(
+      "\n## RELATED FILES — unchanged dbt parents of the changed files (context only; comment on the changed files, not these):",
+      ...context,
+    )
   }
   parts.push("\nReturn ONLY the JSON array per the output contract.")
   return parts.join("\n")
@@ -158,17 +243,12 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     findings,
     status: { ...status, durationMs: Date.now() - startedAt },
   })
-  const files = selectAiFiles(input.files)
+  const budget = aiInputBudget()
+  const files = selectAiFiles(input.files, budget.maxFiles)
   if (!files.length) return done([], { state: "skipped", reason: "no changed dbt files to review" })
 
-  const controller = new AbortController()
-  let timeoutMs = AI_TIMEOUT_BASE_MS
-  let timeout: ReturnType<typeof setTimeout> | undefined
   let modelLabel: string | undefined
   try {
-    const message = buildUserMessage({ ...input, files })
-    timeoutMs = aiTimeoutMs(message.length)
-    timeout = setTimeout(() => controller.abort(), timeoutMs)
     // Prompt comes from the compiled core, not this file.
     const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
     const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
@@ -189,6 +269,46 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     }
     modelLabel = `${model.providerID}/${model.id}`
 
+    // One call per batch; a PR that fits the budget is a single call, as before.
+    const batches = batchAiFiles(files, budget)
+    const results: BatchResult[] = []
+    for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
+      const slice = batches.slice(i, i + BATCH_CONCURRENCY)
+      results.push(...(await Promise.all(slice.map((b) => reviewBatch(input, b, budget, system, model)))))
+    }
+    const findings = results.flatMap((r) => r.findings)
+    const failed = results.filter((r) => r.state !== "ok")
+    log.info("ai review complete", { findings: findings.length, batches: batches.length, failed: failed.length })
+    // The lane is ok when any call answered; a partial failure is reported, not hidden.
+    if (failed.length === results.length) return done([], { state: failed[0].state, reason: failed[0].reason, model: modelLabel })
+    const reason = failed.length ? `${failed.length} of ${results.length} calls failed: ${failed[0].reason}` : undefined
+    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}) })
+  } catch (err) {
+    log.error("ai review failed", { error: err })
+    return done([], { state: "error", reason: safeReason(err), model: modelLabel })
+  }
+}
+
+interface BatchResult {
+  findings: Finding[]
+  state: AiLaneState
+  reason?: string
+}
+
+/** One model call over a group of files: send, wait (bounded), parse and clamp in core. */
+async function reviewBatch(
+  input: AiReviewInput,
+  files: AiReviewFile[],
+  budget: AiInputBudget,
+  system: string,
+  model: Awaited<ReturnType<typeof Provider.getModel>>,
+): Promise<BatchResult> {
+  const message = buildUserMessage({ ...input, files }, budget.maxFileChars)
+  const controller = new AbortController()
+  const timeoutMs = aiTimeoutMs(message.length)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const timedOut = (): BatchResult => ({ findings: [], state: "timeout", reason: `no answer within ${Math.round(timeoutMs / 1000)} s` })
+  try {
     const agent: Agent.Info = {
       name: "dbt-ai-reviewer",
       mode: "primary",
@@ -206,7 +326,6 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       agent: agent.name,
       model: { providerID: model.providerID, modelID: model.id },
     }
-
     const stream = await LLM.stream({
       agent,
       user,
@@ -220,9 +339,8 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       messages: [{ role: "user", content: message }],
     })
     const text = await readStreamText(stream)
-    if (controller.signal.aborted)
-      return done([], { state: "timeout", reason: `no answer within ${Math.round(timeoutMs / 1000)} s`, model: modelLabel })
-    if (!text) return done([], { state: "error", reason: "the model returned no text", model: modelLabel })
+    if (controller.signal.aborted) return timedOut()
+    if (!text) return { findings: [], state: "error", reason: "the model returned no text" }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
@@ -234,11 +352,11 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     // throwing; that is an error, never an "ok" run with no findings.
     const parsedRaw = ((parseRes.data ?? {}) as Record<string, unknown>).findings
     if (parseRes.success === false || !Array.isArray(parsedRaw))
-      return done([], {
+      return {
+        findings: [],
         state: "error",
         reason: `could not parse the model's answer: ${safeReason(parseRes.error ?? "no findings list")}`,
-        model: modelLabel,
-      })
+      }
     const parsed = parsedRaw as any[]
     const byFile = new Map(files.map((f) => [f.path, f]))
 
@@ -273,13 +391,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
         log.warn("skipping malformed ai finding", { error: err })
       }
     }
-    log.info("ai review complete", { findings: out.length })
-    return done(out, { state: "ok", model: modelLabel })
+    return { findings: out, state: "ok" }
   } catch (err) {
-    log.error("ai review failed", { error: err })
-    if (controller.signal.aborted)
-      return done([], { state: "timeout", reason: `no answer within ${Math.round(timeoutMs / 1000)} s`, model: modelLabel })
-    return done([], { state: "error", reason: safeReason(err), model: modelLabel })
+    if (controller.signal.aborted) return timedOut()
+    return { findings: [], state: "error", reason: safeReason(err) }
   } finally {
     clearTimeout(timeout)
   }
