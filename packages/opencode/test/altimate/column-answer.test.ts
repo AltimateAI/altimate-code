@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, describeAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach, namesColumn } from "../../src/altimate/native/dbt/column-reach"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
-import { clearLineageCaches, hasNestedWith, howOf, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
+import { clearLineageCaches, hasNestedWith, howOf, itemName, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -1226,6 +1226,14 @@ describe("both tools: names at the edges", () => {
     }
   })
 
+  test("an alias without AS is read, and the end of an expression isn't taken for one", () => {
+    const named = { "val id": "id", "count(*) n": "n", "t.col c2": "c2", "'' label": "label", '"My Col"': "my col", "a.b as c": "c", "f.*": "*" }
+    for (const [item, name] of Object.entries(named)) expect(itemName(item)).toBe(name)
+    for (const item of ["x is null", "x is not true", "case when a > 0 then 1 else 0 end", "sum(x) over w", "a and b", "a + b",
+      "a div b", "a mod b", "a xor b", "x between a and b", "interval '' day", "interval 1 day", "interval 1.5 hour", `x collate "C"`, "amount::numeric"])
+      expect(itemName(item)).toBeNull()
+  })
+
   test("a COLUMNS() alias without a \\N marker is the output's name, not a template", () => {
     const path = write(nodes("duckdb", [
       model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
@@ -1260,7 +1268,7 @@ describe("both tools: names at the edges", () => {
 
   test("on Postgres and Redshift a cast of a column is named after it, so the trace goes on", () => {
     for (const dialect of ["postgres", "redshift"]) {
-      for (const cast of ["amount::numeric", "cast(amount as numeric)"]) {
+      for (const cast of ["amount::numeric", "cast(amount as numeric)", "amount::int[]", "cast(amount as int[])", `amount::"numeric"`, "amount::numeric::int"]) {
         const path = write(nodes(dialect, [
           model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
           model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`),
@@ -1277,6 +1285,13 @@ describe("both tools: names at the edges", () => {
       model("r", ["orders"], `select "order", amount::numeric from ${T("orders")}`),
     ]))
     expect(carried(columnAnswer(quoted, "orders", "amount"))).toEqual(["r.amount"])
+    // `_col_N` counts SELECT items from 0, unnamed or not: each of two casts keeps its own column's name.
+    const two = write(nodes("postgres", [
+      model("orders", [], "select 1 as order_id, 2 as status, 2.5 as amount", ["order_id", "status", "amount"]),
+      model("r", ["orders"], `select order_id::int, status, amount::numeric from ${T("orders")}`),
+    ]))
+    expect(carried(columnAnswer(two, "orders", "amount"))).toEqual(["r.amount"])
+    expect(carried(columnAnswer(two, "orders", "order_id"))).toEqual(["r.order_id"])
     // Elsewhere the warehouse picks another name: the engine's label stays.
     const duck = write(nodes("duckdb", [
       model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
@@ -1294,6 +1309,15 @@ describe("both tools: names at the edges", () => {
     ]))
     const lineage = dbtLineage({ manifest_path: path, model: "child" })
     expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
+    // Docs that list the rename add no `val_2`.
+    const documented = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("b", [], "select 1 as id, 3 as val", ["id", "val"]),
+      model("r", ["a", "b"], `select a.id, a.val, b.val from ${T("a")} a join ${T("b")} b on a.id = b.id`, ["id", "val", "val_1"]),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const listed = dbtLineage({ manifest_path: documented, model: "child" })
+    expect(Object.keys((listed.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
   })
 
   test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {

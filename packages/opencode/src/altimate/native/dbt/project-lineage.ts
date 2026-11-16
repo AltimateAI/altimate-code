@@ -158,7 +158,7 @@ export function selectItems(stripped: string): string[] {
 /** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
 const ENDS_EXPRESSION = /^(?:null|true|false|end)$/i
 /** Words after which the next word is an operand (`a and b`, `sum(x) over w`), not an alias. */
-const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|between|case|when|then|else|over|collate|escape|interval|distinct|by|as|at|zone|any|all|some|exists)$/i
+const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|between|case|when|then|else|over|collate|escape|interval|distinct|by|as|at|zone|any|all|some|exists|div|mod|xor)$/i
 
 /**
  * A SELECT item's output name when the SQL gives one (`x as name`, `x name`, a bare `t.col`), `*` for a star,
@@ -174,14 +174,16 @@ export function itemName(item: string): string | null {
   const plain = new RegExp(`^([\\s\\S]*?[\\w$)"\`\\]'])\\s+(${QUOTED}|[\\w$]+)$`).exec(item)
   if (!plain) return null
   const before = /([\w$]+)\s*$/.exec(plain[1]!)?.[1]
-  if ((before && TAKES_OPERAND.test(before)) || /(?<![\w$])interval\s+''$/i.test(plain[1]!)) return null
+  if ((before && TAKES_OPERAND.test(before)) || /(?<![\w$])interval\s+(?:''|[\d.]+)$/i.test(plain[1]!)) return null
   return ENDS_EXPRESSION.test(plain[2]!) ? null : unquoteName(plain[2]!)
 }
 
 /** The column a SELECT item casts, unaliased (`amount::numeric`, `cast(t.amount as numeric)`); null otherwise. */
 function castColumn(item: string): string | null {
   const ref = `(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)`
-  const m = new RegExp(`^${ref}\\s*::\\s*[\\w\\s(),]+$`, "i").exec(item) ?? new RegExp(`^cast\\s*\\(\\s*${ref}\\s+as\\s+[\\w\\s(),]+\\)$`, "i").exec(item)
+  // A type name: words, a size (`numeric(10, 2)`), array marks (`int[]`), a quoted name, a further `::` cast.
+  const type = `(?:[\\w\\s(),:]|\\[\\]|"(?:[^"]|"")*")+`
+  const m = new RegExp(`^${ref}\\s*::\\s*${type}$`, "i").exec(item) ?? new RegExp(`^cast\\s*\\(\\s*${ref}\\s+as\\s+${type}\\)$`, "i").exec(item)
   return m ? unquoteName(m[1]!) : null
 }
 
@@ -632,8 +634,10 @@ export class ProjectLineage {
       for (const e of edges) if (real(e.to)) add(e.to)
       const outputs = sql ? this.outputColumns(sql).filter(real) : []
       for (const c of outputs) add(c)
-      // DuckDB keeps a repeated output under a new name (`val`, `val_1`): a `select *` over it reads both.
-      if (this.dialect === "duckdb") for (const c of duckdbRepeats(outputs, new Set(found.keys()))) add(c)
+      // DuckDB keeps a repeated output under a new name (`val`, `val_1`): a `select *` over it reads both. Only
+      // names the SQL makes are taken; a documented `val_1` is that rename.
+      const made = new Set([...edges.map((e) => e.to), ...outputs].filter(real).map((name) => name.toLowerCase()))
+      if (this.dialect === "duckdb") for (const c of duckdbRepeats(outputs, made)) add(c)
     }
     const out = [...found.values()]
     this.columnMemo.set(id, out)
