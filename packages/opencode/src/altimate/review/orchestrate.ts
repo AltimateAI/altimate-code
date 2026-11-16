@@ -326,6 +326,39 @@ export function addedLinesByFile(files: ChangedFile[]): Map<string, Set<number>>
 }
 
 /**
+ * Keep a finding's `suggestion` only when GitHub can apply it as written: every
+ * line of the range was added by the PR, the head file has those lines, and
+ * the replacement changes them. Otherwise the replacement moves into the body
+ * as a plain "Suggested fix" block.
+ */
+export async function validateSuggestions(
+  findings: Finding[],
+  getContent: OrchestrateInput["getContent"],
+  added: Map<string, Set<number>>,
+): Promise<Finding[]> {
+  const heads = new Map<string, Promise<string | undefined>>()
+  const head = (file: string) => {
+    if (!heads.has(file)) heads.set(file, getContent?.(file, "new").catch(() => undefined) ?? Promise.resolve(undefined))
+    return heads.get(file)!
+  }
+  return Promise.all(
+    findings.map(async (f) => {
+      const s = f.suggestion
+      if (!s) return f
+      const lines = added.get(f.file)
+      const range = Array.from({ length: s.endLine - s.startLine + 1 }, (_, i) => s.startLine + i)
+      const inDiff = s.startLine <= s.endLine && !!lines && range.every((n) => lines.has(n))
+      const text = inDiff ? await head(f.file) : undefined
+      const rows = text?.split("\n")
+      const current = rows && rows.length >= s.endLine ? rows.slice(s.startLine - 1, s.endLine).join("\n") : undefined
+      if (current !== undefined && current !== s.replacement) return f
+      const { suggestion: _drop, ...rest } = f
+      return { ...rest, body: `${f.body}\n\nSuggested fix:\n\`\`\`sql\n${s.replacement}\n\`\`\`` } as Finding
+    }),
+  )
+}
+
+/**
  * Mark a finding anchored on a diff context line (one the PR did not add) as
  * `preExisting`. Lines are never removed here: the envelope keeps every
  * finding's line, and posting filters inline comments to the lines GitHub
@@ -2327,7 +2360,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // severe first. The AI lane is grounded in this list (its prompt keeps the
   // top 40), so dropped or repeated findings don't crowd out real ones.
   const cleanFindings = (list: Finding[], merge = true): Finding[] => {
-    let out = dedupe(list).filter((f) => !exclusionReason(f, input.rubric))
+    let out = dedupe(list)
+      .filter((f) => !exclusionReason(f, input.rubric))
+      .map((f) => {
+        // The matched source text some lanes record, quoted as evidence.
+        const line = (f.evidence?.result as { line?: unknown } | undefined)?.line
+        return typeof line === "string" && line.trim() && !f.evidenceLine
+          ? { ...f, evidenceLine: line.trim().slice(0, 200) }
+          : f
+      })
     // Per-rule posting policy: `off` rules are dropped (and so never ground the
     // AI lane); the rest are marked for inline or summary-only posting.
     out = out
@@ -2395,10 +2436,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   }
 
   // Flatten, drop excluded, dedupe, threshold-filter.
+  const validated = await validateSuggestions(merged, getContent, addedLinesByFile(input.changedFiles))
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
-  const findings = cleanFindings(merged).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  const findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // The verdict counts every instance; merging repeats is presentation only.
-  const verdictFindings = cleanFindings(merged, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  const verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings

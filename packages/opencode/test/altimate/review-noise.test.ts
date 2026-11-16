@@ -3,12 +3,15 @@ import {
   isCatalogPortability,
   isSuppressiblePortability,
   runReview,
+  validateSuggestions,
   type ReviewRunner,
 } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { makeFinding, mergeRepeats, type Finding } from "../../src/altimate/review/finding"
 import {
+  BODY_MAX_CHARS,
+  clampBody,
   commentableLines,
   findingMarker,
   inlineComments,
@@ -839,5 +842,118 @@ describe("inline posting policy", () => {
     const env = buildEnvelope({ findings: [inlineAt(1, { body: "the detail" })], tier: "lite", mode: "comment" })
     expect(renderSummary(env)).not.toContain("the detail")
     expect(renderSummary(env, { inline: false })).toContain("the detail")
+  })
+})
+
+describe("output form", () => {
+  const head = "select\n  id\n  , new_col\n  , other_col\n\nfrom src"
+  const added = new Map([["models/m.sql", new Set([3, 4])]])
+  const getContent = async () => head
+  const withSuggestion = (startLine: number, endLine: number, replacement: string) =>
+    finding({
+      severity: "warning",
+      category: "sql_quality",
+      title: "m: ai finding",
+      startLine,
+      evidence: { tool: "ai-review", result: {} },
+      suggestion: { startLine, endLine, replacement },
+    })
+
+  test("a valid suggestion renders a suggestion fence over its line range", async () => {
+    const [f] = await validateSuggestions([withSuggestion(3, 4, "  , new_col\n  , other_col_v2")], getContent, added)
+    expect(f.suggestion).toBeDefined()
+    const [c] = inlineComments(buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })).comments
+    expect(c.body).toContain("```suggestion\n  , new_col\n  , other_col_v2\n```")
+    expect({ start_line: c.start_line, start_side: c.start_side, line: c.line, side: c.side }).toEqual({
+      start_line: 3,
+      start_side: "RIGHT",
+      line: 4,
+      side: "RIGHT",
+    })
+  })
+
+  test("a one-line suggestion sets only `line`", async () => {
+    const [f] = await validateSuggestions([withSuggestion(3, 3, "  , new_col_v2")], getContent, added)
+    const [c] = inlineComments(buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })).comments
+    expect(c.line).toBe(3)
+    expect(c.start_line).toBeUndefined()
+  })
+
+  test("a range outside the added lines, past the file end, or unchanged degrades to a text block", async () => {
+    const cases = [
+      withSuggestion(2, 3, "  id\n  , x"), // line 2 is context, not added
+      withSuggestion(3, 3, "  , new_col"), // replacement equals the current line
+    ]
+    const out = await validateSuggestions(cases, getContent, added)
+    const past = await validateSuggestions(
+      [withSuggestion(3, 4, "x")],
+      async () => "select\n  id\n  , new_col",
+      added,
+    )
+    for (const f of [...out, ...past]) {
+      expect(f.suggestion).toBeUndefined()
+      expect(f.body).toContain("Suggested fix:\n```sql\n")
+      const [c] = inlineComments(buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })).comments
+      expect(c.body).not.toContain("```suggestion")
+      expect(c.start_line).toBeUndefined()
+    }
+  })
+
+  test("long bodies are clamped when rendered; the envelope keeps the full text", () => {
+    const body = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} explains the problem.`).join(" ")
+    const f = finding({ severity: "warning", category: "sql_quality", tier: "inline", startLine: 3, body })
+    const env = buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })
+    expect(env.findings[0].body).toBe(body)
+    const [c] = inlineComments(env).comments
+    expect(c.body).not.toContain(body)
+    expect(c.body).toContain("explains the problem.…")
+    const clamped = clampBody(body)
+    expect(clamped.length).toBeLessThanOrEqual(BODY_MAX_CHARS)
+    expect(clamped.endsWith("problem.…")).toBe(true)
+    expect(renderSummary(env, { inline: false })).toContain(clamped)
+    expect(clampBody("short")).toBe("short")
+  })
+
+  test("a clamp inside a code fence closes the fence", () => {
+    const body = "Use this instead:\n```sql\n" + "select a, b from t\n".repeat(60) + "```"
+    const out = clampBody(body, 200)
+    expect((out.match(/^```/gm) ?? []).length % 2).toBe(0)
+  })
+
+  test("the matched source line is quoted in inline comments and summary bullets", async () => {
+    const sql = "select id from a\nwhere id not in (select id from b)"
+    const env = await runReview({
+      changedFiles: [{ path: "models/m.sql", status: "added", diff: `@@ -0,0 +1,2 @@\n+select id from a\n+where id not in (select id from b)\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return { grade: "B" }
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: true, equivalent: true }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+      } as ReviewRunner,
+      getContent: async () => sql,
+      forceTier: "full",
+    })
+    const f = env.findings.find((x) => x.evidenceLine === "where id not in (select id from b)")
+    expect(f).toBeDefined()
+    const md = renderSummary(env, { inline: false })
+    expect(md).toContain(`\`${f!.file}${f!.startLine ? `:${f!.startLine}` : ""}\` — \`where id not in (select id from b)\``)
+
+    const g = finding({ severity: "warning", category: "sql_quality", tier: "inline", startLine: 3, evidenceLine: "  , new_col" })
+    const [c] = inlineComments(buildEnvelope({ findings: [g], tier: "lite", mode: "comment" })).comments
+    expect(c.body).toContain("`models/m.sql:3` — `, new_col`")
   })
 })
