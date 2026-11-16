@@ -32,6 +32,7 @@ import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
+import { ruleTier } from "./rule-tiers"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
 // Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
@@ -2254,6 +2255,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // top 40), so dropped or repeated findings don't crowd out real ones.
   const cleanFindings = (list: Finding[], merge = true): Finding[] => {
     let out = dedupe(list).filter((f) => !exclusionReason(f, input.rubric))
+    // Per-rule posting policy: `off` rules are dropped (and so never ground the
+    // AI lane); the rest are marked for inline or summary-only posting.
+    out = out
+      .map((f) => ({ f, tier: ruleTier(f.rule, input.config.rules) }))
+      .filter(({ tier }) => tier !== "off")
+      .map(({ f, tier }) => ({ ...f, tier: tier === "inline" ? ("inline" as const) : ("summary" as const) }))
     // Cross-engine portability advice from the regex catalog is noise for a
     // project that runs on one known engine. Core's dialect-aware check (a
     // function missing on THIS engine) is a real error and is kept.

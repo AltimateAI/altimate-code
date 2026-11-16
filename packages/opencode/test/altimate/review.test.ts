@@ -36,6 +36,10 @@ import {
   DEFAULT_REVIEW_CONFIG,
 } from "../../src/altimate/review"
 
+/** Detection tests below exercise rules the default posting policy turns off;
+ *  report every rule so they still see the lane's output. */
+const SHOW_ALL_RULES = { "*": "summary" } as const
+
 // ---------------------------------------------------------------------------
 // finding.ts
 // ---------------------------------------------------------------------------
@@ -1126,7 +1130,7 @@ describe("orchestrate", () => {
     }
     const envCore = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality", "dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["sql_quality", "dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner: withCore,
@@ -1145,7 +1149,7 @@ describe("orchestrate", () => {
     // Control: core lint NOT available (ran:false) → regex twin is kept (fallback).
     const noCore = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality", "dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["sql_quality", "dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner: { ...fakeRunner({}), async check() { return { issues: [], ran: false } } },
@@ -1208,7 +1212,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+group by" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
@@ -1261,7 +1265,7 @@ describe("orchestrate", () => {
           diff: "+on orders.order_id = customers.customer_id\n-on orders.customer_id = customers.customer_id\n",
         },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -1360,7 +1364,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality", "dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["sql_quality", "dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
@@ -1626,7 +1630,7 @@ describe("orchestrate", () => {
         { path: "models/staging/stg_a.sql", status: "modified", diff: "+x\n" },
         { path: "models/staging/stg_b.sql", status: "modified", diff: "+y\n" },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
@@ -1664,7 +1668,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "models/intermediate/int_roles.sql", status: "modified", diff: "+x\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2547,7 +2551,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2583,7 +2587,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2654,7 +2658,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "models/marts/fct_orders.sql", status: "modified", diff: "+group by g, h\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2687,7 +2691,7 @@ describe("orchestrate", () => {
           diff: "+on orders.order_id = customers.customer_id\n",
         },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,

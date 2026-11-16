@@ -77,6 +77,14 @@ export const ReviewConfig = z.object({
     .default({ enabled: false, warehouse: "" }),
   /** Rubric overrides, deep-merged onto DEFAULT_RUBRIC. */
   rubric: Rubric.partial().default({}),
+  /**
+   * Per-rule posting policy, keyed by finding `rule` id (`tool:rule`) or a
+   * `tool:*` glob: `inline` posts on the diff, `summary` keeps it to the
+   * summary comment, `off` drops it. Overrides the shipped defaults in
+   * rule-tiers.ts. Read from the base branch, so a PR cannot relax it.
+   * Engine rules that decide the verdict can be turned off only by exact id.
+   */
+  rules: z.record(z.string(), z.enum(["inline", "summary", "off"])).default({}),
   /** Extra path suffixes to exclude from review. */
   exclude: z.array(z.string()).default([]),
   /**
