@@ -153,6 +153,21 @@ describe("decision notices", () => {
     expect(state).toMatchObject({ pending: [], seen: ["c-1:rejected"] })
   })
 
+  test("a request sent back for changes is shown once with the comment; its resend is let go silently", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    mine = () => page([contribution({ status: "changes_requested", reviewed_by_name: "Olive", review_reason: "Name the table" })])
+    const sentBack = await poll()
+    expect(sentBack.shown).toEqual([
+      { public_id: "c-1", kind: "skill", name: "deploy", status: "changes_requested", reason: "Name the table", reviewer: "Olive", at: "2026-11-01T00:00:00Z" },
+    ])
+    expect((await poll()).shown).toEqual([])
+    // Sent again: the old one is replaced and the new one waits; nothing to tell until it is decided.
+    mine = () => page([contribution({ public_id: "c-2", status: "pending" }), contribution({ status: "superseded" })])
+    expect((await poll()).shown).toEqual([])
+    expect((await ReviewNotices.read(scopeA()))?.pending).toEqual(["c-2"])
+  })
+
   test("a decision announced with nobody listening is still shown when a client next starts", async () => {
     await ReviewNotices.recordSubmitted(scopeA(), { public_id: "c-1", status: "pending" })
     mine = () => page([contribution({ status: "active", reviewed_by_name: "Olive", reviewed_at: "2026-11-02T00:00:00Z" })])
@@ -521,6 +536,24 @@ describe("workspace review status", () => {
     ])
   })
 
+  test("a request sent back for changes says who asked, what, and how to send it again", () => {
+    const lines = describeReviews("Growth", {
+      items: [
+        ReviewApi.Contribution.parse(contribution({ status: "changes_requested", reviewed_by_name: "Olive", review_reason: "Name the table" })),
+        ReviewApi.Contribution.parse(contribution({ public_id: "c-2", kind: "knowledge", name: "FAQ", status: "changes_requested", expired: true })),
+      ],
+      skipped: 0,
+      complete: true,
+    })
+    expect(lines.slice(1)).toEqual([
+      '  skill "deploy" (new): changes requested by Olive: Name the table',
+      "    Change the skill, then send it again with `altimate-code skill publish` (or from your IDE).",
+      // No expiry label: a request sent back is with its author, not waiting.
+      '  knowledge "FAQ" (new): changes requested',
+      "    Change the knowledge base, then send it again from the workspace's Knowledge tab.",
+    ])
+  })
+
   test("withdrawn and removed requests read as such, a removal with who and why", () => {
     const lines = describeReviews("Growth", {
       items: [
@@ -613,6 +646,7 @@ describe("requests for other clients", () => {
         contribution({ public_id: "c-1", status: "pending" }),
         contribution({ public_id: "c-2", status: "active", name: "two" }),
         contribution({ public_id: "c-3", status: "rejected", review_reason: "No" }),
+        contribution({ public_id: "c-4", status: "changes_requested", review_reason: "Shorter" }),
       ])
     const listed = await ReviewRequests.listReview(project)
     expect(listed.status).toBe("ok")
@@ -622,6 +656,7 @@ describe("requests for other clients", () => {
       ["c-1", ["withdraw"]],
       ["c-2", ["remove"]],
       ["c-3", []],
+      ["c-4", ["withdraw"]],
     ])
   })
 
@@ -718,6 +753,106 @@ describe("requests for other clients", () => {
     expect(await ReviewRequests.ruleRequests(project, project, 43)).toEqual([])
     apiKey = "other"
     expect(await ReviewRequests.ruleRequests(project, project, 42)).toEqual([])
+  })
+})
+
+describe("rule proposals sent back for changes", () => {
+  const { ReviewRequests } = require("../../../src/altimate/workspace/review-requests") as typeof import("../../../src/altimate/workspace/review-requests")
+
+  const open = (over: Record<string, unknown> = {}) => ({
+    public_id: "r-1",
+    rule_key: "R-0123456789ab",
+    text: "Name every table",
+    applies_to: [],
+    tags: [],
+    change: "add" as const,
+    created_at: "2026-11-01T00:00:00Z",
+    status: "changes_requested",
+    version: 2,
+    review_reason: "Say which schema",
+    ...over,
+  })
+  /** Rules state pulled for this account and workspace, with `r-1` sent from here and open on the server. */
+  const pulled = async (pending: ReturnType<typeof open>[]) => {
+    const { RulesStore } = await import("../../../src/altimate/rules/store")
+    const { accountDigest } = await import("../../../src/altimate/workspace/state")
+    const digest = (await accountDigest())!
+    await RulesStore.update(project, (s) => {
+      s.scope = { apiUrl: API, tenant: "acme", account: "user:7", datamateId: 42, repoRemote: "github.com/acme/app" } as never
+      s.workspace = { name: "Growth", is_owner: false } as never
+      s.pulled_with = digest
+      s.sent = [{ public_id: "r-1", text: "Name every table", status: "changes_requested", reason: "Say which schema", reviewer: "Olive", change: "add", sent_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-02T00:00:00Z" }]
+      s.my_pending = pending as never
+    })
+    return RulesStore
+  }
+  /** Answer `POST .../rules/<id>/<action>` with `answer`, everything else as the harness does. */
+  const onRule = (answer: (action: string, body: any) => Response) => {
+    const sent: [string, any][] = []
+    const harness = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const hit = url.match(/\/datamates\/42\/rules\/r-1\/(withdraw|resubmit)$/)
+      if (hit) {
+        const body = JSON.parse(init?.body ?? "{}")
+        sent.push([hit[1], body])
+        return answer(hit[1], body)
+      }
+      return harness(input, init)
+    }) as typeof fetch
+    return sent
+  }
+
+  test("each open proposal says what its author may do: a sent-back one may be sent again or withdrawn", async () => {
+    await pulled([open()])
+    expect((await ReviewRequests.ruleRequests(project, project, 42)).map((r) => [r.public_id, r.status, r.version, r.actions])).toEqual([
+      ["r-1", "changes_requested", 2, ["resubmit", "withdraw"]],
+    ])
+    await pulled([open({ status: undefined })])
+    expect((await ReviewRequests.ruleRequests(project, project, 42))[0].actions).toEqual(["withdraw"])
+    // A retirement has no wording to change: it can only be withdrawn.
+    await pulled([open({ change: "retire" })])
+    expect((await ReviewRequests.ruleRequests(project, project, 42))[0].actions).toEqual(["withdraw"])
+  })
+
+  test("a new wording goes with the version, replaces the proposal and waits for review", async () => {
+    const RulesStore = await pulled([open()])
+    const sent = onRule(() => reply({ index: 0, status: "pending", public_id: "r-2", version: 1 }))
+    const result = await ReviewRequests.actOnRule(project, project, "r-1", "resubmit", "  Name every table in the sales schema ")
+    expect(result).toEqual({
+      ok: true,
+      request: { kind: "rule", public_id: "r-2", name: "Name every table in the sales schema", status: "pending", version: 1, actions: ["withdraw"] },
+    })
+    expect(sent).toEqual([["resubmit", { expected_version: 2, text: "Name every table in the sales schema", source: "cli" }]])
+    const state = await RulesStore.read(project)
+    expect(state.my_pending).toEqual([])
+    expect(state.sent.map((x) => [x.public_id, x.status])).toEqual([["r-1", "superseded"], ["r-2", "pending"]])
+  })
+
+  test("withdrawing goes with the version and is recorded at once", async () => {
+    const RulesStore = await pulled([open()])
+    const sent = onRule(() => reply({ public_id: "r-1", status: "withdrawn", version: 3 }))
+    expect(await ReviewRequests.actOnRule(project, project, "r-1", "withdraw")).toMatchObject({ ok: true, request: { status: "withdrawn", actions: [] } })
+    expect(sent).toEqual([["withdraw", { expected_version: 2, source: "cli" }]])
+    expect((await RulesStore.read(project)).sent.map((x) => x.status)).toEqual(["withdrawn"])
+  })
+
+  test("a refusal keeps its code; nothing is asked for a proposal not open, or one not sent back", async () => {
+    await pulled([open()])
+    onRule(() => reply({ detail: { code: "unchanged", message: "Change the wording before sending it again." } }, 409))
+    expect(await ReviewRequests.actOnRule(project, project, "r-1", "resubmit", "Name every table")).toEqual({
+      ok: false,
+      status: 409,
+      code: "unchanged",
+      error: "Change the wording before sending it again.",
+    })
+    const sent = onRule(() => reply({}))
+    expect(await ReviewRequests.actOnRule(project, project, "r-9", "withdraw")).toMatchObject({ ok: false, code: "not_open" })
+    await pulled([open({ status: "pending" })])
+    expect(await ReviewRequests.actOnRule(project, project, "r-1", "resubmit", "x")).toMatchObject({ ok: false, code: "not_allowed" })
+    await pulled([open()])
+    expect(await ReviewRequests.actOnRule(project, project, "r-1", "resubmit", "  ")).toMatchObject({ ok: false, code: "invalid_text" })
+    expect(sent).toEqual([])
   })
 })
 

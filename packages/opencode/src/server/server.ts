@@ -1434,6 +1434,32 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — workspace review: request changes. The person's own rule proposal, still open on the
+      // server: withdraw it, or send a new wording of one sent back for changes (`text`).
+      .post("/altimate/rules/:id/:action", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const action = c.req.param("action")
+        if (action !== "withdraw" && action !== "resubmit") return c.json({ ok: false, error: "action must be withdraw or resubmit." }, 404)
+        const read = await readJsonObject(() => c.req.text(), `rule ${action}`)
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const text = read.body.text
+        if (action === "resubmit" && (typeof text !== "string" || !text.trim())) return c.json({ ok: false, error: "text must be the new wording." }, 400)
+        try {
+          const { ReviewRequests } = await import("../altimate/workspace/review-requests")
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          const result = await ReviewRequests.actOnRule(root, Instance.directory, c.req.param("id"), action, typeof text === "string" ? text : undefined)
+          if (!result.ok) return c.json({ ok: false, code: result.code, error: result.error }, result.status)
+          const [{ RuleEvents }, { Bus }] = await Promise.all([import("../altimate/rules/events"), import("@/bus")])
+          await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
+          return c.json({ ok: true as const, request: result.request })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error(`rule ${action} failed`, { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — workspace review: the person's own requests (rules, skills, knowledge) for clients, and
       // withdrawing or removing a skill or knowledge request. Approving and rejecting stay in the web app.
       .get("/altimate/workspace/requests", async (c) => {

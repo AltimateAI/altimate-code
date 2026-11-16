@@ -41,6 +41,20 @@ describe("rules TUI", () => {
     expect(combinedToast([])).toBeUndefined()
   })
 
+  test("a request sent back for changes is a warning with the comment and how to send it again", () => {
+    const sentBack = { ...approved, status: "changes_requested", reason: "Name the table" }
+    expect(decisionToast(sentBack)).toEqual({
+      variant: "warning",
+      message: 'Changes requested on your skill "cost-guard" by Olive — Name the table. Change it and send it again with `altimate-code skill publish`.',
+      duration: 20000,
+    })
+    expect(decisionToast({ public_id: "r", text: "Name tables", status: "changes_requested", reviewer: "Olive", reason: "Which schema?" })?.message).toBe(
+      'Changes requested on your rule by Olive: "Name tables" — Which schema? Open /rules to send a new wording.',
+    )
+    expect(combinedToast([approved, sentBack])).toMatchObject({ variant: "warning" })
+    expect(combinedToast([approved, sentBack])?.message).toContain('skill "cost-guard" sent back for changes by Olive — Name the table')
+  })
+
   test("decisions that arrive together are one toast, a warning when any is a rejection or a removal", () => {
     expect(combinedToast([approved, rejected])).toEqual({
       variant: "warning",

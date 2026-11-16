@@ -122,6 +122,18 @@ describe("workspace request routes", () => {
     }
   })
 
+  test("a rule proposal's withdraw or new wording is validated before anything is asked, and refused from a browser", async () => {
+    const origin = { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    const refused = await request("POST", "/altimate/rules/r-1/withdraw", {}, origin)
+    expect([403, 409]).toContain(refused.status)
+    expect((await request("POST", "/altimate/rules/r-1/approve", {})).status).toBe(404)
+    for (const body of [{}, { text: "  " }, { text: 5 }]) {
+      const response = await request("POST", "/altimate/rules/r-1/resubmit", body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ ok: false })
+    }
+  })
+
   test("without a link, the list still answers with the person's rules and says why skills and knowledge are missing", async () => {
     await using dir = await tmpdir({ git: true })
     const response = await Server.Default().request("/altimate/workspace/requests", { headers: { "x-opencode-directory": dir.path } })

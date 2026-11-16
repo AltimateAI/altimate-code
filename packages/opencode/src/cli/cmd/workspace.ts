@@ -336,12 +336,23 @@ export const reviewStatusDeps: ReviewStatusDeps = {
 
 const REVIEW_STATUS: Record<ReviewApi.Contribution["status"], string> = {
   pending: "pending review",
+  // altimate_change start — workspace review: request changes
+  changes_requested: "changes requested",
+  // altimate_change end
   active: "approved",
   rejected: "rejected",
   superseded: "replaced by a newer request",
   withdrawn: "withdrawn",
   retired: "removed from the workspace",
 }
+
+// altimate_change start — workspace review: request changes
+/** How the author sends a sent-back request again: the new version replaces it, back in review. */
+export const RESEND_HINT: Record<ReviewApi.Contribution["kind"], string> = {
+  skill: "Change the skill, then send it again with `altimate-code skill publish` (or from your IDE).",
+  knowledge: "Change the knowledge base, then send it again from the workspace's Knowledge tab.",
+}
+// altimate_change end
 
 /** One line per request for `workspace review status`. Pure, so the wording is testable. Server text is made printable. */
 export function describeReviews(workspaceName: string, listed: Awaited<ReturnType<typeof ReviewApi.listMine>>): string[] {
@@ -352,10 +363,15 @@ export function describeReviews(workspaceName: string, listed: Awaited<ReturnTyp
     const change = item.change === "edit" ? "update" : "new"
     const reviewer = item.reviewed_by_name ? ` by ${printable(item.reviewed_by_name)}` : ""
     const reason = item.review_reason ? `: ${printable(item.review_reason)}` : ""
-    const decided = item.status === "active" || item.status === "rejected" || item.status === "retired" ? `${reviewer}${reason}` : ""
+    // altimate_change start — workspace review: request changes (who sent it back, and what to change)
+    const decided = ["active", "rejected", "retired", "changes_requested"].includes(item.status) ? `${reviewer}${reason}` : ""
+    // altimate_change end
     // Expired requests stay pending and can still be approved: the label says they have waited past the window.
     const expired = item.status === "pending" && item.expired ? " (expired: waiting longer than 14 days)" : ""
     lines.push(`  ${item.kind} "${printable(item.name)}" (${change}): ${REVIEW_STATUS[item.status]}${decided}${expired}`)
+    // altimate_change start — workspace review: request changes
+    if (item.status === "changes_requested") lines.push(`    ${RESEND_HINT[item.kind]}`)
+    // altimate_change end
   }
   if (listed.skipped)
     lines.push(`${listed.skipped} request${listed.skipped === 1 ? "" : "s"} could not be read by this version of altimate-code.`)
