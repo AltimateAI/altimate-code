@@ -326,6 +326,75 @@ describe("classifyDbtFile: the project's own directories decide", () => {
   })
 })
 
+describe("layout dirs outside the project root (shared macros in a monorepo)", () => {
+  async function solanaLayout(macroPaths: string) {
+    const root = await newRepo()
+    await write(root, "dbt_subprojects/solana/dbt_project.yml", `name: solana\nmacro-paths: ${macroPaths}\n`)
+    return dbtProjectLayout(path.join(root, "dbt_subprojects/solana"), "dbt_subprojects/solana")
+  }
+
+  test("a macro dir above the root classifies as macro, stays in scope and reaches the AI lane", async () => {
+    const layout = await solanaLayout(`["macros", "../../dbt_macros"]`)
+    expect(classifyDbtFile("dbt_macros/shared/x.sql", layout)).toBe("macro")
+    expect(classifyDbtFile("dbt_subprojects/solana/macros/y.sql", layout)).toBe("macro")
+    const files: ChangedFile[] = [
+      { path: "dbt_macros/shared/x.sql", status: "modified", diff: "+{% macro x() %}1{% endmacro %}\n" },
+      { path: "dbt_subprojects/solana/models/m.sql", status: "modified", diff: "+select 1 as id\n" },
+      { path: "dbt_subprojects/ethereum/models/e.sql", status: "modified", diff: "+select 1 as id\n" },
+    ]
+    const r = scopeToProject(files, layout!.root, layout)
+    expect(r.inScope.map((f) => f.path)).toEqual(["dbt_macros/shared/x.sql", "dbt_subprojects/solana/models/m.sql"])
+    expect(r.outOfScope).toBe(1)
+    // Without the layout the shared macro dir is out of scope, as before.
+    expect(scopeToProject(files, layout!.root).outOfScope).toBe(2)
+
+    let aiPaths: Array<{ path: string; kind?: string }> = []
+    await runReview({
+      changedFiles: r.inScope,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      layout,
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return { grade: "B" }
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: false }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+      } as unknown as ReviewRunner,
+      getContent: async (f, side) => (side === "old" ? undefined : f.endsWith("x.sql") ? "{% macro x() %}1{% endmacro %}\n" : "select 1 as id\n"),
+      getCompiled: async () => undefined,
+      aiReview: async (input) => {
+        aiPaths = input.files.map((f) => ({ path: f.path, kind: f.kind }))
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    expect(aiPaths).toContainEqual({ path: "dbt_macros/shared/x.sql", kind: "macro" })
+  })
+
+  test("a layout dir that escapes the repository is ignored", async () => {
+    const layout = await solanaLayout(`["macros", "../../../outside"]`)
+    const files: ChangedFile[] = [
+      { path: "outside/x.sql", status: "modified" },
+      { path: "../outside/x.sql", status: "modified" },
+    ]
+    const r = scopeToProject(files, layout!.root, layout)
+    expect(r.inScope).toEqual([])
+    expect(r.outOfScope).toBe(2)
+    expect(classifyDbtFile("outside/x.sql", layout)).toBe("other")
+  })
+})
+
 describe("raw Jinja never reaches the engine lanes", () => {
   function runnerRecording(seen: string[]): ReviewRunner {
     return {
