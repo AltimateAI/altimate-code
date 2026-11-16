@@ -13,6 +13,7 @@ import {
   listFilesAt,
   listWorkingTreeFiles,
   grepMatchesAt,
+  grepFixedAt,
   manifestHash,
   resolveCommit,
   commitParents,
@@ -25,6 +26,7 @@ import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { ADAPTERS } from "./dbt-patterns"
 import { runAiReview } from "./ai-review"
+import { aiVerifyEnabled } from "./ai-verify"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -452,6 +454,16 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiDisabledReason,
     aiModel: opts.aiModel,
     aiGraphContext: process.env.ALTIMATE_REVIEW_AI_GRAPH === "1",
+    aiVerify: aiVerifyEnabled(),
+    grepProject: (pattern, glob) => {
+      // The project's dbt directories (repo-relative), or one glob inside the project.
+      const root = projectRootRel ? projectRootRel + "/" : ""
+      const dirs = layout
+        ? [...layout.dirs.model, ...layout.dirs.macro, ...layout.dirs.seed, ...layout.dirs.snapshot, ...layout.dirs.test]
+        : ["models", "macros", "seeds", "snapshots", "tests"]
+      const specs = glob ? [`${root}${glob}`] : dirs.map((d) => path.posix.normalize(root + d))
+      return grepFixedAt(gitRoot, opts.head, pattern, specs.filter((d) => !d.startsWith("..")))
+    },
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,

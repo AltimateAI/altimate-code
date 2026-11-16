@@ -2,6 +2,7 @@ import { Dispatcher } from "../native"
 import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import { loadRawManifest } from "../native/dbt/helpers"
+import { columnReach } from "../native/dbt/column-reach"
 import { isExistenceError } from "../native/existence-error"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
@@ -490,6 +491,15 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         if (child?.path && childId.startsWith("model.")) out.push({ name: child.name, path: child.path })
       }
       return out
+    },
+
+    async columnReach(model: string, column: string, dialect?: string) {
+      try {
+        return columnReach(opts.manifestPath, model, column, dialect)
+      } catch (err) {
+        fail("columnReach", err)
+        return undefined
+      }
     },
 
     async modelConsumers(model: string) {

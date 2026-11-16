@@ -9,6 +9,7 @@ import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
+import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -138,6 +139,8 @@ export interface AiReviewInput {
   prBody?: string
   /** Explicit `provider/model`; omit to use the configured default model. */
   model?: string
+  /** What the verifier may read; it runs only when this is set and `ALTIMATE_REVIEW_AI_VERIFY=1`. */
+  evidence?: AiVerifyEvidence
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -155,6 +158,8 @@ export interface AiLaneStatus {
   cost?: number
   /** Model calls made (one per batch). */
   calls?: number
+  /** The dbt-grounded verifier's outcome, when it ran (opt-in). */
+  verifier?: VerifierStatus
 }
 /** Token counts as `Session.getUsage` reports them: `input` excludes cached
  *  tokens, `inputTotal` includes them. */
@@ -291,7 +296,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       const slice = batches.slice(i, i + BATCH_CONCURRENCY)
       results.push(...(await Promise.all(slice.map((b) => reviewBatch(input, b, budget, system, model)))))
     }
-    const findings = results.flatMap((r) => r.findings)
+    let findings = results.flatMap((r) => r.findings)
     const failed = results.filter((r) => r.state !== "ok")
     log.info("ai review complete", { findings: findings.length, batches: batches.length, failed: failed.length })
     // The lane is ok when any call answered; a partial failure is reported, not hidden.
@@ -299,7 +304,14 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     if (failed.length === results.length)
       return done([], { state: failed[0].state, reason: failed[0].reason, model: modelLabel, ...spent })
     const reason = failed.length ? `${failed.length} of ${results.length} calls failed: ${failed[0].reason}` : undefined
-    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}), ...spent })
+    // Opt-in: try to refute each finding with dbt evidence. Never throws.
+    let verifier: VerifierStatus | undefined
+    if (input.evidence && aiVerifyEnabled()) {
+      const v = await runAiVerify({ findings, grounding: input.grounding, evidence: input.evidence, model })
+      findings = v.findings
+      verifier = v.status
+    }
+    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}), ...spent, ...(verifier ? { verifier } : {}) })
   } catch (err) {
     log.error("ai review failed", { error: err })
     return done([], { state: "error", reason: safeReason(err), model: modelLabel })
