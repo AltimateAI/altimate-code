@@ -286,30 +286,45 @@ export function isSuppressiblePortability(f: Finding, dialect: string, targets: 
   return !worksOn || [dialect.toLowerCase(), ...targets].every((d) => worksOn.includes(d))
 }
 
-/** Head-side line numbers of a unified diff: `commentable` holds the lines
- *  GitHub accepts for an inline comment (added and context lines inside a
- *  hunk); `added` holds only the `+` lines the PR introduced. */
-export function scanDiffLines(diff: string | undefined): { commentable: Set<number>; added: Set<number> } {
-  const commentable = new Set<number>()
-  const added = new Set<number>()
-  if (!diff) return { commentable, added }
+/** A head-side line inside a diff hunk: an added (`+`) or a context (` `) line. */
+export interface DiffLine {
+  line: number
+  text: string
+  kind: "+" | " "
+}
+
+/** Walk a unified diff's hunks, yielding each added and context line with its head-side line number. */
+export function* walkDiffLines(diff: string | undefined): Generator<DiffLine> {
+  if (!diff) return
   let right = 0
   let inHunk = false
   const rows = diff.split("\n")
   if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
-  for (const line of rows) {
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+  for (const row of rows) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
     if (h) {
       right = Number(h[1])
       inHunk = true
       continue
     }
     // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
-    if (!inHunk || line.startsWith("\\")) continue
+    if (!inHunk || row.startsWith("\\")) continue
     // A blank context line may have lost its leading space in transit.
-    if (line.startsWith("+")) added.add(right)
-    if (line.startsWith("+") || line.startsWith(" ") || line === "") commentable.add(right++)
-    else if (!line.startsWith("-")) inHunk = false
+    if (row.startsWith("+")) yield { line: right++, text: row.slice(1), kind: "+" }
+    else if (row.startsWith(" ") || row === "") yield { line: right++, text: row.slice(1), kind: " " }
+    else if (!row.startsWith("-")) inHunk = false
+  }
+}
+
+/** Head-side line numbers of a unified diff: `commentable` holds the lines
+ *  GitHub accepts for an inline comment (added and context lines inside a
+ *  hunk); `added` holds only the `+` lines the PR introduced. */
+export function scanDiffLines(diff: string | undefined): { commentable: Set<number>; added: Set<number> } {
+  const commentable = new Set<number>()
+  const added = new Set<number>()
+  for (const { line, kind } of walkDiffLines(diff)) {
+    commentable.add(line)
+    if (kind === "+") added.add(line)
   }
   return { commentable, added }
 }
@@ -356,6 +371,35 @@ export async function validateSuggestions(
       return { ...rest, body: `${f.body}\n\nSuggested fix:\n\`\`\`sql\n${s.replacement}\n\`\`\`` } as Finding
     }),
   )
+}
+
+/** Shortest evidence text matched as a substring of an added line. */
+const EVIDENCE_SUBSTRING_MIN = 12
+
+/**
+ * Give a line-less finding the diff line its rule matched. The rule records
+ * the matched source text in `evidence.result.line`; this finds it in the
+ * file's diff: the first added line with the same trimmed text, else the first
+ * context line with it (which `markPreExisting` then marks pre-existing), else the
+ * first added line containing it when it is long enough to be specific. A
+ * finding whose text isn't in the diff keeps no line and stays in the summary.
+ */
+export function anchorByEvidence(findings: Finding[], files: ChangedFile[]): Finding[] {
+  const diffs = new Map(files.map((f) => [f.path, f.diff]))
+  const walked = new Map<string, DiffLine[]>()
+  return findings.map((f) => {
+    if (typeof f.startLine === "number") return f
+    const raw = (f.evidence?.result as { line?: unknown } | undefined)?.line
+    const want = typeof raw === "string" ? raw.trim() : ""
+    if (!want || !diffs.has(f.file)) return f
+    if (!walked.has(f.file)) walked.set(f.file, [...walkDiffLines(diffs.get(f.file))])
+    const rows = walked.get(f.file)!
+    const hit =
+      rows.find((r) => r.kind === "+" && r.text.trim() === want) ??
+      rows.find((r) => r.kind === " " && r.text.trim() === want) ??
+      (want.length >= EVIDENCE_SUBSTRING_MIN ? rows.find((r) => r.kind === "+" && r.text.includes(want)) : undefined)
+    return hit ? { ...f, startLine: hit.line, endLine: hit.line } : f
+  })
 }
 
 /**
@@ -2379,7 +2423,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // project that runs on one known engine. Core's dialect-aware check (a
     // function missing on THIS engine) is a real error and is kept.
     if (input.suppressPortability) out = out.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
-    out = markPreExisting(out, input.changedFiles)
+    out = markPreExisting(anchorByEvidence(out, input.changedFiles), input.changedFiles)
     if (merge) out = mergeRepeats(out)
     return out.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
   }

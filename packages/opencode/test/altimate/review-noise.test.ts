@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test"
 import {
+  anchorByEvidence,
+  markPreExisting,
+  scanDiffLines,
+  walkDiffLines,
   isCatalogPortability,
   isSuppressiblePortability,
   runReview,
@@ -22,6 +26,7 @@ import {
 import { buildEnvelope } from "../../src/altimate/review/verdict"
 import { verdictHeadline } from "../../src/altimate/review/format"
 import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
+import { detectModelPatterns } from "../../src/altimate/review/dbt-patterns"
 import { classifyPostOutcome } from "../../src/altimate/review/telemetry"
 import { postGitHubReview } from "../../src/altimate/review/post-github"
 import { shouldSuppressPortability } from "../../src/altimate/review/run"
@@ -955,5 +960,141 @@ describe("output form", () => {
     const g = finding({ severity: "warning", category: "sql_quality", tier: "inline", startLine: 3, evidenceLine: "  , new_col" })
     const [c] = inlineComments(buildEnvelope({ findings: [g], tier: "lite", mode: "comment" })).comments
     expect(c.body).toContain("`models/m.sql:3` — `, new_col`")
+  })
+})
+
+describe("anchoring rule findings by their matched line", () => {
+  const runner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true }
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  } as ReviewRunner
+
+  // Head lines: 1 select id, 2 from t, 3 qualify (context), 4 qualify (added), 5 where x = 1, 6 qualify (added again)
+  const QDIFF = [
+    "@@ -1,3 +1,6 @@",
+    " select id",
+    " from t",
+    " qualify row_number() over (partition by id order by d) = 1",
+    "+  qualify row_number() over (partition by k order by d) = 1 -- latest",
+    "+where x = 1",
+    "+  qualify row_number() over (partition by k order by d) = 1 -- latest",
+  ].join("\n")
+  const file = { path: "models/m.sql", status: "modified" as const, diff: QDIFF }
+  const withLine = (line: string) => finding({ evidence: { tool: "rule-catalog", result: { rule: "x", line } } })
+
+  test("the hunk walker yields head-side lines that agree with scanDiffLines", () => {
+    const rows = [...walkDiffLines(DIFF)]
+    expect(rows.map((r) => `${r.kind}${r.line}`)).toEqual([" 1", " 2", "+3", "+4", " 5", " 6"])
+    expect(rows[2].text).toBe("  , new_col")
+    const { commentable, added } = scanDiffLines(DIFF)
+    expect([...commentable]).toEqual(rows.map((r) => r.line))
+    expect([...added]).toEqual(rows.filter((r) => r.kind === "+").map((r) => r.line))
+  })
+
+  test("a catalog rule records the raw added line, not the comment-stripped one", () => {
+    const added = ["select id from t", "  qualify row_number() over (partition by k order by d) = 1 -- latest"]
+    const f = evaluateCatalog(file, added.join("\n"), added, [], DEFAULT_RUBRIC).find(
+      (x) => (x.evidence?.result as { rule?: string }).rule === "qualify-unsupported",
+    )
+    expect((f!.evidence!.result as { line?: string }).line).toBe(added[1])
+  })
+
+  test("a finding whose text is on an added line gets that line, and it posts inline when its rule is inline-tier", () => {
+    const [f] = anchorByEvidence([withLine("  qualify row_number() over (partition by k order by d) = 1 -- latest")], [file])
+    expect(f.startLine).toBe(4)
+    expect(f.endLine).toBe(4)
+    const [g] = markPreExisting([{ ...f, severity: "warning", tier: "inline" }], [file])
+    expect(g.preExisting).toBeUndefined()
+    const { comments } = inlineComments(buildEnvelope({ findings: [g], tier: "lite", mode: "comment" }))
+    expect(comments.map((c) => c.line)).toEqual([4])
+  })
+
+  test("text only on a context line anchors there and is marked pre-existing", () => {
+    const [f] = markPreExisting(anchorByEvidence([withLine("qualify row_number() over (partition by id order by d) = 1")], [file]), [file])
+    expect(f.startLine).toBe(3)
+    expect(f.preExisting).toBe(true)
+  })
+
+  test("text absent from the diff leaves the finding without a line", () => {
+    const [f] = anchorByEvidence([withLine("select something_else from nowhere")], [file])
+    expect(f.startLine).toBeUndefined()
+    const [g] = anchorByEvidence([withLine("where x = 1")], [{ ...file, path: "models/other.sql" }])
+    expect(g.startLine).toBeUndefined()
+  })
+
+  test("duplicate added lines anchor to the first; surrounding whitespace is ignored", () => {
+    const [f] = anchorByEvidence([withLine("\tqualify row_number() over (partition by k order by d) = 1 -- latest   ")], [file])
+    expect(f.startLine).toBe(4)
+  })
+
+  test("a long fragment matches inside an added line; a short one does not", () => {
+    const [long] = anchorByEvidence([withLine("over (partition by k order by d)")], [file])
+    expect(long.startLine).toBe(4)
+    const [short] = anchorByEvidence([withLine("x = 1 --")], [file])
+    expect(short.startLine).toBeUndefined()
+  })
+
+  test("a finding that already has a line keeps it", () => {
+    const [f] = anchorByEvidence([{ ...withLine("where x = 1"), startLine: 1, endLine: 1 }], [file])
+    expect(f.startLine).toBe(1)
+  })
+
+  test("a dbt-patterns detector's recorded line anchors", () => {
+    const diff = "@@ -1,2 +1,3 @@\n select id from a\n+where id not in (select id from b)\n from_here\n"
+    const changed = { path: "models/m.sql", status: "modified" as const, diff }
+    const found = detectModelPatterns(changed, "select id from a\nwhere id not in (select id from b)\n", DEFAULT_RUBRIC)
+    const notIn = found.find((f) => (f.evidence?.result as { rule?: string }).rule === "not_in_nullable")
+    expect(notIn).toBeDefined()
+    expect(anchorByEvidence([notIn!], [changed])[0].startLine).toBe(2)
+  })
+
+  test("the dedup detector records the added line that opens the window", () => {
+    const sql = "select *\nfrom (\n  select *, row_number() over (\n    partition by id\n  ) as rn\n  from t\n)\nwhere rn = 1\n"
+    const diff = "@@ -0,0 +1,8 @@\n" + sql.trimEnd().split("\n").map((l) => `+${l}`).join("\n") + "\n"
+    const changed = { path: "models/m.sql", status: "added" as const, diff }
+    const f = detectModelPatterns(changed, sql, DEFAULT_RUBRIC).find(
+      (x) => (x.evidence?.result as { rule?: string }).rule === "dedup_no_tiebreaker",
+    )
+    expect((f!.evidence!.result as { line?: string }).line).toBe("  select *, row_number() over (")
+    expect(anchorByEvidence([f!], [changed])[0].startLine).toBe(3)
+  })
+
+  test("end to end: an inline-tier catalog rule becomes an inline comment on its line", async () => {
+    const sql = "select id\nfrom t\nqualify row_number() over (partition by id order by d desc) = 1\n"
+    const env = await runReview({
+      changedFiles: [
+        {
+          path: "models/m.sql",
+          status: "modified",
+          diff: "@@ -1,2 +1,3 @@\n select id\n from t\n+qualify row_number() over (partition by id order by d desc) = 1\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"], dialect: "postgres" },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => sql,
+      forceTier: "full",
+    })
+    const f = env.findings.find((x) => x.rule === "rule-catalog:qualify-unsupported")
+    expect(f).toBeDefined()
+    expect(f!.tier).toBe("inline")
+    expect(f!.startLine).toBe(3)
+    expect(f!.preExisting).toBeUndefined()
+    const { comments } = inlineComments(env)
+    expect(comments.find((c) => c.body.includes(findingMarker(f!.id)))?.line).toBe(3)
   })
 })

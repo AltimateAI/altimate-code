@@ -111,10 +111,20 @@ export interface RuleInput {
 
 /** True when the rule matches the change. */
 export function ruleMatches(rule: Rule, input: RuleInput): boolean {
+  return matchRule(rule, input) !== null
+}
+
+/**
+ * Match a rule against the change. Returns null when it doesn't match, else the
+ * raw added line that carried the signal (the first one that satisfied `added`,
+ * else the added line inside the matching ON clause, else the first added line
+ * where the `newSql` pattern shows), when one exists.
+ */
+export function matchRule(rule: Rule, input: RuleInput): { line?: string } | null {
   const kind = fileKind(input.file)
   const wantKind = rule.kind ?? "model_sql"
-  if (wantKind !== "any" && kind !== wantKind && !(kind === "macro" && rule.macros)) return false
-  if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return false
+  if (wantKind !== "any" && kind !== wantKind && !(kind === "macro" && rule.macros)) return null
+  if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return null
 
   // Relevance gate: a rule only fires when its signal is in THE DIFF, never on
   // an unrelated edit to a matching file. added/removed are diff-anchored by
@@ -122,24 +132,26 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   // changed lines to count as relevant. `absentNewSql` is a whole-file guard.
   const diffText = stripComments([...input.added, ...input.removed].join("\n"))
   let relevant = false
+  let line: string | undefined
   if (rule.added) {
-    const hit = input.added.some((l) => {
+    // Tested on the stripped line; the raw line is what gets recorded.
+    line = input.added.find((l) => {
       const s = rule.ignoreStrings ? stripStrings(stripComments(l)) : stripComments(l)
       return rule.added!.test(s) && !(rule.unless && rule.unless.test(s))
     })
-    if (!hit) return false
+    if (line === undefined) return null
     relevant = true
   }
   if (rule.removed) {
-    if (!input.removed.some((l) => rule.removed!.test(stripComments(l)))) return false
+    if (!input.removed.some((l) => rule.removed!.test(stripComments(l)))) return null
     relevant = true
   }
   if (rule.newSql) {
-    if (!rule.newSql.test(stripComments(input.newSql))) return false
+    if (!rule.newSql.test(stripComments(input.newSql))) return null
     if (rule.newSql.test(diffText)) relevant = true
   }
   if (rule.absentNewSql) {
-    if (rule.absentNewSql.test(stripComments(input.newSql))) return false
+    if (rule.absentNewSql.test(stripComments(input.newSql))) return null
   }
   if (
     rule.check &&
@@ -148,14 +160,24 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
       input.added.map(stripComments),
     )
   )
-    return false
+    return null
   if (rule.onClause) {
-    const changed = input.added.map((l) => stripStrings(stripComments(l)).trim()).filter((l) => /\w{2}/.test(l))
-    const hit = onClauses(input.newSql).some((c) => rule.onClause!.test(c) && changed.some((l) => c.includes(l)))
-    if (!hit) return false
+    const changed = input.added
+      .map((raw) => ({ raw, s: stripStrings(stripComments(raw)).trim() }))
+      .filter(({ s }) => /\w{2}/.test(s))
+    let onLine: string | undefined
+    for (const c of onClauses(input.newSql)) {
+      if (!rule.onClause.test(c)) continue
+      onLine = changed.find(({ s }) => c.includes(s))?.raw
+      if (onLine !== undefined) break
+    }
+    if (onLine === undefined) return null
+    line ??= onLine
     relevant = true
   }
-  return relevant
+  if (!relevant) return null
+  if (line === undefined && rule.newSql) line = input.added.find((l) => rule.newSql!.test(stripComments(l)))
+  return line === undefined ? {} : { line }
 }
 
 /** A column token found in a select item, with the item's `AS` alias (the
@@ -227,6 +249,11 @@ function capturedColumns(rule: Rule, added: string[]): SelectItemColumn[] {
     out.push(...selectItemColumns(l, rule.capturesColumns))
   }
   return out
+}
+
+/** Evidence for a column-capturing rule: distinct columns plus each (column, alias, line) item. */
+function capturedEvidence(items: SelectItemColumn[]) {
+  return { columns: [...new Set(items.map((i) => i.column))], items }
 }
 
 const ON_END = /^(?:join|where|group\s+by|order\s+by|qualify|having|union|limit|window|left|right|inner|full|cross|natural|lateral|select|from)\b|^;|^\{%/i
@@ -413,7 +440,8 @@ export function evaluateCatalog(
     // applies to its own engine once the project's engine is known.
     const engine = ruleEngine(rule)
     if (engine && ctx?.dialectKnown && ctx.dialect.toLowerCase().replace(/^spark$/, "databricks") !== engine) continue
-    if (!ruleMatches(rule, input)) continue
+    const match = matchRule(rule, input)
+    if (!match) continue
     const body = gatedBody(rule, ctx)
     if (body === null) continue
     const f = makeFinding({
@@ -426,15 +454,12 @@ export function evaluateCatalog(
       confidence: "high",
       evidence: {
         tool: "rule-catalog",
-        result:
-          rule.portability || body !== rule.body
-            ? { rule: rule.id, portability: true, worksOn: rule.portability?.worksOn }
-            : rule.capturesColumns
-              ? (() => {
-                  const items = capturedColumns(rule, added)
-                  return { rule: rule.id, columns: [...new Set(items.map((i) => i.column))], items }
-                })()
-              : { rule: rule.id },
+        result: {
+          rule: rule.id,
+          ...(rule.portability || body !== rule.body ? { portability: true, worksOn: rule.portability?.worksOn } : {}),
+          ...(rule.capturesColumns ? capturedEvidence(capturedColumns(rule, added)) : {}),
+          ...(match.line !== undefined ? { line: match.line } : {}),
+        },
       },
       ruleKey: `${rule.category}:${rule.id}`,
     })
