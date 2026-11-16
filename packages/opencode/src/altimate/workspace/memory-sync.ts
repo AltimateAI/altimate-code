@@ -26,19 +26,20 @@ import type { MemoryBlock } from "@/memory/types"
 import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 // Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
 import {
+  accountScopeOf,
   canonicalDirectory,
   currentScope,
   onBindingChanged,
   resolveBinding as resolveProjectBinding,
   resolveBindingOutcome,
   type AccountKey,
+  type AccountScope,
   type CachedBinding,
 } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { projectIdentity, projectIdentityKey, sameProjectIdentity, type ProjectIdentity } from "./remote-identity"
-import { WorkspaceApi, WorkspaceApiError } from "./api-client"
+import { WorkspaceApi, WorkspaceApiError, type ActAs } from "./api-client"
 import { redact } from "@/altimate/debug/report" // altimate_change — failure text in the sync record
-import { AltimateApi } from "@/altimate/api/client"
 import {
   LIST_LIMIT,
   MemoryApi,
@@ -255,14 +256,31 @@ async function currentBinding(directory?: string): Promise<CachedBinding | null>
  * anyway. */
 const MEMORY_ENABLED_TTL_MS = 60_000
 
-/** Exported for tests: the positive TTL is why a failing read can look fine. */
-export const memoryEnabledCache = new Map<number, { checkedAt: number }>()
+/** Exported for tests: the positive TTL is why a failing read can look fine. Keyed by
+ * {@link verdictKey}, like every enablement answer below. */
+export const memoryEnabledCache = new Map<string, { checkedAt: number }>()
 
 /** How long a status read trusts a remembered "no". Longer than the positive
  * TTL on purpose — a status line can be minutes behind, and the cost of asking
  * is a 15s network budget on a path the user is waiting on. */
 const MEMORY_DISABLED_TTL_MS = 5 * 60 * 1000
-const memoryDisabledMemo = new Map<number, number>()
+const memoryDisabledMemo = new Map<string, number>()
+
+/** Every enablement answer is keyed by the account that asked — tenant, API URL, credential
+ * digest — and the workspace id. Ids are tenant-local and two keys can share a tenant, so a
+ * shorter key let a same-numbered workspace under the next account inherit this one's answer. */
+function verdictKey(scope: AccountScope, datamateId: number): string {
+  return `${scope.tenant}|${scope.apiUrl}|${scope.account}|${datamateId}`
+}
+
+/** The ambient credential, read once, and the scope its answers are filed under. The request
+ * is then sent with this same credential, so an account switch in between cannot file one
+ * account's answer under the other's key. Null when no complete credential is configured. */
+async function currentAccount(): Promise<{ actAs: ActAs; scope: AccountScope } | null> {
+  const actAs = await WorkspaceApi.captureCredentials()
+  if (!actAs?.instance || !actAs.url || !actAs.apiKey) return null
+  return { actAs, scope: accountScopeOf(actAs) }
+}
 
 /** The workspace's memory setting from cache alone — never the network.
  *
@@ -272,10 +290,13 @@ const memoryDisabledMemo = new Map<number, number>()
  * looked like it did nothing for up to 15s, and an outage collapsed into
  * "N memories" with no unsynced count. "unknown" is a real answer here, and the
  * caller must render it as one rather than as zero. */
-export function memoryEnabledCached(binding: CachedBinding): "enabled" | "disabled" | "unknown" {
-  const yes = memoryEnabledCache.get(binding.datamateId)
+export async function memoryEnabledCached(binding: CachedBinding): Promise<"enabled" | "disabled" | "unknown"> {
+  const current = await currentAccount()
+  if (!current) return "unknown"
+  const key = verdictKey(current.scope, binding.datamateId)
+  const yes = memoryEnabledCache.get(key)
   if (yes && Date.now() - yes.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
-  const no = memoryDisabledMemo.get(binding.datamateId)
+  const no = memoryDisabledMemo.get(key)
   if (no !== undefined && Date.now() - no < MEMORY_DISABLED_TTL_MS) return "disabled"
   return "unknown"
 }
@@ -283,37 +304,29 @@ export function memoryEnabledCached(binding: CachedBinding): "enabled" | "disabl
 /** The last answer any enablement check gave, per account and workspace, with no expiry on
  * read. For the system prompt's team-memory line, which renders on every step into the cached
  * prefix: reading the 60 s positive TTL there dropped the line a minute after each check and
- * re-created the prefix. Keyed by tenant and API URL as well as id (ids are tenant-local).
- * A failed or inconclusive check keeps the previous answer; a definite one replaces it. */
+ * re-created the prefix. Keyed by {@link verdictKey}. Only an explicit answer is recorded: a
+ * failed check, or a response without the field, keeps the previous one. */
 const memoryVerdict = new Map<string, "enabled" | "disabled">()
 
-function verdictKey(tenant: string, apiUrl: string, datamateId: number): string {
-  return `${tenant}|${apiUrl}|${datamateId}`
+/** The workspace's memory setting for a per-step reader: the last answer recorded for this
+ * account and workspace. Never the network, and never a TTL memo, so it changes only when a
+ * check gives a different explicit answer. */
+export function memoryEnabledLastKnown(binding: CachedBinding, scope: AccountScope): "enabled" | "disabled" | "unknown" {
+  return memoryVerdict.get(verdictKey(scope, binding.datamateId)) ?? "unknown"
 }
 
-async function verdictKeyFor(binding: CachedBinding): Promise<string | undefined> {
-  const creds = await AltimateApi.getCredentials().catch(() => undefined)
-  if (!creds?.altimateInstanceName || !creds.altimateUrl) return undefined
-  return verdictKey(creds.altimateInstanceName, creds.altimateUrl, binding.datamateId)
-}
-
-/** The workspace's memory setting for a per-step reader: a check inside the positive or
- * negative TTL first, else the last answer recorded for this account. Never the network. */
-export function memoryEnabledLastKnown(
-  binding: CachedBinding,
-  account: { tenant: string; apiUrl: string },
-): "enabled" | "disabled" | "unknown" {
-  const cached = memoryEnabledCached(binding)
-  if (cached !== "unknown") return cached
-  return memoryVerdict.get(verdictKey(account.tenant, account.apiUrl, binding.datamateId)) ?? "unknown"
+/** Test seam: record an answer for the current credential without a request, as a check would. */
+export async function noteMemoryVerdictForTests(datamateId: number, verdict: "enabled" | "disabled"): Promise<void> {
+  const current = await currentAccount()
+  if (!current) throw new Error("noteMemoryVerdictForTests needs configured credentials")
+  const key = verdictKey(current.scope, datamateId)
+  memoryVerdict.set(key, verdict)
+  if (verdict === "enabled") memoryEnabledCache.set(key, { checkedAt: Date.now() })
+  else memoryDisabledMemo.set(key, Date.now())
 }
 
 /** Test seam: both memos are process-global, and an earlier case's answer
  * would otherwise leak into a later one. */
-/** Test seam: record the workspace's "memory off" answer without a request. */
-export function noteMemoryDisabledForTests(datamateId: number): void {
-  memoryDisabledMemo.set(datamateId, Date.now())
-}
 
 export function resetEnablementMemoForTests(): void {
   memoryEnabledCache.clear()
@@ -357,26 +370,27 @@ function failureText(err: unknown): string {
 async function memoryStatus(
   binding: CachedBinding,
   opts: {
-    /** Skip the positive cache and ask. The cache is keyed by bare workspace
-     * id, which is safe for the write path (its credentials are fixed) but not
-     * for a caller whose own memo is tenant-scoped: on a memo miss it must not
-     * inherit a positive written under a previous account. */
+    /** Skip the positive cache and ask: the poller keeps its own memo and
+     * asks only when that has expired. */
     fresh?: boolean
   } = {},
 ): Promise<MemoryStatusOutcome> {
-  const cached = opts.fresh ? undefined : memoryEnabledCache.get(binding.datamateId)
+  // One credential read: the memo key and the request both use it.
+  const current = await currentAccount()
+  const key = current ? verdictKey(current.scope, binding.datamateId) : undefined
+  const cached = opts.fresh || !key ? undefined : memoryEnabledCache.get(key)
   if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
-  // Read before the request, so the answer is filed under the account that asked.
-  const verdictAt = await verdictKeyFor(binding)
   try {
-    const workspaces = await WorkspaceApi.listDatamates()
+    const workspaces = await WorkspaceApi.listDatamates(current?.actAs)
     const match = workspaces.find((w) => w.id === binding.datamateId)
     if (!match) {
       // Missing from the list is not a confirmed toggle. The list lags a workspace created moments ago (one
       // service replica serves it stale for a few minutes), so this is unknown, like a failed request: neither
       // verdict is kept, so cache-only readers say unknown too, and the write path still fails closed on it.
-      memoryEnabledCache.delete(binding.datamateId)
-      memoryDisabledMemo.delete(binding.datamateId)
+      if (key) {
+        memoryEnabledCache.delete(key)
+        memoryDisabledMemo.delete(key)
+      }
       if (!missingFromListWarned.has(binding.datamateId)) {
         missingFromListWarned.add(binding.datamateId)
         log.warn("workspace missing from the workspace list; memory setting unknown", { workspace: binding.datamateId })
@@ -393,16 +407,18 @@ async function memoryStatus(
       })
     }
     const value = match.memoryEnabled === true
-    if (verdictAt) memoryVerdict.set(verdictAt, value ? "enabled" : "disabled")
-    if (value) {
-      memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
-      memoryDisabledMemo.delete(binding.datamateId)
-    } else {
-      memoryEnabledCache.delete(binding.datamateId)
+    // The per-step reader keeps its answer on a response that does not say: only an explicit
+    // boolean replaces it. The write path still treats a missing field as "off".
+    if (key && typeof match.memoryEnabled === "boolean") memoryVerdict.set(key, value ? "enabled" : "disabled")
+    if (key && value) {
+      memoryEnabledCache.set(key, { checkedAt: Date.now() })
+      memoryDisabledMemo.delete(key)
+    } else if (key) {
+      memoryEnabledCache.delete(key)
       // Remembered for the cache-only reader below, NOT for this function: the
       // write path must keep re-asking so a workspace switched on mid-session
       // is picked up at once.
-      memoryDisabledMemo.set(binding.datamateId, Date.now())
+      memoryDisabledMemo.set(key, Date.now())
     }
     return value ? "enabled" : "disabled"
   } catch (err) {
@@ -1224,23 +1240,18 @@ const POLL_TTL_MS = 5 * 60 * 1000
  * the tile shows no counts until the next tick either way. */
 const POLL_UNKNOWN_TTL_MS = 30 * 1000
 
-/** Keyed by tenant and API URL as well as workspace id. Workspace ids are
- * tenant-local, so a bare id let a same-numbered workspace in a NEWLY switched
- * account inherit the previous tenant's answer and hide its unsynced count for
- * the whole TTL. (cubic P2 on #1279.) */
+/** Keyed by {@link verdictKey}. Workspace ids are tenant-local, so a bare id let
+ * a same-numbered workspace in a NEWLY switched account inherit the previous
+ * account's answer and hide its unsynced count for the whole TTL. (cubic P2 on #1279.) */
 const pollMemo = new Map<string, { at: number; status: "enabled" | "disabled" | "unknown" }>()
 const pollInFlight = new Map<string, Promise<"enabled" | "disabled" | "unknown">>()
 
 async function pollMemoKey(binding: CachedBinding): Promise<string> {
-  try {
-    const creds = await AltimateApi.getCredentials()
-    return `${creds.altimateInstanceName}|${creds.altimateUrl}|${binding.datamateId}`
-  } catch {
-    // No credentials resolved: fall back to an id-only key. The caller is about
-    // to fail its lookup anyway, and a wrong-tenant hit is impossible when
-    // there is no tenant.
-    return `?|?|${binding.datamateId}`
-  }
+  const current = await currentAccount()
+  // No credentials resolved: fall back to an id-only key. The caller is about
+  // to fail its lookup anyway, and a wrong-account hit is impossible when
+  // there is no account.
+  return current ? verdictKey(current.scope, binding.datamateId) : `?|?|?|${binding.datamateId}`
 }
 
 /** Whether this workspace has memory on, for a caller that polls.
@@ -1256,12 +1267,8 @@ async function pollMemoKey(binding: CachedBinding): Promise<string> {
  * An "unknown" is never memoized: the next tick should ask again rather than
  * inherit a network blip. */
 export async function memoryEnabledForPoller(binding: CachedBinding): Promise<"enabled" | "disabled" | "unknown"> {
-  // The scoped memo is the poller's only cache. `memoryEnabledCache` is keyed by
-  // bare workspace id — right for the write path, which is tenant-bound by its
-  // credentials — but consulting it here reopened a 60s cross-tenant window the
-  // scoped memo had closed: a positive written under the previous account was
-  // served to a same-numbered workspace in the next. One extra request per five
-  // minutes per tenant is the price, and `memoryStatus` still warms both.
+  // The poll memo is the poller's only cache: it asks once per five minutes per
+  // account and workspace, and `memoryStatus` still warms the write path's memos.
   const key = await pollMemoKey(binding)
   const memo = pollMemo.get(key)
   if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS)) return memo.status
@@ -1364,7 +1371,7 @@ export async function pendingCount(
   if (!isEnabled()) return 0
   if (opts.trustEnabled && binding) return partitionPending(blocks, binding, await readIndex()).pending.length
   if (opts.network === false && binding) {
-    const cached = memoryEnabledCached(binding)
+    const cached = await memoryEnabledCached(binding)
     if (cached === "unknown") return null
     if (cached === "disabled") return 0
     return partitionPending(blocks, binding, await readIndex()).pending.length

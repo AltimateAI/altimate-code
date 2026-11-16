@@ -6,7 +6,7 @@
 // the mirror actually issues — method, path, body — rather than a mock's call
 // log. Cases claiming "nothing was sent" check a zero request count, not merely
 // the absence of a throw.
-import { afterAll, afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, test, spyOn } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -44,17 +44,22 @@ const {
   hydrate,
   isEnabled,
   memoryEnabledCached,
+  memoryEnabledForPoller,
+  memoryEnabledLastKnown,
   mirrorBlock,
   lastMirrorTarget,
   flushPendingMirrors,
   overlayBlocks,
   refresh,
+  resetEnablementMemoForTests,
   resetOverlay,
+  resetPollMemoForTests,
   syncInternals,
   toBlock,
   whenHydrated,
 } = await import("../../../src/altimate/workspace/memory-sync")
 const { MIRROR_SOURCE, extractRecordId, LIST_LIMIT } = await import("../../../src/altimate/workspace/memory-api")
+const { credentialDigest } = await import("../../../src/altimate/workspace/state")
 
 import { AltimateApi } from "../../../src/altimate/api/client"
 
@@ -973,7 +978,7 @@ describe("memory_enabled", () => {
     const swept = await backfill([block({ id: "lagging" })], BINDING as any)
     expect(swept.gated).toBe(true)
     expect(swept.gateReason).toBe("error")
-    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+    expect(await memoryEnabledCached(BINDING as any)).toBe("unknown")
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
   })
 
@@ -982,10 +987,83 @@ describe("memory_enabled", () => {
     // earlier "disabled" while the list cannot say anything about the workspace.
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
     await backfill([block({ id: "was-off" })], BINDING as any)
-    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    expect(await memoryEnabledCached(BINDING as any)).toBe("disabled")
     workspaces = []
     await backfill([block({ id: "now-missing" })], BINDING as any)
-    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+    expect(await memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
+})
+
+// The team-memory line in the cached system prefix reads the last verdict for the account the
+// step runs as. Workspace ids are tenant-local and two API keys can share a tenant, so a verdict
+// belongs to tenant, API URL, credential and workspace id together.
+describe("team-memory verdict scope", () => {
+  const API = "https://api.example.com"
+  const scopeOf = (apiKey: string) => ({ tenant: "acme", apiUrl: API, account: credentialDigest(API, "acme", apiKey) })
+
+  beforeEach(() => {
+    resetEnablementMemoForTests()
+    resetPollMemoForTests()
+  })
+  afterEach(() => {
+    setSystemTime()
+    resetEnablementMemoForTests()
+    resetPollMemoForTests()
+  })
+
+  test("two accounts on one tenant with the same workspace id do not share a verdict", async () => {
+    stubCreds("acme", API, "key-a")
+    expect(await memoryEnabledForPoller(BINDING as any)).toBe("enabled")
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf("key-a"))).toBe("enabled")
+
+    // Switched to another key on the same tenant: nothing is known for it yet.
+    stubCreds("acme", API, "key-b")
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf("key-b"))).toBe("unknown")
+    expect(await memoryEnabledCached(BINDING as any)).toBe("unknown")
+
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect(await memoryEnabledForPoller(BINDING as any)).toBe("disabled")
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf("key-b"))).toBe("disabled")
+    // The first account's answer is its own and survives the second account's check.
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf("key-a"))).toBe("enabled")
+  })
+
+  test("the verdict is filed under the credential the request was sent with", async () => {
+    // Every credential read alternates between two keys, so a verdict keyed by one read and a
+    // request authorised by another disagree.
+    let reads = 0
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "acme", altimateUrl: API, altimateApiKey: reads++ % 2 === 0 ? "key-a" : "key-b" }) as Creds
+    const inner = globalThis.fetch
+    let sentWith: string | undefined
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(input)
+      if (url.includes("/datamates/") && !url.includes("/datamates/memory/")) {
+        sentWith = String(init?.headers?.Authorization ?? "").replace(/^Bearer /, "")
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    expect(await memoryEnabledForPoller(BINDING as any)).toBe("enabled")
+    expect(sentWith === "key-a" || sentWith === "key-b").toBe(true)
+    const other = sentWith === "key-a" ? "key-b" : "key-a"
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf(sentWith!))).toBe("enabled")
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf(other))).toBe("unknown")
+  })
+
+  test("a response without the memory field keeps the confirmed verdict", async () => {
+    stubCreds("acme", API, "key-a")
+    const t0 = Date.now()
+    expect(await memoryEnabledForPoller(BINDING as any)).toBe("enabled")
+    // Past every TTL, the next check answers without `memory_enabled`: inconclusive, not "off".
+    setSystemTime(new Date(t0 + 10 * 60_000))
+    workspaces = [{ id: 42, name: "acme" }]
+    await memoryEnabledForPoller(BINDING as any)
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf("key-a"))).toBe("enabled")
+    // An explicit "off" still replaces it.
+    setSystemTime(new Date(t0 + 20 * 60_000))
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect(await memoryEnabledForPoller(BINDING as any)).toBe("disabled")
+    expect(memoryEnabledLastKnown(BINDING as any, scopeOf("key-a"))).toBe("disabled")
   })
 })
 
@@ -1907,9 +1985,9 @@ describe("resetOverlay", () => {
     // reading as off — zero unsynced — for the rest of the negative TTL.
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
     await backfill([block({ id: "off" })], BINDING as any)
-    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    expect(await memoryEnabledCached(BINDING as any)).toBe("disabled")
     resetOverlay()
-    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+    expect(await memoryEnabledCached(BINDING as any)).toBe("unknown")
   })
 })
 

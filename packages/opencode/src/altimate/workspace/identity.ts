@@ -22,8 +22,16 @@
 // meant nagging about linking mid-conversation about an unrelated Databricks topic, or
 // pedantically re-qualifying every casual mention of one. Neither is this feature's
 // job — resolving "this/current/active workspace" is.
-import { createHash } from "node:crypto"
-import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome, currentScope, scopeStringOf } from "./state"
+import {
+  accountScopeOf,
+  onBindingChanged,
+  readLocalBindingScoped,
+  resolveBindingOutcome,
+  type AccountScope,
+  type BindingOutcome,
+  currentScope,
+  scopeStringOf,
+} from "./state"
 import { readPin, resolveWithinRoot } from "./pin"
 import * as Contents from "./contents"
 import { workspaceLabel } from "./workspace-name"
@@ -342,18 +350,16 @@ function resolve(key: string, directory: string): Promise<BindingOutcome> {
   return task
 }
 
-/** The account this step runs as: tenant, host, AND a short digest of the credential.
+/** The account this step runs as: tenant, host, AND a digest of the credential.
  * Keyed on the credential, not only the tenant, for the reason `state.ts`'s pin
  * validation gives: two accounts on one tenant would otherwise share an entry, and a
  * switch mid-process would let the new principal inherit the previous one's answer.
  * Only the digest is kept, never the key. Null when no credentials are configured. */
-type AccountScope = { tenant: string; apiUrl: string; account: string }
 async function accountScope(): Promise<AccountScope | null> {
   if (!(await AltimateApi.isConfigured())) return null
   const c = await AltimateApi.getCredentials()
   if (!c.altimateInstanceName || !c.altimateUrl || !c.altimateApiKey) return null
-  const account = createHash("sha256").update(c.altimateApiKey).digest("hex").slice(0, 16)
-  return { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl, account }
+  return accountScopeOf({ url: c.altimateUrl, instance: c.altimateInstanceName, apiKey: c.altimateApiKey })
 }
 
 /** The team-memory line is shown only for a bound workspace whose last enablement check

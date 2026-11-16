@@ -254,6 +254,10 @@ const runTurn = (dir: string, llm: TestLLMServer["Service"], attached = 1, sessi
 const named = (type: string) => rows.filter((row) => row.type === type)
 const reads = () => named("tool_call").filter((row) => row.tool_name === "read")
 
+/** Memory sync asks `listDatamates` whether memory is on, with the credential it captured; that is
+ * not a pin validation, so the validation counts below leave it out by caller. */
+const calledFromMemorySync = () => (new Error().stack ?? "").includes("memory-sync")
+
 it.live("a pinned session with a different on-disk link names the pinned workspace", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
@@ -422,13 +426,14 @@ it.live("a prompt that fails leaves no verdict, even from an attachment read tha
 it.live("a noReply prompt's attachments in a pinned session name no workspace and send no validation", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir }) {
-      const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(
-        async () =>
-          [
-            { id: PINNED, name: "pinned-workspace" },
-            { id: LINKED, name: "project-link" },
-          ] as never,
-      )
+      let validations = 0
+      const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(async () => {
+        if (!calledFromMemorySync()) validations++
+        return [
+          { id: PINNED, name: "pinned-workspace" },
+          { id: LINKED, name: "project-link" },
+        ] as never
+      })
       restore.push(() => list.mockRestore())
       yield* linkProject(dir)
       pinTo(dir)
@@ -441,8 +446,8 @@ it.live("a noReply prompt's attachments in a pinned session name no workspace an
       )
 
       expect(reads().map((row) => row.workspace_id)).toEqual([undefined])
-      // Memory sync's own question (is memory on?) passes no credential; the pin's validation does.
-      expect(list.mock.calls.filter(([actAs]) => actAs !== undefined).length).toBe(0)
+      // Memory sync's own question (is memory on?) is not a pin validation.
+      expect(validations).toBe(0)
     }),
     { git: true, config: providerCfg },
   ),
@@ -473,7 +478,9 @@ it.live("with the workspace kill switch on, the pin is not checked and the rows 
 it.live("a validation slower than the turn's wait leaves the turn's rows unattributed, with one request", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
+      let validations = 0
       const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(async () => {
+        if (!calledFromMemorySync()) validations++
         await new Promise((done) => setTimeout(done, TURN_PIN_WAIT_MS + 500))
         return [{ id: PINNED, name: "pinned-workspace" }] as never
       })
@@ -482,9 +489,9 @@ it.live("a validation slower than the turn's wait leaves the turn's rows unattri
       pinTo(dir)
       yield* runTurn(dir, llm)
 
-      // Routing and identity join the request the turn started rather than sending their own. The pin's
-      // validation acts as a given credential; memory sync's own question (is memory on?) passes none.
-      expect(list.mock.calls.filter(([actAs]) => actAs !== undefined).length).toBe(1)
+      // Routing and identity join the request the turn started rather than sending their own. Memory
+      // sync's own question (is memory on?) is not a pin validation.
+      expect(validations).toBe(1)
       expect(named("session_start").map((row) => row.workspace_id)).toEqual([undefined])
       expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined])
       expect(rows.filter((row) => row.workspace_id === LINKED)).toEqual([])

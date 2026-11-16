@@ -144,7 +144,7 @@ describe("systemSection", () => {
   })
 
   test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
-    const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
+    const { noteMemoryVerdictForTests, resetEnablementMemoForTests } = await import(
       "../../../src/altimate/workspace/memory-sync"
     )
     await recordApprovedBinding(projectDir, {
@@ -155,7 +155,7 @@ describe("systemSection", () => {
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
     resetEnablementMemoForTests()
-    memoryEnabledCache.set(77, { checkedAt: Date.now() })
+    await noteMemoryVerdictForTests(77, "enabled")
     try {
       expect(await inProject(systemSection)).toContain("Team memory:")
       // A read-only agent is told to read, not to save; resolved and memoised outcomes alike.
@@ -174,7 +174,7 @@ describe("systemSection", () => {
       resetOutcomeMemoForTests()
       resetEnablementMemoForTests()
       // A remembered "no" from the workspace switches the line off.
-      noteMemoryDisabledForTests(77)
+      await noteMemoryVerdictForTests(77, "disabled")
       expect(await inProject(systemSection)).not.toContain("Team memory:")
       expect(await inProject(systemSection)).toContain('is "Team"')
       // Not yet checked is not "on": the write path uploads only on a confirmed
@@ -379,8 +379,8 @@ describe("systemSection", () => {
     }) as unknown as typeof fetch
     // Memory was confirmed on earlier; that does not make a sync promise true of a
     // binding the server can no longer vouch for. (codex on #1344)
-    const { memoryEnabledCache, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
-    memoryEnabledCache.set(9, { checkedAt: Date.now() })
+    const { noteMemoryVerdictForTests, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
+    await noteMemoryVerdictForTests(9, "enabled")
     try {
       const out = await inProject(systemSection)
       // An unconfirmed link is hedged, not stated as fact.
@@ -447,8 +447,8 @@ describe("systemSection", () => {
       projectPath: projectDir,
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
-    const { memoryEnabledCache, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
-    memoryEnabledCache.set(33, { checkedAt: Date.now() })
+    const { noteMemoryVerdictForTests, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
+    await noteMemoryVerdictForTests(33, "enabled")
     try {
       let t = 7_000_000
       setClockForTests(() => t)
