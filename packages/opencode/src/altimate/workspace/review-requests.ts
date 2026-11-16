@@ -148,6 +148,13 @@ export async function act(
   }
 }
 
+/** The author closed it: the reviewer and comment of the earlier decision are not who closed it, or why. */
+function authorClosed(sent: { status: string; updated_at: string; reason?: string; reviewer?: string }, status: string, at: string) {
+  Object.assign(sent, { status, updated_at: at })
+  delete sent.reason
+  delete sent.reviewer
+}
+
 function notReady(status: "signed_out" | "not_linked" | "account_changed" | "unconfirmed"): ActionResult {
   if (status === "signed_out") return { ok: false, status: 401, code: "signed_out", error: "Sign in to Altimate first." }
   if (status === "unconfirmed") return { ok: false, status: 503, code: "link_unconfirmed", error: UNCONFIRMED }
@@ -194,7 +201,7 @@ export async function actOnRule(
         if (s.scope?.datamateId !== ctx.datamateId) return
         s.my_pending = s.my_pending.filter((p) => p.public_id !== publicId)
         const sent = s.sent.find((x) => x.public_id === publicId)
-        if (sent) Object.assign(sent, { status: "withdrawn", updated_at: now })
+        if (sent) authorClosed(sent, "withdrawn", now)
       })
       return { ok: true, request: { kind: "rule", public_id: publicId, name: printable(pending.text), status: "withdrawn", actions: [] } }
     }
@@ -208,7 +215,7 @@ export async function actOnRule(
       if (s.scope?.datamateId !== ctx.datamateId) return
       s.my_pending = s.my_pending.filter((p) => p.public_id !== publicId)
       const sent = s.sent.find((x) => x.public_id === publicId)
-      if (sent) Object.assign(sent, { status: "superseded", updated_at: now })
+      if (sent) authorClosed(sent, "superseded", now)
       if (!s.sent.some((x) => x.public_id === newId))
         s.sent.push({ public_id: newId, text: wording, change: pending.change, status: "pending", sent_at: now, updated_at: now })
     })

@@ -835,7 +835,8 @@ describe("rule proposals sent back for changes", () => {
     expect(sent).toEqual([["resubmit", { expected_version: 2, text: "Name every table in the sales schema", source: "cli" }]])
     const state = await RulesStore.read(project)
     expect(state.my_pending).toEqual([])
-    expect(state.sent.map((x) => [x.public_id, x.status])).toEqual([["r-1", "superseded"], ["r-2", "pending"]])
+    // The author replaced it: the earlier reviewer and comment are not shown as who replaced it.
+    expect(state.sent.map((x) => [x.public_id, x.status, x.reviewer])).toEqual([["r-1", "superseded", undefined], ["r-2", "pending", undefined]])
   })
 
   test("withdrawing goes with the version and is recorded at once", async () => {
