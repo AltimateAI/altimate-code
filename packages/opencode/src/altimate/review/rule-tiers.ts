@@ -34,7 +34,6 @@ const OFF = [
   "rule-catalog:unqualified-column-multi-table",
   "dbt-patterns:case-no-else",
   "dbt-patterns:comma-join",
-  "dbt-patterns:self-join",
   "altimate-core.check:non-portable-function",
   "rule-catalog:cast-float-to-int",
   "rule-catalog:union-not-all",
@@ -68,7 +67,6 @@ const OFF = [
   "rule-catalog:bq-cross-join-unnest",
   "altimate-core.structural-diff:coalesce-removed",
   "dbt-patterns:window-no-partition",
-  "rule-catalog:join-case-folded-one-side",
   "rule-catalog:inequality-join",
   "rule-catalog:running-total-no-order",
   "dbt-patterns:float-equality",
@@ -115,6 +113,8 @@ const SUMMARY = [
   "altimate-core.dbt-config:incremental-no-guard",
   "altimate-core.dbt-config:unique-key-change",
   "dbt-patterns:fanout-join",
+  "dbt-patterns:self-join",
+  "rule-catalog:join-case-folded-one-side",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {
