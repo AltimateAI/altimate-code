@@ -1302,6 +1302,20 @@ describe("both tools: names at the edges", () => {
     expect(carried(columnAnswer(duck, "orders", "amount"))).toEqual(["r._col_1"])
   })
 
+  test("a column name that starts with all or distinct isn't read as a SELECT modifier", () => {
+    for (const name of ["allocation", "distinct_users", "all_time"]) {
+      const path = write(nodes("postgres", [
+        model("f", [], `select 2.5 as ${name}`, [name]),
+        model("r", ["f"], `with q as (select * from ${T("f")}) select ${name}::numeric from q`),
+        model("child", ["r"], `select * from ${T("r")}`),
+      ]))
+      expect(() => columnReach(path, "r", name)).not.toThrow()
+      expect(() => columnAnswer(path, "r", name)).not.toThrow()
+      const lineage = dbtLineage({ manifest_path: path, model: "child" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).toContain(name)
+    }
+  })
+
   test("an expression that only starts with a cast isn't named after the column, and a _col_N the SQL writes stays", () => {
     for (const item of ["amount::numeric is not null", "amount::int in (1, 2)", "cast(amount as int) between 1 and 2", "amount::numeric as _col_1"]) {
       const path = write(nodes("postgres", [
@@ -1330,6 +1344,14 @@ describe("both tools: names at the edges", () => {
     ]))
     const listed = dbtLineage({ manifest_path: documented, model: "child" })
     expect(Object.keys((listed.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
+    // In list order, as DuckDB names them: `id, id, amount as id_1` is `id, id_1, id_1_1`, with no `id_2`.
+    const clash = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, id, amount as id_1 from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const named = dbtLineage({ manifest_path: clash, model: "child" })
+    expect(Object.keys((named.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "id_1", "id_1_1"])
   })
 
   test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {

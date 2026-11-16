@@ -136,7 +136,8 @@ export function selectItems(stripped: string): string[] {
     if (start < 0) {
       if (boundary && word === "select") {
         start = i + 6
-        const lead = /^\s+(?:distinct\s+on\s*\([^)]*\)|distinct|all|top\s+\d+)/i.exec(text.slice(start))
+        // A whole word only: `allocation` and `distinct_users` are column names, not modifiers.
+        const lead = /^\s+(?:distinct\s+on\s*\([^)]*\)|distinct|all|top\s+\d+)(?![\w$])/i.exec(text.slice(start))
         if (lead) start += lead[0].length
         from = start
         i = start - 1
@@ -215,18 +216,22 @@ function columnsTemplates(stripped: string): Set<string> {
   return out
 }
 
-/** DuckDB's names for a SELECT list's repeated outputs: the second `val` is `val_1`, the third `val_2`. */
-function duckdbRepeats(outputs: string[], taken: Set<string>): string[] {
-  const seen = new Map<string, number>()
+/**
+ * The names DuckDB gives a SELECT list's repeated outputs, in list order: an output whose name is already used takes
+ * the first free `_N` (`val, val, val` is `val, val_1, val_2`; `id, id, amount as id_1` is `id, id_1, id_1_1`).
+ */
+function duckdbRepeats(outputs: string[]): string[] {
+  const used = new Set<string>()
   const out: string[] = []
   for (const raw of outputs) {
     const name = raw.toLowerCase()
-    const n = seen.get(name) ?? 0
-    seen.set(name, n + 1)
-    if (n === 0) continue
-    let k = n
-    while (taken.has(`${name}_${k}`)) k++
-    taken.add(`${name}_${k}`)
+    if (!used.has(name)) {
+      used.add(name)
+      continue
+    }
+    let k = 1
+    while (used.has(`${name}_${k}`)) k++
+    used.add(`${name}_${k}`)
     out.push(`${name}_${k}`)
   }
   return out
@@ -641,9 +646,8 @@ export class ProjectLineage {
       const outputs = sql ? this.outputColumns(sql).filter(real) : []
       for (const c of outputs) add(c)
       // DuckDB keeps a repeated output under a new name (`val`, `val_1`): a `select *` over it reads both. Only
-      // names the SQL makes are taken; a documented `val_1` is that rename.
-      const made = new Set([...edges.map((e) => e.to), ...outputs].filter(real).map((name) => name.toLowerCase()))
-      if (this.dialect === "duckdb") for (const c of duckdbRepeats(outputs, made)) add(c)
+      // the SELECT list decides the names; a documented `val_1` is that rename.
+      if (this.dialect === "duckdb") for (const c of duckdbRepeats(outputs)) add(c)
     }
     const out = [...found.values()]
     this.columnMemo.set(id, out)
