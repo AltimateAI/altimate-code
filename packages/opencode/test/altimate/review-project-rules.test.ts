@@ -83,6 +83,43 @@ describe("Jinja structure", () => {
     expect(titles(jinjaFindings(file("macros/ghost.sql", inserted), old, inserted))).toContain("ghost: `ghost` parameters moved position")
     expect(jinjaFindings(file("macros/ghost.sql", appended), old, appended).some((f) => /moved/.test(f.title))).toBe(false)
   })
+  describe("macro-param-shifted anchors on the changed signature", () => {
+    const shifted = (diff: string, old: string, head: string) =>
+      jinjaFindings({ path: "macros/m.sql", status: "modified", diff }, old, head).find((f) => /moved/.test(f.title))
+
+    test("multi-line signature: the inserted parameter line, not the unchanged `{% macro` line", () => {
+      const old = "{% macro stab(\n    model,\n    max_change_percent,\n    days_back\n) %}\nx\n{% endmacro %}"
+      const head = "{% macro stab(\n    model,\n    max_change_percent,\n    max_change_absolute,\n    days_back\n) %}\nx\n{% endmacro %}"
+      const diff = "@@ -2,3 +2,4 @@\n     model,\n     max_change_percent,\n+    max_change_absolute,\n     days_back\n"
+      const f = shifted(diff, old, head)!
+      expect(f.startLine).toBe(4)
+      expect((f.evidence!.result as { line?: string }).line).toBe("    max_change_absolute,")
+    })
+
+    test("single-line signature: the changed `{% macro` line", () => {
+      const old = "{% macro ghost(a, b) %}{% endmacro %}"
+      const head = "-- header\n{% macro ghost(a, x, b) %}{% endmacro %}"
+      const diff = "@@ -1 +1,2 @@\n+-- header\n-{% macro ghost(a, b) %}{% endmacro %}\n+{% macro ghost(a, x, b) %}{% endmacro %}\n"
+      expect(shifted(diff, old, head)!.startLine).toBe(2)
+    })
+
+    test("two macros in one file: each finding anchors inside its own signature", () => {
+      const old = "{% macro one(a, b) %}{% endmacro %}\n{% macro two(\n  c,\n  d\n) %}{% endmacro %}"
+      const head = "{% macro one(a, b) %}{% endmacro %}\n{% macro two(\n  e,\n  c,\n  d\n) %}{% endmacro %}"
+      const diff = "@@ -2,2 +2,3 @@\n {% macro two(\n+  e,\n   c,\n"
+      const f = shifted(diff, old, head)!
+      expect(f.title).toContain("`two`")
+      expect(f.startLine).toBe(3)
+    })
+
+    test("no added line inside the signature: no line set here (left to the evidence text)", () => {
+      const old = "{% macro ghost(a, b) %}{% endmacro %}"
+      const head = "{% macro ghost(b, a) %}{% endmacro %}"
+      const f = shifted("@@ -5 +5 @@\n-x\n+y\n", old, head)!
+      expect(f.startLine).toBeUndefined()
+    })
+  })
+
   test("a var() key renamed without the old key as a fallback", () => {
     const old = "{%- set concat = var('concat_string', '||') -%}"
     const renamed = "{%- set concat = var('datavault4dbt.concat_string', '||') -%}"
