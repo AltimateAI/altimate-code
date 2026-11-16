@@ -454,12 +454,11 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   parseError?: string
 } {
   const result = classifySql(sql, dialect, 0)
-  if (result.blocked) return result
-  // SQL read with certainty (otherwise the word scan of the whole text already covered its literals).
+  if (result.queryType !== "write" || result.blocked) return result
+  // A write may also run the SQL in its literals: a routine body created and called in the same call. Only
+  // SQL read with certainty; otherwise the word scan of the whole text already covered its literals.
   const lexical = tokenizeSql(sql, dialect)
-  if (!lexical.complete) return result
-  // A write may also run the SQL in its literals: a routine body created and called in the same call.
-  if (result.queryType === "write" && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
+  if (lexical.complete && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
   return result
 }
 
