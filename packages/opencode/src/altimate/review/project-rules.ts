@@ -3,7 +3,7 @@
 import path from "path"
 import YAML from "yaml"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
-import type { ChangedFile } from "./diff-filter"
+import { type ChangedFile, walkDiffLines } from "./diff-filter"
 import { incrementalFilter, inlineConfig } from "./incremental-semantics"
 import { parenBody, topLevel } from "./rule-catalog"
 import { capabilityFor } from "./adapter-capabilities"
@@ -205,6 +205,18 @@ export function jinjaBalance(sql: string): string | undefined {
   return undefined
 }
 
+/** The first added head line inside macro `name`'s parameter list in `sql`
+ *  (a multi-line signature changes on a parameter line, not the `{% macro`
+ *  line), with its text; undefined when the PR added none of those lines. */
+function signatureAnchor(file: ChangedFile, sql: string, name: string): { line: number; text: string } | undefined {
+  const m = new RegExp(`\\{%-?\\s*macro\\s+${escapeRe(name)}\\s*\\([^)]*\\)`).exec(sql)
+  if (!m) return undefined
+  const first = sql.slice(0, m.index).split("\n").length
+  const last = first + m[0].split("\n").length - 1
+  const hit = [...walkDiffLines(file.diff)].find((r) => r.kind === "+" && r.line >= first && r.line <= last)
+  return hit && { line: hit.line, text: hit.text }
+}
+
 const macroSignatures = (sql: string | undefined) => {
   const out = new Map<string, string[]>()
   for (const m of (sql ?? "").matchAll(/\{%-?\s*macro\s+([\w.]+)\s*\(([^)]*)\)/g))
@@ -244,19 +256,19 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
       if (!old || old.length === 0) continue
       const kept = old.filter((p) => params.includes(p))
       const shifted = kept.filter((p) => params.indexOf(p) !== old.indexOf(p))
-      if (shifted.length)
-        out.push(
-          finding(
-            file,
-            "macro-param-shifted",
-            "warning",
-            "sql_correctness",
-            `\`${name}\` parameters moved position`,
-            `${shifted.map((p) => `\`${p}\``).join(", ")} ${shifted.length === 1 ? "is" : "are"} no longer at the same position in \`${name}(${params.join(", ")})\`. Callers that pass arguments positionally now bind them to different parameters. Add new parameters at the end, or check every caller uses keywords.`,
-            addedLine(file, new RegExp(`\\bmacro\\s+${escapeRe(name)}\\s*\\(`)),
-            name,
-          ),
-        )
+      if (!shifted.length) continue
+      const at = signatureAnchor(file, newContent, name)
+      const f = finding(
+        file,
+        "macro-param-shifted",
+        "warning",
+        "sql_correctness",
+        `\`${name}\` parameters moved position`,
+        `${shifted.map((p) => `\`${p}\``).join(", ")} ${shifted.length === 1 ? "is" : "are"} no longer at the same position in \`${name}(${params.join(", ")})\`. Callers that pass arguments positionally now bind them to different parameters. Add new parameters at the end, or check every caller uses keywords.`,
+        at?.text ?? addedLine(file, new RegExp(`\\bmacro\\s+${escapeRe(name)}\\s*\\(`)),
+        name,
+      )
+      out.push(at ? { ...f, startLine: at.line, endLine: at.line } : f)
     }
 
     // A var() key renamed with no fallback: projects that set the old key lose their override silently.
