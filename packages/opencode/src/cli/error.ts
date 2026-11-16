@@ -66,15 +66,14 @@ export function FormatError(input: unknown): string | undefined {
       ? providerModelNotFound.suggestions.filter((x) => typeof x === "string")
       : []
     // altimate_change start — upstream_fix: branding regressions in user-visible error strings
+    const hint = modelNotFoundHint(
+      stringField(providerModelNotFound, "providerID"),
+      providerModelNotFound.providerMissing === true,
+    )
     return [
       `Model not found: ${stringField(providerModelNotFound, "providerID")}/${stringField(providerModelNotFound, "modelID")}`,
       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      ...[
-        modelNotFoundHint(
-          stringField(providerModelNotFound, "providerID"),
-          providerModelNotFound.providerMissing === true,
-        ),
-      ].filter((x): x is string => !!x),
+      ...(hint ? [hint] : []),
       `Try: \`altimate models\` to list available models`,
       `Or check your config (altimate-code.json) provider/model names`,
     ].join("\n")
