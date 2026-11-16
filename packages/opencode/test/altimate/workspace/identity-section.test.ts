@@ -1002,22 +1002,42 @@ describe("prefix hash over steps with a stepped clock", () => {
     const { memoryEnabledForPoller, resetEnablementMemoForTests, resetPollMemoForTests } = await import(
       "../../../src/altimate/workspace/memory-sync"
     )
-    const t0 = Date.now()
-    const serving = (async (input: any) =>
-      new Response(
-        JSON.stringify(
-          String(input).includes("/datamates/") ? { datamates: [{ id: 64, name: "Team", memory_enabled: true }] } : {},
-        ),
-        { status: 200, headers: { "content-type": "application/json" } },
-      )) as unknown as typeof fetch
+    const binding = { datamateId: 64, datamateName: "Team", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() }
+    // Answers the workspace list and the binding lookup the resolver's re-check sends.
+    let lookups = 0
+    const answer = (input: any) => {
+      const url = String(input)
+      const body = url.includes("/datamate-project-bindings/by-")
+        ? (lookups++,
+          {
+            binding: { id: 5, datamate_id: 64, datamate_name: "Team", repo_remote: null, project_path: projectDir },
+            datamate: { id: 64, name: "Team" },
+          })
+        : url.includes("/datamates/")
+          ? { datamates: [{ id: 64, name: "Team", memory_enabled: true }] }
+          : {}
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+    }
+    const serving = (async (input: any) => answer(input)) as unknown as typeof fetch
+    // A re-check that answers only when released, after the step's deadline has passed.
+    let release!: () => void
+    const released = new Promise<void>((done) => (release = done))
+    let held = 0
+    const delayed = (async (input: any) => {
+      held++
+      await released
+      return answer(input)
+    }) as unknown as typeof fetch
     globalThis.fetch = serving
-    const binding = { datamateId: 64, datamateName: "Team", repoRemote: null, projectPath: projectDir, linkedAt: t0 }
     await recordApprovedBinding(projectDir, binding, { awaitBackfill: true })
     resetEnablementMemoForTests()
     resetPollMemoForTests()
     try {
       // The enablement check the TUI poll (or a mirror, or the backfill) runs.
       expect(await memoryEnabledForPoller(binding as never)).toBe("enabled")
+      // Read after the setup stamped the validation and enablement times, so each step below is
+      // at least as far past them as it says.
+      const t0 = Date.now()
       const outs: string[] = []
       const step = async (at: number, f: typeof fetch) => {
         setSystemTime(new Date(t0 + at))
@@ -1029,12 +1049,23 @@ describe("prefix hash over steps with a stepped clock", () => {
       // Past the 60 s enablement TTL with no new check.
       await step(61_000, serving)
       await step(2 * 60_000, serving)
-      // Past the resolver's validation window and the summary TTL: the re-check hangs.
-      await step(5 * 60_000 + 1_000, hanging)
-      await step(5 * 60_000 + 20_000, hanging)
+      expect(lookups).toBe(0)
+      // Past the resolver's validation window and the summary TTL: the re-check outlasts the
+      // step's deadline, so this step renders the previous outcome.
+      await step(5 * 60_000 + 1_000, delayed)
+      expect(held).toBeGreaterThan(0)
+      // The held re-check settles; the next step reads its fresh answer.
+      release()
+      await step(5 * 60_000 + 20_000, serving)
+      expect(lookups).toBeGreaterThan(0)
+      // Past the window again: a re-check that answers in time renders the same text.
+      const before = lookups
+      await step(11 * 60_000, serving)
+      expect(lookups).toBeGreaterThan(before)
       for (const out of outs) expect(out).toContain("Team memory:")
       expect(new Set(outs.map(sha)).size).toBe(1)
     } finally {
+      release()
       resetEnablementMemoForTests()
       resetPollMemoForTests()
     }

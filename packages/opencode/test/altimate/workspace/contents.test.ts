@@ -248,7 +248,9 @@ describe("workspace summary", () => {
     const t0 = Date.now()
     const expected = { integrations: ["github"], memoryEnabled: true, knowledge: null }
     expect(await Contents.workspaceSummary(39, t0)).toEqual(expected)
-    const late = t0 + 5 * 60_000 + 1
+    // The cache stamps the entry with the real clock when the fetch settles, after `t0`; measured
+    // from after the first call, `late` is past the TTL however long that call took.
+    const late = Date.now() + 5 * 60_000 + 1_000
     expect(await Contents.workspaceSummary(39, late)).toEqual(expected)
     // Still the good answer, and not cached as fresh: the next step asks again.
     expect(await Contents.workspaceSummary(39, late)).toEqual({ integrations: ["snowflake"], memoryEnabled: true, knowledge: null })
