@@ -489,6 +489,22 @@ function duplicateCaseWhen(sql: string): boolean {
   return false
 }
 
+/** Condition text for comparison: case and spacing folded outside string literals, literals kept verbatim. */
+function normalizeCondition(cond: string): string {
+  return cond
+    .split(/('(?:[^']|'')*')/)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .replace(/\s*([^\w\s])\s*/g, "$1"),
+    )
+    .join("")
+    .trim()
+}
+
 /** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER.
  *  With `added`, only when an added line references that right side (its columns or its join). */
 export function leftJoinNullifiedByWhere(sql: string, added?: string[]): boolean {
