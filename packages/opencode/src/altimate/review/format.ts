@@ -95,18 +95,7 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     // Pick an inline-code-span fence longer than any backtick run inside `r`
     // so a path like `packages/…/foo`bar`.sql` cannot terminate the span
     // (cubic-review P3).
-    const shown = env.tierReasons
-      .slice(0, RENDER_CAP)
-      .map((r) => {
-        const runs = r.match(/`+/g)
-        const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
-        const fence = "`".repeat(maxRun + 1)
-        // If the reason itself starts/ends with a backtick, pad with a space so
-        // the leading/trailing backtick isn't glued to the fence.
-        const pad = /^`|`$/.test(r) ? " " : ""
-        return `${fence}${pad}${r}${pad}${fence}`
-      })
-      .join(", ")
+    const shown = env.tierReasons.slice(0, RENDER_CAP).map(codeSpan).join(", ")
     const overflow =
       env.tierReasons.length > RENDER_CAP
         ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
@@ -220,7 +209,7 @@ function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
       out.push({
         text:
           `- **${ruleTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
-          `  ${oneLine(g[0].body)}  \n  <sub>${g[0].category}</sub>`,
+          `  ${oneLine(clampBody(g[0].body))}  \n  <sub>${g[0].category}</sub>`,
         count: g.length,
       })
       continue
@@ -228,7 +217,10 @@ function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
     for (const f of g) {
       const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
       out.push({
-        text: `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+        text:
+          `- **${f.title}**  \n` +
+          (f.evidenceLine ? `  ${evidenceText(f)}  \n` : "") +
+          `  ${oneLine(clampBody(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
         count: 1,
       })
     }
@@ -324,12 +316,54 @@ function ledgerBlock(ledger: Array<{ path: string; reason: string }>): string[] 
   return lines
 }
 
-/** GitHub `pulls.createReview` inline comments — only findings with a line. */
+/** GitHub `pulls.createReview` inline comments — only findings with a line.
+ *  A multi-line range (a suggestion block) sets `start_line`/`start_side`. */
 export interface InlineComment {
   path: string
   line: number
   side: "RIGHT"
+  start_line?: number
+  start_side?: "RIGHT"
   body: string
+}
+
+/** Rendered length cap for a finding body; the envelope keeps the full text. */
+export const BODY_MAX_CHARS = 600
+
+/** Cut `body` to at most `max` characters at a sentence boundary (a word
+ *  boundary when no sentence ends late enough) and append "…". A code fence
+ *  left open by the cut is closed. */
+export function clampBody(body: string, max = BODY_MAX_CHARS): string {
+  if (body.length <= max) return body
+  const head = body.slice(0, max - 1)
+  const sentence = Math.max(...[". ", "! ", "? ", ".\n", "\n\n"].map((t) => head.lastIndexOf(t)))
+  const word = head.search(/\s\S*$/)
+  const cut = sentence >= max / 2 ? sentence + 1 : word > 0 ? word : head.length
+  let out = head.slice(0, cut).trimEnd() + "…"
+  if ((out.match(/^```/gm) ?? []).length % 2) out += "\n```"
+  return out
+}
+
+/** Inline code span for `s`, fenced longer than any backtick run inside it. */
+function codeSpan(s: string): string {
+  const runs = s.match(/`+/g)
+  const fence = "`".repeat((runs ? Math.max(...runs.map((r) => r.length)) : 0) + 1)
+  // A leading/trailing backtick needs a space so it isn't glued to the fence.
+  const pad = /^`|`$/.test(s) ? " " : ""
+  return `${fence}${pad}${s}${pad}${fence}`
+}
+
+/** `` `file:line` — `<source line>` ``: the line a finding quotes as evidence. */
+function evidenceText(f: Finding): string {
+  const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
+  return `\`${loc}\` — ${codeSpan(oneLine(f.evidenceLine ?? ""))}`
+}
+
+/** A GitHub suggestion block replacing the comment's line range. */
+function suggestionBlock(replacement: string): string {
+  const runs = replacement.match(/`{3,}/g)
+  const fence = "`".repeat(Math.max(3, ...(runs ?? []).map((r) => r.length + 1)))
+  return `${fence}suggestion\n${replacement}\n${fence}`
 }
 
 /** Hidden per-finding marker on inline comments, keyed by the finding's stable
@@ -381,12 +415,25 @@ export function inlineComments(
         a.file.localeCompare(b.file) ||
         a.startLine! - b.startLine!,
     )
-  const comments = fresh.slice(0, posting.inlineBudget).map((f) => ({
-    path: f.file,
-    line: f.startLine!,
-    side: "RIGHT" as const,
-    body: `${SEVERITY_EMOJI[f.severity]} **${f.title}**\n\n${f.body}\n\n${findingMarker(f.id)}`,
-  }))
+  const comments = fresh.slice(0, posting.inlineBudget).map((f): InlineComment => {
+    const parts = [`${SEVERITY_EMOJI[f.severity]} **${f.title}**`]
+    if (f.evidenceLine) parts.push(evidenceText(f))
+    parts.push(clampBody(f.body))
+    const s = f.suggestion
+    if (s) parts.push(suggestionBlock(s.replacement))
+    parts.push(findingMarker(f.id))
+    const body = parts.join("\n\n")
+    // GitHub applies a suggestion to the comment's line range, so the
+    // comment spans exactly the replaced lines.
+    if (!s) return { path: f.file, line: f.startLine!, side: "RIGHT", body }
+    return {
+      path: f.file,
+      line: s.endLine,
+      side: "RIGHT",
+      ...(s.startLine !== s.endLine ? { start_line: s.startLine, start_side: "RIGHT" as const } : {}),
+      body,
+    }
+  })
   return { comments, deferred: fresh.slice(posting.inlineBudget) }
 }
 
