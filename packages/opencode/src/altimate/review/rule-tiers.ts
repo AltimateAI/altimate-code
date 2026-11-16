@@ -20,7 +20,6 @@ const INLINE = [
   "altimate-core.check:non-deterministic-dedup",
   "dbt-patterns:dedup-no-tiebreaker",
   "dbt-semantics:incremental-partition-change",
-  "dbt-project-rules:test-on-null-column",
   "dbt-project-rules:ref-target-missing",
   "rule-catalog:qualify-unsupported",
   "dbt-project-rules:macro-param-shifted",
@@ -38,7 +37,6 @@ const OFF = [
   "rule-catalog:cast-float-to-int",
   "rule-catalog:union-not-all",
   "altimate-core.lexical:reserved-word-alias",
-  "rule-catalog:distinct-and-group-by",
   "dbt-patterns:cross-join",
   "rule-catalog:self-join-no-inequality",
   "rule-catalog:not-exists-suggested",
@@ -114,6 +112,8 @@ const SUMMARY = [
   "dbt-patterns:fanout-join",
   "dbt-patterns:self-join",
   "rule-catalog:join-case-folded-one-side",
+  "dbt-project-rules:test-on-null-column",
+  "rule-catalog:distinct-and-group-by",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {

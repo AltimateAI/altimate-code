@@ -448,7 +448,7 @@ describe("per-rule tiers", () => {
 
   test("default table keys are well-formed ids, and verdict-relevant engine rules are never off", () => {
     const keys = Object.keys(DEFAULT_RULE_TIERS)
-    expect(keys.filter((k) => DEFAULT_RULE_TIERS[k] === "inline")).toHaveLength(15)
+    expect(keys.filter((k) => DEFAULT_RULE_TIERS[k] === "inline")).toHaveLength(14)
     for (const k of keys) expect(k.endsWith(":*") || /^[a-z0-9.-]+:[a-z0-9.-]+$/.test(k)).toBe(true)
     // Rules kept at summary because they produced a real benchmark catch.
     for (const k of [
