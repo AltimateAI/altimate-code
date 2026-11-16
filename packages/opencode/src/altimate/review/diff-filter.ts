@@ -383,3 +383,51 @@ export function countChangedLines(diff: string | undefined): number {
   }
   return n
 }
+
+/** A row inside a unified diff hunk. `line` is the head-side line number for
+ *  `+` and context rows; for a `-` row it is the head line that follows the
+ *  deletion. `hunk` numbers the hunks from 0. */
+export interface DiffRow {
+  line: number
+  text: string
+  kind: "+" | "-" | " "
+  hunk: number
+}
+
+/** Walk every row of a unified diff's hunks: added, removed and context lines. */
+export function* walkDiffRows(diff: string | undefined): Generator<DiffRow> {
+  if (!diff) return
+  let right = 0
+  let hunk = -1
+  let inHunk = false
+  const rows = diff.split("\n")
+  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
+  for (const row of rows) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
+    if (h) {
+      right = Number(h[1])
+      hunk++
+      inHunk = true
+      continue
+    }
+    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
+    if (!inHunk || row.startsWith("\\")) continue
+    // A blank context line may have lost its leading space in transit.
+    if (row.startsWith("+")) yield { line: right++, text: row.slice(1), kind: "+", hunk }
+    else if (row.startsWith(" ") || row === "") yield { line: right++, text: row.slice(1), kind: " ", hunk }
+    else if (row.startsWith("-")) yield { line: right, text: row.slice(1), kind: "-", hunk }
+    else inHunk = false
+  }
+}
+
+/** A head-side line inside a diff hunk: an added (`+`) or a context (` `) line. */
+export interface DiffLine {
+  line: number
+  text: string
+  kind: "+" | " "
+}
+
+/** Walk a unified diff's hunks, yielding each added and context line with its head-side line number. */
+export function* walkDiffLines(diff: string | undefined): Generator<DiffLine> {
+  for (const { line, text, kind } of walkDiffRows(diff)) if (kind !== "-") yield { line, text, kind }
+}
