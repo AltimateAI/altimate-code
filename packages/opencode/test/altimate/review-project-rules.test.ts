@@ -243,6 +243,14 @@ describe("SQL shapes from the catalog", () => {
     expect(fires("case-duplicate-when", "case\n when grade = 'A' then 1\n when grade = 'a' then 2\nend")).toBe(false)
     expect(fires("case-duplicate-when", "case\n when Grade = 'A' then 1\n WHEN grade  =  'A' then 2\nend")).toBe(true)
   })
+  test("duplicate WHEN ignores spacing and keyword case, but not literal case", () => {
+    const tier = (third: string) =>
+      `CASE\n    WHEN s.lifetime_spend >= 1000 THEN 'platinum'\n    WHEN s.lifetime_spend >= 500 THEN 'gold'\n    ${third}\n    ELSE 'standard'\nEND`
+    expect(fires("case-duplicate-when", tier("WHEN s.lifetime_spend>=1000 THEN 'vip'"))).toBe(true)
+    expect(fires("case-duplicate-when", tier("when S.Lifetime_Spend  >=  1000 then 'vip'"))).toBe(true)
+    expect(fires("case-duplicate-when", tier("WHEN s.lifetime_spend>=100 THEN 'silver'"))).toBe(false)
+    expect(fires("case-duplicate-when", "case\n when status = 'A' then 1\n when status = 'a' then 2\nend")).toBe(false)
+  })
   test("window ORDER BY repeating the partition key", () => {
     expect(fires("window-order-repeats-partition", "row_number() over (partition by tx_hash, evt_index order by tx_hash) as rn")).toBe(true)
     expect(fires("window-order-repeats-partition", "row_number() over (partition by tx_hash order by block_time desc) as rn")).toBe(false)
