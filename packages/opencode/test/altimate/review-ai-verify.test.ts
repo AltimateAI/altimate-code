@@ -679,8 +679,11 @@ describe("runAiVerify: the bounded tool loop", () => {
     const a = scripted((req) =>
       req.toolChoice === "none" ? { text: "[]" } : toolStep([["pr_description", {}]], small),
     )
-    await verify([aiFinding()], a.llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "500" } })
-    expect(a.calls.map((c) => c.toolChoice)).toEqual(["auto", "none"])
+    // A budget too small for a tool round and an answer: answer straight away, without tools.
+    const res = await verify([aiFinding()], a.llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "500" } })
+    expect(a.calls.map((c) => c.toolChoice)).toEqual(["none"])
+    expect(a.calls[0].messages.at(-1)?.content).not.toBe(ANSWER_NOW)
+    expect(res.status.state).toBe("budget")
 
     const long = "x".repeat(10_000)
     const b = scripted((req) =>
@@ -696,13 +699,57 @@ describe("runAiVerify: the bounded tool loop", () => {
             ["read_file", { path: "models/fct.sql" }],
           ]),
     )
-    await verify([aiFinding()], b.llm, { readFile: async () => long })
+    await verify(
+      [aiFinding()],
+      b.llm,
+      { readFile: async () => long },
+      { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "1000000" } },
+    )
     // 6 calls × 2,500 chars (+ truncation marks) exceed 16,000 only after the second round.
     expect(b.calls.map((c) => c.toolChoice)).toEqual(["auto", "auto", "none"])
     const results = toolResults(b.calls[1])
     expect(results).toHaveLength(7)
     expect(results[0].length).toBeLessThanOrEqual(2_500 + 20)
     expect(results[6]).toBe("not available: at most 6 tool calls per round")
+  })
+
+  test("the forced answer is budgeted: total tokens stay within the share even with large tool output", async () => {
+    // A model that reports usage proportional to what it is sent and always wants more tools.
+    const spent: number[] = []
+    const llm: VerifierLlm = async (req) => {
+      const input = Math.ceil((req.system.length + JSON.stringify(req.messages).length + 4_000) / 4)
+      const usage = { tokens: { input, inputTotal: input, output: 300, reasoning: 0, cacheRead: 0 }, cost: 0 }
+      spent.push(input + 300)
+      if (req.toolChoice === "none")
+        return { text: JSON.stringify([verdict("c1")]), finishReason: "stop", toolCalls: [], messages: [], usage }
+      return {
+        text: "",
+        ...toolStep(Array.from({ length: 6 }, () => ["read_file", { path: "models/fct.sql" }] as [string, unknown])),
+        usage,
+      } as VerifierStep
+    }
+    const long = "y".repeat(2_400)
+    for (const budget of [12_000, 8_000, 20_000]) {
+      spent.length = 0
+      const { status } = await verify(
+        [aiFinding()],
+        llm,
+        { readFile: async () => long },
+        {
+          env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: String(budget) },
+        },
+      )
+      const total = spent.reduce((a, b) => a + b, 0)
+      expect(total).toBeLessThanOrEqual(budget)
+      expect(status.tokens!.inputTotal + status.tokens!.output).toBe(total)
+      expect(status.reviewed).toBe(1)
+    }
+    // Under the default 12k the batch gets one tool round, then the reserved answer.
+    spent.length = 0
+    const { status } = await verify([aiFinding()], llm, { readFile: async () => long })
+    expect(status.turns).toBe(2)
+    expect(status.state).toBe("budget")
+    expect(spent.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(12_000)
   })
 
   test("reads are limited to changed files, their parents and downstream models", async () => {
