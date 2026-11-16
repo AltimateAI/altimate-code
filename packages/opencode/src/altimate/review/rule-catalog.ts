@@ -50,7 +50,11 @@ export interface Rule {
    * engine, unless that engine is missing from `worksOn` (then it is a real
    * error there and is kept). Omit `worksOn` when support isn't established.
    */
-  portability?: { worksOn?: string[] }
+  portability?: {
+    worksOn?: string[]
+    /** More engines that accept the construct when `check` holds on the new file (comments and strings blanked). */
+    alsoWorksOn?: { engines: string[]; check: (sql: string) => boolean }
+  }
   /**
    * Engine-dependent rule: fires as written where this capability is true for
    * the project's adapter; where it is false, fires with `portabilityBody`
@@ -342,6 +346,13 @@ export function ruleEngine(rule: Rule): string | undefined {
   return m ? PACK_ENGINE[m[1]] : undefined
 }
 
+/** Engines a portability rule's construct runs on, for this file. */
+function worksOn(rule: Rule, newSql: string): string[] | undefined {
+  const p = rule.portability
+  if (!p?.worksOn || !p.alsoWorksOn?.check(stripStrings(stripComments(newSql)))) return p?.worksOn
+  return [...p.worksOn, ...p.alsoWorksOn.engines]
+}
+
 /** Evaluate the catalog against a changed file. */
 export function evaluateCatalog(
   file: ChangedFile,
@@ -375,7 +386,7 @@ export function evaluateCatalog(
         tool: "rule-catalog",
         result: {
           rule: rule.id,
-          ...(rule.portability || body !== rule.body ? { portability: true, worksOn: rule.portability?.worksOn } : {}),
+          ...(rule.portability || body !== rule.body ? { portability: true, worksOn: worksOn(rule, newSql) } : {}),
           ...(match.line !== undefined ? { line: match.line } : {}),
         },
       },
@@ -505,6 +516,14 @@ function normalizeCondition(cond: string): string {
     .trim()
 }
 
+const NAVIGATION_WINDOW_FN = /^(first_value|last_value|nth_value|lead|lag)$/i
+
+/** Calls written `f(x IGNORE NULLS [ORDER BY …] [LIMIT n])`, with whether an OVER follows. */
+function ignoreNullsInCall(sql: string): { fn: string; over: boolean }[] {
+  const re = /\b(\w+)\s*\(\s*[^()]*?\bignore\s+nulls(?:\s+(?:order\s+by|limit)\b[^()]*)?\s*\)(\s*over\b)?/gi
+  return [...sql.matchAll(re)].map((m) => ({ fn: m[1], over: !!m[2] }))
+}
+
 /** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER.
  *  With `added`, only when an added line references that right side (its columns or its join). */
 export function leftJoinNullifiedByWhere(sql: string, added?: string[]): boolean {
@@ -602,12 +621,19 @@ const FEASIBLE: Rule[] = [
     "sql_correctness",
     "warning",
     "IGNORE NULLS inside the function call is BigQuery syntax",
-    "`f(x IGNORE NULLS)` parses on BigQuery only. Trino, Snowflake and others take it after the call: `last_value(x) IGNORE NULLS OVER (…)`.",
+    "`f(x IGNORE NULLS)` parses on BigQuery, and on DuckDB for window functions only. Trino, Snowflake and others take it after the call: `last_value(x) IGNORE NULLS OVER (…)`.",
     {
       added: /\bignore\s+nulls\b/i,
-      check: (sql) => /\(\s*[^()]*?\bignore\s+nulls\s*\)/i.test(sql),
+      check: (sql) => ignoreNullsInCall(sql).length > 0,
       macros: true,
-      portability: { worksOn: ["bigquery", "duckdb"] },
+      // DuckDB takes the in-call form on navigation window functions only; on an aggregate it is a parse error.
+      portability: {
+        worksOn: ["bigquery"],
+        alsoWorksOn: {
+          engines: ["duckdb"],
+          check: (sql) => ignoreNullsInCall(sql).every((m) => m.over && NAVIGATION_WINDOW_FN.test(m.fn)),
+        },
+      },
     },
     { add: "last_value(x ignore nulls) over (partition by k order by d)" },
     { add: "last_value(x) ignore nulls over (partition by k order by d)" },

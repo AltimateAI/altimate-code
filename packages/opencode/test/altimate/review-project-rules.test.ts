@@ -10,7 +10,8 @@ import {
   packagesFindings,
   testsOnNullColumns,
 } from "../../src/altimate/review/project-rules"
-import { CATALOG, ruleMatches, leftJoinNullifiedByWhere } from "../../src/altimate/review/rule-catalog"
+import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
+import { isSuppressiblePortability } from "../../src/altimate/review/orchestrate"
 import { detectMacroPatterns } from "../../src/altimate/review/dbt-patterns"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
@@ -267,6 +268,25 @@ describe("SQL shapes from the catalog", () => {
     expect(fires("ignore-nulls-inside-call", "select last_value(t) ignore nulls over (partition by k order by d) from x")).toBe(false)
     // DuckDB accepts IGNORE NULLS inside the call too, so it is not flagged as non-portable there.
     expect(rule("ignore-nulls-inside-call").portability?.worksOn).toContain("duckdb")
+  })
+  test("IGNORE NULLS inside an aggregate call followed by ORDER BY", () => {
+    expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status IGNORE NULLS ORDER BY order_date) as s from o")).toBe(true)
+    expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status IGNORE NULLS LIMIT 10) as s from o")).toBe(true)
+    expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status ORDER BY order_date) FILTER (WHERE status IS NOT NULL) as s from o")).toBe(false)
+  })
+  test("IGNORE NULLS inside the call: kept on Postgres/Snowflake; dropped on DuckDB for window functions only", () => {
+    const ignoreNulls = (sql: string) =>
+      evaluateCatalog({ path: "models/m.sql", status: "modified" }, sql, sql.split("\n"), [], DEFAULT_RUBRIC).find(
+        (f) => (f.evidence?.result as { rule?: string }).rule === "ignore-nulls-inside-call",
+      )!
+    const win = ignoreNulls("select last_value(location_id ignore nulls) over (partition by c order by d) as l from o")
+    const agg = ignoreNulls("select ARRAY_AGG(status IGNORE NULLS ORDER BY order_date) as s from o")
+    expect(isSuppressiblePortability(win, "duckdb")).toBe(true)
+    expect(isSuppressiblePortability(win, "bigquery")).toBe(true)
+    expect(isSuppressiblePortability(win, "postgres")).toBe(false)
+    expect(isSuppressiblePortability(win, "snowflake")).toBe(false)
+    expect(isSuppressiblePortability(agg, "duckdb")).toBe(false)
+    expect(isSuppressiblePortability(agg, "bigquery")).toBe(true)
   })
 })
 
