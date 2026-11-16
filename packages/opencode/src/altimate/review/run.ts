@@ -451,6 +451,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
     aiDisabledReason,
     aiModel: opts.aiModel,
+    aiGraphContext: process.env.ALTIMATE_REVIEW_AI_GRAPH === "1",
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,

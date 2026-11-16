@@ -30,7 +30,7 @@ import { selectListNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
-import { type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
+import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
 // Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
@@ -153,6 +153,13 @@ export interface ReviewRunner {
   /** Direct downstream models (name + file path) of a model, from the manifest DAG. */
   downstreamModels?(model: string): Promise<Array<{ name: string; path: string }>>
   /**
+   * Direct dbt parents of the nodes defined in these files (project-relative
+   * paths): models, seeds and snapshots by file, sources with their declared
+   * columns, and the project's own macros. A changed yml maps to the models its
+   * tests cover. Paths of parents are project-relative too.
+   */
+  graphParents?(paths: string[]): Promise<Array<{ path: string; kind: string; name: string; forPaths: string[]; columns?: string[] }>>
+  /**
    * Consumers of a model that dbt refs don't show: exposures that depend on it,
    * and whether it has an enforced contract (with the declared columns).
    * Undefined when the model is not in the manifest.
@@ -232,6 +239,8 @@ export interface OrchestrateInput {
   aiDisabledReason?: string
   /** Explicit `provider/model` for the AI lane. */
   aiModel?: string
+  /** Send the changed files' unchanged dbt parents to the AI lane as context. */
+  aiGraphContext?: boolean
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -1240,6 +1249,37 @@ function changesMergeGrain(message: string, newSql: string, oldSql: string | und
 }
 
 /**
+ * The changed files' unchanged dbt parents, read at head, for the AI lane's
+ * cross-file checks: an upstream model's columns, a seed's rows, a macro's
+ * signature. Manifest paths are project-relative; changed paths may carry a
+ * prefix (review run from the repo root), which is reapplied to the parents.
+ */
+async function aiGraphContext(
+  paths: string[],
+  runner: ReviewRunner,
+  getContent: OrchestrateInput["getContent"],
+): Promise<AiContextFile[] | undefined> {
+  if (!runner.graphParents || !getContent || !paths.length) return undefined
+  try {
+    const parents = await runner.graphParents(paths)
+    const out: AiContextFile[] = []
+    for (const p of parents) {
+      if (p.kind === "source") {
+        if (!p.columns?.length) continue
+        out.push({ path: p.path, kind: p.kind, name: p.name, forPaths: p.forPaths, content: `columns: ${p.columns.join(", ")}` })
+        continue
+      }
+      const content = await getContent(p.path, "new").catch(() => undefined)
+      if (content) out.push({ path: p.path, kind: p.kind, name: p.name, forPaths: p.forPaths, content })
+    }
+    return out
+  } catch {
+    // Context is an enrichment: without it the lane reviews the changed files alone.
+    return undefined
+  }
+}
+
+/**
  * dbt CONFIG lint — runs the core dbt-config parser (minijinja) over the RAW model
  * (the `{{ config() }}` block + body) and emits the config/Jinja findings: incremental
  * guard / unique_key, microbatch lookback, enforced-contract on_table_exists,
@@ -2226,9 +2266,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     supporting.forEach((f, i) =>
       aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
     )
+    const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     try {
       const res = await input.aiReview({
         files: aiFiles,
+        context,
         grounding: cleanFindings(merged),
         prTitle: input.prTitle,
         prBody: input.prBody,
