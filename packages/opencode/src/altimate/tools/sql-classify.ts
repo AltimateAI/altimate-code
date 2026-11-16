@@ -206,6 +206,10 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
       /(->>|\bASYNC\s*\(|:=\s*\(|\bDEFAULT\s*\()\s*TRUNCATE\b(?!\s*\()/i.test(names)
     if (CODE_HARD_DENY.test(names) || handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names)))
       blocked = true
+    // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
+    // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write. This runs at
+    // every nesting depth, as on main. Quoted names unwrapped, so "exec"('...') and [exec]('...') count.
+    if (DYNAMIC_SQL.test(maskSql(lexical.tokens, true)) && mentionsHardDenyAnywhere(sql)) blocked = true
   }
   return { queryType: "write", blocked }
 }
@@ -454,10 +458,6 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   // SQL read with certainty (otherwise the word scan of the whole text already covered its literals).
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) return result
-  // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
-  // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write.
-  // Quoted names unwrapped, so "exec"('...') and [exec]('...') count as calls.
-  if (DYNAMIC_SQL.test(maskSql(lexical.tokens, true)) && mentionsHardDenyAnywhere(sql)) return { ...result, blocked: true }
   // A write may also run the SQL in its literals: a routine body created and called in the same call.
   if (result.queryType === "write" && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
   return result
