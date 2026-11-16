@@ -5,7 +5,13 @@ import z from "zod"
 import { readStreamStep } from "../../src/altimate/llm/stream-text"
 import {
   aiVerifyEnabled,
+  applyTriage,
   buildVerifyMessage,
+  DEFAULT_TRIAGE_KNOBS,
+  triage,
+  triageKnobs,
+  type ModelFeatures,
+  type TsFeatures,
   extractFeatures,
   hunkAround,
   numberedSlice,
@@ -13,6 +19,8 @@ import {
   VERIFY_SYSTEM_PROMPT,
 } from "../../src/altimate/review/ai-verify"
 import { makeFinding, type Finding } from "../../src/altimate/review/finding"
+import { inlineEligible } from "../../src/altimate/review/format"
+import { DEFAULT_POSTING_POLICY } from "../../src/altimate/review/verdict"
 import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
@@ -283,5 +291,109 @@ describe("verifier prompt and parser", () => {
       expect(msg).toContain(line)
     expect(msg).toContain("```diff")
     expect(msg).not.toContain("GROUNDING")
+  })
+})
+
+describe("triage (first match wins)", () => {
+  const TS: TsFeatures = {
+    evidenceLineValid: true,
+    targetsUnchangedCode: false,
+    restatesGrounding: false,
+    claimsOtherFile: false,
+    styleOnly: false,
+    lowConfidence: false,
+    hedgedDataDiff: false,
+  }
+  const M: ModelFeatures = {
+    claimType: "code_fact",
+    verdict: "confirmed",
+    value: "actionable",
+    requiresAssumedInput: false,
+    evidence: "line 11: / 100 on an integer",
+    toolsUsed: ["compiled_sql"],
+  }
+  const K = DEFAULT_TRIAGE_KNOBS
+  const f = aiFinding()
+  const rows: Array<[string, Partial<TsFeatures>, Partial<ModelFeatures>, string, string]> = [
+    ["1 restates grounding", { restatesGrounding: true }, {}, "discard", "duplicate_of_engine"],
+    ["2 refuted with evidence", {}, { verdict: "refuted" }, "discard", "refuted"],
+    ["3 cross-file unverifiable", {}, { claimType: "cross_file", verdict: "unverifiable" }, "discard", "unverifiable_cross_file"],
+    ["3 cross-file confirmed without tools", {}, { claimType: "cross_file", toolsUsed: [] }, "discard", "unverifiable_cross_file"],
+    ["4 speculation", {}, { claimType: "speculation" }, "discard", "speculative"],
+    ["4 assumed input, not confirmed", {}, { requiresAssumedInput: true, verdict: "unverifiable" }, "discard", "speculative"],
+    ["5 style only", { styleOnly: true }, {}, "discard", "low_value"],
+    ["5 nit", {}, { value: "nit" }, "discard", "low_value"],
+    ["6 unchanged code, not confirmed", { targetsUnchangedCode: true }, { verdict: "unverifiable" }, "discard", "unchanged_code"],
+    ["7 plausible local claim on a valid line", {}, { verdict: "unverifiable" }, "keep", "plausible_local"],
+    ["7 plausible local claim hedged to a data diff", { evidenceLineValid: null, hedgedDataDiff: true }, { verdict: "unverifiable", claimType: "convention" }, "keep", "plausible_local"],
+    ["8 unverifiable with no line", { evidenceLineValid: null }, { verdict: "unverifiable" }, "discard", "unverifiable"],
+    ["8 unverifiable, low confidence", { lowConfidence: true }, { verdict: "unverifiable" }, "discard", "unverifiable"],
+    ["9 confirmed but informational", {}, { value: "informational" }, "summary", "informational"],
+    ["10 confirmed", {}, {}, "keep", "verified"],
+  ]
+  for (const [name, ts, m, decision, rule] of rows) {
+    test(name, () => {
+      expect(triage(f, { ...TS, ...ts }, { ...M, ...m }, K)).toEqual({ decision: decision as any, rule })
+    })
+  }
+
+  test("refuted without evidence falls through; unchanged code is kept when confirmed, a test gap, or intent", () => {
+    expect(triage(f, TS, { ...M, verdict: "refuted", evidence: " " }, K).rule).toBe("verified")
+    const unchanged = { ...TS, targetsUnchangedCode: true }
+    expect(triage(f, unchanged, M, K).rule).toBe("verified")
+    expect(triage({ ...f, category: "test_coverage" }, unchanged, { ...M, verdict: "unverifiable", claimType: "test_gap" }, K).rule).toBe("plausible_local")
+    expect(triage(f, unchanged, { ...M, verdict: "unverifiable", claimType: "intent" }, K).rule).toBe("plausible_local")
+  })
+
+  test("knobs: nits kept, unverified local claims dropped, fail closed", () => {
+    expect(triage(f, TS, { ...M, value: "nit" }, { ...K, dropNits: false }).rule).toBe("verified")
+    expect(triage(f, TS, { ...M, verdict: "unverifiable" }, { ...K, keepUnverifiedLocal: false }).rule).toBe("unverifiable")
+    expect(triage(f, TS, undefined, K)).toEqual({ decision: "keep", rule: "unreviewed" })
+    expect(triage(f, TS, undefined, { ...K, failMode: "closed" })).toEqual({ decision: "discard", rule: "unreviewed" })
+    // Without a verdict even a grounding duplicate is left alone: fail-open means unchanged.
+    expect(triage(f, { ...TS, restatesGrounding: true }, undefined, K).decision).toBe("keep")
+  })
+
+  test("knobs from the environment", () => {
+    expect(triageKnobs({})).toEqual(DEFAULT_TRIAGE_KNOBS)
+    expect(
+      triageKnobs({ ALTIMATE_REVIEW_AI_VERIFY_DROP_NITS: "0", ALTIMATE_REVIEW_AI_VERIFY_KEEP_LOCAL: "0", ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" }),
+    ).toEqual({ dropNits: false, keepUnverifiedLocal: false, failMode: "closed" })
+  })
+
+  test("applyTriage: verified gets evidence and a body suffix, informational moves to the summary, discards are listed", () => {
+    const a = aiFinding()
+    const b = aiFinding({ title: "fct: Informational note", ruleKey: "b" })
+    const c = aiFinding({ title: "fct: Wrong claim", ruleKey: "c" })
+    const d = aiFinding({ title: "fct: Not answered", ruleKey: "d" })
+    const res = applyTriage([a, b, c, d], [TS, TS, TS, TS], [M, { ...M, value: "informational" }, { ...M, verdict: "refuted", evidence: "line 11 casts first" }, undefined], K)
+    expect(res.findings.map((x) => x.title)).toEqual([a.title, b.title, d.title])
+    const [va, vb, vd] = res.findings
+    expect(va.body).toBe(`${a.body}\n\nVerified: ${M.evidence}`)
+    expect(va.severity).toBe(a.severity)
+    expect(va.evidence?.tool).toBe("ai-review")
+    expect((va.evidence?.result as any).confidence).toBe("medium")
+    expect((va.evidence?.result as any).verification).toMatchObject({ decision: "keep", rule: "verified", verdict: "confirmed", features: TS })
+    expect(vb.tier).toBe("summary")
+    expect(vb.body).toBe(b.body)
+    expect(vd).toBe(d)
+    expect(res.dropped).toEqual([
+      { id: c.id, file: c.file, title: c.title, category: c.category, severity: c.severity, decision: "discard", rule: "refuted", verdict: "refuted", claimType: "code_fact", evidence: "line 11 casts first" },
+    ])
+    expect(res.counts).toEqual({ reviewed: 3, kept: 2, discarded: 1, summary: 1, unreviewed: 1 })
+  })
+
+  test("a finding the verifier moved to the summary is never inline, even from the AI lane", () => {
+    const [kept, summary] = applyTriage([aiFinding(), aiFinding({ ruleKey: "s" })], [TS, TS], [M, { ...M, value: "informational" }], K).findings
+    expect(inlineEligible(kept, DEFAULT_POSTING_POLICY)).toBe(true)
+    expect(inlineEligible({ ...summary, tier: "summary" }, DEFAULT_POSTING_POLICY)).toBe(false)
+  })
+
+  test("dropped is capped at 20", () => {
+    const many = Array.from({ length: 25 }, (_, i) => aiFinding({ ruleKey: `k${i}` }))
+    const res = applyTriage(many, many.map(() => TS), many.map(() => ({ ...M, verdict: "refuted" as const })), K)
+    expect(res.findings).toHaveLength(0)
+    expect(res.dropped).toHaveLength(20)
+    expect(res.counts.discarded).toBe(25)
   })
 })
