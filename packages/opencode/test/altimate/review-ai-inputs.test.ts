@@ -402,3 +402,59 @@ describe("token and cost accounting", () => {
     })
   })
 })
+
+describe("verifier evidence (opt-in)", () => {
+  const aiFinding = {
+    id: "f_ai",
+    severity: "warning" as const,
+    category: "sql_correctness" as const,
+    title: "m: t",
+    body: "b",
+    file: "models/marts/m.sql",
+    confidence: "medium" as const,
+    degraded: false,
+    evidence: { tool: "ai-review", result: { confidence: "medium" } },
+    rule: "ai-review:sql-correctness",
+  }
+  const run = (aiVerify: boolean | undefined, seen: { input?: AiReviewInput }) =>
+    runReview({
+      changedFiles: [mod("models/marts/m.sql", "@@ -1 +1 @@\n-select 1 as id\n+select 2 as id\n")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      ...(aiVerify === undefined ? {} : { aiVerify }),
+      getContent: async (f, side) => (side === "old" ? "select 1 as id" : FILES[f]),
+      generatedAt: "2026-11-14T00:00:00Z",
+      aiReview: async (input) => {
+        seen.input = input
+        return { findings: [aiFinding], status: { state: "ok" } }
+      },
+    })
+
+  test("without aiVerify the lane gets no evidence and the envelope is unchanged", async () => {
+    const off: { input?: AiReviewInput } = {}
+    const on: { input?: AiReviewInput } = {}
+    const envOff = await run(undefined, off)
+    const envOn = await run(true, on)
+    expect("evidence" in off.input!).toBe(false)
+    expect(on.input!.evidence).toBeDefined()
+    // A lane that ignores the evidence produces the same envelope either way.
+    expect(JSON.stringify(envOn)).toBe(JSON.stringify(envOff))
+    expect(envOff.ai).toEqual({ state: "ok" })
+    expect(envOff.findings.map((f) => f.id)).toContain("f_ai")
+  })
+
+  test("the evidence reads engine SQL, numbered file slices and the diff's added lines", async () => {
+    const seen: { input?: AiReviewInput } = {}
+    await run(true, seen)
+    const ev = seen.input!.evidence!
+    expect(await ev.compiledSql("models/marts/m.sql", "new")).toBe("select 2 as id")
+    expect(await ev.compiledSql("models/marts/m.sql", "old")).toBe("select 1 as id")
+    expect(await ev.readFile("models/marts/m.sql", "new", 1, 1)).toBe("1: select 2 as id")
+    expect([...ev.addedLines.get("models/marts/m.sql")!]).toEqual([1])
+    expect(ev.files.map((f) => f.path)).toEqual(["models/marts/m.sql"])
+    expect(ev.dialect).toBe(DEFAULT_REVIEW_CONFIG.dialect)
+  })
+})

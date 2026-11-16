@@ -1669,6 +1669,14 @@ export namespace Telemetry {
         ai_cost?: number
         /** Model calls the AI lane made. */
         ai_calls?: number
+        /** Opt-in AI verifier outcome: ok | skipped | timeout | error | budget. */
+        ai_verify_state?: string
+        /** Verifier tokens: input (including cached) plus output, across batches and tool rounds. */
+        ai_verify_tokens_total?: number
+        ai_verify_tool_calls?: number
+        /** AI findings the verifier kept (including those moved to the summary) and discarded. */
+        ai_verify_kept?: number
+        ai_verify_discarded?: number
         /** Where the review base came from (flag, github_event, default_branch, …). */
         base_source?: string
         out_of_scope_files?: number

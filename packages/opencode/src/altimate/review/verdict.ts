@@ -162,6 +162,15 @@ export const ReviewScope = z.object({
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
+/** Tokens spent by model calls (`input` excludes cached tokens). */
+const AiTokensSchema = z.object({
+  input: z.number().nonnegative(),
+  inputTotal: z.number().nonnegative(),
+  output: z.number().nonnegative(),
+  reasoning: z.number().nonnegative(),
+  cacheRead: z.number().nonnegative(),
+})
+
 export const VerdictEnvelope = z.object({
   version: z.literal("1"),
   verdict: Verdict,
@@ -220,18 +229,44 @@ export const VerdictEnvelope = z.object({
       model: z.string().optional(),
       durationMs: z.number().int().nonnegative().optional(),
       /** Tokens spent by the lane's model calls (`input` excludes cached tokens). */
-      tokens: z
-        .object({
-          input: z.number().nonnegative(),
-          inputTotal: z.number().nonnegative(),
-          output: z.number().nonnegative(),
-          reasoning: z.number().nonnegative(),
-          cacheRead: z.number().nonnegative(),
-        })
-        .optional(),
+      tokens: AiTokensSchema.optional(),
       /** Estimated USD cost from the model's price table. */
       cost: z.number().nonnegative().optional(),
       calls: z.number().int().nonnegative().optional(),
+      /** The opt-in dbt-grounded verifier (`ALTIMATE_REVIEW_AI_VERIFY=1`): what it kept and dropped. */
+      verifier: z
+        .object({
+          state: z.enum(["ok", "skipped", "timeout", "error", "budget"]),
+          reason: z.string().optional(),
+          durationMs: z.number().int().nonnegative().optional(),
+          tokens: AiTokensSchema.optional(),
+          cost: z.number().nonnegative().optional(),
+          turns: z.number().int().nonnegative().optional(),
+          toolCalls: z.number().int().nonnegative().optional(),
+          reviewed: z.number().int().nonnegative().optional(),
+          kept: z.number().int().nonnegative().optional(),
+          discarded: z.number().int().nonnegative().optional(),
+          summary: z.number().int().nonnegative().optional(),
+          unreviewed: z.number().int().nonnegative().optional(),
+          /** Discarded findings (at most 20), for auditing the verifier's precision. */
+          dropped: z
+            .array(
+              z.object({
+                id: z.string(),
+                file: z.string(),
+                title: z.string(),
+                category: z.string(),
+                severity: z.string(),
+                decision: z.enum(["keep", "discard", "summary"]),
+                rule: z.string(),
+                verdict: z.string().optional(),
+                claimType: z.string().optional(),
+                evidence: z.string().optional(),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */

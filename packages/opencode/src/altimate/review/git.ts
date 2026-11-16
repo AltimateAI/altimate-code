@@ -203,6 +203,40 @@ export async function grepMatchesAt(cwd: string, ref: string | undefined, patter
   }
 }
 
+/**
+ * Fixed-string matches of `pattern` in tracked text files at `ref` (the working
+ * tree when omitted) under the repo-root-relative `pathspecs`, at most
+ * `maxHits`, bounded by a timeout. Never throws: no match, a git failure or a
+ * timeout all return what was found (possibly nothing).
+ */
+export async function grepFixedAt(
+  gitRoot: string,
+  ref: string | undefined,
+  pattern: string,
+  pathspecs: string[],
+  opts: { maxHits?: number; timeoutMs?: number } = {},
+): Promise<Array<{ path: string; line: number; text: string }>> {
+  const maxHits = opts.maxHits ?? 50
+  const args = ["grep", "-n", "-I", "-F", "--full-name", "-m", String(maxHits), "-e", pattern, ...(ref ? [ref] : []), "--"]
+  args.push(...pathspecs.map((p) => `:(top)${p}`))
+  let out: string
+  try {
+    out = (await exec("git", args, { cwd: gitRoot, timeout: opts.timeoutMs ?? 5_000, maxBuffer: 4 * 1024 * 1024 })).stdout
+  } catch (e) {
+    // git grep exits 1 when nothing matches; anything else (timeout, bad ref) is no evidence.
+    out = (e as { stdout?: string }).stdout ?? ""
+  }
+  const hits: Array<{ path: string; line: number; text: string }> = []
+  for (const row of out.split("\n")) {
+    const rest = ref && row.startsWith(ref + ":") ? row.slice(ref.length + 1) : row
+    const m = /^(.+?):(\d+):(.*)$/.exec(rest)
+    if (!m) continue
+    hits.push({ path: m[1], line: Number(m[2]), text: m[3].slice(0, 300) })
+    if (hits.length >= maxHits) break
+  }
+  return hits
+}
+
 /** Where the review's base came from, recorded on the verdict envelope. */
 export type BaseSource =
   | "flag" // --base
