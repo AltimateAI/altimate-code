@@ -477,6 +477,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       projectRoot: projectRootRel,
       outOfScopeFiles: scoped.outOfScope || undefined,
       movedUnchangedFiles: scoped.movedUnchanged || undefined,
+      notReviewed: [
+        ...scoped.outOfScopePaths.map((path) => ({ path, reason: `outside the dbt project (${projectRootRel || "."})` })),
+        ...scoped.movedUnchangedPaths.map((path) => ({ path, reason: "moved without edits; not re-reviewed" })),
+      ],
     },
   })
 }

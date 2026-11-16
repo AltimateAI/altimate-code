@@ -248,6 +248,18 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
     expect(r.movedUnchanged).toBe(0)
   })
 
+  test("the dropped files are listed by path for the coverage ledger", () => {
+    const macroMove: ChangedFile = {
+      path: "projects/a/macros/utils/sub/m.sql",
+      oldPath: "projects/a/macros/utils/m.sql",
+      status: "renamed",
+      similarity: 100,
+    }
+    const r = scopeToProject([...files, macroMove], "projects/a")
+    expect(r.outOfScopePaths).toEqual(["projects/b/models/y.sql", ".github/workflows/ci.yml"])
+    expect(r.movedUnchangedPaths).toEqual(["projects/a/macros/utils/sub/m.sql"])
+  })
+
   test("project at the repo root keeps every file", () => {
     expect(scopeToProject(files, "").outOfScope).toBe(0)
   })
