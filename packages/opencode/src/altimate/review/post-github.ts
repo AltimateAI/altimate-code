@@ -1,7 +1,15 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
 import { type VerdictEnvelope, VCS_EVENT, reviewIncomplete } from "./verdict"
-import { renderSummary, inlineComments, postedFindingIds, REVIEW_MARKER, verdictHeadline } from "./format"
+import {
+  renderSummary,
+  inlineComments,
+  inlineEligible,
+  postedFindingIds,
+  postingPolicy,
+  REVIEW_MARKER,
+  verdictHeadline,
+} from "./format"
 
 /**
  * Post a verdict envelope to a GitHub pull request: an upserted summary comment
@@ -61,6 +69,9 @@ export interface PostResult {
   reviewSkipped?: boolean
   /** Earlier blocking altimate reviews dismissed because this run no longer blocks. */
   dismissedReviews?: number
+  /** True when a clean run under `silentWhenClean` posted no review (and no
+   *  summary, unless one from an earlier run needed replacing). Implies `reviewSkipped`. */
+  silent?: boolean
 }
 
 /** True when every check ran (no engine error, no failed file, no abstained
@@ -146,37 +157,11 @@ export async function postGitHubReview(
   const octo = client ?? new Octokit({ auth: target.token })
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
-
-  // 1. Upsert the summary comment (dedup by marker). Paginate ALL comments —
-  //    on a busy PR the prior marker comment can be past the first page, and
-  //    missing it would post a duplicate summary on every rerun.
-  const summary = renderSummary(env)
-  const existing = await octo.paginate(octo.rest.issues.listComments, {
-    owner,
-    repo,
-    issue_number: prNumber,
-    per_page: 100,
-  })
-  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
-  if (prior) {
-    const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
-    result.summaryCommentId = r.data.id
-  } else {
-    const r = await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
-    result.summaryCommentId = r.data.id
-  }
-
-  // 2. Post a review. `env.verdict` arrives already mode-gated from
-  //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
-  //    this map only translates verdict → GitHub event. APPROVE always maps to a
-  //    COMMENT event — the bot must never submit a formal GitHub approval.
-  const event = VCS_EVENT[env.verdict]
-  const headline = verdictHeadline(env)
   const projectRoot = env.scope?.projectRoot || undefined
-  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot)}`
 
-  // Rerun dedup: a finding already commented inline (same fingerprint, which
-  // ignores line numbers) is not posted again on the next push.
+  // 1. Read what is already on the PR. Rerun dedup: a finding already
+  //    commented inline (same fingerprint, which ignores line numbers) is not
+  //    posted again on the next push.
   let posted = new Set<string>()
   let priorBotReview = false
   let staleBlocking: number[] = []
@@ -194,9 +179,40 @@ export async function postGitHubReview(
   } catch {
     /* listing failed: post everything rather than nothing */
   }
-  const comments = inlineComments(env, posted)
-  const withLine = env.findings.filter((f) => typeof f.startLine === "number").length
-  result.inlineSkippedAsPosted = withLine - comments.length
+
+  // 2. Upsert the summary comment (dedup by marker). Paginate ALL comments —
+  //    on a busy PR the prior marker comment can be past the first page, and
+  //    missing it would post a duplicate summary on every rerun. A silent clean
+  //    run posts nothing, but still overwrites an earlier summary so it does
+  //    not keep showing findings that are gone.
+  const summary = renderSummary(env, { alreadyPosted: posted })
+  const silent = summary === ""
+  const existing = await octo.paginate(octo.rest.issues.listComments, {
+    owner,
+    repo,
+    issue_number: prNumber,
+    per_page: 100,
+  })
+  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
+  if (prior) {
+    const body = silent ? renderSummary(env, { alreadyPosted: posted, allowSilent: false }) : summary
+    const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body })
+    result.summaryCommentId = r.data.id
+  } else if (!silent) {
+    const r = await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
+    result.summaryCommentId = r.data.id
+  }
+
+  // 3. Post a review. `env.verdict` arrives already mode-gated from
+  //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
+  //    this map only translates verdict → GitHub event. APPROVE always maps to a
+  //    COMMENT event — the bot must never submit a formal GitHub approval.
+  const event = VCS_EVENT[env.verdict]
+  const headline = verdictHeadline(env)
+  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot)}`
+  const { comments } = inlineComments(env, posted)
+  const posting = postingPolicy(env)
+  result.inlineSkippedAsPosted = env.findings.filter((f) => inlineEligible(f, posting) && posted.has(f.id)).length
 
   // Anchor inline comments to the PR head commit. Without commit_id, GitHub's
   // line-positioning is fragile and can 422 even on valid lines.
@@ -235,6 +251,14 @@ export async function postGitHubReview(
       }
     }
     result.dismissedReviews = dismissed
+  }
+
+  // A silent clean run adds no review: the check status records the run.
+  if (silent) {
+    result.silent = true
+    result.reviewSkipped = true
+    await dismissStale()
+    return result
   }
 
   // Nothing new inline, not blocking, and the PR already has an altimate

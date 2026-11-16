@@ -9,7 +9,7 @@ import { makeFinding } from "../../src/altimate/review/finding"
 import { aiTimeoutMs, safeReason } from "../../src/altimate/review/ai-review"
 import { coverageNotes, renderSummary } from "../../src/altimate/review/format"
 import { prContextFromEnv } from "../../src/altimate/review/run"
-import { verifyEnvelope } from "../../src/altimate/review/verdict"
+import { buildEnvelope, signEnvelope, verifyEnvelope } from "../../src/altimate/review/verdict"
 
 /**
  * The PR comment must be honest about what was checked: a manifest-backed run
@@ -238,5 +238,52 @@ describe("unverified models are listed per reason", () => {
     expect(notes.find((n) => n.includes("models/a.sql"))).toContain("for the base")
     expect(notes.find((n) => n.includes("models/b.sql"))).toContain("for the head")
     expect(notes.find((n) => n.includes("models/a.sql"))).not.toContain("models/b.sql")
+  })
+})
+
+describe("silent clean runs", () => {
+  const clean = (silentWhenClean?: boolean) =>
+    buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      policy:
+        silentWhenClean === undefined
+          ? undefined
+          : { source: "base", hash: "h", posting: { inlineBudget: 10, inlineSeverityFloor: "warning", silentWhenClean } },
+    })
+
+  test("a clean run renders nothing by default and under silentWhenClean", () => {
+    expect(renderSummary(clean())).toBe("")
+    expect(renderSummary(clean(true))).toBe("")
+  })
+
+  test("without silentWhenClean a clean run keeps the old text", () => {
+    expect(renderSummary(clean(false))).toContain("No issues found in the changed dbt models.")
+  })
+
+  test("a clean run with something to report about coverage is not silent", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      ai: { state: "timeout", reason: "no answer within 75 s" },
+    })
+    expect(renderSummary(env)).toContain("Advisory AI review timed out")
+  })
+
+  test("the posting policy is part of the signed envelope", () => {
+    const quiet = signEnvelope(clean(true), "k")
+    expect(quiet.policy?.posting?.silentWhenClean).toBe(true)
+    expect(verifyEnvelope(quiet, "k")).toBe(true)
+    const tampered = { ...quiet, policy: { ...quiet.policy!, posting: { ...quiet.policy!.posting!, inlineBudget: 50 } } }
+    expect(verifyEnvelope(tampered, "k")).toBe(false)
+  })
+
+  test("rendering does not change the envelope", () => {
+    const env = clean(true)
+    const before = JSON.stringify(env)
+    renderSummary(env)
+    expect(JSON.stringify(env)).toBe(before)
   })
 })

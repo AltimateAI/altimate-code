@@ -276,6 +276,7 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
       startLine: line,
       evidence: { tool: "altimate_core.check", result: {} },
       ruleKey: "q:select-star",
+      tier: "inline",
     })
 
   test("a clean rerun dismisses the earlier blocking altimate review", async () => {
@@ -530,6 +531,14 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     expect(r.reviewSkipped).toBe(true)
     expect(calls.createReview).toHaveLength(0)
     expect(calls.createComment.length + calls.updateComment.length).toBe(1)
+  })
+
+  test("a silent clean run makes no write calls", async () => {
+    const env = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    const { client, calls } = fakeClient({})
+    const r = await postGitHubReview(env, target, client)
+    expect(r.silent).toBe(true)
+    expect(Object.values(calls).flat()).toHaveLength(0)
   })
 })
 

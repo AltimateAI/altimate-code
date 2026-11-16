@@ -2538,7 +2538,8 @@ describe("orchestrate", () => {
         "`both-ends`", // both leading + trailing backticks — symmetric padding
       ],
     })
-    const summary = renderSummary(env)
+    // A clean run is silent by default; render it to check the tier line.
+    const summary = renderSummary(env, { allowSilent: false })
     // Sanity: the tier line exists
     expect(summary).toContain("Tier: full")
     // A path with `single` inside must be wrapped by a fence longer than the
@@ -2566,6 +2567,7 @@ describe("orchestrate", () => {
           file: "models/x.sql",
           startLine: 5,
           ruleKey: "r",
+          tier: "inline",
         }),
       ],
       tier: "lite",
@@ -2575,7 +2577,7 @@ describe("orchestrate", () => {
     const summary = renderSummary(env)
     expect(summary).toContain("altimate-code-review")
     expect(summary).toContain("Reviewed with comments")
-    const inline = inlineComments(env)
+    const inline = inlineComments(env).comments
     expect(inline.length).toBe(1)
     expect(inline[0]).toMatchObject({ path: "models/x.sql", line: 5, side: "RIGHT" })
   })

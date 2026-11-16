@@ -1,5 +1,5 @@
-import { type Finding, type Severity, ruleTitle } from "./finding"
-import { type VerdictEnvelope } from "./verdict"
+import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, findingOrigin, ruleTitle } from "./finding"
+import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY } from "./verdict"
 
 /**
  * Render a verdict envelope for humans (PR summary markdown) and for the VCS
@@ -45,11 +45,32 @@ export interface RenderOptions {
   /** Character budget for the comment; findings beyond it are counted, not listed.
    *  `Infinity` renders everything (local CLI output). */
   maxChars?: number
+  /** Finding ids already commented inline on the PR (see postedFindingIds). */
+  alreadyPosted?: Set<string>
+  /** False when the summary is the only output (local CLI, agent tool): every
+   *  finding is then rendered in full instead of as an inline one-liner. */
+  inline?: boolean
+  /** False renders a clean run even under `silentWhenClean` (to replace an
+   *  earlier summary that listed findings). */
+  allowSilent?: boolean
 }
 
-/** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
+/** Full PR/MR summary comment body (markdown), prefixed with the dedup marker.
+ *  Returns `""` for a clean run under `silentWhenClean`: nothing to post. */
 export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): string {
   const maxChars = opts.maxChars ?? SUMMARY_BUDGET_CHARS
+  const notes = coverageNotes(env)
+  if (
+    !env.findings.length &&
+    !notes.length &&
+    !env.summary.degraded &&
+    !env.override &&
+    env.verdict === "APPROVE" &&
+    opts.allowSilent !== false &&
+    postingPolicy(env).silentWhenClean
+  )
+    return ""
+
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
 
   if (env.summary.degraded) {
@@ -59,8 +80,9 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       "",
     )
   }
-  lines.push(...coverageNotes(env))
+  lines.push(...notes)
 
+  const tail: string[] = []
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
   // them, so a customer can see why the review ran at this tier. Also surfaces
   // when --force-tier bypassed the classifier (tierReasons is auto-populated).
@@ -89,10 +111,8 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       env.tierReasons.length > RENDER_CAP
         ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
         : ""
-    lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
+    tail.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
-
-  const tail: string[] = []
   if (env.override) {
     tail.push(
       `> 🔓 **Break-glass override** by @${env.override.by}: ${env.override.reason}`,
@@ -115,21 +135,34 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     return [...lines, ...tail].join("\n")
   }
 
+  // Findings posted inline get a one-line pointer here; the comment on the
+  // diff carries the detail. Pre-existing findings sit in a collapsed list.
+  const deferredIds = new Set(inlineComments(env, opts.alreadyPosted).deferred.map((f) => f.id))
+  const posting = postingPolicy(env)
+  const inline =
+    opts.inline === false ? [] : env.findings.filter((f) => inlineEligible(f, posting) && !deferredIds.has(f.id))
+  const inlineIds = new Set(inline.map((f) => f.id))
+  const preExisting = env.findings.filter((f) => f.preExisting && !inlineIds.has(f.id))
+  const rest = env.findings.filter((f) => !f.preExisting && !inlineIds.has(f.id))
+  if (inline.length) {
+    lines.push(
+      `### Inline (${inline.length})`,
+      "",
+      ...inline.map((f) => `- \`${f.file}:${f.startLine}\` — ${f.title}`),
+      "",
+    )
+  }
+
   // Findings fill the budget left after the fixed parts, most severe first.
   // What does not fit is counted, never silently dropped: the envelope keeps
   // every finding.
   const overflowReserve = 220
   let used = [...lines, ...tail].join("\n").length + overflowReserve
   let hidden = 0
-  const grouped = groupBySeverity(env.findings)
-  for (const sev of ["critical", "warning", "suggestion"] as const) {
-    const items = grouped[sev]
-    if (!items.length) continue
-    const heading = [`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""]
-    const bullets = bulletsFor(items)
+  const fit = (heading: string[], bullets: Array<{ text: string; count: number }>, close: string[]) => {
     let headed = false
     for (const b of bullets) {
-      const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + 2)
+      const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + close.join("\n").length + 2)
       if (used + cost > maxChars) {
         hidden += b.count
         continue
@@ -141,7 +174,20 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       lines.push(b.text)
       used += cost
     }
-    if (headed) lines.push("")
+    if (headed) lines.push(...close, "")
+  }
+  const grouped = groupBySeverity(rest)
+  for (const sev of ["critical", "warning", "suggestion"] as const) {
+    const items = grouped[sev]
+    if (!items.length) continue
+    fit([`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""], bulletsFor(items), [])
+  }
+  if (preExisting.length) {
+    fit(
+      [`<details><summary>Pre-existing (${preExisting.length})</summary>`, ""],
+      bulletsFor(preExisting),
+      ["", "</details>"],
+    )
   }
   if (hidden) {
     lines.push(
@@ -261,15 +307,48 @@ export function postedFindingIds(bodies: Array<string | null | undefined>): Set<
   return out
 }
 
-export function inlineComments(env: VerdictEnvelope, alreadyPosted: Set<string> = new Set()): InlineComment[] {
-  return env.findings
-    .filter((f) => typeof f.startLine === "number" && !alreadyPosted.has(f.id))
-    .map((f) => ({
-      path: f.file,
-      line: f.startLine!,
-      side: "RIGHT" as const,
-      body: `${SEVERITY_EMOJI[f.severity]} **${f.title}**\n\n${f.body}\n\n${findingMarker(f.id)}`,
-    }))
+/** The posting policy an envelope was produced under (defaults for envelopes
+ *  from releases that did not record one). */
+export function postingPolicy(env: VerdictEnvelope): PostingPolicy {
+  return env.policy?.posting ?? DEFAULT_POSTING_POLICY
+}
+
+const CONFIDENCE_ORDER: Record<Confidence, number> = { high: 3, medium: 2, low: 1, unknown: 0 }
+
+/** Whether a finding may be posted as an inline comment: an inline-tier rule
+ *  or the AI lane, on a line the PR added, at or above the severity floor. */
+export function inlineEligible(f: Finding, posting: PostingPolicy): boolean {
+  if (f.tier !== "inline" && findingOrigin(f) !== "ai") return false
+  if (f.preExisting || typeof f.startLine !== "number") return false
+  return SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[posting.inlineSeverityFloor]
+}
+
+/**
+ * Inline comments for this run: eligible findings not already on the PR, most
+ * severe and most confident first, capped at the posting budget. Findings over
+ * the budget are `deferred` and stay in the summary.
+ */
+export function inlineComments(
+  env: VerdictEnvelope,
+  alreadyPosted: Set<string> = new Set(),
+): { comments: InlineComment[]; deferred: Finding[] } {
+  const posting = postingPolicy(env)
+  const fresh = env.findings
+    .filter((f) => inlineEligible(f, posting) && !alreadyPosted.has(f.id))
+    .sort(
+      (a, b) =>
+        SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] ||
+        CONFIDENCE_ORDER[b.confidence] - CONFIDENCE_ORDER[a.confidence] ||
+        a.file.localeCompare(b.file) ||
+        a.startLine! - b.startLine!,
+    )
+  const comments = fresh.slice(0, posting.inlineBudget).map((f) => ({
+    path: f.file,
+    line: f.startLine!,
+    side: "RIGHT" as const,
+    body: `${SEVERITY_EMOJI[f.severity]} **${f.title}**\n\n${f.body}\n\n${findingMarker(f.id)}`,
+  }))
+  return { comments, deferred: fresh.slice(posting.inlineBudget) }
 }
 
 function groupBySeverity(findings: Finding[]): Record<Severity, Finding[]> {

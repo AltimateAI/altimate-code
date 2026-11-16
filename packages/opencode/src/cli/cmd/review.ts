@@ -154,7 +154,7 @@ export const ReviewCommand = cmd({
           process.stdout.write(JSON.stringify(env, null, 2) + "\n")
         } else {
           // Local output is complete; the size budget applies to the posted comment.
-          process.stdout.write(renderSummary(env, { maxChars: Infinity }) + "\n")
+          process.stdout.write(renderSummary(env, { maxChars: Infinity, inline: false, allowSilent: false }) + "\n")
         }
 
         if (args.post) {
@@ -194,7 +194,11 @@ export const ReviewCommand = cmd({
                 `Posted review to ${where}` +
                   (r.inlineFellBack ? " (inline comments fell back to summary-only)" : "") +
                   (r.inlineSkippedAsPosted ? ` (${r.inlineSkippedAsPosted} inline already on the PR)` : "") +
-                  (r.reviewSkipped ? " (summary updated; no new review needed)" : "") +
+                  (r.silent
+                    ? " (clean run: nothing to post)"
+                    : r.reviewSkipped
+                      ? " (summary updated; no new review needed)"
+                      : "") +
                   (r.dismissedReviews ? ` (dismissed ${r.dismissedReviews} earlier blocking review(s))` : ""),
               )
             }
