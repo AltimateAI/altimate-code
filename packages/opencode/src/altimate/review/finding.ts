@@ -285,7 +285,7 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
       out.push(f)
       continue
     }
-    const key = [f.file, f.category, f.severity, !!f.degraded, groupKeyTitle(f)].join("|")
+    const key = [f.file, f.category, f.severity, !!f.degraded, !!f.preExisting, groupKeyTitle(f)].join("|")
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])
