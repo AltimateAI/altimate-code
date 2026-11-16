@@ -160,6 +160,21 @@ describe("consumers outside the DAG", () => {
     expect(nested.findings.some((x) => x.title.includes("final-layer"))).toBe(false)
   })
 
+  test("final-layer `select * from final`: a renamed alias in the CTE is a removed column", async () => {
+    const none = { exposures: [], contractEnforced: false, contractColumns: [] }
+    const model = (alias: string) =>
+      `with payments as (\n  select customer_id, amount from src\n),\nfinal as (\n  select customer_id, ${alias}\n  from payments\n)\nselect * from final`
+    const before = model("sum(amount) as customer_lifetime_value")
+    // Lineage that only traces plain columns, as the engine does without a schema.
+    const runner = { ...fakeRunner(none), columnLineage: async () => [{ source: '"src"."customer_id"', target: "customer_id" }] } as ReviewRunner
+    const run = (after: string) =>
+      review(none, { runner, getContent: async (_f, side) => (side === "old" ? before : after), getCompiled: async (_f, side) => (side === "old" ? before : after) })
+    const renamed = (await run(model("sum(amount) as lifetime_value"))).findings.find((x) => x.rule === "dbt.manifest:removed-final-layer-columns")
+    expect(renamed?.body).toContain("`customer_lifetime_value`")
+    const kept = await run(model("coalesce(sum(amount), 0) as customer_lifetime_value"))
+    expect(kept.findings.some((x) => x.rule === "dbt.manifest:removed-final-layer-columns")).toBe(false)
+  })
+
   const optIn = { config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["lineage_breakage", "contract_violation"], checkContractColumns: true } }
 
   test("opt-in: a new column missing from the enforced contract is reported, and never blocks", async () => {
