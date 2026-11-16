@@ -119,6 +119,7 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       (env.manifestHash ? ` · manifest \`${env.manifestHash.slice(0, 10)}\`` : "") +
       (env.scope?.baseRef ? ` · base \`${env.scope.baseRef}\`` : "") +
       (env.ai?.state === "ok" && env.ai.model ? ` · AI \`${env.ai.model}\`` : "") +
+      (env.ai?.tokens ? ` · tokens ${(env.ai.tokens.inputTotal + env.ai.tokens.output).toLocaleString("en-US")}` : "") +
       "</sub>",
   )
 

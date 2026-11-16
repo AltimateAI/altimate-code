@@ -149,6 +149,21 @@ export interface AiLaneStatus {
   /** `provider/model` the lane ran with. */
   model?: string
   durationMs?: number
+  /** Tokens spent across all calls that reported usage. */
+  tokens?: AiTokens
+  /** Estimated cost in USD from the model's price table (0 when unpriced). */
+  cost?: number
+  /** Model calls made (one per batch). */
+  calls?: number
+}
+/** Token counts as `Session.getUsage` reports them: `input` excludes cached
+ *  tokens, `inputTotal` includes them. */
+export interface AiTokens {
+  input: number
+  inputTotal: number
+  output: number
+  reasoning: number
+  cacheRead: number
 }
 export interface AiReviewResult {
   findings: Finding[]
@@ -280,9 +295,11 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     const failed = results.filter((r) => r.state !== "ok")
     log.info("ai review complete", { findings: findings.length, batches: batches.length, failed: failed.length })
     // The lane is ok when any call answered; a partial failure is reported, not hidden.
-    if (failed.length === results.length) return done([], { state: failed[0].state, reason: failed[0].reason, model: modelLabel })
+    const spent = laneUsage(results)
+    if (failed.length === results.length)
+      return done([], { state: failed[0].state, reason: failed[0].reason, model: modelLabel, ...spent })
     const reason = failed.length ? `${failed.length} of ${results.length} calls failed: ${failed[0].reason}` : undefined
-    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}) })
+    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}), ...spent })
   } catch (err) {
     log.error("ai review failed", { error: err })
     return done([], { state: "error", reason: safeReason(err), model: modelLabel })
@@ -293,6 +310,67 @@ interface BatchResult {
   findings: Finding[]
   state: AiLaneState
   reason?: string
+  usage?: BatchUsage
+}
+
+export interface BatchUsage {
+  tokens: AiTokens
+  cost: number
+}
+
+export function addUsage(a: BatchUsage, b: BatchUsage): BatchUsage {
+  return {
+    tokens: {
+      input: a.tokens.input + b.tokens.input,
+      inputTotal: a.tokens.inputTotal + b.tokens.inputTotal,
+      output: a.tokens.output + b.tokens.output,
+      reasoning: a.tokens.reasoning + b.tokens.reasoning,
+      cacheRead: a.tokens.cacheRead + b.tokens.cacheRead,
+    },
+    cost: a.cost + b.cost,
+  }
+}
+
+/** Lane-status accounting fields for a set of batch results: calls made, and
+ *  tokens and cost summed over the calls that reported usage. */
+export function laneUsage(results: Array<{ usage?: BatchUsage }>): Pick<AiLaneStatus, "tokens" | "cost" | "calls"> {
+  const reported = results.flatMap((r) => (r.usage ? [r.usage] : []))
+  if (!reported.length) return { calls: results.length }
+  const total = reported.reduce(addUsage)
+  return { tokens: total.tokens, cost: total.cost, calls: results.length }
+}
+
+/**
+ * Tokens and cost of one drained stream, with the session's accounting rules.
+ * Returns undefined when the provider reported nothing usable: accounting
+ * never fails the lane.
+ */
+export async function streamUsage(
+  stream: { totalUsage: PromiseLike<unknown>; providerMetadata: PromiseLike<unknown> },
+  model: Pick<Provider.Model, "cost" | "api">,
+): Promise<BatchUsage | undefined> {
+  try {
+    const usage = await stream.totalUsage
+    const metadata = await stream.providerMetadata
+    if (!usage) return undefined
+    // Loaded lazily, as in learn/usage.ts, to keep the session module out of
+    // this module's import graph.
+    const { Session } = await import("@/session")
+    const u = Session.getUsage({ model: model as Provider.Model, usage: usage as any, metadata: (metadata ?? undefined) as any })
+    return {
+      tokens: {
+        input: u.tokens.input,
+        inputTotal: u.tokens.inputTotal,
+        output: u.tokens.output,
+        reasoning: u.tokens.reasoning,
+        cacheRead: u.tokens.cache.read,
+      },
+      cost: u.cost,
+    }
+  } catch (err) {
+    log.warn("ai review usage unavailable", { error: err })
+    return undefined
+  }
 }
 
 /** One model call over a group of files: send, wait (bounded), parse and clamp in core. */
@@ -308,6 +386,7 @@ async function reviewBatch(
   const timeoutMs = aiTimeoutMs(message.length)
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   const timedOut = (): BatchResult => ({ findings: [], state: "timeout", reason: `no answer within ${Math.round(timeoutMs / 1000)} s` })
+  let usage: BatchUsage | undefined
   try {
     const agent: Agent.Info = {
       name: "dbt-ai-reviewer",
@@ -340,7 +419,8 @@ async function reviewBatch(
     })
     const text = await readStreamText(stream)
     if (controller.signal.aborted) return timedOut()
-    if (!text) return { findings: [], state: "error", reason: "the model returned no text" }
+    usage = await streamUsage(stream, model)
+    if (!text) return { findings: [], state: "error", reason: "the model returned no text", usage }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
@@ -392,10 +472,10 @@ async function reviewBatch(
         log.warn("skipping malformed ai finding", { error: err })
       }
     }
-    return { findings: out, state: "ok" }
+    return { findings: out, state: "ok", usage }
   } catch (err) {
     if (controller.signal.aborted) return timedOut()
-    return { findings: [], state: "error", reason: safeReason(err) }
+    return { findings: [], state: "error", reason: safeReason(err), usage }
   } finally {
     clearTimeout(timeout)
   }

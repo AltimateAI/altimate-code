@@ -219,6 +219,19 @@ export const VerdictEnvelope = z.object({
       reason: z.string().optional(),
       model: z.string().optional(),
       durationMs: z.number().int().nonnegative().optional(),
+      /** Tokens spent by the lane's model calls (`input` excludes cached tokens). */
+      tokens: z
+        .object({
+          input: z.number().nonnegative(),
+          inputTotal: z.number().nonnegative(),
+          output: z.number().nonnegative(),
+          reasoning: z.number().nonnegative(),
+          cacheRead: z.number().nonnegative(),
+        })
+        .optional(),
+      /** Estimated USD cost from the model's price table. */
+      cost: z.number().nonnegative().optional(),
+      calls: z.number().int().nonnegative().optional(),
     })
     .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
