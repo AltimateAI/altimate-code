@@ -395,3 +395,133 @@ export function buildVerifyMessage(
   parts.push("", "Verify each candidate with the tools, then return ONLY the JSON array.")
   return parts.join("\n")
 }
+
+/** Triage switches. Defaults: drop nits, keep plausible local claims, fail open. */
+export interface TriageKnobs {
+  dropNits: boolean
+  keepUnverifiedLocal: boolean
+  failMode: "open" | "closed"
+}
+
+export const DEFAULT_TRIAGE_KNOBS: TriageKnobs = { dropNits: true, keepUnverifiedLocal: true, failMode: "open" }
+
+/**
+ * Knobs for experiments: `ALTIMATE_REVIEW_AI_VERIFY_DROP_NITS=0`,
+ * `ALTIMATE_REVIEW_AI_VERIFY_KEEP_LOCAL=0`, `ALTIMATE_REVIEW_AI_VERIFY_FAIL=closed`.
+ */
+export function triageKnobs(env: Record<string, string | undefined> = process.env): TriageKnobs {
+  return {
+    dropNits: env.ALTIMATE_REVIEW_AI_VERIFY_DROP_NITS !== "0",
+    keepUnverifiedLocal: env.ALTIMATE_REVIEW_AI_VERIFY_KEEP_LOCAL !== "0",
+    failMode: env.ALTIMATE_REVIEW_AI_VERIFY_FAIL === "closed" ? "closed" : "open",
+  }
+}
+
+const LOCAL_CLAIMS = new Set<ModelFeatures["claimType"]>(["code_fact", "convention", "test_gap", "intent"])
+
+/**
+ * Decide one finding (pure; first matching row wins). Without a model verdict
+ * (id omitted, unparsable answer, timeout, budget, error) the fail mode alone
+ * decides: open keeps the finding unchanged, closed discards it.
+ */
+export function triage(f: Finding, ts: TsFeatures, m: ModelFeatures | undefined, knobs: TriageKnobs): { decision: Decision; rule: string } {
+  if (!m) return knobs.failMode === "open" ? { decision: "keep", rule: "unreviewed" } : { decision: "discard", rule: "unreviewed" }
+  if (ts.restatesGrounding) return { decision: "discard", rule: "duplicate_of_engine" }
+  if (m.verdict === "refuted" && m.evidence.trim()) return { decision: "discard", rule: "refuted" }
+  if (m.claimType === "cross_file" && (m.verdict === "unverifiable" || m.toolsUsed.length === 0))
+    return { decision: "discard", rule: "unverifiable_cross_file" }
+  if (m.claimType === "speculation" || (m.requiresAssumedInput && m.verdict !== "confirmed"))
+    return { decision: "discard", rule: "speculative" }
+  if (knobs.dropNits && (ts.styleOnly || m.value === "nit")) return { decision: "discard", rule: "low_value" }
+  if (ts.targetsUnchangedCode && m.verdict !== "confirmed" && f.category !== "test_coverage" && m.claimType !== "intent")
+    return { decision: "discard", rule: "unchanged_code" }
+  if (
+    knobs.keepUnverifiedLocal &&
+    m.verdict === "unverifiable" &&
+    LOCAL_CLAIMS.has(m.claimType) &&
+    (ts.evidenceLineValid === true || ts.hedgedDataDiff) &&
+    !ts.lowConfidence
+  )
+    return { decision: "keep", rule: "plausible_local" }
+  if (m.verdict === "unverifiable") return { decision: "discard", rule: "unverifiable" }
+  if (m.value === "informational") return { decision: "summary", rule: "informational" }
+  return { decision: "keep", rule: "verified" }
+}
+
+/** Most discarded findings listed on the envelope. */
+export const DROPPED_MAX = 20
+
+/** The verifier's record on a kept finding, under `evidence.result.verification`. */
+export interface Verification {
+  decision: Decision
+  rule: string
+  verdict: ModelFeatures["verdict"]
+  claimType: ModelFeatures["claimType"]
+  value: ModelFeatures["value"]
+  toolsUsed: string[]
+  evidence: string
+  features: TsFeatures
+}
+
+/**
+ * Apply triage to every finding. Kept and summary findings that the model
+ * reviewed carry `evidence.result.verification` (the evidence tool stays
+ * `ai-review`); verified ones get the evidence appended to the body. Severity
+ * is never raised. Unreviewed findings kept by the open fail mode are
+ * returned unchanged.
+ */
+export function applyTriage(
+  findings: Finding[],
+  ts: TsFeatures[],
+  model: Array<ModelFeatures | undefined>,
+  knobs: TriageKnobs,
+): { findings: Finding[]; dropped: DroppedFinding[]; counts: Pick<VerifierStatus, "reviewed" | "kept" | "discarded" | "summary" | "unreviewed"> } {
+  const out: Finding[] = []
+  const dropped: DroppedFinding[] = []
+  const counts = { reviewed: 0, kept: 0, discarded: 0, summary: 0, unreviewed: 0 }
+  findings.forEach((f, i) => {
+    const m = model[i]
+    if (m) counts.reviewed++
+    else counts.unreviewed++
+    const { decision, rule } = triage(f, ts[i], m, knobs)
+    if (decision === "discard") {
+      counts.discarded++
+      if (dropped.length < DROPPED_MAX)
+        dropped.push({
+          id: f.id,
+          file: f.file,
+          title: f.title,
+          category: f.category,
+          severity: f.severity,
+          decision,
+          rule,
+          ...(m ? { verdict: m.verdict, claimType: m.claimType, evidence: m.evidence } : {}),
+        })
+      return
+    }
+    if (decision === "summary") counts.summary++
+    else counts.kept++
+    if (!m) {
+      out.push(f)
+      return
+    }
+    const verification: Verification = {
+      decision,
+      rule,
+      verdict: m.verdict,
+      claimType: m.claimType,
+      value: m.value,
+      toolsUsed: m.toolsUsed,
+      evidence: m.evidence,
+      features: ts[i],
+    }
+    const prior = f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
+    out.push({
+      ...f,
+      evidence: { tool: f.evidence?.tool ?? "ai-review", result: { ...prior, verification } },
+      ...(rule === "verified" && m.evidence ? { body: `${f.body}\n\nVerified: ${m.evidence}` } : {}),
+      ...(decision === "summary" ? { tier: "summary" as const } : {}),
+    })
+  })
+  return { findings: out, dropped, counts }
+}
