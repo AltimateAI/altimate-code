@@ -16,6 +16,7 @@ import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { Dispatcher } from "@/altimate/native"
 import {
+  dbtAdapterHasLineage,
   dbtAdapterInternals,
   disposeDbtAdapter,
   getDbtAdapter,
@@ -102,6 +103,26 @@ afterEach(() => {
   delete dbtAdapterInternals.readConfig
   delete dbtAdapterInternals.create
   delete dbtAdapterInternals.hasModelLineage
+})
+
+// dbt-tools' own tests cover how the check reads an adapter, an instance-field method included.
+describe("whether the dbt-integration answers a model's lineage", () => {
+  test("asks about the started adapter once there is one, and about none before", async () => {
+    const asked: unknown[] = []
+    dbtAdapterInternals.hasModelLineage = (adapter) => {
+      asked.push(adapter)
+      return false
+    }
+    useConfig()
+    await dbtAdapterHasLineage()
+    dbtAdapterInternals.create = async () => fakeAdapter(true)
+    const started = await getDbtAdapter()
+    expect(started).toBeTruthy()
+    await dbtAdapterHasLineage()
+    expect(asked).toHaveLength(2)
+    expect(asked[0]).toBeUndefined()
+    expect(asked[1]).toBe(started)
+  })
 })
 
 describe("dbt_lineage in a read-only call", () => {
