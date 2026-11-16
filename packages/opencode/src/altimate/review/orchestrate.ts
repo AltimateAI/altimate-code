@@ -564,6 +564,20 @@ async function semanticChangeLane(
   ]
 }
 
+/**
+ * A check issue as evidence. On compiled SQL its line number doesn't exist in
+ * the PR's file, so the compiled line's text goes in `line` (the number moves
+ * to `compiledLine`) for `anchorByEvidence` to find among the added lines;
+ * only text that is specific and unique in the compiled SQL.
+ */
+function checkEvidence(issue: { line?: number }, sql: string, linesMatchFile: boolean): object {
+  if (linesMatchFile || typeof issue.line !== "number") return issue
+  const rows = sql.split("\n")
+  const text = rows[issue.line - 1]?.trim() ?? ""
+  if (text.length < EVIDENCE_SUBSTRING_MIN || rows.filter((r) => r.trim() === text).length !== 1) return issue
+  return { ...issue, line: text, compiledLine: issue.line }
+}
+
 async function qualityLane(
   file: ChangedFile & { kind: string },
   runner: ReviewRunner,
@@ -625,7 +639,7 @@ async function qualityLane(
         startLine: linesMatchFile ? issue.line : undefined,
         endLine: linesMatchFile ? issue.line : undefined,
         ...(syntax ? { confidence: "unknown" as const } : {}),
-        evidence: { tool: "altimate_core.check", result: issue },
+        evidence: { tool: "altimate_core.check", result: checkEvidence(issue, sql, linesMatchFile) },
         // Include the message so distinct instances of the same rule (e.g. two
         // different non-portable functions) don't collapse under one fingerprint.
         ruleKey: `quality:${issue.rule}:${(issue.message ?? "").slice(0, 60)}`,

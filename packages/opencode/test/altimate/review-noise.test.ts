@@ -815,4 +815,35 @@ describe("anchoring rule findings by their matched line", () => {
     const { comments } = inlineComments(env)
     expect(comments.find((c) => c.body.includes(findingMarker(f!.id)))?.line).toBe(3)
   })
+
+  test("a core check issue on a Jinja model anchors by its compiled line's text", async () => {
+    const raw = "with o as (\n  select * from {{ ref('orders') }}\n)\nselect *,\n  row_number() over (partition by order_id order by ordered_at desc) as rn\nfrom o\n"
+    const compiled = "with o as (\n\n  select * from \"db\".\"main\".\"orders\"\n\n)\nselect *,\n  row_number() over (partition by order_id order by ordered_at desc) as rn\nfrom o\n"
+    const diff = "@@ -1,4 +1,6 @@\n with o as (\n   select * from {{ ref('orders') }}\n )\n-select * from o\n+select *,\n+  row_number() over (partition by order_id order by ordered_at desc) as rn\n+from o\n"
+    const review = (line: number) =>
+      runReview({
+        changedFiles: [{ path: "models/m.sql", status: "modified", diff }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          ...runner,
+          async check() {
+            return { issues: [{ rule: "non_deterministic_dedup", message: "ROW_NUMBER() orders only by time", line, severity: "warning" }], ran: true }
+          },
+        } as ReviewRunner,
+        getContent: async () => raw,
+        getCompiled: async () => compiled,
+        forceTier: "full",
+      })
+    const dedup = (env: Awaited<ReturnType<typeof review>>) => env.findings.find((x) => x.rule === "altimate-core.check:non-deterministic-dedup")
+    // Compiled line 7 is the window: found on head line 5 of the raw file.
+    expect(dedup(await review(7))?.startLine).toBe(5)
+    // Compiled line 3 (the expanded ref) is not in the raw file; line 5 (`)`) is too short to be specific.
+    for (const line of [3, 5]) {
+      const f = dedup(await review(line))
+      expect(f).toBeDefined()
+      expect(f!.startLine).toBeUndefined()
+    }
+  })
 })
