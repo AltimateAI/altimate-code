@@ -54,13 +54,12 @@ function review(extra: Partial<Parameters<typeof runReview>[0]> = {}) {
 }
 
 describe("lint-only banner", () => {
-  test("an undecidable finding on a manifest-backed run does not flip the run to lint-only", async () => {
+  test("undecidable equivalence on a manifest-backed run goes to the ledger, not lint-only", async () => {
     const env = await review()
-    expect(env.findings.some((f) => f.degraded)).toBe(true)
+    expect(env.findings.some((f) => f.rule === "altimate-core.equivalence:undecided")).toBe(false)
     expect(env.summary.degraded).toBe(false)
-    const md = renderSummary(env)
-    expect(md).not.toContain("Lint-only run")
-    expect(md).toContain("could not be decided by the engine")
+    expect(env.scope?.notReviewed?.some((n) => n.reason.startsWith("equivalence could not be proven"))).toBe(true)
+    expect(renderSummary(env)).not.toContain("Lint-only run")
   })
 
   test("no manifest for the changed models is still lint-only", async () => {
@@ -341,7 +340,7 @@ describe("coverage ledger: what the review did not look at", () => {
 
   test("no manifest note when the runner cannot tell", async () => {
     const env = await review()
-    expect(env.scope?.notReviewed ?? []).toEqual([])
+    expect((env.scope?.notReviewed ?? []).filter((n) => n.reason.includes("manifest"))).toEqual([])
   })
 
   test("the ledger replaces the count lines and caps the list", () => {

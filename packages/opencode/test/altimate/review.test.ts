@@ -1947,7 +1947,7 @@ describe("orchestrate", () => {
     expect(env.findings.find((f) => f.category === "semantic_change")).toBeUndefined()
   })
 
-  test("undecidable equivalence → unknown-confidence warning, never critical", async () => {
+  test("undecidable equivalence → coverage ledger entry, no finding", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/fct_revenue.sql", status: "modified", diff: "+x\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -1963,10 +1963,11 @@ describe("orchestrate", () => {
       runner,
       getContent: content("select 2", "select 1"),
     })
-    const sem = env.findings.find((f) => f.category === "semantic_change")
-    expect(sem).toBeDefined()
-    expect(sem!.confidence).toBe("unknown")
-    expect(sem!.severity).not.toBe("critical")
+    expect(env.findings.find((f) => f.category === "semantic_change")).toBeUndefined()
+    expect(env.scope?.notReviewed).toContainEqual({
+      path: "models/marts/fct_revenue.sql",
+      reason: "equivalence could not be proven (no schema or unsupported SQL); verify with a data-diff",
+    })
   })
 
   test("PII exposure → critical pii_exposure finding", async () => {
