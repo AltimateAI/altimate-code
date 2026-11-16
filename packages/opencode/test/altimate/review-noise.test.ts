@@ -20,6 +20,7 @@ import {
 import { buildEnvelope } from "../../src/altimate/review/verdict"
 import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
 import { classifyPostOutcome } from "../../src/altimate/review/telemetry"
+import { DEFAULT_RULE_TIERS, ruleTier, type RuleTier } from "../../src/altimate/review/rule-tiers"
 
 /**
  * The PR comment must stay readable: inline comments land on real lines of the
@@ -341,5 +342,121 @@ describe("repeats of one rule within a file", () => {
     const [rest] = mergeRepeats([grain("tx_hash"), grain("evt_index")])
     expect(all.id).toBe(rest.id)
     expect(all.id).not.toBe(grain("block_month").id)
+  })
+})
+
+describe("per-rule tiers", () => {
+  const sql = [
+    "select o.id, o.amount, case when o.amount > 0 then 'pos' end as sign",
+    "from {{ ref('orders') }} o, {{ ref('customers') }} c",
+    "where 1=1 and o.id = c.id",
+    "group by 1, 2",
+  ].join("\n")
+  const runner: ReviewRunner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: false, differences: ["row count differs"], confidence: "high" } as any
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  }
+  const review = (rules: Record<string, RuleTier>, aiReview?: (input: { grounding: Finding[] }) => Promise<Finding[]>) =>
+    runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: sql.split("\n").map((l) => `+${l}`).join("\n") }],
+      config: {
+        ...DEFAULT_REVIEW_CONFIG,
+        reviewers: aiReview ? ["dbt_patterns", "semantic_change", "ai_review"] : ["dbt_patterns", "semantic_change"],
+        rules,
+      },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      aiReview: aiReview as any,
+      getContent: async (_p, side) => (side === "old" ? "select id from {{ ref('orders') }}" : sql),
+      getCompiled: async (_p, side) =>
+        side === "old" ? "select id from db.orders" : sql.replace(/\{\{ ref\('(\w+)'\) \}\}/g, "db.$1"),
+    })
+  const rules = (fs: Finding[]) => fs.map((f) => f.rule).sort()
+
+  test("an off rule is dropped from the findings and from the AI's grounding", async () => {
+    let grounding: Finding[] | undefined
+    const env = await review({}, async (input) => {
+      grounding = input.grounding
+      return []
+    })
+    expect(DEFAULT_RULE_TIERS["dbt-patterns:comma-join"]).toBe("off")
+    expect(rules(env.findings)).toEqual(["altimate-core.equivalence:not-equivalent", "rule-catalog:group-by-positional"])
+    expect(grounding).toBeDefined()
+    expect(rules(grounding!)).toEqual(rules(env.findings))
+    expect(env.findings.every((f) => f.tier === "summary")).toBe(true)
+  })
+
+  test("the same rules surface when the policy reports everything", async () => {
+    const env = await review({ "*": "summary" })
+    // These five ids are emitted by real detectors and are keys of the default table.
+    for (const id of [
+      "dbt-patterns:comma-join",
+      "dbt-patterns:case-no-else",
+      "rule-catalog:where-1-eq-1",
+      "rule-catalog:self-equality",
+      "rule-catalog:group-by-positional",
+    ]) {
+      expect(rules(env.findings)).toContain(id)
+      expect(DEFAULT_RULE_TIERS[id]).toBeDefined()
+    }
+  })
+
+  test("a glob turns off catalog rules but not engine equivalence", async () => {
+    const env = await review({ "rule-catalog:*": "off", "*": "off" })
+    expect(rules(env.findings)).toEqual(["altimate-core.equivalence:not-equivalent"])
+  })
+
+  test("an exact override can turn off an engine rule, and can promote a rule inline", async () => {
+    const env = await review({ "altimate-core.equivalence:not-equivalent": "off", "rule-catalog:group-by-positional": "inline" })
+    expect(rules(env.findings)).toEqual(["rule-catalog:group-by-positional"])
+    expect(env.findings[0].tier).toBe("inline")
+  })
+
+  test("resolution order: exact, longest glob, default table, summary", () => {
+    expect(ruleTier(undefined)).toBe("summary")
+    expect(ruleTier("some-new-tool:unknown-rule")).toBe("summary")
+    expect(ruleTier("dbt-project-rules:temporary-code-marker")).toBe("inline")
+    expect(ruleTier("rule-catalog:join-no-on")).toBe("off")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule-catalog:*": "summary" })).toBe("summary")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule-catalog:*": "summary", "rule-catalog:join-*": "inline" })).toBe("inline")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule-catalog:*": "inline", "rule-catalog:join-no-on": "off" })).toBe("off")
+    expect(ruleTier("impact-analysis:downstream-consumers", { "impact-analysis:*": "off" })).toBe("summary")
+    expect(ruleTier("impact-analysis:downstream-consumers", { "impact-analysis:*": "inline" })).toBe("inline")
+  })
+
+  test("default table keys are well-formed ids, and verdict-relevant engine rules are never off", () => {
+    const keys = Object.keys(DEFAULT_RULE_TIERS)
+    expect(keys.filter((k) => DEFAULT_RULE_TIERS[k] === "inline")).toHaveLength(15)
+    for (const k of keys) expect(k.endsWith(":*") || /^[a-z0-9.-]+:[a-z0-9.-]+$/.test(k)).toBe(true)
+    // Rules kept at summary because they produced a real benchmark catch.
+    for (const k of [
+      "altimate-core.structural-diff:removed-predicate",
+      "dbt-project-rules:partition-not-in-merge-key",
+      "dbt-project-rules:models-disabled",
+      "rule-catalog:greatest-least-null",
+      "rule-catalog:hardcoded-year-filter",
+      "dbt-patterns:hardcoded-date",
+      "altimate-core.dbt-config:incremental-no-guard",
+      "altimate-core.dbt-config:unique-key-change",
+      "dbt-patterns:fanout-join",
+    ])
+      expect(ruleTier(k)).toBe("summary")
+    for (const p of ["altimate-core.equivalence:", "impact-analysis:", "schema.detect-pii:", "contract-check:", "data.diff:"])
+      expect(keys.filter((k) => k.startsWith(p) && DEFAULT_RULE_TIERS[k] === "off")).toEqual([])
   })
 })

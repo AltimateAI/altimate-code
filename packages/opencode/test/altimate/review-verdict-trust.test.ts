@@ -257,7 +257,8 @@ describe("every finding carries a stable rule id", () => {
         { path: "models/marts/m.sql", status: "modified", diff: sql.split("\n").map((l) => `+${l}`).join("\n") },
         { path: "models/staging/gone.sql", status: "deleted", diff: "" },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, dialect: "snowflake" },
+      // Report every rule, including ones the default posting policy turns off.
+      config: { ...DEFAULT_REVIEW_CONFIG, dialect: "snowflake", rules: { "*": "summary" } },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       forceTier: "full",
