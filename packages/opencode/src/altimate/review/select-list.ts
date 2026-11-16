@@ -99,3 +99,36 @@ export function selectListNames(sql: string, opts: { complete?: boolean } = {}):
   }
   return names
 }
+
+/**
+ * Output names of the final SELECT, following `select * from <cte>` to that
+ * CTE's own select list (dbt's `select * from final`). Null when unknown;
+ * `complete` is passed to `selectListNames`.
+ */
+export function finalSelectNames(sql: string, opts: { complete?: boolean } = {}): string[] | null {
+  const text = blankComments(sql)
+  let query = sql
+  for (let hop = 0; hop < 5; hop++) {
+    const names = selectListNames(query, opts)
+    if (names) return names
+    const flat = flatten(query)
+    const selects = [...flat.matchAll(/\bselect\b/gi)]
+    if (!selects.length) return null
+    const tail = flat.slice(selects[selects.length - 1].index! + "select".length)
+    const from = /^\s*\*\s+from\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:(?:where|order|limit|qualify)\b[\s\S]*)?;?\s*$/i.exec(tail)
+    if (!from) return null
+    // The CTE's body: the parenthesis after `<name> as`.
+    const def = new RegExp(`(?:\\bwith\\s+(?:recursive\\s+)?|,\\s*)${from[1]}\\s+as\\s*\\(`, "i").exec(text)
+    if (!def) return null
+    const open = def.index + def[0].length - 1
+    let level = 0
+    let close = -1
+    for (let i = open; i < text.length && close < 0; i++) {
+      if (text[i] === "(") level++
+      else if (text[i] === ")" && --level === 0) close = i
+    }
+    if (close < 0) return null
+    query = text.slice(open + 1, close)
+  }
+  return null
+}

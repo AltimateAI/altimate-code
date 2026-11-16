@@ -27,7 +27,7 @@ import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, spli
 import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
-import { selectListNames } from "./select-list"
+import { finalSelectNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
@@ -738,8 +738,9 @@ async function outputColumns(runner: ReviewRunner, sql: string, dialect: string)
   // set is unknown. Filling it from the select list alone would make every
   // unaliased expression look removed when only one side's lineage failed.
   if (!cols.length) return new Set()
-  // `*` in the final SELECT makes `named` null: keep lineage's own answer.
-  const named = selectListNames(sql)
+  // `*` in the final SELECT: keep lineage's own answer (it expands stars it can resolve),
+  // plus the CTE's own list when the star reads a CTE of this query.
+  const named = finalSelectNames(sql)
   return new Set([...cols, ...(named ?? [])])
 }
 
@@ -786,7 +787,7 @@ function rawSelectList(sql: string): Set<string> {
     // it becomes its own `__jinja__` item, which marks the list unknown.
     .replace(/\{%[\s\S]*?%\}/g, " , __jinja__ , ")
     .replace(/\{\{[\s\S]*?\}\}/g, " __jinja__ ")
-  const names = selectListNames(plain, { complete: true })
+  const names = finalSelectNames(plain, { complete: true })
   // A Jinja expression inside an item (e.g. `{{ col }} as x`) leaves its alias
   // intact; only a Jinja item standing alone is unknown.
   if (!names || names.includes("__jinja__")) return new Set()
