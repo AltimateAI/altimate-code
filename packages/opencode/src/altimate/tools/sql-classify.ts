@@ -312,7 +312,12 @@ function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialec
   )
 }
 
-const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
+// Dynamic SQL: EXEC or EXECUTE as a call or statement (EXEC('...'), EXEC sp_executesql, EXECUTE IMMEDIATE,
+// SELECT exec('...')), not as a column or alias (SELECT execute FROM t, 1 AS execute, t.execute), which is
+// followed by a clause word, an operator, `,`, `)` or the end. PREPARE and DO start a statement. The
+// lookbehind runs only after EXEC matched, so each run of whitespace is scanned once.
+const DYNAMIC_SQL =
+  /\bEXEC(UTE)?\b(?<!\bAS\s+EXEC(UTE)?|\.\s*EXEC(UTE)?)(?!\s*($|[,);=<>!|+*\/%-]|(FROM|WHERE|AS|IS|IN|AND|OR|ORDER|GROUP|HAVING|LIMIT|UNION)\b))|(^|;)\s*(PREPARE|DO)\b/i
 
 // Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), and in Oracle,
 // Snowflake and MariaDB (Oracle mode) s.NEXTVAL, quoted or not (in Oracle a quoted name must be
@@ -453,7 +458,8 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   if (!lexical.complete) return result
   // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
   // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write.
-  if (DYNAMIC_SQL.test(maskSql(lexical.tokens)) && mentionsHardDenyAnywhere(sql)) return { ...result, blocked: true }
+  // Quoted names unwrapped, so "exec"('...') and [exec]('...') count as calls.
+  if (DYNAMIC_SQL.test(maskSql(lexical.tokens, true)) && mentionsHardDenyAnywhere(sql)) return { ...result, blocked: true }
   // A write may also run the SQL in its literals: a routine body created and called in the same call.
   if (result.queryType === "write" && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
   return result

@@ -691,6 +691,17 @@ describe("each engine's own literal and statement rules", () => {
     ["SELECT exec('DROP SCHEMA victim')", "snowflake", "read", true],
     ["SELECT exec('DROP DATABASE victim')", "mysql", "read", true],
     ["SELECT execute('DROP SCHEMA victim CASCADE')", "postgres", "read", true],
+    // A quoted helper name is still a call.
+    ['SELECT "exec"(\'DROP SCHEMA victim\')', "postgres", "read", true],
+    ["SELECT [exec]('DROP SCHEMA victim')", "sqlserver", "read", true],
+    ["SELECT `execute`('DROP DATABASE victim')", "mysql", "read", true],
+    ['SELECT "exec"($$DROP SCHEMA victim$$)', "clickhouse", "read", true],
+    ["SELECT exec /* c */ ('DROP SCHEMA victim')", "postgres", "write", true],
+    // A column or alias named execute is not dynamic SQL.
+    ["SELECT 'DROP NAMESPACE analytics' AS execute", "postgres", "read", false],
+    ["SELECT execute FROM audit_log WHERE s = 'DROP CATALOG x'", "postgres", "read", false],
+    ["SELECT 1 AS execute /* DROP CATALOG analytics */", "postgres", "read", false],
+    ["SELECT E'\\x44ROP SCHEMA analytics' AS execute", "postgres", "read", false],
     // A dot inside one quoted name is not a sequence advance.
     ['SELECT "s.NEXTVAL" FROM metrics', "snowflake", "read", false],
     ['SELECT "s.NEXTVAL" FROM metrics', "oracle", "read", false],
