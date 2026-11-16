@@ -7,10 +7,20 @@
 // not the model — decides what is kept. Opt-in (`ALTIMATE_REVIEW_AI_VERIFY=1`)
 // and fail-open: any error, timeout or exhausted budget leaves the findings it
 // did not review unchanged.
+import { tool, type ModelMessage, type Tool } from "ai"
+import z from "zod"
 import type { Provider } from "@/provider/provider"
+import { LLM } from "@/session/llm"
+import type { Agent } from "@/agent/agent"
+import type { MessageV2 } from "@/session/message-v2"
+import { MessageID, SessionID } from "@/session/schema"
+import { Log } from "@/altimate/util/log"
 import type { Finding } from "./finding"
-import type { AiReviewFile, AiTokens } from "./ai-review"
+import { type AiReviewFile, type AiTokens, type BatchUsage, addUsage, aiTimeoutMs, streamUsage } from "./ai-review"
 import { type ReviewRunner, scanDiffLines, walkDiffLines } from "./orchestrate"
+import { readStreamStep, type StepToolCall } from "../llm/stream-text"
+
+const log = Log.create({ service: "ai-verify" })
 
 /** What the verifier may read: the PR's files, the engine, and the dbt project. */
 export interface AiVerifyEvidence {
@@ -84,29 +94,6 @@ export interface RunAiVerifyInput {
   model: Provider.Model
   /** Overrides the verifier system prompt (tests). */
   system?: string
-}
-
-/**
- * Verify the AI lane's findings. Never throws: on any failure the findings
- * come back unchanged with a status saying what happened.
- */
-export async function runAiVerify(
-  input: RunAiVerifyInput,
-  _deps: { env?: Record<string, string | undefined> } = {},
-): Promise<{ findings: Finding[]; status: VerifierStatus }> {
-  const status: VerifierStatus = {
-    state: "skipped",
-    reason: "the verifier is not implemented yet",
-    durationMs: 0,
-    turns: 0,
-    toolCalls: 0,
-    reviewed: 0,
-    kept: input.findings.length,
-    discarded: 0,
-    summary: 0,
-    unreviewed: input.findings.length,
-  }
-  return { findings: input.findings, status }
 }
 
 /** Most lines one `read_file` call returns. */
@@ -252,7 +239,14 @@ export interface ModelFeatures {
   toolsUsed: string[]
 }
 
-const CLAIM_TYPES: ModelFeatures["claimType"][] = ["code_fact", "cross_file", "convention", "intent", "test_gap", "speculation"]
+const CLAIM_TYPES: ModelFeatures["claimType"][] = [
+  "code_fact",
+  "cross_file",
+  "convention",
+  "intent",
+  "test_gap",
+  "speculation",
+]
 const VERDICTS: ModelFeatures["verdict"][] = ["confirmed", "refuted", "unverifiable"]
 const VALUES: ModelFeatures["value"][] = ["actionable", "informational", "nit"]
 const EVIDENCE_MAX = 240
@@ -365,9 +359,13 @@ export function hunkAround(diff: string | undefined, line?: number): string {
     const at = r.head ?? rows.slice(i).find((x) => x.head !== undefined)?.head ?? right
     return Math.abs(at - line) <= HUNK_RADIUS
   }
-  const picked = rows.filter(near).map((r) => (r.head !== undefined ? `${String(r.head).padStart(4)} ${r.text}` : `     ${r.text}`))
+  const picked = rows
+    .filter(near)
+    .map((r) => (r.head !== undefined ? `${String(r.head).padStart(4)} ${r.text}` : `     ${r.text}`))
   const text = picked.join("\n")
-  return text.length > HUNK_MAX_CHARS ? text.slice(0, HUNK_MAX_CHARS) + "\n… (truncated)" : text || "(the line is outside the diff)"
+  return text.length > HUNK_MAX_CHARS
+    ? text.slice(0, HUNK_MAX_CHARS) + "\n… (truncated)"
+    : text || "(the line is outside the diff)"
 }
 
 /** The user message for one batch: the PR title and each candidate with its hunk. Not the whole file, not the grounding. */
@@ -424,8 +422,16 @@ const LOCAL_CLAIMS = new Set<ModelFeatures["claimType"]>(["code_fact", "conventi
  * (id omitted, unparsable answer, timeout, budget, error) the fail mode alone
  * decides: open keeps the finding unchanged, closed discards it.
  */
-export function triage(f: Finding, ts: TsFeatures, m: ModelFeatures | undefined, knobs: TriageKnobs): { decision: Decision; rule: string } {
-  if (!m) return knobs.failMode === "open" ? { decision: "keep", rule: "unreviewed" } : { decision: "discard", rule: "unreviewed" }
+export function triage(
+  f: Finding,
+  ts: TsFeatures,
+  m: ModelFeatures | undefined,
+  knobs: TriageKnobs,
+): { decision: Decision; rule: string } {
+  if (!m)
+    return knobs.failMode === "open"
+      ? { decision: "keep", rule: "unreviewed" }
+      : { decision: "discard", rule: "unreviewed" }
   if (ts.restatesGrounding) return { decision: "discard", rule: "duplicate_of_engine" }
   if (m.verdict === "refuted" && m.evidence.trim()) return { decision: "discard", rule: "refuted" }
   if (m.claimType === "cross_file" && (m.verdict === "unverifiable" || m.toolsUsed.length === 0))
@@ -433,7 +439,12 @@ export function triage(f: Finding, ts: TsFeatures, m: ModelFeatures | undefined,
   if (m.claimType === "speculation" || (m.requiresAssumedInput && m.verdict !== "confirmed"))
     return { decision: "discard", rule: "speculative" }
   if (knobs.dropNits && (ts.styleOnly || m.value === "nit")) return { decision: "discard", rule: "low_value" }
-  if (ts.targetsUnchangedCode && m.verdict !== "confirmed" && f.category !== "test_coverage" && m.claimType !== "intent")
+  if (
+    ts.targetsUnchangedCode &&
+    m.verdict !== "confirmed" &&
+    f.category !== "test_coverage" &&
+    m.claimType !== "intent"
+  )
     return { decision: "discard", rule: "unchanged_code" }
   if (
     knobs.keepUnverifiedLocal &&
@@ -475,7 +486,11 @@ export function applyTriage(
   ts: TsFeatures[],
   model: Array<ModelFeatures | undefined>,
   knobs: TriageKnobs,
-): { findings: Finding[]; dropped: DroppedFinding[]; counts: Pick<VerifierStatus, "reviewed" | "kept" | "discarded" | "summary" | "unreviewed"> } {
+): {
+  findings: Finding[]
+  dropped: DroppedFinding[]
+  counts: Pick<VerifierStatus, "reviewed" | "kept" | "discarded" | "summary" | "unreviewed">
+} {
   const out: Finding[] = []
   const dropped: DroppedFinding[] = []
   const counts = { reviewed: 0, kept: 0, discarded: 0, summary: 0, unreviewed: 0 }
@@ -515,7 +530,8 @@ export function applyTriage(
       evidence: m.evidence,
       features: ts[i],
     }
-    const prior = f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
+    const prior =
+      f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
     out.push({
       ...f,
       evidence: { tool: f.evidence?.tool ?? "ai-review", result: { ...prior, verification } },
@@ -524,4 +540,545 @@ export function applyTriage(
     })
   })
   return { findings: out, dropped, counts }
+}
+
+// ---------------------------------------------------------------------------
+// Tool loop
+// ---------------------------------------------------------------------------
+
+/** Tokens (input incl. cached + output) one PR's verifier may spend before it must answer. */
+export const VERIFY_MAX_TOKENS = 20_000
+/** Tool-output characters one batch may accumulate before it must answer. */
+export const VERIFY_MAX_TOOL_CHARS = 16_000
+/** Tool calls run per round; extra calls get a refusal. */
+export const VERIFY_MAX_CALLS_PER_ROUND = 6
+/** Candidates per model conversation. */
+export const VERIFY_BATCH_SIZE = 8
+const TOOL_OUTPUT_MAX = 2_500
+const PR_TEXT_MAX = 1_500
+const BATCH_CONCURRENCY = 2
+export const ANSWER_NOW = "Answer now with the evidence you have."
+
+/** One model step as the loop needs it: text, why it stopped, the tool calls, the messages to append. */
+export interface VerifierStep {
+  text: string
+  finishReason: string
+  toolCalls: StepToolCall[]
+  /** Response messages (the assistant turn, plus any tool results the SDK produced itself). */
+  messages: ModelMessage[]
+  usage?: BatchUsage
+}
+export interface VerifierStepRequest {
+  system: string
+  messages: ModelMessage[]
+  /** Tool declarations without `execute`: the loop runs the calls itself. */
+  tools: Record<string, Tool>
+  toolChoice: "auto" | "none"
+  abort: AbortSignal
+}
+/** One model step. Production goes through the harness (`LLM.stream`); tests script it. */
+export type VerifierLlm = (req: VerifierStepRequest) => Promise<VerifierStep>
+
+/** The production step: one `LLM.stream` call through the harness, no session, temperature 0. */
+export function harnessVerifierLlm(model: Provider.Model): VerifierLlm {
+  const sessionID = SessionID.descending()
+  return async (req) => {
+    const agent: Agent.Info = {
+      name: "dbt-ai-verifier",
+      mode: "primary",
+      hidden: true,
+      options: {},
+      permission: [],
+      prompt: req.system,
+      temperature: 0,
+    }
+    const user: MessageV2.User = {
+      id: MessageID.ascending(),
+      sessionID,
+      role: "user",
+      time: { created: Date.now() },
+      agent: agent.name,
+      model: { providerID: model.providerID, modelID: model.id },
+    }
+    const stream = await LLM.stream({
+      agent,
+      user,
+      system: [req.system],
+      small: false,
+      // LLM.stream prunes its tool map in place; give it a copy.
+      tools: { ...req.tools },
+      toolChoice: req.toolChoice,
+      model,
+      abort: req.abort,
+      sessionID,
+      retries: 1,
+      messages: req.messages,
+    })
+    const step = await readStreamStep(stream)
+    return { ...step, messages: step.messages as ModelMessage[], usage: await streamUsage(stream, model) }
+  }
+}
+
+/** The dbt neighbourhood of the changed files, for the read allowlist and model lookups. */
+interface Graph {
+  parents: Array<{ path: string; kind: string; name: string; columns?: string[] }>
+  downstream: Array<{ name: string; path: string }>
+}
+
+const MODEL_KINDS = new Set([undefined, "model_sql", "python_model"])
+
+async function gatherGraph(ev: AiVerifyEvidence): Promise<Graph> {
+  const parents = (await ev.runner.graphParents?.(ev.files.map((f) => f.path)).catch(() => undefined)) ?? []
+  const root = ev.projectRoot ? ev.projectRoot.replace(/\/+$/, "") + "/" : ""
+  const downstream: Graph["downstream"] = []
+  for (const f of ev.files.filter((x) => MODEL_KINDS.has(x.kind))) {
+    for (const d of (await ev.runner.downstreamModels?.(f.model).catch(() => undefined)) ?? [])
+      if (!downstream.some((x) => x.name === d.name)) downstream.push({ name: d.name, path: root + d.path })
+  }
+  return { parents, downstream }
+}
+
+function clampOutput(s: string): string {
+  return s.length > TOOL_OUTPUT_MAX ? s.slice(0, TOOL_OUTPUT_MAX) + "\n… (truncated)" : s
+}
+
+function safeReason(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  return raw
+    .replace(/\s+/g, " ")
+    .replace(/(bearer\s+)[^\s]+/gi, "$1***")
+    .replace(/\b(sk|pk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, "***")
+    .slice(0, 200)
+}
+
+interface VerifyTool {
+  description: string
+  input: z.ZodObject<z.ZodRawShape>
+  run(args: Record<string, unknown>): Promise<string>
+}
+
+const NA = (why: string) => `not available: ${why}`
+const json = (v: unknown) => JSON.stringify(v)
+
+/** The verifier's tools, closing over the evidence. Every result is a string; failures say "not available". */
+export function verifierTools(
+  ev: AiVerifyEvidence,
+  graph: Graph = { parents: [], downstream: [] },
+): Record<string, VerifyTool> {
+  const allowed = [
+    ...new Set([
+      ...ev.files.map((f) => f.path),
+      ...ev.addedLines.keys(),
+      ...graph.parents.map((p) => p.path),
+      ...graph.downstream.map((d) => d.path),
+    ]),
+  ]
+  /** A requested path inside the review scope, as the repo-relative path to read; a project-relative path resolves too. */
+  const resolve = (p: unknown): string | undefined => {
+    const want = String(p ?? "").replace(/^\.?\/+/, "")
+    if (!want || want.split("/").includes("..")) return undefined
+    if (allowed.includes(want)) return want
+    const hits = allowed.filter((a) => a.endsWith("/" + want))
+    return hits.length === 1 ? hits[0] : undefined
+  }
+  const modelPath = (name: string): string | undefined =>
+    ev.files.find((f) => f.model === name && MODEL_KINDS.has(f.kind))?.path ??
+    graph.parents.find((p) => p.name === name && (p.kind === "model" || p.kind === "snapshot"))?.path ??
+    graph.downstream.find((d) => d.name === name)?.path
+  const side = z.enum(["old", "new"]).optional().describe("old = base branch, new = PR head (default)")
+  const scope = NA("outside review scope (changed files, their dbt parents and direct downstream models only)")
+
+  return {
+    read_file: {
+      description:
+        "Read up to 200 numbered lines of a changed file, a dbt parent of one, or a direct downstream model.",
+      input: z.object({
+        path: z.string(),
+        side,
+        start: z.number().int().positive().optional(),
+        end: z.number().int().positive().optional(),
+      }),
+      async run({ path, side, start, end }) {
+        const p = resolve(path)
+        if (!p) return scope
+        return (
+          (await ev.readFile(p, (side as "old" | "new") ?? "new", start as number, end as number)) ??
+          NA(`${p} does not exist on that side`)
+        )
+      },
+    },
+    compiled_sql: {
+      description: "dbt-compiled SQL of a model file (raw SQL when it has no Jinja).",
+      input: z.object({ path: z.string(), side }),
+      async run({ path, side }) {
+        const p = resolve(path)
+        if (!p) return scope
+        return (await ev.compiledSql(p, (side as "old" | "new") ?? "new")) ?? NA(`no compiled SQL for ${p}`)
+      },
+    },
+    model_columns: {
+      description:
+        "Output columns of a model (column lineage of its compiled SQL, plus contract columns) or declared columns of a source (`source_name.table`).",
+      input: z.object({ model: z.string() }),
+      async run({ model }) {
+        const name = String(model)
+        const source = graph.parents.find(
+          (p) => p.kind === "source" && (p.name === name || p.name.endsWith("." + name)),
+        )
+        if (source) return json({ source: source.name, columns: source.columns ?? [] })
+        const path = modelPath(name)
+        const sql = path ? await ev.compiledSql(path, "new") : undefined
+        const lineage = sql && ev.runner.columnLineage ? await ev.runner.columnLineage(sql, ev.dialect ?? "") : []
+        const columns = [...new Set(lineage.map((e) => e.target).filter(Boolean))]
+        const contract = (await ev.runner.modelConsumers?.(name))?.contractColumns ?? []
+        if (!columns.length && !contract.length)
+          return NA(path ? `no columns resolved for ${name}` : `${name} is outside review scope`)
+        return json({ model: name, columns, contractColumns: contract })
+      },
+    },
+    column_reach: {
+      description: "Downstream models and exposures that read one column of a model (manifest + compiled SQL).",
+      input: z.object({ model: z.string(), column: z.string() }),
+      async run({ model, column }) {
+        if (!ev.runner.columnReach) return NA("no dbt manifest")
+        const r = await ev.runner.columnReach(String(model), String(column), ev.dialect)
+        if (!r) return NA(`${model} is not in the manifest`)
+        return json({
+          readers: r.models.map((m) => ({ model: m.name, as: m.columns })),
+          uncertain: r.uncertain.map((m) => ({ model: m.name, reason: m.reason })),
+          untraced: r.untraced.map((m) => m.name),
+          exposures: r.exposures.map((e) => e.label),
+          uncertainExposures: r.uncertain_exposures.map((e) => e.label),
+          truncated: r.truncated,
+        })
+      },
+    },
+    model_config: {
+      description: "A model's merged dbt config, its declared unique keys (tests) and primary key.",
+      input: z.object({ model: z.string() }),
+      async run({ model }) {
+        const name = String(model)
+        const [config, uniqueKeys, primaryKey] = await Promise.all([
+          ev.runner.modelConfig?.(name),
+          ev.runner.declaredUniqueKeys?.(name),
+          ev.runner.declaredPrimaryKey?.(name),
+        ])
+        if (!config && !uniqueKeys?.length && !primaryKey) return NA(`${name} is not in the manifest`)
+        return json({ config, uniqueKeys: uniqueKeys ?? [], primaryKey })
+      },
+    },
+    downstream: {
+      description: "Direct downstream models of a model, its exposures, and whether it has an enforced contract.",
+      input: z.object({ model: z.string() }),
+      async run({ model }) {
+        const name = String(model)
+        if (!ev.runner.downstreamModels && !ev.runner.modelConsumers) return NA("no dbt manifest")
+        const [models, consumers] = await Promise.all([
+          ev.runner.downstreamModels?.(name),
+          ev.runner.modelConsumers?.(name),
+        ])
+        if (!consumers && !models?.length) return NA(`${name} is not in the manifest`)
+        return json({ models: (models ?? []).map((m) => m.name), ...(consumers ?? {}) })
+      },
+    },
+    equivalence: {
+      description: "Whether a changed model's compiled SQL is semantically equivalent before and after the PR.",
+      input: z.object({ path: z.string() }),
+      async run({ path }) {
+        const p = resolve(path)
+        if (!p) return scope
+        const [oldSql, newSql] = await Promise.all([ev.compiledSql(p, "old"), ev.compiledSql(p, "new")])
+        if (!oldSql || !newSql) return NA(`${p} has no compiled ${oldSql ? "head" : "base"} SQL`)
+        return json(await ev.runner.equivalence(oldSql, newSql, ev.dialect))
+      },
+    },
+    grain: {
+      description: "A model's grain from its compiled SQL: the final GROUP BY and dedup PARTITION BY columns.",
+      input: z.object({ path: z.string() }),
+      async run({ path }) {
+        const p = resolve(path)
+        if (!p) return scope
+        if (!ev.runner.grain) return NA("grain analysis unavailable")
+        const sql = await ev.compiledSql(p, "new")
+        return sql ? json(await ev.runner.grain(sql)) : NA(`no compiled SQL for ${p}`)
+      },
+    },
+    grep_project: {
+      description:
+        "Fixed-string search of the dbt project at the PR head (models, macros, seeds, snapshots, tests). At most 50 hits.",
+      input: z.object({ pattern: z.string().min(2), glob: z.string().optional() }),
+      async run({ pattern, glob }) {
+        if (!ev.grepProject) return NA("project search unavailable")
+        const hits = await ev.grepProject(String(pattern), glob as string | undefined)
+        return hits.length ? hits.map((h) => `${h.path}:${h.line}: ${h.text}`).join("\n") : "no matches"
+      },
+    },
+    pr_description: {
+      description: "The PR title and description.",
+      input: z.object({}),
+      async run() {
+        const text = `${ev.prTitle ?? ""}\n\n${ev.prBody ?? ""}`.trim()
+        return text ? text.slice(0, PR_TEXT_MAX) : NA("the PR has no title or description")
+      },
+    },
+  }
+}
+
+/** Run one tool call, never throwing; output is a string of at most 2,500 characters. */
+async function runToolCall(defs: Record<string, VerifyTool>, call: StepToolCall): Promise<string> {
+  const def = Object.hasOwn(defs, call.toolName) ? defs[call.toolName] : undefined
+  if (!def || call.invalid) return NA(`unknown tool or malformed call: ${call.toolName}`)
+  const args = def.input.safeParse(call.input ?? {})
+  if (!args.success) return NA(`invalid input for ${call.toolName}: ${args.error.issues[0]?.message ?? "bad input"}`)
+  try {
+    return clampOutput(await def.run(args.data))
+  } catch (err) {
+    return NA(safeReason(err))
+  }
+}
+
+/** Tool-call ids that already have a result in `messages` (the SDK answers invalid calls itself). */
+function answeredCalls(messages: ModelMessage[]): Set<string> {
+  const out = new Set<string>()
+  for (const m of messages)
+    if (m.role === "tool") for (const part of m.content) if (part.type === "tool-result") out.add(part.toolCallId)
+  return out
+}
+
+/** Rough token count for a step whose provider reported no usage (4 characters per token). */
+function estimateTokens(req: VerifierStepRequest, text: string): number {
+  return Math.ceil((req.system.length + JSON.stringify(req.messages).length + text.length) / 4)
+}
+
+interface BatchOutcome {
+  verdicts: Map<string, ModelFeatures>
+  state: "ok" | "timeout" | "error" | "budget"
+  reason?: string
+  usage?: BatchUsage
+  turns: number
+  toolCalls: number
+}
+
+/**
+ * One batch's conversation: up to 3 tool rounds, then a forced answer. The
+ * answer is forced early (toolChoice "none") once the batch's token share or
+ * the tool-output budget is spent.
+ */
+async function verifyBatch(
+  message: string,
+  ids: Set<string>,
+  ctx: {
+    system: string
+    llm: VerifierLlm
+    defs: Record<string, VerifyTool>
+    tools: Record<string, Tool>
+    abort: AbortSignal
+    maxTokens: number
+  },
+): Promise<BatchOutcome> {
+  const messages: ModelMessage[] = [{ role: "user", content: message }]
+  const out: BatchOutcome = { verdicts: new Map(), state: "ok", turns: 0, toolCalls: 0 }
+  let tokens = 0
+  let toolChars = 0
+  let rounds = 0
+  try {
+    for (;;) {
+      const overBudget = tokens > ctx.maxTokens || toolChars > VERIFY_MAX_TOOL_CHARS
+      const force = rounds >= VERIFY_MAX_ROUNDS || overBudget
+      if (overBudget) out.state = "budget"
+      if (force && rounds > 0) messages.push({ role: "user", content: ANSWER_NOW })
+      const req: VerifierStepRequest = {
+        system: ctx.system,
+        messages: [...messages],
+        tools: ctx.tools,
+        toolChoice: force ? "none" : "auto",
+        abort: ctx.abort,
+      }
+      const step = await ctx.llm(req)
+      out.turns++
+      if (step.usage) out.usage = out.usage ? addUsage(out.usage, step.usage) : step.usage
+      tokens += step.usage ? step.usage.tokens.inputTotal + step.usage.tokens.output : estimateTokens(req, step.text)
+      if (ctx.abort.aborted) throw ctx.abort.reason ?? new Error("aborted")
+      if (force || step.finishReason !== "tool-calls" || !step.toolCalls.length) {
+        out.verdicts = parseVerifierOutput(step.text, ids)
+        if (!out.verdicts.size && out.state === "ok") {
+          out.state = "error"
+          out.reason = "the verifier returned no parsable verdicts"
+        }
+        return out
+      }
+      messages.push(...step.messages)
+      const answered = answeredCalls(step.messages)
+      const pending = step.toolCalls.filter((c) => !answered.has(c.toolCallId))
+      const results: string[] = []
+      for (const [i, call] of pending.entries()) {
+        const result =
+          i < VERIFY_MAX_CALLS_PER_ROUND
+            ? await runToolCall(ctx.defs, call)
+            : NA(`at most ${VERIFY_MAX_CALLS_PER_ROUND} tool calls per round`)
+        if (i < VERIFY_MAX_CALLS_PER_ROUND) out.toolCalls++
+        toolChars += result.length
+        results.push(result)
+      }
+      if (pending.length)
+        messages.push({
+          role: "tool",
+          content: pending.map((c, i) => ({
+            type: "tool-result" as const,
+            toolCallId: c.toolCallId,
+            toolName: c.toolName,
+            output: { type: "text" as const, value: results[i] },
+          })),
+        })
+      rounds++
+    }
+  } catch (err) {
+    if (ctx.abort.aborted) return { ...out, state: "timeout", reason: "no answer before the verifier timeout" }
+    return { ...out, state: "error", reason: safeReason(err) }
+  }
+}
+
+/** Split findings into batches of at most 8, keeping one file's findings together where they fit. */
+export function batchFindings(findings: Finding[], size = VERIFY_BATCH_SIZE): number[][] {
+  const byFile = new Map<string, number[]>()
+  findings.forEach((f, i) => byFile.set(f.file, [...(byFile.get(f.file) ?? []), i]))
+  const batches: number[][] = []
+  let cur: number[] = []
+  for (const group of byFile.values()) {
+    for (let i = 0; i < group.length; i += size) {
+      const chunk = group.slice(i, i + size)
+      if (cur.length + chunk.length > size) {
+        batches.push(cur)
+        cur = []
+      }
+      cur.push(...chunk)
+    }
+  }
+  if (cur.length) batches.push(cur)
+  return batches.filter((b) => b.length)
+}
+
+/** Token budget override for experiments: `ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS`. */
+function maxTokensFrom(env: Record<string, string | undefined>): number {
+  const n = Number(env.ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS)
+  return Number.isFinite(n) && n > 0 ? n : VERIFY_MAX_TOKENS
+}
+
+export interface VerifyDeps {
+  /** The model step; defaults to the harness LLM for `input.model`. */
+  llm?: VerifierLlm
+  env?: Record<string, string | undefined>
+  /** Overrides the PR-level timeout (tests). */
+  timeoutMs?: number
+}
+
+/**
+ * Verify the AI lane's findings: features, one batched tool loop per ≤8
+ * findings, deterministic triage. Never throws: on any failure the findings
+ * it could not review come back unchanged (fail-open), with a status saying
+ * what happened.
+ */
+export async function runAiVerify(
+  input: RunAiVerifyInput,
+  deps: VerifyDeps = {},
+): Promise<{ findings: Finding[]; status: VerifierStatus }> {
+  const startedAt = Date.now()
+  // Defaults describe "nothing reviewed, everything kept unchanged".
+  const status = (s: Pick<VerifierStatus, "state"> & Partial<VerifierStatus>): VerifierStatus => ({
+    turns: 0,
+    toolCalls: 0,
+    reviewed: 0,
+    kept: input.findings.length,
+    discarded: 0,
+    summary: 0,
+    unreviewed: input.findings.length,
+    ...s,
+    durationMs: Date.now() - startedAt,
+  })
+  if (!input.findings.length)
+    return { findings: input.findings, status: status({ state: "skipped", reason: "no AI findings to verify" }) }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const env = deps.env ?? process.env
+    const ev = input.evidence
+    const llm = deps.llm ?? harnessVerifierLlm(input.model)
+    const graph = await gatherGraph(ev)
+    const names = { parents: graph.parents.map((p) => p.name), downstream: graph.downstream.map((d) => d.name) }
+    const fileByPath = new Map(ev.files.map((f) => [f.path, f]))
+    const ts = input.findings.map((f) =>
+      extractFeatures(f, fileByPath.get(f.file), input.grounding, names, ev.addedLines.get(f.file) ?? new Set()),
+    )
+    const batches = batchFindings(input.findings).map((idx) => {
+      const ids = idx.map((_, j) => `c${j + 1}`)
+      const message = buildVerifyMessage(
+        ev.prTitle,
+        idx.map((i, j) => ({
+          id: ids[j],
+          finding: input.findings[i],
+          diff: fileByPath.get(input.findings[i].file)?.diff,
+        })),
+      )
+      return { idx, ids, message }
+    })
+    const promptChars = batches.reduce((n, b) => n + b.message.length, 0)
+    const controller = new AbortController()
+    timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? aiTimeoutMs(promptChars))
+    const defs = verifierTools(ev, graph)
+    const tools = Object.fromEntries(
+      Object.entries(defs).map(([name, d]) => [name, tool({ description: d.description, inputSchema: d.input })]),
+    ) as Record<string, Tool>
+    const ctx = {
+      system: input.system ?? VERIFY_SYSTEM_PROMPT,
+      llm,
+      defs,
+      tools,
+      abort: controller.signal,
+      maxTokens: maxTokensFrom(env) / batches.length,
+    }
+    const outcomes: BatchOutcome[] = []
+    for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
+      const slice = batches.slice(i, i + BATCH_CONCURRENCY)
+      outcomes.push(...(await Promise.all(slice.map((b) => verifyBatch(b.message, new Set(b.ids), ctx)))))
+    }
+
+    const model: Array<ModelFeatures | undefined> = input.findings.map(() => undefined)
+    batches.forEach((b, k) => b.idx.forEach((i, j) => (model[i] = outcomes[k].verdicts.get(b.ids[j]))))
+    const triaged = applyTriage(input.findings, ts, model, triageKnobs(env))
+    for (const d of triaged.dropped)
+      log.info("ai verify dropped", { id: d.id, file: d.file, rule: d.rule, verdict: d.verdict })
+
+    const usage = outcomes.flatMap((o) => (o.usage ? [o.usage] : []))
+    const spent = usage.length ? usage.reduce(addUsage) : undefined
+    // A timeout wins; every batch failing is an error; an early forced answer is budget. A
+    // partial failure is reported, not hidden.
+    const errors = outcomes.filter((o) => o.state === "error")
+    const timeout = outcomes.find((o) => o.state === "timeout")
+    let state: VerifierStatus["state"] = "ok"
+    let reason: string | undefined
+    if (timeout) [state, reason] = ["timeout", timeout.reason]
+    else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
+    else if (outcomes.some((o) => o.state === "budget"))
+      [state, reason] = ["budget", "token or tool-output budget reached; answered early"]
+    if (errors.length && state !== "error")
+      reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`]
+        .filter(Boolean)
+        .join("; ")
+    return {
+      findings: triaged.findings,
+      status: status({
+        state,
+        ...(reason ? { reason } : {}),
+        ...(spent ? { tokens: spent.tokens, cost: spent.cost } : {}),
+        turns: outcomes.reduce((n, o) => n + o.turns, 0),
+        toolCalls: outcomes.reduce((n, o) => n + o.toolCalls, 0),
+        ...triaged.counts,
+        ...(triaged.dropped.length ? { dropped: triaged.dropped } : {}),
+      }),
+    }
+  } catch (err) {
+    log.error("ai verify failed", { error: err })
+    return { findings: input.findings, status: status({ state: "error", reason: safeReason(err) }) }
+  } finally {
+    clearTimeout(timer)
+  }
 }

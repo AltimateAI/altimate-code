@@ -5,7 +5,15 @@ import z from "zod"
 import { readStreamStep } from "../../src/altimate/llm/stream-text"
 import {
   aiVerifyEnabled,
+  ANSWER_NOW,
   applyTriage,
+  batchFindings,
+  runAiVerify,
+  verifierTools,
+  type AiVerifyEvidence,
+  type VerifierLlm,
+  type VerifierStep,
+  type VerifierStepRequest,
   buildVerifyMessage,
   DEFAULT_TRIAGE_KNOBS,
   triage,
@@ -49,7 +57,12 @@ describe("wiring", () => {
         stream: new ReadableStream({
           start(c) {
             c.enqueue({ type: "stream-start", warnings: [] })
-            c.enqueue({ type: "tool-call", toolCallId: "t1", toolName: "read_file", input: JSON.stringify({ path: "models/a.sql" }) })
+            c.enqueue({
+              type: "tool-call",
+              toolCallId: "t1",
+              toolName: "read_file",
+              input: JSON.stringify({ path: "models/a.sql" }),
+            })
             c.enqueue({
               type: "finish",
               finishReason: { unified: "tool-calls", raw: "tool_use" },
@@ -70,7 +83,9 @@ describe("wiring", () => {
     })
     const step = await readStreamStep(stream)
     expect(step.finishReason).toBe("tool-calls")
-    expect(step.toolCalls).toEqual([{ toolCallId: "t1", toolName: "read_file", input: { path: "models/a.sql" }, invalid: undefined }])
+    expect(step.toolCalls).toEqual([
+      { toolCallId: "t1", toolName: "read_file", input: { path: "models/a.sql" }, invalid: undefined },
+    ])
     // One assistant message with the call; no tool message, since nothing executed it.
     const msgs = step.messages as ModelMessage[]
     expect(msgs.map((m) => m.role)).toEqual(["assistant"])
@@ -99,7 +114,15 @@ describe("wiring", () => {
       spyOn(Provider, "defaultModel").mockResolvedValue({ providerID: "fake", modelID: "m" } as any)
       spyOn(Provider, "getModel").mockResolvedValue({ providerID: "fake", id: "m", api: { npm: "x" }, cost: {} } as any)
       const answer = JSON.stringify([
-        { file: "models/a.sql", line: 1, severity: "warning", category: "sql_correctness", title: "t", body: "b", confidence: "high" },
+        {
+          file: "models/a.sql",
+          line: 1,
+          severity: "warning",
+          category: "sql_correctness",
+          title: "t",
+          body: "b",
+          confidence: "high",
+        },
       ])
       const stream = spyOn(LLM, "stream").mockImplementation(
         async () =>
@@ -134,7 +157,8 @@ describe("wiring", () => {
 })
 
 // models/fct.sql at head: line 10 context, 11 added, 12 context.
-const DIFF = "@@ -10,2 +10,3 @@\n select order_id,\n+  coalesce(amount_cents, 0) / 100 as amount,\n from {{ ref('stg_orders') }}\n"
+const DIFF =
+  "@@ -10,2 +10,3 @@\n select order_id,\n+  coalesce(amount_cents, 0) / 100 as amount,\n from {{ ref('stg_orders') }}\n"
 const FILE: AiReviewFile = { path: "models/fct.sql", status: "modified", model: "fct", diff: DIFF }
 const ADDED = new Set([11])
 const NAMES = { parents: ["stg_orders", "raw.payments"], downstream: ["rpt_revenue"] }
@@ -185,8 +209,13 @@ describe("extractFeatures (deterministic, free)", () => {
 
   test("restatesGrounding: similar title on the same file, or same category and column", () => {
     const g = makeFinding({
-      severity: "warning", category: "sql_correctness", title: "fct: division drops cents in amount",
-      body: "x", file: "models/fct.sql", model: "fct", evidence: { tool: "rule-catalog", result: { rule: "r" } },
+      severity: "warning",
+      category: "sql_correctness",
+      title: "fct: division drops cents in amount",
+      body: "x",
+      file: "models/fct.sql",
+      model: "fct",
+      evidence: { tool: "rule-catalog", result: { rule: "r" } },
     })
     expect(feats(aiFinding(), [g]).restatesGrounding).toBe(true)
     expect(feats(aiFinding(), [{ ...g, file: "models/other.sql" }]).restatesGrounding).toBe(false)
@@ -204,8 +233,14 @@ describe("extractFeatures (deterministic, free)", () => {
   })
 
   test("styleOnly: sql_quality naming remarks without a correctness word", () => {
-    expect(feats(aiFinding({ category: "sql_quality", title: "fct: Alias naming", body: "Use snake_case aliases." })).styleOnly).toBe(true)
-    expect(feats(aiFinding({ category: "sql_quality", title: "fct: Alias naming", body: "The alias hides a null." })).styleOnly).toBe(false)
+    expect(
+      feats(aiFinding({ category: "sql_quality", title: "fct: Alias naming", body: "Use snake_case aliases." }))
+        .styleOnly,
+    ).toBe(true)
+    expect(
+      feats(aiFinding({ category: "sql_quality", title: "fct: Alias naming", body: "The alias hides a null." }))
+        .styleOnly,
+    ).toBe(false)
     expect(feats(aiFinding({ title: "fct: Alias naming", body: "Use snake_case aliases." })).styleOnly).toBe(false)
   })
 
@@ -256,7 +291,13 @@ describe("verifier prompt and parser", () => {
 
   test("bad enums are coerced, unknown ids ignored, evidence clamped, tools filtered", () => {
     const text = JSON.stringify([
-      item("c1", { claim_type: "vibes", verdict: "probably", value: "huge", evidence: "x".repeat(500), tools_used: ["grep_project", 3, null] }),
+      item("c1", {
+        claim_type: "vibes",
+        verdict: "probably",
+        value: "huge",
+        evidence: "x".repeat(500),
+        tools_used: ["grep_project", 3, null],
+      }),
       item("c9"),
       "junk",
     ])
@@ -287,7 +328,14 @@ describe("verifier prompt and parser", () => {
   test("the batch message has each candidate's fields and hunk, not the file or grounding", () => {
     const msg = buildVerifyMessage("Fix revenue", [{ id: "c1", finding: aiFinding(), diff: DIFF }])
     expect(msg.startsWith("PR: Fix revenue")).toBe(true)
-    for (const line of ["id: c1", "file: models/fct.sql", "line: 11", "category: sql_correctness", "severity: warning", "title: fct: Division drops cents"])
+    for (const line of [
+      "id: c1",
+      "file: models/fct.sql",
+      "line: 11",
+      "category: sql_correctness",
+      "severity: warning",
+      "title: fct: Division drops cents",
+    ])
       expect(msg).toContain(line)
     expect(msg).toContain("```diff")
     expect(msg).not.toContain("GROUNDING")
@@ -317,16 +365,52 @@ describe("triage (first match wins)", () => {
   const rows: Array<[string, Partial<TsFeatures>, Partial<ModelFeatures>, string, string]> = [
     ["1 restates grounding", { restatesGrounding: true }, {}, "discard", "duplicate_of_engine"],
     ["2 refuted with evidence", {}, { verdict: "refuted" }, "discard", "refuted"],
-    ["3 cross-file unverifiable", {}, { claimType: "cross_file", verdict: "unverifiable" }, "discard", "unverifiable_cross_file"],
-    ["3 cross-file confirmed without tools", {}, { claimType: "cross_file", toolsUsed: [] }, "discard", "unverifiable_cross_file"],
+    [
+      "3 cross-file unverifiable",
+      {},
+      { claimType: "cross_file", verdict: "unverifiable" },
+      "discard",
+      "unverifiable_cross_file",
+    ],
+    [
+      "3 cross-file confirmed without tools",
+      {},
+      { claimType: "cross_file", toolsUsed: [] },
+      "discard",
+      "unverifiable_cross_file",
+    ],
     ["4 speculation", {}, { claimType: "speculation" }, "discard", "speculative"],
-    ["4 assumed input, not confirmed", {}, { requiresAssumedInput: true, verdict: "unverifiable" }, "discard", "speculative"],
+    [
+      "4 assumed input, not confirmed",
+      {},
+      { requiresAssumedInput: true, verdict: "unverifiable" },
+      "discard",
+      "speculative",
+    ],
     ["5 style only", { styleOnly: true }, {}, "discard", "low_value"],
     ["5 nit", {}, { value: "nit" }, "discard", "low_value"],
-    ["6 unchanged code, not confirmed", { targetsUnchangedCode: true }, { verdict: "unverifiable" }, "discard", "unchanged_code"],
+    [
+      "6 unchanged code, not confirmed",
+      { targetsUnchangedCode: true },
+      { verdict: "unverifiable" },
+      "discard",
+      "unchanged_code",
+    ],
     ["7 plausible local claim on a valid line", {}, { verdict: "unverifiable" }, "keep", "plausible_local"],
-    ["7 plausible local claim hedged to a data diff", { evidenceLineValid: null, hedgedDataDiff: true }, { verdict: "unverifiable", claimType: "convention" }, "keep", "plausible_local"],
-    ["8 unverifiable with no line", { evidenceLineValid: null }, { verdict: "unverifiable" }, "discard", "unverifiable"],
+    [
+      "7 plausible local claim hedged to a data diff",
+      { evidenceLineValid: null, hedgedDataDiff: true },
+      { verdict: "unverifiable", claimType: "convention" },
+      "keep",
+      "plausible_local",
+    ],
+    [
+      "8 unverifiable with no line",
+      { evidenceLineValid: null },
+      { verdict: "unverifiable" },
+      "discard",
+      "unverifiable",
+    ],
     ["8 unverifiable, low confidence", { lowConfidence: true }, { verdict: "unverifiable" }, "discard", "unverifiable"],
     ["9 confirmed but informational", {}, { value: "informational" }, "summary", "informational"],
     ["10 confirmed", {}, {}, "keep", "verified"],
@@ -341,13 +425,22 @@ describe("triage (first match wins)", () => {
     expect(triage(f, TS, { ...M, verdict: "refuted", evidence: " " }, K).rule).toBe("verified")
     const unchanged = { ...TS, targetsUnchangedCode: true }
     expect(triage(f, unchanged, M, K).rule).toBe("verified")
-    expect(triage({ ...f, category: "test_coverage" }, unchanged, { ...M, verdict: "unverifiable", claimType: "test_gap" }, K).rule).toBe("plausible_local")
+    expect(
+      triage(
+        { ...f, category: "test_coverage" },
+        unchanged,
+        { ...M, verdict: "unverifiable", claimType: "test_gap" },
+        K,
+      ).rule,
+    ).toBe("plausible_local")
     expect(triage(f, unchanged, { ...M, verdict: "unverifiable", claimType: "intent" }, K).rule).toBe("plausible_local")
   })
 
   test("knobs: nits kept, unverified local claims dropped, fail closed", () => {
     expect(triage(f, TS, { ...M, value: "nit" }, { ...K, dropNits: false }).rule).toBe("verified")
-    expect(triage(f, TS, { ...M, verdict: "unverifiable" }, { ...K, keepUnverifiedLocal: false }).rule).toBe("unverifiable")
+    expect(triage(f, TS, { ...M, verdict: "unverifiable" }, { ...K, keepUnverifiedLocal: false }).rule).toBe(
+      "unverifiable",
+    )
     expect(triage(f, TS, undefined, K)).toEqual({ decision: "keep", rule: "unreviewed" })
     expect(triage(f, TS, undefined, { ...K, failMode: "closed" })).toEqual({ decision: "discard", rule: "unreviewed" })
     // Without a verdict even a grounding duplicate is left alone: fail-open means unchanged.
@@ -357,7 +450,11 @@ describe("triage (first match wins)", () => {
   test("knobs from the environment", () => {
     expect(triageKnobs({})).toEqual(DEFAULT_TRIAGE_KNOBS)
     expect(
-      triageKnobs({ ALTIMATE_REVIEW_AI_VERIFY_DROP_NITS: "0", ALTIMATE_REVIEW_AI_VERIFY_KEEP_LOCAL: "0", ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" }),
+      triageKnobs({
+        ALTIMATE_REVIEW_AI_VERIFY_DROP_NITS: "0",
+        ALTIMATE_REVIEW_AI_VERIFY_KEEP_LOCAL: "0",
+        ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed",
+      }),
     ).toEqual({ dropNits: false, keepUnverifiedLocal: false, failMode: "closed" })
   })
 
@@ -366,34 +463,479 @@ describe("triage (first match wins)", () => {
     const b = aiFinding({ title: "fct: Informational note", ruleKey: "b" })
     const c = aiFinding({ title: "fct: Wrong claim", ruleKey: "c" })
     const d = aiFinding({ title: "fct: Not answered", ruleKey: "d" })
-    const res = applyTriage([a, b, c, d], [TS, TS, TS, TS], [M, { ...M, value: "informational" }, { ...M, verdict: "refuted", evidence: "line 11 casts first" }, undefined], K)
+    const res = applyTriage(
+      [a, b, c, d],
+      [TS, TS, TS, TS],
+      [M, { ...M, value: "informational" }, { ...M, verdict: "refuted", evidence: "line 11 casts first" }, undefined],
+      K,
+    )
     expect(res.findings.map((x) => x.title)).toEqual([a.title, b.title, d.title])
     const [va, vb, vd] = res.findings
     expect(va.body).toBe(`${a.body}\n\nVerified: ${M.evidence}`)
     expect(va.severity).toBe(a.severity)
     expect(va.evidence?.tool).toBe("ai-review")
     expect((va.evidence?.result as any).confidence).toBe("medium")
-    expect((va.evidence?.result as any).verification).toMatchObject({ decision: "keep", rule: "verified", verdict: "confirmed", features: TS })
+    expect((va.evidence?.result as any).verification).toMatchObject({
+      decision: "keep",
+      rule: "verified",
+      verdict: "confirmed",
+      features: TS,
+    })
     expect(vb.tier).toBe("summary")
     expect(vb.body).toBe(b.body)
     expect(vd).toBe(d)
     expect(res.dropped).toEqual([
-      { id: c.id, file: c.file, title: c.title, category: c.category, severity: c.severity, decision: "discard", rule: "refuted", verdict: "refuted", claimType: "code_fact", evidence: "line 11 casts first" },
+      {
+        id: c.id,
+        file: c.file,
+        title: c.title,
+        category: c.category,
+        severity: c.severity,
+        decision: "discard",
+        rule: "refuted",
+        verdict: "refuted",
+        claimType: "code_fact",
+        evidence: "line 11 casts first",
+      },
     ])
     expect(res.counts).toEqual({ reviewed: 3, kept: 2, discarded: 1, summary: 1, unreviewed: 1 })
   })
 
   test("a finding the verifier moved to the summary is never inline, even from the AI lane", () => {
-    const [kept, summary] = applyTriage([aiFinding(), aiFinding({ ruleKey: "s" })], [TS, TS], [M, { ...M, value: "informational" }], K).findings
+    const [kept, summary] = applyTriage(
+      [aiFinding(), aiFinding({ ruleKey: "s" })],
+      [TS, TS],
+      [M, { ...M, value: "informational" }],
+      K,
+    ).findings
     expect(inlineEligible(kept, DEFAULT_POSTING_POLICY)).toBe(true)
     expect(inlineEligible({ ...summary, tier: "summary" }, DEFAULT_POSTING_POLICY)).toBe(false)
   })
 
   test("dropped is capped at 20", () => {
     const many = Array.from({ length: 25 }, (_, i) => aiFinding({ ruleKey: `k${i}` }))
-    const res = applyTriage(many, many.map(() => TS), many.map(() => ({ ...M, verdict: "refuted" as const })), K)
+    const res = applyTriage(
+      many,
+      many.map(() => TS),
+      many.map(() => ({ ...M, verdict: "refuted" as const })),
+      K,
+    )
     expect(res.findings).toHaveLength(0)
     expect(res.dropped).toHaveLength(20)
     expect(res.counts.discarded).toBe(25)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The tool loop, with a scripted model
+// ---------------------------------------------------------------------------
+
+const FAKE_MODEL = { providerID: "fake", id: "verifier", api: { npm: "x" }, cost: {} } as unknown as Provider.Model
+
+function evidence(over: Partial<AiVerifyEvidence> = {}): AiVerifyEvidence {
+  const heads: Record<string, string> = {
+    "models/fct.sql": "select order_id,\n  coalesce(amount_cents, 0) / 100 as amount,\nfrom {{ ref('stg_orders') }}",
+    "models/stg_orders.sql": "select id as order_id, amount_cents from raw.orders",
+  }
+  return {
+    dialect: "snowflake",
+    files: [FILE],
+    addedLines: new Map([["models/fct.sql", ADDED]]),
+    prTitle: "Fix revenue rounding",
+    prBody: "Divide cents by 100.",
+    runner: {
+      async graphParents() {
+        return [{ path: "models/stg_orders.sql", kind: "model", name: "stg_orders", forPaths: ["models/fct.sql"] }]
+      },
+      async downstreamModels() {
+        return [{ name: "rpt_revenue", path: "models/rpt_revenue.sql" }]
+      },
+      async columnLineage(sql: string) {
+        return sql.includes("amount_cents from raw")
+          ? [{ source: "raw.orders.amount_cents", target: "amount_cents" }]
+          : []
+      },
+    } as any,
+    readFile: async (p, side, start, end) => numberedSlice(side === "new" ? heads[p] : undefined, start, end),
+    compiledSql: async (p, side) => (side === "new" ? heads[p] : undefined),
+    grepProject: async (pattern) => [{ path: "models/rpt_revenue.sql", line: 3, text: `sum(${pattern})` }],
+    ...over,
+  }
+}
+
+function scripted(
+  script: (req: VerifierStepRequest, turn: number) => Partial<VerifierStep> | Promise<Partial<VerifierStep>>,
+) {
+  const calls: VerifierStepRequest[] = []
+  const llm: VerifierLlm = async (req) => {
+    calls.push(req)
+    return { text: "", finishReason: "stop", toolCalls: [], messages: [], ...(await script(req, calls.length)) }
+  }
+  return { llm, calls }
+}
+
+function toolStep(calls: Array<[string, unknown]>, usage?: VerifierStep["usage"]): Partial<VerifierStep> {
+  const toolCalls = calls.map(([toolName, input], k) => ({ toolCallId: `t${k}-${Math.random()}`, toolName, input }))
+  return {
+    finishReason: "tool-calls",
+    toolCalls,
+    messages: [{ role: "assistant", content: toolCalls.map((c) => ({ type: "tool-call" as const, ...c })) }],
+    usage,
+  }
+}
+
+const verdict = (id: string, over: Record<string, unknown> = {}) => ({
+  id,
+  claim_type: "code_fact",
+  verdict: "confirmed",
+  value: "actionable",
+  requires_assumed_input: false,
+  evidence: "line 11: coalesce(amount_cents, 0) / 100",
+  tools_used: ["compiled_sql"],
+  ...over,
+})
+
+/** The tool results the loop sent back to the model, in order. */
+function toolResults(req: VerifierStepRequest): string[] {
+  return req.messages.flatMap((m) =>
+    m.role === "tool"
+      ? m.content.flatMap((p) => (p.type === "tool-result" && p.output.type === "text" ? [p.output.value] : []))
+      : [],
+  )
+}
+
+const verify = (
+  findings: Finding[],
+  llm: VerifierLlm,
+  over: Partial<AiVerifyEvidence> = {},
+  deps: { env?: Record<string, string>; timeoutMs?: number } = {},
+) => runAiVerify({ findings, grounding: [], evidence: evidence(over), model: FAKE_MODEL }, { llm, env: {}, ...deps })
+
+describe("runAiVerify: the bounded tool loop", () => {
+  test("a confirmed finding is kept with its verification; one call, no tools", async () => {
+    const { llm, calls } = scripted(() => ({ text: JSON.stringify([verdict("c1")]) }))
+    const { findings, status } = await verify([aiFinding()], llm)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].toolChoice).toBe("auto")
+    expect(calls[0].system).toContain("adversarial verifier")
+    expect(Object.keys(calls[0].tools).sort()).toEqual([
+      "column_reach",
+      "compiled_sql",
+      "downstream",
+      "equivalence",
+      "grain",
+      "grep_project",
+      "model_columns",
+      "model_config",
+      "pr_description",
+      "read_file",
+    ])
+    expect(findings).toHaveLength(1)
+    expect((findings[0].evidence?.result as any).verification).toMatchObject({ decision: "keep", rule: "verified" })
+    expect(findings[0].body).toContain("Verified: line 11")
+    expect(status).toMatchObject({
+      state: "ok",
+      turns: 1,
+      toolCalls: 0,
+      reviewed: 1,
+      kept: 1,
+      discarded: 0,
+      unreviewed: 0,
+    })
+  })
+
+  test("tool results go back to the model; after 3 rounds the answer is forced with toolChoice none", async () => {
+    const { llm, calls } = scripted((req) =>
+      req.toolChoice === "none"
+        ? { text: JSON.stringify([verdict("c1")]) }
+        : toolStep([["compiled_sql", { path: "models/fct.sql" }]]),
+    )
+    const { status } = await verify([aiFinding()], llm)
+    expect(calls.map((c) => c.toolChoice)).toEqual(["auto", "auto", "auto", "none"])
+    const last = calls[3]
+    expect(last.messages.at(-1)).toEqual({ role: "user", content: ANSWER_NOW })
+    expect(toolResults(last)).toHaveLength(3)
+    expect(toolResults(last)[0]).toContain("coalesce(amount_cents, 0) / 100")
+    expect(status).toMatchObject({ state: "ok", turns: 4, toolCalls: 3 })
+  })
+
+  test("a spent token budget forces the answer early and reports budget", async () => {
+    const big = { tokens: { input: 30_000, inputTotal: 30_000, output: 10, reasoning: 0, cacheRead: 0 }, cost: 0.1 }
+    const { llm, calls } = scripted((req) =>
+      req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["pr_description", {}]], big),
+    )
+    const { findings, status } = await verify([aiFinding()], llm)
+    expect(calls.map((c) => c.toolChoice)).toEqual(["auto", "none"])
+    expect(status.state).toBe("budget")
+    expect(status.tokens?.inputTotal).toBe(30_000)
+    expect(status.cost).toBeCloseTo(0.1, 10)
+    // The forced answer still counts.
+    expect(status.reviewed).toBe(1)
+    expect(findings).toHaveLength(1)
+  })
+
+  test("the env budget override and the tool-output budget both force the answer", async () => {
+    const small = { tokens: { input: 600, inputTotal: 600, output: 10, reasoning: 0, cacheRead: 0 }, cost: 0 }
+    const a = scripted((req) =>
+      req.toolChoice === "none" ? { text: "[]" } : toolStep([["pr_description", {}]], small),
+    )
+    await verify([aiFinding()], a.llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "500" } })
+    expect(a.calls.map((c) => c.toolChoice)).toEqual(["auto", "none"])
+
+    const long = "x".repeat(10_000)
+    const b = scripted((req) =>
+      req.toolChoice === "none"
+        ? { text: "[]" }
+        : toolStep([
+            ["read_file", { path: "models/fct.sql" }],
+            ["read_file", { path: "models/fct.sql" }],
+            ["read_file", { path: "models/fct.sql" }],
+            ["read_file", { path: "models/fct.sql" }],
+            ["read_file", { path: "models/fct.sql" }],
+            ["read_file", { path: "models/fct.sql" }],
+            ["read_file", { path: "models/fct.sql" }],
+          ]),
+    )
+    await verify([aiFinding()], b.llm, { readFile: async () => long })
+    // 6 calls × 2,500 chars (+ truncation marks) exceed 16,000 only after the second round.
+    expect(b.calls.map((c) => c.toolChoice)).toEqual(["auto", "auto", "none"])
+    const results = toolResults(b.calls[1])
+    expect(results).toHaveLength(7)
+    expect(results[0].length).toBeLessThanOrEqual(2_500 + 20)
+    expect(results[6]).toBe("not available: at most 6 tool calls per round")
+  })
+
+  test("reads are limited to changed files, their parents and downstream models", async () => {
+    const { llm, calls } = scripted((req, turn) =>
+      turn === 1
+        ? toolStep([
+            ["read_file", { path: "models/secret.sql" }],
+            ["read_file", { path: "../etc/passwd" }],
+            ["read_file", { path: "models/stg_orders.sql", start: 1, end: 1 }],
+            ["compiled_sql", { path: "stg_orders.sql" }],
+            ["read_file", { path: "models/rpt_revenue.sql", side: "old" }],
+          ])
+        : { text: JSON.stringify([verdict("c1")]) },
+    )
+    await verify([aiFinding()], llm)
+    const [secret, traversal, parent, bySuffix, downstreamOld] = toolResults(calls[1])
+    expect(secret).toBe(
+      "not available: outside review scope (changed files, their dbt parents and direct downstream models only)",
+    )
+    expect(traversal).toStartWith("not available: outside review scope")
+    expect(parent).toBe("1: select id as order_id, amount_cents from raw.orders")
+    expect(bySuffix).toBe("select id as order_id, amount_cents from raw.orders")
+    expect(downstreamOld).toBe("not available: models/rpt_revenue.sql does not exist on that side")
+  })
+
+  test("the dbt tools answer from the runner; failures and unknown tools say not available", async () => {
+    const { llm, calls } = scripted((req, turn) =>
+      turn === 1
+        ? toolStep([
+            ["model_columns", { model: "stg_orders" }],
+            ["grep_project", { pattern: "amount" }],
+            ["pr_description", {}],
+            ["column_reach", { model: "fct", column: "amount" }],
+            ["drop_table", { name: "x" }],
+            ["model_columns", {}],
+          ])
+        : { text: JSON.stringify([verdict("c1")]) },
+    )
+    await verify([aiFinding()], llm)
+    const r = toolResults(calls[1])
+    expect(JSON.parse(r[0])).toEqual({ model: "stg_orders", columns: ["amount_cents"], contractColumns: [] })
+    expect(r[1]).toBe("models/rpt_revenue.sql:3: sum(amount)")
+    expect(r[2]).toBe("Fix revenue rounding\n\nDivide cents by 100.")
+    expect(r[3]).toBe("not available: no dbt manifest")
+    expect(r[4]).toBe("not available: unknown tool or malformed call: drop_table")
+    expect(r[5]).toStartWith("not available: invalid input for model_columns")
+  })
+
+  test("a tool that throws returns not available instead of failing the loop", async () => {
+    const { llm, calls } = scripted((req, turn) =>
+      turn === 1 ? toolStep([["compiled_sql", { path: "models/fct.sql" }]]) : { text: JSON.stringify([verdict("c1")]) },
+    )
+    const { status } = await verify([aiFinding()], llm, {
+      compiledSql: async () => {
+        throw new Error("compiled dir unreadable")
+      },
+    })
+    expect(toolResults(calls[1])).toEqual(["not available: compiled dir unreadable"])
+    expect(status.state).toBe("ok")
+  })
+
+  test("calls the SDK already answered (invalid calls) are not answered twice", async () => {
+    const { llm, calls } = scripted((req, turn) => {
+      if (turn > 1) return { text: JSON.stringify([verdict("c1")]) }
+      const step = toolStep([
+        ["read_file", { path: "models/fct.sql" }],
+        ["nope", {}],
+      ])
+      const bad = step.toolCalls![1]
+      step.toolCalls![1] = { ...bad, invalid: true }
+      step.messages!.push({
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: bad.toolCallId,
+            toolName: "nope",
+            output: { type: "error-text", value: "no such tool" },
+          },
+        ],
+      })
+      return step
+    })
+    await verify([aiFinding()], llm)
+    const ids = calls[1].messages.flatMap((m) => (m.role === "tool" ? m.content.map((p) => (p as any).toolCallId) : []))
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids).toHaveLength(2)
+  })
+
+  test("ids the model omits stay unchanged (fail-open); a refuted one is dropped and listed", async () => {
+    const a = aiFinding()
+    const b = aiFinding({ title: "fct: Second claim", ruleKey: "b" })
+    const { llm } = scripted(() => ({
+      text: JSON.stringify([verdict("c2", { verdict: "refuted", evidence: "line 11 casts first" })]),
+    }))
+    const { findings, status } = await verify([a, b], llm)
+    expect(findings).toEqual([a])
+    expect(status).toMatchObject({ state: "ok", reviewed: 1, unreviewed: 1, kept: 1, discarded: 1 })
+    expect(status.dropped).toEqual([expect.objectContaining({ id: b.id, rule: "refuted", verdict: "refuted" })])
+  })
+
+  test("malformed JSON leaves every finding unchanged and reports an error", async () => {
+    const f = aiFinding()
+    const { llm } = scripted(() => ({ text: '[{"id": "c1", "verdict": "refu' }))
+    const { findings, status } = await verify([f], llm)
+    expect(findings).toEqual([f])
+    expect(status).toMatchObject({
+      state: "error",
+      reason: "the verifier returned no parsable verdicts",
+      unreviewed: 1,
+      kept: 1,
+    })
+  })
+
+  test("a model call that throws leaves the findings unchanged", async () => {
+    const f = aiFinding()
+    const llm: VerifierLlm = async () => {
+      throw new Error("401 bad key sk-abcdefghijklmnop")
+    }
+    const { findings, status } = await verify([f], llm)
+    expect(findings).toEqual([f])
+    expect(status.state).toBe("error")
+    expect(status.reason).not.toContain("abcdefghijklmnop")
+  })
+
+  test("a timeout aborts the call and leaves the findings unchanged", async () => {
+    const f = aiFinding()
+    const llm: VerifierLlm = (req) =>
+      new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
+    const { findings, status } = await verify([f], llm, {}, { timeoutMs: 20 })
+    expect(findings).toEqual([f])
+    expect(status.state).toBe("timeout")
+  })
+
+  test("never throws, even on broken evidence", async () => {
+    const f = aiFinding()
+    const { llm } = scripted(() => ({ text: "[]" }))
+    const { findings, status } = await verify([f], llm, { addedLines: undefined as any })
+    expect(findings).toEqual([f])
+    expect(status.state).toBe("error")
+  })
+
+  test("no findings: skipped without a model call", async () => {
+    const { llm, calls } = scripted(() => ({}))
+    const { status } = await verify([], llm)
+    expect(calls).toHaveLength(0)
+    expect(status.state).toBe("skipped")
+  })
+
+  test("25 findings go in batches of at most 8; dropped is capped at 20", async () => {
+    const many = Array.from({ length: 25 }, (_, i) => aiFinding({ ruleKey: `k${i}`, file: `models/m${i % 3}.sql` }))
+    expect(batchFindings(many).map((b) => b.length)).toEqual([8, 1, 8, 8])
+    const { llm, calls } = scripted((req) => {
+      const ids = [...String(req.messages[0].content).matchAll(/^id: (c\d+)$/gm)].map((m) => m[1])
+      return { text: JSON.stringify(ids.map((id) => verdict(id, { verdict: "refuted", evidence: "no" }))) }
+    })
+    const { findings, status } = await verify(many, llm)
+    expect(calls).toHaveLength(4)
+    expect(findings).toHaveLength(0)
+    expect(status.discarded).toBe(25)
+    expect(status.dropped).toHaveLength(20)
+  })
+
+  test("batches keep a file's findings together when they fit", () => {
+    const f = (file: string, k: string) => aiFinding({ file, ruleKey: k })
+    const list = [f("a", "1"), f("b", "2"), f("a", "3"), ...Array.from({ length: 6 }, (_, i) => f("c", `c${i}`))]
+    expect(batchFindings(list)).toEqual([
+      [0, 2, 1],
+      [3, 4, 5, 6, 7, 8],
+    ])
+  })
+
+  test("verifierTools: equivalence needs a base side; grain needs the engine", async () => {
+    const defs = verifierTools(evidence())
+    expect(await defs.equivalence.run({ path: "models/fct.sql" })).toBe(
+      "not available: models/fct.sql has no compiled base SQL",
+    )
+    expect(await defs.grain.run({ path: "models/fct.sql" })).toBe("not available: grain analysis unavailable")
+  })
+})
+
+describe("runAiReview with the verifier on (harness path, scripted LLM.stream)", () => {
+  afterEach(() => mock.restore())
+
+  test("the review call and the verifier calls both go through LLM.stream; the status carries the verifier", async () => {
+    const prev = process.env.ALTIMATE_REVIEW_AI_VERIFY
+    process.env.ALTIMATE_REVIEW_AI_VERIFY = "1"
+    try {
+      spyOn(Provider, "defaultModel").mockResolvedValue({ providerID: "fake", modelID: "m" } as any)
+      spyOn(Provider, "getModel").mockResolvedValue(FAKE_MODEL as any)
+      const review = JSON.stringify([
+        {
+          file: "models/fct.sql",
+          line: 11,
+          severity: "warning",
+          category: "sql_correctness",
+          title: "Division drops cents",
+          body: "Integer division truncates `amount`.",
+          confidence: "high",
+        },
+      ])
+      const seen: any[] = []
+      spyOn(LLM, "stream").mockImplementation(async (input: any) => {
+        seen.push(input)
+        const verifier = input.agent.name === "dbt-ai-verifier"
+        const text = verifier
+          ? JSON.stringify([verdict("c1", { verdict: "refuted", evidence: "line 11 casts to numeric first" })])
+          : review
+        return {
+          fullStream: (async function* () {})(),
+          text: Promise.resolve(text),
+          finishReason: Promise.resolve("stop"),
+          response: Promise.resolve({ messages: [{ role: "assistant", content: text }] }),
+          totalUsage: Promise.resolve({ inputTokens: 1_000, outputTokens: 100, totalTokens: 1_100 }),
+          providerMetadata: Promise.resolve(undefined),
+        } as any
+      })
+      const res = await runAiReview({ files: [FILE], grounding: [], evidence: evidence() })
+      expect(seen.map((s) => s.agent.name)).toEqual(["dbt-ai-reviewer", "dbt-ai-verifier"])
+      const v = seen[1]
+      expect(v.toolChoice).toBe("auto")
+      expect(v.agent.temperature).toBe(0)
+      expect(Object.keys(v.tools)).toContain("read_file")
+      expect(v.tools.read_file.execute).toBeUndefined()
+      expect(String(v.messages[0].content)).toContain("title: fct: Division drops cents")
+      expect(res.findings).toHaveLength(0)
+      expect(res.status.verifier).toMatchObject({ state: "ok", turns: 1, reviewed: 1, discarded: 1 })
+      expect(res.status.verifier?.tokens?.inputTotal).toBe(1_000)
+      // The lane's own accounting is unchanged by the verifier.
+      expect(res.status.calls).toBe(1)
+    } finally {
+      if (prev === undefined) delete process.env.ALTIMATE_REVIEW_AI_VERIFY
+      else process.env.ALTIMATE_REVIEW_AI_VERIFY = prev
+    }
   })
 })
