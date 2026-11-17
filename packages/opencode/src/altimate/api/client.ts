@@ -354,12 +354,8 @@ export namespace AltimateApi {
     const url = `${creds.altimateUrl}${endpoint}`
     // Checked here so that only the header check can make fetch throw a TypeError before sending. Only
     // http(s) is sent: "localhost:3000" parses as a URL with the scheme "localhost:".
-    // Credentials in the URL make fetch throw an uncoded TypeError too, so they are refused here.
-    const parsed = URL.canParse(url) ? new URL(url) : undefined
-    if (!parsed || !["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)
-      throw new Error(
-        `API ${method} ${endpoint} could not be sent: the stored API URL is not an http(s) URL without credentials.`,
-      )
+    if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol))
+      throw new Error(`API ${method} ${endpoint} could not be sent: the stored API URL is not an http(s) URL.`)
     // Any body but undefined is sent: null, false, 0 and "" are JSON values too. A body that can't be
     // serialised fails here with its own error, which quotes no credential.
     const payload = body !== undefined ? JSON.stringify(body) : undefined
