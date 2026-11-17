@@ -29,6 +29,9 @@ interface NodeFiles {
 /** The most insights the text of the answer lists; the structured result carries every one. */
 const LISTED_LINES = 100
 
+/** The most bytes of insights the structured result carries. */
+export const RESULT_BYTES = 2 * 1024 * 1024
+
 /** Test seams. */
 export const dbtHealthInternals = {
   /** How long the DataPilot run may take. */
@@ -38,7 +41,7 @@ export const dbtHealthInternals = {
     new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
       const child = execFile(
         python,
-        ["-c", script, ...args],
+        ["-I", "-c", script, ...args],
         { cwd, signal, timeout: dbtHealthInternals.runTimeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
         (error, stdout, stderr) => {
           const code = (error as { code?: unknown } | null)?.code
@@ -157,8 +160,8 @@ async function pythonFor(root: string): Promise<string> {
 // any of its integrations, and its `All` mode would run `dbt docs generate`.
 const SCRIPT = `
 import sys, os
-# Python puts the working folder first on the path; keep the project files from shadowing modules,
-# the standard library ones imported below included.
+# The interpreter runs isolated (-I): no PYTHONPATH, no user site, no working folder on the path. The filter
+# is kept for an interpreter wrapper that adds the working folder anyway.
 sys.path = [p for p in sys.path if p not in ("", os.getcwd())]
 import json, logging
 try:
@@ -171,19 +174,32 @@ except ImportError as e:
     kind = "missing_datapilot" if isinstance(e, ModuleNotFoundError) and getattr(e, "name", None) == "datapilot" else "failed"
     print(json.dumps({"error": kind, "detail": str(e)}))
     sys.exit(0)
+try:
+    from importlib.metadata import version as _version
+    datapilot_version = _version("altimate-datapilot-cli")
+except Exception:
+    datapilot_version = None
 manifest_path, catalog_path, config_path = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     logging.disable(logging.CRITICAL)
     config = load_config(config_path) if config_path else None
+    # The manifest is read once, so the insights and the file paths come from the same version of it.
+    import tempfile
+    with open(manifest_path, "rb") as f:
+        data = f.read()
+    raw = json.loads(data)
+    with tempfile.TemporaryDirectory() as tmp:
+        snapshot = os.path.join(tmp, "manifest.json")
+        with open(snapshot, "wb") as f:
+            f.write(data)
+        manifest = load_manifest(snapshot)
     generator = DBTInsightGenerator(
-        manifest=load_manifest(manifest_path),
+        manifest=manifest,
         catalog=load_catalog(catalog_path) if catalog_path else None,
         config=config,
     )
     reports = generator.run()
     out = {k: [json.loads(i.json()) for i in v] for k, v in reports.get(MODEL, {}).items()}
-    with open(manifest_path) as f:
-        raw = json.load(f)
     nodes = {
         k: {"package": n.get("package_name"), "file": n.get("original_file_path"), "patch": n.get("patch_path")}
         for k, n in raw.get("nodes", {}).items()
@@ -191,7 +207,7 @@ try:
     }
     print(json.dumps({"model_insights": out, "nodes": nodes, "project": (raw.get("metadata") or {}).get("project_name")}))
 except Exception as e:
-    print(json.dumps({"error": "failed", "detail": str(e)}))
+    print(json.dumps({"error": "failed", "detail": str(e), "version": datapilot_version}))
 `
 
 /** A manifest `patch_path` (`package://models/schema.yml`) as the path inside its package. */
@@ -240,7 +256,7 @@ function failure(title: string, output: string, extra: Record<string, unknown> =
 
 export const DbtHealthTool = Tool.define("dbt_health", {
   description:
-    "DataPilot project health insights for the models of the dbt project (hard-coded references, missing tests or documentation, naming and structure issues, and so on). Uses the project's dbt integration (starts it, so it needs write permission) for a fresh manifest, then runs DataPilot (the `altimate-datapilot-cli` Python package, which must be installed in the project's Python) over the manifest, and the catalog when target/catalog.json exists. Returns `insights`: uniqueId, path, name, severity, message and recommendation for each, plus the model's absolute `file` and `properties` file for the project's own models.",
+    "DataPilot project health insights for the models of the dbt project (hard-coded references, missing tests or documentation, naming and structure issues, and so on). Uses the project's dbt integration (starts it, so it needs write permission) for a fresh manifest, then runs DataPilot (the `altimate-datapilot-cli` Python package, which must be installed in the project's Python) over the manifest, and the catalog when target/catalog.json exists. Returns `insights`: uniqueId, path, name, severity, message and recommendation for each, plus the model's absolute `file` and `properties` file for the project's own models. When dbt can't parse the project the answer is a failure with the parse errors (no insights from the last manifest); a failed project check alone is answered from the last good manifest, labelled `stale_manifest`. A very large result is cut at a byte limit: `truncated` is then true, and `total` counts every insight.",
   parameters: z.object({
     config_path: z
       .string()
@@ -259,6 +275,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     // the run; one that leaves only the last good manifest is said so in the answer.
     let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
     let rebuiltAt: number | undefined
+    let parsed_stale_path: string | undefined
     if (typeof adapter.parseManifest === "function") {
       try {
         if (typeof adapter.rebuildManifest === "function") {
@@ -281,6 +298,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         if (parsed?.stale) {
           // The same shape the other dbt tools give a stale manifest.
           const writtenAt = typeof parsed.stale.writtenAt === "number" && Number.isFinite(parsed.stale.writtenAt) ? parsed.stale.writtenAt : undefined
+          parsed_stale_path = typeof parsed.stale.manifestPath === "string" ? parsed.stale.manifestPath : undefined
           stale = {
             message: `The dbt project check failed, so these insights come from the manifest of the last successful parse${writtenAt === undefined ? "" : `, written ${new Date(writtenAt).toISOString()}`}. They may not match the project as it is now.`,
             manifest_path: parsed.stale.manifestPath,
@@ -297,8 +315,10 @@ export const DbtHealthTool = Tool.define("dbt_health", {
           : failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${reason}`)
       }
     }
-    const manifest: string =
+    let manifest: string =
       (typeof adapter.getManifestPath === "function" ? adapter.getManifestPath() : undefined) ?? path.join(root, "target", "manifest.json")
+    // The manifest the adapter read when it fell back to the last good one may sit under a configured target-path.
+    if (stale && typeof parsed_stale_path === "string" && parsed_stale_path) manifest = parsed_stale_path
     if (!fs.existsSync(manifest)) return failure("no manifest", `dbt_health can't run: no manifest at ${manifest}; run dbt parse or dbt compile first.`)
     // The adapter's own watcher can replace this rebuild with one of its own (the replaced one resolves
     // normally and writes nothing): a manifest older than the rebuild this call started is the last one.
@@ -335,7 +355,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       return failure("failed", `dbt_health couldn't run ${python}: ${e instanceof Error ? e.message : String(e)}`)
     }
     // DataPilot may log to stdout: the answer is the last line that parses as the script's answer.
-    let parsed: { error?: string; detail?: string; model_insights?: unknown; nodes?: Record<string, NodeFiles>; project?: string } | undefined
+    let parsed: { error?: string; detail?: string; model_insights?: unknown; nodes?: Record<string, NodeFiles>; project?: string; version?: string | null } | undefined
     let end = run.stdout.length
     while (end > 0 && !parsed) {
       const start = run.stdout.lastIndexOf("\n", end - 1) + 1
@@ -354,7 +374,15 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         `DataPilot isn't installed in ${python}. Install the \`altimate-datapilot-cli\` package into the dbt project's Python (for example \`${python} -m pip install altimate-datapilot-cli\`) and run again.`,
         { missing: "altimate-datapilot-cli", python },
       )
-    if (parsed.error) return failure("failed", `DataPilot failed: ${parsed.detail ?? parsed.error}`)
+    if (parsed.error) {
+      const detail = String(parsed.detail ?? parsed.error)
+      const shown = detail.length > 2000 ? `${detail.slice(0, 2000)}… (${detail.length - 2000} more characters)` : detail
+      const version = parsed.version ? ` (altimate-datapilot-cli ${parsed.version})` : ""
+      const hint = /validation error|invalid manifest/i.test(detail)
+        ? `\nThe installed DataPilot${version} may be too old for this dbt version's manifest: upgrade it with \`${python} -m pip install -U altimate-datapilot-cli\`.`
+        : ""
+      return failure("failed", `DataPilot failed${version}: ${shown}${hint}`)
+    }
     const insightsShape = (v: unknown) =>
       !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((list) => Array.isArray(list))
     if (run.code !== 0 || !insightsShape(parsed.model_insights))
@@ -364,13 +392,24 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     try {
       realRoot = fs.realpathSync(root)
     } catch {}
-    const insights = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project)
+    const all = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project)
+    // The structured result is read by a plugin that accepts at most 4 MiB: keep it well under that.
+    let bytes = 0
+    let keep = 0
+    for (const i of all) {
+      bytes += JSON.stringify(i).length + 1
+      if (bytes > RESULT_BYTES) break
+      keep++
+    }
+    const insights = all.slice(0, keep)
+    const truncated = keep < all.length
     const lines = insights.slice(0, LISTED_LINES).map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
     return {
-      title: `dbt_health: ${insights.length} insight${insights.length === 1 ? "" : "s"}`,
-      metadata: { success: true, insights, catalog: !!catalog, ...(stale ? { stale_manifest: stale } : {}) },
+      title: `dbt_health: ${all.length} insight${all.length === 1 ? "" : "s"}`,
+      metadata: { success: true, insights, catalog: !!catalog, ...(truncated ? { truncated: true, total: all.length } : {}), ...(stale ? { stale_manifest: stale } : {}) },
       output: [
         stale?.message,
+        truncated ? `The result is cut at ${keep} of ${all.length} insights (size limit); \`insights\` holds those.` : undefined,
         insights.length ? lines.join("\n") : "No health insights.",
         insights.length > LISTED_LINES ? `…and ${insights.length - LISTED_LINES} more insights, all in the \`insights\` of the CLI's --json output.` : undefined,
       ]

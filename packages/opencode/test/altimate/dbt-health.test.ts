@@ -8,7 +8,7 @@ import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
-import { DbtHealthTool, dbtHealthInternals, flattenInsights } from "@/altimate/tools/dbt-health"
+import { DbtHealthTool, dbtHealthInternals, flattenInsights, RESULT_BYTES } from "@/altimate/tools/dbt-health"
 import { resultFailed } from "@/altimate/mcp-server/adapter"
 import { initTool } from "./tool-fixture"
 
@@ -404,16 +404,49 @@ describe("dbt_health", () => {
     expect(parses).toBe(1)
     expect(order).toEqual(["rebuild", "parse", "python"])
     expect(fresh.metadata.stale_manifest).toBeUndefined()
-    parsed = { stale: { writtenAt: Date.UTC(2026, 0, 2, 3, 4, 5), manifestPath: "x" } }
+    // A project with `target-path: build`: the last good manifest sits outside target/.
+    const built = path.join(project, "build", "manifest.json")
+    await mkdir(path.dirname(built), { recursive: true })
+    await writeFile(built, "{}")
+    parsed = { stale: { writtenAt: Date.UTC(2026, 0, 2, 3, 4, 5), manifestPath: built } }
     const old = await run()
+    expect(python.calls.at(-1)!.args[0]).toBe(built)
     expect(old.metadata.success).toBe(true)
     expect(old.metadata.stale_manifest).toMatchObject({
       message: "The dbt project check failed, so these insights come from the manifest of the last successful parse, written 2026-01-02T03:04:05.000Z. They may not match the project as it is now.",
-      manifest_path: "x",
+      manifest_path: built,
       written_at: "2026-01-02T03:04:05.000Z",
     })
     expect((old.metadata.stale_manifest as { age_seconds: number }).age_seconds).toBeGreaterThan(0)
     expect(old.output.split("\n")[0]).toContain("last successful parse")
+  })
+
+  test("a result over the byte limit is cut, with the total said", async () => {
+    const big = "x".repeat(40_000)
+    const many = Object.fromEntries(
+      Array.from({ length: 100 }, (_, n) => [
+        `model.shop.m${n}`,
+        [{ unique_id: `model.shop.m${n}`, original_file_path: `models/m${n}.sql`, severity: "WARNING", insight: { name: "Big", message: big, recommendation: "" } }],
+      ]),
+    )
+    python.stdout = JSON.stringify({ model_insights: many, nodes: {}, project: "shop" }) + "\n"
+    const result = await run()
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.truncated).toBe(true)
+    expect(result.metadata.total).toBe(100)
+    expect(result.metadata.insights.length).toBeLessThan(100)
+    expect(JSON.stringify(result.metadata.insights).length).toBeLessThanOrEqual(RESULT_BYTES)
+    expect(result.title).toBe("dbt_health: 100 insights")
+  })
+
+  test("a DataPilot failure is capped, names the version, and hints an upgrade for a manifest it rejects", async () => {
+    python.stdout = JSON.stringify({ error: "failed", detail: "Invalid manifest file " + "e".repeat(5000), version: "0.2.0" }) + "\n"
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("altimate-datapilot-cli 0.2.0")
+    expect(result.output).toContain("more characters")
+    expect(result.output).toContain("pip install -U altimate-datapilot-cli")
+    expect(result.output.length).toBeLessThan(2600)
   })
 
   test("does not run DataPilot when the project can't be parsed", async () => {
@@ -460,7 +493,8 @@ describe("dbt_health", () => {
       const saved = process.env.PYTHONPATH
       process.env.PYTHONPATH = pythonPath
       try {
-        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originalRun(py, script, args, cwd, signal)
+        // The interpreter runs isolated, so PYTHONPATH is not read: the stub folder is added to the path inside the process.
+        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originalRun(py, `import sys\nsys.path.append(${JSON.stringify(pythonPath)})\n${script}`, args, cwd, signal)
         return await run()
       } finally {
         if (saved === undefined) delete process.env.PYTHONPATH
@@ -543,7 +577,7 @@ describe("dbt_health", () => {
   })
 
   test("an unreadable written-at time of the old manifest is left out, not a throw", async () => {
-    parsed = { stale: { writtenAt: Number.NaN, manifestPath: "x" } }
+    parsed = { stale: { writtenAt: Number.NaN, manifestPath: path.join(project, "target", "manifest.json") } }
     const result = await run()
     expect(result.metadata.success).toBe(true)
     expect(result.metadata.stale_manifest.written_at).toBeUndefined()
@@ -669,7 +703,7 @@ describe("dbt_health", () => {
       const saved = process.env.PYTHONPATH
       process.env.PYTHONPATH = pkg
       try {
-        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originals.runPython(py, script, args, cwd, signal)
+        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originals.runPython(py, `import sys\nsys.path.append(${JSON.stringify(pkg)})\n${script}`, args, cwd, signal)
         dbtAdapterInternals.create = async () => ({ isInitialized: () => true, getProjectRoot: () => dir, parseManifest: async () => parsed })
         const result = await run()
         expect(result.output).not.toContain("json.py")
