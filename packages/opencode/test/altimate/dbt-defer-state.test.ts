@@ -51,6 +51,27 @@ describe("dbt_defer_state", () => {
     })
   })
 
+  test("a settings file with a byte order mark is read like one without", async () => {
+    write(".vscode/settings.json", "\uFEFF" + JSON.stringify({ "dbt.deferConfigPerProject": { analytics: { deferToProduction: true, manifestPathForDeferral: "${workspaceFolder}/prod-state" } } }))
+    const result = await resolveDeferState(path.join(root, "analytics"))
+    expect(result).toMatchObject({ enabled: true, mode: "local" })
+  })
+
+  test("a profile that inherits its target and outputs through a YAML merge key keeps them", async () => {
+    write("profiles/profiles.yml", "base: &base\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\nshop:\n  <<: *base\n")
+    settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${workspaceFolder}/prod-state" } })
+    const result = await resolveDeferState(path.join(root, "analytics"))
+    expect(result.defaultTarget).toBe("dev")
+    expect(result.targets).toEqual(["dev"])
+  })
+
+  test("a profile with an output named default and no target runs that output, as dbt does", async () => {
+    write("profiles/profiles.yml", "shop:\n  outputs:\n    default:\n      type: duckdb\n    prod:\n      type: duckdb\n")
+    settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${workspaceFolder}/prod-state" } })
+    const result = await resolveDeferState(path.join(root, "analytics"))
+    expect(result.defaultTarget).toBe("default")
+  })
+
   test("defer off still returns the configured state dir, so a session can switch it on", async () => {
     settings({ analytics: { deferToProduction: false, manifestPathForDeferral: "${workspaceFolder}/prod-state" } })
     const result = await resolveDeferState(path.join(root, "analytics"))

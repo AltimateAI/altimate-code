@@ -60,6 +60,8 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ENOTDIR" ? undefined : UNREADABLE
   }
+  // VS Code reads a file with a leading byte order mark as it reads one without.
+  text = text.replace(/^\uFEFF/, "")
   // An empty or whitespace-only file is a settings file with nothing in it.
   if (text.trim() === "") return {}
   const errors: ParseError[] = []
@@ -140,7 +142,8 @@ function profilesFile(projectDir: string): string | undefined {
 
 async function parseYaml(text: string): Promise<any> {
   const mod = await import("yaml")
-  return (mod.default ?? mod).parse(text)
+  // dbt reads YAML with PyYAML, which merges `<<` keys.
+  return (mod.default ?? mod).parse(text, { merge: true })
 }
 
 /** The project's profile name, that profile's default `target` and its output names. */
@@ -161,8 +164,10 @@ export async function readProfileTargets(projectDir: string) {
     const profile = profiles?.[out.profile]
     if (profile && typeof profile === "object") {
       const target = resolveEnvVars(profile.target)
-      if (typeof target === "string" && target !== "") out.defaultTarget = target
       if (profile.outputs && typeof profile.outputs === "object") out.targets = Object.keys(profile.outputs)
+      if (typeof target === "string" && target !== "") out.defaultTarget = target
+      // With no `target`, dbt runs the output named "default".
+      else if (profile.target === undefined && out.targets.includes("default")) out.defaultTarget = "default"
     }
   } catch {
     // An unreadable profiles.yml leaves the target unknown.
