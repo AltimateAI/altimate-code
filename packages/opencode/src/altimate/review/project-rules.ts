@@ -448,6 +448,33 @@ export function quickstartModelFindings(
   ]
 }
 
+// ── package-lock.yml ────────────────────────────────────────────────────────
+
+/** True when the dbt project at `dir` is a package others install: it carries an
+ *  `integration_tests/` project, or its `dbt_project.yml` names no profile. */
+export function isPackageProject(projectYml: string | undefined, integrationTestsYml: string | undefined): boolean {
+  if (integrationTestsYml) return true
+  const doc = parseYaml(projectYml)
+  return !!doc && typeof doc === "object" && !doc.profile
+}
+
+/** `package-lock.yml` added to a package: it pins the package's own dev dependencies, which
+ *  projects installing the package never read, and drifts from `packages.yml` ranges. */
+export function packageLockFindings(file: ChangedFile, isPackage: boolean): Finding[] {
+  if (!/(^|\/)package-lock\.yml$/.test(file.path) || file.status !== "added" || !isPackage) return []
+  return [
+    finding(
+      file,
+      "package-lock-in-package",
+      "suggestion",
+      "materialization",
+      "`package-lock.yml` committed in a dbt package",
+      "This repository is a dbt package (it has an `integration_tests/` project or no `profile:`). Projects that install it resolve their own dependencies and never read this lock file, while it pins the package's development installs to versions that drift from the `packages.yml` ranges. Leave it out (add it to `.gitignore`) unless the package deliberately locks its CI.",
+      addedLines(file.diff)[0],
+    ),
+  ]
+}
+
 // ── doc() references ────────────────────────────────────────────────────────
 
 const DOC_REF = /\bdoc\s*\(\s*['"](\w+)['"]\s*\)/g

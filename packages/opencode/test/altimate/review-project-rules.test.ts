@@ -10,6 +10,7 @@ import {
   literalNullColumns,
   missingRefFindings,
   modelConfigFindings,
+  packageLockFindings,
   packagesFindings,
   quickstartModelFindings,
   testWindowFindings,
@@ -622,5 +623,27 @@ describe("doc() reference with no docs block", () => {
     })
     expect(ruleIds(env.findings)).toContain("dbt-project-rules:doc-block-missing")
     expect(searched).toContain("docs audience_id *.md")
+  })
+})
+
+describe("package-lock.yml added to a dbt package", () => {
+  const lock = "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\nsha1_hash: abc\n"
+  const run = (tree: Record<string, string>) =>
+    prReview([{ path: "package-lock.yml", status: "added", head: lock }], { tree })
+  test("a package (integration_tests project present): fires on the file's first line", async () => {
+    const env = await run({ "dbt_project.yml": "name: pkg\nprofile: dev\n", "integration_tests/dbt_project.yml": "name: pkg_tests\nprofile: ci\n" })
+    const f = env.findings.find((x) => x.rule === "dbt-project-rules:package-lock-in-package")!
+    expect(f.file).toBe("package-lock.yml")
+    expect((f.evidence!.result as { line?: string }).line).toBe("packages:")
+    expect((env.scope?.notReviewed ?? []).map((n) => n.path)).not.toContain("package-lock.yml")
+  })
+  test("a package with no profile and no integration tests also counts", async () => {
+    expect(ruleIds((await run({ "dbt_project.yml": "name: pkg\n" })).findings)).toContain("dbt-project-rules:package-lock-in-package")
+  })
+  test("twin: an application project (profile, no integration_tests) commits its lock file", async () => {
+    expect(ruleIds((await run({ "dbt_project.yml": "name: app\nprofile: warehouse\n" })).findings)).not.toContain("dbt-project-rules:package-lock-in-package")
+  })
+  test("a lock file that was already committed (modified) is not this change", () => {
+    expect(packageLockFindings({ path: "package-lock.yml", status: "modified", diff: plus(lock) }, true)).toHaveLength(0)
   })
 })
