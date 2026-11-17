@@ -334,7 +334,7 @@ export namespace AltimateApi {
    */
   function sendFailure(e: unknown): string {
     if (e instanceof TypeError)
-      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+      return "the request was refused before it was sent (TypeError)."
     const word = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined)
     const name = (e instanceof Error && word(e.name)) || "Error"
     const code = word((e as { code?: unknown } | null)?.code)

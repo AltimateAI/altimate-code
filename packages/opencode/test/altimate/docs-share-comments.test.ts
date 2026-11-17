@@ -2,12 +2,13 @@
 // resolving, which a read-only call refuses. The backend is replaced at AltimateApi.apiRequest, so
 // these tests send nothing and need no stored credentials.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
+import { Instance } from "@/project/instance"
 import { AltimateApi } from "@/altimate/api/client"
 import { listSharedDocs, replyToThread, resolveThread } from "@/altimate/api/docs-share"
 import { DocsShareCommentsTool, openThreads, userName } from "@/altimate/tools/docs-share-comments"
@@ -156,16 +157,74 @@ describe("docs_share_comments list", () => {
     }
   })
 
-  test("an unknown thread status does not fail the list and is not open", async () => {
+  test("an unknown thread status is an error, never 'no open threads'", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     const group = SHARES[0]!.conversation_group[0]!
     answer = (endpoint) =>
       endpoint.startsWith("/dbt/dbt_docs_share/all")
-        ? [{ ...SHARES[0], conversation_group: [{ ...group, status: "Archived" }, { ...group, conversation_group_id: 99 }] }]
+        ? [{ ...SHARES[0], conversation_group: [{ ...group, status: "Pendng" }] }]
         : undefined
     const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
-    expect(result.metadata.success).toBe(true)
-    expect((result.metadata as any).threads.map((t: any) => t.group_id)).toEqual([99])
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("unexpected answer")
+  })
+
+  test("a thread with a partial range keeps the list and loses only its line", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    for (const range of [{ end: { line: 1, character: 1 } }, {}]) {
+      answer = (endpoint) =>
+        endpoint.startsWith("/dbt/dbt_docs_share/all")
+          ? [{ ...SHARES[0], conversation_group: [group, { ...group, conversation_group_id: 50, meta: { filePath: "m.sql", range } }] }]
+          : undefined
+      const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+      expect(result.metadata.success).toBe(true)
+      const threads = (result.metadata as any).threads
+      expect(threads.map((t: any) => t.group_id)).toEqual([11, 50])
+      expect(threads[1].range).toBeUndefined()
+    }
+  })
+
+  test("threads and messages come in a fixed order, and metadata is cleaned and bounded", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    const msg = (id: number, ts: string, message = "m") => ({ conversation_id: id, user_id: 1, timestamp: ts, message })
+    const many = Array.from({ length: 150 }, (_, i) => msg(1000 + i, `2026-11-01T10:00:${String(i % 60).padStart(2, "0")}Z`))
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? [
+            {
+              ...SHARES[0],
+              conversation_group: [
+                { ...group, conversation_group_id: 30, conversations: [msg(2, "2026-11-01T11:00:00Z"), msg(1, "2026-11-01T10:00:00Z")] },
+                { ...group, conversation_group_id: 20, conversations: [msg(5, "t", `x\u001b[31m${"y".repeat(100000)}`)] },
+                { ...group, conversation_group_id: 40, conversations: many },
+              ],
+            },
+          ]
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    const threads = (result.metadata as any).threads
+    expect(threads.map((t: any) => t.group_id)).toEqual([20, 30, 40])
+    expect(threads[1].messages.map((m: any) => m.id)).toEqual([1, 2])
+    expect(threads[0].messages[0].text).not.toContain("\u001b")
+    expect(threads[0].messages[0].text.length).toBeLessThanOrEqual(2001)
+    expect(threads[2].messages).toHaveLength(100)
+    expect((result.metadata as any).truncated).toBe(true)
+  })
+
+  test("a call cancelled while the people are loaded does not report success", async () => {
+    const controller = new AbortController()
+    const tool = await initTool(DocsShareCommentsTool)
+    ;(AltimateApi.apiRequest as any).mockImplementation(async (_m: string, endpoint: string) => {
+      if (endpoint === "/users/chat") {
+        controller.abort()
+        throw new Error("aborted")
+      }
+      return SHARES
+    })
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, { ...ctx, abort: controller.signal })
+    expect(result.metadata.success).toBe(false)
   })
 
   test("a paginated answer is unwrapped, and a share without name or project_name still lists", async () => {
@@ -195,7 +254,7 @@ describe("docs_share_comments list", () => {
   test("a failed reply says it may have been posted and to list first", async () => {
     failOn = "/conversation"
     const tool = await initTool(DocsShareCommentsTool)
-    const result = await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
+    const result = await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("may already have been posted")
     expect(result.output).toContain("list")
@@ -269,6 +328,42 @@ describe("docs_share_comments list", () => {
     }
   })
 
+  test("a project under dbt_packages is not the session's project, and a templated name is refused", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "docs-share-"))
+    const cwd = process.cwd()
+    try {
+      await writeFile(path.join(dir, "dbt_project.yml"), "name: 'jaffle_shop'\n")
+      const pkg = path.join(dir, "dbt_packages", "dbt_utils")
+      await mkdir(pkg, { recursive: true })
+      await writeFile(path.join(pkg, "dbt_project.yml"), "name: 'dbt_utils'\n")
+      process.chdir(pkg)
+      const tool = await initTool(DocsShareCommentsTool)
+      expect((await tool.execute({ action: "list" }, ctx)).metadata.project).toBe("jaffle_shop")
+      await writeFile(path.join(dir, "dbt_project.yml"), `name: "{{ env_var('P') }}"\n`)
+      process.chdir(dir)
+      calls = []
+      const refused = await tool.execute({ action: "list" }, ctx)
+      expect(refused.metadata.error).toBe("no_project")
+      expect(calls).toEqual([])
+    } finally {
+      process.chdir(cwd)
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the default project comes from the instance directory, not the process cwd", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "docs-share-"))
+    try {
+      await writeFile(path.join(dir, "dbt_project.yml"), "name: 'instance_proj'\n")
+      const tool = await initTool(DocsShareCommentsTool)
+      const result = await Instance.provide({ directory: dir, fn: () => tool.execute({ action: "list" }, ctx) })
+      expect(result.metadata.project).toBe("instance_proj")
+      expect(calls[0].endpoint).toBe("/dbt/dbt_docs_share/all?projects=instance_proj")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test("says so when there is no project name to ask for", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "docs-share-"))
     const cwd = process.cwd()
@@ -299,15 +394,15 @@ describe("docs_share_comments reply and resolve", () => {
       },
     )
     await tool.execute({ action: "list", project: "shop" }, ctx)
-    await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
-    await tool.execute({ action: "resolve", share_id: 7, group_id: 11 }, ctx)
-    expect(seen).toHaveLength(4)
+    await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
+    await tool.execute({ action: "resolve", project: "jaffle_shop", share_id: 7, group_id: 11 }, ctx)
+    expect(seen).toHaveLength(6)
     for (const signal of seen) expect(signal).toBe(ctx.abort)
   })
 
   test("a read-only call refuses reply and sends nothing", async () => {
     const tool = await initTool(DocsShareCommentsTool)
-    const result = await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "Thanks" }, readOnly)
+    const result = await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "Thanks" }, readOnly)
     expect(result.metadata).toMatchObject({ success: false, error: "read_only" })
     expect(result.output).toContain("--allow-write")
     expect(calls).toEqual([])
@@ -315,7 +410,7 @@ describe("docs_share_comments reply and resolve", () => {
 
   test("a read-only call refuses resolve and sends nothing", async () => {
     const tool = await initTool(DocsShareCommentsTool)
-    const result = await tool.execute({ action: "resolve", share_id: 7, group_id: 11 }, readOnly)
+    const result = await tool.execute({ action: "resolve", project: "jaffle_shop", share_id: 7, group_id: 11 }, readOnly)
     expect(result.metadata).toMatchObject({ success: false, error: "read_only" })
     expect(calls).toEqual([])
   })
@@ -323,7 +418,7 @@ describe("docs_share_comments reply and resolve", () => {
   test("a plan-mode call is read-only too", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     const result = await tool.execute(
-      { action: "reply", share_id: 7, group_id: 11, text: "x" },
+      { action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "x" },
       { ...ctx, agent: "plan" },
     )
     expect(result.metadata.error).toBe("read_only")
@@ -332,9 +427,10 @@ describe("docs_share_comments reply and resolve", () => {
 
   test("reply posts the trimmed text to the thread", async () => {
     const tool = await initTool(DocsShareCommentsTool)
-    const result = await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "  Gross is fine.  " }, ctx)
+    const result = await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "  Gross is fine.  " }, ctx)
     expect(result.metadata.success).toBe(true)
     expect(calls).toEqual([
+      { method: "GET", endpoint: "/dbt/dbt_docs_share/all?projects=jaffle_shop", body: undefined },
       {
         method: "POST",
         endpoint: "/dbt/dbt_docs_share/7/conversation_group/11/conversation",
@@ -345,17 +441,30 @@ describe("docs_share_comments reply and resolve", () => {
 
   test("resolve posts to the thread's resolve endpoint", async () => {
     const tool = await initTool(DocsShareCommentsTool)
-    const result = await tool.execute({ action: "resolve", share_id: 7, group_id: 11 }, ctx)
+    const result = await tool.execute({ action: "resolve", project: "jaffle_shop", share_id: 7, group_id: 11 }, ctx)
     expect(result.metadata.success).toBe(true)
     expect(calls).toEqual([
+      { method: "GET", endpoint: "/dbt/dbt_docs_share/all?projects=jaffle_shop", body: undefined },
       { method: "POST", endpoint: "/dbt/dbt_docs_share/7/conversation_group/11/resolve", body: { resolved: true } },
     ])
+  })
+
+  test("a thread that is not an open thread of the share is refused before anything is posted", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    for (const [share_id, group_id] of [[8, 11], [7, 99], [7, 12]]) {
+      for (const action of ["reply", "resolve"] as const) {
+        calls = []
+        const result = await tool.execute({ action, project: "jaffle_shop", share_id, group_id, text: "x" }, ctx)
+        expect(result.metadata).toMatchObject({ success: false, error: "unknown_thread" })
+        expect(calls.every((c) => c.method === "GET")).toBe(true)
+      }
+    }
   })
 
   test("asks for the ids and the text before sending anything", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     expect((await tool.execute({ action: "reply", text: "x" }, ctx)).metadata.error).toBe("missing_ids")
-    expect((await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "   " }, ctx)).metadata.error).toBe(
+    expect((await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "   " }, ctx)).metadata.error).toBe(
       "missing_text",
     )
     expect(calls).toEqual([])
@@ -370,8 +479,8 @@ describe("docs_share_comments reply and resolve", () => {
       endpoint.includes("/conversation") || endpoint.includes("/resolve") ? (body ?? null) : undefined
     const tool = await initTool(DocsShareCommentsTool)
     for (const args of [
-      { action: "reply" as const, share_id: 7, group_id: 11, text: "Thanks" },
-      { action: "resolve" as const, share_id: 7, group_id: 11 },
+      { action: "reply" as const, project: "jaffle_shop", share_id: 7, group_id: 11, text: "Thanks" },
+      { action: "resolve" as const, project: "jaffle_shop", share_id: 7, group_id: 11 },
     ]) {
       const result = await tool.execute(args, ctx)
       expect(result.metadata).toMatchObject({ success: false, error: "not_accepted" })
@@ -382,7 +491,7 @@ describe("docs_share_comments reply and resolve", () => {
   test("reports a backend refusal without throwing", async () => {
     failOn = "/resolve"
     const tool = await initTool(DocsShareCommentsTool)
-    const result = await tool.execute({ action: "resolve", share_id: 7, group_id: 11 }, ctx)
+    const result = await tool.execute({ action: "resolve", project: "jaffle_shop", share_id: 7, group_id: 11 }, ctx)
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("status 500")
   })
@@ -394,6 +503,13 @@ describe("helpers and exposure", () => {
     expect(userName(USERS, 2)).toBe("Grace Hopper")
     // A colleague's email is never used as the name that reaches the model.
     expect(userName([{ id: 5, email: "x@example.com" }], 5)).toBe("user 5")
+    // `display_name` holds the email for a user without a name, and a "." for a name two users share.
+    const ada = { id: 12, display_name: "Ada.ada@example.com", first_name: "Ada", email: "ada@example.com" }
+    expect(userName([ada], 12)).toBe("Ada")
+    expect(userName([{ id: 6, display_name: "ada@example.com", email: "ada@example.com" }], 6)).toBe("user 6")
+    const twin = { id: 13, first_name: "Ada" }
+    expect(userName([ada, twin], 12)).toBe("Ada (user 12)")
+    expect(userName([ada, twin], 13)).toBe("Ada (user 13)")
     expect(userName([], 5)).toBe("user 5")
   })
 

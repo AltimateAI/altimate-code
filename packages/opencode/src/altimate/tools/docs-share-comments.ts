@@ -1,3 +1,4 @@
+import path from "node:path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { projectRoot } from "../native/connections/registry"
@@ -27,48 +28,76 @@ export interface OpenThread {
   messages: { id: number; user_id: number; author: string; at: string; text: string }[]
 }
 
+const MAX_THREADS = 200
+const MAX_MESSAGES = 100
+
+const fullName = (u: DocsShareUser) => [u.first_name, u.last_name].filter(Boolean).join(" ").trim()
+
+/**
+ * Who wrote a message: the first and last name, and the user id when two people share it. Never
+ * `display_name` or `email`: the service fills `display_name` with the email of a user without a name.
+ */
 export function userName(users: DocsShareUser[], id: number): string {
   const u = users.find((x) => x.id === id)
-  if (!u) return `user ${id}`
-  const full = [u.first_name, u.last_name].filter(Boolean).join(" ")
-  return u.display_name || full || `user ${id}`
+  const full = u ? fullName(u) : ""
+  if (!full) return `user ${id}`
+  return users.some((x) => x.id !== id && fullName(x) === full) ? `${full} (user ${id})` : full
 }
 
 /** The open ("Pending") threads of the shares, with each message's author named. */
 export function openThreads(shares: DocsShare[], users: DocsShareUser[]): OpenThread[] {
+  const clean = (v: string | undefined) => (v === undefined ? undefined : oneLine(v))
   const out: OpenThread[] = []
   for (const share of shares) {
     for (const group of share.conversation_group) {
       if (group.status !== "Pending") continue
       out.push({
         share_id: share.share_id,
-        share_name: share.name ?? "",
-        project: share.project_name ?? "",
+        share_name: oneLine(share.name ?? ""),
+        project: oneLine(share.project_name ?? ""),
         group_id: group.conversation_group_id,
-        file_path: group.meta?.filePath,
-        unique_id: group.meta?.uniqueId,
-        column: group.meta?.column,
-        field: group.meta?.field,
-        highlight: group.meta?.highlight,
+        file_path: clean(group.meta?.filePath),
+        unique_id: clean(group.meta?.uniqueId),
+        column: clean(group.meta?.column),
+        field: clean(group.meta?.field),
+        highlight: clean(group.meta?.highlight),
         range: group.meta?.range ?? undefined,
-        messages: group.conversations.map((m) => ({
-          id: m.conversation_id,
-          user_id: m.user_id,
-          author: userName(users, m.user_id),
-          at: m.timestamp,
-          text: m.message,
-        })),
+        // The service gives no order: oldest first, the newest MAX_MESSAGES kept.
+        messages: [...group.conversations]
+          .sort((a, b) => (Date.parse(a.timestamp) || 0) - (Date.parse(b.timestamp) || 0) || a.conversation_id - b.conversation_id)
+          .slice(-MAX_MESSAGES)
+          .map((m) => ({
+            id: m.conversation_id,
+            user_id: m.user_id,
+            author: oneLine(userName(users, m.user_id)),
+            at: oneLine(m.timestamp),
+            text: oneLine(m.message),
+          })),
       })
     }
   }
-  return out
+  return out.sort((a, b) => a.share_id - b.share_id || a.group_id - b.group_id)
 }
+
+const LAG_NOTE =
+  "list can lag up to five minutes behind a post, so wait before running it to check, and do not post again until it shows the result."
 
 function notAccepted(action: "reply" | "resolve") {
   return failure(
     `docs_share_comments: ${action} not accepted`,
-    `The shared docs service did not confirm the ${action}: it may or may not have been posted. Run list to check before trying again.`,
+    `The shared docs service did not confirm the ${action}: it may or may not have been posted. ${LAG_NOTE}`,
     "not_accepted",
+  )
+}
+
+const SCOPE_NOTE =
+  "This lists the shares you own and the threads you are tagged in, not every share of the project, and it can lag up to five minutes behind a post."
+
+function noProject(problem?: string) {
+  return failure(
+    "docs_share_comments: no project",
+    problem ?? "No dbt project name: pass `project`, or run in a session whose project directory holds a dbt project.",
+    "no_project",
   )
 }
 
@@ -107,15 +136,30 @@ function formatThreads(threads: OpenThread[]): string {
   return lines.join("\n")
 }
 
+/** The dbt project the call is about: `project`, else the session's own dbt project (never one under `dbt_packages`). */
+async function resolveProject(project: string | undefined): Promise<{ name?: string; problem?: string }> {
+  if (project) return { name: project }
+  let info = await detectDbtProject(projectRoot())
+  const marker = `${path.sep}dbt_packages${path.sep}`
+  if (info.found && info.path && `${info.path}${path.sep}`.includes(marker)) {
+    info = await detectDbtProject(info.path.slice(0, info.path.indexOf(marker)) || path.sep)
+  }
+  if (!info.name) return {}
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(info.name)) {
+    return { problem: "the project's name in dbt_project.yml is not a plain name (is it a template?): pass `project`." }
+  }
+  return { name: info.name }
+}
+
 export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
   description:
-    "Comment threads on shared dbt docs: `list` the open threads for a dbt project (with the people's names), `reply` to a thread, or `resolve` it. `reply` and `resolve` post to the shared docs under the signed-in user's name and need write permission; a read-only call refuses them.",
+    "Comment threads on shared dbt docs: `list` the open threads for a dbt project (with the people's names; only the shares you own and the threads you are tagged in, and it can lag up to five minutes behind a post), `reply` to a thread, or `resolve` it. `reply` and `resolve` post to the shared docs under the signed-in user's name and need write permission; a read-only call refuses them.",
   parameters: z.object({
     action: z.enum(["list", "reply", "resolve"]).describe("What to do"),
     project: z
       .string()
       .optional()
-      .describe("dbt project name the shared docs belong to (default: the project holding the working directory)"),
+      .describe("dbt project name the shared docs belong to (default: the dbt project of this session's project directory)"),
     share_id: z.number().int().optional().describe("Shared docs id (reply, resolve)"),
     group_id: z.number().int().optional().describe("Comment thread id (reply, resolve)"),
     text: z.string().optional().describe("Reply text (reply)"),
@@ -123,20 +167,23 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
   async execute(args, ctx) {
     if (args.action === "list") {
       try {
-        const project = args.project ?? (await detectDbtProject(projectRoot())).name
-        if (!project) {
-          return failure(
-            "docs_share_comments: no project",
-            "No dbt project name: pass `project`, or run from inside a dbt project.",
-            "no_project",
-          )
-        }
-        const [shares, users] = await Promise.all([listSharedDocs([project], ctx.abort), listTenantUsers(ctx.abort).catch(() => [])])
-        const threads = openThreads(shares, users)
+        const { name: project, problem } = await resolveProject(args.project)
+        if (!project) return noProject(problem)
+        const [shares, users] = await Promise.all([
+          listSharedDocs([project], ctx.abort),
+          listTenantUsers(ctx.abort).catch((error) => {
+            // The names are optional; a cancelled call is not.
+            if (ctx.abort.aborted) throw error
+            return []
+          }),
+        ])
+        const all = openThreads(shares, users)
+        const threads = all.slice(0, MAX_THREADS)
+        const truncated = threads.length < all.length || all.some((t) => t.messages.length >= MAX_MESSAGES)
         return {
-          title: `Comments: ${threads.length} open`,
-          metadata: { success: true, project, count: threads.length, threads },
-          output: formatThreads(threads),
+          title: `Comments: ${all.length} open`,
+          metadata: { success: true, project, count: all.length, truncated, threads },
+          output: `${formatThreads(threads)}${truncated ? `\nShowing the first ${MAX_THREADS} threads and the newest ${MAX_MESSAGES} messages of each.` : ""}\n${SCOPE_NOTE}`,
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -160,10 +207,29 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         "missing_ids",
       )
     }
+    if (args.action === "reply" && !args.text?.trim()) {
+      return failure("docs_share_comments: reply", "reply needs non-empty text.", "missing_text")
+    }
     try {
+      // The service accepts any pair of ids, and stores a reply where nobody reads it when the thread is
+      // not on the share: check the pair against the project's open threads first.
+      const { name: project, problem } = await resolveProject(args.project)
+      if (!project) return noProject(problem)
+      const shares = await listSharedDocs([project], ctx.abort)
+      const known = shares.some(
+        (s) =>
+          s.share_id === args.share_id &&
+          s.conversation_group.some((g) => g.conversation_group_id === args.group_id && g.status === "Pending"),
+      )
+      if (!known) {
+        return failure(
+          `docs_share_comments: ${args.action}`,
+          `Thread ${args.group_id} is not an open thread of share ${args.share_id} in project ${project}: nothing was sent. Run list for the ids.`,
+          "unknown_thread",
+        )
+      }
       if (args.action === "reply") {
-        const text = args.text?.trim()
-        if (!text) return failure("docs_share_comments: reply", "reply needs non-empty text.", "missing_text")
+        const text = args.text!.trim()
         const res = await replyToThread(args.share_id, args.group_id, text, ctx.abort)
         if (res?.ok !== true) return notAccepted("reply")
         return {
@@ -183,7 +249,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
       const msg = e instanceof Error ? e.message : String(e)
       return failure(
         "docs_share_comments: ERROR",
-        `Could not ${args.action === "reply" ? "reply to" : "resolve"} the thread: ${msg}. The ${args.action} may already have been posted: run list to check before trying again.`,
+        `Could not ${args.action === "reply" ? "reply to" : "resolve"} the thread: ${msg}. The ${args.action} may already have been posted. ${LAG_NOTE}`,
         msg,
       )
     }

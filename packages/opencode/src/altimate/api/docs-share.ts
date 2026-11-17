@@ -19,8 +19,8 @@ export interface DocsShareRange {
 export interface DocsShareThread {
   conversation_group_id: number
   owner?: number
-  /** "Pending" is open; any other value (e.g. "Resolved") is closed. */
-  status: string
+  /** "Pending" is open; "Resolved" is closed. */
+  status: "Pending" | "Resolved"
   meta?: {
     field?: "description"
     column?: string
@@ -63,8 +63,11 @@ const SharesAnswer = z.array(
     conversation_group: z.array(
       z.object({
         conversation_group_id: z.number(),
-        status: z.string(),
-        meta: z.object({ range: Range.nullish() }).passthrough().nullish(),
+        // The backend's status is a closed set: a value outside it is an error, never "no open threads".
+        status: z.enum(["Pending", "Resolved"]),
+        // A range that is partial (the editor extension can store one without a start) drops the
+        // line of the thread, never the thread or the list.
+        meta: z.object({ range: Range.nullish().catch(undefined) }).passthrough().nullish(),
         conversations: z.array(
           z.object({ conversation_id: z.number(), message: z.string(), timestamp: z.string(), user_id: z.number() }),
         ),
