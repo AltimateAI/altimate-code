@@ -274,4 +274,17 @@ describe("dbt_cost_estimate", () => {
     expect(result.metadata.bytes).toBeUndefined()
     expect(result.output).toContain('"lots"')
   })
+
+  test("escapes quotes and backslashes for the integrations that write the SQL into a Jinja argument", async () => {
+    useAdapter(calls)
+    await (await initTool(DbtCostEstimateTool)).execute({ sql: "where s = 'a\\b'" }, ctx)
+    expect(calls.dryRuns).toEqual(["compiled(where s = \\'a\\\\b\\')"])
+  })
+
+  test("hands the SQL to the Python bridge as is", async () => {
+    useAdapter(calls)
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "python3", dbtIntegration: "core", queryLimit: 500 })
+    await (await initTool(DbtCostEstimateTool)).execute({ sql: "where s = 'a'" }, ctx)
+    expect(calls.dryRuns).toEqual(["compiled(where s = 'a')"])
+  })
 })

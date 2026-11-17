@@ -2,6 +2,15 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { dbtAdapterFor } from "./dbt-adapter-access"
 
+/**
+ * Every dbt integration but the Python bridge writes the SQL into a `{{ validate_sql('...') }}` Jinja
+ * argument, so a quote or backslash in it must be escaped or any filter on a string breaks the dry run.
+ * The bridge binds the SQL as a parameter and takes it as is.
+ */
+export function forDryRun(sql: string, integration: unknown): string {
+  return integration === "core" ? sql : sql.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+}
+
 /** The units dbt-bigquery's `format_bytes` writes, smallest first; each is 1024 times the one before. */
 const UNITS = ["Bytes", "KiB", "MiB", "GiB", "TiB", "PiB"] as const
 
@@ -93,7 +102,12 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     }
     let display: unknown
     try {
-      const result = await untilAbort(() => adapter.validateSQLDryRun(compiled), signal)
+      const integration = await untilAbort(async () => {
+        const { dbtAdapterInternals } = await import("../native/connections/register")
+        const read = dbtAdapterInternals.readConfig ?? (await import("../../../../dbt-tools/src/config")).read
+        return ((await read()) as { dbtIntegration?: unknown } | null)?.dbtIntegration
+      }, signal)
+      const result = await untilAbort(() => adapter.validateSQLDryRun(forDryRun(compiled as string, integration)), signal)
       if (result == null) {
         return failure("dry run failed", "The dry run returned no estimate: dbt-core before 1.6 can't dry run.", { adapter: type })
       }
