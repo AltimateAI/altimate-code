@@ -272,6 +272,27 @@ describe("dbt_health", () => {
     expect(result.metadata.stale_manifest.message).toContain("not rewritten")
   })
 
+  test("a rebuild queued behind another counts from when it starts, not from when its call arrived", async () => {
+    let calls = 0
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      // The first rebuild is slow; the queued one resolves at once without writing, as a watcher-replaced one does.
+      rebuildManifest: async () => {
+        if (calls++ === 0) await new Promise((r) => setTimeout(r, 2100))
+      },
+      parseManifest: async () => parsed,
+    })
+    const first = run()
+    await new Promise((r) => setTimeout(r, 50))
+    // The first rebuild's manifest lands while the second call waits.
+    const wrote = new Date()
+    await utimes(path.join(project, "target", "manifest.json"), wrote, wrote)
+    const second = await run()
+    await first
+    expect(second.metadata.stale_manifest?.message).toContain("not rewritten")
+  })
+
   test("a rebuild that reports only warnings still runs DataPilot", async () => {
     dbtAdapterInternals.create = async () => ({
       isInitialized: () => true,

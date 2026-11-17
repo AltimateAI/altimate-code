@@ -79,8 +79,15 @@ function trackRebuild(adapter: object, slot: Slot) {
 }
 
 /** Waits for a manifest rebuild that starts no earlier than this call, bounded by a timeout and the call's abort. */
-async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<void> {
+async function rebuildManifest(rawAdapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<number> {
   signal.throwIfAborted()
+  // The rebuild's own start time, taken when it actually starts: a queued one starts after the one before it.
+  const adapter = rawAdapter
+  const start = async () => {
+    const at = Date.now()
+    await adapter.rebuildManifest()
+    return at
+  }
   let slot = rebuilding.get(adapter)
   if (!slot && abandonedRunning.has(adapter))
     throw new Error("a manifest rebuild that timed out is still running: try again once it has finished")
@@ -88,7 +95,7 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
   // The calls waiting on the queued rebuild: it starts only if one of them still wants it.
   let waiters: { count: number } | undefined
   if (!slot) {
-    shared = Promise.resolve().then(() => adapter.rebuildManifest())
+    shared = Promise.resolve().then(start)
     slot = { running: shared }
     rebuilding.set(adapter, slot)
     trackRebuild(adapter, slot)
@@ -101,7 +108,7 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
       owner.queued = owner.running.catch(() => {}).then(() => {
         if (owner.abandoned) throw new Error("the manifest rebuild it waited for was abandoned after a timeout")
         if (mine.count === 0) throw new Error("the manifest rebuild it waited for was cancelled")
-        return adapter.rebuildManifest()
+        return start()
       })
       owner.queued.catch(() => {})
     }
@@ -130,11 +137,12 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
     }, dbtHealthInternals.rebuildTimeoutMs)
   })
   waited.catch(() => {})
-  await Promise.race([shared, waited]).finally(() => {
+  const startedAt = (await Promise.race([shared, waited]).finally(() => {
     if (waiters) waiters.count--
     signal.removeEventListener("abort", stop)
     clearTimeout(timer)
-  })
+  })) as number
+  return startedAt
 }
 
 /** The Python dbt runs under: the one the dbt config names (the adapter uses it), else one found for the project. */
@@ -254,9 +262,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     if (typeof adapter.parseManifest === "function") {
       try {
         if (typeof adapter.rebuildManifest === "function") {
-          const startedAt = Date.now()
-          await rebuildManifest(adapter, ctx.abort)
-          rebuiltAt = startedAt
+          rebuiltAt = await rebuildManifest(adapter, ctx.abort)
         }
         // A rebuild that fails to compile returns normally and leaves the last manifest: its diagnostics say so.
         // The adapter's own getDiagnostics() answers nothing; the integration beneath it holds them.
