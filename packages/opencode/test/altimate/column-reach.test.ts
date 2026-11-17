@@ -154,6 +154,7 @@ describe("columnReach", () => {
     )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     const found = reach.models.find((m) => m.name === "stg_case")
+    expect(found?.columns).toEqual(["foo"])
     expect(found?.lens_types).toBeUndefined()
   })
 

@@ -134,13 +134,18 @@ function rated(
     const tables: Record<string, { columns: { name: string; type: string }[] }> = {}
     for (const parent of parents) {
       const node = lookup(parent)
-      // The columns the first trace reads the parent against: the YAML's, or the compiled SQL's when it lists none.
+      // The columns the first trace reads the parent against: the YAML's, plus any the compiled SQL gives it that the YAML omits.
       const declared = Object.entries<any>(node?.columns ?? {}).map(([key, col]) => ({
         name: String(col?.name ?? key),
         type: String(col?.data_type ?? col?.type ?? ""),
       }))
-      const columns =
-        declared.length > 0 ? declared : columnsOf(parent).map((col) => ({ name: col.name, type: String(col.type ?? "") }))
+      const known = new Set(declared.map((col) => col.name.toLowerCase()))
+      const columns = [
+        ...declared,
+        ...columnsOf(parent)
+          .filter((col) => !known.has(col.name.toLowerCase()))
+          .map((col) => ({ name: col.name, type: String(col.type ?? "") })),
+      ]
       if (columns.length === 0) continue
       for (const key of relationKeys(node)) tables[key] = { columns }
     }
