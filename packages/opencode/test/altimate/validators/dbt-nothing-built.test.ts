@@ -284,6 +284,7 @@ describe("run_results and inventory helpers", () => {
   })
 
   test("readRunResults reads a caller-named folder and returns the invocation id, elapsed time and per-node time", async () => {
+    delete process.env.DBT_TARGET_PATH
     await makeProject()
     await fs.mkdir(join(dir, "chosen"), { recursive: true })
     await fs.writeFile(
@@ -306,6 +307,7 @@ describe("run_results and inventory helpers", () => {
   })
 
   test("readRunResults returns null for a file rewritten while it was being read", async () => {
+    delete process.env.DBT_TARGET_PATH
     await makeProject()
     await fs.mkdir(join(dir, "target"), { recursive: true })
     const file = join(dir, "target", "run_results.json")
@@ -325,22 +327,29 @@ describe("run_results and inventory helpers", () => {
   })
 
   test("readRunResults takes the time from between the two identity stats, so it describes the version the rows came from", async () => {
+    delete process.env.DBT_TARGET_PATH
     const dir = await fs.mkdtemp(join(tmpdir(), "rr-order-"))
     await fs.mkdir(join(dir, "target"), { recursive: true })
     await fs.writeFile(join(dir, "target", "run_results.json"), JSON.stringify({ args: { which: "build" }, results: [] }))
     const real = fs.stat
+    // Only the stat between the two identity checks answers this time, so the time returned is that one.
+    const between = 1_234_567
     const kinds: string[] = []
-    const spy = spyOn(fs, "stat").mockImplementation(((p: any, o?: any) => {
-      if (String(p).endsWith("run_results.json")) kinds.push(o?.bigint ? "bigint" : "plain")
-      return real(p, o)
+    const spy = spyOn(fs, "stat").mockImplementation((async (p: any, o?: any) => {
+      const stat: any = await real(p, o)
+      if (!String(p).endsWith("run_results.json")) return stat
+      kinds.push(o?.bigint ? "bigint" : "plain")
+      return kinds.length === 2 && !o?.bigint ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { mtimeMs: between }) : stat
     }) as any)
+    let artifact: Awaited<ReturnType<typeof readRunResults>> = null
     try {
-      await readRunResults(dir)
+      artifact = await readRunResults(dir)
     } finally {
       spy.mockRestore()
       await fs.rm(dir, { recursive: true, force: true })
     }
     expect(kinds).toEqual(["bigint", "plain", "bigint"])
+    expect(artifact?.mtimeMs).toBe(between)
   })
 
   test("readRunResults returns null when the artifact is missing", async () => {

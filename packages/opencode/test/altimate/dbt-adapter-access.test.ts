@@ -35,8 +35,8 @@ const FEATURE_TOOLS = Object.keys(MINIMAL_ARGS)
 /** The sentence every stub's answer carries; a real tool replaces the whole file, so it no longer has it. */
 const PLACEHOLDER_MARKER = "is not implemented in this build of altimate-code yet."
 const toolSource = (id: string) => path.join(import.meta.dir, "../../src/altimate/tools", `${id.replaceAll("_", "-")}.ts`)
+// Read when a test runs, so a missing source file fails the test that checks for it rather than the import.
 const isPlaceholder = (id: string) => readFileSync(toolSource(id), "utf8").includes(PLACEHOLDER_MARKER)
-const PLACEHOLDERS = FEATURE_TOOLS.filter(isPlaceholder)
 
 const ctx: Tool.Context = {
   sessionID: SessionID.make("ses_dbt_adapter_access"),
@@ -102,7 +102,7 @@ describe("feature tools in the allow-list", () => {
   })
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
-    for (const id of PLACEHOLDERS) {
+    for (const id of FEATURE_TOOLS.filter(isPlaceholder)) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
