@@ -140,7 +140,8 @@ interface Found {
 const FIELD_SOURCES: Record<string, { env: string[]; mcp: RegExp }> = {
   // A GitHub token in the shell can be for any host (GitHub Enterprise uses the same names), so it is not read: gh's own
   // github.com login, GitHub's official MCP setups, or a token entered here are the sources.
-  github_token: { env: [], mcp: /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i },
+  // GitHub's official servers read GITHUB_PERSONAL_ACCESS_TOKEN only; another token key beside it is not theirs.
+  github_token: { env: [], mcp: /^GITHUB_PERSONAL_ACCESS_TOKEN$/ },
   jiraApiToken: { env: ["JIRA_API_TOKEN", "ATLASSIAN_API_TOKEN"], mcp: /^(JIRA_API_TOKEN|ATLASSIAN_API_TOKEN)$/i },
   jiraPatToken: { env: ["JIRA_PAT_TOKEN", "JIRA_PERSONAL_TOKEN", "JIRA_PAT"], mcp: /^(JIRA_PAT_TOKEN|JIRA_PERSONAL_TOKEN|JIRA_PAT)$/i },
   linearApiKey: { env: ["LINEAR_API_KEY"], mcp: /^LINEAR_(API_KEY|TOKEN)$/i },
@@ -225,6 +226,8 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   const args = server.args ?? []
   if (!command || !args.every((a) => typeof a === "string" && (GITHUB_MCP_WORD.test(a) || GITHUB_MCP_PROGRAM.test(a)))) return false
   // docker and npx must be running GitHub's server, as the first word that is not one of their own options; the binary is it.
+  // docker passes the container only what -e names: the token must be among it.
+  if (command === "docker" && !args.some((a, j) => a === "-e" && args[j + 1] === "GITHUB_PERSONAL_ACCESS_TOKEN")) return false
   // Only each command's own leading words are skipped: docker's `run`, Windows' `/c npx`; an image called npx is still an image.
   const lead = command === "docker" ? ["run"] : command === "cmd" ? ["/c", "npx"] : []
   let i = 0
@@ -586,7 +589,16 @@ async function request(url: string, init: RequestInit) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15_000)
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal })
+    let res: Response
+    try {
+      res = await fetch(url, { ...init, signal: controller.signal })
+    } catch (e) {
+      // A transport error can quote the request, credentials in its headers included: each header value, and the token after
+      // its scheme, is taken out before the message goes anywhere.
+      const secrets = Object.values((init.headers ?? {}) as Record<string, string>).flatMap((v) => [String(v), ...String(v).split(/\s+/).slice(1)]).filter((v) => v.length >= 8)
+      const message = secrets.reduce((m, v) => m.split(v).join("<redacted>"), e instanceof Error ? e.message : String(e))
+      throw Object.assign(new Error(message), { name: e instanceof Error ? e.name : "Error" })
+    }
     const text = await res.text()
     let data: any = null
     try {
@@ -838,6 +850,9 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         await core.purgeCredentialSecrets(id, rec, false, written)
       } catch (e) {
         purgeNote = `The previous credential could not be removed from this machine: ${e instanceof Error ? e.message : String(e)}`
+        // Its fields are remembered, so disconnect still removes them though this save no longer lists them.
+        const old = (rec?.secretFields ?? []).filter((f) => !written.has(f))
+        await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], leftoverFields: [...new Set([...(next.providers[id]?.leftoverFields ?? []), ...old])] })).catch(() => {})
       }
       // A draft left behind does not stop the move: the workspace copy is still removed below.
       const draftNote = await clearDrafts()

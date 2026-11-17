@@ -123,7 +123,9 @@ async function call<T>(cfg: BackendConfig, method: string, path: string, body?: 
     return data as T
   } catch (e) {
     if (e instanceof BackendError) throw e
-    throw new BackendError(`Could not reach the Altimate API: ${e instanceof Error ? e.message : String(e)}`, 0, null)
+    // A transport error can quote the request, the key in its header included (Bun's invalid-header error does).
+    const text = (e instanceof Error ? e.message : String(e)).split(cfg.token).join("<redacted>")
+    throw new BackendError(`Could not reach the Altimate API: ${text}`, 0, null)
   } finally {
     clearTimeout(timer)
   }

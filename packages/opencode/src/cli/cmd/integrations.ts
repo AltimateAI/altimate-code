@@ -209,6 +209,7 @@ const DisconnectCommand = cmd({
       const removed = removedLocal || removedRemote > 0
       if (args.json) return json({ provider: id, status: "disconnected", removed, removedFromWorkspace: removedRemote, detached, ...(workspaceUnchecked ? { workspaceChecked: false, workspaceNote: `The workspace was not checked for a copy of this connection: ${workspaceUnchecked}` } : {}), ...(detachMessage ? { message: `Could not detach it from the linked workspace: ${detachMessage}` } : {}) })
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} disconnected${removed ? "" : S.TEXT_DIM + " (nothing was stored)" + S.TEXT_NORMAL}`)
+      if (args["local-only"]) out(`  ${S.TEXT_DIM}Removed from this machine only; any workspace copy was left in place.${S.TEXT_NORMAL}`)
       if (workspaceUnchecked) out(`  ${S.TEXT_WARNING}The workspace was not checked for a copy of this connection (${clean(workspaceUnchecked)}). Sign in and disconnect again to remove it.${S.TEXT_NORMAL}`)
       if (!detached) out(`  ${S.TEXT_WARNING}Could not detach it from the linked workspace: ${clean(detachMessage)}. Check the workspace's integrations.${S.TEXT_NORMAL}`)
     } catch (e) {

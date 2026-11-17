@@ -127,7 +127,7 @@ describe("detection parsing", () => {
     fs.writeFileSync(
       path.join(home, ".claude.json"),
       JSON.stringify({
-        mcpServers: { github: { command: "npx", args: ["@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: "x" } } },
+        mcpServers: { github: { command: "npx", args: ["@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "x" } } },
         projects: { [cwd]: { mcpServers: { linear: { type: "http", url: "https://mcp.linear.app/mcp" } } } },
       }),
     )
@@ -2121,6 +2121,47 @@ describe("credentials flow", () => {
       expect(api.state.rows).toHaveLength(0)
     })
 
+    test("an official server's own token is read, not another token key beside it", async () => {
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"], env: { GH_TOKEN: "ghp_enterprise_token_5678", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } } }))
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+        expect(calls.some((c) => c.auth?.includes("ghp_enterprise_token_5678"))).toBe(false)
+      } finally {
+        fs.rmSync(path.join(home, ".claude.json"), { force: true })
+      }
+    })
+
+    test("Keep local remembers an old secret field it could not remove, so disconnect still removes it", async () => {
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      await core.storeSecret(core.secretKey("cred", "github", "old_custom_token"), "old")
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, secretFields: ["github_token", "old_custom_token"] }))
+      const purge = spyOn(core, "purgeCredentialSecrets").mockRejectedValueOnce(new Error("keychain locked"))
+      try {
+        await token("github", "github_token")
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      } finally {
+        purge.mockRestore()
+      }
+      expect(core.loadStore().providers.github?.leftoverFields).toEqual(["old_custom_token"])
+      await core.disconnect("github")
+      expect(await core.readSecret(core.secretKey("cred", "github", "old_custom_token"))).toBeUndefined()
+    })
+
+    test("a transport error that quotes the request does not print a credential", async () => {
+      const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_u: unknown, init: any) => {
+        throw new TypeError(`Header has invalid value: ${JSON.stringify(init?.headers ?? {})}`)
+      }) as any)
+      try {
+        const r = await creds.validate("github", "", { github_token: "ghp_secret_value_9999" })
+        expect(JSON.stringify(r)).not.toContain("ghp_secret_value_9999")
+        await expect(backend.listVisibleConnections({ apiUrl: "http://x", tenant: "t", token: "altimate_key_secret_1234" })).rejects.toThrow("<redacted>")
+        await backend.listVisibleConnections({ apiUrl: "http://x", tenant: "t", token: "altimate_key_secret_1234" }).catch((e) => expect(String(e)).not.toContain("altimate_key_secret_1234"))
+      } finally {
+        fetchSpy.mockRestore()
+      }
+    })
+
     test("a config file whose args are not a list neither throws nor counts as GitHub's setup", async () => {
       expect(creds.mcpServerIsGithubDotCom({ command: "npx", args: "stdio" as any, env: { GITHUB_TOKEN: GOOD } })).toBe(false)
       expect(() => core.detectFromMcpServers({ github: { command: "npx", args: {} as any, env: { GITHUB_TOKEN: GOOD } } }, "user")).not.toThrow()
@@ -2287,9 +2328,12 @@ describe("credentials flow", () => {
     })
 
     test("an MCP env value that is only an unresolved reference does not count as a token", () => {
-      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_TOKEN: "${MISSING_TOKEN}" } })).toBe(false)
-      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_TOKEN: " $MISSING_TOKEN " } })).toBe(false)
-      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_TOKEN: "ghp_real" } })).toBe(true)
+      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${MISSING_TOKEN}" } })).toBe(false)
+      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_PERSONAL_ACCESS_TOKEN: " $MISSING_TOKEN " } })).toBe(false)
+      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_real" } })).toBe(true)
+      // Another token key beside it is not the server's token, and docker must forward the one it reads.
+      expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GH_TOKEN: "ghe_enterprise" } })).toBe(false)
+      expect(creds.mcpEnvHasToken("github", { command: "docker", args: ["run", "-i", "--rm", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_real" } })).toBe(false)
     })
 
     test("a sync whose cleanup fails records the uploaded credential's secret fields with the leftover", async () => {
@@ -3078,7 +3122,7 @@ describe("credentials flow", () => {
       await core.storeSecret(core.secretKey("cred", "github", "github_token"), GOOD)
       const saved = core.loadStore().providers.github!
       expect((await core.disconnect("github", { localOnly: true })).removedRemote).toBe(0)
-      expect([await core.readSecret(core.secretKey("cred", "github", "github_token")), api.state.rows.filter((r) => !r.deleted).length]).toEqual([undefined, 1])
+      expect([await core.readSecret(core.secretKey("cred", "github", "github_token")), api.state.rows.filter((r) => !r.deleted).length, core.loadStore().providers.github?.connectionId]).toEqual([undefined, 1, undefined])
       await core.updateStore((st) => void (st.providers.github = saved))
       // On its own backend the renamed connection is removed.
       await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: recorded.connectionBackend }))
@@ -3175,6 +3219,8 @@ describe("credentials flow", () => {
     const text = help.stderr.toString() + help.stdout.toString()
     expect(text).toContain("--local-only")
     for (const flag of ["--oauth", "--reauth", "--frontend"]) expect(text).not.toContain(flag)
+    const disconnectHelp = run("disconnect", "--help")
+    expect(disconnectHelp.stderr.toString() + disconnectHelp.stdout.toString()).toContain("--local-only")
     expect(JSON.parse(run("block", "--json").stdout.toString())).toMatchObject({ status: "failed" })
     const bad = run("set", "linear", "linearApiKey", "x", "--json")
     expect(JSON.parse(bad.stdout.toString())).toMatchObject({ status: "failed" })

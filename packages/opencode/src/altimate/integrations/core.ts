@@ -373,7 +373,7 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
           source: { kind: "mcp-remote", label: `Claude MCP (${name})` },
           account: null,
           syncable: false,
-          note: "usable in Claude; its token is not read from a repository file, set it in your environment to sync",
+          note: "usable in Claude; its token is not read from a repository file, enter it with connect to sync",
         })
       } else if (hasToken) {
         found.push({
