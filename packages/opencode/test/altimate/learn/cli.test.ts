@@ -715,6 +715,7 @@ test("failed publish after promotion prints a retry command that publishes the e
 import { mock } from "bun:test"
 class SkillNameConflictError extends Error {}
 mock.module(${publisher}, () => ({
+  publishErrorCode: () => null,
   SkillNameConflictError,
   explainPublishError: (error) => error.message,
   describePublish: (report) => 'Updated "' + report.name + '" in the workspace',
@@ -941,6 +942,7 @@ import { mock } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 mock.module(${publisher}, () => ({
+  publishErrorCode: () => null,
   publishSkill: async ({ skillDirectory }) => {
     const skill = await fs.readFile(path.join(skillDirectory, "SKILL.md"), "utf8")
     if (!skill.includes(${JSON.stringify(Playbook.HEADER)}) || !skill.includes(${JSON.stringify(text)}))
