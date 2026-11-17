@@ -175,10 +175,25 @@ describe("dbt_cte_profile list", () => {
     expect(whole.metadata.incomplete).toBeUndefined()
   })
 
-  test("the query runs against the model's own name, so its incremental context is kept", async () => {
+  test("the query runs against the model's own name", async () => {
     const tool = await initTool(DbtCteProfileTool)
     await tool.execute({ model: "customers", cte: "orders" }, ctx)
     expect(queries[0].name).toBe("customers")
+  })
+
+  test("a CTE chain that reads is_incremental() or this is not run, since the count query would not see the model's context", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    for (const [model, sql] of [
+      ["inc_filter", "with a as (select * from {{ ref('x') }} {% if is_incremental() %} where id > 1 {% endif %}), b as (select * from a) select * from b"],
+      ["inc_this", "with a as (select max(id) m from {{ this }}), b as (select * from a) select * from b"],
+    ] as const) {
+      await writeFile(path.join(project, "models", "marts", `${model}.sql`), sql)
+      const before = queries.length
+      const result = await tool.execute({ model, cte: "b" }, ctx)
+      expect(result.metadata.success).toBe(false)
+      expect(result.output).toContain("is_incremental() or this")
+      expect(queries.length).toBe(before)
+    }
   })
 
   test("a model without CTEs lists none", async () => {

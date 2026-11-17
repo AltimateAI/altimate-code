@@ -210,6 +210,9 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     const block = unclosedJinjaBlock(query)
     if (block) return failure("no query", `${name} is inside a Jinja {% ${block} %} block of ${args.model}, which cannot be cut off at that CTE and stay valid: compile the model and profile the compiled SQL, or move the WITH out of the block.`, { model: args.model, cte: name })
 
+    // The adapter runs the query as an inline node, not as the model, so is_incremental() and this would resolve for that node instead.
+    if (/\bis_incremental\s*\(|\{\{-?[^}]*\bthis\b/.test(query)) return failure("not run", `${name} depends on is_incremental() or this in ${args.model}. A count query runs outside the model, so those would resolve differently and the count would not match what the model reads. Compile the model and profile the compiled SQL instead.`, { model: args.model, cte: name })
+
     const access = await dbtAdapterFor(ctx)
     if (!access.adapter) return failure("not run", access.reason ?? "the dbt adapter is not available", { model: args.model, cte: name, refusal: access.refusal })
     const adapter = access.adapter
