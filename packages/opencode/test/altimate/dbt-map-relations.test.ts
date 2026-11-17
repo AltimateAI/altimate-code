@@ -159,7 +159,8 @@ describe("scanTableReferences", () => {
       "with orders as (select * from db.raw.orders), b(x) as materialized (select 1) select * from orders",
       "snowflake",
     )
-    expect([...ctes.keys()]).toEqual(["orders", "b"])
+    // Snowflake folds an unquoted name to upper case, so that is the name a CTE is known by.
+    expect([...ctes.keys()]).toEqual(["ORDERS", "B"])
     expect(refs.map((r) => r.raw)).toEqual(["db.raw.orders", "orders"])
   })
 })
@@ -585,5 +586,101 @@ describe("review regressions", () => {
   test("a backticked path and a bare name of the same table add no row the SQL cannot show", () => {
     const rows = mapRelations(["orders", "proj.ds.orders"], "select * from orders o join `proj.ds.orders`", [], "bigquery")
     expect(rows.map((r) => r.raw)).toEqual(["orders", "`proj.ds.orders`"])
+  })
+})
+
+describe("table lists after a join condition, a sample clause or ONLY", () => {
+  const raws = (sql: string, dialect = "snowflake") => scanTableReferences(sql, dialect).refs.map((r) => r.raw)
+
+  test("a comma after a join's ON condition goes on with the list", () => {
+    expect(raws("select * from db.z.items i join db.a.orders a on i.id = a.id, db.z.orders z")).toEqual([
+      "db.z.items",
+      "db.a.orders",
+      "db.z.orders",
+    ])
+    expect(raws("select * from a join b on f(a.x, b.y) = 1, c where c.k = 1")).toEqual(["a", "b", "c"])
+    expect(raws("select * from a join b using (id), c")).toEqual(["a", "b", "c"])
+  })
+
+  test("a join condition ends at the next join or clause, not at a comma inside the select list", () => {
+    expect(raws("select * from a join b on a.id = b.id join c on c.id = b.id where a.x in (1, 2)")).toEqual(["a", "b", "c"])
+  })
+
+  test("the first table of a parenthesized join is read; a subquery is not a table", () => {
+    expect(raws("select * from (raw.jaffle.a x join raw.jaffle.b y on x.id = y.id)")).toEqual(["raw.jaffle.a", "raw.jaffle.b"])
+    expect(raws("select * from (select * from raw.s.t) q, raw.s.u")).toEqual(["raw.s.t", "raw.s.u"])
+  })
+
+  test("a table after a parenthesized join is still read, however deep the group", () => {
+    expect(raws("select * from (a join b on a.id = b.id), c")).toEqual(["a", "b", "c"])
+    expect(raws("select * from (a join b on a.id = b.id) j, c")).toEqual(["a", "b", "c"])
+    expect(raws("select * from ((a join b on a.id = b.id) join c on c.id = a.id), d")).toEqual(["a", "b", "c", "d"])
+  })
+
+  test("a group that starts with a subquery or ONLY, and a CASE in a join condition, do not cut the list", () => {
+    expect(raws("select * from ((select * from x) q join b on 1=1), c")).toEqual(["x", "b", "c"])
+    expect(raws("select * from (only a join b on 1=1), c", "postgres")).toEqual(["a", "b", "c"])
+    expect(raws("select * from a join b on case when a.x = 1 then 1 else 0 end = 1, c")).toEqual(["a", "b", "c"])
+  })
+
+  test("a join condition does not run on into MERGE, ON CONFLICT or later statements", () => {
+    expect(raws("merge into t using s on t.id = s.id when matched then update set a = s.a, b = s.b", "snowflake")).toEqual(["t", "s"])
+    expect(raws("insert into t select * from s on conflict (id) do update set a = excluded.a, b = excluded.b", "postgres")).toEqual(["t", "s"])
+    expect(raws("select * from a join b on a.id = b.id; select x, y from c")).toEqual(["a", "b", "c"])
+  })
+
+  test("ONLY is skipped for PostgreSQL only", () => {
+    expect(raws("select * from only join b on 1=1", "snowflake")).toEqual(["only", "b"])
+  })
+
+  test("a sample clause does not end the list", () => {
+    expect(raws("select * from db.z.items tablesample (10), db.z.orders")).toEqual(["db.z.items", "db.z.orders"])
+    expect(raws("select * from db.z.items i tablesample bernoulli (10) repeatable (3), db.z.orders", "postgres")).toEqual([
+      "db.z.items",
+      "db.z.orders",
+    ])
+  })
+
+  test("PostgreSQL's ONLY is not a table name", () => {
+    expect(raws("select * from only db.z.orders", "postgres")).toEqual(["db.z.orders"])
+    expect(raws("select * from only orders o, only db.z.items", "postgres")).toEqual(["orders", "db.z.items"])
+  })
+
+  test("each of them reaches the mapped rows with the schema as written", () => {
+    const relations = manifestRelations(MANIFEST)
+    const rows = mapRelations(
+      ["items", "orders"],
+      "select * from db.z.items i join db.a.orders a on i.id = a.id, db.z.orders z",
+      relations,
+      "snowflake",
+    )
+    expect(rows.map((r) => r.raw)).toEqual(["db.z.items", "db.a.orders", "db.z.orders"])
+  })
+})
+
+describe("a quoted CTE name and a table that differs only in case", () => {
+  const rows = (sql: string, dialect: string) => mapRelations(["orders"], sql, [], dialect).map((r) => r.raw)
+
+  test("Snowflake: a quoted lower-case CTE is not the unquoted table", () => {
+    expect(rows('with "orders" as (select 1) select * from ORDERS', "snowflake")).toEqual(["ORDERS"])
+    expect(rows('with "orders" as (select 1) select * from "orders"', "snowflake")).toEqual([])
+    expect(rows("with orders as (select 1) select * from ORDERS", "snowflake")).toEqual([])
+  })
+
+  test("PostgreSQL: a quoted upper-case CTE is not the unquoted table", () => {
+    expect(rows('with "ORDERS" as (select 1) select * from orders', "postgres")).toEqual(["orders"])
+    expect(rows("with orders as (select 1) select * from ORDERS", "postgres")).toEqual([])
+  })
+
+  test("with the real parser: a quoted CTE name beside a physical table of another case", async () => {
+    // altimate-core reports the table list the mapper starts from; the physical table must survive both steps.
+    const sql = 'with "orders" as (select * from raw."orders") select * from ORDERS o join "orders" x on 1=1'
+    const tables = await tablesOf(sql, "snowflake")
+    expect(mapRelations(tables, sql, [], "snowflake").map((r) => r.raw)).toEqual(expect.arrayContaining(["ORDERS"]))
+  })
+
+  test("elsewhere quoting does not change the case a name is compared in", () => {
+    expect(rows("with `Orders` as (select 1) select * from orders", "databricks")).toEqual([])
+    expect(rows("with [Orders] as (select 1) select * from orders", "tsql")).toEqual([])
   })
 })

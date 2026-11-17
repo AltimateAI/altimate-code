@@ -93,12 +93,12 @@ export function splitQualified(text: string, splitBacktickDots = false): string[
 }
 
 /** A table reference found in the SQL text: the text as written and its unquoted parts. */
-type Reference = { raw: string; parts: string[]; start?: number }
+type Reference = { raw: string; parts: string[]; start?: number; /** The last part was written in double quotes. */ quoted?: boolean }
 
 /** What the scan of a query found: its table references in text order, and the names its CTEs define. */
 export type Scan = {
   refs: Reference[]
-  /** By lower-cased name: whether the WITH is recursive, and the text offsets of each body that defines the name. */
+  /** By identity (see `identityOf`): whether the WITH is recursive, and the text offsets of each body that defines the name. */
   ctes: Map<string, { recursive: boolean; bodies: [number, number][] }>
 }
 
@@ -108,6 +108,8 @@ const BACKSLASH_ESCAPE = new Set(["bigquery", "databricks", "spark", "mysql", "h
 const DOLLAR_QUOTE = new Set(["snowflake", "postgres", "redshift", "duckdb"])
 const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "fabric", "synapse", "oracle"])
 const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb"])
+// Dialects where a double-quoted name keeps its case while an unquoted one is folded, so `"orders"` and `ORDERS` differ.
+const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower" }
 const BRACKET_QUOTE = new Set(["tsql", "sqlserver", "fabric", "synapse"])
 
 const RESERVED = new Set([
@@ -160,6 +162,13 @@ const RESERVED = new Set([
 ])
 // Clause words that start a list of tables. `from` inside these calls reads a column or a string instead.
 const TABLE_KEYWORDS = new Set(["from", "join", "into", "update", "using"])
+// Words that end a join's ON condition: the next join, or the next clause of the query.
+const JOIN_CONDITION_END = new Set([
+  "join", "inner", "left", "right", "full", "cross", "natural", "outer", "where", "group", "order", "having",
+  "union", "intersect", "except", "minus", "limit", "offset", "fetch", "window", "qualify", "for", "returning",
+  "when", "set", "do", "select", "lateral", "distribute", "cluster", "sort", "settings",
+])
+const SUBQUERY_START = new Set(["select", "with", "values", "table", "from"])
 const FROM_INSIDE_CALL = new Set(["extract", "trim", "substring", "overlay", "position"])
 
 type Token = { kind: "word" | "quoted" | "punct" | "other"; start: number; end: number; text: string }
@@ -269,6 +278,17 @@ function afterParens(tokens: Token[], at: number): number {
   return tokens.length
 }
 
+/**
+ * What a name written once refers to: its lower-cased text, except where the dialect keeps the case of a
+ * double-quoted name and folds an unquoted one, which there is the folded text and the quoted one its own text.
+ */
+function identityOf(name: string, quoted: boolean, dialect: string): string {
+  const fold = FOLDS_UNQUOTED[dialect]
+  if (!fold) return name.toLowerCase()
+  if (quoted) return name
+  return fold === "upper" ? name.toUpperCase() : name.toLowerCase()
+}
+
 const isPunct = (token: Token | undefined, text: string) => token?.kind === "punct" && token.text === text
 
 /**
@@ -290,7 +310,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
     if (keyword) i++
     const recursive = keyword || IMPLICIT_RECURSION.has(dialect)
     while (tokens[i] && (tokens[i].kind === "word" || tokens[i].kind === "quoted")) {
-      const name = nameOf(tokens[i], dialect)[0].toLowerCase()
+      const name = identityOf(nameOf(tokens[i], dialect)[0], tokens[i].kind === "quoted" && tokens[i].text[0] === '"', dialect)
       let j = i + 1
       if (isPunct(tokens[j], "(")) j = afterParens(tokens, j)
       if (tokens[j]?.text.toLowerCase() !== "as") return
@@ -310,14 +330,36 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
 
   const readList = (start: number, strict: boolean) => {
     let i = start
-    for (;;) {
+    const groups = ["from", "join"].includes(tokens[start - 1]?.text.toLowerCase() ?? "")
+    let groupEnd = -1
+    for (let item = 0; ; item++) {
       // LATERAL prefixes a table expression in the list; the list goes on after it.
       if (tokens[i]?.kind === "word" && tokens[i].text.toLowerCase() === "lateral") i++
-      if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
-      else {
+      // `(a join b on ...)` groups tables: its first table is read like any other, and the list goes on after the
+      // group's `)`. The tables after the first are found by the JOIN in the group. Any other `(` is a subquery.
+      while (
+        item === 0 &&
+        groups &&
+        isPunct(tokens[i], "(") &&
+        !SUBQUERY_START.has(tokens[i + 1]?.text.toLowerCase() ?? "") &&
+        (["word", "quoted"].includes(tokens[i + 1]?.kind ?? "") || isPunct(tokens[i + 1], "("))
+      ) {
+        if (groupEnd < 0) groupEnd = afterParens(tokens, i)
+        i++
+      }
+      if (isPunct(tokens[i], "(")) {
+        i = afterParens(tokens, i)
+        if (groupEnd >= 0) i = Math.max(i, groupEnd)
+        groupEnd = -1
+      } else {
         const first = tokens[i]
         if (!first || (first.kind !== "word" && first.kind !== "quoted")) return
         if (first.kind === "word" && RESERVED.has(first.text.toLowerCase())) return
+        // PostgreSQL's `FROM ONLY name` leaves out the table's children; the name follows.
+        if (dialect.startsWith("postgres") && first.kind === "word" && first.text.toLowerCase() === "only" && ["word", "quoted"].includes(tokens[i + 1]?.kind ?? "")) {
+          i++
+          continue
+        }
         const parts: string[] = [...nameOf(first, dialect)]
         let at = i
         while (isPunct(tokens[at + 1], ".") && ["word", "quoted"].includes(tokens[at + 2]?.kind ?? "")) {
@@ -327,7 +369,15 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
         const last = tokens[at]
         i = at + 1
         if (isPunct(tokens[i], "(") && strict) i = afterParens(tokens, i)
-        else refs.push({ raw: sql.slice(first.start, last.end), parts, start: first.start })
+        else
+          refs.push({
+            raw: sql.slice(first.start, last.end),
+            parts,
+            start: first.start,
+            quoted: last.kind === "quoted" && last.text[0] === '"',
+          })
+        if (groupEnd >= 0) i = groupEnd
+        groupEnd = -1
       }
       // An alias with or without AS, then its column list, then a comma continues a FROM list.
       if (tokens[i]?.text.toLowerCase() === "as") i++
@@ -336,9 +386,33 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
         i++
         if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
       }
+      // A sample clause or a join condition sits between a table and the comma that goes on with the list.
+      i = skipSampleAndCondition(i)
       if (isPunct(tokens[i], ",")) i++
       else return
     }
+  }
+
+  // After a table and its alias: `TABLESAMPLE [method] (n) [REPEATABLE (n)]`, then a join's `ON ...` up to a comma.
+  const skipSampleAndCondition = (start: number) => {
+    let i = start
+    const word = () => (tokens[i]?.kind === "word" ? tokens[i].text.toLowerCase() : "")
+    while (["tablesample", "sample", "repeatable", "seed", "bernoulli", "system", "block", "row"].includes(word())) {
+      i++
+      if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
+    }
+    if (word() !== "on") return i
+    i++
+    let cases = 0
+    while (i < tokens.length) {
+      if (tokens[i].kind === "word" && word() === "case") cases++
+      else if (tokens[i].kind === "word" && word() === "end" && cases > 0) cases--
+      if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
+      else if (isPunct(tokens[i], ",")) return i
+      else if (isPunct(tokens[i], ")") || tokens[i].text === ";" || (tokens[i].kind === "word" && cases === 0 && JOIN_CONDITION_END.has(word()))) return i
+      else i++
+    }
+    return i
   }
 
   for (let i = 0; i < tokens.length; i++) {
@@ -464,10 +538,11 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
     entries.push(r)
   }
   const covered = new Set<string>()
+  const cteNames = new Set([...ctes.keys()].map((k) => k.toLowerCase()))
   for (const r of refs) {
     const last = r.parts[r.parts.length - 1]
     const whole = r.parts.join(".")
-    const cte = ctes.get(last.toLowerCase())
+    const cte = ctes.get(identityOf(last, !!r.quoted, dialect))
     // A CTE's own name inside its own body is the real table unless the WITH is recursive.
     const inOwnBody = !!cte && !cte.recursive && cte.bodies.some(([from, to]) => r.start! >= from && r.start! < to)
     if (r.parts.length === 1 && cte && !inOwnBody) continue
@@ -475,10 +550,10 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
       add(r)
       covered.add(last.toLowerCase())
       covered.add(whole.toLowerCase())
-    } else if (cte) add(r)
+    } else if (cteNames.has(last.toLowerCase())) add(r)
   }
   for (const t of tables) {
-    if (covered.has(t.toLowerCase()) || ctes.has(t.toLowerCase())) continue
+    if (covered.has(t.toLowerCase()) || cteNames.has(t.toLowerCase())) continue
     add({ raw: t, parts: splitQualified(t, dialect === "bigquery") })
   }
   return entries.map((entry) => {
