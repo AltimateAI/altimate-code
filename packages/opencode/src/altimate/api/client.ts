@@ -342,8 +342,9 @@ export namespace AltimateApi {
       try {
         return await start()
       } catch (e) {
-        // A timeout or the caller's abort rejects with its own reason, which holds no header.
-        if (controller.signal.aborted || signal?.aborted) throw e
+        // A timeout or the caller's abort rejects with its own reason, which holds no header. An abort
+        // that raced a refused header leaves the header error, so match the reason, not the flag.
+        if (e === controller.signal.reason || e === signal?.reason) throw e
         // Others can quote a header: Bun's check of a header value with CR/LF quotes `Bearer <key>`.
         const message = redact(e instanceof Error ? e.message : String(e), creds.altimateApiKey)
         throw new Error(`API ${method} ${endpoint} could not be sent: ${message}`)

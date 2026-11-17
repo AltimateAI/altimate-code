@@ -11,6 +11,7 @@ import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import { dbtAdapterAccessInternals, dbtAdapterFor } from "@/altimate/tools/dbt-adapter-access"
+import { resultFailed } from "@/altimate/mcp-server/adapter"
 import { EXPOSED, MCP_OPEN_WRITE_TOOLS, WRITE_TOOLS } from "@/altimate/tool-cli/allow-list"
 import { AltimateApi } from "@/altimate/api/client"
 import { Instance } from "@/project/instance"
@@ -89,6 +90,7 @@ describe("feature tools in the allow-list", () => {
       expect(result.title).toBe(`${id}: not implemented`)
       expect(result.metadata).toEqual({ success: false, error: "not implemented", truncated: false })
       expect(result.output).toContain(id)
+      expect(resultFailed(result)).toBe(true)
     }
   })
 })
@@ -436,6 +438,31 @@ describe("AltimateApi.apiRequest", () => {
     expect(error).toBeInstanceOf(Error)
     expect(error.message).not.toContain("sk_SECRET123")
     expect(error.message).toContain("API GET /dbt/v1/x could not be sent")
+  })
+
+  test("never shows the stored key when a header refusal races the caller's abort", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({
+        altimateUrl: "https://api.example.test",
+        altimateInstanceName: "acme",
+        altimateApiKey: "sk_SECRET123",
+      }),
+    )
+    const original = globalThis.fetch
+    const controller = new AbortController()
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      controller.abort(new Error("cancelled by the user"))
+      throw new TypeError(`bad header: '${(init.headers as Record<string, string>).Authorization}'`)
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal).catch(
+        (e: Error) => e,
+      )
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: bad header: 'Bearer [redacted]'")
+    } finally {
+      globalThis.fetch = original
+    }
   })
 
   test("never shows the stored key from any fetch failure", async () => {
