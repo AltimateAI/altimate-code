@@ -1360,14 +1360,15 @@ describe("both tools: names at the edges", () => {
     ["cast(t.amount as numeric)", "amount"], ["amount::int[]", "amount"], ["cast(amount as int[])", "amount"],
     ["amount::int[3]", "amount"], ['amount::"numeric"', "amount"], ["amount::pg_catalog.numeric", "amount"],
     ["amount::double precision", "amount"], ["amount::numeric(10, 2)", "amount"], ["cast(amount as numeric(10, 2))", "amount"],
-    ["amount::timestamp(3) with time zone", "amount"],
+    ["amount::timestamp(3) with time zone", "amount"], ["amount::geometry(Point,4326)", "amount"],
+    ["cast(amount as geometry(Point, 4326))", "amount"], ["amount::varchar(max)", "amount"],
     // Chains and parentheses.
     ["amount::numeric::int", "amount"], ["cast(amount as numeric)::int", "amount"], ["cast(cast(amount as numeric) as int)", "amount"],
     ["(amount::numeric)::int", "amount"], ["(amount)::numeric", "amount"], ["((amount))::numeric", "amount"],
     ["cast((amount) as numeric)", "amount"], ["(amount)", "amount"],
     // No space beside `as`, and quoted names.
     ["cast((amount)as numeric)", "amount"], ['cast("amount"as numeric)', "amount"], ['cast(amount as"numeric")', "amount"],
-    ['"Amount"::int', "amount"], ['("a""b")::numeric', 'a"b'], ['("null")::int', "null"],
+    ['"Amount"::int', "amount"], ['("a""b")::numeric', 'a"b'], ['("null")::int', "null"], ['"a``b"::int', "a``b"], ['`a""b`::int', 'a""b'],
     // Qualified names that read like literals or keywords.
     ["q.end::int", "end"], ["cast(q.end as int)", "end"], ["(q.end)::int", "end"], ["q.null::int", "null"], ["q.true::int", "true"],
     ["cast(t.has as int)", "has"], ["allé::numeric", "allé"],

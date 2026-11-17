@@ -243,6 +243,8 @@ export function castColumn(item: string): string | null {
   const punct = (k: number, text: string) => t[k]?.kind === "punct" && t[k]!.text === text
   const word = (k: number, text: string) => t[k]?.kind === "name" && t[k]!.text.toLowerCase() === text
   const named = (k: number) => t[k]?.kind === "quoted" || t[k]?.kind === "name"
+  // A type modifier: a number (`numeric(10, 2)`) or a name (`varchar(max)`, `geometry(Point, 4326)`).
+  const modifier = (k: number) => t[k]?.kind === "number" || named(k)
 
   const type = (): boolean => {
     let words = 0
@@ -250,9 +252,9 @@ export function castColumn(item: string): string | null {
       const k = t[at]
       if (k && (k.kind === "quoted" || (k.kind === "name" && !NOT_TYPE.test(k.text)))) at++, words++
       else if (words && punct(at, ".")) at++
-      else if (words && punct(at, "(") && t[at + 1]?.kind === "number") {
+      else if (words && punct(at, "(") && modifier(at + 1)) {
         at += 2
-        while (punct(at, ",") && t[at + 1]?.kind === "number") at += 2
+        while (punct(at, ",") && modifier(at + 1)) at += 2
         if (!punct(at, ")")) return false
         at++
       } else if (words && punct(at, "[")) {
@@ -267,7 +269,11 @@ export function castColumn(item: string): string | null {
     const start = at++
     while (punct(at, ".") && named(at + 1)) at += 2
     const last = t[at - 1]!
-    if (last.kind === "quoted") return last.text.slice(1, -1).replace(/""/g, '"').replace(/``/g, "`").toLowerCase()
+    // Only the token's own quote is escaped by doubling: `"a``b"` is a``b.
+    if (last.kind === "quoted") {
+      const q = last.text[0]!
+      return last.text.slice(1, -1).replaceAll(q + q, q).toLowerCase()
+    }
     return at - start === 1 && ENDS_EXPRESSION.test(last.text) ? null : last.text.toLowerCase()
   }
   const operand = (): string | null => {
