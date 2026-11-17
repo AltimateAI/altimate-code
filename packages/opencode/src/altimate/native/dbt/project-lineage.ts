@@ -234,8 +234,9 @@ export function castColumn(item: string, inner = false): string | null {
   if (blank.startsWith("(") && closingParen(blank, 0) === blank.length - 1) return castColumn(s.slice(1, -1), true)
   const call = /^cast\s*\(/i.exec(blank)
   if (call && closingParen(blank, call[0].length - 1) === blank.length - 1) {
-    // `as` after a space or a `)`: `cast((amount)as numeric)`.
-    const at = lastOutsideParens(blank.slice(call[0].length, -1), /(?:\s|(?<=\)))as\s/)
+    // `as` as a whole word, by zero-width bounds so a quote or `)` beside it stays in place: `cast("amount"as numeric)`,
+    // `cast(amount as"numeric")`, `cast((amount)as numeric)`.
+    const at = lastOutsideParens(blank.slice(call[0].length, -1), /(?<![\w$])as(?![\w$])/)
     if (!at) return null
     const body = s.slice(call[0].length, -1)
     return isType(body.slice(at.end)) ? castColumn(body.slice(0, at.start), true) : null
