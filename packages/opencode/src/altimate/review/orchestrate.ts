@@ -51,8 +51,10 @@ import {
   missingRefFindings,
   modelConfigFindings,
   packagesFindings,
+  quickstartModelFindings,
   testWindowFindings,
   testsOnNullColumns,
+  yamlParseFindings,
 } from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
 import { ruleTier } from "./rule-tiers"
@@ -2290,6 +2292,41 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     for (const findings of sets) all.push(findings)
   }
 
+  // Files checked whatever their dbt role (a `.quickstart/quickstart.yml` is "other"): YAML that
+  // no longer parses, and new models missing from the quickstart `public_models`.
+  const otherChecked = new Set<string>()
+  const checkedOther = (file: ChangedFile) => {
+    otherChecked.add(file.path)
+    touch([file])
+  }
+  if (lanes.has("dbt_patterns")) {
+    const read = (p: string, side: "old" | "new") => getContent?.(p, side)?.catch(() => undefined) ?? Promise.resolve(undefined)
+    const ymls = reviewable.filter((f) => f.status !== "deleted" && /\.ya?ml$/i.test(f.path))
+    const sets = await Promise.all(
+      ymls.map(async (file) => {
+        const [newContent, oldContent] = await Promise.all([
+          read(file.path, "new"),
+          file.status === "added" ? Promise.resolve(undefined) : read(file.oldPath ?? file.path, "old"),
+        ])
+        if (file.kind === "other") checkedOther(file)
+        return yamlParseFindings(file, oldContent, newContent)
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+
+    const newModels = reviewable.filter((f) => f.kind === "model_sql" && f.status === "added")
+    if (newModels.length) {
+      const QUICKSTART = /(^|\/)\.quickstart\/quickstart\.ya?ml$/
+      const changed = reviewable.find((f) => QUICKSTART.test(f.path) && f.status !== "deleted")
+      const qsPath = changed?.path ?? `${input.layout?.root ? input.layout.root + "/" : ""}.quickstart/quickstart.yml`
+      const content = await read(qsPath, "new")
+      if (content) {
+        if (changed) checkedOther(changed)
+        all.push(quickstartModelFindings(changed ?? newModels[0], qsPath, content, newModels.map((f) => modelNameFromPath(f.path))))
+      }
+    }
+  }
+
   // schema.yml-level detectors (test removal) — run on changed YAML files
   // regardless of tier, since deleting a guardrail test is always worth flagging.
   // Pass old + new content when available so the detector diffs structural YAML
@@ -2615,7 +2652,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ...(input.scope?.notReviewed ?? []),
     ...dropped,
     ...reviewable
-      .filter((f) => f.kind === "other" || f.kind === "analysis")
+      .filter((f) => (f.kind === "other" && !otherChecked.has(f.path)) || f.kind === "analysis")
       .map((f) => ({ path: f.path, reason: "not a dbt model/macro/test/yml/seed file" })),
     ...reviewable
       .filter((f) => !touched.has(f.path))

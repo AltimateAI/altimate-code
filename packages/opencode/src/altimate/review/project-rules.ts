@@ -381,6 +381,73 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
   return out
 }
 
+// ── YAML structure ──────────────────────────────────────────────────────────
+
+/** The first YAML error in `text` (all documents), with its 1-based line; undefined when it parses. */
+export function yamlError(text: string): { message: string; line?: number; duplicate: boolean } | undefined {
+  for (const doc of YAML.parseAllDocuments(text)) {
+    const e = doc.errors?.[0]
+    if (e) return { message: e.message.split("\n")[0].replace(/ at line \d+, column \d+:?$/, ""), line: e.linePos?.[0]?.line, duplicate: e.code === "DUPLICATE_KEY" }
+  }
+  return undefined
+}
+
+/** A YAML file that parsed at base and no longer parses at head (a mis-indented key often
+ *  becomes a duplicate key of the entry above it). */
+export function yamlParseFindings(file: ChangedFile, oldContent: string | undefined, newContent: string | undefined): Finding[] {
+  if (!/\.ya?ml$/i.test(file.path) || file.status === "deleted" || !newContent) return []
+  const err = yamlError(newContent)
+  if (!err || (oldContent !== undefined && yamlError(oldContent))) return []
+  const text = err.line ? newContent.split("\n")[err.line - 1] : undefined
+  const f = finding(
+    file,
+    "yaml-parse-error",
+    "warning",
+    "sql_correctness",
+    err.duplicate ? "YAML key defined twice" : "file no longer parses as YAML",
+    err.duplicate
+      ? `${err.message}${err.line ? ` (line ${err.line})` : ""}. A key indented one level too deep becomes a second entry of the mapping above it; parsers either reject the file or keep only one value. Check the indentation of the keys added here.`
+      : `${err.message}${err.line ? ` (line ${err.line})` : ""}. The file parsed before this change; tools that read it now fail.`,
+    text,
+  )
+  return [err.line ? { ...f, startLine: err.line, endLine: err.line } : f]
+}
+
+/** New models named like the public models a `.quickstart/quickstart.yml` lists, but missing from
+ *  its `public_models`: the quickstart setup won't expose them. */
+export function quickstartModelFindings(
+  /** Where the finding goes: the quickstart file when the PR changes it, else the new model. */
+  target: ChangedFile,
+  quickstartPath: string,
+  content: string | undefined,
+  newModels: string[],
+): Finding[] {
+  const doc = parseYaml(content)
+  const listed: string[] = Array.isArray(doc?.public_models) ? doc.public_models.filter((x: unknown) => typeof x === "string") : []
+  if (listed.length < 3) return []
+  // The package prefix (`hubspot__…`) most public models share.
+  const counts = new Map<string, number>()
+  for (const m of listed) {
+    const p = /^([a-z0-9_]+?)__/i.exec(m)?.[1]
+    if (p) counts.set(p, (counts.get(p) ?? 0) + 1)
+  }
+  const [prefix, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? ["", 0]
+  if (!prefix || n < listed.length * 0.8) return []
+  const have = new Set(listed.map((m) => m.toLowerCase()))
+  const missing = newModels.filter((m) => m.toLowerCase().startsWith(`${prefix.toLowerCase()}__`) && !have.has(m.toLowerCase()))
+  if (!missing.length) return []
+  return [
+    finding(
+      target,
+      "quickstart-public-model-missing",
+      "suggestion",
+      "materialization",
+      `new model${missing.length === 1 ? "" : "s"} missing from \`public_models\``,
+      `${missing.map((m) => `\`${m}\``).join(", ")} ${missing.length === 1 ? "is" : "are"} new and named like the ${listed.length} models \`${quickstartPath}\` lists in \`public_models\`, but ${missing.length === 1 ? "isn't" : "aren't"} listed. Add ${missing.length === 1 ? "it" : "them"}, or confirm ${missing.length === 1 ? "it is" : "they are"} meant to stay internal.`,
+    ),
+  ]
+}
+
 // ── singular test windows ───────────────────────────────────────────────────
 
 const UNIT_SECONDS: Record<string, number> = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000, quarter: 7776000, year: 31536000 }

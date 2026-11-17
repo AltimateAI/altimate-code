@@ -124,6 +124,8 @@ const SUMMARY = [
   "dbt-project-rules:macro-param-no-default",
   "dbt-project-rules:dispatch-kwarg-not-in-variant",
   "dbt-project-rules:test-window-shrunk",
+  "dbt-project-rules:yaml-parse-error",
+  "dbt-project-rules:quickstart-public-model-missing",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {
