@@ -2285,7 +2285,8 @@ export namespace Provider {
       const availableProviders = Object.keys(s.providers)
       const matches = fuzzysort.go(providerID, availableProviders, { limit: 3, threshold: -10000 })
       const suggestions = matches.map((m) => m.target)
-      throw new ModelNotFoundError({ providerID, modelID, suggestions })
+      // altimate_change — mark a missing provider, so the error can say how to connect it
+      throw new ModelNotFoundError({ providerID, modelID, suggestions, providerMissing: true })
     }
 
     const info = provider.models[modelID]
@@ -2595,6 +2596,8 @@ export namespace Provider {
     providerID: ProviderID,
     modelID: ModelID,
     suggestions: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
+    // altimate_change — true when the provider itself is not available, not only the model
+    providerMissing: Schema.optional(Schema.Boolean),
   })
 
   export const InitError = NamedError.create("ProviderInitError", {

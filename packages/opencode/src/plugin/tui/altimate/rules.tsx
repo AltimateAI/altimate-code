@@ -814,7 +814,8 @@ function requestLine(r: WorkspaceRequest): string {
   return `${status}${by}${update}${expired}${r.reason ? ` — ${printable(r.reason)}` : ""}`
 }
 
-/** Withdraw a waiting request, or remove an approved one from the workspace: each after a confirm. */
+/** Withdraw a waiting request, or remove an approved one from the workspace. Removing stops serving it to the
+ * whole team, so it asks again, opening on "No" so a stray Enter cannot remove it. */
 function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
   const what = `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
   const options: TuiDialogSelectOption<string>[] = [
@@ -830,24 +831,55 @@ function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
     <api.ui.DialogSelect
       title={`Your ${what}`}
       options={options}
-      onSelect={async (option) => {
-        if (option.value !== "withdraw" && option.value !== "remove") return void showMenu(api)
-        api.ui.dialog.clear()
-        const result = await post<{ ok: boolean; error?: string; code?: string; request?: WorkspaceRequest }>(
-          api,
-          `/altimate/workspace/requests/${encodeURIComponent(request.public_id)}/${option.value}`,
-          { expected_version: request.version },
-        ).catch(() => undefined)
-        if (!result?.ok)
-          return api.ui.toast({ variant: "error", message: `Not ${option.value === "withdraw" ? "withdrawn" : "removed"}: ${printable(result?.error ?? "the session server did not answer")}`, duration: 8000 })
-        api.ui.toast({
-          variant: "success",
-          message: option.value === "withdraw" ? `Withdrew your ${what}.` : `Removed your ${what} from the workspace.`,
-          duration: 6000,
-        })
+      onSelect={(option) => {
+        if (option.value === "withdraw") return void runRequestAction(api, request, what, "withdraw")
+        if (option.value === "remove") return confirmRemove(api, request, what)
+        return void showMenu(api)
       }}
     />
   ))
+}
+
+function confirmRemove(api: TuiPluginApi, request: WorkspaceRequest, what: string) {
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect<string>
+      title={`Remove your ${what} from the workspace?`}
+      options={[
+        { title: "No, keep it", value: "no", description: "Nothing changes." },
+        { title: "Yes, remove it", value: "yes", description: "Teammates stop getting it. You can send it again later." },
+      ]}
+      current="no"
+      onSelect={(choice) => {
+        if (choice.value === "yes") return void runRequestAction(api, request, what, "remove")
+        return showRequestActions(api, request)
+      }}
+    />
+  ))
+}
+
+async function runRequestAction(
+  api: TuiPluginApi,
+  request: WorkspaceRequest,
+  what: string,
+  action: "withdraw" | "remove",
+) {
+  api.ui.dialog.clear()
+  const result = await post<{ ok: boolean; error?: string; code?: string; request?: WorkspaceRequest }>(
+    api,
+    `/altimate/workspace/requests/${encodeURIComponent(request.public_id)}/${action}`,
+    { expected_version: request.version },
+  ).catch(() => undefined)
+  if (!result?.ok)
+    return api.ui.toast({
+      variant: "error",
+      message: `Not ${action === "withdraw" ? "withdrawn" : "removed"}: ${printable(result?.error ?? "the session server did not answer")}`,
+      duration: 8000,
+    })
+  api.ui.toast({
+    variant: "success",
+    message: action === "withdraw" ? `Withdrew your ${what}.` : `Removed your ${what} from the workspace.`,
+    duration: 6000,
+  })
 }
 // altimate_change end
 

@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.11] - 2026-11-16
+
+**You can use a Claude Pro or Max plan through your own Claude Code login, and workspace review works from every client.** The new Claude subscription provider runs Claude models through the `claude` you already have installed; Altimate Code never reads or stores its token. The first-run picker and `/connect` suggest the subscription logins already on the machine. On workspaces with review on, a member's skill goes to the owner or an admin for approval, everyone sees their own requests and their status, and requests can be withdrawn or removed from the TUI, `serve` and the plugins. Team rules also reach Claude Code and Codex sessions through the plugins. `impact_analysis` answers where a column's value goes, or where it comes from, hop by hop. Also in this release: a capped agent ends with an answer, one overflow compacts once, and the dbt adapter starts under Bun.
+
+**Heads-up for support:**
+- **The Anthropic provider's "Claude Pro/Max" sign-in is removed.** A login saved with it no longer connects; Anthropic API keys are unaffected. The TUI shows a one-time notice, and a `--model anthropic/...` that no longer resolves says what to do. To keep using the plan: install Claude Code 2.1.296 or later, run `claude auth login`, then `/connect` → **Claude subscription**. The `claude-code-20250219` beta header is no longer sent.
+- **Claude subscription needs `claude` on the same machine.** `OPENCODE_CLAUDE_PATH` points at a specific binary (on Windows, the full path to `claude.exe` if the login check does not finish). `claude` runs with the user's environment, so an `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in the shell is used, and billed, instead of the subscription. If no login is found within 5 minutes, `/connect` says to run `claude auth login`. Deleting a chat also deletes Claude Code's copy of it (`claude --resume` no longer lists it).
+- **The first-run picker shows at most five suggestions:** the Altimate LLM Gateway, subscription logins found on this machine, the Claude and ChatGPT subscriptions, and the Anthropic and OpenAI API keys. Altimate Base, Google and every other provider are under **Search all providers…**. Detection only checks that a login exists; nothing is read from it or sent anywhere.
+- **On a workspace with review on, a member's `skill publish` sends the skill for review** and exits 0; it reaches the team once the owner or an admin approves it in the Altimate web app. `altimate-code workspace review status` shows where each request stands.
+- **Workspace admins review and manage like the owner.** Against an older server that sends no role, an admin is treated as a member.
+- **Removing an approved skill or knowledge base from the workspace** (`/rules` → your request → **Remove from the workspace**) stops serving it to the whole team, and now asks for confirmation.
+- **A capped agent (`steps`) ends with a text answer** sent with no tools, and the cap counts model requests rather than loop iterations, so compaction no longer uses up steps.
+
+### Added
+
+- **Claude subscription provider.** Claude models through the user's Claude Code login, with Altimate Code's tools, permissions, agents and skills; Claude Code's own tools, settings, `CLAUDE.md`, hooks and MCP servers are off. See "Claude Agent (Claude subscription)" in the providers docs. (#1706)
+- **Subscription suggestions on the first-run picker and `/connect`**, from Claude Code, Codex CLI and Copilot editor logins and logins saved earlier, through `GET /altimate/provider/subscriptions`. (#1706)
+- **Workspace review.** `skill publish` waits for approval on review-on workspaces, `workspace review status` lists your requests, and the TUI shows a notice once when a request is approved, rejected or removed. Skills sync at the version the workspace serves you. (#1685, #1708)
+- **Workspace roles.** Admins approve, reject and manage like the owner, and their own submissions go in without review. (#1707)
+- **Your requests in one view, from any client.** `/rules` lists your rule proposals and your skill and knowledge requests, and withdraws or removes them; `serve` gives the same through `GET /altimate/workspace/requests` and `POST /altimate/workspace/requests/{id}/withdraw|remove`, and `workspace review decisions --json` for plugins. (#1716)
+- **Workspace rules in Claude Code and Codex sessions** through the plugins' hooks (`learn hook`, `learn rules`). (#1626)
+- **Column answer in `impact_analysis`.** With a column and `direction` (`downstream` by default, or `upstream`), it traces the value hop by hop through compiled SQL and lists every model past the edited one as carrying it or possibly carrying it, with the reason (`metadata.column_answer`). `dbt_lineage` uses the same column resolver. See `impact_analysis` in the lineage tools docs. (#1710)
+- **`tool report-event`**, which the Claude Code plugin calls to count how its lineage report is used (`lineage_report` telemetry; nothing is sent when telemetry is off). (#1718)
+
+### Changed
+
+- **The dbt integration moves to 0.3.17**, which starts its Python bridge without `python-bridge`, so the dbt-first path of `sql_execute` runs under Bun, and dbt's log lines stay off the TUI and JSON output. (#1368)
+
+### Fixed
+
+- **A capped agent ends with an answer** instead of a failed request, and a capped subagent no longer hands its parent an empty result; an empty task result is reported as such. (#1632)
+- **One context overflow compacts once**, instead of replacing the summary with a summary of the kept tail, and the post-compaction ledger lists files written by shell commands. (#1639)
+- **Background subagents run without blocking the parent** when `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` is on: `background: true` returns a `task_id` to collect later, at most 4 run per parent, and cancellation keeps partial findings. (#1643)
+- **Workspace telemetry.** A workspace's first prompt and job are sent from any session bound to it, with `origin`; a pinned IDE session names the picked workspace; a failed prompt leaves no workspace verdict; and `ALTIMATE_DISABLE_WORKSPACE` stops a saved link's first events. (#1699, #1672, #1705, #1711)
+- **Clearer failures.** A failed `impact_analysis` column answer is said in the report, a Claude Code start that times out names the network or proxy as the likely cause, and a Claude subscription `/connect` that finds no login says to run `claude auth login`.
+
 ## [0.12.10] - 2026-11-07
 
 **Workspace rules are no longer read from the repository, and a session's title no longer sticks on its placeholder.** The workspace rules state (queued proposals, pending approvals, review notices, dismissed topics and the personal learning choice) moves out of the project folder to a private per-user file, so a branch, merge or pull cannot plant a proposal or an approval that a client would then send with the signed-in person's credential, and team rules reach a session only for the account that pulled them. A session whose first title request fails now retries on the next messages and records the provider's error. Also in this release: a project linked by its path can gain its git remote so team rules can sync, `learn status` says why rules are off, and `tool` commands deliver a large answer whole on a pipe.
