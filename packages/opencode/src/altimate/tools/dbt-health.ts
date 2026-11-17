@@ -32,6 +32,11 @@ const LISTED_LINES = 100
 /** The most bytes of insights the structured result carries. */
 export const RESULT_BYTES = 2 * 1024 * 1024
 
+/** A failure of the wait for a rebuild, as opposed to one of the parse. */
+function rebuildWait(message: string) {
+  return Object.assign(new Error(message), { name: "RebuildWaitError" })
+}
+
 /** Test seams. */
 export const dbtHealthInternals = {
   /** How long the DataPilot run may take. */
@@ -82,10 +87,9 @@ function trackRebuild(adapter: object, slot: Slot) {
 }
 
 /** Waits for a manifest rebuild that starts no earlier than this call, bounded by a timeout and the call's abort. */
-async function rebuildManifest(rawAdapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<number> {
+async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<number> {
   signal.throwIfAborted()
   // The rebuild's own start time, taken when it actually starts: a queued one starts after the one before it.
-  const adapter = rawAdapter
   const start = async () => {
     const at = Date.now()
     await adapter.rebuildManifest()
@@ -93,7 +97,7 @@ async function rebuildManifest(rawAdapter: { rebuildManifest: () => unknown }, s
   }
   let slot = rebuilding.get(adapter)
   if (!slot && abandonedRunning.has(adapter))
-    throw new Error("a manifest rebuild that timed out is still running: try again once it has finished")
+    throw rebuildWait("a manifest rebuild that timed out is still running: try again once it has finished")
   let shared: Promise<unknown>
   // The calls waiting on the queued rebuild: it starts only if one of them still wants it.
   let waiters: { count: number } | undefined
@@ -109,8 +113,8 @@ async function rebuildManifest(rawAdapter: { rebuildManifest: () => unknown }, s
       owner.waiters = mine
       // A slot a timed-out call abandoned starts no rebuild of its own, nor does one every waiter has left.
       owner.queued = owner.running.catch(() => {}).then(() => {
-        if (owner.abandoned) throw new Error("the manifest rebuild it waited for was abandoned after a timeout")
-        if (mine.count === 0) throw new Error("the manifest rebuild it waited for was cancelled")
+        if (owner.abandoned) throw rebuildWait("the manifest rebuild it waited for was abandoned after a timeout")
+        if (mine.count === 0) throw rebuildWait("the manifest rebuild it waited for was cancelled")
         return start()
       })
       owner.queued.catch(() => {})
@@ -136,7 +140,7 @@ async function rebuildManifest(rawAdapter: { rebuildManifest: () => unknown }, s
         }
         running.then(clear, clear)
       }
-      reject(new Error(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`))
+      reject(rebuildWait(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`))
     }, dbtHealthInternals.rebuildTimeoutMs)
   })
   waited.catch(() => {})
@@ -310,7 +314,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         if (ctx.abort.aborted) throw e
         const reason = e instanceof Error ? e.message : String(e)
         // The wait's own failures are not parse errors.
-        return /^(the|a) manifest rebuild/.test(reason)
+        return e instanceof Error && e.name === "RebuildWaitError"
           ? failure("rebuild unavailable", `dbt_health can't run: ${reason}`)
           : failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${reason}`)
       }
@@ -323,9 +327,13 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     // The adapter's own watcher can replace this rebuild with one of its own (the replaced one resolves
     // normally and writes nothing): a manifest older than the rebuild this call started is the last one.
     if (!stale && rebuiltAt !== undefined) {
-      const written = fs.statSync(manifest).mtimeMs
+      // The file can vanish between the check above and here (a concurrent rebuild, `dbt clean`): the note is advisory.
+      let written: number | undefined
+      try {
+        written = fs.statSync(manifest).mtimeMs
+      } catch {}
       // A completed rebuild writes the manifest after it started; the second absorbs a coarse file clock.
-      if (written < Math.floor(rebuiltAt / 1000) * 1000)
+      if (written !== undefined && written < Math.floor(rebuiltAt / 1000) * 1000)
         stale = {
           message: "The manifest was not rewritten by this call's rebuild (another rebuild may have replaced it and still be running), so these insights may not match the project as it is now; run dbt_health again in a moment.",
           manifest_path: manifest,
@@ -384,7 +392,10 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       return failure("failed", `DataPilot failed${version}: ${shown}${hint}`)
     }
     const insightsShape = (v: unknown) =>
-      !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((list) => Array.isArray(list))
+      !!v &&
+      typeof v === "object" &&
+      !Array.isArray(v) &&
+      Object.values(v).every((list) => Array.isArray(list) && list.every((r) => !!r && typeof r === "object" && !Array.isArray(r)))
     if (run.code !== 0 || !insightsShape(parsed.model_insights))
       return failure("failed", `DataPilot gave no insights (exit ${run.code}).${run.stderr ? `\n${run.stderr.slice(-2000)}` : ""}`)
     // Paths from the folder as the system names it (`/tmp` is `/private/tmp` on macOS), the way an editor's cwd is.

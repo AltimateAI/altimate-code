@@ -2,6 +2,7 @@
 // replaced through their seams, so these tests need no dbt, no Python and no DataPilot.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises"
+import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -274,17 +275,22 @@ describe("dbt_health", () => {
 
   test("a rebuild queued behind another counts from when it starts, not from when its call arrived", async () => {
     let calls = 0
+    let entered!: () => void
+    const firstEntered = new Promise<void>((r) => (entered = r))
     dbtAdapterInternals.create = async () => ({
       isInitialized: () => true,
       getProjectRoot: () => project,
       // The first rebuild is slow; the queued one resolves at once without writing, as a watcher-replaced one does.
       rebuildManifest: async () => {
-        if (calls++ === 0) await new Promise((r) => setTimeout(r, 2100))
+        if (calls++ === 0) {
+          entered()
+          await new Promise((r) => setTimeout(r, 2100))
+        }
       },
       parseManifest: async () => parsed,
     })
     const first = run()
-    await new Promise((r) => setTimeout(r, 50))
+    await firstEntered
     // The first rebuild's manifest lands while the second call waits.
     const wrote = new Date()
     await utimes(path.join(project, "target", "manifest.json"), wrote, wrote)
@@ -419,6 +425,34 @@ describe("dbt_health", () => {
     })
     expect((old.metadata.stale_manifest as { age_seconds: number }).age_seconds).toBeGreaterThan(0)
     expect(old.output.split("\n")[0]).toContain("last successful parse")
+  })
+
+  test("an insight entry that is not an object is a failure, not a throw", async () => {
+    python.stdout = JSON.stringify({ model_insights: { "model.shop.orders": [null] }, nodes: {}, project: "shop" }) + "\n"
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+  })
+
+  test("a manifest that vanishes after the existence check is not a throw", async () => {
+    const manifest = path.join(project, "target", "manifest.json")
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {},
+      parseManifest: async () => parsed,
+    })
+    const stat = fs.statSync
+    ;(fs as any).statSync = (p: any, ...rest: any[]) => {
+      if (p === manifest) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+      return (stat as any)(p, ...rest)
+    }
+    try {
+      const result = await run()
+      expect(result.metadata.success).toBe(true)
+      expect(result.metadata.stale_manifest).toBeUndefined()
+    } finally {
+      ;(fs as any).statSync = stat
+    }
   })
 
   test("a result over the byte limit is cut, with the total said", async () => {
