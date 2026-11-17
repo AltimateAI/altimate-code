@@ -18,7 +18,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   const tokens: SqlToken[] = []
   const mysqlComments = !dialect || /^(mysql|mariadb)$/i.test(dialect)
   const hashComments = /^(mysql|mariadb|bigquery)$/i.test(dialect ?? "")
-  const clickhouseComments = /^clickhouse$/i.test(dialect ?? "")
+  const clickhouse = /^clickhouse$/i.test(dialect ?? "")
   // Snowflake also starts a line comment with //.
   const slashComments = /^snowflake$/i.test(dialect ?? "")
   // E'...' escape strings exist only in PostgreSQL and the engines that follow it; elsewhere E is
@@ -35,7 +35,8 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   const nestedComments = /^(postgres|duckdb|sqlserver|tsql|mssql|fabric|clickhouse|spark|databricks)$/i.test(dialect ?? "")
   // Where nesting is not known either way, a /* inside a comment makes its end uncertain.
   const nestingKnown = nestedComments || /^(mysql|mariadb|sqlite|oracle|trino)$/i.test(dialect ?? "")
-  const dollarQuotes = /^(postgres|redshift|duckdb|snowflake)$/i.test(dialect ?? "")
+  // ClickHouse heredocs ($tag$...$tag$) read like PostgreSQL dollar quotes.
+  const dollarQuotes = /^(postgres|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")
   // Quoting is dialect-specific: brackets can contain executable array expressions,
   // and PostgreSQL backticks can be operators. Unknown dialects keep both visible.
   const backtickIdentifiers = /^(mysql|mariadb|sqlite|bigquery|clickhouse|spark|databricks|hive)$/i.test(dialect ?? "")
@@ -44,6 +45,9 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   // may still escape a quote with a backslash or start a comment with #, so both make the SQL
   // uncertain. Oracle, Trino and Fabric do neither.
   const unmodeled = !isModeledDialect(dialect)
+  const sparkHints = unmodeled || /^(spark|databricks|hive|mysql|mariadb)$/i.test(dialect ?? "")
+  // Oracle q'<x>...<x>' quotes end at a delimiter this lexer does not track.
+  const qQuotes = unmodeled || /^oracle$/i.test(dialect ?? "")
   const ambiguousBackslash = unmodeled || /^(postgres|postgresql|spark|databricks|hive)$/i.test(dialect ?? "")
   let complete = true
   let i = 0
@@ -56,7 +60,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     if (
       (sql.startsWith("--", i) && (!mysqlComments || i + 2 === sql.length || /[\x00-\x20\x7f]/.test(sql[i + 2]))) ||
       (hashComments && sql[i] === "#") ||
-      (clickhouseComments && (sql.startsWith("//", i) || sql.startsWith("# ", i) || sql.startsWith("#!", i))) ||
+      (clickhouse && (sql.startsWith("//", i) || sql.startsWith("# ", i) || sql.startsWith("#!", i))) ||
       (slashComments && sql.startsWith("//", i))
     ) {
       kind = "comment"
@@ -66,7 +70,8 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     } else if (sql.startsWith("/*", i)) {
       // MySQL/MariaDB execute these comments. Generic SQL parsers discard them,
       // so they cannot establish that a query is read-only or scratch-confined.
-      if (/^\/\*(?:!|[mM]!)/.test(sql.slice(i))) complete = false
+      if (/^\/\*(?:!|[mM]!)/.test(sql.slice(i, i + 4))) complete = false
+      const hint = sparkHints && sql.startsWith("/*+", i)
       kind = "comment"
       let depth = 1
       i += 2
@@ -81,6 +86,8 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
         } else i++
       }
       if (depth) complete = false
+      // Spark and MySQL 8 lex a /*+ hint's body as code, so a quote there can hold the */ that seems to end it.
+      if (hint && /['"`]/.test(sql.slice(start, i))) complete = false
     } else if (tripleQuotes && (sql.startsWith("'''", i) || sql.startsWith('"""', i))) {
       // Ends only at the same three quotes; a backslash keeps the next character even in a raw
       // r'''...''' string (BigQuery reads the escape but keeps it as text).
@@ -130,7 +137,14 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
           // After an odd run of backslashes a quote is escaped in some modes and closes the literal in
           // others, so where it ends cannot be known: in an unmodeled dialect, in Spark, Databricks
           // and Hive (escapedStringLiterals) and in PostgreSQL (standard_conforming_strings off).
-          if (ambiguousBackslash && !escaped && quote !== "[" && sql[i] === end) {
+          // Not PostgreSQL "..." or `...` identifiers, which take no backslash escapes.
+          if (
+            ambiguousBackslash &&
+            !escaped &&
+            quote !== "`" &&
+            !(quote === '"' && /^(postgres|postgresql)$/i.test(dialect ?? "")) &&
+            sql[i] === end
+          ) {
             let run = 0
             for (let j = i - 1; j > start && sql[j] === "\\"; j--) run++
             if (run % 2 === 1) complete = false
@@ -149,9 +163,19 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
         }
         if (!closed) complete = false
         i = Math.min(i, sql.length)
-      } else if (dollarQuotes && sql[i] === "$" && !IDENTIFIER_CHAR.test(sql[i - 1] ?? "")) {
+      } else if (dollarQuotes && sql[i] === "$" && !(clickhouse ? /[\w$]/ : IDENTIFIER_CHAR).test(sql[i - 1] ?? "")) {
         DOLLAR_TAG.lastIndex = i
-        const tag = /^snowflake$/i.test(dialect ?? "") ? (sql.startsWith("$$", i) ? "$$" : undefined) : DOLLAR_TAG.exec(sql)?.[0]
+        // ClickHouse's heredoc tag is whatever lies between the two $ (ASCII words only before it).
+        const close = clickhouse ? sql.indexOf("$", i + 1) : -1
+        const tag = /^snowflake$/i.test(dialect ?? "")
+          ? sql.startsWith("$$", i)
+            ? "$$"
+            : undefined
+          : clickhouse
+            ? close < 0
+              ? undefined
+              : sql.slice(i, close + 1)
+            : DOLLAR_TAG.exec(sql)?.[0]
         if (tag) {
           kind = "literal"
           const end = sql.indexOf(tag, i + tag.length)
@@ -165,6 +189,8 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     if (!kind) {
       // Unmodeled dialect: # starts a comment in MySQL and BigQuery, so what follows cannot be read.
       if (unmodeled && sql[start] === "#") complete = false
+      if (qQuotes && /[nNqQ]/.test(sql[start]) && /^[nN]?[qQ]'/.test(sql.slice(start, start + 3)) && !/[\w$]/.test(sql[start - 1] ?? ""))
+        complete = false
       i++
       continue
     }
