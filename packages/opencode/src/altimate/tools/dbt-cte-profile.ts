@@ -7,7 +7,7 @@ import { projectRoot } from "../native/connections/registry"
 import { isQueryTimeoutError } from "@altimateai/drivers/types"
 import { executeQuery } from "../native/query-execution"
 import { dbtAdapterFor } from "./dbt-adapter-access"
-import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, unclosedJinjaBlock, type CteInfo } from "./cte-detect"
+import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, unclosedJinjaBlock, unreadCteAfter, type CteInfo } from "./cte-detect"
 
 /** Folders a model search never enters. */
 const SKIPPED_DIRS = new Set(["target", "dbt_packages", "dbt_modules", "node_modules", "logs", "venv", "site-packages"])
@@ -136,7 +136,8 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     if (!root) return failure("no dbt project", "No dbt project here: run from a dbt project folder.")
     const located = modelFile(root, args.model)
     if (!located.file) return failure("model not found", located.error ?? `no model named ${args.model}`)
-    const size = fs.statSync(located.file).size
+    const modelPath = located.file
+    const size = fs.statSync(modelPath).size
     if (size > MAX_MODEL_BYTES) return failure("model too large", `${args.model} is ${size} bytes; the largest file read is ${MAX_MODEL_BYTES}.`)
     const text = fs.readFileSync(located.file, "utf-8")
     const ctes = detectCtes(text)
@@ -157,12 +158,14 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
         clause: c.withClauseStart,
         position,
       }))
-      const output = list.length
-        ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `${c.position + 1}. ${c.name} (line ${c.line})`)].join("\n")
-        : `No CTEs in ${file}.`
+      const stop = unreadCteAfter(text, ctes)
+      const note = stop === undefined ? "" : `\nThe list is incomplete: a CTE after line ${lineAt(stop)} could not be read (its name is built by a Jinja expression or loop).`
+      const output = (list.length
+        ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `position ${c.position}: ${c.name} (line ${c.line})`)].join("\n")
+        : `No CTEs in ${file}.`) + note
       return {
         title: `dbt_cte_profile: ${list.length} CTE${list.length === 1 ? "" : "s"} in ${args.model}`,
-        metadata: { success: true, model: args.model, file, ctes: list },
+        metadata: { success: true, model: args.model, file, ctes: list, ...(stop === undefined ? {} : { incomplete: true }) },
         output,
       }
     }
@@ -213,7 +216,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     try {
       // The adapter has no cancel of its own: the run's timeout, budget and abort end the wait, not the query.
       const result: { data?: Record<string, unknown>[] } = await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
-        adapter.immediatelyExecuteSQLWithLimit(query, `cte_profiler_${name}`, 1),
+        adapter.immediatelyExecuteSQLWithLimit(query, path.basename(modelPath, ".sql"), 1),
       )
       const queryMs = Math.round(performance.now() - started)
       const rows = extractRowCount(result?.data)

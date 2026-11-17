@@ -301,6 +301,19 @@ export function detectCtes(text: string): CteInfo[] {
   return ctes
 }
 
+/**
+ * Line-independent offset of a comma that follows the last CTE read of a WITH clause: another CTE comes
+ * after it but could not be read (its name is built by a Jinja expression or loop), so the list is short.
+ */
+export function unreadCteAfter(text: string, ctes: CteInfo[]): number | undefined {
+  for (const c of ctes) {
+    if (ctes.some((other) => other.withClauseStart === c.withClauseStart && other.index === c.index + 1)) continue
+    const next = skipTrivia(text, c.queryEnd + 1, true)
+    if (text[next] === ",") return next
+  }
+  return undefined
+}
+
 /** Drop a trailing column list: `my_cte (id, name)` -> `my_cte`. */
 export function stripColumnList(rawName: string): string {
   const end = readIdentifier(rawName, 0)

@@ -128,7 +128,30 @@ describe("dbt_cte_profile list", () => {
       { name: "final", line: 12, index: 2, clause: expect.any(Number), position: 2 },
     ])
     expect(result.output).toContain("3 CTEs")
+    // The numbers shown are the ones `position` takes: it counts from 0.
+    expect(result.output).toContain("position 0: orders (line 4)")
+    expect(result.output).toContain("position 2: final (line 12)")
     expect(queries).toEqual([])
+  })
+
+  test("a CTE whose name a Jinja expression builds ends the list, and the list says so", async () => {
+    await writeFile(
+      path.join(project, "models", "marts", "looped.sql"),
+      "with base as (select 1 as a),\n{% for t in ['x'] %}\n{{ t }}_c as (select 1 as a),\n{% endfor %}\nfinal as (select 1 as a) select * from final\n",
+    )
+    const tool = await initTool(DbtCteProfileTool)
+    const result = await tool.execute({ model: "looped" }, ctx)
+    expect(result.metadata.ctes.map((c: { name: string }) => c.name)).toEqual(["base"])
+    expect(result.metadata.incomplete).toBe(true)
+    expect(result.output).toContain("The list is incomplete: a CTE after line 1")
+    const whole = await tool.execute({ model: "customers" }, ctx)
+    expect(whole.metadata.incomplete).toBeUndefined()
+  })
+
+  test("the query runs against the model's own name, so its incremental context is kept", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    await tool.execute({ model: "customers", cte: "orders" }, ctx)
+    expect(queries[0].name).toBe("customers")
   })
 
   test("a model without CTEs lists none", async () => {
@@ -355,7 +378,7 @@ describe("dbt_cte_profile run", () => {
     expect(result.metadata.rows).toBe(42)
     expect(typeof result.metadata.queryMs).toBe("number")
     expect(queries).toHaveLength(1)
-    expect(queries[0].name).toBe('cte_profiler_"Big Spenders"')
+    expect(queries[0].name).toBe("customers")
     expect(queries[0].limit).toBe(1)
     expect(queries[0].sql).toContain("{{ config(materialized='table') }}")
     expect(queries[0].sql).toContain("orders as (")
