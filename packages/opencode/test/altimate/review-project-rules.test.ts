@@ -378,3 +378,24 @@ describe("config read from Jinja variables and project defaults", () => {
     expect(titles(modelConfigFindings(file("models/m.sql", sql), sql, "bigquery", { materialized: "incremental" }))).not.toContain("m: `unique_key` has no effect on a table")
   })
 })
+
+describe("GROUP BY a single position in macro SQL", () => {
+  const macro = (body: string, path = "macros/tables/hub.sql") =>
+    detectMacroPatterns({ path, status: "modified", diff: plus(body) }, body, DEFAULT_RUBRIC, new Set())
+  const ordinal = <T extends { rule?: string }>(fs: T[]) => fs.filter((f) => f.rule === "rule-catalog:macro-group-by-ordinal")
+  const body = "{% macro hub(src_loaded_at) %}\nSELECT max(t.{{ src_loaded_at }}) AS {{ src_loaded_at }},\n'x' AS src_label\nFROM {{ this }} t\nGROUP BY 2\n{% endmacro %}"
+  test("fires on the added GROUP BY line and records it", () => {
+    const hits = ordinal(macro(body))
+    expect(hits).toHaveLength(1)
+    expect((hits[0].evidence?.result as { line?: string }).line).toBe("GROUP BY 2")
+  })
+  test("twin: grouping by the column name is silent", () => {
+    expect(ordinal(macro(body.replace("GROUP BY 2", "GROUP BY src_label")))).toHaveLength(0)
+  })
+  test("two positions stay with group-by-positional; a model's GROUP BY 1 is not this rule", () => {
+    expect(ordinal(macro(body.replace("GROUP BY 2", "GROUP BY 1, 2")))).toHaveLength(0)
+    const sql = "select a, count(*) from t\ngroup by 1"
+    const model = evaluateCatalog({ path: "models/m.sql", status: "modified" }, sql, sql.split("\n"), [], DEFAULT_RUBRIC)
+    expect(ordinal(model)).toHaveLength(0)
+  })
+})
