@@ -27,6 +27,10 @@ const BATCH_CONCURRENCY = 2
 const COVERAGE_QUOTAS = { model: 12, macro: 8, test: 4, yml: 6 }
 /** Head-side lines of context kept around each changed line in a file excerpt. */
 const EXCERPT_CONTEXT_LINES = 20
+/** Characters of a file's diff section under coverage (hunks beyond it are listed as omitted). */
+const COVERAGE_DIFF_CHARS = 16_000
+/** Current-file head kept under coverage when the diff section already carries every hunk of a long diff. */
+const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
 
 /**
  * How much of the PR the lane sends. Defaults keep one bounded call; the
@@ -41,7 +45,7 @@ export interface AiInputBudget {
   batchChars: number
   /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
    *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
-  coverage?: { quotas: Record<AiFileBucket, number> }
+  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number> }
 }
 export function aiInputBudget(env: Record<string, string | undefined> = process.env): AiInputBudget {
   const num = (v: string | undefined, d: number) => {
@@ -55,6 +59,7 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
     coverage:
       env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
         ? {
+            diffChars: num(env.ALTIMATE_REVIEW_AI_COVERAGE_DIFF_CHARS, COVERAGE_DIFF_CHARS),
             quotas: {
               model: num(env.ALTIMATE_REVIEW_AI_QUOTA_MODEL, COVERAGE_QUOTAS.model),
               macro: num(env.ALTIMATE_REVIEW_AI_QUOTA_MACRO, COVERAGE_QUOTAS.macro),
@@ -362,29 +367,49 @@ function headHunkStats(diff: string | undefined, maxChars: number): Omit<Section
   return { hunksSent: sent, hunksTotal: hunks.length }
 }
 
+/** How coverage mode renders a file: the diff section's own character budget. */
+export interface AiCoverageRender {
+  diffChars: number
+}
+/** `true` means coverage with the default diff budget; `false` keeps today's rendering. */
+type CoverageArg = boolean | AiCoverageRender | undefined
+
+function coverageRender(c: CoverageArg): AiCoverageRender | undefined {
+  if (!c) return undefined
+  return c === true ? { diffChars: COVERAGE_DIFF_CHARS } : c
+}
+
 /** One changed file as it appears in the prompt, with what it carries. */
-function renderFile(f: AiReviewFile, maxChars: number, coverage: boolean, withCard: boolean): { text: string } & SectionStats {
+function renderFile(f: AiReviewFile, maxChars: number, coverageArg: CoverageArg, withCard: boolean): { text: string } & SectionStats {
+  const coverage = coverageRender(coverageArg)
   const label = f.kind && KIND_LABEL[f.kind]
   const parts = [`\n### ${f.path} (${f.status}${label ? `, ${label}` : ""})`]
   if (withCard && f.card) parts.push(`dbt context (from manifest):\n${f.card}`)
   let stats: SectionStats = { ...headHunkStats(f.diff, maxChars), truncated: (f.diff?.length ?? 0) > maxChars }
+  // Under coverage a long diff sent whole makes the file windows redundant: keep a short head instead.
+  let fileChars = maxChars
   if (f.diff) {
     if (coverage && f.diff.length > maxChars) {
-      const ex = excerptDiff(f.diff, maxChars)
+      const { text: excerpt, ...ex } = excerptDiff(f.diff, coverage.diffChars)
       stats = ex
-      parts.push("Diff:\n```diff\n" + ex.text + "\n```")
+      if (ex.hunksSent === ex.hunksTotal && !ex.truncated) fileChars = COVERAGE_FULL_DIFF_FILE_CHARS
+      parts.push("Diff:\n```diff\n" + excerpt + "\n```")
     } else parts.push("Diff:\n```diff\n" + truncate(f.diff, maxChars) + "\n```")
   }
   if (f.sql) {
     const isModel = !f.kind || f.kind === "model_sql"
-    const body = coverage ? excerptFile(f.sql, f.diff, maxChars).text : truncate(f.sql, maxChars)
-    if (f.sql.length > maxChars) stats = { ...stats, truncated: true }
+    const body = !coverage
+      ? truncate(f.sql, maxChars)
+      : fileChars < maxChars
+        ? truncate(f.sql, fileChars)
+        : excerptFile(f.sql, f.diff, maxChars).text
+    if (f.sql.length > fileChars) stats = { ...stats, truncated: true }
     parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + body + "\n```")
   }
   return { text: parts.join("\n"), ...stats }
 }
 
-function fileSection(f: AiReviewFile, maxChars: number, coverage = false): string {
+function fileSection(f: AiReviewFile, maxChars: number, coverage: CoverageArg = false): string {
   return renderFile(f, maxChars, coverage, true).text
 }
 
@@ -394,7 +419,7 @@ export function batchAiFiles(files: AiReviewFile[], budget: AiInputBudget): AiRe
   let cur: AiReviewFile[] = []
   let size = 0
   for (const f of files) {
-    const n = fileSection(f, budget.maxFileChars, !!budget.coverage).length
+    const n = fileSection(f, budget.maxFileChars, budget.coverage).length
     if (cur.length && size + n > budget.batchChars) {
       batches.push(cur)
       cur = []
@@ -534,13 +559,13 @@ function relatedContext(input: AiReviewInput): string[] {
 }
 
 /** Assemble the user message (mechanical formatting — not IP). */
-export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_CHARS, coverage = false): string {
+export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_CHARS, coverage: CoverageArg = false): string {
   return buildBatchMessage(input, maxFileChars, coverage).message
 }
 
 /** The user message for one call and a record of each file it carries. Context
  *  cards stop once a call holds 6,000 characters of them. */
-function buildBatchMessage(input: AiReviewInput, maxFileChars: number, coverage: boolean): { message: string; records: AiInputRecord[] } {
+function buildBatchMessage(input: AiReviewInput, maxFileChars: number, coverage: CoverageArg): { message: string; records: AiInputRecord[] } {
   const records: AiInputRecord[] = []
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
@@ -601,7 +626,6 @@ export interface AiInputPlan {
  */
 export function planAiInput(input: AiReviewInput, env: Record<string, string | undefined> = process.env): AiInputPlan {
   const budget = aiInputBudget(env)
-  const coverage = !!budget.coverage
   let files: AiReviewFile[]
   let unsent: AiReviewFile[]
   if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas))
@@ -611,7 +635,7 @@ export function planAiInput(input: AiReviewInput, env: Record<string, string | u
     unsent = input.files.filter((f) => sendable(f) && !chosen.has(f))
   }
   const batches = files.length ? batchAiFiles(files, budget) : []
-  const built = batches.map((b) => buildBatchMessage({ ...input, files: b }, budget.maxFileChars, coverage))
+  const built = batches.map((b) => buildBatchMessage({ ...input, files: b }, budget.maxFileChars, budget.coverage))
   return { budget, files, unsent, batches, messages: built.map((b) => b.message), input: built.flatMap((b) => b.records) }
 }
 

@@ -553,6 +553,48 @@ describe("input coverage (opt-in ALTIMATE_REVIEW_AI_COVERAGE=1)", () => {
     expect(lost).not.toContain("unit_price")
   })
 
+  test("the diff gets its own 16k budget: a 20-hunk 14k diff goes whole, a 30k diff stops at 16k", () => {
+    const hunk = (k: number, size: number) =>
+      `@@ -${10 + k * 100},${size} +${10 + k * 100},${size} @@\n` + Array.from({ length: size }, (_, i) => `+  , hub_hashkey_${k}_${i} as hk_${k}_${i} -- macro col`).join("\n")
+    const diffOf = (hunks: number, size: number) => Array.from({ length: hunks }, (_, k) => hunk(k, size)).join("\n") + "\n"
+    // The current file holds every added line at its head-side line number.
+    const fileLines = Array.from({ length: 4_000 }, (_, i) => `  , select_line_${i} -- current file content`)
+    for (let k = 0; k < 40; k++) for (let i = 0; i < 15; i++) fileLines[10 + k * 100 + i - 1] = `  , hub_hashkey_${k}_${i} as hk_${k}_${i} -- macro col`
+    const sql = fileLines.join("\n")
+    const small = diffOf(20, 15)
+    expect(small.length).toBeGreaterThan(13_000)
+    expect(small.length).toBeLessThan(16_000)
+    const file: AiReviewFile = { path: "macros/hub.sql", status: "modified", model: "hub", kind: "macro", diff: small, sql }
+    const plan = planAiInput({ grounding: [], files: [file] }, COVERAGE)
+    expect(plan.input[0]).toMatchObject({ hunksSent: 20, hunksTotal: 20, truncated: true })
+    const msg = plan.messages[0]
+    expect(msg).toContain(hunk(19, 15))
+    expect(msg).not.toContain("hunk omitted")
+    // Every hunk is in the diff, so the current file is a 2,000-char head.
+    const current = msg.slice(msg.indexOf("Current file:"))
+    expect(current).toContain("… (truncated)")
+    expect(current.length).toBeLessThan(2_200)
+    expect(plan.input[0].chars).toBe(msg.slice(msg.indexOf("\n### macros/hub.sql"), msg.indexOf("\n\nReturn ONLY")).length)
+
+    const big = diffOf(40, 15)
+    expect(big.length).toBeGreaterThan(28_000)
+    const bigPlan = planAiInput({ grounding: [], files: [{ ...file, diff: big }] }, COVERAGE)
+    const rec = bigPlan.input[0]
+    expect(rec.hunksTotal).toBe(40)
+    expect(rec.hunksSent).toBeGreaterThan(20)
+    expect(rec.hunksSent).toBeLessThan(40)
+    const diffPart = bigPlan.messages[0].slice(bigPlan.messages[0].indexOf("Diff:"), bigPlan.messages[0].indexOf("Current file:"))
+    expect(diffPart.length).toBeLessThan(16_300)
+    expect(diffPart).toMatch(/more hunks omitted, at lines \d+–\d+/)
+    // Not every hunk went, so the current file keeps its ±20-line windows.
+    expect(bigPlan.messages[0]).toMatch(/Current file:[\s\S]*lines \d+–\d+ omitted/)
+    // The budget is env-overridable; the default lane still cuts the head at 6,000.
+    expect(aiInputBudget({ ...COVERAGE, ALTIMATE_REVIEW_AI_COVERAGE_DIFF_CHARS: "8000" }).coverage?.diffChars).toBe(8_000)
+    const plain = planAiInput({ grounding: [], files: [file] }, {})
+    expect(plain.messages[0]).toBe(buildUserMessage({ grounding: [], files: [file] }))
+    expect(plain.input[0].hunksSent).toBeLessThan(20)
+  })
+
   test("diff excerpts keep whole hunks and name the omitted ones by line; one oversized hunk keeps its head", () => {
     const hunk = (start: number) => `@@ -${start},40 +${start},40 @@\n` + Array.from({ length: 40 }, (_, i) => `+  , value_${start}_${i} as column_${start}_${i}`).join("\n")
     const diff = [10, 200, 400, 600, 800].map(hunk).join("\n") + "\n"
