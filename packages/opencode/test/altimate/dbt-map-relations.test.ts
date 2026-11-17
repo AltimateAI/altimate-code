@@ -692,6 +692,8 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     const rel = (name: string, id: string) => ({ parts: ["DB", "S", name], call: `{{ ref('${id}') }}`, kind: "model" as const, name: id, uniqueId: id, relationName: `"DB"."S"."${name}"`, root: true })
     const rows = mapRelations(["orders"], "select * from DB.S.orders", [rel("orders", "a_lower"), rel("ORDERS", "b_upper")], "snowflake")
     expect(rows[0].replaceWith).toBe("{{ ref('b_upper') }}")
+    const mixed = mapRelations(["orders"], 'select * from "DB"."S".orders', [rel("orders", "a_lower"), rel("ORDERS", "b_upper")], "snowflake")
+    expect(mixed[0].replaceWith).toBe("{{ ref('b_upper') }}")
   })
 
   test("T-SQL table hints and PIVOT do not end the list", () => {

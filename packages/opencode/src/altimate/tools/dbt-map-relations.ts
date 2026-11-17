@@ -623,7 +623,7 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
     // Where an unquoted name is folded (Snowflake reads `orders` as ORDERS), the relation it really names comes first.
     const direction = FOLDS_UNQUOTED[dialect]
     const written = entry.parts[entry.parts.length - 1]
-    const folded = direction && !entry.raw.includes('"') && written ? (direction === "upper" ? written.toUpperCase() : written.toLowerCase()) : null
+    const folded = direction && !entry.quoted && written ? (direction === "upper" ? written.toUpperCase() : written.toLowerCase()) : null
     for (const rel of relations) {
       const how = matchParts(entry.parts, rel.parts)
       if (!how) continue
