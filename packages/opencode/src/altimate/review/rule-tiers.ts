@@ -119,6 +119,8 @@ const SUMMARY = [
   "rule-catalog:union-not-all",
   "rule-catalog:unqualified-column-multi-table",
   "rule-catalog:where-1-eq-1",
+  // Macro, test and yml rules: summary until each is judged on replayed PRs.
+  "rule-catalog:macro-group-by-ordinal",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {
