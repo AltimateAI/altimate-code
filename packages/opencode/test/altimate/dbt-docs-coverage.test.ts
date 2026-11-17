@@ -97,10 +97,32 @@ describe("docsCoverage", () => {
     expect(r.missing).toEqual(["a*b"])
   })
 
-  test("a column read that merely contains the letters star is the SQL's error, not a wildcard", () => {
-    expect(() => docsCoverage({ ...orders, compiled_code: "select start_time + 1 from t" }, "snowflake")).toThrow(
-      "unable to determine output column name",
-    )
+  test("a column literally named * is that column, not a wildcard", () => {
+    const r = docsCoverage({ ...orders, compiled_code: 'select "*" from t' }, "snowflake")
+    expect(r.source).toBe("compiled_sql")
+    expect(r.output_columns).toEqual(["*"])
+    expect(r.missing).toEqual(["*"])
+  })
+
+  test.each([
+    ["an expression with no alias", "select count(*) from raw.orders"],
+    ["a UNION", "select id from a union all select id from b"],
+    ["an arithmetic expression named by nothing", "select start_time + 1 from t"],
+  ])("%s falls back to the manifest's columns", (_name, sql) => {
+    const r = docsCoverage({ ...orders, compiled_code: sql }, "snowflake")
+    expect(r.source).toBe("manifest_columns")
+    expect(r.output_columns).toEqual(["id", "customer_id", "status"])
+  })
+
+  test("an unreadable select list with no columns in the manifest is a short error without the engine's debug text", () => {
+    let message = ""
+    try {
+      docsCoverage({ ...orders, columns: {}, compiled_code: "select count(*) from t" }, "snowflake")
+    } catch (e) {
+      message = (e as Error).message
+    }
+    expect(message).toContain("its columns are not known")
+    expect(message).not.toContain("CountFunc")
   })
 
   test("select * with no columns in the manifest is an error, not full coverage", () => {
@@ -119,7 +141,7 @@ describe("docsCoverage", () => {
       const r = await tool.execute({ model: "orders", manifest_path: path }, ctx as any)
       expect(r.metadata.source).toBe("manifest_columns")
       expect(r.metadata.output_columns).toEqual(["id", "customer_id", "status"])
-      expect(r.output).toContain("a column the SQL adds beside `*` is not")
+      expect(r.output).toContain("a column the SQL adds beside them is not")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

@@ -12,7 +12,7 @@ export interface DocsCoverage {
   model: string
   unique_id: string
   has_description: boolean
-  /** The model's output columns, as written in its compiled SQL (or the manifest's columns when the SQL has `*`). */
+  /** The model's output columns, as written in its compiled SQL (or the manifest's columns when the select list cannot be read as names). */
   output_columns: string[]
   /** Output columns that have a description. */
   documented: string[]
@@ -20,13 +20,13 @@ export interface DocsCoverage {
   missing: string[]
   /** Percent of output columns with a description, 0 to 100, rounded to one decimal; 100 when there are no columns. */
   percent: number
-  /** Where the column list came from: the compiled SQL's select list, or the manifest's columns when the select list has a `*`. */
+  /** Where the column list came from: the compiled SQL's select list, or the manifest's columns when the select list cannot be read as names (`*`, an unnamed expression, a UNION). */
   source: "compiled_sql" | "manifest_columns"
 }
 
 const hasText = (value: unknown) => typeof value === "string" && value.trim().length > 0
 
-/** Coverage of one manifest model node. Throws when the node has no compiled SQL, the engine cannot read it, or it selects `*` and the manifest lists no columns. */
+/** Coverage of one manifest model node. Throws when the node has no compiled SQL, the engine cannot read it, or its select list cannot be read as column names and the manifest lists no columns. */
 export function docsCoverage(node: any, dialect: string | undefined): DocsCoverage {
   const yamlColumns: Record<string, any> = node.columns ?? {}
   const described = new Set<string>()
@@ -42,21 +42,20 @@ export function docsCoverage(node: any, dialect: string | undefined): DocsCovera
   let source: DocsCoverage["source"] = "compiled_sql"
   try {
     outputs = core.extractOutputColumns(sql, dialect)
-  } catch (e) {
-    // A `select *` names no columns, so the engine refuses it; the manifest's own columns are then
-    // the best list there is. Any other failure is the SQL's, and is reported.
-    if (!/due to star\b/i.test(e instanceof Error ? e.message : String(e))) throw e
+  } catch {
+    // A select list the engine cannot turn into names (a `*`, an expression with no alias, a UNION) has
+    // no column list to count, so the manifest's own columns are the best list there is. The engine's
+    // message is its own debug text and is not passed on.
     outputs = []
     source = "manifest_columns"
   }
-  if (outputs.includes("*")) source = "manifest_columns"
   if (source === "manifest_columns") {
     outputs = Object.entries<any>(yamlColumns).map(([key, col]) => String(col?.name || key))
   }
 
   if (source === "manifest_columns" && outputs.length === 0) {
     throw new Error(
-      `Model "${node.name}" selects \`*\` and the manifest lists no columns for it, so its columns are not known. List them in its YAML or run \`dbt docs generate\`.`,
+      `Model "${node.name}" has a select list that cannot be read as column names (a \`*\`, an expression with no alias or a UNION) and the manifest lists no columns for it, so its columns are not known. List them in its YAML or run \`dbt docs generate\`.`,
     )
   }
 
@@ -123,7 +122,7 @@ export const DbtDocsCoverageTool = Tool.define("dbt_docs_coverage", {
       if (result.missing.length > 0) lines.push(`Missing descriptions: ${result.missing.join(", ")}`)
       if (result.source === "manifest_columns")
         lines.push(
-          "The model selects `*`, so only the columns the manifest lists are counted; a column the SQL adds beside `*` is not.",
+          "The model's select list cannot be read as column names (a `*`, an expression with no alias or a UNION), so only the columns the manifest lists are counted; a column the SQL adds beside them is not.",
         )
       return {
         title: `Docs coverage: ${result.model} ${result.percent}%`,

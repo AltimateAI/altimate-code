@@ -436,6 +436,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
       reads = true
       if (edge.lineage_type !== "indirect" && typeof edge.target === "string") {
         const out = edge.target.toLowerCase()
+        // Only one candidate gets here: more than one is ambiguous and was skipped above.
         const lens = joinLens(
           lensOf.get(candidates[0]!)?.get(source.column),
           typeof edge.lens_type === "string" ? edge.lens_type : undefined,
