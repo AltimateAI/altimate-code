@@ -2318,10 +2318,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
     for (const file of reviewable.filter((f) => f.status === "added" && /(^|\/)package-lock\.yml$/.test(f.path))) {
       const dir = file.path.slice(0, file.path.length - "package-lock.yml".length)
-      const [projectYml, testsYml] = await Promise.all([read(`${dir}dbt_project.yml`, "new"), read(`${dir}integration_tests/dbt_project.yml`, "new")])
+      const [projectYml, testsYml, nested] = await Promise.all([
+        read(`${dir}dbt_project.yml`, "new"),
+        read(`${dir}integration_tests/dbt_project.yml`, "new"),
+        // `integration_tests/<name>/dbt_project.yml` (grepProject globs from the project root;
+        // a git pathspec `*` crosses directories).
+        (dir === (input.layout?.root ? input.layout.root + "/" : "") && input.grepProject?.("name", "integration_tests/*dbt_project.yml").then((h) => h ?? []).catch(() => [])) ||
+          Promise.resolve([]),
+      ])
       if (projectYml === undefined && testsYml === undefined) continue
       checkedOther(file)
-      all.push(packageLockFindings(file, isPackageProject(projectYml, testsYml)))
+      all.push(packageLockFindings(file, isPackageProject(projectYml, !!testsYml || nested.length > 0)))
     }
 
     const newModels = reviewable.filter((f) => f.kind === "model_sql" && f.status === "added")

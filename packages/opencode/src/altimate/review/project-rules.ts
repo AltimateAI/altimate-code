@@ -422,7 +422,13 @@ export function quickstartModelFindings(
   content: string | undefined,
   newModels: string[],
 ): Finding[] {
-  const doc = parseYaml(content)
+  // Lenient like PyYAML: a duplicate key elsewhere in the file must not hide the list.
+  let doc: any
+  try {
+    doc = YAML.parse(content ?? "", { uniqueKeys: false })
+  } catch {
+    return []
+  }
   const listed: string[] = Array.isArray(doc?.public_models) ? doc.public_models.filter((x: unknown) => typeof x === "string") : []
   if (listed.length < 3) return []
   // The package prefix (`hubspot__…`) most public models share.
@@ -450,10 +456,10 @@ export function quickstartModelFindings(
 
 // ── package-lock.yml ────────────────────────────────────────────────────────
 
-/** True when the dbt project at `dir` is a package others install: it carries an
- *  `integration_tests/` project, or its `dbt_project.yml` names no profile. */
-export function isPackageProject(projectYml: string | undefined, integrationTestsYml: string | undefined): boolean {
-  if (integrationTestsYml) return true
+/** True when the dbt project at `dir` is a package others install: it carries a dbt project
+ *  under `integration_tests/` (at any depth), or its `dbt_project.yml` names no profile. */
+export function isPackageProject(projectYml: string | undefined, hasIntegrationTests: boolean): boolean {
+  if (hasIntegrationTests) return true
   const doc = parseYaml(projectYml)
   return !!doc && typeof doc === "object" && !doc.profile
 }
