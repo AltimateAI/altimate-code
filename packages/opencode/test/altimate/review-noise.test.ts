@@ -402,7 +402,12 @@ describe("per-rule tiers", () => {
       return []
     })
     expect(DEFAULT_RULE_TIERS["dbt-patterns:comma-join"]).toBe("off")
-    expect(rules(env.findings)).toEqual(["altimate-core.equivalence:not-equivalent", "rule-catalog:group-by-positional"])
+    expect(rules(env.findings)).toEqual([
+      "altimate-core.equivalence:not-equivalent",
+      "rule-catalog:group-by-positional",
+      "rule-catalog:self-equality",
+      "rule-catalog:where-1-eq-1",
+    ])
     expect(grounding).toBeDefined()
     expect(rules(grounding!)).toEqual(rules(env.findings))
     expect(env.findings.every((f) => f.tier === "summary")).toBe(true)
@@ -430,8 +435,8 @@ describe("per-rule tiers", () => {
 
   test("an exact override can turn off an engine rule, and can promote a rule inline", async () => {
     const env = await review({ "altimate-core.equivalence:not-equivalent": "off", "rule-catalog:group-by-positional": "inline" })
-    expect(rules(env.findings)).toEqual(["rule-catalog:group-by-positional"])
-    expect(env.findings[0].tier).toBe("inline")
+    expect(rules(env.findings)).toEqual(["rule-catalog:group-by-positional", "rule-catalog:self-equality", "rule-catalog:where-1-eq-1"])
+    expect(env.findings.find((f) => f.rule === "rule-catalog:group-by-positional")?.tier).toBe("inline")
   })
 
   test("resolution order: exact, longest glob, default table, summary", () => {
