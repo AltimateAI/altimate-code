@@ -287,4 +287,11 @@ describe("dbt_cost_estimate", () => {
     await (await initTool(DbtCostEstimateTool)).execute({ sql: "where s = 'a'" }, ctx)
     expect(calls.dryRuns).toEqual(["compiled(where s = 'a')"])
   })
+
+  test("a config that names no integration is the Python bridge: the SQL goes as is", async () => {
+    useAdapter(calls)
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "python3", queryLimit: 500 })
+    await (await initTool(DbtCostEstimateTool)).execute({ sql: "where s = 'a'" }, ctx)
+    expect(calls.dryRuns).toEqual(["compiled(where s = 'a')"])
+  })
 })

@@ -5,10 +5,10 @@ import { dbtAdapterFor } from "./dbt-adapter-access"
 /**
  * Every dbt integration but the Python bridge writes the SQL into a `{{ validate_sql('...') }}` Jinja
  * argument, so a quote or backslash in it must be escaped or any filter on a string breaks the dry run.
- * The bridge binds the SQL as a parameter and takes it as is.
+ * The bridge, which a config without an integration also means, binds the SQL as a parameter and takes it as is.
  */
 export function forDryRun(sql: string, integration: unknown): string {
-  return integration === "core" ? sql : sql.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+  return integration == null || integration === "core" ? sql : sql.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
 }
 
 /** The units dbt-bigquery's `format_bytes` writes, smallest first; each is 1024 times the one before. */
