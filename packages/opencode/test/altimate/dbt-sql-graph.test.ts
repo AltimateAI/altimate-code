@@ -299,6 +299,23 @@ describe("remapSqlLineage", () => {
     expect(member.edges).toEqual([["x", "constructor"]])
   })
 
+  test("a quoted Foo and FOO are two relations: each parent keeps its own exact-case match", () => {
+    const two = {
+      tableEdges: [] as [string, string][],
+      details: {
+        "Foo#1": { type: "table", name: "Foo", columns: [] },
+        "FOO#1": { type: "table", name: "FOO", columns: [] },
+      },
+    } as any
+    const g = remapSqlLineage(two, { name: "m", uniqueId: "model.p.m", resourceType: "model" }, [
+      { uniqueId: "model.p.mixed", alias: "Foo", resourceType: "model" },
+      { uniqueId: "model.p.upper", alias: "FOO", resourceType: "model" },
+    ])
+    const byId = Object.fromEntries(g.nodes.map((n) => [n.id, n.nodeId]))
+    expect(byId["Foo#1"]).toBe("model.p.mixed")
+    expect(byId["FOO#1"]).toBe("model.p.upper")
+  })
+
   test("does not mutate the backend reply", () => {
     expect(reply.details.__final_select__).toBeDefined()
     expect(reply.tableEdges[1]).toEqual(["o", "__final_select__"])
@@ -477,22 +494,37 @@ describe("buildSqlGraph", () => {
       { ...reply, details: [] },
       { ...reply, details: { a: 1 } },
       { ...reply, tableEdges: [["a"]] },
+      { ...reply, details: { a: {} } },
+      { ...reply, details: {}, tableEdges: [["a", "__final_select__"]] },
     ]) {
       await expect(
         buildSqlGraph(adapter(), "orders", { ...deps, fetchLineage: async () => bad as any }, signal),
       ).rejects.toThrow("no SQL graph")
     }
     // A compile that never settles does not hold the call past its cancellation.
+    let enteredCompile: () => void = () => {}
+    const entered = new Promise<void>((resolve) => (enteredCompile = resolve))
     const stalled = new AbortController()
     const pending = buildSqlGraph(
-      adapter({ unsafeCompileQuery: () => new Promise(() => {}) }),
+      adapter({ unsafeCompileQuery: () => (enteredCompile(), new Promise(() => {})) }),
       "orders",
       deps,
       stalled.signal,
     )
+    await entered
     stalled.abort(new Error("cancelled"))
     await expect(pending).rejects.toThrow("cancelled")
     const aborted = AbortSignal.abort()
+    let parsedManifest = false
+    await expect(
+      buildSqlGraph(
+        adapter({ parseManifest: async () => ((parsedManifest = true), undefined as any) }),
+        "orders",
+        deps,
+        aborted,
+      ),
+    ).rejects.toThrow()
+    expect(parsedManifest).toBe(false)
     let called = false
     await expect(
       buildSqlGraph(adapter(), "orders", { ...deps, fetchLineage: async () => ((called = true), reply) }, aborted),

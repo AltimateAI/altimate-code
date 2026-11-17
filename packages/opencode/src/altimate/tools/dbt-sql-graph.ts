@@ -132,14 +132,20 @@ export function remapSqlLineage(
   const claimed = new Map<string, Set<string>>()
   for (const p of parents) {
     // A source's relation is its table's identifier; any other node's, its alias.
-    const wanted = (p.sourceTable ?? p.alias ?? "").toLowerCase()
+    const wanted = p.sourceTable ?? p.alias ?? ""
     if (!wanted) continue
     // The backend keys a relation by its location and a per-occurrence suffix, so the match is on its name, in the parent's database and schema when both say one;
-    // every occurrence of the relation in the SQL stands for the same dbt node.
-    for (const [k, d] of Object.entries(details)) {
-      if (d.type !== "table" || (d.name ?? k).toLowerCase() !== wanted) continue
-      if (d.schema && p.schema && d.schema.toLowerCase() !== p.schema.toLowerCase()) continue
-      if (d.db && p.database && d.db.toLowerCase() !== p.database.toLowerCase()) continue
+    // every occurrence of the relation in the SQL stands for the same dbt node. A quoted `Foo` and `FOO` can be two relations:
+    // an exact-case match wins, and only without one does the match ignore case.
+    const matches = (fold: (v: string) => string) =>
+      Object.entries(details).filter(([k, d]) => {
+        if (d.type !== "table" || fold(d.name ?? k) !== fold(wanted)) return false
+        if (d.schema && p.schema && fold(d.schema) !== fold(p.schema)) return false
+        if (d.db && p.database && fold(d.db) !== fold(p.database)) return false
+        return true
+      })
+    const exact = matches((v) => v)
+    for (const [k] of exact.length ? exact : matches((v) => v.toLowerCase())) {
       claimed.set(k, (claimed.get(k) ?? new Set()).add(p.uniqueId))
       mapping[k] = { nodeId: p.uniqueId, type: p.resourceType }
     }
@@ -190,6 +196,7 @@ export async function buildSqlGraph(
   deps: SqlGraphDeps,
   signal: AbortSignal,
 ): Promise<SqlGraph> {
+  signal.throwIfAborted()
   const manifest = await untilAborted(adapter.parseManifest(), signal)
   signal.throwIfAborted()
   if (!manifest) throw new Error("the dbt manifest is not available")
@@ -199,6 +206,7 @@ export async function buildSqlGraph(
   if (node.resource_type !== "model" || !node.path?.toLowerCase().endsWith(".sql"))
     throw new Error(`${node.name} is not a dbt model with a SQL file`)
   const file = path.isAbsolute(node.path) ? node.path : path.join(deps.projectRoot ?? "", node.path)
+  signal.throwIfAborted()
   const compiled = await untilAborted(adapter.unsafeCompileQuery(deps.readFile(file), node.name), signal)
   signal.throwIfAborted()
   if (!compiled) throw new Error(`unable to compile ${node.name}`)
@@ -284,7 +292,8 @@ export async function buildSqlGraph(
     !Array.isArray(response?.tableEdges) ||
     !isRecord(response.details) ||
     !response.tableEdges.every((e) => Array.isArray(e) && e.length === 2 && e.every((x) => typeof x === "string")) ||
-    !Object.values(response.details).every(isRecord)
+    !Object.values(response.details).every((d) => isRecord(d) && typeof (d as { type?: unknown }).type === "string") ||
+    !response.tableEdges.every((e) => e.every((x) => Object.hasOwn(response.details, x)))
   )
     throw new Error("the backend returned no SQL graph")
   return remapSqlLineage(

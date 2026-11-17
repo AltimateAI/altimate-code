@@ -138,9 +138,7 @@ describe("dbtAdapterFor", () => {
   test("a read-only call cancelled beforehand is cancelled, not refused", async () => {
     const controller = new AbortController()
     controller.abort()
-    await expect(
-      dbtAdapterFor({ ...ctx, abort: controller.signal, extra: { forceReadOnly: true } }),
-    ).rejects.toThrow()
+    await expect(dbtAdapterFor({ ...ctx, abort: controller.signal, extra: { forceReadOnly: true } })).rejects.toThrow()
     expect(created).toBe(0)
   })
 
@@ -593,10 +591,18 @@ describe("AltimateApi.apiRequest", () => {
     globalThis.fetch = (async () => (urlSends++, new Response("{}"))) as unknown as typeof fetch
     try {
       // Not a URL, or a URL whose scheme isn't http(s): "localhost:3000" parses with the scheme "localhost:".
-      for (const altimateUrl of ["api.example.test", "localhost:3000", "file:///tmp", "ftp://api.example.test"]) {
+      for (const altimateUrl of [
+        "api.example.test",
+        "localhost:3000",
+        "file:///tmp",
+        "ftp://api.example.test",
+        "https://user:pass@api.example.test",
+      ]) {
         await Bun.write(file, JSON.stringify({ altimateUrl, altimateInstanceName: "a", altimateApiKey: "k1" }))
         const badUrl = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
-        expect(badUrl.message).toBe("API GET /dbt/v1/x could not be sent: the stored API URL is not an http(s) URL.")
+        expect(badUrl.message).toBe(
+          "API GET /dbt/v1/x could not be sent: the stored API URL is not an http(s) URL without credentials.",
+        )
       }
       expect(urlSends).toBe(0)
     } finally {
