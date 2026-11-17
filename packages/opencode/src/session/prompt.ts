@@ -23,6 +23,8 @@ import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
 // altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
 import { FreeTier } from "../altimate/free/client"
+// altimate_change — explain a missing Anthropic provider (Claude Pro/Max sign-in removed)
+import { modelNotFoundHint } from "../altimate/provider/model-hint"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -1313,10 +1315,12 @@ export namespace SessionPrompt {
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) {
           const hint = e.data.suggestions?.length ? ` Did you mean: ${e.data.suggestions.join(", ")}?` : ""
+          // altimate_change — explain a missing Anthropic provider
+          const guidance = modelNotFoundHint(e.data.providerID, e.data.providerMissing)
           Bus.publish(Session.Event.Error, {
             sessionID,
             error: new NamedError.Unknown({
-              message: `Model not found: ${e.data.providerID}/${e.data.modelID}.${hint}`,
+              message: `Model not found: ${e.data.providerID}/${e.data.modelID}.${hint}${guidance ? ` ${guidance}` : ""}`,
             }).toObject(),
           })
         }
@@ -4881,9 +4885,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       if (Provider.ModelNotFoundError.isInstance(e)) {
         const { providerID, modelID, suggestions } = e.data
         const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
+        // altimate_change — explain a missing Anthropic provider
+        const guidance = modelNotFoundHint(providerID, e.data.providerMissing)
         Bus.publish(Session.Event.Error, {
           sessionID: input.sessionID,
-          error: new NamedError.Unknown({ message: `Model not found: ${providerID}/${modelID}.${hint}` }).toObject(),
+          error: new NamedError.Unknown({
+            message: `Model not found: ${providerID}/${modelID}.${hint}${guidance ? ` ${guidance}` : ""}`,
+          }).toObject(),
         })
       }
       throw e
