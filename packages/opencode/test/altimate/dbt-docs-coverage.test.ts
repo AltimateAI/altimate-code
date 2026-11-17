@@ -10,11 +10,13 @@ import { initTool } from "./tool-fixture"
 import { DbtDocsCoverageTool, docsCoverage } from "../../src/altimate/tools/dbt-docs-coverage"
 import { SessionID, MessageID } from "../../src/session/schema"
 
+const inheritedTelemetry = process.env.ALTIMATE_TELEMETRY_DISABLED
 beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
 afterAll(() => {
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  if (inheritedTelemetry === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  else process.env.ALTIMATE_TELEMETRY_DISABLED = inheritedTelemetry
 })
 
 const ctx = {
