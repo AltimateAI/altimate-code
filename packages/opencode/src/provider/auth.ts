@@ -259,8 +259,9 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         return yield* new OauthCodeMissing({ providerID: input.providerID })
       }
 
-      const result = yield* Effect.promise(() =>
-        match.method === "code" ? match.callback(input.code!) : match.callback(),
+      // altimate_change — the signal aborts when this call is interrupted, so a polling login can stop
+      const result = yield* Effect.promise((signal) =>
+        match.method === "code" ? match.callback(input.code!) : match.callback({ signal }),
       )
       if (!result || result.type !== "success") return yield* new OauthCallbackFailed({})
 
@@ -307,8 +308,10 @@ export async function methods() {
 export async function authorize(input: { providerID: string } & AuthorizeInput) {
   return runProviderAuth((svc) => svc.authorize({ ...input, providerID: ProviderV2.ID.make(input.providerID) }))
 }
-export async function callback(input: { providerID: string } & CallbackInput) {
-  return runProviderAuth((svc) => svc.callback({ ...input, providerID: ProviderV2.ID.make(input.providerID) }))
+export async function callback(input: { providerID: string } & CallbackInput, signal?: AbortSignal) {
+  return runProviderAuth((svc) => svc.callback({ ...input, providerID: ProviderV2.ID.make(input.providerID) }), {
+    signal,
+  })
 }
 // Persist an API-key credential for a provider. Restored after the Effect-only
 // migration dropped it; delegates straight to Auth (the Service had no extra

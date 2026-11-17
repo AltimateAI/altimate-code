@@ -454,7 +454,7 @@ function installCards(api: TuiPluginApi) {
     const key = shownKey(p)
     if (seen.has(key)) return
     api.kv.set(seenKey(), [...seen, key].slice(-200))
-    if (!quiet) reviewToast(api, p)
+    if (!quiet) toasterOf(api).push(p)
   }
   // `live`: a decision that arrived as an event before the first replay. It is news even when the replay is the scope's
   // first, which records what was kept before it silently.
@@ -505,6 +505,7 @@ function installCards(api: TuiPluginApi) {
     disposed = true
     if (leaseTimer) clearTimeout(leaseTimer)
     clearTimeout(startup)
+    disposeToaster(api)
     for (const off of offs.splice(0)) off()
     disposeEffects()
   })
@@ -516,23 +517,112 @@ type Shown = { public_id: string; text: string; status: string; reason?: string;
 /** How a decision is remembered as shown: rule and skill ids live in different id spaces. */
 export const shownKey = (p: Pick<Shown, "kind" | "public_id" | "status">) => `${p.kind ?? "rule"}:${p.public_id}:${p.status}`
 
-function reviewToast(api: TuiPluginApi, raw: Shown) {
-  const p = { ...raw, text: printable(raw.text), reason: raw.reason && printable(raw.reason), reviewer: raw.reviewer && printable(raw.reviewer) }
+type DecisionToast = { variant: "success" | "warning" | "info"; message: string; duration: number }
+
+const cleanShown = (raw: Shown): Shown => ({
+  ...raw,
+  text: printable(raw.text),
+  reason: raw.reason && printable(raw.reason),
+  reviewer: raw.reviewer && printable(raw.reviewer),
+})
+const quote = (text: string) => `"${text.length > 80 ? text.slice(0, 79) + "…" : text}"`
+const isBad = (p: Shown) => p.status === "rejected" || (p.status === "retired" && p.kind !== undefined && p.kind !== "rule")
+
+/** The toast for one decision on the person's own rule, skill or knowledge request; none for a rule status this
+ * version does not show. */
+export function decisionToast(raw: Shown): DecisionToast | undefined {
+  const p = cleanShown(raw)
   const who = p.reviewer ? ` by ${p.reviewer}` : ""
-  const quoted = `"${p.text.length > 80 ? p.text.slice(0, 79) + "…" : p.text}"`
+  const quoted = quote(p.text)
   // A skill or knowledge base the person submitted to the workspace: `text` is its name.
   if (p.kind && p.kind !== "rule") {
     const what = p.kind === "skill" ? `Your skill ${quoted}` : `Your knowledge base ${quoted}`
-    if (p.status === "active") api.ui.toast({ variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 })
-    else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
-    else if (p.status === "retired") api.ui.toast({ variant: "warning", message: `${what} was removed from the workspace${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
+    if (p.status === "active") return { variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 }
+    if (p.status === "rejected") return { variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 }
+    if (p.status === "retired") return { variant: "warning", message: `${what} was removed from the workspace${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 }
     // A status this version does not know (a newer server) is still shown, not dropped.
-    else api.ui.toast({ variant: "info", message: `${what} is now ${printable(p.status)}${who}.`, duration: 10000 })
-    return
+    return { variant: "info", message: `${what} is now ${printable(p.status)}${who}.`, duration: 10000 }
   }
-  if (p.status === "active") api.ui.toast({ variant: "success", message: `Your rule was approved${who}: ${quoted}. It now applies to the team.`, duration: 10000 })
-  else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `Your rule was rejected${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
-  else if (p.status === "retired") api.ui.toast({ variant: "info", message: `Retired${who}: ${quoted}`, duration: 10000 })
+  if (p.status === "active") return { variant: "success", message: `Your rule was approved${who}: ${quoted}. It now applies to the team.`, duration: 10000 }
+  if (p.status === "rejected") return { variant: "warning", message: `Your rule was rejected${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 }
+  if (p.status === "retired") return { variant: "info", message: `Retired${who}: ${quoted}`, duration: 10000 }
+  return undefined
+}
+
+/** How many decisions a combined toast names. */
+const COMBINED_NAMED = 5
+
+/** One line of a combined toast. */
+function decisionLine(raw: Shown): string {
+  const p = cleanShown(raw)
+  const what = p.kind === "skill" ? "skill" : p.kind === "knowledge" ? "knowledge base" : "rule"
+  const did: Record<string, string> = { active: "approved", rejected: "rejected", retired: p.kind && p.kind !== "rule" ? "removed" : "retired" }
+  const who = p.reviewer ? ` by ${p.reviewer}` : ""
+  const why = isBad(p) && p.reason ? ` — ${p.reason}` : ""
+  return `${what} ${quote(p.text)} ${did[p.status] ?? printable(p.status)}${who}${why}`
+}
+
+/** The toast for decisions that arrived together. The TUI shows one toast at a time, so several are listed in one
+ * rather than each replacing the last; a warning when any of them is a rejection or a removal. */
+export function combinedToast(decisions: Shown[]): DecisionToast | undefined {
+  const shown = decisions.filter((d) => decisionToast(d) !== undefined)
+  if (shown.length <= 1) return shown[0] && decisionToast(shown[0])
+  // A TUI closed for a while can replay many at once: a few are named, the rest counted (`/rules` lists them all).
+  const named = shown.slice(0, COMBINED_NAMED).map(decisionLine)
+  const more = shown.length - named.length
+  return {
+    variant: shown.some(isBad) ? "warning" : "success",
+    message: `${shown.length} decisions on your requests: ${named.join(" · ")}${more > 0 ? ` · and ${more} more (see /rules)` : ""}`,
+    duration: 15000,
+  }
+}
+
+/** Decisions to toast, held for `windowMs` so the ones that arrive together are shown together. `shownSince` tells
+ * "Sync now" a decision was (or is about to be) shown since it started, so its summary does not replace it. */
+export function decisionToaster(show: (toast: DecisionToast) => void, windowMs = 300, now = () => Date.now()) {
+  let queue: Shown[] = []
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let lastShown = Number.NEGATIVE_INFINITY
+  const flush = () => {
+    timer = undefined
+    const toast = combinedToast(queue.splice(0))
+    if (!toast) return
+    lastShown = now()
+    show(toast)
+  }
+  return {
+    push(decision: Shown) {
+      queue.push(decision)
+      if (timer === undefined) {
+        timer = setTimeout(flush, windowMs)
+        timer.unref?.()
+      }
+    },
+    flush,
+    shownSince: (since: number) => queue.some((d) => decisionToast(d) !== undefined) || lastShown >= since,
+    dispose() {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+      queue = []
+    },
+  }
+}
+
+const toasters = new WeakMap<TuiPluginApi, ReturnType<typeof decisionToaster>>()
+/** This TUI's one decision toaster: shared by the notices and "Sync now". */
+function toasterOf(api: TuiPluginApi) {
+  let toaster = toasters.get(api)
+  if (!toaster) {
+    toaster = decisionToaster((toast) => api.ui.toast(toast))
+    toasters.set(api, toaster)
+  }
+  return toaster
+}
+
+/** Drops this TUI's toaster: nothing held is shown after the plugin goes away, and a later one starts fresh. */
+function disposeToaster(api: TuiPluginApi) {
+  toasters.get(api)?.dispose()
+  toasters.delete(api)
 }
 
 async function showMenu(api: TuiPluginApi) {
@@ -611,10 +701,13 @@ async function showMenu(api: TuiPluginApi) {
         if (option.value === "sync" || option.value === "toggle" || option.value === "follow") api.ui.dialog.clear()
         if (option.value === "sync") {
           api.ui.toast({ variant: "info", message: "Syncing rules…", duration: 3000 })
+          const started = Date.now()
           const report = await post<{ ok: boolean; error?: string; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[]; queued?: number; error?: string }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync").catch(() => undefined)
           // A review notice from this pull is its own toast: the success summary would cover it, but a problem (proposals
           // kept queued, a failed pull) is still said.
-          const reviewed = !!report?.pull?.notices.length
+          // A skill or knowledge decision this sync found arrives as an event, not in `pull.notices`: the TUI shows one
+          // toast at a time, so the summary must not replace it either.
+          const reviewed = !!report?.pull?.notices.length || toasterOf(api).shownSince(started)
           if (report?.context && report.context.status !== "ready")
             api.ui.toast({ variant: "warning", message: `Rules sync skipped: ${printable(report.context.reason ?? report.context.status)}.`, duration: 8000 })
           else if (report?.pull?.ok && report.push?.error)
@@ -692,7 +785,8 @@ function requestLine(r: WorkspaceRequest): string {
   return `${status}${by}${update}${expired}${r.reason ? ` — ${printable(r.reason)}` : ""}`
 }
 
-/** Withdraw a waiting request, or remove an approved one from the workspace: each after a confirm. */
+/** Withdraw a waiting request, or remove an approved one from the workspace. Removing stops serving it to the
+ * whole team, so it asks again, opening on "No" so a stray Enter cannot remove it. */
 function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
   const what = `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
   const options: TuiDialogSelectOption<string>[] = [
@@ -708,24 +802,55 @@ function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
     <api.ui.DialogSelect
       title={`Your ${what}`}
       options={options}
-      onSelect={async (option) => {
-        if (option.value !== "withdraw" && option.value !== "remove") return void showMenu(api)
-        api.ui.dialog.clear()
-        const result = await post<{ ok: boolean; error?: string; code?: string; request?: WorkspaceRequest }>(
-          api,
-          `/altimate/workspace/requests/${encodeURIComponent(request.public_id)}/${option.value}`,
-          { expected_version: request.version },
-        ).catch(() => undefined)
-        if (!result?.ok)
-          return api.ui.toast({ variant: "error", message: `Not ${option.value === "withdraw" ? "withdrawn" : "removed"}: ${printable(result?.error ?? "the session server did not answer")}`, duration: 8000 })
-        api.ui.toast({
-          variant: "success",
-          message: option.value === "withdraw" ? `Withdrew your ${what}.` : `Removed your ${what} from the workspace.`,
-          duration: 6000,
-        })
+      onSelect={(option) => {
+        if (option.value === "withdraw") return void runRequestAction(api, request, what, "withdraw")
+        if (option.value === "remove") return confirmRemove(api, request, what)
+        return void showMenu(api)
       }}
     />
   ))
+}
+
+function confirmRemove(api: TuiPluginApi, request: WorkspaceRequest, what: string) {
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect<string>
+      title={`Remove your ${what} from the workspace?`}
+      options={[
+        { title: "No, keep it", value: "no", description: "Nothing changes." },
+        { title: "Yes, remove it", value: "yes", description: "Teammates stop getting it. You can send it again later." },
+      ]}
+      current="no"
+      onSelect={(choice) => {
+        if (choice.value === "yes") return void runRequestAction(api, request, what, "remove")
+        return showRequestActions(api, request)
+      }}
+    />
+  ))
+}
+
+async function runRequestAction(
+  api: TuiPluginApi,
+  request: WorkspaceRequest,
+  what: string,
+  action: "withdraw" | "remove",
+) {
+  api.ui.dialog.clear()
+  const result = await post<{ ok: boolean; error?: string; code?: string; request?: WorkspaceRequest }>(
+    api,
+    `/altimate/workspace/requests/${encodeURIComponent(request.public_id)}/${action}`,
+    { expected_version: request.version },
+  ).catch(() => undefined)
+  if (!result?.ok)
+    return api.ui.toast({
+      variant: "error",
+      message: `Not ${action === "withdraw" ? "withdrawn" : "removed"}: ${printable(result?.error ?? "the session server did not answer")}`,
+      duration: 8000,
+    })
+  api.ui.toast({
+    variant: "success",
+    message: action === "withdraw" ? `Withdrew your ${what}.` : `Removed your ${what} from the workspace.`,
+    duration: 6000,
+  })
 }
 // altimate_change end
 
