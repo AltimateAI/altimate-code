@@ -2219,6 +2219,29 @@ describe("credentials flow", () => {
       expect(await core.readSecret(core.secretKey("cred", "github", "old_custom_token"))).toBeUndefined()
     })
 
+    test("a provider that redirects is not followed with the credential", async () => {
+      const target = Bun.serve({ port: 0, fetch: () => Response.json({ login: "elsewhere" }) })
+      const redirecting = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { location: `http://127.0.0.1:${target.port}/user` } }) })
+      process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${redirecting.port}`
+      try {
+        const r = await creds.validate("github", "", { github_token: GOOD })
+        expect(r.ok).toBe(false)
+      } finally {
+        process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
+        redirecting.stop(true)
+        target.stop(true)
+      }
+    })
+
+    test("Jira is detected from any token variable connect reads", () => {
+      process.env.JIRA_PAT_TOKEN = GOOD
+      try {
+        expect(core.scan().find((d) => d.id === "jira")?.source).toEqual({ kind: "env", label: "JIRA_PAT_TOKEN" })
+      } finally {
+        delete process.env.JIRA_PAT_TOKEN
+      }
+    })
+
     test("a transport error that quotes the request does not print a credential", async () => {
       const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_u: unknown, init: any) => {
         throw new TypeError(`Header has invalid value: ${JSON.stringify(init?.headers ?? {})}`)

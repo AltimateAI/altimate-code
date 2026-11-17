@@ -441,8 +441,9 @@ function detectJira(home: string): Detection | undefined {
     if (cfg.server || cfg.login)
       return { id: "jira", source: { kind: "cli", label: "jira-cli" }, account: cfg.login ?? null, syncable: true, note: cfg.server ? `site ${cfg.server}` : null }
   } catch {}
-  if (process.env.JIRA_API_TOKEN)
-    return { id: "jira", source: { kind: "env", label: "JIRA_API_TOKEN" }, account: process.env.JIRA_USER ?? null, syncable: true, note: null }
+  // Every Jira token variable connect reads, not just the Cloud one.
+  const envToken = ["JIRA_API_TOKEN", "ATLASSIAN_API_TOKEN", "JIRA_PAT_TOKEN", "JIRA_PERSONAL_TOKEN", "JIRA_PAT"].find((k) => process.env[k]?.trim())
+  if (envToken) return { id: "jira", source: { kind: "env", label: envToken }, account: process.env.JIRA_USER ?? null, syncable: true, note: null }
   if (onPath("acli")) return { id: "jira", source: { kind: "cli", label: "acli" }, account: null, syncable: true, note: null }
 }
 

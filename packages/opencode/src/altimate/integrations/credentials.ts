@@ -285,7 +285,7 @@ function fromEnv(field: string): Found | undefined {
   }
 }
 
-function jiraCliConfig(): { server?: string; login?: string } {
+function jiraCliConfig(): { server?: string; login?: string; authType?: string } {
   try {
     return core.parseJiraCliConfig(fs.readFileSync(path.join(core.homeDir(), ".config/.jira/.config.yml"), "utf8"))
   } catch {
@@ -621,7 +621,8 @@ async function request(url: string, init: RequestInit) {
   try {
     let res: Response
     try {
-      res = await fetch(url, { ...init, signal: controller.signal })
+      // A credential goes only to the URL it was meant for: a redirect is a failure, never followed with the header.
+      res = await fetch(url, { ...init, redirect: "error", signal: controller.signal })
     } catch (e) {
       // A transport error can quote the request, credentials in its headers included: each header value, and the token after
       // its scheme, is taken out before the message goes anywhere.
