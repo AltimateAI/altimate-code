@@ -399,3 +399,31 @@ describe("GROUP BY a single position in macro SQL", () => {
     expect(ordinal(model)).toHaveLength(0)
   })
 })
+
+describe("parameter added to an existing macro without a default", () => {
+  const noDefault = (diff: string, old: string, head: string, path = "macros/tests/anomalies.sql") =>
+    jinjaFindings({ path, status: "modified", diff }, old, head).filter((f) => f.rule === "dbt-project-rules:macro-param-no-default")
+  const old = "{% test anomalies(\n    model,\n    days_back,\n    sensitivity=3\n) %}\nselect 1\n{% endtest %}"
+  const head = (p: string) => `{% test anomalies(\n    model,\n    days_back,\n    ${p},\n    sensitivity=3\n) %}\nselect 1\n{% endtest %}`
+  const diff = (p: string) => `@@ -2,3 +2,4 @@\n     model,\n     days_back,\n+    ${p},\n     sensitivity=3\n`
+  test("fires on the added parameter line of a test block", () => {
+    const fs = noDefault(diff("floor_value"), old, head("floor_value"))
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine).toBe(4)
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe("    floor_value,")
+  })
+  test("twin: the same parameter with `=none` is silent", () => {
+    expect(noDefault(diff("floor_value=none"), old, head("floor_value=none"))).toHaveLength(0)
+  })
+  test("a new macro, or a parameter that already existed, is not a new required parameter", () => {
+    expect(jinjaFindings({ path: "macros/m.sql", status: "added", diff: plus(head("floor_value")) }, undefined, head("floor_value")).filter((f) => f.rule === "dbt-project-rules:macro-param-no-default")).toHaveLength(0)
+    const renamedOnly = "@@ -1 +1 @@\n-{% macro m(a, b) %}\n+{% macro m(a, b) -%}\n"
+    expect(noDefault(renamedOnly, "{% macro m(a, b) %}{% endmacro %}", "{% macro m(a, b) -%}{% endmacro %}", "macros/m.sql")).toHaveLength(0)
+  })
+  test("defaults holding calls and lists do not split the parameter list", () => {
+    const o = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp()) %}{% endmacro %}"
+    const h = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp(), b) %}{% endmacro %}"
+    const fs = noDefault(`@@ -1 +1 @@\n-${o}\n+${h}\n`, o, h, "macros/m.sql")
+    expect(fs.map((f) => f.title)).toEqual(["m: new parameter `b` of `m` has no default"])
+  })
+})

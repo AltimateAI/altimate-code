@@ -121,6 +121,7 @@ const SUMMARY = [
   "rule-catalog:where-1-eq-1",
   // Macro, test and yml rules: summary until each is judged on replayed PRs.
   "rule-catalog:macro-group-by-ordinal",
+  "dbt-project-rules:macro-param-no-default",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {
