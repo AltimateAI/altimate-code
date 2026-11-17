@@ -352,9 +352,10 @@ export namespace AltimateApi {
     signal?: AbortSignal,
   ) {
     const url = `${creds.altimateUrl}${endpoint}`
-    // Checked here so that only the header check can make fetch throw a TypeError before sending.
-    if (!URL.canParse(url))
-      throw new Error(`API ${method} ${endpoint} could not be sent: the stored API URL is not a valid URL.`)
+    // Checked here so that only the header check can make fetch throw a TypeError before sending. Only
+    // http(s) is sent: "localhost:3000" parses as a URL with the scheme "localhost:".
+    if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol))
+      throw new Error(`API ${method} ${endpoint} could not be sent: the stored API URL is not an http(s) URL.`)
     // Any body but undefined is sent: null, false, 0 and "" are JSON values too. A body that can't be
     // serialised fails here with its own error, which quotes no credential.
     const payload = body !== undefined ? JSON.stringify(body) : undefined
