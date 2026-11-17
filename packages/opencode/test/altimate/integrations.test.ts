@@ -496,11 +496,15 @@ describe("workspace connections", () => {
     process.env.ALTIMATE_INTEGRATIONS_TOKEN = "bearer-1"
     process.env.ALTIMATE_INTEGRATIONS_TENANT = "acme"
     process.env.ALTIMATE_INTEGRATIONS_HOME = fs.mkdtempSync(path.join(tmp, "empty-"))
-    process.env.GITHUB_TOKEN = "gh_env_token"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_env_token"
     githubApiBefore = process.env.ALTIMATE_INTEGRATIONS_GITHUB_API
     process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${server.port}`
     spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "unbound" })
-    await core.recordDetections([{ id: "github", source: { kind: "env", label: "GITHUB_TOKEN" }, account: null, syncable: true, note: null }])
+    // The detected credential comes from gh's own github.com login; a stand-in gh serves it from a test-only variable.
+    const ghBin = fs.mkdtempSync(path.join(tmp, "ghbin-"))
+    fs.writeFileSync(path.join(ghBin, "gh"), '#!/bin/sh\nif [ "$1" = auth ] && [ -n "$ALTIMATE_TEST_GH_TOKEN" ]; then [ "$2" = token ] && echo "$ALTIMATE_TEST_GH_TOKEN"; exit 0; fi\nexit 1\n', { mode: 0o755 })
+    process.env.PATH = `${ghBin}:${saved.PATH}`
+    await core.recordDetections([{ id: "github", source: { kind: "cli", label: "gh CLI" }, account: null, syncable: true, note: null }])
   })
   afterEach(() => {
     ;(workspaceState.resolveBindingOutcome as any).mockRestore?.()
@@ -509,15 +513,15 @@ describe("workspace connections", () => {
     for (const k of ["ALTIMATE_INTEGRATIONS_API_URL", "ALTIMATE_INTEGRATIONS_TOKEN", "ALTIMATE_INTEGRATIONS_TENANT", "ALTIMATE_INTEGRATIONS_HOME"]) delete process.env[k]
     if (githubApiBefore === undefined) delete process.env.ALTIMATE_INTEGRATIONS_GITHUB_API
     else process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = githubApiBefore
-    if (saved.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN
-    else process.env.GITHUB_TOKEN = saved.GITHUB_TOKEN
+    delete process.env.ALTIMATE_TEST_GH_TOKEN
+    process.env.PATH = saved.PATH
   })
   const writes = () => calls.filter((c) => c.method !== "GET")
 
   test("sync of a replaced detected token does not carry over the old token's expiry", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     expect(core.loadStore().providers.github?.expiresAt).toBe("2031-01-02T03:04:05.000Z")
-    process.env.GITHUB_TOKEN = "gh_no_expiry"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_no_expiry"
     expect((await core.syncProvider("github")).result).toBe("synced")
     expect(writes()[1].body).toEqual({ config: { github_token: "gh_no_expiry" } })
   })
@@ -525,7 +529,7 @@ describe("workspace connections", () => {
   test("sync does not upload into a connection that is already shared without --share", async () => {
     expect((await core.syncProvider("github")).shared).toBeUndefined()
     api.state.rows[0].privacy = "public"
-    process.env.GITHUB_TOKEN = "gh_no_expiry"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_no_expiry"
     const refused = await core.syncProvider("github")
     expect([refused.result, refused.reason, refused.shared]).toEqual(["failed", core.SHARED_CONNECTION_REFUSAL("github"), undefined])
     expect(writes()).toHaveLength(1)
@@ -564,7 +568,7 @@ describe("workspace connections", () => {
   test("a failure after a shared rewrite that reaches the outer catch still says who has the new credential", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     api.state.rows[0].privacy = "public"
-    process.env.GITHUB_TOKEN = "gh_no_expiry"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_no_expiry"
     const o = await core.syncProvider("github", (label) => {
       if (label.startsWith("Updated connection")) throw new Error("EPIPE")
     }, 0, false, true)
@@ -612,7 +616,7 @@ describe("workspace connections", () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     // A credential kept on this machine after the upload, e.g. by a Keep local whose record write failed: the only copy of it.
     await core.storeSecret(core.secretKey("cred", "github", "github_token"), "kept_local_token")
-    delete process.env.GITHUB_TOKEN
+    delete process.env.ALTIMATE_TEST_GH_TOKEN
     const pathBefore = process.env.PATH
     process.env.PATH = fs.mkdtempSync(path.join(tmp, "nobin-"))
     try {
@@ -633,7 +637,7 @@ describe("workspace connections", () => {
     expect(calls.filter((c) => c.method === "GET" && c.path === "/connections/")).toHaveLength(1)
     expect(core.loadStore().providers.github).toMatchObject({ registered: true, synced: true, connectionId: 21 })
 
-    process.env.GITHUB_TOKEN = "gh_env_token_2"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_env_token_2"
     const second = await core.syncProvider("github")
     expect(second.result).toBe("synced")
     expect(second.steps).toEqual([{ label: "Updated connection", ok: true }, { label: "Not linked to a workspace: run altimate link", ok: false }])
@@ -745,7 +749,7 @@ describe("workspace connections", () => {
     expect(skipsSynced({ provider: "github", all: true })).toBe(true)
     await core.syncProvider("github")
     const before = writes().length
-    process.env.GITHUB_TOKEN = "gh_env_token_other"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_env_token_other"
     const kept = await core.syncProvider("github", undefined, 0, skipsSynced({ provider: "github", keepSynced: true }))
     expect(kept.steps[0]).toEqual({ label: "Connection already in the workspace", ok: true })
     expect(writes()).toHaveLength(before)
@@ -824,7 +828,7 @@ describe("workspace connections", () => {
   test("sync over every provider leaves a saved connection alone and only attaches it", async () => {
     await core.syncProvider("github")
     const before = writes().length
-    process.env.GITHUB_TOKEN = "gh_env_token_other"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_env_token_other"
     const all = await core.syncProvider("github", undefined, 0, true)
     expect(all.result).toBe("synced")
     expect(all.steps[0]).toEqual({ label: "Connection already in the workspace", ok: true })
@@ -981,7 +985,7 @@ describe("workspace connections", () => {
     } finally {
       upload.mockRestore()
     }
-    delete process.env.GITHUB_TOKEN
+    delete process.env.ALTIMATE_TEST_GH_TOKEN
     // No gh either, so the retry has nothing to upload and takes the attach-only path.
     const pathBefore = process.env.PATH
     process.env.PATH = fs.mkdtempSync(path.join(tmp, "nobin-"))
@@ -1170,12 +1174,12 @@ describe("workspace connections", () => {
   })
 
   test("sync uploads nothing when the provider rejects the detected credential, or cannot be reached", async () => {
-    process.env.GITHUB_TOKEN = "gh_bad"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_bad"
     const refused = await core.syncProvider("github")
     expect([refused.result, refused.reason]).toEqual(["failed", "GitHub rejected the token (401): Bad credentials"])
     expect(writes()).toEqual([])
     expect(core.loadStore().providers.github?.registered).toBeFalsy()
-    process.env.GITHUB_TOKEN = "gh_env_token"
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_env_token"
     process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = "http://127.0.0.1:1"
     const down = await core.syncProvider("github")
     expect(down.result).toBe("failed")
@@ -1208,7 +1212,7 @@ describe("workspace connections", () => {
   test("a credential found here is still offered next to a hand-made workspace connection", async () => {
     api.seed({ name: "Hand made", integration_id: "github", last_validated_at: "2030-05-01T00:00:00Z" })
     const shown = (await core.statusRemote()).providers[0]
-    expect([shown.state, shown.managed, shown.found]).toEqual(["connected", false, { source: { kind: "env", label: "GITHUB_TOKEN" }, account: null }])
+    expect([shown.state, shown.managed, shown.found]).toEqual(["connected", false, { source: { kind: "cli", label: "gh CLI" }, account: null }])
     const plain = (await core.statusRemote()).providers[1]
     expect(plain.found).toBeUndefined()
   })
@@ -1292,7 +1296,7 @@ describe("workspace connections", () => {
     const store = core.loadStore()
     store.providers.github = { registered: true, synced: true, connectionId: row.id, variant: "default", secretFields: ["github_token"], values: {} } as any
     core.saveStore(store)
-    delete process.env.GITHUB_TOKEN
+    delete process.env.ALTIMATE_TEST_GH_TOKEN
     const out = await core.syncProvider("github")
     expect(out.result).toBe("synced")
     expect(out.steps).toEqual([{ label: "Connection already in the workspace", ok: true }, { label: "Not linked to a workspace: run altimate link", ok: false }])
@@ -1303,7 +1307,7 @@ describe("workspace connections", () => {
     const store = core.loadStore()
     store.providers.github = { registered: true, synced: true, connectionId: 999, variant: "default", secretFields: ["github_token"], values: {} } as any
     core.saveStore(store)
-    delete process.env.GITHUB_TOKEN
+    delete process.env.ALTIMATE_TEST_GH_TOKEN
     expect((await core.syncProvider("github")).result).toBe("skipped")
   })
 
@@ -1979,58 +1983,49 @@ describe("credentials flow", () => {
     test("a GitHub token that may belong to another host is never sent to api.github.com, from gh, the shell or an MCP server", async () => {
       const claude = path.join(home, ".claude.json")
       const mcp = (server: Record<string, unknown>, name = "github") => fs.writeFileSync(claude, JSON.stringify({ mcpServers: { [name]: server } }))
-      // gh hands back GITHUB_TOKEN as the github.com token, so it must not be asked whenever that variable is not usable.
-      fake("gh", 't="${GH_TOKEN:-$GITHUB_TOKEN}"; [ -n "$t" ] && echo "$t"')
+      const settings = path.join(home, ".claude", "settings.json")
+      const ENTERPRISE = "ghp_enterprise_token_5678"
+      const sentEnterprise = () => calls.some((c) => c.auth?.includes(ENTERPRISE))
+      // gh would hand back GH_TOKEN or GITHUB_TOKEN as the github.com token; it is run without them, so only its stored login answers.
+      fake("gh", 't="${GH_TOKEN:-${GITHUB_TOKEN:-$STORED_GH_LOGIN}}"; [ -n "$t" ] && echo "$t"')
       const refused = async () => {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
-        // A server may still be listed as usable in Claude, but nothing is offered for sync.
         expect(core.scan().find((d) => d.id === "github" && d.syncable)).toBeUndefined()
       }
-      const cases: { env?: Record<string, string>; server?: Record<string, unknown>; project?: true; name?: string; settings?: Record<string, string> }[] = [
-        { env: { GITHUB_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
-        { env: { GH_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
-        // The same token written literally into an enterprise server's config.
-        { env: { GITHUB_TOKEN: GOOD }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
-        // A repository's .mcp.json ties the shell token to another host as well.
-        { env: { GITHUB_TOKEN: GOOD }, project: true, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } } },
-        // A server not called github at all that hands the shell token to another host.
-        { env: { GITHUB_TOKEN: GOOD }, name: "enterprise", server: { type: "http", url: "https://git.corp.example/mcp", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } } },
-        // A GitHub server for another host with no token of its own inherits this environment's.
-        { env: { GITHUB_TOKEN: GOOD }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp" } } },
-        { server: { command: "github-mcp-server", args: ["stdio", "--host", "ghe.corp"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
-        // docker passes the variable on by name, in forms other than a separate -e NAME, for a server not called github.
-        { env: { GH_TOKEN: GOOD }, name: "corp", server: { command: "docker", args: ["run", "-i", "--env=GH_TOKEN", "corp/mcp"] } },
-        { env: { GH_TOKEN: GOOD }, name: "corp", server: { command: "docker", args: ["run", "-i", "-eGH_TOKEN", "corp/mcp"] } },
-        // A server set to another host with no token of its own reads this environment's, whatever it is called.
-        { env: { GITHUB_TOKEN: GOOD }, name: "corp", server: { command: "corp-mcp", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp" } } },
-        { server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_BASE_URL: "https://ghe.corp/api/v3", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
-        // A host Claude Code's own settings give the servers it starts.
-        { settings: { GITHUB_HOST: "https://ghe.corp" }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
-        { settings: { GITHUB_HOST: "https://ghe.corp" }, env: { GITHUB_TOKEN: GOOD } },
-        // Claude Code's settings naming github.com do not hide another host set in the shell.
-        { settings: { GH_HOST: "github.com" }, env: { GH_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
-        { env: { GITHUB_TOKEN: GOOD, GH_HOST: "${UNSET:-github.com-ghe.corp}" } },
-        { env: { GITHUB_TOKEN: GOOD, GITHUB_API_URL: "https://github.com:x@ghe.corp/api/v3" } },
-        // The user's own config ties the shell token to another host.
-        { env: { GITHUB_TOKEN: GOOD }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } } },
-        { env: { GITHUB_TOKEN: GOOD }, server: { command: "docker", args: ["run", "-i", "-e", "GITHUB_TOKEN", "--env-file", "/etc/ghe.env", "ghcr.io/github/github-mcp-server"] } },
+      // A token in the shell is never read, whatever host settings sit beside it.
+      for (const env of [{ GITHUB_TOKEN: ENTERPRISE }, { GH_TOKEN: ENTERPRISE }, { GITHUB_TOKEN: ENTERPRISE, GITHUB_SERVER_URL: "https://github.com" }]) {
+        Object.assign(process.env, env)
+        try {
+          await refused()
+        } finally {
+          for (const k of Object.keys(env)) delete process.env[k]
+        }
+      }
+      expect(sentEnterprise()).toBe(false)
+      // gh's stored github.com login is used even while an enterprise token and host are set for gh in the shell.
+      Object.assign(process.env, { GH_TOKEN: ENTERPRISE, GH_HOST: "ghe.corp.example", STORED_GH_LOGIN: GOOD })
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+        expect(sentEnterprise()).toBe(false)
+      } finally {
+        for (const k of ["GH_TOKEN", "GH_HOST", "STORED_GH_LOGIN"]) delete process.env[k]
+        await core.disconnect("github")
+      }
+      // An MCP server's token is read only from one of GitHub's official setups with nothing naming another host.
+      const official = { command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } }
+      const cases: { server: Record<string, unknown>; env?: Record<string, string>; settings?: Record<string, string> }[] = [
         { server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "${UNSET:-https://github.com-enterprise.example}", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
         { server: { type: "http", url: "https://ghe.corp/mcp", env: { GITHUB_TOKEN: GOOD } } },
         { server: { command: "env GITHUB_HOST=ghe.corp github-mcp-server stdio", env: { GITHUB_TOKEN: GOOD } } },
         { server: { command: "docker", args: ["run", "-i", "--env-file", "/etc/ghe.env", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
-        { env: { GITHUB_HOST: "https://ghe.corp.example" }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        { server: { command: "github-mcp-server", args: ["stdio", "--host", "ghe.corp"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        { server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_BASE_URL: "https://ghe.corp/api/v3", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        { server: official, env: { GITHUB_HOST: "https://ghe.corp.example" } },
+        { server: official, settings: { GITHUB_HOST: "https://ghe.corp" } },
       ]
-      const cwd = process.cwd()
       for (const c of cases) {
         Object.assign(process.env, c.env ?? {})
-        const project = fs.mkdtempSync(path.join(tmp, "repo-"))
-        if (c.server && c.project) {
-          fs.writeFileSync(path.join(project, ".mcp.json"), JSON.stringify({ mcpServers: { github: c.server } }))
-          // Run from a subdirectory: the repository's file still applies.
-          fs.mkdirSync(path.join(project, "sub"))
-          process.chdir(path.join(project, "sub"))
-        } else if (c.server) mcp(c.server, c.name)
-        const settings = path.join(home, ".claude", "settings.json")
+        mcp(c.server)
         if (c.settings) {
           fs.mkdirSync(path.dirname(settings), { recursive: true })
           fs.writeFileSync(settings, JSON.stringify({ env: c.settings }))
@@ -2039,44 +2034,12 @@ describe("credentials flow", () => {
           await refused()
         } finally {
           fs.rmSync(settings, { force: true })
-          process.chdir(cwd)
           for (const k of Object.keys(c.env ?? {})) delete process.env[k]
           fs.rmSync(claude, { force: true })
         }
       }
-      // A server that names neither the shell variable nor its value leaves the shell token usable, and so does GitHub's own remote server.
-      for (const server of [
-        { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "ghe_other_token" } },
-        // Its own literal GITHUB_TOKEN is another token: the key alone does not claim the shell's.
-        { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_TOKEN: "ghe_other_token" } },
-        { type: "http", url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } },
-        // A remote server that is given no shell token cannot take it.
-        { type: "http", url: "https://example.com/github/mcp" },
-        // A filesystem server over a folder called github is not a GitHub server, nor is a script kept in one.
-        { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/github"], name: "files" },
-        { command: "/Users/me/github/tools/run.sh", name: "tools" },
-      ]) {
-        const { name, ...config } = server as Record<string, unknown>
-        mcp(config, (name as string) ?? "github")
-        process.env.GITHUB_TOKEN = GOOD
-        try {
-          expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
-        } finally {
-          delete process.env.GITHUB_TOKEN
-          fs.rmSync(claude, { force: true })
-          await core.disconnect("github")
-        }
-      }
-      // github.com settings stay usable: the shell token beside github.com hosts, and the official server.
-      Object.assign(process.env, { GITHUB_TOKEN: GOOD, GITHUB_SERVER_URL: "https://github.com", GITHUB_API_URL: "https://api.github.com" })
-      try {
-        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
-      } finally {
-        for (const k of ["GITHUB_TOKEN", "GITHUB_SERVER_URL", "GITHUB_API_URL"]) delete process.env[k]
-        await core.disconnect("github")
-      }
       fake("gh", null)
-      mcp({ command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } })
+      mcp(official)
       try {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
       } finally {
@@ -2090,14 +2053,14 @@ describe("credentials flow", () => {
         fs.mkdirSync(path.join(dir, ".claude"), { recursive: true })
         fs.writeFileSync(path.join(dir, ".claude", "settings.json"), JSON.stringify({ env: { GITHUB_HOST: host } }))
       }
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } } }))
       const cwd = process.cwd()
       process.chdir(path.join(repo, "sub"))
-      process.env.GITHUB_TOKEN = GOOD
       try {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
       } finally {
         process.chdir(cwd)
-        delete process.env.GITHUB_TOKEN
+        fs.rmSync(path.join(home, ".claude.json"), { force: true })
       }
     })
 
@@ -2122,50 +2085,6 @@ describe("credentials flow", () => {
       expect(api.state.rows).toHaveLength(0)
     })
 
-    test("Claude Code's config directory and this tool's own MCP config are looked at too", async () => {
-      const dir = fs.mkdtempSync(path.join(tmp, "claude-config-"))
-      process.env.CLAUDE_CONFIG_DIR = dir
-      process.env.GITHUB_TOKEN = GOOD
-      try {
-        fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ env: { GH_HOST: "ghe.example" } }))
-        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
-        fs.rmSync(path.join(dir, "settings.json"))
-        fs.writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: { ghe: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } } } }))
-        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
-      } finally {
-        delete process.env.CLAUDE_CONFIG_DIR
-      }
-      const repo = fs.mkdtempSync(path.join(tmp, "repo-"))
-      fs.writeFileSync(path.join(repo, "altimate-code.jsonc"), `{ // this tool's own servers\n "mcp": { "ghe": { "type": "local", "command": ["github-mcp-server", "stdio"], "environment": { "GITHUB_HOST": "https://ghe.corp" } } } }`)
-      const cwd = process.cwd()
-      process.chdir(repo)
-      const own = (dir: string, mcp: unknown) => {
-        fs.mkdirSync(dir, { recursive: true })
-        fs.writeFileSync(path.join(dir, "altimate-code.json"), JSON.stringify({ mcp }))
-      }
-      try {
-        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
-        fs.rmSync(path.join(repo, "altimate-code.jsonc"))
-        // This tool's own reference syntax, a remote server's headers, and the .altimate-code folder.
-        for (const [dir, mcp] of [
-          [repo, { ghe: { type: "local", command: ["github-mcp-server", "stdio"], environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_TOKEN}", GITHUB_HOST: "https://ghe.example.com" } } }],
-          [repo, { ghe: { type: "remote", url: "https://ghe.example.com/mcp", headers: { Authorization: "Bearer {env:GITHUB_TOKEN}" } } }],
-          [repo, { ghe: { type: "remote", url: "https://ghe.example.com/mcp", headers: { Authorization: `Bearer ${GOOD}` } } }],
-          [path.join(repo, ".altimate-code"), { ghe: { type: "remote", url: "https://ghe.example.com/mcp", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } } }],
-        ] as [string, unknown][]) {
-          own(dir, mcp)
-          try {
-            expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
-          } finally {
-            fs.rmSync(path.join(dir, "altimate-code.json"))
-          }
-        }
-      } finally {
-        process.chdir(cwd)
-        delete process.env.GITHUB_TOKEN
-      }
-    })
-
     test("a config file whose args are not a list neither throws nor counts as GitHub's setup", async () => {
       expect(creds.mcpServerIsGithubDotCom({ command: "npx", args: "stdio" as any, env: { GITHUB_TOKEN: GOOD } })).toBe(false)
       fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "npx", args: "stdio", env: { GITHUB_TOKEN: GOOD } } } }))
@@ -2176,6 +2095,23 @@ describe("credentials flow", () => {
       } finally {
         delete process.env.GITHUB_TOKEN
         fs.rmSync(path.join(home, ".claude.json"), { force: true })
+      }
+    })
+
+    test("Claude Code's config directory is where its servers and settings are read from", async () => {
+      const dir = fs.mkdtempSync(path.join(tmp, "claude-config-"))
+      const official = { command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } }
+      fs.writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: { github: official } }))
+      process.env.CLAUDE_CONFIG_DIR = dir
+      try {
+        // Its settings there say the servers run for another host, so the server's token is not read.
+        fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ env: { GH_HOST: "ghe.example" } }))
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+        fs.rmSync(path.join(dir, "settings.json"))
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      } finally {
+        delete process.env.CLAUDE_CONFIG_DIR
+        await core.disconnect("github")
       }
     })
 

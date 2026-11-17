@@ -8,7 +8,6 @@ import fs from "node:fs"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { parse as parseJsonc } from "jsonc-parser"
 import { IntegrationsCore as core } from "./core"
 import { IntegrationsBackend as backend } from "./backend"
 import { workspaceLabel } from "../workspace/workspace-name"
@@ -139,7 +138,9 @@ interface Found {
 }
 
 const FIELD_SOURCES: Record<string, { env: string[]; mcp: RegExp }> = {
-  github_token: { env: ["GITHUB_TOKEN", "GH_TOKEN"], mcp: /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i },
+  // A GitHub token in the shell can be for any host (GitHub Enterprise uses the same names), so it is not read: gh's own
+  // github.com login, GitHub's official MCP setups, or a token entered here are the sources.
+  github_token: { env: [], mcp: /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i },
   jiraApiToken: { env: ["JIRA_API_TOKEN", "ATLASSIAN_API_TOKEN"], mcp: /^(JIRA_API_TOKEN|ATLASSIAN_API_TOKEN)$/i },
   jiraPatToken: { env: ["JIRA_PAT_TOKEN", "JIRA_PERSONAL_TOKEN", "JIRA_PAT"], mcp: /^(JIRA_PAT_TOKEN|JIRA_PERSONAL_TOKEN|JIRA_PAT)$/i },
   linearApiKey: { env: ["LINEAR_API_KEY"], mcp: /^LINEAR_(API_KEY|TOKEN)$/i },
@@ -233,87 +234,14 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
 }
 
 /**
- * Every MCP server that may run from here, whatever it is called: user level, this directory's and its parents' project
- * entries, and their .mcp.json files. A repository's file is read here only to refuse a token, never to read one.
+ * gh with only its own stored logins: without GH_TOKEN or GITHUB_TOKEN, which gh would hand back as the github.com
+ * token whatever host they belong to, and without the host and enterprise settings that point it elsewhere. What it
+ * returns for --hostname github.com is then the github.com login and nothing else.
  */
-function serversAround(): [string, core.McpServer][] {
-  const claude = core.readJson<any>(core.claudeJsonPath(), {})
-  const maps: unknown[] = [claude.mcpServers, ...MANAGED_DIRS.map((d) => core.readJson<any>(path.join(d, "managed-mcp.json"), {})?.mcpServers)]
-  const own: unknown[] = [ownMcpServers(path.join(xdgConfig(), "opencode")), ownMcpServers(path.join(xdgConfig(), "altimate-code"))]
-  for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
-    maps.push(claude.projects?.[dir]?.mcpServers, core.readJson<any>(path.join(dir, ".mcp.json"), {})?.mcpServers)
-    own.push(ownMcpServers(dir), ownMcpServers(path.join(dir, ".opencode")), ownMcpServers(path.join(dir, ".altimate-code")))
-    if (path.dirname(dir) === dir) break
-  }
-  return [...maps, ...own].flatMap((m) => (m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([, sv]) => !!sv && typeof sv === "object") : []))
-}
-
-const xdgConfig = () => process.env.XDG_CONFIG_HOME || path.join(core.homeDir(), ".config")
-
-/** This tool's own MCP servers in a config directory (local ones as command arrays with an environment), in Claude's shape. */
-function ownMcpServers(dir: string): Record<string, core.McpServer> {
-  const servers: Record<string, core.McpServer> = {}
-  for (const file of ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]) {
-    let mcp: unknown
-    try {
-      mcp = parseJsonc(fs.readFileSync(path.join(dir, file), "utf8"))?.mcp
-    } catch {
-      continue
-    }
-    for (const [name, sv] of Object.entries(mcp && typeof mcp === "object" ? (mcp as Record<string, any>) : {})) {
-      if (!sv || typeof sv !== "object") continue
-      const command = Array.isArray(sv.command) ? sv.command : []
-      // Headers are kept too: they are where a remote server's token goes.
-      servers[name] = { command: command[0], args: command.slice(1), url: sv.url, env: sv.environment, headers: sv.headers } as core.McpServer
-    }
-  }
-  return servers
-}
-
-/** GitHub's own remote MCP endpoint works only with github.com tokens, so a token it is given belongs to github.com. */
-const isGithubDotComRemote = (server: core.McpServer) => {
-  try {
-    return new URL(String(server.url)).hostname === "api.githubcopilot.com"
-  } catch {
-    return false
-  }
-}
-
-/**
- * Whether a server that is not a confirmed github.com GitHub setup may take a shell token variable: it references it
- * (${NAME}, $NAME, or docker's -e NAME), holds its value, or is a GitHub server with no token of its own, which then
- * inherits this environment. That token may then be another host's.
- */
-function claimedByOtherHost(name: string): boolean {
-  // ${NAME} and $NAME as Claude Code writes them, {env:NAME} as this tool does.
-  const reference = new RegExp(`\\$\\{?${name}\\b|\\{env:${name}\\}`)
-  // The name on its own in an argument: after -e (so -eNAME too), =, a space or nothing, but not inside a longer NAME_LIKE word.
-  const word = new RegExp(`(^|[^A-Z0-9_])${name}\\b`)
-  const value = process.env[name]?.trim()
-  return serversAround().some(([serverName, server]) => {
-    // A GitHub server by what it is called or runs, not by a folder path it is given (a filesystem server over ~/github is not one).
-    const args: unknown[] = Array.isArray(server.args) ? server.args : server.args != null ? [server.args] : []
-    // The command by its file name only: a folder it sits in does not make it a GitHub server.
-    const named = [serverName, typeof server.command === "string" ? path.basename(server.command) : "", server.url, ...args.filter((a) => typeof a === "string" && !/^([~/.]|[A-Za-z]:[\\/])/.test(a))]
-    const github = /github/i.test(named.filter(Boolean).join(" "))
-    if (isGithubDotComRemote(server) || (github && mcpServerIsGithubDotCom(server))) return false
-    const text = JSON.stringify(server)
-    // docker passes a variable on by name in any of its forms: -e NAME, -eNAME, --env=NAME.
-    if (reference.test(text) || args.some((a) => word.test(String(a))) || (!!value && text.includes(value))) return true
-    // A local GitHub server, or one set to another host, with no token of its own reads this environment's.
-    const inheritsToken = !isRemote(server) && !Object.keys(server.env ?? {}).some((k) => GITHUB_TOKEN_KEY.test(k))
-    return inheritsToken && (github || !hostSettingsAreGithubDotCom(server.env ?? {}))
-  })
-}
-
-/** Whether the shell's GitHub token variable may be read: the shell's host settings name github.com and no other-host server takes its token from it. */
-export function shellGithubTokenUsable(name: string): boolean {
-  return surroundingHostsAreGithubDotCom() && !claimedByOtherHost(name)
-}
-
-/** Whether gh may be asked for the github.com token: gh hands back GH_TOKEN or GITHUB_TOKEN as that token whatever host they belong to, so it is asked only when each one set is usable. */
-export function ghTokenUsable(): boolean {
-  return ["GH_TOKEN", "GITHUB_TOKEN"].every((name) => !process.env[name]?.trim() || shellGithubTokenUsable(name))
+export function ghEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST"]) delete env[k]
+  return env
 }
 
 /** Whether an MCP server's environment holds a credential this flow reads for the provider, not just any value. */
@@ -338,7 +266,6 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
 
 function fromEnv(field: string): Found | undefined {
   for (const name of FIELD_SOURCES[field]?.env ?? []) {
-    if (field === "github_token" && !shellGithubTokenUsable(name)) continue
     const value = process.env[name]?.trim()
     if (value) return { value, source: { kind: "env", label: name } }
   }
@@ -359,9 +286,8 @@ function gitEmail(): string | undefined {
 
 function detectField(id: ProviderId, field: string): Found | undefined {
   if (core.demoMode()) return undefined
-  if (field === "github_token" && ghTokenUsable()) {
-    // The token for github.com only, the host it is validated against, whatever GH_HOST says.
-    const r = spawnSync("gh", ["auth", "token", "--hostname", "github.com"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
+  if (field === "github_token") {
+    const r = spawnSync("gh", ["auth", "token", "--hostname", "github.com"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: ghEnv() })
     if (r.status === 0 && r.stdout.trim()) return { value: r.stdout.trim(), source: { kind: "cli", label: "gh CLI" } }
   }
   const cli = jiraCliConfig()

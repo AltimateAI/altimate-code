@@ -413,15 +413,13 @@ function onPath(bin: string): boolean {
 }
 
 function detectGithub(): Detection | undefined {
-  // Only github.com: GH_HOST may point gh at an enterprise host, whose token must never go to api.github.com.
-  const auth = !creds.ghTokenUsable() ? null : spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: process.env })
-  if (auth?.status === 0) {
-    const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
+  // gh is asked for its own github.com login only (see creds.ghEnv): a token in the shell may be for another host.
+  const auth = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: creds.ghEnv() })
+  if (auth.status === 0) {
+    const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: creds.ghEnv() })
     const login = who.status === 0 ? who.stdout.trim() : ""
     return { id: "github", source: { kind: "cli", label: "gh CLI" }, account: login || null, syncable: true, note: null }
   }
-  const envToken = ["GITHUB_TOKEN", "GH_TOKEN"].find((name) => process.env[name]?.trim() && creds.shellGithubTokenUsable(name))
-  if (envToken) return { id: "github", source: { kind: "env", label: envToken }, account: null, syncable: true, note: null }
 }
 
 function detectJira(home: string): Detection | undefined {
