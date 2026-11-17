@@ -968,6 +968,14 @@ export namespace SessionProcessor {
                         status: "error",
                         input: value.input ?? match.state.input,
                         error: toolErrorText, // altimate_change — dispatch-capped (see above)
+                        // altimate_change start — a rejection that stops the session is recorded as such, so a
+                        // provider holding the call open (Claude Agent) ends its turn instead of resuming it
+                        ...((value.error instanceof PermissionNext.RejectedError ||
+                          value.error instanceof Question.RejectedError) &&
+                        shouldBreak
+                          ? { metadata: { rejected: true } }
+                          : {}),
+                        // altimate_change end
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),

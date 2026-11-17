@@ -89,10 +89,13 @@ function env(cfg: Config): RuntimePythonEnvironment {
   }
 }
 
-/** Whether this dbt-integration answers a model's lineage, for a caller deciding whether to `create`. */
-export function hasModelLineage(): boolean {
-  const prototype = DBTProjectIntegrationAdapter.prototype as { getModelLineage?: unknown }
-  return typeof prototype.getModelLineage === "function"
+/**
+ * Whether this dbt-integration answers a model's lineage, for a caller deciding whether to `create`.
+ * Pass the adapter once one has started: a method defined as an instance field isn't on the prototype.
+ */
+export function hasModelLineage(adapter?: DBTProjectIntegrationAdapter): boolean {
+  const target = (adapter ?? DBTProjectIntegrationAdapter.prototype) as { getModelLineage?: unknown }
+  return typeof target.getModelLineage === "function"
 }
 
 export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter> {

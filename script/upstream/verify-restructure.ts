@@ -110,7 +110,6 @@ const EXPLICIT_MOVES: Record<string, string> = {
   "packages/opencode/bin/altimate-code": "packages/opencode/bin/altimate",
   "packages/opencode/src/cli/cmd/engine.ts": "packages/opencode/src/altimate/cli/engine.ts",
   "packages/opencode/src/cli/cmd/tui/context/theme/altimate-code.json": "packages/opencode/src/altimate/cli/theme/altimate-code.json",
-  "packages/opencode/src/plugin/anthropic.ts": "packages/opencode/src/altimate/plugin/anthropic.ts",
   "packages/opencode/src/session/PAID_CONTEXT_FEATURES.md": "packages/opencode/src/altimate/session/PAID_CONTEXT_FEATURES.md",
   ".github/PULL_REQUEST_TEMPLATE.md": ".github/pull_request_template.md",
 }

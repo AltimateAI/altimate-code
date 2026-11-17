@@ -59,20 +59,22 @@ describe("v1.4.0 merge — provider system survives PR #18186 + sdk patch remova
     expect(existsSync(patchFile)).toBe(false)
   })
 
-  test("BUILTIN plugin still includes anthropic-auth (PR #18186 reverted)", async () => {
+  // The direct Claude Pro/Max login and the Claude Code beta flag stay removed, as upstream did in
+  // PR #18186; Claude Pro/Max goes through the Claude Agent provider.
+  test("BUILTIN plugin does not load anthropic-auth", async () => {
     const content = await readText(path.join(srcDir, "plugin", "index.ts"))
-    expect(content).toContain("opencode-anthropic-auth@0.0.13")
-    expect(content).toContain("BUILTIN")
+    expect(content).not.toMatch(/["'`]opencode-anthropic-auth/)
   })
 
-  test("provider.ts has claude-code-20250219 anthropic-beta header", async () => {
+  test("provider.ts does not send the claude-code-20250219 anthropic-beta flag", async () => {
     const content = await readText(path.join(srcDir, "provider", "provider.ts"))
-    expect(content).toContain("claude-code-20250219")
+    expect(content).not.toContain("claude-code-20250219")
   })
 
-  test("session/llm.ts guards User-Agent for non-anthropic providers", async () => {
+  test("session/llm.ts sends the Altimate Code User-Agent, Anthropic included", async () => {
     const content = await readText(path.join(srcDir, "session", "llm.ts"))
-    expect(content).toContain('providerID !== "anthropic"')
+    expect(content).toContain('"User-Agent": `altimate-code/')
+    expect(content).not.toContain('providerID !== "anthropic"')
   })
 })
 

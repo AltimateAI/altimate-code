@@ -12,7 +12,13 @@ import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
 // altimate_change start — telemetry for skill operations
 import { Telemetry } from "@/altimate/telemetry"
-import { describePublish, explainPublishError, publishSkill, type PublishReport } from "@/altimate/workspace/skill-publish"
+import {
+  describePublish,
+  explainPublishError,
+  publishErrorCode,
+  publishSkill,
+  type PublishReport,
+} from "@/altimate/workspace/skill-publish"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { printable } from "@/altimate/rules/printable"
 // altimate_change end
@@ -490,8 +496,9 @@ const SkillPublishCommand = cmd({
     // altimate_change start — workspace review: every outcome goes through one writer, JSON or text, and every failure
     // exits non-zero
     const json = args.json === true
-    const fail = (message: string) => {
-      if (json) process.stdout.write(JSON.stringify({ ok: false, error: message }, null, 2) + EOL)
+    // `code`: the stable reason for a refusal this command explains (`review_disabled`, `too_many_requests`, …).
+    const fail = (message: string, code?: string) => {
+      if (json) process.stdout.write(JSON.stringify({ ok: false, error: message, ...(code ? { code } : {}) }, null, 2) + EOL)
       else process.stderr.write(message + EOL)
       process.exitCode = 1
     }
@@ -499,13 +506,13 @@ const SkillPublishCommand = cmd({
     // writer, once: a result already written is not followed by a second one, but the command still exits non-zero.
     // Server text is made inert before it reaches the terminal.
     let written = false
-    const once = (message: string) => {
+    const once = (message: string, code?: string) => {
       if (written) {
         process.exitCode = 1
         return
       }
       written = true
-      fail(printable(message))
+      fail(printable(message), code)
     }
     // altimate_change end
     try {
@@ -563,7 +570,7 @@ const SkillPublishCommand = cmd({
           } catch {}
         } catch (err) {
           const known = explainPublishError(err)
-          once(known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`)
+          once(known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`, publishErrorCode(err) ?? undefined)
         }
       })
     } catch (err) {
