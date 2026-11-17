@@ -596,12 +596,16 @@ describe("workspace connections", () => {
     expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual(["leftover_token", false])
   })
 
-  test("a leftover recorded for another backend is not removed here", async () => {
+  test("a leftover recorded for another backend is neither removed nor unmarked here", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     await core.storeSecret("github", "leftover_token")
     await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: "https://other.example#other-tenant" }))
     expect((await core.syncProvider("github")).result).toBe("synced")
     expect(await core.readSecret("github")).toBe("leftover_token")
+    // Its connection recorded for that other backend: an id here is not it, and the mark stays.
+    await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: "https://other.example#other-tenant" }))
+    expect((await core.syncProvider("github")).result).toBe("skipped")
+    expect(core.loadStore().providers.github?.cleanupPending).toBe("https://other.example#other-tenant")
   })
 
   test("an attach-only sync never removes a local secret it did not record as a leftover", async () => {
@@ -2135,8 +2139,27 @@ describe("credentials flow", () => {
       fs.writeFileSync(path.join(repo, "altimate-code.jsonc"), `{ // this tool's own servers\n "mcp": { "ghe": { "type": "local", "command": ["github-mcp-server", "stdio"], "environment": { "GITHUB_HOST": "https://ghe.corp" } } } }`)
       const cwd = process.cwd()
       process.chdir(repo)
+      const own = (dir: string, mcp: unknown) => {
+        fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(path.join(dir, "altimate-code.json"), JSON.stringify({ mcp }))
+      }
       try {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+        fs.rmSync(path.join(repo, "altimate-code.jsonc"))
+        // This tool's own reference syntax, a remote server's headers, and the .altimate-code folder.
+        for (const [dir, mcp] of [
+          [repo, { ghe: { type: "local", command: ["github-mcp-server", "stdio"], environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_TOKEN}", GITHUB_HOST: "https://ghe.example.com" } } }],
+          [repo, { ghe: { type: "remote", url: "https://ghe.example.com/mcp", headers: { Authorization: "Bearer {env:GITHUB_TOKEN}" } } }],
+          [repo, { ghe: { type: "remote", url: "https://ghe.example.com/mcp", headers: { Authorization: `Bearer ${GOOD}` } } }],
+          [path.join(repo, ".altimate-code"), { ghe: { type: "remote", url: "https://ghe.example.com/mcp", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } } }],
+        ] as [string, unknown][]) {
+          own(dir, mcp)
+          try {
+            expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+          } finally {
+            fs.rmSync(path.join(dir, "altimate-code.json"))
+          }
+        }
       } finally {
         process.chdir(cwd)
         delete process.env.GITHUB_TOKEN
@@ -3016,12 +3039,29 @@ describe("credentials flow", () => {
       expect(core.loadStore().providers.github?.registered).toBe(true)
     })
 
-    test("disconnect removes the recorded connection even after the host name changed", async () => {
+    test("disconnect removes the recorded connection even after the host name changed, but only on its own backend", async () => {
       real()
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
       api.state.rows[0].name = "GitHub (from old-host)"
+      // Recorded for another backend: the same id here is someone's hand-made connection and stays.
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: "https://other.example#t" }))
       await core.disconnect("github")
+      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(1)
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      api.state.rows.forEach((r) => (r.name = "GitHub (from old-host)"))
+      await core.disconnect("github")
+      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(1)
+    })
+
+    test("Keep local removes the recorded workspace copy after the host name changed", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      api.state.rows[0].name = "GitHub (from old-host)"
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
       expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(0)
     })
 

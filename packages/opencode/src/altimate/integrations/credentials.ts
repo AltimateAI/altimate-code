@@ -242,7 +242,7 @@ function serversAround(): [string, core.McpServer][] {
   const own: unknown[] = [ownMcpServers(path.join(xdgConfig(), "opencode")), ownMcpServers(path.join(xdgConfig(), "altimate-code"))]
   for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
     maps.push(claude.projects?.[dir]?.mcpServers, core.readJson<any>(path.join(dir, ".mcp.json"), {})?.mcpServers)
-    own.push(ownMcpServers(dir), ownMcpServers(path.join(dir, ".opencode")))
+    own.push(ownMcpServers(dir), ownMcpServers(path.join(dir, ".opencode")), ownMcpServers(path.join(dir, ".altimate-code")))
     if (path.dirname(dir) === dir) break
   }
   return [...maps, ...own].flatMap((m) => (m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([, sv]) => !!sv && typeof sv === "object") : []))
@@ -263,7 +263,8 @@ function ownMcpServers(dir: string): Record<string, core.McpServer> {
     for (const [name, sv] of Object.entries(mcp && typeof mcp === "object" ? (mcp as Record<string, any>) : {})) {
       if (!sv || typeof sv !== "object") continue
       const command = Array.isArray(sv.command) ? sv.command : []
-      servers[name] = { command: command[0], args: command.slice(1), url: sv.url, env: sv.environment }
+      // Headers are kept too: they are where a remote server's token goes.
+      servers[name] = { command: command[0], args: command.slice(1), url: sv.url, env: sv.environment, headers: sv.headers } as core.McpServer
     }
   }
   return servers
@@ -284,7 +285,8 @@ const isGithubDotComRemote = (server: core.McpServer) => {
  * inherits this environment. That token may then be another host's.
  */
 function claimedByOtherHost(name: string): boolean {
-  const reference = new RegExp(`\\$\\{?${name}\\b`)
+  // ${NAME} and $NAME as Claude Code writes them, {env:NAME} as this tool does.
+  const reference = new RegExp(`\\$\\{?${name}\\b|\\{env:${name}\\}`)
   // The name on its own in an argument: after -e (so -eNAME too), =, a space or nothing, but not inside a longer NAME_LIKE word.
   const word = new RegExp(`(^|[^A-Z0-9_])${name}\\b`)
   const value = process.env[name]?.trim()
@@ -906,7 +908,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       const draftNote = await clearDrafts()
       if (signedIn && hadCopy) {
         try {
-          detachNote = (await core.removeManaged(id, signedIn)).detachError
+          // The record was just rewritten for this machine, so the connection it had is passed on.
+          detachNote = (await core.removeManaged(id, signedIn, rec)).detachError
         } catch (e) {
           removeFailure = e instanceof Error ? e.message : String(e)
         }
@@ -944,7 +947,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) + (res.shared ? ` ${core.SHARED_REWRITE_NOTE}` : ""), ...(res.shared ? { shared: true as const } : {}) })
         // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
         if (!res.created && !(rec?.registered && !rec.synced)) {
-          await record(true, { connectionId: res.connectionId, rejected: true })
+          await record(true, { connectionId: res.connectionId, connectionBackend: core.backendKey(cfg), rejected: true })
           const draftNote = await clearDrafts()
           const refusal = rejected("synced")
           return draftNote ? { ...refusal, message: `${refusal.message} ${draftNote}` } : refusal
@@ -965,7 +968,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       // The connection lives in the workspace and was accepted; no secret is kept on this machine.
       // The record is saved first: the workspace has the connection, so a cleanup that fails afterwards is reported, not turned into a failed connect.
       try {
-        await record(true, { connectionId: res.connectionId })
+        await record(true, { connectionId: res.connectionId, connectionBackend: core.backendKey(cfg) })
       } catch (e) {
         return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message: [core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again"), ...exposure.notes].join(" "), ...(exposure.shared ? { shared: true as const } : {}) }
       }

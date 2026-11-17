@@ -72,6 +72,8 @@ export interface StoredProvider {
   expiresAt?: string | null
   /** Workspace connection id when the credential was saved to the workspace. */
   connectionId?: number | null
+  /** The backend (`backendKey`) that `connectionId` belongs to: the same id on another backend is another connection. */
+  connectionBackend?: string
   /** Credential form: non-secret values typed in but not yet connected. Secrets live in the secret store. */
   drafts?: Record<string, string>
   /** Credential form: the non-secret values of the connected credentials. */
@@ -1179,11 +1181,13 @@ async function syncReal(
         const visible = await backend.listVisibleConnections(cfg)
         const own = backend.ownConnections(visible)
         // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
-        const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
+        // A recorded id names a connection only on the backend it was recorded for.
+        const sameBackend = (store.providers[id]?.connectionBackend ?? backendKey(cfg)) === backendKey(cfg)
+        const found = known == null ? findManaged(own, id) : sameBackend ? own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id]) : undefined
         // A connection this machine saved that is gone from the workspace is not attached; it was deleted there. What was left here
         // as its leftover is then the only copy, so it is kept and stops being a leftover.
         if (!found) {
-          if (store.providers[id]?.cleanupPending) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
+          if (store.providers[id]?.cleanupPending === backendKey(cfg)) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
           return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
         }
         // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for,
@@ -1249,6 +1253,7 @@ async function syncReal(
             rejected: false,
             unverified: false,
             connectionId: res.connectionId,
+            connectionBackend: backendKey(cfg),
             expiresAt,
             cleanupPending: false,
             updatedAt: new Date().toISOString(),
@@ -1334,11 +1339,15 @@ export async function disconnectRemote(id: ProviderId, cfg?: backend.BackendConf
 }
 
 /** Like disconnectRemote, and also says why a connection could not be detached from the linked workspace. The workspace list is replaced whole, so a failed detach leaves a dangling reference. */
-export async function removeManaged(id: ProviderId, config: backend.BackendConfig | null): Promise<{ removed: number; detachError: string | null }> {
+export async function removeManaged(
+  id: ProviderId,
+  config: backend.BackendConfig | null,
+  recordedFor: Pick<StoredProvider, "connectionId" | "connectionBackend"> | undefined = loadStore().providers[id],
+): Promise<{ removed: number; detachError: string | null }> {
   if (!config) return { removed: 0, detachError: null }
   const name = managedName(id)
-  // The connection this machine recorded counts too, so it is found after the host name changed.
-  const recorded = loadStore().providers[id]?.connectionId
+  // The connection this machine recorded counts too, so it is found after the host name changed; only on the backend it was recorded for.
+  const recorded = recordedFor?.connectionBackend === backendKey(config) ? recordedFor.connectionId : undefined
   const managed = (await backend.listOwnConnections(config)).filter((c) => c.integration_id === INTEGRATION_IDS[id] && (c.name === name || c.id === recorded))
   let detachError: string | null = null
   for (const c of managed) {
