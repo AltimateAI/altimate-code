@@ -484,7 +484,12 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
     else if (token.kind === "word") {
       const word = token.text.toLowerCase()
       if (word === "with") readCtes(i + 1)
-      else if (TABLE_KEYWORDS.has(word)) {
+      else if (word === "table" && ["overwrite", "create", "replace", "temporary", "temp", "transient", "external", "volatile", "unlogged", "global", "local"].includes(tokens[i - 1]?.text.toLowerCase() ?? "")) {
+        // `INSERT OVERWRITE TABLE t` and `CREATE [OR REPLACE] TABLE t`: the target is read with the qualifiers written.
+        let at = i + 1
+        while (["if", "not", "exists"].includes(tokens[at]?.text.toLowerCase() ?? "")) at++
+        readList(at, false)
+      } else if (TABLE_KEYWORDS.has(word)) {
         if (
           word === "from" &&
           (FROM_INSIDE_CALL.has(calls[calls.length - 1] ?? "") || tokens[i - 1]?.text.toLowerCase() === "distinct")

@@ -696,6 +696,12 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(mixed[0].replaceWith).toBe("{{ ref('b_upper') }}")
   })
 
+  test("the target of INSERT OVERWRITE TABLE and CREATE TABLE keeps its qualifiers", () => {
+    expect(raws("insert overwrite table main.live.orders select * from main.raw.input", "databricks")).toEqual(["main.live.orders", "main.raw.input"])
+    expect(raws("create or replace table main.live.orders as select * from main.raw.input", "snowflake")).toEqual(["main.live.orders", "main.raw.input"])
+    expect(raws("create table if not exists main.live.orders as select * from main.raw.input", "postgres")).toEqual(["main.live.orders", "main.raw.input"])
+  })
+
   test("T-SQL table hints and PIVOT do not end the list", () => {
     expect(raws("select * from db.a.orders with (nolock), db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
     expect(raws("select * from db.a.orders pivot (sum(x) for y in ([a])) p, db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
