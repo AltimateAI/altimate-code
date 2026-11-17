@@ -375,22 +375,22 @@ describe("triage (first match wins)", () => {
       "3 cross-file unverifiable",
       {},
       { claimType: "cross_file", verdict: "unverifiable" },
-      "discard",
+      "summary",
       "unverifiable_cross_file",
     ],
     [
       "3 cross-file confirmed without tools",
       {},
       { claimType: "cross_file", toolsUsed: [] },
-      "discard",
+      "summary",
       "unverifiable_cross_file",
     ],
-    ["4 speculation", {}, { claimType: "speculation" }, "discard", "speculative"],
+    ["4 speculation", {}, { claimType: "speculation" }, "summary", "speculative"],
     [
       "4 assumed input, not confirmed",
       {},
       { requiresAssumedInput: true, verdict: "unverifiable" },
-      "discard",
+      "summary",
       "speculative",
     ],
     ["5 style only", { styleOnly: true }, {}, "discard", "low_value"],
@@ -1072,7 +1072,7 @@ describe("decisions[]: offline re-triage from one run's envelope", () => {
     const base = retriage(status.decisions!, DEFAULT_TRIAGE_KNOBS).decisions[2]
     const hyp = retriage(status.decisions!, { ...DEFAULT_TRIAGE_KNOBS, claimsOtherFileAsCrossFile: true }).decisions[2]
     expect(base).toMatchObject({ decision: "keep", rule: "verified" })
-    expect(hyp).toMatchObject({ decision: "discard", rule: "unverifiable_cross_file" })
+    expect(hyp).toMatchObject({ decision: "summary", rule: "unverifiable_cross_file" })
   })
 
   test("decisions survive the envelope and re-triage from it without casts", async () => {

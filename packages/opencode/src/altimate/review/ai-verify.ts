@@ -439,10 +439,13 @@ export function triage(
       : { decision: "discard", rule: "unreviewed" }
   if (ts.restatesGrounding) return { decision: "discard", rule: "duplicate_of_engine" }
   if (m.verdict === "refuted" && m.evidence.trim()) return { decision: "discard", rule: "refuted" }
+  // Unverified cross-file and speculative claims go to the summary, not away:
+  // in the decision run about half of these discards were judged valuable and
+  // they held real catches, so they are kept for the reader but never posted inline.
   if (m.claimType === "cross_file" && (m.verdict === "unverifiable" || m.toolsUsed.length === 0))
-    return { decision: "discard", rule: "unverifiable_cross_file" }
+    return { decision: "summary", rule: "unverifiable_cross_file" }
   if (m.claimType === "speculation" || (m.requiresAssumedInput && m.verdict !== "confirmed"))
-    return { decision: "discard", rule: "speculative" }
+    return { decision: "summary", rule: "speculative" }
   if (knobs.dropNits && (ts.styleOnly || m.value === "nit")) return { decision: "discard", rule: "low_value" }
   if (
     ts.targetsUnchangedCode &&
