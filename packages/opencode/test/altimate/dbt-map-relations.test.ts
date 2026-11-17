@@ -646,6 +646,21 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(raws("select * from only orders o, only db.z.items", "postgres")).toEqual(["orders", "db.z.items"])
   })
 
+  test("a parenthesized join after a comma, a USING group and a bare SAMPLE clause keep every table", () => {
+    expect(raws("select * from s.items i, (one.orders a join two.orders b on a.id = b.id)")).toEqual(["s.items", "one.orders", "two.orders"])
+    expect(raws("merge into t using (one.s a join two.s b on a.id = b.id) on 1=1")).toEqual(["t", "one.s", "two.s"])
+    expect(raws("select * from db.z.items sample (10), db.z.orders")).toEqual(["db.z.items", "db.z.orders"])
+    expect(raws("select * from db.z.items sample join db.z.orders on 1=1")).toEqual(["db.z.items", "db.z.orders"])
+  })
+
+  test("ClickHouse comments, and the mssql and redshift spellings, follow their dialect", () => {
+    expect(raws("select * from a.orders # it's fine\n join a.payments", "clickhouse")).toEqual(["a.orders", "a.payments"])
+    expect(raws("select * from a.orders // from legacy.x\n join a.payments", "clickhouse")).toEqual(["a.orders", "a.payments"])
+    expect(mapRelations(["c"], "with c as (select 0 union all select n + 1 from c) select * from c", [], "mssql")).toEqual([])
+    expect(raws("select * from [db].[s].[t]", "mssql")).toEqual(["[db].[s].[t]"])
+    expect(mapRelations(["orders"], 'with "Orders" as (select 1) select * from orders', [], "redshift").map((r) => r.raw)).toEqual(["orders"])
+  })
+
   test("each of them reaches the mapped rows with the schema as written", () => {
     const relations = manifestRelations(MANIFEST)
     const rows = mapRelations(

@@ -106,11 +106,11 @@ export type Scan = {
 const DOUBLE_QUOTE_STRING = new Set(["bigquery", "databricks", "spark", "mysql", "hive"])
 const BACKSLASH_ESCAPE = new Set(["bigquery", "databricks", "spark", "mysql", "hive", "clickhouse", "snowflake"])
 const DOLLAR_QUOTE = new Set(["snowflake", "postgres", "redshift", "duckdb"])
-const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "fabric", "synapse", "oracle"])
-const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb"])
+const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "mssql", "fabric", "synapse", "oracle"])
+const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb", "clickhouse"])
 // Dialects where a double-quoted name keeps its case while an unquoted one is folded, so `"orders"` and `ORDERS` differ.
-const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower" }
-const BRACKET_QUOTE = new Set(["tsql", "sqlserver", "fabric", "synapse"])
+const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower", redshift: "lower" }
+const BRACKET_QUOTE = new Set(["tsql", "sqlserver", "mssql", "fabric", "synapse"])
 
 const RESERVED = new Set([
   "select",
@@ -201,7 +201,7 @@ function tokenize(sql: string, dialect: string): Token[] {
     const ch = sql[i]
     const two = sql.slice(i, i + 2)
     if (/\s/.test(ch)) i++
-    else if (two === "--" || (ch === "#" && HASH_COMMENT.has(dialect)) || (two === "//" && dialect === "snowflake")) {
+    else if (two === "--" || (ch === "#" && HASH_COMMENT.has(dialect)) || (two === "//" && (dialect === "snowflake" || dialect === "clickhouse"))) {
       while (i < n && sql[i] !== "\n") i++
     } else if (two === "/*") {
       const end = sql.indexOf("*/", i + 2)
@@ -330,17 +330,22 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
 
   const readList = (start: number, strict: boolean) => {
     let i = start
-    const groups = ["from", "join"].includes(tokens[start - 1]?.text.toLowerCase() ?? "")
+    // FROM and JOIN lists may hold a parenthesised group at any position. After USING a `(` is a column list
+    // unless a JOIN sits inside it.
+    const using = tokens[start - 1]?.text.toLowerCase() === "using"
+    const groups = strict
+    const isGroup = (at: number) =>
+      !using || tokens.slice(at, afterParens(tokens, at)).some((t) => t.kind === "word" && t.text.toLowerCase() === "join")
     let groupEnd = -1
     for (let item = 0; ; item++) {
       // LATERAL prefixes a table expression in the list; the list goes on after it.
       if (tokens[i]?.kind === "word" && tokens[i].text.toLowerCase() === "lateral") i++
-      // `(a join b on ...)` groups tables: its first table is read like any other, and the list goes on after the
+      // `(a join b on ...)` groups tables, at any position in the list: its first table is read like any other, and the list goes on after the
       // group's `)`. The tables after the first are found by the JOIN in the group. Any other `(` is a subquery.
       while (
-        item === 0 &&
         groups &&
         isPunct(tokens[i], "(") &&
+        isGroup(i) &&
         !SUBQUERY_START.has(tokens[i + 1]?.text.toLowerCase() ?? "") &&
         (["word", "quoted"].includes(tokens[i + 1]?.kind ?? "") || isPunct(tokens[i + 1], "("))
       ) {
@@ -382,7 +387,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       // An alias with or without AS, then its column list, then a comma continues a FROM list.
       if (tokens[i]?.text.toLowerCase() === "as") i++
       const alias = tokens[i]
-      if (alias && (alias.kind === "quoted" || (alias.kind === "word" && !RESERVED.has(alias.text.toLowerCase())))) {
+      const startsSample = alias?.kind === "word" && ["sample", "tablesample"].includes(alias.text.toLowerCase()) && (isPunct(tokens[i + 1], "(") || ["bernoulli", "system", "block", "row"].includes(tokens[i + 1]?.text.toLowerCase() ?? ""))
+      if (alias && !startsSample && (alias.kind === "quoted" || (alias.kind === "word" && !RESERVED.has(alias.text.toLowerCase())))) {
         i++
         if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
       }
