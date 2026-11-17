@@ -231,7 +231,7 @@ const NOT_TYPE =
  *   item    = operand { "::" type }          (at least one cast or one pair of parentheses)
  *   operand = column | "(" item ")" | "cast" "(" item "as" type ")"
  *   column  = name { "." name }              (a bare `null`, `true`, `false` or `end` is a literal)
- *   type    = word { word | "." | "(" number { "," number } ")" | "[" [ number ] "]" }
+ *   type    = word { word | "." | "(" mod { "," mod } ")" | "[" [ number ] "]" }   (mod = number | name)
  *
  * So `amount::numeric`, `(amount)::numeric`, `cast((amount)as numeric)`, `cast(amount as numeric)::int` and `q.end::int`
  * name a column; `amount::numeric + 1`, `coalesce(amount)::numeric`, `(1.5)::numeric` and `(null)::int` don't.
