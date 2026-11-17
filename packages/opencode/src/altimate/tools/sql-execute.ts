@@ -9,7 +9,13 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
 // altimate_change start - SQL write access control + fingerprinting
-import { classifyAndCheck, classifyMongoCommand, computeSqlFingerprint, isScratchSafeWrite } from "./sql-classify"
+import {
+  classifyAndCheck,
+  classifyMongoCommand,
+  computeSqlFingerprint,
+  isScratchSafeWrite,
+  mentionsHardDenyAnywhere,
+} from "./sql-classify"
 import { statementsOf } from "./sql-tokenize"
 
 const MONGO_WAREHOUSE_TYPES = new Set(["mongodb", "mongo"])
@@ -231,7 +237,12 @@ export const SqlExecuteTool = Tool.define(
               )
             }
             const classification = mongo ?? classifyEvery(sql, dialects)
-            const { queryType, blocked } = classification
+            // dbt renders Jinja before it runs SQL, wherever the Jinja sits (a comment or literal too),
+            // so {% do run_query('...') %} runs while the query compiles and {# ... #} removes text.
+            // A Mongo command routed to dbt is rendered too.
+            const jinja = target?.dbt === true && /\{[{%#]/.test(sql)
+            const queryType = jinja ? "write" : classification.queryType
+            const blocked = classification.blocked || (jinja && mentionsHardDenyAnywhere(sql))
             const query = mongo?.normalized ?? sql
             if (blocked) {
               throw new Error(
@@ -671,14 +682,18 @@ function resolveStepRefs(
  * type and every target of the project's profile; when the profile's targets cannot be read, or one
  * is an adapter with no supported dialect, every supported dialect and the generic lexing count.
  * Read without starting dbt or loading the handlers. The registry warehouse is named for the ask. */
-async function defaultTarget(forceReadOnly: boolean): Promise<{ dialects: (string | undefined)[]; warehouse?: string }> {
+async function defaultTarget(
+  forceReadOnly: boolean,
+): Promise<{ dialects: (string | undefined)[]; warehouse?: string; dbt?: boolean }> {
   const fallback = Registry.list().warehouses[0] // before any await, as the call resolves it now
   const dialectOf = (type?: string) => (type ? (Registry.canonicalType(type) ?? undefined) : undefined)
   const dialects: (string | undefined)[] = fallback ? [dialectOf(fallback.type)] : []
+  let viaDbt = false
   if (!forceReadOnly) {
     const { dbtProjectAdapterType } = await import("../native/connections/dbt-adapter-type")
     const dbt = await dbtProjectAdapterType()
     if (dbt.project) {
+      viaDbt = true
       const types = [dbt.type, ...dbt.targetTypes].filter((type): type is string => Boolean(type))
       const known = types.map(dialectOf)
       dialects.push(...known.filter(Boolean))
@@ -686,7 +701,11 @@ async function defaultTarget(forceReadOnly: boolean): Promise<{ dialects: (strin
       if (!dbt.targetTypes.length || known.includes(undefined)) dialects.push(...EVERY_DIALECT, undefined)
     }
   }
-  return { dialects: dialects.length ? [...new Set(dialects)] : [undefined], ...(fallback && { warehouse: fallback.name }) }
+  return {
+    dialects: dialects.length ? [...new Set(dialects)] : [undefined],
+    ...(fallback && { warehouse: fallback.name }),
+    ...(viaDbt && { dbt: true }),
+  }
 }
 
 const EVERY_DIALECT = ["postgres", "redshift", "duckdb", "snowflake", "bigquery", "mysql", "sqlserver", "databricks", "clickhouse", "oracle", "trino", "sqlite"]

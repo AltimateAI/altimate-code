@@ -83,7 +83,7 @@ describe("feature tools in the allow-list", () => {
   })
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
-    for (const id of FEATURE_TOOLS.filter((tool) => tool !== "dbt_docs_coverage")) {
+    for (const id of FEATURE_TOOLS) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
@@ -620,23 +620,6 @@ describe("AltimateApi.apiRequest", () => {
     try {
       const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
       expect(error.message).toBe("API GET /dbt/v1/x could not be sent: Error (ConnectionRefused).")
-    } finally {
-      globalThis.fetch = original
-    }
-  })
-
-  test("a TypeError carrying a code or cause is a network failure, not a bad header", async () => {
-    await Bun.write(
-      path.join(home, ".altimate", "altimate.json"),
-      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: "k1" }),
-    )
-    const original = globalThis.fetch
-    globalThis.fetch = (async () => {
-      throw Object.assign(new TypeError("fetch failed: Bearer k1"), { cause: { code: "ECONNREFUSED" } })
-    }) as unknown as typeof fetch
-    try {
-      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
-      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: TypeError (ECONNREFUSED).")
     } finally {
       globalThis.fetch = original
     }

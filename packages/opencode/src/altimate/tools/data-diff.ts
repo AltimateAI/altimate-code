@@ -119,7 +119,7 @@ export const DataDiffTool = Tool.define("data_diff", {
         target: args.target,
         key_columns: args.key_columns,
         source_warehouse: args.source_warehouse,
-        target_warehouse: args.target_warehouse,
+        target_warehouse: args.target_warehouse || undefined, // "" is the source warehouse, as the ask resolves it
         extra_columns: args.extra_columns,
         algorithm: args.algorithm,
         where_clause: args.where_clause,

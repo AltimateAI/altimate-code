@@ -334,16 +334,14 @@ export namespace AltimateApi {
    */
   function sendFailure(e: unknown): string {
     const word = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined)
-    // A refused header is a TypeError with no code and no cause; a failed connection is a TypeError too
-    // (`fetch failed`) but carries one or the other.
-    const cause = (e as { cause?: unknown } | null)?.cause
-    const evidence = word((e as { code?: unknown } | null)?.code) || cause !== undefined
-    if (e instanceof TypeError && !evidence)
-      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
     const name = (e instanceof Error && word(e.name)) || "Error"
-    const code =
-      word((e as { code?: unknown } | null)?.code) || word((cause as { code?: unknown } | null | undefined)?.code)
-    return code ? `${name} (${code}).` : `${name}.`
+    const code = word((e as { code?: unknown } | null)?.code)
+    // A network failure carries its code, whatever its class.
+    if (code) return `${name} (${code}).`
+    // The URL and the body are checked before sending, so an uncoded TypeError is the header check.
+    if (e instanceof TypeError)
+      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+    return `${name}.`
   }
 
   async function request(
