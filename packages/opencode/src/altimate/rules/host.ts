@@ -318,7 +318,8 @@ function noticeLines(start: Start, ws: string): string[] {
     const sentBack = notice.status === "changes_requested"
     const status = notice.status === "active" ? "approved" : sentBack ? "sent back for changes" : printable(notice.status)
     const by = notice.reviewer ? ` by ${printable(notice.reviewer)}` : ""
-    const next = sentBack ? " (it can be reworded or withdrawn from /rules in the TUI)" : ""
+    // A retirement sent back can only be withdrawn: the notice does not say which it is, so it names no action.
+    const next = sentBack ? " (open /rules in the TUI to act on it)" : ""
     return `- ${status}${by}: "${printable(notice.text)}"${notice.reason ? ` — ${printable(notice.reason)}` : ""}${next}`
     // altimate_change end
   }

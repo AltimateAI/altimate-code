@@ -21,6 +21,9 @@ import { WorkspaceApi, type ActAs, type DatamateRef } from "@/altimate/workspace
 import * as Manage from "@/altimate/workspace/manage"
 import { accountDigest, credentialDigest, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 import { ReviewApi } from "@/altimate/workspace/review-api"
+// altimate_change start — workspace review: request changes (one resend hint for the CLI and the TUI)
+import { resendHint } from "@/altimate/workspace/resend-hint"
+// altimate_change end
 import { printable, printableDeep } from "@/altimate/rules/printable"
 
 export const EXIT = { OK: 0, FAILED: 1, USAGE: 2, NOT_LINKED: 3 } as const
@@ -346,13 +349,6 @@ const REVIEW_STATUS: Record<ReviewApi.Contribution["status"], string> = {
   retired: "removed from the workspace",
 }
 
-// altimate_change start — workspace review: request changes
-/** How the author sends a sent-back request again: the new version replaces it, back in review. */
-export const RESEND_HINT: Record<ReviewApi.Contribution["kind"], string> = {
-  skill: "Change the skill, then send it again with `altimate-code skill publish` (or from your IDE).",
-  knowledge: "Change the knowledge base, then send it again from the workspace's Knowledge tab.",
-}
-// altimate_change end
 
 /** One line per request for `workspace review status`. Pure, so the wording is testable. Server text is made printable. */
 export function describeReviews(workspaceName: string, listed: Awaited<ReturnType<typeof ReviewApi.listMine>>): string[] {
@@ -370,7 +366,7 @@ export function describeReviews(workspaceName: string, listed: Awaited<ReturnTyp
     const expired = item.status === "pending" && item.expired ? " (expired: waiting longer than 14 days)" : ""
     lines.push(`  ${item.kind} "${printable(item.name)}" (${change}): ${REVIEW_STATUS[item.status]}${decided}${expired}`)
     // altimate_change start — workspace review: request changes
-    if (item.status === "changes_requested") lines.push(`    ${RESEND_HINT[item.kind]}`)
+    if (item.status === "changes_requested") lines.push(`    ${resendHint(item.kind, item.name)}`)
     // altimate_change end
   }
   if (listed.skipped)

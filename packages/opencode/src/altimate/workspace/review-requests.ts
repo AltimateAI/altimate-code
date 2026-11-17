@@ -8,9 +8,12 @@
 // Rules come from the person's local rules state (`RulesSummary.rows`, no network), shown only for the account and
 // workspace it was pulled for. Skill and knowledge requests are read from the server with one captured credential, checked against the account the project's link was resolved
 // with, as the review poll does.
+import { Log } from "@/util/log"
 import { RulesApiError } from "../rules/api"
 import { printable } from "../rules/printable"
 import { ReviewApi } from "./review-api"
+
+const log = Log.create({ service: "altimate-workspace-review-requests" })
 
 export type RequestKind = "rule" | "skill" | "knowledge"
 // altimate_change start — workspace review: request changes (`resubmit`: a rule's author sends a new wording)
@@ -98,7 +101,7 @@ export async function ruleRequests(root: string, directory: string, workspaceId?
   return (await RulesSummary.rows(root, "mine")).map((row) => {
     const pending = open.get(row.public_id)
     // Still open on the server: its status and comment are the last pull's (the local row may not have heard yet).
-    const status = pending?.status ?? (pending ? "pending" : row.status)
+    const status = pending ? (pending.status ?? "pending") : row.status
     const reason = pending ? (pending.review_reason ?? undefined) : row.reason
     return {
       kind: "rule" as const,
@@ -135,7 +138,9 @@ type ActionStatus = 400 | 401 | 403 | 404 | 409 | 422 | 502 | 503
 export async function act(
   directory: string,
   publicId: string,
-  action: RequestAction,
+  // altimate_change start — workspace review: request changes (`resubmit` is a rule's, `actOnRule`)
+  action: "withdraw" | "remove",
+  // altimate_change end
   body: { expected_version: number; reason?: string },
 ): Promise<ActionResult> {
   try {
@@ -151,10 +156,16 @@ export async function act(
   }
 }
 
-/** Out of the open proposals now, and remembered against a pull already on its way (`closed_locally`). */
-function closeLocally(s: { my_pending: { public_id: string }[]; closed_locally: { public_id: string; at: string }[] }, publicId: string, at: string) {
+type RulesState = import("../rules/store").State
+
+/** Out of the open proposals now, and remembered against a pull already on its way (`closed_locally`), with the new
+ * proposal a resend opened. Returns the open entry it took out, if any. */
+function closeLocally(s: RulesState, publicId: string, at: string, replacedBy?: RulesState["my_pending"][number]) {
+  const removed = s.my_pending.find((p) => p.public_id === publicId)
   s.my_pending = s.my_pending.filter((p) => p.public_id !== publicId)
-  s.closed_locally.push({ public_id: publicId, at })
+  s.close_seq += 1
+  s.closed_locally.push({ public_id: publicId, at, seq: s.close_seq, ...(replacedBy ? { replaced_by: replacedBy } : {}) })
+  return removed
 }
 
 /** The author closed it: the reviewer and comment of the earlier decision are not who closed it, or why. */
@@ -182,75 +193,120 @@ function failure(error: unknown): ActionResult {
 }
 
 // altimate_change start — workspace review: request changes
+/** Server answers that leave the proposal's state unknown here (no answer, or a conflict meaning it changed since the
+ * last pull): the caller syncs, so `/rules` shows what the server has. */
+export const UNCERTAIN: ReadonlySet<string> = new Set(["upstream_failed", "invalid_status", "version_conflict"])
+
 /** Withdraw one of the person's rule proposals, or send a new wording of one sent back for changes, on the project's
- * workspace. The proposal's version comes from the last pull (`my_pending`); the local rules state records the answer
- * at once, so `/rules` shows it before the next pull. Never throws. */
+ * workspace. The proposal's version comes from the last pull (`my_pending`); `expectedVersion`, when the caller read
+ * one, must still be it. The local rules state records the answer at once, so `/rules` shows it before the next pull,
+ * but only while it is still the state pulled for this account, workspace and credential. Never throws. */
 export async function actOnRule(
   root: string,
   directory: string,
   publicId: string,
   action: "withdraw" | "resubmit",
   text?: string,
+  expectedVersion?: number,
 ): Promise<ActionResult> {
   try {
     const ctx = await context(directory)
     if (!ctx.ready) return notReady(ctx.status)
-    const [{ RulesStore }, { RulesApi }] = await Promise.all([import("../rules/store"), import("../rules/api")])
+    const [{ RulesStore }, { RulesApi }, { RulesSync }, { lint, normalizeText }] = await Promise.all([
+      import("../rules/store"),
+      import("../rules/api"),
+      import("../rules/sync"),
+      import("../learn/curator"),
+    ])
     const state = await RulesStore.read(root)
-    // The rules state must be the one pulled for this workspace with the credential signed in now.
-    const ours = (s: typeof state) => s.scope?.datamateId === ctx.datamateId
-    const pending =
-      ours(state) && (await RulesStore.verified(state)) ? state.my_pending.find((p) => p.public_id === publicId) : undefined
-    if (!pending?.version)
-      return { ok: false, status: 409, code: "not_open", error: "This proposal is not waiting for review in the last sync. Sync rules and try again." }
+    // The rules state must be the one pulled for this workspace with the credential signed in now, and an answer is
+    // recorded only into that same state: another account or workspace may be adopted while the request is out.
+    if (state.scope?.datamateId !== ctx.datamateId || !(await RulesStore.verified(state)))
+      return { ok: false, status: 409, code: "not_open", error: NOT_OPEN }
+    const scope = state.scope
+    const pulledWith = state.pulled_with
+    const ours = (s: RulesState) => RulesStore.sameScope(s.scope, scope) && s.pulled_with === pulledWith
+    const pending = state.my_pending.find((p) => p.public_id === publicId)
+    if (!pending?.version) return { ok: false, status: 409, code: "not_open", error: NOT_OPEN }
+    if (expectedVersion !== undefined && expectedVersion !== pending.version)
+      return { ok: false, status: 409, code: "version_conflict", error: "This proposal changed since you read it. Open /rules again." }
     const actions = ruleActions(pending.status ?? "pending", pending.change)
     if (!actions.includes(action))
       return { ok: false, status: 409, code: "not_allowed", error: action === "resubmit" ? "Only a proposal sent back for changes can be sent again." : "This proposal cannot be withdrawn." }
-    const now = new Date().toISOString()
+    // The server already acted when this runs: a busy learn lock is waited out (`record`), and a write that still
+    // fails is logged, not reported as a failed action (the next pull records it).
+    const recordLocally = (change: (s: RulesState) => void) =>
+      RulesSync.record(root, (s) => (ours(s) ? change(s) : undefined)).catch((error) =>
+        log.warn("rule action applied on the server; not recorded locally", { error: error instanceof Error ? error.message : String(error) }),
+      )
     if (action === "withdraw") {
       await RulesApi.withdraw(ctx.actAs, ctx.datamateId, publicId, { expected_version: pending.version })
-      await RulesStore.update(root, (s) => {
-        if (!ours(s)) return
-        closeLocally(s, publicId, now)
-        if ((pending.status ?? "pending") === "pending") s.pending_count = Math.max(0, s.pending_count - 1)
+      // Stamped once the server answered: a pull that started before then cannot know about it (`RulesSync.pull`).
+      const at = new Date().toISOString()
+      await recordLocally((s) => {
+        const removed = closeLocally(s, publicId, at)
+        // Counted once, against what the state holds now: a pull or another withdrawal may have taken it out already.
+        if (removed && (removed.status ?? "pending") === "pending") s.pending_count = Math.max(0, s.pending_count - 1)
         const sent = s.sent.find((x) => x.public_id === publicId)
-        if (sent) authorClosed(sent, "withdrawn", now)
+        if (sent && !AUTHOR_CLOSED.has(sent.status)) authorClosed(sent, "withdrawn", at)
       })
       return { ok: true, request: { kind: "rule", public_id: publicId, name: printable(pending.text), status: "withdrawn", actions: [] } }
     }
-    const wording = text?.trim() ?? ""
-    if (!wording) return { ok: false, status: 400, code: "invalid_text", error: "Write the new wording of the rule." }
+    // Checked like an edited proposal: one line, within the length, no commands, links or secrets. Linted as typed (a
+    // line break is a control character the normalized form drops), sent normalized.
+    const typed = text?.trim() ?? ""
+    if (!typed) return { ok: false, status: 400, code: "invalid_text", error: "Write the new wording of the rule." }
+    const problem = lint(typed)
+    if (problem) return { ok: false, status: 400, code: "invalid_text", error: `The new wording ${problem}.` }
+    const wording = normalizeText(typed).trim()
     const result = await RulesApi.resubmit(ctx.actAs, ctx.datamateId, publicId, { expected_version: pending.version, text: wording })
     if (result.status !== "pending" || !result.public_id)
       return { ok: false, status: 422, code: result.error_code ?? result.status, error: printable(result.error_detail || result.error_code || result.status) }
     const newId = result.public_id
-    await RulesStore.update(root, (s) => {
-      if (!ours(s)) return
-      closeLocally(s, publicId, now)
+    const at = new Date().toISOString()
+    const opened = {
+      ...pending,
+      public_id: newId,
+      rule_key: result.rule_key ?? pending.rule_key,
+      text: wording,
+      created_at: at,
+      status: "pending",
+      version: result.version,
+      review_reason: null,
+    }
+    await recordLocally((s) => {
+      // A pull that ran meanwhile may know it already: decided (a notice recorded), or listed. Its record stands.
+      const decision = s.notices.filter((n) => n.public_id === newId).at(-1)
+      const open = !decision && !!result.version
+      closeLocally(s, publicId, at, open ? opened : undefined)
       // The new proposal waits for review: it can be withdrawn, and reaches the person's sessions, before the next pull.
-      if (result.version && !s.my_pending.some((p) => p.public_id === newId)) {
-        s.my_pending.push({
-          ...pending,
-          public_id: newId,
-          rule_key: result.rule_key ?? pending.rule_key,
-          text: wording,
-          created_at: now,
-          status: "pending",
-          version: result.version,
-          review_reason: null,
-        })
+      if (open && !s.my_pending.some((p) => p.public_id === newId)) {
+        s.my_pending.push(opened)
         s.pending_count += 1
       }
       const sent = s.sent.find((x) => x.public_id === publicId)
-      if (sent) authorClosed(sent, "superseded", now)
+      if (sent && !AUTHOR_CLOSED.has(sent.status)) authorClosed(sent, "superseded", at)
       if (!s.sent.some((x) => x.public_id === newId))
-        s.sent.push({ public_id: newId, text: wording, change: pending.change, status: "pending", sent_at: now, updated_at: now })
+        s.sent.push({
+          public_id: newId,
+          text: wording,
+          change: pending.change,
+          status: decision?.status ?? "pending",
+          ...(decision?.reason ? { reason: decision.reason } : {}),
+          ...(decision?.reviewer ? { reviewer: decision.reviewer } : {}),
+          sent_at: at,
+          updated_at: decision?.at ?? at,
+        })
     })
     return { ok: true, request: { kind: "rule", public_id: newId, name: printable(wording), status: "pending", ...(result.version ? { version: result.version } : {}), actions: ["withdraw"] } }
   } catch (error) {
     return failure(error)
   }
 }
+
+const NOT_OPEN = "This proposal is not waiting for review in the last sync. Sync rules and try again."
+/** Statuses only the author sets: not overwritten by a later local record. */
+const AUTHOR_CLOSED: ReadonlySet<string> = new Set(["withdrawn", "superseded"])
 // altimate_change end
 
 /** The workspace the project is linked to, with one captured credential that is still the one signed in. */

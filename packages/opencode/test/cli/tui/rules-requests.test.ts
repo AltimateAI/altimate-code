@@ -46,11 +46,12 @@ describe("rules TUI", () => {
     const sentBack = { ...approved, status: "changes_requested", reason: "Name the table" }
     expect(decisionToast(sentBack)).toEqual({
       variant: "warning",
-      message: 'Changes requested on your skill "cost-guard" by Olive — Name the table. Change it and send it again with `altimate-code skill publish`.',
+      message:
+        'Changes requested on your skill "cost-guard" by Olive — Name the table. Change the skill, then send it again with `altimate-code skill publish cost-guard` (or from your IDE).',
       duration: 20000,
     })
     expect(decisionToast({ public_id: "r", text: "Name tables", status: "changes_requested", reviewer: "Olive", reason: "Which schema?" })?.message).toBe(
-      'Changes requested on your rule by Olive: "Name tables" — Which schema? Open /rules to reword or withdraw it.',
+      'Changes requested on your rule by Olive: "Name tables" — Which schema? Open /rules to see what you can do.',
     )
     expect(combinedToast([approved, sentBack])).toMatchObject({ variant: "warning" })
     expect(combinedToast([approved, sentBack])?.message).toContain('skill "cost-guard" sent back for changes by Olive — Name the table')
@@ -98,7 +99,7 @@ describe("rules TUI", () => {
 })
 
 describe("requestActionsTitle", () => {
-  const request = (over: Partial<WorkspaceRequest>): WorkspaceRequest => ({
+  const request = (over: Partial<WorkspaceRequest> & { kind?: "skill" | "knowledge" }): WorkspaceRequest & { kind: "skill" | "knowledge" } => ({
     kind: "skill",
     public_id: "c-1",
     name: "demo-naming",
@@ -110,11 +111,15 @@ describe("requestActionsTitle", () => {
   test("a request sent back carries the reviewer's whole comment and how to send it again", () => {
     const comment = "Also cover mart models (fct_ / dim_), and say whether snapshots follow this too"
     expect(requestActionsTitle(request({ status: "changes_requested", reviewer: "Local Admin", reason: comment }))).toBe(
-      `Your skill "demo-naming": changes requested by Local Admin — ${comment}. Change it, then send it again with \`altimate-code skill publish\`.`,
+      `Your skill "demo-naming": changes requested by Local Admin — ${comment}. Change the skill, then send it again with \`altimate-code skill publish demo-naming\` (or from your IDE).`,
     )
     expect(
       requestActionsTitle(request({ kind: "knowledge", name: "Glossary", status: "changes_requested", reviewer: "Ann", reason: "Add ARR" })),
-    ).toBe(`Your knowledge base "Glossary": changes requested by Ann — Add ARR. Change it, then send it again from the workspace's Knowledge tab.`)
+    ).toBe(`Your knowledge base "Glossary": changes requested by Ann — Add ARR. Change the knowledge base, then send it again from the workspace's Knowledge tab.`)
+    // A name that is not a plain slug is quoted, so the printed command runs as written.
+    expect(requestActionsTitle(request({ name: "cost guard", status: "changes_requested" }))).toBe(
+      `Your skill "cost guard": changes requested. Change the skill, then send it again with \`altimate-code skill publish "cost guard"\` (or from your IDE).`,
+    )
   })
 
   test("a comment that already ends a sentence gets no second stop", () => {

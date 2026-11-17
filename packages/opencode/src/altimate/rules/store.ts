@@ -196,9 +196,16 @@ export const State = z.object({
    * credential binding as `rules`: delivered to this person only (`vouched`). Replaced by every pull. */
   my_pending: z.array(MyPending).default([]),
   // altimate_change start — workspace review: request changes
-  /** The person's own proposals they withdrew or replaced from here (`actOnRule`), with when: a pull that started
-   * before then answers from before it, so it neither brings them back nor overwrites what was recorded. */
-  closed_locally: z.array(z.object({ public_id: z.string(), at: z.string() })).default([]),
+  /** The person's own proposals they withdrew or replaced from here (`actOnRule`), recorded once the server answered:
+   * a pull that started before then answers from before it, so it neither brings them back nor overwrites what was
+   * recorded. `seq` orders a closure against a pull (`close_seq` when the pull started), so a clock that steps back
+   * cannot unfence it; `at` only ages it out. `replaced_by` is the new proposal a resend opened: an answer from before
+   * the resend does not list it, and it stays open meanwhile. */
+  closed_locally: z
+    .array(z.object({ public_id: z.string(), at: z.string(), seq: z.number().int().optional(), replaced_by: MyPending.optional() }))
+    .default([]),
+  /** The last `closed_locally` sequence number; kept across a reset, so a pull already running still compares right. */
+  close_seq: z.number().int().default(0),
   // altimate_change end
   outbox: z.array(OutboxItem).default([]),
   sent: z.array(Sent).default([]),
@@ -530,6 +537,9 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
       : {}),
     // A drop notice outlives a later reset: it is about proposals the person was told were queued.
     ...(state.scope_drop ? { scope_drop: state.scope_drop } : {}),
+    // altimate_change start — workspace review: request changes (a pull still running compares against it)
+    close_seq: state.close_seq,
+    // altimate_change end
     // A "remember" is saved locally whatever the workspace: no reset loses it. Nor an open proposal: its answer checks
     // the scope it was raised for.
     remember_requests: state.remember_requests,

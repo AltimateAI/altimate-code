@@ -126,11 +126,19 @@ describe("workspace request routes", () => {
     const origin = { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
     const refused = await request("POST", "/altimate/rules/r-1/withdraw", {}, origin)
     expect([403, 409]).toContain(refused.status)
-    expect((await request("POST", "/altimate/rules/r-1/approve", {})).status).toBe(404)
+    const unknown = await request("POST", "/altimate/rules/r-1/approve", {})
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toMatchObject({ ok: false, code: "unknown_action" })
     for (const body of [{}, { text: "  " }, { text: 5 }]) {
       const response = await request("POST", "/altimate/rules/r-1/resubmit", body)
       expect(response.status).toBe(400)
-      expect(await response.json()).toMatchObject({ ok: false })
+      expect(await response.json()).toMatchObject({ ok: false, code: "invalid_text" })
+    }
+    // The version the client read, when it sends one, is a positive integer.
+    for (const body of [{ expected_version: 0 }, { expected_version: "2" }, { expected_version: 1.5 }]) {
+      const response = await request("POST", "/altimate/rules/r-1/withdraw", body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ ok: false, code: "invalid_version" })
     }
   })
 

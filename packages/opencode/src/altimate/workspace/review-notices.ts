@@ -187,14 +187,14 @@ const newestFirst = (notices: readonly Notice[]) => [...notices].sort((a, b) => 
 /** How every client remembers a decision it showed: rule and skill ids live in different id spaces. */
 export const decisionKey = (n: Pick<Notice, "kind" | "public_id" | "status">) => `${n.kind}:${n.public_id}:${n.status}`
 
-/** The decisions in `items` this client has not recorded yet: the caller's own, seen pending (or, for a removal, approved)
- * before or decided after `state.since`; never one the person decided themselves. Pure. */
 // altimate_change start — workspace review: request changes
 /** Decisions reported to the author once: approved, rejected, or sent back for changes. */
 const DECIDED: ReadonlySet<string> = new Set(["active", "rejected", "changes_requested"])
 const isDecided = (status: string): status is "active" | "rejected" | "changes_requested" => DECIDED.has(status)
 // altimate_change end
 
+/** The decisions in `items` this client has not recorded yet: the caller's own, seen pending (or, for a removal, approved)
+ * before or decided after `state.since`; never one the person decided themselves. Pure. */
 export function decided(state: State, items: readonly ReviewApi.Contribution[]): Notice[] {
   const pending = new Set(state.pending)
   const approved = new Set(state.approved)

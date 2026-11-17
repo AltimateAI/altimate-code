@@ -21,6 +21,9 @@ import { createEffect, createRoot, createSignal, onCleanup, Show } from "solid-j
 import type { ProposalCard } from "@/altimate/rules/events"
 import { RuleClassify } from "@/altimate/rules/classify"
 import { printable } from "@/altimate/rules/printable"
+// altimate_change start — workspace review: request changes (one resend hint for the CLI and the TUI)
+import { resendHint } from "@/altimate/workspace/resend-hint"
+// altimate_change end
 import type { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
 import { WorkspaceRole } from "@/altimate/workspace/role"
@@ -549,7 +552,7 @@ export function decisionToast(raw: Shown): DecisionToast | undefined {
     if (p.status === "changes_requested")
       return {
         variant: "warning",
-        message: `${sentence(`Changes requested on your ${p.kind === "skill" ? "skill" : "knowledge base"} ${quoted}${who}${p.reason ? ` — ${p.reason}` : ""}`)} ${p.kind === "skill" ? "Change it and send it again with `altimate-code skill publish`." : "Change it and send it again from the workspace's Knowledge tab."}`,
+        message: `${sentence(`Changes requested on your ${p.kind === "skill" ? "skill" : "knowledge base"} ${quoted}${who}${p.reason ? ` — ${p.reason}` : ""}`)} ${resendHint(p.kind, p.text)}`,
         duration: 20000,
       }
     // altimate_change end
@@ -561,7 +564,7 @@ export function decisionToast(raw: Shown): DecisionToast | undefined {
   if (p.status === "retired") return { variant: "info", message: `Retired${who}: ${quoted}`, duration: 10000 }
   // altimate_change start — workspace review: request changes
   if (p.status === "changes_requested")
-    return { variant: "warning", message: `${sentence(`Changes requested on your rule${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`)} Open /rules to reword or withdraw it.`, duration: 20000 }
+    return { variant: "warning", message: `${sentence(`Changes requested on your rule${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`)} Open /rules to see what you can do.`, duration: 20000 }
   // altimate_change end
   return undefined
 }
@@ -663,7 +666,7 @@ async function showMenu(api: TuiPluginApi) {
     new Promise<"slow">((resolve) => (slow = setTimeout(() => resolve("slow"), REQUESTS_WAIT_MS))),
   ]).finally(() => clearTimeout(slow))
   const allRequests = listed === "slow" ? [] : (listed?.requests ?? [])
-  const requests = allRequests.filter((r) => r.kind !== "rule")
+  const requests = allRequests.filter((r): r is ItemRequest => r.kind !== "rule")
   // What the person may do on a proposal still open on the server (withdraw, send a new wording), by its id.
   const ruleRequests = new Map(allRequests.filter((r) => r.kind === "rule").map((r) => [r.public_id, r]))
   const requestsNote = requestsProblem(listed)
@@ -731,8 +734,14 @@ async function showMenu(api: TuiPluginApi) {
           return
         }
         if (option.value.startsWith("mine:")) {
-          const request = ruleRequests.get(option.value.slice("mine:".length))
+          const id = option.value.slice("mine:".length)
+          const request = ruleRequests.get(id)
           if (request?.actions.length) return showRuleActions(api, request)
+          // The requests listing did not answer in time: what can be done on it is not known yet.
+          if (listed === "slow" || listed === undefined)
+            return api.ui.toast({ variant: "warning", message: "Could not check what you can do on this proposal just now. Open /rules again.", duration: 6000 })
+          const row = mine.find((r) => r.public_id === id)
+          if (row) api.ui.toast({ variant: "info", message: `Nothing to do on this proposal: it is ${label[row.status] ?? printable(row.status)}.`, duration: 5000 })
           return
         }
         if (option.value === "requests-note") {
@@ -831,26 +840,30 @@ function requestLine(r: WorkspaceRequest): string {
   return `${status}${by}${update}${expired}${r.reason ? ` — ${printable(r.reason)}` : ""}`
 }
 
-/** How the author sends a request sent back for changes again. */
-const RESEND_HINT = {
-  skill: "Change it, then send it again with `altimate-code skill publish`.",
-  knowledge: "Change it, then send it again from the workspace's Knowledge tab.",
-} as const
+// altimate_change start — workspace review: request changes
+/** A skill or knowledge request, as its dialogs name it. */
+type ItemRequest = WorkspaceRequest & { kind: "skill" | "knowledge" }
+const requestWhat = (request: ItemRequest) => `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
+// altimate_change end
 
+// altimate_change start — workspace review: request changes
 /** The title of a skill or knowledge request's dialog: its status, who decided it, and their whole comment (the list
  * row cuts a long one off), plus how to send it again when it was sent back for changes. */
-export function requestActionsTitle(request: WorkspaceRequest): string {
-  const what = `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
-  const hint = request.status === "changes_requested" ? ` ${RESEND_HINT[request.kind === "skill" ? "skill" : "knowledge"]}` : ""
+export function requestActionsTitle(request: ItemRequest): string {
+  const what = requestWhat(request)
+  const hint = request.status === "changes_requested" ? ` ${resendHint(request.kind, request.name)}` : ""
+  // altimate_change end
   const line = requestLine(request)
   // No second stop after a comment that already ends one ("Which column?").
   return `Your ${what}: ${line}${/[.!?…]$/.test(line) ? "" : "."}${hint}`
 }
 
+// altimate_change start — workspace review: request changes
 /** Withdraw a waiting request, or remove an approved one from the workspace. Removing stops serving it to the
  * whole team, so it asks again, opening on "No" so a stray Enter cannot remove it. */
-function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
-  const what = `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
+function showRequestActions(api: TuiPluginApi, request: ItemRequest) {
+  const what = requestWhat(request)
+  // altimate_change end
   const options: TuiDialogSelectOption<string>[] = [
     ...(request.actions.includes("withdraw")
       ? [{ title: "Withdraw the request", value: "withdraw", description: "Take it back before it is reviewed. You can send it again later." }]
@@ -873,7 +886,9 @@ function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
   ))
 }
 
-function confirmRemove(api: TuiPluginApi, request: WorkspaceRequest, what: string) {
+// altimate_change start — workspace review: request changes
+function confirmRemove(api: TuiPluginApi, request: ItemRequest, what: string) {
+  // altimate_change end
   api.ui.dialog.replace(() => (
     <api.ui.DialogSelect<string>
       title={`Remove your ${what} from the workspace?`}
@@ -938,7 +953,6 @@ function showRuleActions(api: TuiPluginApi, request: WorkspaceRequest) {
               api.ui.dialog.clear()
               void act("resubmit", text)
             }}
-            onCancel={() => showRuleActions(api, request)}
           />
         ))
       }}
