@@ -1,5 +1,5 @@
 // The tools the dbt Power User features call: their allow-list entries and placeholder answers, the
-// one gate every dbt-adapter-backed tool goes through, and the API helper for new endpoint files. The
+// one gate the new dbt-adapter-backed tools go through, and the API helper for new endpoint files. The
 // dbt adapter is replaced through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -11,6 +11,7 @@ import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import { dbtAdapterAccessInternals, dbtAdapterFor } from "@/altimate/tools/dbt-adapter-access"
+import { resultFailed } from "@/altimate/mcp-server/adapter"
 import { EXPOSED, MCP_OPEN_WRITE_TOOLS, WRITE_TOOLS } from "@/altimate/tool-cli/allow-list"
 import { AltimateApi } from "@/altimate/api/client"
 import { Instance } from "@/project/instance"
@@ -30,8 +31,6 @@ const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
   dbt_cte_profile: { model: "customers" },
 }
 const FEATURE_TOOLS = Object.keys(MINIMAL_ARGS)
-/** Tools that have their own implementation and tests. */
-const IMPLEMENTED = new Set(["dbt_health"])
 
 const ctx: Tool.Context = {
   sessionID: SessionID.make("ses_dbt_adapter_access"),
@@ -84,13 +83,14 @@ describe("feature tools in the allow-list", () => {
   })
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
-    for (const id of FEATURE_TOOLS.filter((id) => !IMPLEMENTED.has(id))) {
+    for (const id of FEATURE_TOOLS) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
       expect(result.title).toBe(`${id}: not implemented`)
       expect(result.metadata).toEqual({ success: false, error: "not implemented", truncated: false })
       expect(result.output).toContain(id)
+      expect(resultFailed(result)).toBe(true)
     }
   })
 })
@@ -125,6 +125,18 @@ describe("dbtAdapterFor", () => {
     expect(access.refusal).toBeUndefined()
     expect(access.adapter?.isInitialized()).toBe(true)
     expect(created).toBe(1)
+  })
+
+  test("returns the adapter to a session inside the adapter's own project", async () => {
+    try {
+      const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
+      expect(access.refusal).toBeUndefined()
+      expect(access.reason).toBeUndefined()
+      expect(access.adapter?.isInitialized()).toBe(true)
+      expect(created).toBe(1)
+    } finally {
+      await disposeInstance(project)
+    }
   })
 
   test("says when the adapter didn't load the project", async () => {
@@ -182,6 +194,15 @@ describe("dbtAdapterFor", () => {
     expect(created).toBe(0)
   })
 
+  test("a cancelled read-only or plan-mode call throws rather than being refused", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const abort = controller.signal
+    await expect(dbtAdapterFor({ ...ctx, abort, extra: { forceReadOnly: true } })).rejects.toThrow()
+    await expect(dbtAdapterFor({ ...ctx, abort, agent: "plan" })).rejects.toThrow()
+    expect(created).toBe(0)
+  })
+
   test("a session in a dbt project the adapter isn't set up for says so", async () => {
     dbtAdapterInternals.readConfig = async () => null
     try {
@@ -194,6 +215,86 @@ describe("dbtAdapterFor", () => {
     } finally {
       await disposeInstance(project)
     }
+  })
+
+  test("a stalled dbt config read gives up at the start timeout", async () => {
+    let release = () => {}
+    dbtAdapterInternals.readConfig = () => new Promise((resolve) => (release = () => resolve(null)))
+    const saved = dbtAdapterAccessInternals.adapterStartTimeoutMs
+    dbtAdapterAccessInternals.adapterStartTimeoutMs = 20
+    try {
+      const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
+      expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter didn't start within 0.02 s" })
+      expect(created).toBe(0)
+    } finally {
+      release()
+      dbtAdapterAccessInternals.adapterStartTimeoutMs = saved
+      await disposeInstance(project)
+    }
+  })
+
+  test("a call cancelled during a stalled dbt config read throws at once", async () => {
+    let release = () => {}
+    let entered = () => {}
+    const reading = new Promise<void>((resolve) => (entered = resolve))
+    dbtAdapterInternals.readConfig = () => {
+      entered()
+      return new Promise((resolve) => (release = () => resolve(null)))
+    }
+    const controller = new AbortController()
+    try {
+      const pending = Instance.provide({
+        directory: project,
+        fn: () => dbtAdapterFor({ ...ctx, abort: controller.signal }),
+      })
+      await reading
+      controller.abort(new Error("cancelled"))
+      await expect(pending).rejects.toThrow("cancelled")
+    } finally {
+      release()
+      await disposeInstance(project)
+    }
+  })
+
+  test("removes its abort listener and its timer whatever the outcome", async () => {
+    const controller = new AbortController()
+    const signal = controller.signal
+    let listening = 0
+    const add = signal.addEventListener.bind(signal)
+    const remove = signal.removeEventListener.bind(signal)
+    signal.addEventListener = ((...a: Parameters<typeof add>) => {
+      if (a[0] === "abort") listening += 1
+      return add(...a)
+    }) as typeof signal.addEventListener
+    signal.removeEventListener = ((...a: Parameters<typeof remove>) => {
+      if (a[0] === "abort") listening -= 1
+      return remove(...a)
+    }) as typeof signal.removeEventListener
+    const timers = new Set<unknown>()
+    const set = globalThis.setTimeout
+    const clear = globalThis.clearTimeout
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      const t = set(fn, ms)
+      timers.add(t)
+      return t
+    }) as typeof setTimeout
+    globalThis.clearTimeout = ((t: ReturnType<typeof setTimeout>) => {
+      timers.delete(t)
+      return clear(t)
+    }) as typeof clearTimeout
+    try {
+      expect((await dbtAdapterFor({ ...ctx, abort: signal })).adapter).toBeDefined()
+      dbtAdapterInternals.create = async () => {
+        throw new Error("dbt-integration missing")
+      }
+      resetDbtAdapter()
+      expect((await dbtAdapterFor({ ...ctx, abort: signal })).refusal).toBe("not_started")
+    } finally {
+      globalThis.setTimeout = set
+      globalThis.clearTimeout = clear
+    }
+    expect(listening).toBe(0)
+    expect(timers.size).toBe(0)
   })
 
   test("a session in another dbt project than the adapter's says which", async () => {
@@ -262,10 +363,10 @@ describe("AltimateApi.apiRequest", () => {
     }
   })
 
-  test("sends a body of false, 0 or null, and none only when there is none", async () => {
+  test("sends a falsy JSON body rather than dropping it", async () => {
     await Bun.write(
       path.join(home, ".altimate", "altimate.json"),
-      JSON.stringify({ altimateUrl: "https://api.example.test/", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+      JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
     )
     const original = globalThis.fetch
     const bodies: unknown[] = []
@@ -274,17 +375,156 @@ describe("AltimateApi.apiRequest", () => {
       return new Response("{}", { status: 200 })
     }) as unknown as typeof fetch
     try {
-      for (const body of [false, 0, null, undefined]) await AltimateApi.apiRequest("POST", "/dbt/v1/x", body)
-      expect(bodies).toEqual(["false", "0", "null", undefined])
+      for (const body of [null, false, 0, ""]) await AltimateApi.apiRequest("POST", "/dbt/v1/x", body)
+      await AltimateApi.apiRequest("GET", "/dbt/v1/x")
+      expect(bodies).toEqual(["null", "false", "0", '""', undefined])
     } finally {
       globalThis.fetch = original
     }
   })
 
-  test("names the file when the stored credentials can't be read", async () => {
-    await Bun.write(path.join(home, ".altimate", "altimate.json"), "{not json")
-    await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow(
-      `The Altimate credentials in ${path.join(home, ".altimate", "altimate.json")} can't be used`,
+  test("a cancelled call stops the request", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
     )
+    const original = globalThis.fetch
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise((_, reject) => {
+        // Like fetch: a signal already aborted rejects at once, else the abort does.
+        if (init.signal?.aborted) return reject(init.signal.reason)
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      })) as unknown as typeof fetch
+    const controller = new AbortController()
+    try {
+      const pending = AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal)
+      controller.abort(new Error("cancelled by the user"))
+      await expect(pending).rejects.toThrow("cancelled by the user")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("names the file and the failure, never the file's text, when the credentials aren't valid JSON", async () => {
+    const file = path.join(home, ".altimate", "altimate.json")
+    await Bun.write(
+      file,
+      '{"altimateUrl":"https://x.test","altimateInstanceName":"acme","altimateApiKey": sk_SECRET123}',
+    )
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe(`The Altimate credentials in ${file} can't be used: the file is not valid JSON.`)
+    expect(error.message).not.toContain("sk_SECRET123")
+  })
+
+  test("names the missing field, never a value, when the credentials are incomplete", async () => {
+    const file = path.join(home, ".altimate", "altimate.json")
+    await Bun.write(file, JSON.stringify({ altimateUrl: "https://x.test", altimateApiKey: "sk_SECRET123" }))
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error.message).toBe(
+      `The Altimate credentials in ${file} can't be used: altimateInstanceName is missing or not valid.`,
+    )
+    expect(error.message).not.toContain("sk_SECRET123")
+  })
+
+  test("never shows the stored key when sending the request fails", async () => {
+    const key = "sk_SECRET123\r\nX: y"
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: key }),
+    )
+    // The real fetch: it rejects a header value with CR/LF, quoting the value.
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).not.toContain("sk_SECRET123")
+    expect(error.message).toContain("API GET /dbt/v1/x could not be sent")
+  })
+
+  test("never shows the stored key when a header refusal races the caller's abort", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({
+        altimateUrl: "https://api.example.test",
+        altimateInstanceName: "acme",
+        altimateApiKey: "sk_SECRET123",
+      }),
+    )
+    const original = globalThis.fetch
+    const controller = new AbortController()
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      controller.abort(new Error("cancelled by the user"))
+      throw new TypeError(`bad header: '${(init.headers as Record<string, string>).Authorization}'`)
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal).catch(
+        (e: Error) => e,
+      )
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: bad header: 'Bearer [redacted]'")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("never shows the stored key from any fetch failure", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({
+        altimateUrl: "https://api.example.test",
+        altimateInstanceName: "acme",
+        altimateApiKey: "sk_SECRET123",
+      }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      throw new TypeError(`bad header: '${(init.headers as Record<string, string>).Authorization}'`)
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: bad header: 'Bearer [redacted]'")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("a timed-out request says it timed out", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise((_, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      })) as unknown as typeof fetch
+    const saved = AltimateApi.requestInternals.timeoutMs
+    AltimateApi.requestInternals.timeoutMs = 10
+    try {
+      await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow(
+        "API GET /dbt/v1/x timed out after 0.01 s",
+      )
+    } finally {
+      AltimateApi.requestInternals.timeoutMs = saved
+      globalThis.fetch = original
+    }
+  })
+
+  test("a call cancelled before it starts reads no credentials and sends nothing", async () => {
+    const original = globalThis.fetch
+    let sent = 0
+    globalThis.fetch = (async () => {
+      sent += 1
+      return new Response("{}")
+    }) as unknown as typeof fetch
+    const controller = new AbortController()
+    controller.abort(new Error("cancelled by the user"))
+    try {
+      // No credentials are stored: reading them would fail with another message.
+      await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal)).rejects.toThrow(
+        "cancelled by the user",
+      )
+      expect(sent).toBe(0)
+    } finally {
+      globalThis.fetch = original
+    }
   })
 })
