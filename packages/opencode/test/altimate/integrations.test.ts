@@ -103,6 +103,9 @@ describe("GitHub host policy", () => {
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp"] },
       // A second `run` is the image docker runs, not docker's own word.
       { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "run", "ghcr.io/github/github-mcp-server"] },
+      // npx runs npm packages and docker runs images: each only its own kind.
+      { command: "npx", args: ["-y", "ghcr.io/github/github-mcp-server"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "@modelcontextprotocol/server-github"] },
       // An image called npx is not GitHub's, whatever follows it.
       { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "npx", "ghcr.io/github/github-mcp-server"] },
       // The official image named after the one docker actually runs.
@@ -1813,6 +1816,19 @@ describe("credentials flow", () => {
       for (const k of JIRA_ENV) delete process.env[k]
     })
 
+    test("jira-cli's Server setup gives its JIRA_API_TOKEN as the personal access token", async () => {
+      fs.mkdirSync(path.join(home, ".config/.jira"), { recursive: true })
+      fs.writeFileSync(path.join(home, ".config/.jira/.config.yml"), `server: ${base()}\nlogin: me\nauth_type: bearer\n`)
+      process.env.JIRA_API_TOKEN = GOOD
+      try {
+        const r = await creds.connectCredentials({ id: "jira", localOnly: true })
+        expect([r.status, r.account]).toEqual(["connected", "Server Me"])
+        expect(core.loadStore().providers.jira?.variant).toBe("server")
+      } finally {
+        fs.rmSync(path.join(home, ".config/.jira/.config.yml"), { force: true })
+      }
+    })
+
     test("a planted project file cannot point the user's token at another host", async () => {
       plant({ JIRA_URL: base() })
       process.env.JIRA_PAT_TOKEN = GOOD
@@ -2136,6 +2152,17 @@ describe("credentials flow", () => {
         onUser = null
       }
       expect([await core.readSecret(core.secretKey("draft", "github", "github_token")), await core.readSecret(core.secretKey("draft", "github", "other_field"))]).toEqual(["ghp_entered_meanwhile_5678", "ghp_other_field_draft"])
+    })
+
+    test("a connected provider keeps its variant when a draft for the other variant is left", async () => {
+      await creds.setDraft("jira", "jiraDomain", "acme")
+      await creds.setDraft("jira", "jiraEmail", "me@acme.com")
+      await token("jira", "jiraApiToken")
+      expect((await creds.connectCredentials({ id: "jira", variant: "cloud", localOnly: true })).status).toBe("connected")
+      await creds.setDraft("jira", "jiraBaseUrl", "https://jira.corp.example")
+      await token("jira", "jiraApiToken")
+      await creds.connectCredentials({ id: "jira", localOnly: true })
+      expect(core.loadStore().providers.jira?.variant).toBe("cloud")
     })
 
     test("a successful connect keeps a non-secret value typed again while it ran", async () => {
@@ -3216,6 +3243,11 @@ describe("credentials flow", () => {
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
       expect(api.state.rows[0].name).toBe("My GitHub")
+      // So is one that only starts like this tool's own names.
+      api.state.rows[0].name = "GitHub (from laptop) — production"
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
+      expect(api.state.rows[0].name).toBe("GitHub (from laptop) — production")
       expect(await core.managedInWorkspace("github")).toBe(true)
       expect(core.deriveRemote(api.state.rows as any, HOST, { github: id }).find((r) => r.integration_id === "github")?.managed).toBe(true)
     })

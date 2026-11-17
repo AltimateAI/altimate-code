@@ -411,12 +411,12 @@ export function detectFromClaudeConfigs(home: string, cwd: string): Detection[] 
 }
 
 /** Reads `server` and `login` from a jira-cli config without a YAML dependency. */
-export function parseJiraCliConfig(text: string): { server?: string; login?: string } {
+export function parseJiraCliConfig(text: string): { server?: string; login?: string; authType?: string } {
   const pick = (key: string) => {
     const m = text.match(new RegExp(`^${key}:\\s*['"]?([^'"\\n]+?)['"]?\\s*$`, "m"))
     return m?.[1]
   }
-  return { server: pick("server"), login: pick("login") }
+  return { server: pick("server"), login: pick("login"), authType: pick("auth_type") }
 }
 
 function onPath(bin: string): boolean {
@@ -1020,7 +1020,7 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
   if (sharedConnection && !share) throw new Error(SHARED_CONNECTION_REFUSAL(id, retry))
   const saved = existing
     ? // The recorded connection found under an older host name takes this machine's name again, so every lookup by name finds it.
-      await backend.updateConnection(cfg, existing.id, existing.name !== managedName(id) && existing.name.startsWith(`${PROVIDER_NAMES[id]} (from `) ? { config, name: managedName(id) } : { config })
+      await backend.updateConnection(cfg, existing.id, existing.name !== managedName(id) && new RegExp(`^${PROVIDER_NAMES[id]} \\(from [^()]+\\)$`).test(existing.name) ? { config, name: managedName(id) } : { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
   const isValid = saved.is_valid !== false
   const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }), ...(sharedConnection || (existing && saved.privacy != null && saved.privacy !== "private") ? { shared: true as const } : {}) }

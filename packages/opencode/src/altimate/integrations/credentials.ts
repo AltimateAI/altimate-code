@@ -167,7 +167,9 @@ const GITHUB_TOKEN_KEY = /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i
 // package, or GitHub's binary, each with only its own flags and settings. A server is a github.com token source only in
 // one of these shapes; anything else (other flags, files, mounts, URLs, hosts in any form) is not read here.
 const GITHUB_MCP_COMMAND = /^(?:.*[\\/])?(docker|npx|github-mcp-server|cmd)(\.exe|\.cmd)?$/i
-const GITHUB_MCP_PROGRAM = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+|@sha256:[a-f0-9]{64})?|mcp\/github(:[\w.-]+)?|@modelcontextprotocol\/server-github(@[\w.-]+)?)$/
+const GITHUB_MCP_IMAGE = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+|@sha256:[a-f0-9]{64})?|mcp\/github(:[\w.-]+)?)$/
+const GITHUB_MCP_PACKAGE = /^@modelcontextprotocol\/server-github(@[\w.-]+)?$/
+const GITHUB_MCP_PROGRAM = new RegExp(`${GITHUB_MCP_IMAGE.source}|${GITHUB_MCP_PACKAGE.source}`)
 // Windows runs npx through `cmd /c`.
 const GITHUB_MCP_WORD = /^(run|-i|-t|-it|--rm|-e|-y|\/c|npx|stdio|--read-only|--dynamic-toolsets|--toolsets(=[a-z_]+(,[a-z_]+)*)?|[a-z_]+(,[a-z_]+)*|GITHUB_(PERSONAL_ACCESS_TOKEN|TOKEN|TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)|GITHUB_(TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)=[\w,.-]*|GH_TOKEN)$/
 const GITHUB_MCP_SETTING = /^GITHUB_(TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)$/
@@ -235,7 +237,9 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   while (i < lead.length && args[i] === lead[i]) i++
   if (i < lead.length) return false
   while (i < args.length && args[i].startsWith("-")) i += args[i] === "-e" ? 2 : 1
-  if (command !== "github-mcp-server" && !GITHUB_MCP_PROGRAM.test(args[i] ?? "")) return false
+  // docker runs GitHub's image; npx (directly or through cmd) runs GitHub's npm package. Each only its own kind.
+  const program = command === "docker" ? GITHUB_MCP_IMAGE : GITHUB_MCP_PACKAGE
+  if (command !== "github-mcp-server" && !program.test(args[i] ?? "")) return false
   const settings = Object.entries(server.env ?? {}).every(
     ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
   )
@@ -304,6 +308,9 @@ function detectField(id: ProviderId, field: string): Found | undefined {
   const jiraCli: Source = { kind: "cli", label: "jira-cli" }
   if (field === "jiraDomain" && cli.server) return { value: core.normaliseJiraDomain(cli.server), source: jiraCli }
   if (field === "jiraBaseUrl" && cli.server) return { value: cli.server.trim().replace(/\/+$/, ""), source: jiraCli }
+  // jira-cli's Server setup (auth_type bearer) keeps a personal access token in JIRA_API_TOKEN, not a Cloud API token.
+  if (cli.authType === "bearer" && field === "jiraPatToken" && process.env.JIRA_API_TOKEN?.trim()) return { value: process.env.JIRA_API_TOKEN.trim(), source: jiraCli }
+  if (cli.authType === "bearer" && field === "jiraApiToken") return undefined
   if (field === "jiraEmail" && cli.login) return { value: cli.login, source: jiraCli }
   const found = fromEnv(field) ?? fromMcpEnv(id, field)
   if (found && field === "jiraDomain") return { ...found, value: core.normaliseJiraDomain(found.value) }
@@ -735,7 +742,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     return local({ status: "failed", sync: "local", message: `${name} is not connected yet. Use connect first.`, code: "not_connected" })
 
   const blocked = core.isBlocked(id)
-  const r = await resolve(id, opts.variant ?? (opts.update ? rec?.variant : undefined), Boolean(opts.localOnly) || blocked)
+  // A connected provider keeps its variant unless one is asked for: a draft left for the other variant does not switch it.
+  const r = await resolve(id, opts.variant ?? (opts.update || rec?.registered ? rec?.variant : undefined), Boolean(opts.localOnly) || blocked)
   const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
   if (missing.length)
     return local({ status: "missing_fields", sync: syncState(), message: [`Missing: ${missing.map((f) => f.label).join(", ")}`, ...missing.map((f) => r.notes[f.name]).filter(Boolean)].join(". "), code: "missing_fields", missing: missing.map((f) => f.name) })
