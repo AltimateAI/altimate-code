@@ -122,6 +122,7 @@ const SUMMARY = [
   // Macro, test and yml rules: summary until each is judged on replayed PRs.
   "rule-catalog:macro-group-by-ordinal",
   "dbt-project-rules:macro-param-no-default",
+  "dbt-project-rules:dispatch-kwarg-not-in-variant",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {

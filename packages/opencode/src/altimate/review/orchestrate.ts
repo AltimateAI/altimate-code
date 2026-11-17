@@ -41,7 +41,17 @@ import { detectUnitTestFixtures } from "./unit-tests"
 import { finalSelectNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
-import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
+import {
+  dbtProjectFindings,
+  dispatchKwargFindings,
+  dispatchVariants,
+  jinjaFindings,
+  joinTargets,
+  missingRefFindings,
+  modelConfigFindings,
+  packagesFindings,
+  testsOnNullColumns,
+} from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
 import { ruleTier } from "./rule-tiers"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
@@ -2209,6 +2219,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     for (const findings of sets) all.push(findings)
   }
 
+  // An `adapter.dispatch` call that now passes a keyword some `<adapter>__` variant in the repo doesn't take.
+  const dispatchVariantFindings = async (file: ChangedFile, newSql: string): Promise<Finding[]> => {
+    if (!/\badapter\.dispatch\b/.test(newSql)) return []
+    const texts = new Map<string, string>([[file.path, newSql]])
+    for (const name of new Set([...newSql.matchAll(/\badapter\.dispatch\s*\(\s*['"](?:\w+\.)?(\w+)['"]/g)].map((m) => m[1]))) {
+      const hits = (await input.grepProject?.(`__${name}(`).catch(() => [])) ?? []
+      for (const path of new Set(hits.map((h) => h.path)))
+        if (!texts.has(path)) texts.set(path, (await getContent?.(path, "new").catch(() => undefined)) ?? "")
+    }
+    return dispatchKwargFindings(file, newSql, (name) => [...texts.values()].flatMap((t) => dispatchVariants(t, name)))
+  }
+
   // Macros: the catalog rules that hold in a SQL template, and vars with no default.
   if (lanes.has("dbt_patterns")) {
     const macros = reviewable.filter((f) => f.kind === "macro" && f.status !== "deleted")
@@ -2224,6 +2246,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           return [
             ...detectMacroPatterns(file, newSql, input.rubric, projectVars, { dialect, dialectKnown: !!input.dialectKnown }),
             ...jinjaFindings(file, oldSql, newSql),
+            ...(await dispatchVariantFindings(file, newSql)),
           ]
         } catch (err) {
           failedFile(file, err)

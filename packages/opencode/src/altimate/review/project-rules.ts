@@ -381,6 +381,76 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
   return out
 }
 
+// ── adapter.dispatch variants ───────────────────────────────────────────────
+
+/** `adapter.dispatch('name', …)(…)` calls whose argument list carries `kw=` keywords on added
+ *  lines: the dispatched macro name, and each such keyword with the raw added line. */
+export function addedDispatchKwargs(file: ChangedFile, sql: string): { name: string; kwargs: { kw: string; line: number; text: string }[] }[] {
+  const added = [...walkDiffLines(file.diff)].filter((r) => r.kind === "+")
+  const lineAt = (i: number) => sql.slice(0, i).split("\n").length
+  const out: { name: string; kwargs: { kw: string; line: number; text: string }[] }[] = []
+  for (const m of sql.matchAll(/\badapter\.dispatch\s*\(\s*['"]([\w.]+)['"]/g)) {
+    const open = m.index! + m[0].indexOf("(")
+    const head = parenBody(sql, open)
+    const after = open + head.length + 2
+    const call = /^\s*\(/.exec(sql.slice(after))
+    if (!call) continue
+    const argsOpen = after + call[0].length - 1
+    const args = parenBody(sql, argsOpen)
+    const first = lineAt(argsOpen)
+    const last = first + args.split("\n").length - 1
+    const kws = [...topLevel(args).matchAll(/(?:^|,)\s*(\w+)\s*=(?!=)/g)].map((k) => k[1])
+    const kwargs = kws.flatMap((kw) => {
+      const hit = added.find((r) => r.line >= first && r.line <= last && new RegExp(`\\b${kw}\\s*=(?!=)`).test(r.text))
+      return hit ? [{ kw, line: hit.line, text: hit.text }] : []
+    })
+    if (kwargs.length) out.push({ name: m[1].split(".").pop()!, kwargs })
+  }
+  return out
+}
+
+/** Every `{% macro <prefix>__<name>(…) %}` in `text`: its parameters, and whether its body reads
+ *  `kwargs` (Jinja then accepts any extra keyword). */
+export function dispatchVariants(text: string, name: string): { macro: string; params: string[]; acceptsKwargs: boolean }[] {
+  const out: { macro: string; params: string[]; acceptsKwargs: boolean }[] = []
+  for (const [macro, sig] of signatures(text)) {
+    if (!macro.endsWith(`__${name}`) || macro === name) continue
+    const at = new RegExp(`\\{%-?\\s*macro\\s+${escapeRe(macro)}\\s*\\(`).exec(text)!.index
+    const end = text.slice(at).search(/\{%-?\s*endmacro\b/)
+    const body = text.slice(at, end < 0 ? undefined : at + end)
+    out.push({ macro, params: sig.params.map((p) => p.name), acceptsKwargs: /\bkwargs\b/.test(body) || /\bvarargs\b/.test(body) })
+  }
+  return out
+}
+
+/** Keywords a changed `adapter.dispatch` call now passes that an in-repo variant does not take:
+ *  on that adapter dbt fails with "takes no keyword argument". */
+export function dispatchKwargFindings(
+  file: ChangedFile,
+  sql: string,
+  variantsOf: (name: string) => { macro: string; params: string[]; acceptsKwargs: boolean }[],
+): Finding[] {
+  const out: Finding[] = []
+  for (const call of addedDispatchKwargs(file, sql)) {
+    const variants = variantsOf(call.name)
+    for (const { kw, line, text } of call.kwargs) {
+      const missing = variants.filter((v) => !v.acceptsKwargs && !v.params.includes(kw)).map((v) => v.macro)
+      if (!missing.length) continue
+      const f = finding(
+        file,
+        "dispatch-kwarg-not-in-variant",
+        "warning",
+        "sql_correctness",
+        `\`${call.name}\` now passes \`${kw}\`, which ${missing.length === 1 ? "a variant doesn't" : "some variants don't"} accept`,
+        `The \`adapter.dispatch('${call.name}')\` call passes \`${kw}=\`, but ${missing.map((v) => `\`${v}\``).join(", ")} ${missing.length === 1 ? "has" : "have"} no \`${kw}\` parameter. On ${missing.length === 1 ? "that adapter" : "those adapters"} dbt fails with "takes no keyword argument '${kw}'". Add the parameter (with a default) to every variant.`,
+        text,
+      )
+      out.push({ ...f, startLine: line, endLine: line })
+    }
+  }
+  return out
+}
+
 // ── model config combinations ───────────────────────────────────────────────
 
 const unquote = (v: string | undefined) => (v ?? "").trim().replace(/^['"]|['"]$/g, "")
