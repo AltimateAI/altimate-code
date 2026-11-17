@@ -35,6 +35,8 @@ type Relation = {
   relationName: string
   parts: string[]
   call: string
+  /** False for a model that comes from an installed package; a bare ref() resolves to the project's own first. */
+  root: boolean
 }
 
 const RANK: Record<Exclude<RelationMatch, "none">, number> = { exact: 0, case_insensitive: 1, partial: 2 }
@@ -104,6 +106,8 @@ export type Scan = {
 const DOUBLE_QUOTE_STRING = new Set(["bigquery", "databricks", "spark", "mysql", "hive"])
 const BACKSLASH_ESCAPE = new Set(["bigquery", "databricks", "spark", "mysql", "hive", "clickhouse", "snowflake"])
 const DOLLAR_QUOTE = new Set(["snowflake", "postgres", "redshift", "duckdb"])
+const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "fabric", "synapse", "oracle"])
+const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb"])
 const BRACKET_QUOTE = new Set(["tsql", "sqlserver", "fabric", "synapse"])
 
 const RESERVED = new Set([
@@ -188,7 +192,7 @@ function tokenize(sql: string, dialect: string): Token[] {
     const ch = sql[i]
     const two = sql.slice(i, i + 2)
     if (/\s/.test(ch)) i++
-    else if (two === "--") {
+    else if (two === "--" || (ch === "#" && HASH_COMMENT.has(dialect)) || (two === "//" && dialect === "snowflake")) {
       while (i < n && sql[i] !== "\n") i++
     } else if (two === "/*") {
       const end = sql.indexOf("*/", i + 2)
@@ -281,8 +285,10 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
   // `name [(columns)] as [not] [materialized] (`, then `,` for the next CTE.
   const readCtes = (start: number) => {
     let i = start
-    const recursive = tokens[i]?.text.toLowerCase() === "recursive"
-    if (recursive) i++
+    // Snowflake, T-SQL and Oracle recurse without the keyword: a CTE that names itself is the recursion there.
+    const keyword = tokens[i]?.text.toLowerCase() === "recursive"
+    if (keyword) i++
+    const recursive = keyword || IMPLICIT_RECURSION.has(dialect)
     while (tokens[i] && (tokens[i].kind === "word" || tokens[i].kind === "quoted")) {
       const name = nameOf(tokens[i], dialect)[0].toLowerCase()
       let j = i + 1
@@ -405,7 +411,15 @@ export function manifestRelations(manifest: any, dialect?: string): Relation[] {
     const call = pkg
       ? `{{ ref(${jinjaString(pkg)}, ${jinjaString(node.name)}${version}) }}`
       : `{{ ref(${jinjaString(node.name)}${version}) }}`
-    out.push({ kind, name: node.name, uniqueId, relationName, parts: splitQualified(relationName, splitDots), call })
+    out.push({
+      kind,
+      name: node.name,
+      uniqueId,
+      relationName,
+      parts: splitQualified(relationName, splitDots),
+      call,
+      root: !pkg,
+    })
   }
   const sources: Record<string, any> = manifest?.sources ?? {}
   for (const [uniqueId, node] of Object.entries(sources)) {
@@ -418,6 +432,7 @@ export function manifestRelations(manifest: any, dialect?: string): Relation[] {
       relationName,
       parts: splitQualified(relationName, splitDots),
       call: `{{ source(${jinjaString(node.source_name)}, ${jinjaString(node.name)}) }}`,
+      root: true,
     })
   }
   return out
@@ -458,7 +473,8 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
     if (r.parts.length === 1 && cte && !inOwnBody) continue
     if (wanted.has(last.toLowerCase()) || wanted.has(whole.toLowerCase())) {
       add(r)
-      covered.add((wanted.has(last.toLowerCase()) ? last : whole).toLowerCase())
+      covered.add(last.toLowerCase())
+      covered.add(whole.toLowerCase())
     } else if (cte) add(r)
   }
   for (const t of tables) {
@@ -466,7 +482,7 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
     add({ raw: t, parts: splitQualified(t, dialect === "bigquery") })
   }
   return entries.map((entry) => {
-    const hits: RelationCandidate[] = []
+    const hits: (RelationCandidate & { root: boolean })[] = []
     for (const rel of relations) {
       const how = matchParts(entry.parts, rel.parts)
       if (!how) continue
@@ -477,18 +493,21 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
         uniqueId: rel.uniqueId,
         relationName: rel.relationName,
         match: how,
+        root: rel.root,
       })
     }
     hits.sort(
       (a, b) =>
-        RANK[a.match] - RANK[b.match] || KIND_RANK[a.kind] - KIND_RANK[b.kind] || a.uniqueId.localeCompare(b.uniqueId),
+        RANK[a.match] - RANK[b.match] || KIND_RANK[a.kind] - KIND_RANK[b.kind] ||
+        Number(b.root) - Number(a.root) ||
+        a.uniqueId.localeCompare(b.uniqueId),
     )
     const best = hits[0]
     return {
       raw: entry.raw,
       replaceWith: best ? best.replaceWith : entry.raw,
       match: best ? best.match : "none",
-      candidates: hits,
+      candidates: hits.map(({ root: _root, ...candidate }) => candidate),
     }
   })
 }
@@ -568,5 +587,6 @@ async function defaultManifestPath(): Promise<string | null> {
   try {
     real = await fs.promises.realpath(root)
   } catch {}
-  return path.join(real, "target", "manifest.json")
+  const { resolveDbtTargetPath } = await import("../validators/validator-utils")
+  return path.join(await resolveDbtTargetPath(real), "manifest.json")
 }

@@ -333,7 +333,8 @@ describe("mapRelations", () => {
   })
 
   test("a table named like its own CTE, read inside that CTE, is the real table; a recursive CTE's own name is not", () => {
-    expect(map("with orders as (select * from orders) select * from orders", []).map((r) => r.raw)).toEqual(["orders"])
+    const sql = "with orders as (select * from orders) select * from orders"
+    expect(mapRelations([], sql, [], "postgres").map((r) => r.raw)).toEqual(["orders"])
     expect(
       map("with recursive customers as (select 1 union all select * from customers) select * from customers", []),
     ).toEqual([])
@@ -545,7 +546,44 @@ describe("review regressions", () => {
   })
 
   test("quoted names that differ only in inner whitespace are different tables", () => {
-    const rows = mapRelations(['"A  B"', '"A B"'], 'select * from "A  B", "A B"', [], "snowflake")
+    const rows = mapRelations(["A  B", "A B"], 'select * from "A  B", "A B"', [], "snowflake")
     expect(rows.map((r) => r.raw)).toEqual(['"A  B"', '"A B"'])
+  })
+  test("a CTE that names itself is the recursion in Snowflake and T-SQL without the RECURSIVE keyword", () => {
+    const sql = "with c as (select 0 n union all select n + 1 from c where n < 5) select * from c"
+    for (const dialect of ["snowflake", "tsql"]) {
+      expect(mapRelations(["c"], sql, [], dialect)).toEqual([])
+    }
+    expect(mapRelations(["c"], sql, [], "postgres").map((r) => r.raw)).toEqual(["c"])
+  })
+
+  test("a model of the project outranks a same-named model of an installed package", () => {
+    const node = (pkg: string) => ({
+      resource_type: "model",
+      name: "date_spine",
+      package_name: pkg,
+      relation_name: `"db"."s"."date_spine"`,
+      schema: "s",
+    })
+    const manifest = {
+      metadata: { project_name: "shop" },
+      nodes: { "model.dbt_utils.date_spine": node("dbt_utils"), "model.shop.date_spine": node("shop") },
+    }
+    const rows = mapRelations(["date_spine"], "select * from date_spine", manifestRelations(manifest, "snowflake"), "snowflake")
+    expect(rows[0].replaceWith).toBe("{{ ref('date_spine') }}")
+    expect(rows[0].candidates.length).toBe(2)
+    expect(Object.keys(rows[0].candidates[0])).not.toContain("root")
+  })
+
+  test("# and // line comments are skipped where the dialect has them", () => {
+    const bq = scanTableReferences("select * from a.orders # don't remove\njoin a.payments", "bigquery")
+    expect(bq.refs.map((r) => r.raw)).toEqual(["a.orders", "a.payments"])
+    const sf = scanTableReferences("select * from a.orders // it's here\njoin a.payments", "snowflake")
+    expect(sf.refs.map((r) => r.raw)).toEqual(["a.orders", "a.payments"])
+  })
+
+  test("a backticked path and a bare name of the same table add no row the SQL cannot show", () => {
+    const rows = mapRelations(["orders", "proj.ds.orders"], "select * from orders o join `proj.ds.orders`", [], "bigquery")
+    expect(rows.map((r) => r.raw)).toEqual(["orders", "`proj.ds.orders`"])
   })
 })
