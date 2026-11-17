@@ -414,8 +414,9 @@ function onPath(bin: string): boolean {
 
 function detectGithub(): Detection | undefined {
   // gh is asked for its own github.com login only (see creds.ghEnv): a token in the shell may be for another host.
-  const auth = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: creds.ghEnv() })
-  if (auth.status === 0) {
+  // The active github.com login: `gh auth status` fails when another stored account has expired, so its token is asked for instead.
+  const auth = spawnSync("gh", ["auth", "token", "--hostname", "github.com"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: creds.ghEnv() })
+  if (auth.status === 0 && auth.stdout.trim()) {
     const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: creds.ghEnv() })
     const login = who.status === 0 ? who.stdout.trim() : ""
     return { id: "github", source: { kind: "cli", label: "gh CLI" }, account: login || null, syncable: true, note: null }
@@ -953,6 +954,13 @@ export const RECORD_WRITE_FAILED = (error: string, retry: string) =>
  * written, that the leftover is not recorded.
  */
 /** Which backend and tenant a connection id belongs to: the same id elsewhere is another connection. */
+/** Why a workspace copy cannot be removed from the backend signed in to: it was recorded on another one. Null when it can. */
+export function recordedElsewhere(id: ProviderId, cfg: backend.BackendConfig | null): string | null {
+  const rec = loadStore().providers[id]
+  if (!cfg || rec?.connectionId == null || !rec.connectionBackend || rec.connectionBackend === backendKey(cfg)) return null
+  return `${PROVIDER_NAMES[id]} is saved in a workspace on another Altimate sign-in (${rec.connectionBackend.split("#")[0]}). Sign in to that one to remove it there, then run this again.`
+}
+
 export const backendKey = (cfg: backend.BackendConfig) => `${cfg.apiUrl.replace(/\/+$/, "")}#${cfg.tenant}`
 
 export async function recordLeftover(id: ProviderId, cfg: backend.BackendConfig): Promise<string> {
@@ -1294,6 +1302,9 @@ export function disconnect(id: ProviderId): Promise<DisconnectResult> {
     })
     if (synced && !login && !mockMode())
       throw new Error(`${PROVIDER_NAMES[id]} is saved in your workspace. Sign in to Altimate to remove it, then disconnect again.`)
+    // Nothing is forgotten here while its workspace copy sits on a backend this login cannot reach.
+    const elsewhere = recordedElsewhere(id, login)
+    if (elsewhere) throw new Error(elsewhere)
     const { removed, detachError } = await removeManaged(id, login)
     const removedLocal = await disconnectLocal(id)
     await creds.discardDraftSecrets(id)

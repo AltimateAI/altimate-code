@@ -774,6 +774,9 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       let removeFailure: string | null = null
       const wasBlocked = core.isBlocked(id)
       const signedIn = await core.realConfig()
+      // A copy recorded on another backend cannot be removed from this one; nothing is changed until that login is used.
+      const elsewhere = opts.localOnly ? core.recordedElsewhere(id, signedIn) : null
+      if (elsewhere) return local({ status: "failed", sync: syncState(), message: elsewhere })
       // A connection id still recorded means a workspace copy whose removal has not finished yet.
       let hadCopy = Boolean(core.loadStore().providers[id]?.synced) || Boolean(core.loadStore().providers[id]?.connectionId) || remoteManaged
       if (opts.localOnly && signedIn && !hadCopy) {

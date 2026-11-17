@@ -2120,6 +2120,12 @@ describe("credentials flow", () => {
       }
     })
 
+    test("gh's active github.com login is found even when another stored account has expired", async () => {
+      // gh auth status fails when any stored account is invalid; the active account's token is still there.
+      fake("gh", '[ "$2" = status ] && exit 1; [ "$2" = token ] && echo ' + GOOD)
+      expect(core.scan().find((d) => d.id === "github")?.source).toEqual({ kind: "cli", label: "gh CLI" })
+    })
+
     test("detected credentials are used without typing", async () => {
       fake("gh", '[ "$2" = token ] && echo ' + GOOD)
       const r = await creds.connectCredentials({ id: "github", localOnly: true })
@@ -2985,15 +2991,18 @@ describe("credentials flow", () => {
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
       api.state.rows[0].name = "GitHub (from old-host)"
-      // Recorded for another backend: the same id here is someone's hand-made connection and stays.
+      // Recorded for another backend: nothing here is touched and nothing is forgotten, so that backend can still remove it.
+      const recorded = core.loadStore().providers.github!
       await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: "https://other.example#t" }))
-      await core.disconnect("github")
-      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(1)
+      await expect(core.disconnect("github")).rejects.toThrow("another Altimate sign-in (https://other.example)")
       await token("github", "github_token")
-      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
-      api.state.rows.forEach((r) => (r.name = "GitHub (from old-host)"))
+      const kept = await creds.connectCredentials({ id: "github", localOnly: true })
+      expect([kept.status, kept.message]).toEqual(["failed", expect.stringContaining("another Altimate sign-in")])
+      expect([api.state.rows.filter((r) => !r.deleted).length, core.loadStore().providers.github?.connectionId]).toEqual([1, recorded.connectionId])
+      // On its own backend the renamed connection is removed.
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: recorded.connectionBackend }))
       await core.disconnect("github")
-      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(1)
+      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(0)
     })
 
     test("Keep local whose workspace removal fails keeps the recorded connection, so connecting again removes it", async () => {
