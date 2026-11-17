@@ -163,9 +163,10 @@ const GITHUB_TOKEN_KEY = /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i
 // The official GitHub MCP server setups, word for word: docker running GitHub's image, npx running the reference
 // package, or GitHub's binary, each with only its own flags and settings. A server is a github.com token source only in
 // one of these shapes; anything else (other flags, files, mounts, URLs, hosts in any form) is not read here.
-const GITHUB_MCP_COMMAND = /^(?:.*[\\/])?(docker|npx|github-mcp-server)(\.exe|\.cmd)?$/i
-const GITHUB_MCP_PROGRAM = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+)?|@modelcontextprotocol\/server-github(@[\w.-]+)?)$/
-const GITHUB_MCP_WORD = /^(run|-i|--rm|-e|-y|stdio|--read-only|--dynamic-toolsets|--toolsets|[a-z_]+(,[a-z_]+)*|GITHUB_(PERSONAL_ACCESS_TOKEN|TOKEN|TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)|GH_TOKEN)$/
+const GITHUB_MCP_COMMAND = /^(?:.*[\\/])?(docker|npx|github-mcp-server|cmd)(\.exe|\.cmd)?$/i
+const GITHUB_MCP_PROGRAM = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+|@sha256:[a-f0-9]{64})?|@modelcontextprotocol\/server-github(@[\w.-]+)?)$/
+// Windows runs npx through `cmd /c`.
+const GITHUB_MCP_WORD = /^(run|-i|-t|-it|--rm|-e|-y|\/c|npx|stdio|--read-only|--dynamic-toolsets|--toolsets(=[a-z_]+(,[a-z_]+)*)?|[a-z_]+(,[a-z_]+)*|GITHUB_(PERSONAL_ACCESS_TOKEN|TOKEN|TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)|GH_TOKEN)$/
 const GITHUB_MCP_SETTING = /^GITHUB_(TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)$/
 
 /** Whether a host setting names github.com: a literal URL or host whose parsed hostname is github.com or api.github.com. A reference or an unparsable value does not. */
@@ -235,13 +236,18 @@ const isGithubDotComRemote = (server: core.McpServer) => {
  */
 function claimedByOtherHost(name: string): boolean {
   const reference = new RegExp(`\\$\\{?${name}\\b`)
+  // The name on its own in an argument: after -e (so -eNAME too), =, a space or nothing, but not inside a longer NAME_LIKE word.
+  const word = new RegExp(`(^|[^A-Z0-9_])${name}\\b`)
   const value = process.env[name]?.trim()
   return serversAround().some(([serverName, server]) => {
     const github = core.providerMatchesMcp("github", serverName, server)
     if (isGithubDotComRemote(server) || (github && mcpServerIsGithubDotCom(server))) return false
     const text = JSON.stringify(server)
-    if (reference.test(text) || (server.args ?? []).includes(name) || (!!value && text.includes(value))) return true
-    return github && !isRemote(server) && !Object.keys(server.env ?? {}).some((k) => GITHUB_TOKEN_KEY.test(k))
+    // docker passes a variable on by name in any of its forms: -e NAME, -eNAME, --env=NAME.
+    if (reference.test(text) || (server.args ?? []).some((a) => word.test(String(a))) || (!!value && text.includes(value))) return true
+    // A local GitHub server, or one set to another host, with no token of its own reads this environment's.
+    const inheritsToken = !isRemote(server) && !Object.keys(server.env ?? {}).some((k) => GITHUB_TOKEN_KEY.test(k))
+    return inheritsToken && (github || !hostSettingsAreGithubDotCom(server.env ?? {}))
   })
 }
 

@@ -58,12 +58,15 @@ describe("GitHub host policy", () => {
   })
   test("an MCP server is confirmed for github.com only when nothing in it may name another host", () => {
     expect(creds.mcpServerIsGithubDotCom(official)).toBe(true)
-    for (const ok of [
+    const oks: core.McpServer[] = [
       { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
+      { command: "cmd", args: ["/c", "npx", "-y", "@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
+      { ...official, args: ["run", "-it", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", `ghcr.io/github/github-mcp-server@sha256:${"a".repeat(64)}`] },
+      { command: "github-mcp-server", args: ["stdio", "--toolsets=repos,issues"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
       { command: "/usr/local/bin/github-mcp-server", args: ["stdio", "--toolsets", "repos,issues", "--read-only"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x", GITHUB_TOOLSETS: "repos" } },
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v0.5.0"] },
-    ])
-      expect(creds.mcpServerIsGithubDotCom(ok)).toBe(true)
+    ]
+    for (const ok of oks) expect(creds.mcpServerIsGithubDotCom(ok)).toBe(true)
     expect(creds.mcpServerIsGithubDotCom({ ...official, env: { ...official.env, GITHUB_HOST: "https://github.com" } })).toBe(true)
     const others: core.McpServer[] = [
       { ...official, env: { ...official.env, GITHUB_HOST: "https://ghe.corp" } },
@@ -565,6 +568,16 @@ describe("workspace connections", () => {
     expect(o.reason).toContain(core.SHARED_REWRITE_NOTE)
   })
 
+  test("a recorded leftover is removed even when the workspace marked its connection invalid", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    await core.storeSecret("github", "leftover_token")
+    await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+    api.state.rows[0].is_valid = false
+    const o = await core.syncProvider("github")
+    expect([o.result, o.reason]).toEqual(["skipped", expect.stringContaining("invalid")])
+    expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, false])
+  })
+
   test("an attach-only sync never removes a local secret it did not record as a leftover", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     // A credential kept on this machine after the upload, e.g. by a Keep local whose record write failed: the only copy of it.
@@ -698,6 +711,8 @@ describe("workspace connections", () => {
     expect(skipsSynced({ provider: undefined, all: true })).toBe(true)
     expect(skipsSynced({ provider: "github" })).toBe(false)
     expect(skipsSynced({ provider: "github", keepSynced: true })).toBe(true)
+    // --all selects every provider, so it keeps their synced connections whatever provider is named.
+    expect(skipsSynced({ provider: "github", all: true })).toBe(true)
     await core.syncProvider("github")
     const before = writes().length
     process.env.GITHUB_TOKEN = "gh_env_token_other"
@@ -921,6 +936,18 @@ describe("workspace connections", () => {
     expect(core.isSynced("github")).toBe(true)
     // The sync that the warning names has nothing left to upload, and removes the leftover while it attaches.
     expect(await core.readSecret("github")).toBe("leftover_token")
+    // Even with a token to upload still here, the sync the warning names only removes the leftover.
+    const upload = spyOn(backend, "updateConnection")
+    try {
+      await core.storeSecret("github", "leftover_token")
+      expect((await core.syncProvider("github")).result).toBe("synced")
+      expect(upload).not.toHaveBeenCalled()
+      expect(await core.readSecret("github")).toBeUndefined()
+      await core.storeSecret("github", "leftover_token")
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+    } finally {
+      upload.mockRestore()
+    }
     delete process.env.GITHUB_TOKEN
     // No gh either, so the retry has nothing to upload and takes the attach-only path.
     const pathBefore = process.env.PATH
@@ -1938,6 +1965,11 @@ describe("credentials flow", () => {
         // A GitHub server for another host with no token of its own inherits this environment's.
         { env: { GITHUB_TOKEN: GOOD }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp" } } },
         { server: { command: "github-mcp-server", args: ["stdio", "--host", "ghe.corp"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        // docker passes the variable on by name, in forms other than a separate -e NAME, for a server not called github.
+        { env: { GH_TOKEN: GOOD }, name: "corp", server: { command: "docker", args: ["run", "-i", "--env=GH_TOKEN", "corp/mcp"] } },
+        { env: { GH_TOKEN: GOOD }, name: "corp", server: { command: "docker", args: ["run", "-i", "-eGH_TOKEN", "corp/mcp"] } },
+        // A server set to another host with no token of its own reads this environment's, whatever it is called.
+        { env: { GITHUB_TOKEN: GOOD }, name: "corp", server: { command: "corp-mcp", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp" } } },
         { server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_BASE_URL: "https://ghe.corp/api/v3", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
         { env: { GITHUB_TOKEN: GOOD, GH_HOST: "${UNSET:-github.com-ghe.corp}" } },
         { env: { GITHUB_TOKEN: GOOD, GITHUB_API_URL: "https://github.com:x@ghe.corp/api/v3" } },
@@ -1974,6 +2006,8 @@ describe("credentials flow", () => {
         // Its own literal GITHUB_TOKEN is another token: the key alone does not claim the shell's.
         { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_TOKEN: "ghe_other_token" } },
         { type: "http", url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } },
+        // A remote server that is given no shell token cannot take it.
+        { type: "http", url: "https://example.com/github/mcp" },
       ]) {
         mcp(server)
         process.env.GITHUB_TOKEN = GOOD

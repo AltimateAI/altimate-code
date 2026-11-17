@@ -1170,11 +1170,11 @@ async function syncReal(
         const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
         // A connection this machine saved that is gone from the workspace is not attached; it was deleted there.
         if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
-        if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
-        step("Connection already in the workspace")
-        // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for.
-        // Only a leftover recorded after an upload is removed: any other secret here may be the only copy of a credential.
+        // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for,
+        // also when the workspace marked the connection invalid: it still holds it. Only a leftover recorded after an upload is removed: any other secret here may be the only copy of a credential.
         if (known != null && store.providers[id]?.cleanupPending) await purgeLocal(store.providers[id])
+        if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps }
+        step("Connection already in the workspace")
         return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private", false, false)
       })
     } catch (e) {

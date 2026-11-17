@@ -136,7 +136,7 @@ async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false, s
 }
 
 /** A run over every provider, or one provider asked to keep a saved connection, never overwrites a connection already synced to the workspace. */
-export const skipsSynced = (args: { provider?: string; all?: boolean; keepSynced?: boolean }) => !args.provider || Boolean(args.keepSynced)
+export const skipsSynced = (args: { provider?: string; all?: boolean; keepSynced?: boolean }) => !args.provider || Boolean(args.all) || Boolean(args.keepSynced)
 
 export const SyncCommand = cmd({
   command: "sync [provider]",
