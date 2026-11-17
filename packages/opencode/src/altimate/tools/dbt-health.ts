@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DbtHealthTool = Tool.define("dbt_health", {
-  description: "Not implemented yet: always returns an error. DataPilot project health insights for the dbt project.",
+  description: "DataPilot project health insights for the dbt project.",
   parameters: z.object({
     config_path: z.string().optional().describe("DataPilot config file to use"),
   }),

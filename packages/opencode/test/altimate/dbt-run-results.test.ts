@@ -205,25 +205,6 @@ describe("dbt_run_results", () => {
     expect(result.output).toContain("not a run artifact")
   })
 
-  test("a run that wrote to another target folder is read from that folder, whatever DBT_TARGET_PATH says", async () => {
-    const dir = await project("custom-target", COMPILE)
-    await mkdir(path.join(dir, "ci-out"), { recursive: true })
-    await writeFile(path.join(dir, "ci-out", "run_results.json"), JSON.stringify(BUILD))
-    const before = process.env["DBT_TARGET_PATH"]
-    process.env["DBT_TARGET_PATH"] = "elsewhere"
-    let view: any
-    try {
-      view = (await run(dir, "ci-out")).metadata
-    } finally {
-      if (before === undefined) delete process.env["DBT_TARGET_PATH"]
-      else process.env["DBT_TARGET_PATH"] = before
-    }
-    const own = (await run(dir)).metadata as any
-
-    expect(view.invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
-    expect(own.invocationId).toBe("22222222-aaaa-bbbb-cccc-000000000002")
-  })
-
   test("a node id longer than the bound is cut, so the answer stays small", async () => {
     const long = "x".repeat(5000)
     const dir = await project("long-id", {

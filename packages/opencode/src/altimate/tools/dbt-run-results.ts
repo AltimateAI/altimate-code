@@ -1,3 +1,4 @@
+import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
@@ -64,21 +65,51 @@ function cut(text: string | null, max = MAX_MESSAGE): string | null {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
+/** The fields `readRunResults` does not carry, from the same file version it parsed (null when the file changed since). */
+async function extraFields(
+  file: string,
+  mtimeMs: number,
+): Promise<{ invocationId: string | null; elapsedSec: number | null; times: Map<string, number> } | null> {
+  try {
+    const before = await fs.stat(file)
+    if (before.mtimeMs !== mtimeMs) return null
+    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as {
+      metadata?: { invocation_id?: unknown }
+      elapsed_time?: unknown
+      results?: unknown
+    }
+    const after = await fs.stat(file)
+    if (after.mtimeMs !== mtimeMs || after.size !== before.size || after.ino !== before.ino) return null
+    const times = new Map<string, number>()
+    if (Array.isArray(parsed.results)) {
+      for (const r of parsed.results as Array<Record<string, unknown>>) {
+        if (r && typeof r["unique_id"] === "string" && typeof r["execution_time"] === "number" && Number.isFinite(r["execution_time"]))
+          times.set(r["unique_id"], r["execution_time"])
+      }
+    }
+    const id = parsed.metadata?.invocation_id
+    const elapsed = typeof parsed.elapsed_time === "number" && Number.isFinite(parsed.elapsed_time) ? parsed.elapsed_time : null
+    return { invocationId: typeof id === "string" && id ? id : null, elapsedSec: elapsed, times }
+  } catch {
+    return null
+  }
+}
+
 /**
- * The last dbt run of a project, from one read of its run_results.json: `readRunResults` gives the path,
- * the command, the invocation id, the elapsed time and each row's status, execution time and message,
- * so every field belongs to the same file. `targetPath` names the folder a run with `--target-path`
- * wrote to.
+ * The last dbt run of a project: `readRunResults` gives the path, the command and each row's status and
+ * message; the invocation id, elapsed time and execution times are read from the same file version.
  */
-export async function readRunView(dbtRoot: string, targetPath?: string): Promise<DbtRunResultsView> {
-  const artifact = await readRunResults(dbtRoot, targetPath)
+export async function readRunView(dbtRoot: string): Promise<DbtRunResultsView> {
+  const artifact = await readRunResults(dbtRoot)
   if (!artifact) return NONE
+  const extra = await extraFields(artifact.path, artifact.mtimeMs)
+  if (!extra) return NONE
   const all = artifact.results.map(
     (node): DbtRunResultRow => ({
       uniqueId: cut(node.uniqueId, MAX_IDENTIFIER) ?? "",
       name: cut(displayName(node.uniqueId, node.name), MAX_IDENTIFIER) ?? "",
       status: cut(node.status, MAX_IDENTIFIER) ?? "",
-      executionTimeSec: node.executionTimeSec,
+      executionTimeSec: extra.times.get(node.uniqueId) ?? null,
       message: cut(node.message),
     }),
   )
@@ -90,9 +121,9 @@ export async function readRunView(dbtRoot: string, targetPath?: string): Promise
   return {
     found: true,
     projectDir: dbtRoot,
-    invocationId: cut(artifact.invocationId, MAX_IDENTIFIER),
+    invocationId: cut(extra.invocationId, MAX_IDENTIFIER),
     command: cut(artifact.command, MAX_IDENTIFIER),
-    elapsedSec: artifact.elapsedSec,
+    elapsedSec: extra.elapsedSec,
     completedAt: new Date(artifact.mtimeMs).toISOString(),
     total: all.length,
     passed: all.length - failed.length - skipped,
@@ -104,25 +135,21 @@ export async function readRunView(dbtRoot: string, targetPath?: string): Promise
 
 export const DbtRunResultsTool = Tool.define("dbt_run_results", {
   description:
-    "Read the last dbt run of a project from its target/run_results.json (or the folder `target_path` names): the invocation id, the dbt command, the elapsed seconds, when it finished, the counts, and one row per node (the failures first, at most 200) with its status, execution seconds and message. Read-only; runs nothing. A compile or parse writes success rows without building anything, so look at `command`.",
+    "Read the last dbt run of a project from its target/run_results.json: the invocation id, the dbt command, the elapsed seconds, when it finished, the counts, and one row per node (the failures first, at most 200) with its status, execution seconds and message. Read-only; runs nothing. A compile or parse writes success rows without building anything, so look at `command`.",
   parameters: z.object({
     project_dir: z
       .string()
       .optional()
       .describe("A folder in the dbt project (its dbt_project.yml is looked for there and above; default: the project the session's directory is in, else the one the dbt adapter is configured for)"),
-    target_path: z
-      .string()
-      .optional()
-      .describe("The folder the dbt run wrote its artifacts to when it was not the project's own target folder (a relative one is from the project)"),
   }),
   async execute(args) {
     const root = args.project_dir ? await projectAbove(path.resolve(projectRoot(), args.project_dir)) : await defaultRoot()
-    const view = await readRunView(root, args.target_path)
+    const view = await readRunView(root)
     if (!view.found) {
       return {
         title: "dbt run results: none",
         metadata: { ...view },
-        output: `No readable run_results.json for the dbt project at ${root}${args.target_path ? ` (in ${args.target_path})` : ""}: no dbt command has written one there yet, or the file is not a run artifact.`,
+        output: `No readable run_results.json for the dbt project at ${root}: no dbt command has written one there yet, or the file is not a run artifact.`,
       }
     }
     const command = view.command ? `dbt ${view.command}` : "dbt (unknown command)"

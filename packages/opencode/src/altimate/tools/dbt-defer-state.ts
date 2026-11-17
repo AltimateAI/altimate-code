@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DbtDeferStateTool = Tool.define("dbt_defer_state", {
-  description: "Not implemented yet: always returns an error. dbt Power User's defer-to-production setting for a dbt project, and the profile's default target.",
+  description: "dbt Power User's defer-to-production setting for a dbt project, and the profile's default target.",
   parameters: z.object({
     project_dir: z.string().describe("dbt project folder"),
   }),

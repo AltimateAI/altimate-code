@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
-  description: "Not implemented yet: always returns an error. List a dbt model's CTEs, or time one CTE with a row-count query.",
+  description: "List a dbt model's CTEs, or time one CTE with a row-count query.",
   parameters: z.object({
     model: z.string().describe("Model name"),
     cte: z.string().optional().describe("CTE to time; without it, the CTE list is returned"),

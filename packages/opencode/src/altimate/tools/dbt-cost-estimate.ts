@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
-  description: "Not implemented yet: always returns an error. Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run (BigQuery).",
+  description: "Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run (BigQuery).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),

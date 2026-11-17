@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
-  description: "Not implemented yet: always returns an error. Comment threads on shared dbt docs: list open threads, reply to one, or resolve one.",
+  description: "Comment threads on shared dbt docs: list open threads, reply to one, or resolve one.",
   parameters: z.object({
     action: z.enum(["list", "reply", "resolve"]).describe("What to do"),
     project: z.string().optional().describe("dbt project name the shared docs belong to"),

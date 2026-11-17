@@ -717,6 +717,7 @@ class SkillNameConflictError extends Error {}
 mock.module(${publisher}, () => ({
   SkillNameConflictError,
   explainPublishError: (error) => error.message,
+  publishErrorCode: () => null,
   describePublish: (report) => 'Updated "' + report.name + '" in the workspace',
   publishSkill: async (options) => {
     if (!options.replace) throw new SkillNameConflictError("publish again with --replace")
@@ -949,6 +950,7 @@ mock.module(${publisher}, () => ({
   },
   describePublish: () => "Published approved lessons.",
   explainPublishError: () => undefined,
+  publishErrorCode: () => null,
 }))
 `)
   const result = await runLearn(dir.path, ["promote", "--yes", "--publish", "--name", name], preload, { ALTIMATE_DISABLE_WORKSPACE: "" })

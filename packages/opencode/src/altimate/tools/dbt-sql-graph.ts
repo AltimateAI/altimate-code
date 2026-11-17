@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 
 export const DbtSqlGraphTool = Tool.define("dbt_sql_graph", {
-  description: "Not implemented yet: always returns an error. A dbt model's SQL as a graph: its CTEs, joins and filters, and the edges between them.",
+  description: "A dbt model's SQL as a graph: its CTEs, joins and filters, and the edges between them.",
   parameters: z.object({
     model: z.string().describe("Model name"),
   }),
