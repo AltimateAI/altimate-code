@@ -1303,7 +1303,7 @@ describe("both tools: names at the edges", () => {
   })
 
   test("a column name that starts with all or distinct isn't read as a SELECT modifier", () => {
-    for (const name of ["allocation", "distinct_users", "all_time"]) {
+    for (const name of ["allocation", "distinct_users", "all_time", "all$x"]) {
       const path = write(nodes("postgres", [
         model("f", [], `select 2.5 as ${name}`, [name]),
         model("r", ["f"], `with q as (select * from ${T("f")}) select ${name}::numeric from q`),
@@ -1316,8 +1316,38 @@ describe("both tools: names at the edges", () => {
     }
   })
 
+  test("a cast after a SELECT modifier is named after its column, so a settled model has it", () => {
+    // Each throws "r has no column amount" on main: the modifier or the parentheses hid the cast.
+    for (const dialect of ["postgres", "redshift"]) {
+      const lists = ["distinct on(id)amount::numeric, id", "distinct on (coalesce(id, 0)) id, amount::numeric", "distinct(amount)::numeric, id",
+        "all(amount)::numeric, id", "distinct ((amount))::numeric, id", "id, (amount)::numeric", "id, cast((amount) as numeric)"]
+      if (dialect === "postgres") lists.push("distinct on (id) id, amount::numeric")
+      if (dialect === "redshift") lists.push("top 5amount::numeric, id", "top 5 amount::numeric, id")
+      for (const list of lists) {
+        const path = write(nodes(dialect, [
+          model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+          model("r", ["f"], `with q as (select * from ${T("f")}) select ${list} from q`),
+          model("child", ["r"], `select * from ${T("r")}`),
+        ]))
+        expect(() => columnReach(path, "r", "amount")).not.toThrow()
+        expect(carried(columnAnswer(path, "r", "amount"))).toEqual(["child.amount"])
+      }
+    }
+  })
+
+  test("mixed and nested cast chains of a column are named after it", () => {
+    for (const cast of ["cast(amount as numeric)::int", "cast(cast(amount as numeric) as int)", "(amount::numeric)::int"]) {
+      const path = write(nodes("postgres", [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`),
+      ]))
+      expect(carried(columnAnswer(path, "orders", "amount"))).toEqual(["r.amount"])
+    }
+  })
+
   test("an expression that only starts with a cast isn't named after the column, and a _col_N the SQL writes stays", () => {
-    for (const item of ["amount::numeric is not null", "amount::int in (1, 2)", "cast(amount as int) between 1 and 2", "amount::numeric as _col_1"]) {
+    for (const item of ["amount::numeric is not null", "amount::int in (1, 2)", "cast(amount as int) between 1 and 2", "amount::numeric as _col_1",
+      "(amount + 1)::int", "amount::numeric + 1", "cast(amount as int) * 2"]) {
       const path = write(nodes("postgres", [
         model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
         model("r", ["orders"], `select order_id, ${item} from ${T("orders")}`),
@@ -1352,6 +1382,14 @@ describe("both tools: names at the edges", () => {
     ]))
     const named = dbtLineage({ manifest_path: clash, model: "child" })
     expect(Object.keys((named.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "id_1", "id_1_1"])
+    // Names repeat regardless of case: `Val, val` is `val, val_1`.
+    const cased = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, amount as Val, id as val from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const folded = dbtLineage({ manifest_path: cased, model: "child" })
+    expect(Object.keys((folded.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
   })
 
   test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {

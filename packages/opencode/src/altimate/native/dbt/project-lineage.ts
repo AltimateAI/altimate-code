@@ -136,9 +136,7 @@ export function selectItems(stripped: string): string[] {
     if (start < 0) {
       if (boundary && word === "select") {
         start = i + 6
-        // A whole word only: `allocation` and `distinct_users` are column names, not modifiers.
-        const lead = /^\s+(?:distinct\s+on\s*\([^)]*\)|distinct|all|top\s+\d+)(?![\w$])/i.exec(text.slice(start))
-        if (lead) start += lead[0].length
+        start += modifierLength(text, start)
         from = start
         i = start - 1
       }
@@ -179,15 +177,73 @@ export function itemName(item: string): string | null {
   return ENDS_EXPRESSION.test(plain[2]!) ? null : unquoteName(plain[2]!)
 }
 
-/** The column a SELECT item casts, unaliased (`amount::numeric`, `cast(t.amount as numeric)`); null otherwise. */
-function castColumn(item: string): string | null {
-  const ref = `(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)`
-  // A type name: words (`double precision`, `pg_catalog.int4`), a size (`numeric(10, 2)`), array marks (`int[]`,
-  // `int[3]`), a quoted name, a further `::` cast.
-  const type = `((?:[\\w\\s(),:.]|\\[\\d*\\]|"(?:[^"]|"")*")+)`
-  const m = new RegExp(`^${ref}\\s*::\\s*${type}$`, "i").exec(item) ?? new RegExp(`^cast\\s*\\(\\s*${ref}\\s+as\\s+${type}\\)$`, "i").exec(item)
-  if (!m || NOT_TYPE.test(m[2]!.replace(new RegExp(QUOTED, "g"), " "))) return null
-  return unquoteName(m[1]!)
+/**
+ * The length of the modifier a SELECT list starts with at `at` in quote-blanked text: `distinct on (…)` up to its
+ * matching `)`, `top N`, or the whole word `distinct` or `all` (`allocation` and `distinct_users` are names); 0 when
+ * there is none.
+ */
+function modifierLength(text: string, at: number): number {
+  const rest = text.slice(at)
+  const on = /^\s+distinct\s+on\s*\(/i.exec(rest)
+  if (on) {
+    const end = closingParen(rest, on[0].length - 1)
+    return end < 0 ? 0 : end + 1
+  }
+  return /^\s+(?:top\s+\d+|(?:distinct|all)(?![\w$]))/i.exec(rest)?.[0].length ?? 0
+}
+
+/** The index of the `)` that closes the `(` at `open` in quote-blanked text, -1 when it isn't closed. */
+function closingParen(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "(") depth++
+    else if (text[i] === ")" && --depth === 0) return i
+  }
+  return -1
+}
+
+/** Where the last `pattern` outside parentheses starts and ends in quote-blanked text; null when there is none. */
+function lastOutsideParens(text: string, pattern: RegExp): { start: number; end: number } | null {
+  const depth: number[] = []
+  let d = 0
+  for (const ch of text) {
+    if (ch === ")") d--
+    depth.push(d)
+    if (ch === "(") d++
+  }
+  let last: { start: number; end: number } | null = null
+  for (const m of text.matchAll(new RegExp(pattern.source, "gi"))) if (depth[m.index] === 0) last = { start: m.index, end: m.index + m[0].length }
+  return last
+}
+
+/**
+ * The column a SELECT item casts, unaliased, through parentheses and any mix of casts (`amount::numeric`,
+ * `cast(t.amount as numeric)`, `(amount)::numeric`, `cast(amount as numeric)::int`); null otherwise.
+ */
+function castColumn(item: string, inner = false): string | null {
+  const s = item.trim()
+  const blank = s.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+  const ref = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(s)
+  if (ref) {
+    const name = ref[1]!
+    return inner && !/^\d/.test(name) && !ENDS_EXPRESSION.test(name) ? unquoteName(name) : null
+  }
+  if (blank.startsWith("(") && closingParen(blank, 0) === blank.length - 1) return castColumn(s.slice(1, -1), true)
+  const call = /^cast\s*\(/i.exec(blank)
+  if (call && closingParen(blank, call[0].length - 1) === blank.length - 1) {
+    const at = lastOutsideParens(blank.slice(call[0].length, -1), /\sas\s/)
+    if (!at) return null
+    const body = s.slice(call[0].length, -1)
+    return isType(body.slice(at.end)) ? castColumn(body.slice(0, at.start), true) : null
+  }
+  const at = lastOutsideParens(blank, /::/)
+  return at && isType(s.slice(at.end)) ? castColumn(s.slice(0, at.start), true) : null
+}
+
+/** Whether text is a type name: words (`double precision`, `pg_catalog.int4`), a size (`numeric(10, 2)`), array marks
+ * (`int[]`, `int[3]`) or a quoted name, and nothing that makes it more (`numeric is not null`). */
+function isType(text: string): boolean {
+  return /^\s*(?:[\w\s(),.]|\[\d*\]|"(?:[^"]|"")*")+$/.test(text) && !NOT_TYPE.test(text.replace(new RegExp(QUOTED, "g"), " "))
 }
 
 /** Words that make the rest of an item more than a type (`amount::numeric is not null`, `amount::int as x`). */
