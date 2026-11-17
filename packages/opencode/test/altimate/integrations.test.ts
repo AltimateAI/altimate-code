@@ -72,6 +72,11 @@ describe("GitHub host policy", () => {
       { ...official, args: ["run", "-i", "--env-file=/etc/ghe.env", "ghcr.io/github/github-mcp-server"] },
       { ...official, args: ["run", "-i", "-v", "/etc/gh:/root/.config/gh", "ghcr.io/github/github-mcp-server"] },
       { command: "sh", args: ["-c", 'GITHUB_HOST="ghe.corp" github-mcp-server stdio'], env: { GITHUB_TOKEN: "ghp_x" } },
+      { ...official, env: { ...official.env, GITHUB_BASE_URL: "https://ghe.corp/api/v3" } },
+      { command: "npx", args: ["-y", "@acme/github-enterprise-mcp"], env: { GITHUB_TOKEN: "ghp_x" } },
+      { command: "github-mcp-server", args: ["stdio", "--host", "ghe.corp"], env: { GITHUB_TOKEN: "ghp_x" } },
+      { command: "github-mcp-server", args: ["stdio", "--url=https://git.corp.example"], env: { GITHUB_TOKEN: "ghp_x" } },
+      { ...official, env: { ...official.env, GITHUB_TOOLSETS: "${TOOLSETS}" } },
     ]
     for (const server of others) expect(creds.mcpServerIsGithubDotCom(server)).toBe(false)
     // A host exported in this shell applies to the server too, unless the server sets its own.
@@ -1897,7 +1902,7 @@ describe("credentials flow", () => {
 
     test("a GitHub token that may belong to another host is never sent to api.github.com, from gh, the shell or an MCP server", async () => {
       const claude = path.join(home, ".claude.json")
-      const mcp = (server: Record<string, unknown>) => fs.writeFileSync(claude, JSON.stringify({ mcpServers: { github: server } }))
+      const mcp = (server: Record<string, unknown>, name = "github") => fs.writeFileSync(claude, JSON.stringify({ mcpServers: { [name]: server } }))
       // gh hands back GITHUB_TOKEN as the github.com token, so it must not be asked whenever that variable is not usable.
       fake("gh", 't="${GH_TOKEN:-$GITHUB_TOKEN}"; [ -n "$t" ] && echo "$t"')
       const refused = async () => {
@@ -1905,13 +1910,19 @@ describe("credentials flow", () => {
         // A server may still be listed as usable in Claude, but nothing is offered for sync.
         expect(core.scan().find((d) => d.id === "github" && d.syncable)).toBeUndefined()
       }
-      const cases: { env?: Record<string, string>; server?: Record<string, unknown>; project?: true }[] = [
+      const cases: { env?: Record<string, string>; server?: Record<string, unknown>; project?: true; name?: string }[] = [
         { env: { GITHUB_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
         { env: { GH_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
         // The same token written literally into an enterprise server's config.
         { env: { GITHUB_TOKEN: GOOD }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
         // A repository's .mcp.json ties the shell token to another host as well.
         { env: { GITHUB_TOKEN: GOOD }, project: true, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } } },
+        // A server not called github at all that hands the shell token to another host.
+        { env: { GITHUB_TOKEN: GOOD }, name: "enterprise", server: { type: "http", url: "https://git.corp.example/mcp", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } } },
+        // A GitHub server for another host with no token of its own inherits this environment's.
+        { env: { GITHUB_TOKEN: GOOD }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp" } } },
+        { server: { command: "github-mcp-server", args: ["stdio", "--host", "ghe.corp"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        { server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_BASE_URL: "https://ghe.corp/api/v3", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
         { env: { GITHUB_TOKEN: GOOD, GH_HOST: "${UNSET:-github.com-ghe.corp}" } },
         { env: { GITHUB_TOKEN: GOOD, GITHUB_API_URL: "https://github.com:x@ghe.corp/api/v3" } },
         // The user's own config ties the shell token to another host.
@@ -1932,7 +1943,7 @@ describe("credentials flow", () => {
           // Run from a subdirectory: the repository's file still applies.
           fs.mkdirSync(path.join(project, "sub"))
           process.chdir(path.join(project, "sub"))
-        } else if (c.server) mcp(c.server)
+        } else if (c.server) mcp(c.server, c.name)
         try {
           await refused()
         } finally {
@@ -1944,6 +1955,8 @@ describe("credentials flow", () => {
       // A server that names neither the shell variable nor its value leaves the shell token usable, and so does GitHub's own remote server.
       for (const server of [
         { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "ghe_other_token" } },
+        // Its own literal GITHUB_TOKEN is another token: the key alone does not claim the shell's.
+        { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_TOKEN: "ghe_other_token" } },
         { type: "http", url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } },
       ]) {
         mcp(server)
@@ -2105,6 +2118,20 @@ describe("credentials flow", () => {
       expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_TOKEN: "ghp_real" } })).toBe(true)
     })
 
+    test("a leftover that cannot be recorded is not followed by advice to sync", async () => {
+      const rename = fs.renameSync
+      const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations.json")) throw new Error("disk full")
+        return rename(from, to)
+      }) as any)
+      try {
+        expect(await core.recordLeftover("github")).toBe("It could not be recorded for removal either (disk full).")
+      } finally {
+        spy.mockRestore()
+      }
+      expect(await core.recordLeftover("github")).toBe("Run altimate integrations sync github to remove it.")
+    })
+
     test("Keep local over a recorded leftover writes nothing until the leftover mark is cleared", async () => {
       real()
       await token("github", "github_token")
@@ -2126,9 +2153,31 @@ describe("credentials flow", () => {
       expect([await core.readSecret(core.secretKey("cred", "github", "github_token")), await core.readSecret("github")]).toEqual([undefined, undefined])
     })
 
+    test("Keep local whose secret write fails puts back the leftover mark with the previous secrets", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+      await token("github", "github_token")
+      const rename = fs.renameSync
+      const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations-secrets.json")) throw new Error("disk full")
+        return rename(from, to)
+      }) as any)
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("failed")
+      } finally {
+        spy.mockRestore()
+      }
+      expect(core.loadStore().providers.github?.cleanupPending).toBe(true)
+    })
+
     test("a local cleanup that fails after the upload is a warning on a connected result, and the record says synced", async () => {
       real()
       await core.storeSecret("github", "leftover_token")
+      // An older credential saved here, which the new one replaces in the workspace.
+      await core.storeSecret(core.secretKey("cred", "github", "github_token"), "old_local_token")
+      await core.updateStore((st) => void (st.providers.github = { registered: true, synced: false, variant: "token", secretFields: ["github_token"], values: {} }))
       await token("github", "github_token")
       const rename = fs.renameSync
       const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
@@ -2143,10 +2192,16 @@ describe("credentials flow", () => {
         spy.mockRestore()
       }
       expect(core.isSynced("github")).toBe(true)
-      // Recorded as a leftover, so the sync the message names removes it.
+      // Recorded as a leftover, so the sync the message names removes it, without uploading it.
       expect(core.loadStore().providers.github?.cleanupPending).toBe(true)
-      expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("synced")
-      expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, false])
+      const upload = spyOn(backend, "updateConnection")
+      try {
+        expect((await core.syncProvider("github")).result).toBe("synced")
+        expect(upload).not.toHaveBeenCalled()
+      } finally {
+        upload.mockRestore()
+      }
+      expect([await core.readSecret("github"), await core.readSecret(core.secretKey("cred", "github", "github_token")), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, undefined, false])
     })
 
     test("Keep local removes nothing from the workspace when the local copy cannot be stored", async () => {

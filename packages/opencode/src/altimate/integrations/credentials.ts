@@ -159,8 +159,12 @@ const isEnvReference = (value: string) => {
 // as another host: the check allows what it can confirm instead of refusing the forms it knows.
 
 const GITHUB_HOST_KEY = /^(GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE_URL)$/i
-/** Text that may set a GitHub host where it is not read here: a host setting, an enterprise setting, a gh flag, or a file the server loads. */
-const GITHUB_HOST_HINT = /GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE|GH_ENTERPRISE|gh-host|env-file|--volume|--mount|--config|(^|\s)-v(\s|$)/i
+const GITHUB_TOKEN_KEY = /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i
+/** Hosts a github.com setup names: the site, its API, GitHub's container registry and GitHub's own remote MCP endpoint. */
+const GITHUB_DOT_COM_HOSTS = new Set(["github.com", "api.github.com", "ghcr.io", "api.githubcopilot.com"])
+const HOSTNAME = /(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]/gi
+/** Settings that are not read here (a reference, an env file, a mount or config file) or that say enterprise. */
+const UNREADABLE = /\$|env-file|--volume|--mount|--config|(^|\s)-v(\s|$)|enterprise|\bghe\b/i
 
 /** Whether a host setting names github.com: a literal URL or host whose parsed hostname is github.com or api.github.com. A reference or an unparsable value does not. */
 export function namesGithubDotCom(value: string): boolean {
@@ -179,29 +183,37 @@ function hostSettingsAreGithubDotCom(env: Record<string, unknown>): boolean {
   return Object.entries(env).every(([key, value]) => !GITHUB_HOST_KEY.test(key) || value == null || (typeof value === "string" && (value.trim() === "" || namesGithubDotCom(value))))
 }
 
-/** Whether a GitHub MCP server is confirmed to be for github.com: run locally, nothing in its command or arguments that may set a host, and every host setting it sees (its own or this environment's) names github.com. */
+/** Whether a piece of a server's config names only github.com: nothing unreadable, and every hostname in it is a github.com one. */
+function namesOnlyGithubDotCom(text: string): boolean {
+  return !UNREADABLE.test(text) && [...text.matchAll(HOSTNAME)].every((m) => GITHUB_DOT_COM_HOSTS.has(m[0].toLowerCase()))
+}
+
+const isRemote = (server: core.McpServer) => Boolean(server.url) || server.type === "http" || server.type === "sse"
+
+/**
+ * Whether a GitHub MCP server is confirmed to be for github.com: run locally; its command, arguments and every setting
+ * other than its token name only github.com hosts and nothing unreadable; and every host setting it sees (its own or
+ * this environment's) names github.com. Its token is read only then.
+ */
 export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
-  // A remote server is reached over its URL, not with the token in its environment.
-  if (server.url || server.type === "http" || server.type === "sse") return false
-  if ([server.command, ...(server.args ?? [])].some((w) => typeof w === "string" && GITHUB_HOST_HINT.test(w))) return false
-  if (Object.keys(server.env ?? {}).some((k) => !GITHUB_HOST_KEY.test(k) && GITHUB_HOST_HINT.test(k))) return false
+  if (isRemote(server)) return false
+  if (![server.command, ...(server.args ?? [])].every((w) => w == null || (typeof w === "string" && namesOnlyGithubDotCom(w)))) return false
+  if (!Object.entries(server.env ?? {}).every(([k, v]) => GITHUB_TOKEN_KEY.test(k) || (typeof v === "string" && namesOnlyGithubDotCom(`${k}=${v}`)))) return false
   return hostSettingsAreGithubDotCom({ ...process.env, ...server.env })
 }
 
 /**
- * Every GitHub MCP server that may run from here: user level, this directory's and its parents' project entries, and their
- * .mcp.json files. A repository's file is read here only to refuse a token, never to read one.
+ * Every MCP server that may run from here, whatever it is called: user level, this directory's and its parents' project
+ * entries, and their .mcp.json files. A repository's file is read here only to refuse a token, never to read one.
  */
-function githubServersAround(): core.McpServer[] {
+function serversAround(): [string, core.McpServer][] {
   const claude = core.readJson<any>(path.join(core.homeDir(), ".claude.json"), {})
   const maps: unknown[] = [claude.mcpServers]
   for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
     maps.push(claude.projects?.[dir]?.mcpServers, core.readJson<any>(path.join(dir, ".mcp.json"), {})?.mcpServers)
     if (path.dirname(dir) === dir) break
   }
-  return maps.flatMap((m) =>
-    m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([n, sv]) => !!sv && typeof sv === "object" && core.providerMatchesMcp("github", n, sv)).map(([, sv]) => sv) : [],
-  )
+  return maps.flatMap((m) => (m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([, sv]) => !!sv && typeof sv === "object") : []))
 }
 
 /** GitHub's own remote MCP endpoint works only with github.com tokens, so a token it is given belongs to github.com. */
@@ -213,14 +225,20 @@ const isGithubDotComRemote = (server: core.McpServer) => {
   }
 }
 
-/** Whether a GitHub MCP server that is not confirmed for github.com names a shell variable, or holds its value: that token may then be the other host's. */
+/**
+ * Whether a server that is not a confirmed github.com GitHub setup may take a shell token variable: it references it
+ * (${NAME}, $NAME, or docker's -e NAME), holds its value, or is a GitHub server with no token of its own, which then
+ * inherits this environment. That token may then be another host's.
+ */
 function claimedByOtherHost(name: string): boolean {
-  const word = new RegExp(`\\b${name}\\b`)
+  const reference = new RegExp(`\\$\\{?${name}\\b`)
   const value = process.env[name]?.trim()
-  return githubServersAround().some((server) => {
-    if (mcpServerIsGithubDotCom(server) || isGithubDotComRemote(server)) return false
+  return serversAround().some(([serverName, server]) => {
+    const github = core.providerMatchesMcp("github", serverName, server)
+    if (isGithubDotComRemote(server) || (github && mcpServerIsGithubDotCom(server))) return false
     const text = JSON.stringify(server)
-    return word.test(text) || (!!value && text.includes(value))
+    if (reference.test(text) || (server.args ?? []).includes(name) || (!!value && text.includes(value))) return true
+    return github && !isRemote(server) && !Object.keys(server.env ?? {}).some((k) => GITHUB_TOKEN_KEY.test(k))
   })
 }
 
@@ -772,7 +790,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       if (opts.localOnly && !wasBlocked) await core.setBlocked([id], true)
       // A leftover recorded from an earlier upload is about to be replaced by this credential, so it stops being one before
       // anything is written: otherwise a later sync would remove the only copy of what is saved here.
-      if (core.loadStore().providers[id]?.cleanupPending) {
+      const hadLeftover = Boolean(core.loadStore().providers[id]?.cleanupPending)
+      if (hadLeftover) {
         try {
           await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false }))
         } catch (e) {
@@ -801,6 +820,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
             else await core.storeSecret(key, prev)
           } catch {}
         }
+        // The previous secrets are back, and with them the leftover they were.
+        if (hadLeftover) await core.recordLeftover(id)
         if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
         return local({ status: "failed", sync: hadCopy ? "synced" : "local", message: e instanceof Error ? e.message : String(e) })
       }
@@ -885,9 +906,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         await core.purgeCredentialSecrets(id, rec, false)
         await core.deleteSecret(id)
       } catch (e) {
-        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id}${exposure.shared ? " --share" : ""} to remove it.`
-        // Recorded so that sync removes this leftover, and only a leftover, later.
-        await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: true })).catch(() => {})
+        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. ${await core.recordLeftover(id)}`
       }
       // What was typed in is the form's, not the credential's: discard removes it, as for any other draft.
       try {
