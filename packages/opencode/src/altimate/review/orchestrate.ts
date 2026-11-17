@@ -45,6 +45,7 @@ import {
   dbtProjectFindings,
   dispatchKwargFindings,
   dispatchVariants,
+  docRefFindings,
   jinjaFindings,
   joinTargets,
   missingRefFindings,
@@ -2347,6 +2348,22 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   //
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
+  // A `{% docs name %}` block in any of the project's .md files at head (cached per name).
+  const docLookups = new Map<string, Promise<boolean>>()
+  const docExists = (name: string) => {
+    if (!docLookups.has(name)) {
+      const block = new RegExp(`\\{%-?\\s*docs\\s+${name}\\s*-?%\\}`)
+      docLookups.set(
+        name,
+        (input.grepProject?.(`docs ${name}`, "*.md") ?? Promise.resolve([]))
+          // An unavailable search (undefined) is no evidence the block is missing.
+          .then((hits) => hits === undefined || hits.some((h) => block.test(h.text)))
+          // A failed search is no evidence the block is missing.
+          .catch(() => true),
+      )
+    }
+    return docLookups.get(name)!
+  }
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
   touch(schemaFiles)
   const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
@@ -2365,6 +2382,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ...detectUnitTestFixtures(file, oldContent, newContent),
             ...snapshotYmlFindings(file, oldContent, newContent),
             ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
+            ...(lanes.has("dbt_patterns") && input.grepProject ? await docRefFindings(file, oldContent, newContent, docExists) : []),
           ]
         } catch (err) {
           // One malformed schema file degrades that file only.

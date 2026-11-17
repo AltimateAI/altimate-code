@@ -448,6 +448,44 @@ export function quickstartModelFindings(
   ]
 }
 
+// ── doc() references ────────────────────────────────────────────────────────
+
+const DOC_REF = /\bdoc\s*\(\s*['"](\w+)['"]\s*\)/g
+
+/** `doc('x')` names this change adds to a yml file that no docs block in the project defines:
+ *  dbt fails to parse the project. Only when another `doc()` in the file resolves in the project,
+ *  so docs kept in an installed package aren't mistaken for missing ones. */
+export async function docRefFindings(
+  file: ChangedFile,
+  oldContent: string | undefined,
+  newContent: string | undefined,
+  docExists: (name: string) => Promise<boolean>,
+): Promise<Finding[]> {
+  if (!newContent || file.status === "deleted") return []
+  const before = new Set([...(oldContent ?? "").matchAll(DOC_REF)].map((m) => m[1]))
+  const lines = new Map<string, string>()
+  for (const l of addedLines(file.diff)) for (const m of l.matchAll(DOC_REF)) if (!before.has(m[1]) && !lines.has(m[1])) lines.set(m[1], l)
+  if (!lines.size) return []
+  const missing: string[] = []
+  for (const name of [...lines.keys()].slice(0, 10)) if (!(await docExists(name))) missing.push(name)
+  if (!missing.length) return []
+  const others = [...new Set([...newContent.matchAll(DOC_REF)].map((m) => m[1]))].filter((n) => !missing.includes(n)).slice(0, 5)
+  let resolves = false
+  for (const n of others) if ((resolves = await docExists(n))) break
+  if (!resolves) return []
+  return missing.map((name) =>
+    finding(
+      file,
+      "doc-block-missing",
+      "warning",
+      "sql_correctness",
+      `\`doc('${name}')\` has no docs block`,
+      `No \`{% docs ${name} %}\` block exists in the project's \`.md\` files, while the other \`doc()\` references in this file resolve there. dbt fails to parse the project on a \`doc()\` it can't resolve. Add the docs block, or fix the name.`,
+      lines.get(name),
+    ),
+  )
+}
+
 // ── singular test windows ───────────────────────────────────────────────────
 
 const UNIT_SECONDS: Record<string, number> = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000, quarter: 7776000, year: 31536000 }

@@ -3,6 +3,7 @@ import {
   dbtProjectFindings,
   dispatchKwargFindings,
   dispatchVariants,
+  docRefFindings,
   jinjaBalance,
   jinjaFindings,
   joinTargets,
@@ -586,5 +587,40 @@ describe("new model missing from the quickstart public_models", () => {
     const m: ChangedFile = { path: "models/crm__new.sql", status: "added" }
     expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["crm__new"])[0].file).toBe("models/crm__new.sql")
     expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["other__new"])).toHaveLength(0)
+  })
+})
+
+describe("doc() reference with no docs block", () => {
+  const base = "models:\n  - name: stg_ads\n    columns:\n      - name: campaign_id\n        description: \"{{ doc('campaign_id') }}\"\n"
+  const head = (name: string) => base + `      - name: ${name}\n        description: "{{ doc('${name}') }}"\n`
+  const yml = (name: string): ChangedFile => ({
+    path: "models/staging/stg_ads.yml",
+    status: "modified",
+    diff: `@@ -5,0 +6,2 @@\n+      - name: ${name}\n+        description: "{{ doc('${name}') }}"\n`,
+  })
+  const defined = new Set(["campaign_id", "user_id"])
+  const exists = async (n: string) => defined.has(n)
+  test("a new doc() name no docs block defines: fires on its added line", async () => {
+    const fs = await docRefFindings(yml("audience_id"), base, head("audience_id"), exists)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].rule).toBe("dbt-project-rules:doc-block-missing")
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe(`        description: "{{ doc('audience_id') }}"`)
+  })
+  test("twin: a doc() name the project defines is silent", async () => {
+    expect(await docRefFindings(yml("user_id"), base, head("user_id"), exists)).toHaveLength(0)
+  })
+  test("no other doc() in the file resolves locally (docs may come from a package): silent", async () => {
+    expect(await docRefFindings(yml("audience_id"), base, head("audience_id"), async () => false)).toHaveLength(0)
+  })
+  test("end to end: the project's .md files are searched for the block", async () => {
+    const searched: string[] = []
+    const env = await prReview([{ path: "models/staging/stg_ads.yml", head: head("audience_id"), base, diff: yml("audience_id").diff }], {
+      grepProject: async (pattern, glob) => {
+        searched.push(`${pattern} ${glob}`)
+        return pattern === "docs campaign_id" ? [{ path: "models/docs.md", line: 3, text: "{% docs campaign_id %}" }] : []
+      },
+    })
+    expect(ruleIds(env.findings)).toContain("dbt-project-rules:doc-block-missing")
+    expect(searched).toContain("docs audience_id *.md")
   })
 })
