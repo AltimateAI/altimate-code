@@ -262,6 +262,25 @@ describe("AltimateApi.apiRequest", () => {
     }
   })
 
+  test("sends a body of false, 0 or null, and none only when there is none", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test/", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(init.body)
+      return new Response("{}", { status: 200 })
+    }) as unknown as typeof fetch
+    try {
+      for (const body of [false, 0, null, undefined]) await AltimateApi.apiRequest("POST", "/dbt/v1/x", body)
+      expect(bodies).toEqual(["false", "0", "null", undefined])
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
   test("names the file when the stored credentials can't be read", async () => {
     await Bun.write(path.join(home, ".altimate", "altimate.json"), "{not json")
     await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow(

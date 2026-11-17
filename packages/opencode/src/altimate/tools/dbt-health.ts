@@ -61,9 +61,10 @@ export const dbtHealthInternals = {
  * edited files after it read them, so it waits for a rebuild that starts after it arrived; calls that
  * arrive in the same window share that one.
  */
-const rebuilding = new WeakMap<object, { running: Promise<unknown>; queued?: Promise<unknown> }>()
+type Slot = { running: Promise<unknown>; queued?: Promise<unknown>; abandoned?: boolean }
+const rebuilding = new WeakMap<object, Slot>()
 
-function trackRebuild(adapter: object, slot: { running: Promise<unknown>; queued?: Promise<unknown> }) {
+function trackRebuild(adapter: object, slot: Slot) {
   const next = () => {
     if (rebuilding.get(adapter) !== slot) return
     if (slot.queued) {
@@ -86,8 +87,14 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
     rebuilding.set(adapter, slot)
     trackRebuild(adapter, slot)
   } else {
-    slot.queued ??= slot.running.catch(() => {}).then(() => adapter.rebuildManifest())
-    shared = slot.queued
+    const owner = slot
+    // A slot a timed-out call abandoned starts no rebuild of its own: its waiters fail and the next call starts afresh.
+    owner.queued ??= owner.running.catch(() => {}).then(() => {
+      if (owner.abandoned) throw new Error("the manifest rebuild it waited for was abandoned after a timeout")
+      return adapter.rebuildManifest()
+    })
+    owner.queued.catch(() => {})
+    shared = owner.queued
   }
   let stop = () => {}
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -96,7 +103,10 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
     signal.addEventListener("abort", stop, { once: true })
     timer = setTimeout(() => {
       // A rebuild that never settles must not hold the queue: drop this slot so the next call starts a fresh one.
-      if (rebuilding.get(adapter) === slot) rebuilding.delete(adapter)
+      if (rebuilding.get(adapter) === slot) {
+        slot.abandoned = true
+        rebuilding.delete(adapter)
+      }
       reject(new Error(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`))
     }, dbtHealthInternals.rebuildTimeoutMs)
   })

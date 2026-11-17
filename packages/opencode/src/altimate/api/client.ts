@@ -335,7 +335,7 @@ export namespace AltimateApi {
           "x-tenant": creds.altimateInstanceName,
           ...clientHeaders(),
         },
-        ...(body ? { body: JSON.stringify(body) } : {}),
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       })
       if (!res.ok) {
         throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
