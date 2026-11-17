@@ -204,7 +204,13 @@ describe("workspace activity routes", () => {
   test("a deferred look is passed through, and its mark comes back for the client to confirm", async () => {
     const { WorkspaceActivity } = await import("../../src/altimate/workspace/workspace-activity")
     const { spyOn } = await import("bun:test")
-    const seen = { at: "2026-11-12T10:00:00Z", ids: [{ id: "e1", at: "2026-11-12T10:00:00Z" }], overlap: true, from: "" }
+    const seen = {
+      at: "2026-11-12T10:00:00Z",
+      ids: [{ id: "e1", at: "2026-11-12T10:00:00Z" }],
+      overlap: true,
+      from: "",
+      scope: "s-1",
+    }
     const look = spyOn(WorkspaceActivity, "changesSince").mockResolvedValue({
       status: "ok",
       workspace: { id: 42, name: "Growth" },
@@ -235,17 +241,24 @@ describe("workspace activity routes", () => {
         { host: "tui" },
         { host: "tui", seen: { at: 5 } },
         { host: "tui", seen: "2026-11-12T10:00:00Z" },
+        // A mark without the workspace and account it came from.
+        { host: "tui", seen: { at: "2026-11-12T10:00:00Z", ids: [], overlap: true, from: "" } },
       ]) {
         const response = await request("POST", "/altimate/workspace/activity/seen", body)
         expect(response.status).toBe(400)
         expect(await response.json()).toMatchObject({ ok: false })
       }
       expect(acknowledge).not.toHaveBeenCalled()
-      const seen = { at: "2026-11-12T10:00:00Z", ids: [], overlap: true, from: "" }
+      const seen = { at: "2026-11-12T10:00:00Z", ids: [], overlap: true, from: "", scope: "s-1" }
       const ok = await request("POST", "/altimate/workspace/activity/seen", { host: "tui", seen })
       expect(await ok.json()).toEqual({ ok: true, status: "ok" })
       expect(acknowledge.mock.calls[0]?.[1]).toBe("tui")
       expect(acknowledge.mock.calls[0]?.[2]).toEqual(seen)
+      // Relinked or signed in as someone else since the look.
+      acknowledge.mockResolvedValue({ status: "scope_changed" })
+      const moved = await request("POST", "/altimate/workspace/activity/seen", { host: "tui", seen })
+      expect(moved.status).toBe(409)
+      expect(await moved.json()).toMatchObject({ ok: false, status: "scope_changed" })
     } finally {
       acknowledge.mockRestore()
     }

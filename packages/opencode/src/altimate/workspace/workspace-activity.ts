@@ -93,33 +93,55 @@ type Scope = Seen["scope"]
 export const markOf = (value: Seen["seen"][string] | undefined): Mark | undefined =>
   value === undefined ? undefined : typeof value === "string" ? { at: value, ids: [], overlap: false, from: "" } : value
 
-/** A server time in milliseconds; one without a zone is UTC, as the server keeps them. */
-const ms = (at: string) => Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(at) ? at : `${at}Z`)
+/** How many reported ids a mark keeps: past that, the oldest go and `from` moves up to cover them. */
+const MAX_IDS = 200
+
+/** A server time as a fixed-width UTC string with microseconds, which the server keeps: two of them compare as
+ * strings, exactly. One without a zone is UTC, as the server keeps them. `undefined` when it is not a time. */
+export function precise(at: string, shiftMs = 0): string | undefined {
+  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?([zZ]|[+-]\d\d:?\d\d)?$/.exec(at)
+  if (!match) return undefined
+  const whole = Date.parse(`${match[1]}${match[3] ?? "Z"}`)
+  if (Number.isNaN(whole)) return undefined
+  // Offsets are whole minutes, so only the whole seconds move with them; the fraction is kept to the microsecond.
+  return `${new Date(whole + shiftMs).toISOString().slice(0, 19)}.${(match[2] ?? "").padEnd(6, "0").slice(0, 6)}Z`
+}
+const key = (at: string) => precise(at) ?? ""
+const newest = (a: string, b: string) => (key(b) >= key(a) ? b : a)
 
 /** The `since` a look asks from. */
 export function sinceOf(mark: Mark): string | undefined {
   if (!mark.at) return undefined
   if (!mark.overlap) return mark.at
-  const at = ms(mark.at)
-  return Number.isNaN(at) ? mark.at : new Date(at - OVERLAP_MS).toISOString()
+  return precise(mark.at, -OVERLAP_MS) ?? mark.at
 }
 
-/** The mark after a look (or after merging two): the newest time, and the ids within `OVERLAP_MS` of it. `cut`: the
- * look's page did not hold every change it asked for, so its ids are complete only from its oldest item. */
+/** The mark after a look (or after merging two): the newest time (the item's on a tie), and the ids within
+ * `OVERLAP_MS` of it. `from` is where the ids stop being complete: the oldest item of a `cut` page; the old mark when
+ * ids first arrive (it reported what came before without them); and the oldest id kept when more than `MAX_IDS` are
+ * in the window. */
 export function advance(mark: Mark | undefined, items: Pick<Item, "id" | "at">[], options: { cut?: boolean } = {}): Mark {
-  const times = [...(mark?.at ? [mark.at] : []), ...items.map((i) => i.at)].filter((at) => !Number.isNaN(ms(at)))
-  const at = times.reduce<string>((a, b) => (a && ms(a) >= ms(b) ? a : b), "") || mark?.at || ""
-  const floor = at ? ms(at) - OVERLAP_MS : Number.NEGATIVE_INFINITY
-  const ids = new Map<string, string>()
+  const times = [...(mark?.at ? [mark.at] : []), ...items.map((i) => i.at)].filter((at) => precise(at) !== undefined)
+  const at = times.reduce<string>((a, b) => (a ? newest(a, b) : b), "") || mark?.at || ""
+  const floor = (at && precise(at, -OVERLAP_MS)) || ""
+  const window = new Map<string, string>()
   for (const entry of [...(mark?.ids ?? []), ...items.flatMap((i) => (i.id ? [{ id: i.id, at: i.at }] : []))])
-    if (ms(entry.at) > floor) ids.set(entry.id, entry.at)
+    if (key(entry.at) > floor) window.set(entry.id, entry.at)
+  const ids = [...window].map(([id, at]) => ({ id, at })).sort((a, b) => (key(a.at) < key(b.at) ? -1 : key(a.at) > key(b.at) ? 1 : 0))
+  const kept = ids.slice(-MAX_IDS)
+  const turningOn = !(mark?.overlap ?? false) && Boolean(mark?.at) && items.some((i) => i.id !== undefined)
   const oldest = items.at(-1)?.at
-  const from = options.cut && oldest && ms(oldest) > floor ? oldest : ""
+  const froms = [
+    ...(options.cut && oldest ? [oldest] : []),
+    ...(turningOn && mark ? [mark.at] : []),
+    ...(ids.length > kept.length ? [kept[0].at] : []),
+  ]
+  const from = froms.reduce<string>((a, b) => (a ? newest(a, b) : b), "")
   return {
     at,
-    ids: [...ids].map(([id, at]) => ({ id, at })).slice(-200),
+    ids: kept,
     overlap: (mark?.overlap ?? false) || items.some((i) => i.id !== undefined),
-    from,
+    from: from && key(from) > floor ? from : "",
   }
 }
 
@@ -129,17 +151,14 @@ function isFresh(mark: Mark | undefined, reported: Set<string>, item: Item): boo
   if (item.id === undefined) return true
   if (reported.has(item.id)) return false
   if (!mark?.at || !mark.from) return true
-  return !(ms(item.at) <= ms(mark.at) && ms(item.at) <= ms(mark.from))
+  return !(key(item.at) <= key(mark.at) && key(item.at) <= key(mark.from))
 }
 
 /** Where each client's last look is kept. */
 export const dir = () => path.join(Global.Path.state, "workspace-activity")
-const fileOf = (scope: Scope) =>
-  path.join(
-    dir(),
-    createHash("sha256").update(JSON.stringify([scope.apiUrl, scope.tenant, scope.account, scope.datamateId])).digest("hex") +
-      ".json",
-  )
+const scopeId = (scope: Scope) =>
+  createHash("sha256").update(JSON.stringify([scope.apiUrl, scope.tenant, scope.account, scope.datamateId])).digest("hex")
+const fileOf = (scope: Scope) => path.join(dir(), `${scopeId(scope)}.json`)
 
 async function readSeen(scope: Scope): Promise<Seen> {
   const raw = await fs.readFile(fileOf(scope), "utf8").catch(() => undefined)
@@ -168,8 +187,14 @@ async function writeSeen(state: Seen): Promise<void> {
 const plural = (n: number, kind: Item["kind"]) =>
   `${n} ${kind === "skill" ? (n === 1 ? "skill" : "skills") : n === 1 ? "knowledge base" : "knowledge bases"}`
 
-const cap = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
-const nameOf = (item: Item) => cap(printable(item.name).trim(), NAME_MAX)
+const segmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : undefined
+/** `text` cut to `max` characters, ending with "…", never inside one. */
+const cap = (text: string, max: number) => {
+  const chars = segmenter ? Array.from(segmenter.segment(text), (s) => s.segment) : Array.from(text)
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text
+}
+const fullName = (item: Item) => printable(item.name).trim()
+const nameOf = (item: Item) => cap(fullName(item), NAME_MAX)
 
 /** The one line: "Since your last session in X: 2 skills added (a, b), 1 knowledge base removed (c)." Items are counted
  * by `subject` (by name from a server without it), so several changes to one item count once per kind of change and
@@ -188,7 +213,8 @@ export function summaryLine(workspaceName: string, items: Item[], hasMore = fals
     const key = `${item.kind}:${item.action}`
     const group = groups.get(key) ?? { kind: item.kind, action: item.action, subjects: new Set<string>(), names: [] }
     const name = nameOf(item)
-    group.subjects.add(item.subject ?? `name:${name}`)
+    // Without a `subject`, the whole name tells items apart; only what is shown is cut.
+    group.subjects.add(item.subject ?? `name:${fullName(item)}`)
     if (name && !group.names.includes(name)) group.names.push(name)
     groups.set(key, group)
   }
@@ -200,9 +226,13 @@ export function summaryLine(workspaceName: string, items: Item[], hasMore = fals
   return cap(`${where}: ${parts.join(", ")}.`, LINE_MAX)
 }
 
+/** A deferred look's mark, with the workspace and account it belongs to. */
+export const SeenMark = Mark.extend({ scope: z.string() })
+export type SeenMark = z.infer<typeof SeenMark>
+
 export type Changes =
   /** `seen`: with `defer`, the mark to hand back to `acknowledge` once the line was shown. */
-  | { status: "ok"; workspace: { id: number; name: string }; items: Item[]; line?: string; seen?: Mark }
+  | { status: "ok"; workspace: { id: number; name: string }; items: Item[]; line?: string; seen?: SeenMark }
   /** First look for this client: where to start from is recorded, nothing is said. */
   | { status: "first"; workspace: { id: number; name: string } }
   | { status: "signed_out" | "not_linked" | "account_changed" | "unconfirmed" | "unsupported" }
@@ -258,15 +288,17 @@ export async function changesSince(directory: string, host: string, options: { d
       // (no local clock is involved). Otherwise the newest change it was given.
       const mark = markOf(state.seen[host])
       const since = mark && sinceOf(mark)
-      // Whether a page reached back to the mark: then it holds every change after the mark, and `has_more` is about the
-      // overlap the look read again, not about news.
-      const reached = (items: Item[]) =>
-        Boolean(mark?.at) && items.length > 0 && ms(items[items.length - 1].at) <= ms(mark!.at)
+      // How the page's oldest change compares with the mark, to the microsecond. At or below it: the page holds every
+      // change after the mark (newest first), so `has_more` is about the overlap the look read again, not about news.
+      // Changes at the mark itself were reported, or are below where the last look's ids stop (`from`).
+      const oldestVsMark = (items: Item[]) =>
+        mark?.at && items.length > 0 ? key(items[items.length - 1].at).localeCompare(key(mark.at)) : 1
       let page = await fetchActivity(workspace.id, since, actAs, LIMIT)
       // Cut inside the overlap: read again with the most the server gives, so a change that committed late is in it.
-      if (page.hasMore && mark?.overlap && reached(page.items)) page = await fetchActivity(workspace.id, since, actAs, MAX_LIMIT)
+      if (page.hasMore && mark?.overlap && oldestVsMark(page.items) <= 0)
+        page = await fetchActivity(workspace.id, since, actAs, MAX_LIMIT)
       const { items } = page
-      const hasMore = page.hasMore && !reached(items)
+      const hasMore = page.hasMore && !(oldestVsMark(items) <= 0)
       const reported = new Set(mark?.ids.map((entry) => entry.id))
       const fresh = items.filter((item) => isFresh(mark, reported, item))
       const next = advance(mark, items, { cut: page.hasMore })
@@ -277,7 +309,7 @@ export async function changesSince(directory: string, host: string, options: { d
         return { status: "first", workspace }
       }
       const line = summaryLine(workspace.name, fresh, hasMore)
-      if (line && options.defer) return { status: "ok", workspace, items: fresh, line, seen: next }
+      if (line && options.defer) return { status: "ok", workspace, items: fresh, line, seen: { ...next, scope: scopeId(scope) } }
       await save()
       return { status: "ok", workspace, items: fresh, ...(line ? { line } : {}) }
     })
@@ -286,26 +318,43 @@ export async function changesSince(directory: string, host: string, options: { d
   }
 }
 
-/** The line from a deferred look was shown: record its mark, merged with any look since. Never throws. */
-export async function acknowledge(directory: string, host: string, seen: Mark): Promise<{ status: "ok" } | Changes> {
+/** Where the ids of two looks merged stop being complete. A cut point holds where the other look does not vouch
+ * for it: after the other's newest time (the other never read there), or when the other was cut too (then the older
+ * point, below which neither read). A look that read its whole window up to and past a cut point vouches for it. */
+export function mergedFrom(current: Mark | undefined, seen: Mark): string {
+  const holds = (x: Mark | undefined, y: Mark | undefined) =>
+    Boolean(x?.from) && (!y?.at || key(x!.from) > key(y.at) || Boolean(y.from))
+  const points = [...(holds(seen, current) ? [seen.from] : []), ...(holds(current, seen) ? [current!.from] : [])]
+  if (points.length < 2) return points[0] ?? ""
+  // Both hold. After the other's newest time, each is the only one that read there: the newer point covers both.
+  const past = points.filter((p, i) => key(p) > key((i === 0 ? current : seen)?.at ?? ""))
+  if (past.length > 0) return past.reduce((a, b) => newest(a, b))
+  return points.reduce((a, b) => (key(a) <= key(b) ? a : b))
+}
+
+/** The line from a deferred look was shown: record its mark, merged with any look since. A mark from another
+ * workspace or account (relinked, or signed in as someone else, since the look) is refused: `scope_changed`. Never
+ * throws. */
+export async function acknowledge(
+  directory: string,
+  host: string,
+  seen: SeenMark,
+): Promise<{ status: "ok" | "scope_changed" } | Changes> {
   try {
     const where = await locate(directory)
     if (!where.ok) return where.changes
     const { scope } = where
+    if (seen.scope !== scopeId(scope)) return { status: "scope_changed" as const }
+    const { scope: _scope, ...look } = seen
     return await locked(scope, async () => {
       const state = await readSeen(scope)
       const current = markOf(state.seen[host])
-      const merged = advance(current ? { ...current, overlap: current.overlap || seen.overlap } : seen, [
-        ...seen.ids,
-        ...(seen.at ? [{ at: seen.at }] : []),
+      const merged = advance(current ? { ...current, overlap: current.overlap || look.overlap } : look, [
+        ...look.ids,
+        ...(look.at ? [{ at: look.at }] : []),
       ])
-      // Ids are incomplete only below where both looks stopped reading: a look that read its whole window
-      // vouches for it, so only when both were cut does the older cut point hold.
-      const froms = [current?.from, seen.from]
-      if (froms.every(Boolean)) {
-        const older = (froms as string[]).sort((a, b) => ms(a) - ms(b))[0]
-        if (ms(older) > ms(merged.at) - OVERLAP_MS) merged.from = older
-      }
+      const from = mergedFrom(current, look)
+      merged.from = from && key(from) > ((merged.at && precise(merged.at, -OVERLAP_MS)) || "") ? from : ""
       await writeSeen({ ...state, seen: { ...state.seen, [host]: merged } })
       return { status: "ok" as const }
     })

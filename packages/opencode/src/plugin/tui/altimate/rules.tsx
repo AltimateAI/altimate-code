@@ -520,6 +520,8 @@ function installCards(api: TuiPluginApi) {
     })
   const showActivity = async () => {
     await Promise.race([startupReplay, wait(ACTIVITY_REPLAY_WAIT_MS)])
+    // The replay may have won: its wait is not left running, so dispose clears every timer still pending.
+    if (activityTimer) clearTimeout(activityTimer)
     if (disposed) return
     const answer = await get<{ ok: boolean; status?: string; line?: string; seen?: unknown }>(
       api,

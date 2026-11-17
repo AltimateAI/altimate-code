@@ -1489,9 +1489,13 @@ export namespace Server {
         if (!/^[a-z][a-z0-9-]{0,31}$/.test(host)) return c.json({ ok: false, error: "host must name the client, e.g. vscode." }, 400)
         try {
           const { WorkspaceActivity } = await import("../altimate/workspace/workspace-activity")
-          const seen = WorkspaceActivity.Mark.safeParse(read.body.seen)
+          const seen = WorkspaceActivity.SeenMark.safeParse(read.body.seen)
           if (!seen.success) return c.json({ ok: false, error: "seen must be the mark a deferred look returned." }, 400)
-          return c.json({ ok: true as const, ...(await WorkspaceActivity.acknowledge(Instance.directory, host, seen.data)) })
+          const result = await WorkspaceActivity.acknowledge(Instance.directory, host, seen.data)
+          // The project was relinked, or another account signed in, since the look: its mark is not this workspace's.
+          if (result.status === "scope_changed")
+            return c.json({ ok: false, status: result.status, error: "The workspace or account changed since that look." }, 409)
+          return c.json({ ok: true as const, ...result })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("workspace activity seen failed", { error })

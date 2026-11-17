@@ -47,11 +47,13 @@ const tracked = (id: string, name: string, action: string, at: string, kind = "s
 let asked: (string | undefined)[] = []
 let limits: number[] = []
 let activity: (since: string | undefined, limit: number) => Response = () => reply({ items: [], has_more: false })
-/** A server holding `changes`: newest first (ties by id, newest first), after `since`, at most `limit`. */
-const server = (changes: ReturnType<typeof tracked>[]) => (since: string | undefined, limit: number) => {
+/** A server holding `changes`: newest first (ties by id, newest first), after `since` to the microsecond as the
+ * service compares, at most `limit`. Changes without ids sort by time only. */
+const server = (changes: { at: string; id?: string }[]) => (since: string | undefined, limit: number) => {
+  const at = (value: string) => WorkspaceActivity.precise(value) ?? ""
   const after = changes
-    .filter((c) => since === undefined || Date.parse(c.at) > Date.parse(since))
-    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || b.id.localeCompare(a.id, undefined, { numeric: true }))
+    .filter((c) => since === undefined || at(c.at) > at(since))
+    .sort((a, b) => at(b.at).localeCompare(at(a.at)) || (b.id ?? "").localeCompare(a.id ?? "", undefined, { numeric: true }))
   return reply({ items: after.slice(0, limit), has_more: after.length > limit })
 }
 let project = ""
@@ -162,7 +164,7 @@ describe("changes that commit late, and what was already reported", () => {
         has_more: false,
       })
     const next = await WorkspaceActivity.changesSince(project, "tui")
-    expect(asked[1]).toBe("2026-11-12T09:55:00.000Z")
+    expect(asked[1]).toBe("2026-11-12T09:55:00.000000Z")
     expect(next.status === "ok" && next.line).toBe("Since your last session in Growth: 1 skill added (late).")
     // Both are reported now: nothing more to say.
     const quiet = await WorkspaceActivity.changesSince(project, "tui")
@@ -182,7 +184,7 @@ describe("changes that commit late, and what was already reported", () => {
     })
     // A server time without a zone is UTC.
     expect(WorkspaceActivity.sinceOf({ at: "2026-11-12T10:00:00", ids: [], overlap: true, from: "" })).toBe(
-      "2026-11-12T09:55:00.000Z",
+      "2026-11-12T09:55:00.000000Z",
     )
   })
 })
@@ -208,12 +210,76 @@ describe("more changes than a page, under the overlap", () => {
     expect(quiet.status === "ok" && quiet.line).toBeUndefined()
   })
 
+  test("a page cut at the mark's own time still holds every change after it: the count is exact", async () => {
+    // 120 changes at one time, more than the most one answer holds: the first look reads 50 of them.
+    const changes = bulk(120, "2026-11-12T10:00:00Z")
+    activity = server(changes)
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    changes.push(tracked("n1", "naming", "added", "2026-11-12T10:00:30Z"))
+    const next = await WorkspaceActivity.changesSince(project, "tui")
+    expect(next.status === "ok" && next.line).toBe("Since your last session in Growth: 1 skill added (naming).")
+  })
+
   test("more changes after the mark than a page holds still say there were more", async () => {
     activity = server([tracked("o1", "old", "added", "2026-11-12T10:00:00Z")])
     expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
     activity = server([tracked("o1", "old", "added", "2026-11-12T10:00:00Z"), ...bulk(70, "2026-11-13T10:00:00Z")])
     const next = await WorkspaceActivity.changesSince(project, "tui")
     expect(next.status === "ok" && next.line).toStartWith("Since your last session in Growth: more than 50 changes")
+  })
+})
+
+describe("times to the microsecond, as the server keeps them", () => {
+  test("a change in the same millisecond as the mark is reported once, then the mark moves past it", async () => {
+    // A server without ids: each look asks from the mark itself.
+    const changes: { at: string; kind: string; name: string; action: string }[] = [
+      change("first", "added", "2026-11-12T09:00:00.123456Z"),
+    ]
+    activity = server(changes)
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    changes.push(change("same-millisecond", "added", "2026-11-12T09:00:00.123789Z"))
+    const next = await WorkspaceActivity.changesSince(project, "tui")
+    expect(next.status === "ok" && next.line).toBe("Since your last session in Growth: 1 skill added (same-millisecond).")
+    expect(asked[1]).toBe("2026-11-12T09:00:00.123456Z")
+    const quiet = await WorkspaceActivity.changesSince(project, "tui")
+    expect(quiet.status === "ok" && quiet.line).toBeUndefined()
+    expect(asked[2]).toBe("2026-11-12T09:00:00.123789Z")
+  })
+
+  test("times compare exactly, whatever their zone or digits", () => {
+    expect(WorkspaceActivity.precise("2026-11-12T10:00:00.5+05:30")).toBe("2026-11-12T04:30:00.500000Z")
+    expect(WorkspaceActivity.precise("2026-11-12T10:00:00")).toBe("2026-11-12T10:00:00.000000Z")
+    expect(WorkspaceActivity.precise("not a time")).toBeUndefined()
+  })
+})
+
+describe("when the server starts giving ids", () => {
+  test("the change the last look reported without an id is not reported again", async () => {
+    const changes: { at: string; id?: string }[] = [change("before", "added", "2026-11-12T10:00:00Z")]
+    activity = server(changes)
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    // The server is updated: ids from now on, for old changes too.
+    changes.splice(0, 1, tracked("e0", "before", "added", "2026-11-12T10:00:00Z"))
+    changes.push(tracked("e1", "after", "added", "2026-11-12T10:01:00Z"))
+    const next = await WorkspaceActivity.changesSince(project, "tui")
+    expect(next.status === "ok" && next.line).toBe("Since your last session in Growth: 1 skill added (after).")
+    // The next look reads from 5 minutes before the mark: "before" is in it, and is history.
+    const quiet = await WorkspaceActivity.changesSince(project, "tui")
+    expect(quiet.status === "ok" && quiet.line).toBeUndefined()
+  })
+})
+
+describe("more ids in the window than a mark keeps", () => {
+  test("the oldest go, and the cut point moves up to cover them", () => {
+    const items = Array.from({ length: 250 }, (_, i) => ({
+      id: `e${i}`,
+      at: `2026-11-12T10:00:${String(Math.floor(i / 5)).padStart(2, "0")}.${String(i % 5).padStart(6, "0")}Z`,
+    })).reverse()
+    const mark = WorkspaceActivity.advance(undefined, items)
+    expect(mark.ids).toHaveLength(200)
+    // The 50 oldest went; the oldest kept is e50, and below it unknown ids are history.
+    expect(mark.ids[0]).toEqual({ id: "e50", at: "2026-11-12T10:00:10.000000Z" })
+    expect(mark.from).toBe("2026-11-12T10:00:10.000000Z")
   })
 })
 
@@ -233,6 +299,38 @@ describe("a deferred look", () => {
     expect(after.status === "ok" && after.line).toBeUndefined()
   })
 
+  test("acknowledging a cut look after a complete one keeps its overflow from coming back", async () => {
+    const changes: ReturnType<typeof tracked>[] = [tracked("o1", "old", "added", "2026-11-12T09:00:00Z")]
+    activity = server(changes)
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    // A complete look: nothing new.
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("ok")
+    // 70 skills attached in one save, an hour later.
+    for (let i = 0; i < 70; i++) changes.push(tracked(`b${i}`, `bulk-${i}`, "added", "2026-11-12T10:00:00Z"))
+    const shown = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    expect(shown.status === "ok" && shown.line).toStartWith("Since your last session in Growth: more than 50 changes")
+    if (shown.status !== "ok" || !shown.seen) throw new Error("expected a mark to acknowledge")
+    expect(await WorkspaceActivity.acknowledge(project, "tui", shown.seen)).toEqual({ status: "ok" })
+    // The next start says nothing: the 20 it did not name were summed up as "more than 50".
+    const next = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    expect(next.status === "ok" && next.line).toBeUndefined()
+  })
+
+  test("a mark from before a relink is refused, and the new workspace's look is untouched", async () => {
+    activity = () => reply({ items: [], has_more: false })
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    activity = server([tracked("e1", "naming", "added", "2026-11-12T10:00:00Z")])
+    const shown = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    if (shown.status !== "ok" || !shown.seen) throw new Error("expected a mark to acknowledge")
+    // Relinked to another workspace while the line waited to be shown.
+    await recordApprovedBinding(
+      project,
+      { datamateId: 43, datamateName: "Other", repoRemote: null, projectPath: project, linkedAt: Date.now() } as never,
+      { awaitBackfill: true },
+    )
+    expect(await WorkspaceActivity.acknowledge(project, "tui", shown.seen)).toEqual({ status: "scope_changed" })
+  })
+
   test("acknowledging an older look keeps what a look in between recorded", async () => {
     activity = () => reply({ items: [], has_more: false })
     expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
@@ -247,7 +345,7 @@ describe("a deferred look", () => {
     // The newer mark holds: nothing is said again.
     const after = await WorkspaceActivity.changesSince(project, "tui")
     expect(after.status === "ok" && after.line).toBeUndefined()
-    expect(asked.at(-1)).toBe("2026-11-12T10:55:00.000Z")
+    expect(asked.at(-1)).toBe("2026-11-12T10:55:00.000000Z")
   })
 
   test("a cut look acknowledged after a complete one does not hide later changes as history", async () => {
@@ -292,6 +390,17 @@ describe("the line", () => {
     expect(WorkspaceActivity.summaryLine("Growth", items)).toBe(
       "Since your last session in Growth: 2 knowledge bases added (Glossary), 1 skill added (naming).",
     )
+  })
+
+  test("without a subject, long names that share their first characters are still two items", () => {
+    const items = [change(`${"x".repeat(40)}A`, "added", "2"), change(`${"x".repeat(40)}B`, "added", "1")] as never
+    expect(WorkspaceActivity.summaryLine("Growth", items)).toStartWith("Since your last session in Growth: 2 skills added (")
+  })
+
+  test("a cut never splits a character", () => {
+    const line = WorkspaceActivity.summaryLine("Growth", [change("😀".repeat(45), "added", "1")] as never)!
+    expect(line).toBe(`Since your last session in Growth: 1 skill added (${"😀".repeat(39)}…).`)
+    expect(line).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
   })
 
   test("caps long names and the whole line, and leaves out an empty name", () => {
