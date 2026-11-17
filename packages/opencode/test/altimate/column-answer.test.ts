@@ -1319,9 +1319,11 @@ describe("both tools: names at the edges", () => {
   test("a cast after a SELECT modifier is named after its column, so a settled model has it", () => {
     // Each throws "r has no column amount" on main: the modifier or the parentheses hid the cast.
     for (const dialect of ["postgres", "redshift"]) {
-      const lists = ["distinct on(id)amount::numeric, id", "distinct on (coalesce(id, 0)) id, amount::numeric", "distinct(amount)::numeric, id",
-        "all(amount)::numeric, id", "distinct ((amount))::numeric, id", "id, (amount)::numeric", "id, cast((amount) as numeric)"]
-      if (dialect === "postgres") lists.push("distinct on (id) id, amount::numeric")
+      const lists = ["distinct(amount)::numeric, id", "all(amount)::numeric, id", "distinct ((amount))::numeric, id", "id, (amount)::numeric",
+        "id, cast((amount) as numeric)"]
+      // DISTINCT ON is Postgres only; TOP is Redshift's.
+      if (dialect === "postgres")
+        lists.push("distinct on(id)amount::numeric, id", "distinct on (coalesce(id, 0)) id, amount::numeric", "distinct on (id) id, amount::numeric")
       if (dialect === "redshift") lists.push("top 5amount::numeric, id", "top 5 amount::numeric, id")
       for (const list of lists) {
         const path = write(nodes(dialect, [
