@@ -604,6 +604,14 @@ describe("workspace connections", () => {
     expect(writes().length).toBe(before)
   })
 
+  test("disconnect removes a leftover's secret fields too", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    await core.storeSecret(core.secretKey("cred", "github", "old_custom_token"), "old")
+    await core.recordLeftover("github", (await core.realConfig())!, ["old_custom_token"])
+    await core.disconnect("github")
+    expect(await core.readSecret(core.secretKey("cred", "github", "old_custom_token"))).toBeUndefined()
+  })
+
   test("a leftover's secret fields are removed even when a later save no longer lists them", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     await core.storeSecret(core.secretKey("cred", "github", "old_custom_token"), "old")
@@ -630,8 +638,11 @@ describe("workspace connections", () => {
     expect(await core.readSecret("github")).toBe("leftover_token")
     // Its connection recorded for that other backend: an id here is not it, and the mark stays.
     await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: "https://other.example#other-tenant" }))
-    expect((await core.syncProvider("github")).result).toBe("skipped")
+    const o = await core.syncProvider("github", undefined, 0, true)
+    // Said to be on that other sign-in, not removed.
+    expect([o.result, o.reason]).toEqual(["failed", expect.stringContaining("another Altimate sign-in (https://other.example)")])
     expect(core.loadStore().providers.github?.cleanupPending).toBe("https://other.example#other-tenant")
+    expect((await core.statusRemote()).providers.find((p) => p.id === "github")?.note).toContain("another Altimate sign-in")
   })
 
   test("an attach-only sync never removes a local secret it did not record as a leftover", async () => {

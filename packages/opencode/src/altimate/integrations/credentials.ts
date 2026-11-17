@@ -916,7 +916,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       }
       let leftover: string | null = null
       try {
-        await core.purgeCredentialSecrets(id, rec && { ...rec, secretFields: [...(rec.secretFields ?? []), ...(rec.leftoverFields ?? [])] }, false)
+        await core.purgeCredentialSecrets(id, rec, false)
         await core.deleteSecret(id)
         // Whatever was left here from before is gone with it.
         if (core.loadStore().providers[id]?.cleanupPending) await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false, leftoverFields: undefined })).catch(() => {})

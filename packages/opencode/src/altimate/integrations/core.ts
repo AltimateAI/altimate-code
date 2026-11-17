@@ -308,7 +308,8 @@ export async function deleteSecret(id: string) {
 export async function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvider, includeDrafts = true, keep: Set<string> = new Set()) {
   const catalog = await creds.catalogSecretFields(id)
   await withLock(async () => {
-    for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...catalog, ...(rec?.secretFields ?? [])])) {
+    // Fields a recorded leftover had are included: a later save or catalog change may no longer list them.
+    for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...catalog, ...(rec?.secretFields ?? []), ...(rec?.leftoverFields ?? [])])) {
       if (includeDrafts) await deleteSecret(secretKey("draft", id, field))
       if (!keep.has(field)) await deleteSecret(secretKey("cred", id, field))
     }
@@ -712,7 +713,13 @@ export async function statusRemote(): Promise<StatusResult> {
   try {
     const remote = deriveRemote(await backend.listOwnConnections(cfg))
     const detections = Object.values(loadStore().providers).flatMap((rec) => (rec?.detection ? [rec.detection] : []))
-    return { ...mergeRemote(local, remote, Date.now(), detections), workspace: await liveWorkspaceInfo() }
+    const merged = mergeRemote(local, remote, Date.now(), detections)
+    // A connection recorded on another sign-in is not in this workspace view; it is shown as this machine knows it, with where it is.
+    const providers = merged.providers.map((p) => {
+      const elsewhere = recordedElsewhere(p.id, cfg)
+      return elsewhere ? { ...(local.providers.find((l) => l.id === p.id) ?? p), note: elsewhere } : p
+    })
+    return { ...merged, providers, workspace: await liveWorkspaceInfo() }
   } catch (e) {
     return { ...unchecked(e), workspace: await liveWorkspaceInfo().catch(() => workspaceInfo()) }
   }
@@ -1157,7 +1164,7 @@ async function syncReal(
   // sync that retries it, and is recorded so that sync, and only it, removes the leftover later.
   const purgeLocal = async (record: StoredProvider | undefined) => {
     try {
-      await purgeCredentialSecrets(id, record && { ...record, secretFields: [...(record.secretFields ?? []), ...(record.leftoverFields ?? [])] }, false)
+      await purgeCredentialSecrets(id, record, false)
       await deleteSecret(id)
       if (record?.cleanupPending) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false, leftoverFields: undefined })).catch(() => {})
     } catch (e) {
@@ -1191,6 +1198,9 @@ async function syncReal(
         // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
         // A recorded id names a connection only on the backend it was recorded for.
         const sameBackend = (store.providers[id]?.connectionBackend ?? backendKey(cfg)) === backendKey(cfg)
+        // Kept on another sign-in, not removed: say where it is.
+        const elsewhere = recordedElsewhere(id, cfg)
+        if (known != null && elsewhere) return { id, result: "failed", reason: elsewhere, steps: [] }
         const found = known == null ? findManaged(own, id) : sameBackend ? own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id]) : undefined
         // A connection this machine saved that is gone from the workspace is not attached; it was deleted there. What was left here
         // as its leftover is then the only copy, so it is kept and stops being a leftover.
