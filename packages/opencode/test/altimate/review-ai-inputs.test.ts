@@ -5,6 +5,7 @@ import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import {
   addUsage,
   aiInputBudget,
+  aiOptionalFields,
   batchAiFiles,
   buildUserMessage,
   laneUsage,
@@ -456,5 +457,91 @@ describe("verifier evidence (opt-in)", () => {
     expect([...ev.addedLines.get("models/marts/m.sql")!]).toEqual([1])
     expect(ev.files.map((f) => f.path)).toEqual(["models/marts/m.sql"])
     expect(ev.dialect).toBe(DEFAULT_REVIEW_CONFIG.dialect)
+  })
+})
+
+describe("core output fields: evidence line, pre-existing, suggestion, cites", () => {
+  const item = (extra: Record<string, unknown> = {}) => ({ file: "models/marts/m.sql", title: "t", body: "b", ...extra })
+
+  test("a core without the fields (0.9.0) yields the body alone", () => {
+    expect(aiOptionalFields(item())).toEqual({ body: "b" })
+  })
+
+  test("each field maps to the finding; cites becomes a body suffix", () => {
+    const out = aiOptionalFields(
+      item({
+        evidence_line: "  where x = 1  ",
+        pre_existing: true,
+        suggestion: { start_line: 2, end_line: 3, replacement: "where x = 2" },
+        cites: "models/REVIEW.md",
+      }),
+    )
+    expect(out).toEqual({
+      body: "b (per `models/REVIEW.md`)",
+      evidenceLine: "where x = 1",
+      preExisting: true,
+      suggestion: { startLine: 2, endLine: 3, replacement: "where x = 2" },
+    })
+  })
+
+  test("malformed or empty values are dropped, never the finding", () => {
+    for (const suggestion of [
+      { start_line: 3, end_line: 2, replacement: "x" },
+      { start_line: 0, end_line: 1, replacement: "x" },
+      { start_line: 1.5, end_line: 2, replacement: "x" },
+      { start_line: 1, end_line: 1 },
+      { start_line: 1, end_line: 1, replacement: "x".repeat(2_001) },
+      "replace it",
+      null,
+    ]) {
+      expect(aiOptionalFields(item({ suggestion })).suggestion).toBeUndefined()
+    }
+    expect(aiOptionalFields(item({ evidence_line: "   ", cites: "", pre_existing: "true" }))).toEqual({ body: "b" })
+    expect(aiOptionalFields(item({ evidence_line: "x".repeat(300) })).evidenceLine).toHaveLength(200)
+  })
+
+  async function reviewWith(extra: Record<string, unknown>, diff: string) {
+    const finding = makeFinding({
+      severity: "warning",
+      category: "sql_correctness",
+      title: "m: t",
+      ...aiOptionalFields(item(extra)),
+      file: "models/marts/m.sql",
+      model: "m",
+      startLine: 2,
+      endLine: 2,
+      confidence: "high",
+      evidence: { tool: "ai-review", result: { confidence: "high" } },
+      ruleKey: "ai:sql_correctness:t",
+      rule: "ai-review:sql_correctness",
+    })
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff }],
+      config: { ...DEFAULT_REVIEW_CONFIG, severityThreshold: "suggestion" },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async (_f, side) => (side === "old" ? undefined : "select 1\nfrom a\nwhere x = 1\n"),
+      generatedAt: "2026-11-14T00:00:00Z",
+      forceTier: "full",
+      aiReview: async () => ({ findings: [finding], status: { state: "ok" } }),
+    })
+    return env.findings.find((f) => f.file === "models/marts/m.sql" && f.title === "m: t")
+  }
+
+  const DIFF = "@@ -1,3 +1,3 @@\n select 1\n-from b\n+from a\n where x = 1\n"
+
+  test("an AI-set pre_existing survives anchoring on an added line", async () => {
+    const f = await reviewWith({ pre_existing: true, evidence_line: "from a" }, DIFF)
+    expect(f).toMatchObject({ startLine: 2, preExisting: true, evidenceLine: "from a" })
+  })
+
+  test("an AI suggestion goes through suggestion validation", async () => {
+    const kept = await reviewWith({ suggestion: { start_line: 2, end_line: 2, replacement: "from c" } }, DIFF)
+    expect(kept?.suggestion).toEqual({ startLine: 2, endLine: 2, replacement: "from c" })
+    // Line 3 is context, not added: the replacement degrades to text.
+    const moved = await reviewWith({ suggestion: { start_line: 3, end_line: 3, replacement: "where x = 2" } }, DIFF)
+    expect(moved?.suggestion).toBeUndefined()
+    expect(moved?.body).toContain("Suggested fix:\n```sql\nwhere x = 2\n```")
   })
 })
