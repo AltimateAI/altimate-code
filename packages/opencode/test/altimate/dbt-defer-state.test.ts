@@ -5,7 +5,7 @@ import path from "path"
 import { Effect } from "effect"
 import type { Tool } from "../../src/tool/tool"
 import { SessionID, MessageID } from "../../src/session/schema"
-import { resolveEnvVars } from "../../src/altimate/native/connections/dbt-profiles"
+import { resolveEnvVars } from "../../src/altimate/tools/dbt-defer-state"
 import { DbtDeferStateTool, resolveDeferState, findDeferSetting } from "../../src/altimate/tools/dbt-defer-state"
 import { initTool } from "./tool-fixture"
 

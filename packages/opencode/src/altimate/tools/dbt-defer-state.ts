@@ -1,9 +1,32 @@
 import z from "zod"
 import fs from "fs"
+import os from "os"
 import path from "path"
 import { createScanner, parse as parseJsonc, stripComments, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
-import { resolveEnvVars, resolveProfilesPath } from "../native/connections/dbt-profiles"
+
+/** Resolve Jinja `{{ env_var('NAME') }}` and `{{ env_var('NAME', 'default') }}`, in single or double quotes. */
+export function resolveEnvVars(value: unknown): unknown {
+  if (typeof value !== "string") return value
+  return value.replace(
+    /\{\{\s*env_var\s*\(\s*(['"])((?:(?!\1)[\s\S])+)\1\s*(?:,\s*(['"])((?:(?!\3)[\s\S])*)\3\s*)?\)\s*\}\}/g,
+    (_match, _q1: string, envName: string, _q2?: string, defaultValue?: string) => process.env[envName] ?? defaultValue ?? "",
+  )
+}
+
+/** dbt's profiles.yml lookup: DBT_PROFILES_DIR, then the project folder, then ~/.dbt. */
+function resolveProfilesPath(projectDir?: string): string {
+  const envDir = process.env.DBT_PROFILES_DIR
+  if (envDir) {
+    const envPath = path.join(envDir, "profiles.yml")
+    if (fs.existsSync(envPath)) return envPath
+  }
+  if (projectDir) {
+    const projectPath = path.join(projectDir, "profiles.yml")
+    if (fs.existsSync(projectPath)) return projectPath
+  }
+  return path.join(os.homedir(), ".dbt", "profiles.yml")
+}
 
 // The Power User setting this tool reads: `dbt.deferConfigPerProject`, keyed by the dbt project's path
 // relative to its workspace folder.
@@ -136,7 +159,7 @@ function lookupDeferSetting(projectDir: string, workspaceDir?: string) {
 }
 
 function profilesFile(projectDir: string): string | undefined {
-  const file = resolveProfilesPath(undefined, projectDir)
+  const file = resolveProfilesPath(projectDir)
   return fs.existsSync(file) ? file : undefined
 }
 

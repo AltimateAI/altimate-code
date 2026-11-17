@@ -84,7 +84,6 @@ describe("feature tools in the allow-list", () => {
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
     for (const id of FEATURE_TOOLS) {
-      if (id === "dbt_defer_state") continue // implemented in its own package
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
@@ -97,7 +96,6 @@ describe("feature tools in the allow-list", () => {
 
   test("each placeholder still checks its arguments before it refuses", async () => {
     for (const id of FEATURE_TOOLS) {
-      if (id === "dbt_defer_state") continue // implemented in its own package
       const tool = await initTool(EXPOSED[id] as any)
       // A string where an object is expected fails every schema, whatever its required fields.
       const failed = await Promise.resolve()
