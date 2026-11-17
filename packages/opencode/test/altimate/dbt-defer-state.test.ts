@@ -170,9 +170,17 @@ describe("dbt_defer_state", () => {
   test("double-quoted env_var() names and defaults are resolved too", async () => {
     write("analytics/dbt_project.yml", "name: shop\nprofile: '{{ env_var(\"DEFER_TEST_PROFILE\", \"shop\") }}'\n")
     write("profiles/profiles.yml", "shop:\n  target: '{{ env_var(\"DEFER_TEST_TARGET2\", \"dev\") }}'\n  outputs:\n    dev:\n      type: duckdb\n")
-    delete process.env.DEFER_TEST_PROFILE
-    delete process.env.DEFER_TEST_TARGET2
-    expect(await resolveDeferState(path.join(root, "analytics"))).toMatchObject({ profile: "shop", defaultTarget: "dev" })
+    const saved = { profile: process.env.DEFER_TEST_PROFILE, target: process.env.DEFER_TEST_TARGET2 }
+    try {
+      delete process.env.DEFER_TEST_PROFILE
+      delete process.env.DEFER_TEST_TARGET2
+      expect(await resolveDeferState(path.join(root, "analytics"))).toMatchObject({ profile: "shop", defaultTarget: "dev" })
+    } finally {
+      if (saved.profile === undefined) delete process.env.DEFER_TEST_PROFILE
+      else process.env.DEFER_TEST_PROFILE = saved.profile
+      if (saved.target === undefined) delete process.env.DEFER_TEST_TARGET2
+      else process.env.DEFER_TEST_TARGET2 = saved.target
+    }
   })
 
   test("a settings file holding only a comment does not hide the workspace entry", () => {
