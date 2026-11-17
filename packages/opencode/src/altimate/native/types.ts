@@ -635,6 +635,49 @@ export interface ExpensiveQueriesResult {
   error?: string
 }
 
+// --- FinOps: Databricks SQL warehouse savings ---
+
+export interface DatabricksSavingsParams {
+  /** Databricks connection name. If omitted, the first Databricks connection is used. */
+  warehouse?: string
+  /** Clock override for tests; the window ends at 06:00 UTC on this instant's UTC date. */
+  now_ms?: number
+}
+
+/** One saving on one SQL warehouse, as altimate-core reports it. */
+export interface DatabricksSavingsFinding {
+  check_id: "wh_classic_pro_to_serverless" | "wh_oversized"
+  title: string
+  warehouse_id: string
+  warehouse_name: string
+  severity: "critical" | "high" | "medium" | "low"
+  daily_min: number
+  daily_max: number
+  monthly_min: number
+  monthly_max: number
+  evidence: Record<string, unknown> & { kind: "serverless" | "over_sized" }
+}
+
+export interface DatabricksSavingsReport {
+  lookback_days: number
+  /** Largest monthly saving first. */
+  findings: DatabricksSavingsFinding[]
+  /** Each warehouse counted once, at its largest low end and largest high end. */
+  total: { monthly_min: number; monthly_max: number; warehouses: number }
+}
+
+export interface DatabricksSavingsResult {
+  success: boolean
+  /** The days the facts cover: `start` inclusive, `end` at 06:00 UTC (YYYY-MM-DD). */
+  window: { start: string; end: string }
+  /** The connection that ran the check, and the SQL warehouse it runs on. */
+  warehouse?: string
+  ran_on?: string
+  warehouses_checked?: number
+  report?: DatabricksSavingsReport
+  error?: string
+}
+
 // --- FinOps: Warehouse Advisor ---
 
 export interface WarehouseAdvisorParams {
@@ -1254,6 +1297,7 @@ export const BridgeMethods = {
   "finops.analyze_credits": {} as { params: CreditAnalysisParams; result: CreditAnalysisResult },
   "finops.expensive_queries": {} as { params: ExpensiveQueriesParams; result: ExpensiveQueriesResult },
   "finops.warehouse_advice": {} as { params: WarehouseAdvisorParams; result: WarehouseAdvisorResult },
+  "finops.databricks_savings": {} as { params: DatabricksSavingsParams; result: DatabricksSavingsResult },
   "finops.unused_resources": {} as { params: UnusedResourcesParams; result: UnusedResourcesResult },
   "finops.role_grants": {} as { params: RoleGrantsParams; result: RoleGrantsResult },
   "finops.role_hierarchy": {} as { params: RoleHierarchyParams; result: RoleHierarchyResult },

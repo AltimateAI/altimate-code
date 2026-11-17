@@ -419,6 +419,7 @@ const analystConfigEnabled = new Set([
   "dbt_profiles",
   "dbt_unit_test_gen",
   "finops_analyze_credits",
+  "finops_databricks_savings",
   "finops_expensive_queries",
   "finops_query_history",
   "finops_role_grants",

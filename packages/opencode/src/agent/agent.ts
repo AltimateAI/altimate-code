@@ -267,6 +267,7 @@ export const layer = Layer.effect(
           finops_analyze_credits: "allow",
           finops_expensive_queries: "allow",
           finops_warehouse_advice: "allow",
+          finops_databricks_savings: "allow",
           finops_unused_resources: "allow",
           finops_role_grants: "allow",
           finops_role_hierarchy: "allow",

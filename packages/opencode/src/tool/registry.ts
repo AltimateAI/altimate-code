@@ -106,6 +106,7 @@ import { FinopsQueryHistoryTool } from "../altimate/tools/finops-query-history"
 import { FinopsAnalyzeCreditsTool } from "../altimate/tools/finops-analyze-credits"
 import { FinopsExpensiveQueriesTool } from "../altimate/tools/finops-expensive-queries"
 import { FinopsWarehouseAdviceTool } from "../altimate/tools/finops-warehouse-advice"
+import { FinopsDatabricksSavingsTool } from "../altimate/tools/finops-databricks-savings"
 import { FinopsUnusedResourcesTool } from "../altimate/tools/finops-unused-resources"
 import {
   FinopsRoleGrantsTool,
@@ -490,6 +491,7 @@ export namespace ToolRegistry {
       FinopsAnalyzeCreditsTool,
       FinopsExpensiveQueriesTool,
       FinopsWarehouseAdviceTool,
+      FinopsDatabricksSavingsTool,
       FinopsUnusedResourcesTool,
       FinopsRoleGrantsTool,
       FinopsRoleHierarchyTool,

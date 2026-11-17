@@ -23,6 +23,7 @@ import { analyzeCredits, getExpensiveQueries } from "../../src/altimate/native/f
 import { adviseWarehouse } from "../../src/altimate/native/finops/warehouse-advisor"
 import { findUnusedResources } from "../../src/altimate/native/finops/unused-resources"
 import { queryGrants } from "../../src/altimate/native/finops/role-access"
+import { databricksSavings } from "../../src/altimate/native/finops/databricks-savings"
 
 const DB_CONFIG = process.env.ALTIMATE_CODE_CONN_DATABRICKS_TEST
 const HAS_DATABRICKS = !!DB_CONFIG
@@ -203,5 +204,19 @@ describe.skipIf(!HAS_DATABRICKS)("Databricks FinOps Integration", () => {
         expect(result.grant_count).toBe(0)
       }
     })
+  })
+  // -------------------------------------------------------------------------
+  // Databricks SQL warehouse savings (facts measured here, rules in altimate-core)
+  // -------------------------------------------------------------------------
+  describe("databricks_savings", () => {
+    test("measures every warehouse of the workspace and returns core's report", async () => {
+      const result = await databricksSavings({ warehouse: WH })
+      expectValidResult(result)
+      if (result.success) {
+        expect(result.warehouses_checked).toBeGreaterThan(0)
+        expect(Array.isArray(result.report!.findings)).toBe(true)
+        expect(result.report!.total.warehouses).toBe(new Set(result.report!.findings.map((f) => f.warehouse_id)).size)
+      }
+    }, 300000)
   })
 })
