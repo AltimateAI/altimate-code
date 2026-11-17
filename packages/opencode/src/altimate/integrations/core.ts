@@ -917,6 +917,8 @@ export const sameRecord = (cur: StoredProvider | undefined, rec: StoredProvider 
   (cur?.connectionId ?? null) === (rec?.connectionId ?? null) &&
   cur?.validatedAt === rec?.validatedAt &&
   cur?.credentialStamp === rec?.credentialStamp &&
+  // A cleanup that failed meanwhile turned what was read into a leftover, which must not be uploaded.
+  (cur?.cleanupPending || false) === (rec?.cleanupPending || false) &&
   JSON.stringify(cur?.secretFields ?? []) === JSON.stringify(rec?.secretFields ?? []) &&
   JSON.stringify(Object.entries(cur?.values ?? {}).sort()) === JSON.stringify(Object.entries(rec?.values ?? {}).sort())
 

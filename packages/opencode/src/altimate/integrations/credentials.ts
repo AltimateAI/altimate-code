@@ -182,23 +182,28 @@ export function namesGithubDotCom(value: string): boolean {
 }
 
 /**
- * The env Claude Code's settings give the servers it starts: user settings, then this directory's and its parents'
- * project settings. A host set there applies to a server's token just as one in this shell does.
+ * The env blocks Claude Code's settings give the servers it starts, one per file: managed settings, user settings, and
+ * this directory's and its parents' project settings. Each is checked on its own, so one file cannot hide another's host.
  */
-function claudeSettingsEnv(): Record<string, unknown> {
-  const files = [path.join(core.homeDir(), ".claude", "settings.json")]
+function claudeSettingsEnvs(): Record<string, unknown>[] {
+  const files = [
+    "/Library/Application Support/ClaudeCode/managed-settings.json",
+    "/etc/claude-code/managed-settings.json",
+    "C:\\ProgramData\\ClaudeCode\\managed-settings.json",
+    path.join(core.homeDir(), ".claude", "settings.json"),
+  ]
   for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
     files.push(path.join(dir, ".claude", "settings.json"), path.join(dir, ".claude", "settings.local.json"))
     if (path.dirname(dir) === dir) break
   }
-  return Object.assign(
-    {},
-    ...files.map((f) => {
-      const env = core.readJson<any>(f, {})?.env
-      return env && typeof env === "object" ? env : {}
-    }),
-  )
+  return files.flatMap((f) => {
+    const env = core.readJson<any>(f, {})?.env
+    return env && typeof env === "object" ? [env] : []
+  })
 }
+
+/** Whether the shell's and every Claude Code settings file's host settings name github.com, each checked on its own. */
+const surroundingHostsAreGithubDotCom = () => [process.env, ...claudeSettingsEnvs()].every(hostSettingsAreGithubDotCom)
 
 /** Whether every host setting in an environment, if any, names github.com. */
 function hostSettingsAreGithubDotCom(env: Record<string, unknown>): boolean {
@@ -222,7 +227,8 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   const settings = Object.entries(server.env ?? {}).every(
     ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
   )
-  return settings && hostSettingsAreGithubDotCom({ ...process.env, ...claudeSettingsEnv(), ...server.env })
+  // The server's own settings, this shell's and Claude Code's are each checked: none may name another host.
+  return settings && surroundingHostsAreGithubDotCom()
 }
 
 /**
@@ -274,7 +280,7 @@ function claimedByOtherHost(name: string): boolean {
 
 /** Whether the shell's GitHub token variable may be read: the shell's host settings name github.com and no other-host server takes its token from it. */
 export function shellGithubTokenUsable(name: string): boolean {
-  return hostSettingsAreGithubDotCom({ ...process.env, ...claudeSettingsEnv() }) && !claimedByOtherHost(name)
+  return surroundingHostsAreGithubDotCom() && !claimedByOtherHost(name)
 }
 
 /** Whether gh may be asked for the github.com token: gh hands back GH_TOKEN or GITHUB_TOKEN as that token whatever host they belong to, so it is asked only when each one set is usable. */

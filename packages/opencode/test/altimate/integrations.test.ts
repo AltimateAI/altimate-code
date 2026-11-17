@@ -46,6 +46,9 @@ describe("sameRecord", () => {
     expect(core.sameRecord({ ...base, credentialStamp: "b" }, base)).toBe(false)
     expect(core.sameRecord({ ...base, values: { url: "y" } }, base)).toBe(false)
     expect(core.sameRecord({ ...base, secretFields: ["other"] }, base)).toBe(false)
+    // A cleanup that failed meanwhile made the credential read before it a leftover.
+    expect(core.sameRecord({ ...base, cleanupPending: "https://x#t" }, base)).toBe(false)
+    expect(core.sameRecord({ ...base, cleanupPending: false }, base)).toBe(true)
   })
 })
 
@@ -100,11 +103,11 @@ describe("GitHub host policy", () => {
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp"] },
     ]
     for (const server of others) expect(creds.mcpServerIsGithubDotCom(server)).toBe(false)
-    // A host exported in this shell applies to the server too, unless the server sets its own.
+    // A host exported in this shell blocks the server, even one that names github.com itself: each source is checked on its own.
     process.env.GITHUB_HOST = "ghe.corp"
     try {
       expect(creds.mcpServerIsGithubDotCom(official)).toBe(false)
-      expect(creds.mcpServerIsGithubDotCom({ ...official, env: { ...official.env, GITHUB_HOST: "github.com" } })).toBe(true)
+      expect(creds.mcpServerIsGithubDotCom({ ...official, env: { ...official.env, GITHUB_HOST: "github.com" } })).toBe(false)
     } finally {
       delete process.env.GITHUB_HOST
     }
@@ -1990,6 +1993,8 @@ describe("credentials flow", () => {
         // A host Claude Code's own settings give the servers it starts.
         { settings: { GITHUB_HOST: "https://ghe.corp" }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
         { settings: { GITHUB_HOST: "https://ghe.corp" }, env: { GITHUB_TOKEN: GOOD } },
+        // Claude Code's settings naming github.com do not hide another host set in the shell.
+        { settings: { GH_HOST: "github.com" }, env: { GH_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
         { env: { GITHUB_TOKEN: GOOD, GH_HOST: "${UNSET:-github.com-ghe.corp}" } },
         { env: { GITHUB_TOKEN: GOOD, GITHUB_API_URL: "https://github.com:x@ghe.corp/api/v3" } },
         // The user's own config ties the shell token to another host.
@@ -2061,6 +2066,23 @@ describe("credentials flow", () => {
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
       } finally {
         fs.rmSync(claude, { force: true })
+      }
+    })
+
+    test("a project's settings naming another host are not hidden by a parent's naming github.com", async () => {
+      const repo = fs.mkdtempSync(path.join(tmp, "repo-"))
+      for (const [dir, host] of [[repo, "github.com"], [path.join(repo, "sub"), "ghe.corp"]]) {
+        fs.mkdirSync(path.join(dir, ".claude"), { recursive: true })
+        fs.writeFileSync(path.join(dir, ".claude", "settings.json"), JSON.stringify({ env: { GITHUB_HOST: host } }))
+      }
+      const cwd = process.cwd()
+      process.chdir(path.join(repo, "sub"))
+      process.env.GITHUB_TOKEN = GOOD
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+      } finally {
+        process.chdir(cwd)
+        delete process.env.GITHUB_TOKEN
       }
     })
 
