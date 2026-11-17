@@ -208,8 +208,11 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
       blocked = true
     // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
     // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write. This runs at
-    // every nesting depth, as on main. Quoted names unwrapped, so "exec"('...') and [exec]('...') count.
-    if (DYNAMIC_SQL.test(maskSql(lexical.tokens, true)) && mentionsHardDenyAnywhere(sql)) blocked = true
+    // every nesting depth, as on main. Both readings count: quoted names masked to spaces, as on main, so
+    // EXEC[sp_executesql] and PREPARE`p`FROM keep their word boundaries, and quoted names unwrapped, so
+    // "exec"('...') and [exec]('...') count as calls.
+    const dynamic = DYNAMIC_SQL.test(maskSql(lexical.tokens)) || DYNAMIC_SQL.test(maskSql(lexical.tokens, true))
+    if (dynamic && mentionsHardDenyAnywhere(sql)) blocked = true
   }
   return { queryType: "write", blocked }
 }

@@ -706,6 +706,15 @@ describe("each engine's own literal and statement rules", () => {
     ["DECLARE @s nvarchar(max) = 'DROP ' + 'SCHEMA x'; EXEC [from] @s", "sqlserver", "write", true],
     ["SELECT 'DROP SCHEMA analytics' AS execute", "postgres", "write", true],
     ["SELECT 'TRUNCATE' AS v FROM t ORDER BY v", "postgres", "read", false],
+    // A quoted name right after EXEC or PREPARE keeps the word boundary.
+    ["DECLARE @s nvarchar(max) = 'DROP ' + 'DATABASE victim'; EXEC[sp_executesql] @s", "sqlserver", "write", true],
+    ["DECLARE @s nvarchar(max) = 'DROP ' + 'DATABASE victim'; EXEC[dbo].[sp_executesql] @s", "sqlserver", "write", true],
+    ["DECLARE @s nvarchar(max) = 'DROP ' + 'DATABASE victim'; EXECUTE[sp_executesql] @s", "sqlserver", "write", true],
+    ["DECLARE @s nvarchar(max) = 'DROP ' + 'DATABASE victim'; EXEC\"sp_executesql\" @s", "sqlserver", "write", true],
+    ["DECLARE @s nvarchar(max) = 'DROP ' + 'DATABASE victim'; SELECT 1 [x]EXEC(@s)", "sqlserver", "write", true],
+    ["CREATE PROCEDURE p AS EXEC[sp_executesql] N'DROP ' + N'DATABASE x'", "sqlserver", "write", true],
+    ["CREATE PROCEDURE r5p() BEGIN SET @s = CONCAT('DROP ', 'DATABASE victim'); PREPARE`p`FROM @s; EXECUTE`p`; END", "mysql", "write", true],
+    ["PREPARE\"p\" AS SELECT 'DROP ' || 'SCHEMA victim'", "postgres", "write", true],
     // The dynamic scan runs inside nested SQL too, as on main.
     ["SELECT * FROM query('SELECT execute FROM t WHERE s = ''DROP SCHEMA x''')", "duckdb", "write", true],
     ["SELECT * FROM TABLE(to_query('SELECT execute FROM t WHERE s = ''DROP DATABASE x'''))", "snowflake", "write", true],
