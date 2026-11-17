@@ -143,7 +143,7 @@ describe("dbt_cte_profile list", () => {
     const result = await tool.execute({ model: "looped" }, ctx)
     expect(result.metadata.ctes.map((c: { name: string }) => c.name)).toEqual(["base"])
     expect(result.metadata.incomplete).toBe(true)
-    expect(result.output).toContain("The list is incomplete: a CTE after line 1")
+    expect(result.output).toContain("The list is incomplete: the CTEs from line 1 on could not be read")
     const absent = await tool.execute({ model: "looped", cte: "final" }, ctx)
     expect(absent.metadata.success).toBe(false)
     expect(absent.output).toContain("The list is incomplete")
@@ -152,10 +152,25 @@ describe("dbt_cte_profile list", () => {
       "{% if true %}\nwith a as (select 1 as x), {{ y }}_c as (select 1 as x) select * from a\n{% else %}\nwith b as (select 2 as x) select * from b\n{% endif %}\n",
     )
     const multi = await tool.execute({ model: "firstloop" }, ctx)
-    expect(multi.output).toContain("after line 2 could not be read")
+    expect(multi.output).toContain("the CTEs from line 2 on could not be read")
     await writeFile(path.join(project, "models", "marts", "loopfirst.sql"), "with {{ x }}_c as (select 1 as a), final as (select 1 as a) select * from final\n")
     const first = await tool.execute({ model: "loopfirst" }, ctx)
     expect(first.metadata.incomplete).toBe(true)
+    expect(first.metadata.ctes).toEqual([])
+    expect(first.output).toContain("No CTEs in")
+    expect(first.output).toContain("the CTEs from line 1 on could not be read")
+    for (const [model, sql] of [
+      ["prefixed", "with recursive stg_{{ var('s') }} as (select 1 as a) select * from stg_x\n"],
+      ["hierarchy", "select * from emp start with {{ root_filter() }} connect by prior id = parent_id\n"],
+    ]) {
+      await writeFile(path.join(project, "models", "marts", `${model}.sql`), sql)
+    }
+    expect((await tool.execute({ model: "prefixed" }, ctx)).metadata.incomplete).toBe(true)
+    const hierarchy = await tool.execute({ model: "hierarchy" }, ctx)
+    expect(hierarchy.metadata.incomplete).toBeUndefined()
+    expect(hierarchy.output).toBe("No CTEs in " + path.join("models", "marts", "hierarchy.sql") + ".")
+    const byPosition = await tool.execute({ model: "looped", position: 5 }, ctx)
+    expect(byPosition.output).toContain("The list is incomplete")
     const whole = await tool.execute({ model: "customers" }, ctx)
     expect(whole.metadata.incomplete).toBeUndefined()
   })

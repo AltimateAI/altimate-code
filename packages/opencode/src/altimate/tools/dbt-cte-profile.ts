@@ -159,7 +159,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
         position,
       }))
       const stop = unreadCteAfter(text, ctes)
-      const note = stop === undefined ? "" : `\nThe list is incomplete: a CTE after line ${text.substring(0, stop).split("\n").length} could not be read (its name is built by a Jinja expression or loop).`
+      const note = stop === undefined ? "" : `\nThe list is incomplete: the CTEs from line ${text.substring(0, stop).split("\n").length} on could not be read (its name is built by a Jinja expression or loop).`
       const output = (list.length
         ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `position ${c.position}: ${c.name} (line ${c.line})`)].join("\n")
         : `No CTEs in ${file}.`) + note

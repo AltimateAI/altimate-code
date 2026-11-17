@@ -302,7 +302,7 @@ export function detectCtes(text: string): CteInfo[] {
 }
 
 /**
- * Offset where a CTE that could not be read begins or is announced, or undefined when every CTE was read: the
+ * Offset from which the CTEs could not be read, or undefined when every CTE was read: the
  * comma after the last CTE read of a WITH clause that goes on, or the start of a clause where none was read
  * (its first name is built by a Jinja expression or loop). The list is short from there on.
  */
@@ -311,8 +311,12 @@ export function unreadCteAfter(text: string, ctes: CteInfo[]): number | undefine
   for (const withPos of findTopLevelWithKeywords(text)) {
     const own = ctes.filter((c) => c.withClauseStart === withPos)
     if (own.length === 0) {
-      const first = skipTrivia(text, withPos + 4, true)
-      if (text[first] === "{" && text[first + 1] === "{") found.push(first)
+      // `START WITH` (a hierarchical query) opens no CTE list.
+      if (/\bstart\s*$/i.test(text.substring(Math.max(0, withPos - 24), withPos))) continue
+      let first = skipTrivia(text, withPos + 4, true)
+      if (/recursive\b/iy.test(text.substring(first, first + 10))) first = skipTrivia(text, first + "recursive".length, true)
+      const unreadName = /^[\p{L}\p{N}_$]*\{\{/u.exec(text.substring(first, first + 130))
+      if (unreadName) found.push(first)
       continue
     }
     const last = own[own.length - 1]
