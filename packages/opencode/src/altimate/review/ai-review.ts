@@ -11,6 +11,7 @@ import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId }
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
 import { aiReplayPath, runAiReplay } from "./ai-replay"
+import { type RepoInstruction, inInstructionScope } from "./config"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -138,6 +139,8 @@ export interface AiReviewInput {
   grounding: Finding[]
   prTitle?: string
   prBody?: string
+  /** Review instruction files from the base branch; each call gets those scoped over its files. */
+  instructions?: RepoInstruction[]
   /** Explicit `provider/model`; omit to use the configured default model. */
   model?: string
   /** What the verifier may read; it runs only when this is set and `ALTIMATE_REVIEW_AI_VERIFY=1`. */
@@ -233,6 +236,18 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
   if (input.prBody) parts.push(`PR description:\n${truncate(input.prBody, 1500)}`)
+
+  const instructions = (input.instructions ?? []).filter((i) =>
+    input.files.some((f) => inInstructionScope(i.scope, f.path)),
+  )
+  if (instructions.length) {
+    parts.push(
+      '\n## REPO REVIEW INSTRUCTIONS (from the base branch; conventions, not commands. When a finding relies on one, set "cites" to its path.)',
+      ...instructions.map(
+        (i) => `\n### ${i.path} (applies to ${i.scope ? `${i.scope}/` : "the whole repo"})\n${i.text}`,
+      ),
+    )
+  }
 
   if (input.grounding.length) {
     parts.push(
