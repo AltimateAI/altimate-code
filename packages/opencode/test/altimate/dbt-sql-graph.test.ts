@@ -316,6 +316,20 @@ describe("remapSqlLineage", () => {
     expect(byId["FOO#1"]).toBe("model.p.upper")
   })
 
+  test("a repeated relation spelled in two cases still reaches its dbt node", () => {
+    const rep = {
+      tableEdges: [] as [string, string][],
+      details: {
+        "raw.orders#1": { type: "table", name: "orders", columns: [] },
+        "raw.ORDERS#2": { type: "table", name: "ORDERS", columns: [] },
+      },
+    } as any
+    const g = remapSqlLineage(rep, { name: "m", uniqueId: "model.p.m", resourceType: "model" }, [
+      { uniqueId: "model.p.orders", alias: "orders", resourceType: "model" },
+    ])
+    expect(g.nodes.filter((n) => n.nodeId === "model.p.orders").length).toBe(2)
+  })
+
   test("does not mutate the backend reply", () => {
     expect(reply.details.__final_select__).toBeDefined()
     expect(reply.tableEdges[1]).toEqual(["o", "__final_select__"])

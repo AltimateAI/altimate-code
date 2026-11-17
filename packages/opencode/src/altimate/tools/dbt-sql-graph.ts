@@ -132,20 +132,23 @@ export function remapSqlLineage(
   const claimed = new Map<string, Set<string>>()
   for (const p of parents) {
     // A source's relation is its table's identifier; any other node's, its alias.
-    const wanted = p.sourceTable ?? p.alias ?? ""
-    if (!wanted) continue
+    if (!(p.sourceTable ?? p.alias)) continue
     // The backend keys a relation by its location and a per-occurrence suffix, so the match is on its name, in the parent's database and schema when both say one;
     // every occurrence of the relation in the SQL stands for the same dbt node. A quoted `Foo` and `FOO` can be two relations:
-    // an exact-case match wins, and only without one does the match ignore case.
-    const matches = (fold: (v: string) => string) =>
+    // an occurrence goes to the parent whose name it matches exactly, and other occurrences match ignoring case unless another parent owns them exactly.
+    const matches = (q: (typeof parents)[number], fold: (v: string) => string) =>
       Object.entries(details).filter(([k, d]) => {
-        if (d.type !== "table" || fold(d.name ?? k) !== fold(wanted)) return false
-        if (d.schema && p.schema && fold(d.schema) !== fold(p.schema)) return false
-        if (d.db && p.database && fold(d.db) !== fold(p.database)) return false
+        const w = q.sourceTable ?? q.alias ?? ""
+        if (d.type !== "table" || fold(d.name ?? k) !== fold(w)) return false
+        if (d.schema && q.schema && fold(d.schema) !== fold(q.schema)) return false
+        if (d.db && q.database && fold(d.db) !== fold(q.database)) return false
         return true
       })
-    const exact = matches((v) => v)
-    for (const [k] of exact.length ? exact : matches((v) => v.toLowerCase())) {
+    const exactOf = (q: (typeof parents)[number]) => matches(q, (v) => v).map(([k]) => k)
+    const others = new Set(parents.filter((q) => q !== p && (q.sourceTable ?? q.alias)).flatMap(exactOf))
+    const mine = new Set(exactOf(p))
+    for (const [k] of matches(p, (v) => v.toLowerCase())) {
+      if (!mine.has(k) && others.has(k)) continue
       claimed.set(k, (claimed.get(k) ?? new Set()).add(p.uniqueId))
       mapping[k] = { nodeId: p.uniqueId, type: p.resourceType }
     }
