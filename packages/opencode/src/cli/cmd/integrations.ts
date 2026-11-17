@@ -40,7 +40,7 @@ const SYNC_LABEL: Record<ProviderStatus["sync"], string> = {
   blocked: "blocked, kept local",
 }
 
-function printStatus(result: StatusResult, title: string) {
+export function printStatus(result: StatusResult, title: string) {
   out()
   out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${clean(result.workspace.name)}` : "workspace not linked"}${result.workspace.tenant ? ` (${clean(result.workspace.tenant)})` : ""}${S.TEXT_NORMAL}`)
   if (result.workspaceUnchecked) out(`  ${S.TEXT_WARNING}Could not check the workspace, so these states come from this machine and may be out of date: ${clean(result.workspaceUnchecked)}${S.TEXT_NORMAL}`)
@@ -50,6 +50,8 @@ function printStatus(result: StatusResult, title: string) {
     const src = p.source ? `${clean(p.source.label)}${p.account ? ` · ${clean(p.account)}` : ""}` : "-"
     out(`  ${v.color}${v.icon}${S.TEXT_NORMAL} ${S.TEXT_NORMAL_BOLD}${p.name.padEnd(8)}${S.TEXT_NORMAL} ${v.color}${v.label.padEnd(10)}${S.TEXT_NORMAL} ${src}`)
     if (p.state !== "not_found") out(`    ${S.TEXT_DIM}${SYNC_LABEL[p.sync]}${p.expiresAt && p.state === "connected" ? ` · expires ${clean(p.expiresAt)}` : ""}${p.note ? ` · ${clean(p.note)}` : ""}${S.TEXT_NORMAL}`)
+    else if (p.note) out(`    ${S.TEXT_DIM}${clean(p.note)}${S.TEXT_NORMAL}`)
+    if (p.found) out(`    ${S.TEXT_DIM}also found on this machine: ${clean(p.found.source.label)}${p.found.account ? ` · ${clean(p.found.account)}` : ""}${S.TEXT_NORMAL}`)
   }
   out()
 }
@@ -104,7 +106,7 @@ export const syncedTo = (o: Pick<core.SyncOutcome, "shared">) => `synced to work
 function renderSync(o: core.SyncOutcome) {
   const name = core.PROVIDER_NAMES[o.id]
   const warnings = () => {
-    for (const st of o.steps) if (!st.ok && st.label.startsWith(core.LOCAL_CLEANUP_FAILED_PREFIX)) out(`  ${S.TEXT_WARNING}!${S.TEXT_NORMAL} ${clean(st.label)}`)
+    for (const st of o.steps) if (!st.ok && (st.label.startsWith(core.LOCAL_CLEANUP_FAILED_PREFIX) || st.label === core.NOT_LINKED_LABEL)) out(`  ${S.TEXT_WARNING}!${S.TEXT_NORMAL} ${clean(st.label)}`)
   }
   if (o.result === "kept_local") return out(`  ${S.TEXT_WARNING}⊘${S.TEXT_NORMAL} ${name}: kept local (${clean(o.reason)})`)
   if (o.result === "failed") {

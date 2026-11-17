@@ -312,8 +312,12 @@ export async function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvide
 }
 
 /** Claude MCP server maps the user set up themselves: user level and this project's entry in ~/.claude.json. A repository's own `.mcp.json` is not among them, as whoever controls the repository can write it; it only signals presence in `detectFromClaudeConfigs`. */
+/** Claude Code's own directory and config file: moved together by CLAUDE_CONFIG_DIR. */
+export const claudeDir = (home = homeDir()) => process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude")
+export const claudeJsonPath = (home = homeDir()) => (process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : path.join(home, ".claude.json"))
+
 export function mcpServerMaps(home: string, cwd: string): { scope: "user" | "project"; servers: Record<string, McpServer> }[] {
-  const claude = readJson<any>(path.join(home, ".claude.json"), {})
+  const claude = readJson<any>(claudeJsonPath(home), {})
   return [
     { scope: "user", servers: claude.mcpServers ?? {} },
     { scope: "project", servers: claude.projects?.[cwd]?.mcpServers ?? {} },
@@ -1176,8 +1180,12 @@ async function syncReal(
         const own = backend.ownConnections(visible)
         // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
         const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
-        // A connection this machine saved that is gone from the workspace is not attached; it was deleted there.
-        if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
+        // A connection this machine saved that is gone from the workspace is not attached; it was deleted there. What was left here
+        // as its leftover is then the only copy, so it is kept and stops being a leftover.
+        if (!found) {
+          if (store.providers[id]?.cleanupPending) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
+          return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
+        }
         // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for,
         // also when the workspace marked the connection invalid: it still holds it. Only a leftover recorded after an upload is removed: any other secret here may be the only copy of a credential.
         if (known != null && store.providers[id]?.cleanupPending === backendKey(cfg)) await purgeLocal(store.providers[id])
@@ -1329,7 +1337,9 @@ export async function disconnectRemote(id: ProviderId, cfg?: backend.BackendConf
 export async function removeManaged(id: ProviderId, config: backend.BackendConfig | null): Promise<{ removed: number; detachError: string | null }> {
   if (!config) return { removed: 0, detachError: null }
   const name = managedName(id)
-  const managed = (await backend.listOwnConnections(config)).filter((c) => c.integration_id === INTEGRATION_IDS[id] && c.name === name)
+  // The connection this machine recorded counts too, so it is found after the host name changed.
+  const recorded = loadStore().providers[id]?.connectionId
+  const managed = (await backend.listOwnConnections(config)).filter((c) => c.integration_id === INTEGRATION_IDS[id] && (c.name === name || c.id === recorded))
   let detachError: string | null = null
   for (const c of managed) {
     detachError = (await detachFromBoundWorkspace(config, c.id)) ?? detachError

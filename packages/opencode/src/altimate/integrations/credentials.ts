@@ -8,6 +8,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
+import { parse as parseJsonc } from "jsonc-parser"
 import { IntegrationsCore as core } from "./core"
 import { IntegrationsBackend as backend } from "./backend"
 import { workspaceLabel } from "../workspace/workspace-name"
@@ -181,17 +182,15 @@ export function namesGithubDotCom(value: string): boolean {
   }
 }
 
+/** Where Claude Code reads an organisation's managed settings and MCP servers. */
+const MANAGED_DIRS = ["/Library/Application Support/ClaudeCode", "/etc/claude-code", "C:\\Program Files\\ClaudeCode", "C:\\ProgramData\\ClaudeCode"]
+
 /**
  * The env blocks Claude Code's settings give the servers it starts, one per file: managed settings, user settings, and
  * this directory's and its parents' project settings. Each is checked on its own, so one file cannot hide another's host.
  */
 function claudeSettingsEnvs(): Record<string, unknown>[] {
-  const files = [
-    "/Library/Application Support/ClaudeCode/managed-settings.json",
-    "/etc/claude-code/managed-settings.json",
-    "C:\\ProgramData\\ClaudeCode\\managed-settings.json",
-    path.join(core.homeDir(), ".claude", "settings.json"),
-  ]
+  const files = [...MANAGED_DIRS.map((d) => path.join(d, "managed-settings.json")), path.join(core.claudeDir(), "settings.json")]
   for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
     files.push(path.join(dir, ".claude", "settings.json"), path.join(dir, ".claude", "settings.local.json"))
     if (path.dirname(dir) === dir) break
@@ -220,6 +219,8 @@ const isRemote = (server: core.McpServer) => Boolean(server.url) || server.type 
 export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   if (isRemote(server) || typeof server.command !== "string") return false
   const command = server.command.match(GITHUB_MCP_COMMAND)?.[1]?.toLowerCase()
+  // A config file may hold anything: arguments that are not a list are not one of the official setups.
+  if (server.args != null && !Array.isArray(server.args)) return false
   const args = server.args ?? []
   if (!command || !args.every((a) => typeof a === "string" && (GITHUB_MCP_WORD.test(a) || GITHUB_MCP_PROGRAM.test(a)))) return false
   // docker and npx must be running GitHub's server; the binary is it.
@@ -236,13 +237,36 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
  * entries, and their .mcp.json files. A repository's file is read here only to refuse a token, never to read one.
  */
 function serversAround(): [string, core.McpServer][] {
-  const claude = core.readJson<any>(path.join(core.homeDir(), ".claude.json"), {})
-  const maps: unknown[] = [claude.mcpServers]
+  const claude = core.readJson<any>(core.claudeJsonPath(), {})
+  const maps: unknown[] = [claude.mcpServers, ...MANAGED_DIRS.map((d) => core.readJson<any>(path.join(d, "managed-mcp.json"), {})?.mcpServers)]
+  const own: unknown[] = [ownMcpServers(path.join(xdgConfig(), "opencode")), ownMcpServers(path.join(xdgConfig(), "altimate-code"))]
   for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
     maps.push(claude.projects?.[dir]?.mcpServers, core.readJson<any>(path.join(dir, ".mcp.json"), {})?.mcpServers)
+    own.push(ownMcpServers(dir), ownMcpServers(path.join(dir, ".opencode")))
     if (path.dirname(dir) === dir) break
   }
-  return maps.flatMap((m) => (m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([, sv]) => !!sv && typeof sv === "object") : []))
+  return [...maps, ...own].flatMap((m) => (m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([, sv]) => !!sv && typeof sv === "object") : []))
+}
+
+const xdgConfig = () => process.env.XDG_CONFIG_HOME || path.join(core.homeDir(), ".config")
+
+/** This tool's own MCP servers in a config directory (local ones as command arrays with an environment), in Claude's shape. */
+function ownMcpServers(dir: string): Record<string, core.McpServer> {
+  const servers: Record<string, core.McpServer> = {}
+  for (const file of ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]) {
+    let mcp: unknown
+    try {
+      mcp = parseJsonc(fs.readFileSync(path.join(dir, file), "utf8"))?.mcp
+    } catch {
+      continue
+    }
+    for (const [name, sv] of Object.entries(mcp && typeof mcp === "object" ? (mcp as Record<string, any>) : {})) {
+      if (!sv || typeof sv !== "object") continue
+      const command = Array.isArray(sv.command) ? sv.command : []
+      servers[name] = { command: command[0], args: command.slice(1), url: sv.url, env: sv.environment }
+    }
+  }
+  return servers
 }
 
 /** GitHub's own remote MCP endpoint works only with github.com tokens, so a token it is given belongs to github.com. */
@@ -266,12 +290,14 @@ function claimedByOtherHost(name: string): boolean {
   const value = process.env[name]?.trim()
   return serversAround().some(([serverName, server]) => {
     // A GitHub server by what it is called or runs, not by a folder path it is given (a filesystem server over ~/github is not one).
-    const named = [serverName, server.command, server.url, ...(server.args ?? []).filter((a) => typeof a === "string" && !/^([~/.]|[A-Za-z]:[\\/])/.test(a))]
+    const args: unknown[] = Array.isArray(server.args) ? server.args : server.args != null ? [server.args] : []
+    // The command by its file name only: a folder it sits in does not make it a GitHub server.
+    const named = [serverName, typeof server.command === "string" ? path.basename(server.command) : "", server.url, ...args.filter((a) => typeof a === "string" && !/^([~/.]|[A-Za-z]:[\\/])/.test(a))]
     const github = /github/i.test(named.filter(Boolean).join(" "))
     if (isGithubDotComRemote(server) || (github && mcpServerIsGithubDotCom(server))) return false
     const text = JSON.stringify(server)
     // docker passes a variable on by name in any of its forms: -e NAME, -eNAME, --env=NAME.
-    if (reference.test(text) || (server.args ?? []).some((a) => word.test(String(a))) || (!!value && text.includes(value))) return true
+    if (reference.test(text) || args.some((a) => word.test(String(a))) || (!!value && text.includes(value))) return true
     // A local GitHub server, or one set to another host, with no token of its own reads this environment's.
     const inheritsToken = !isRemote(server) && !Object.keys(server.env ?? {}).some((k) => GITHUB_TOKEN_KEY.test(k))
     return inheritsToken && (github || !hostSettingsAreGithubDotCom(server.env ?? {}))
@@ -406,7 +432,8 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
       origin[f.name] = "draft"
       continue
     }
-    const stored = detectedOnly ? undefined : f.secret ? await core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
+    // A recorded leftover is what a workspace already holds, or an older credential it replaced: it is never offered again.
+    const stored = detectedOnly || (f.secret && rec?.cleanupPending) ? undefined : f.secret ? await core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
     if (stored) {
       values[f.name] = f.name === "jiraDomain" ? core.normaliseJiraDomain(stored) : stored
       origin[f.name] = "stored"
@@ -757,7 +784,11 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   if (!check.ok && !unverified) {
     if (check.rejected) {
       // The provider refused what was typed: it is not kept, and the connection that was working is left as it was.
-      for (const f of secretFields) if (r.origin[f] === "draft") await core.deleteSecret(core.secretKey("draft", id, f))
+      // Only the value that was checked: one saved again while the check ran is a new entry and stays.
+      await core.withLock(async () => {
+        for (const f of secretFields)
+          if (r.origin[f] === "draft" && (await core.readSecret(core.secretKey("draft", id, f))) === r.values[f]) await core.deleteSecret(core.secretKey("draft", id, f))
+      })
       // Only a re-test of exactly the stored values (every field, not just the secrets) shows that credential has stopped working.
       if (rec?.registered && secretFields.length && r.variant === rec.variant && r.def.fields.every((f) => !r.values[f.name] || r.origin[f.name] === "stored")) {
         await core.updateStore((store) => {
@@ -849,6 +880,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
           written.add(f)
         }
         if (secretFields[0] && r.values[secretFields[0]]) await put(id, r.values[secretFields[0]])
+        // The record is written before anything old is purged, so a failed write is undone like a failed secret write.
+        await record(false, { connectionId: null })
       } catch (e) {
         for (const [key, prev] of undo.reverse()) {
           try {
@@ -869,7 +902,6 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       } catch (e) {
         purgeNote = `The previous credential could not be removed from this machine: ${e instanceof Error ? e.message : String(e)}`
       }
-      await record(false, { connectionId: null })
       // A draft left behind does not stop the move: the workspace copy is still removed below.
       const draftNote = await clearDrafts()
       if (signedIn && hadCopy) {

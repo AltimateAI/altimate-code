@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import path from "node:path"
 import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
-import { skipsSynced, clean, syncedTo, SyncCommand, ConnectCommand } from "../../src/cli/cmd/integrations"
+import { skipsSynced, clean, syncedTo, SyncCommand, ConnectCommand, printStatus } from "../../src/cli/cmd/integrations"
 import { IntegrationsBackend as backend } from "../../src/altimate/integrations/backend"
 import { IntegrationsCredentials as creds } from "../../src/altimate/integrations/credentials"
 import { AltimateApi } from "../../src/altimate/api/client"
@@ -584,6 +584,16 @@ describe("workspace connections", () => {
     const o = await core.syncProvider("github")
     expect([o.result, o.reason]).toEqual(["skipped", expect.stringContaining("invalid")])
     expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, false])
+  })
+
+  test("a leftover whose workspace connection was deleted is kept and stops being a leftover", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    await core.storeSecret("github", "leftover_token")
+    const key = core.backendKey((await core.realConfig())!)
+    await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: key }))
+    api.state.rows[0].deleted = true
+    expect((await core.syncProvider("github")).result).toBe("skipped")
+    expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual(["leftover_token", false])
   })
 
   test("a leftover recorded for another backend is not removed here", async () => {
@@ -1506,7 +1516,7 @@ describe("credentials flow", () => {
   let server: ReturnType<typeof Bun.serve>
   const api = connectionsStub()
   let catalog: unknown = []
-  let onUser: (() => void) | null = null
+  let onUser: (() => unknown) | null = null
   const saved = { ...process.env }
   const home = osTmp("integ-home-")
   const bin = osTmp("integ-bin-")
@@ -1571,7 +1581,7 @@ describe("credentials flow", () => {
         const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
         calls.push({ method: req.method, path: url.pathname, query: url.search, auth, body })
         const deny = () => Response.json({ message: "Bad credentials" }, { status: 401 })
-        if (url.pathname === "/user") onUser?.()
+        if (url.pathname === "/user") await onUser?.()
         if (url.pathname === "/user")
           return auth === `Bearer ${GOOD}` ? Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } }) : deny()
         if (url.pathname === "/rest/api/3/myself") return auth === basic("me@acme.com", GOOD) ? Response.json({ emailAddress: "me@acme.com" }) : deny()
@@ -2038,8 +2048,9 @@ describe("credentials flow", () => {
         { type: "http", url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } },
         // A remote server that is given no shell token cannot take it.
         { type: "http", url: "https://example.com/github/mcp" },
-        // A filesystem server over a folder called github is not a GitHub server.
+        // A filesystem server over a folder called github is not a GitHub server, nor is a script kept in one.
         { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/github"], name: "files" },
+        { command: "/Users/me/github/tools/run.sh", name: "tools" },
       ]) {
         const { name, ...config } = server as Record<string, unknown>
         mcp(config, (name as string) ?? "github")
@@ -2083,6 +2094,65 @@ describe("credentials flow", () => {
       } finally {
         process.chdir(cwd)
         delete process.env.GITHUB_TOKEN
+      }
+    })
+
+    test("a rejected draft is removed only while it still holds the value that was checked", async () => {
+      await token("github", "github_token", "ghp_refused_by_github_1234")
+      // A new value is saved while the check of the old one is in flight.
+      onUser = () => creds.setSecretDraft("github", "github_token", { kind: "clipboard" }, clip(GOOD))
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("rejected")
+      } finally {
+        onUser = null
+      }
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(GOOD)
+    })
+
+    test("a recorded leftover is not offered again by connect", async () => {
+      real()
+      await core.storeSecret(core.secretKey("cred", "github", "github_token"), GOOD)
+      await core.updateStore((st) => void (st.providers.github = { registered: true, synced: true, variant: "token", secretFields: ["github_token"], values: {}, connectionId: 999, cleanupPending: "https://elsewhere#t" }))
+      const r = await creds.connectCredentials({ id: "github" })
+      expect(r.status).not.toBe("connected")
+      expect(api.state.rows).toHaveLength(0)
+    })
+
+    test("Claude Code's config directory and this tool's own MCP config are looked at too", async () => {
+      const dir = fs.mkdtempSync(path.join(tmp, "claude-config-"))
+      process.env.CLAUDE_CONFIG_DIR = dir
+      process.env.GITHUB_TOKEN = GOOD
+      try {
+        fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ env: { GH_HOST: "ghe.example" } }))
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+        fs.rmSync(path.join(dir, "settings.json"))
+        fs.writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: { ghe: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp", GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } } } }))
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+      } finally {
+        delete process.env.CLAUDE_CONFIG_DIR
+      }
+      const repo = fs.mkdtempSync(path.join(tmp, "repo-"))
+      fs.writeFileSync(path.join(repo, "altimate-code.jsonc"), `{ // this tool's own servers\n "mcp": { "ghe": { "type": "local", "command": ["github-mcp-server", "stdio"], "environment": { "GITHUB_HOST": "https://ghe.corp" } } } }`)
+      const cwd = process.cwd()
+      process.chdir(repo)
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+      } finally {
+        process.chdir(cwd)
+        delete process.env.GITHUB_TOKEN
+      }
+    })
+
+    test("a config file whose args are not a list neither throws nor counts as GitHub's setup", async () => {
+      expect(creds.mcpServerIsGithubDotCom({ command: "npx", args: "stdio" as any, env: { GITHUB_TOKEN: GOOD } })).toBe(false)
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "npx", args: "stdio", env: { GITHUB_TOKEN: GOOD } } } }))
+      process.env.GITHUB_TOKEN = GOOD
+      try {
+        expect(() => core.scan()).not.toThrow()
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
+      } finally {
+        delete process.env.GITHUB_TOKEN
+        fs.rmSync(path.join(home, ".claude.json"), { force: true })
       }
     })
 
@@ -2276,6 +2346,28 @@ describe("credentials flow", () => {
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
       expect(core.loadStore().providers.github?.cleanupPending).toBe(false)
+    })
+
+    test("Keep local whose record write fails puts back the previous secrets and nothing old is purged", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      const before = await core.readSecret(core.secretKey("cred", "github", "github_token"))
+      await token("github", "github_token")
+      const rename = fs.renameSync
+      const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations.json") && fs.readFileSync(from, "utf8").includes('"credentialStamp"') && !fs.readFileSync(from, "utf8").includes('"blocked": {\n    "github": false')) {
+          const next = JSON.parse(fs.readFileSync(from, "utf8"))
+          if (next.providers?.github?.updatedAt && next.providers.github.updatedAt !== core.loadStore().providers.github?.updatedAt) throw new Error("disk full")
+        }
+        return rename(from, to)
+      }) as any)
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("failed")
+      } finally {
+        spy.mockRestore()
+      }
+      expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(before)
     })
 
     test("Keep local whose secret write fails puts back the leftover mark with the previous secrets", async () => {
@@ -2924,6 +3016,15 @@ describe("credentials flow", () => {
       expect(core.loadStore().providers.github?.registered).toBe(true)
     })
 
+    test("disconnect removes the recorded connection even after the host name changed", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      api.state.rows[0].name = "GitHub (from old-host)"
+      await core.disconnect("github")
+      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(0)
+    })
+
     test("disconnect removes the credential secrets", async () => {
       await token("github", "github_token")
       await creds.connectCredentials({ id: "github", localOnly: true })
@@ -3193,6 +3294,18 @@ describe("the CLI passes --share through and reports shared", () => {
       await (SyncCommand.handler as any)({ provider: "github", share: true, json: true })
       expect(sync.mock.calls[0][4]).toBe(true)
       expect(JSON.parse(logs[logs.length - 1]).results[0].shared).toBe(true)
+      // Text output shows a sync that attached nowhere.
+      sync.mockResolvedValue({ id: "github", result: "synced", steps: [{ label: core.NOT_LINKED_LABEL, ok: false }] })
+      logs.length = 0
+      await (SyncCommand.handler as any)({ provider: "github", json: false })
+      expect(logs.some((l) => clean(l).includes(core.NOT_LINKED_LABEL))).toBe(true)
+      // Status text shows a removed connection's note, and a credential also found on this machine.
+      logs.length = 0
+      printStatus({ workspace: { linked: false }, providers: [
+        { id: "github", name: "GitHub", state: "not_found", sync: "local", note: "removed in the workspace" },
+        { id: "jira", name: "Jira", state: "connected", sync: "synced", found: { source: { kind: "env", label: "JIRA_API_TOKEN" }, account: null } },
+      ] } as any, "Integrations")
+      expect([logs.some((l) => clean(l).includes("removed in the workspace")), logs.some((l) => clean(l).includes("also found on this machine: JIRA_API_TOKEN"))]).toEqual([true, true])
       // Text output shows a local cleanup warning on a failed or skipped sync too, as --json carries it.
       const warning = `${core.LOCAL_CLEANUP_FAILED_PREFIX}disk full. Run altimate integrations sync github to remove it.`
       sync.mockResolvedValue({ id: "github", result: "failed", reason: "boom", steps: [{ label: warning, ok: false }] })
