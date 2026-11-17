@@ -112,6 +112,12 @@ async function projectDir(): Promise<string | undefined> {
   return getDbtProjectRoot()
 }
 
+// True when a Jinja tag (comments and quoted strings inside it left out) calls is_incremental() or names this.
+function readsModelContext(sql: string): boolean {
+  const tags = sql.replace(/\{#[\s\S]*?#\}/g, "").match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []
+  return tags.some((tag) => /\bis_incremental\s*\(|\bthis\b/.test(tag.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''")))
+}
+
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
   return { title: `dbt_cte_profile: ${title}`, metadata: { success: false, error: output, ...extra }, output }
 }
@@ -211,7 +217,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     if (block) return failure("no query", `${name} is inside a Jinja {% ${block} %} block of ${args.model}, which cannot be cut off at that CTE and stay valid: compile the model and profile the compiled SQL, or move the WITH out of the block.`, { model: args.model, cte: name })
 
     // The adapter runs the query as an inline node, not as the model, so is_incremental() and this would resolve for that node instead.
-    if (/\bis_incremental\s*\(|\{\{-?[^}]*\bthis\b/.test(query)) return failure("not run", `${name} depends on is_incremental() or this in ${args.model}. A count query runs outside the model, so those would resolve differently and the count would not match what the model reads. Compile the model and profile the compiled SQL instead.`, { model: args.model, cte: name })
+    if (readsModelContext(query)) return failure("not run", `${name} depends on is_incremental() or this in ${args.model}. A count query runs outside the model, so those would resolve differently and the count would not match what the model reads. Compile the model and profile the compiled SQL instead.`, { model: args.model, cte: name })
 
     const access = await dbtAdapterFor(ctx)
     if (!access.adapter) return failure("not run", access.reason ?? "the dbt adapter is not available", { model: args.model, cte: name, refusal: access.refusal })

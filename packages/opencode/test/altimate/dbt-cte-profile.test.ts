@@ -186,6 +186,7 @@ describe("dbt_cte_profile list", () => {
     for (const [model, sql] of [
       ["inc_filter", "with a as (select * from {{ ref('x') }} {% if is_incremental() %} where id > 1 {% endif %}), b as (select * from a) select * from b"],
       ["inc_this", "with a as (select max(id) m from {{ this }}), b as (select * from a) select * from b"],
+      ["inc_set", "{% set rel = this %} with a as (select * from {{ rel }}), b as (select * from a) select * from b"],
     ] as const) {
       await writeFile(path.join(project, "models", "marts", `${model}.sql`), sql)
       const before = queries.length
@@ -194,6 +195,16 @@ describe("dbt_cte_profile list", () => {
       expect(result.output).toContain("is_incremental() or this")
       expect(queries.length).toBe(before)
     }
+  })
+
+  test("is_incremental() or this in a comment, a string or a ref name does not stop the run", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    await writeFile(
+      path.join(project, "models", "marts", "quiet.sql"),
+      "{# is_incremental() is unused, {{ this }} #}\n-- is_incremental()\nwith a as (select 'is_incremental()' as label from {{ ref('this_model') }}), b as (select * from a) select * from b",
+    )
+    const result = await tool.execute({ model: "quiet", cte: "b" }, ctx)
+    expect(result.metadata.success).toBe(true)
   })
 
   test("a model without CTEs lists none", async () => {
