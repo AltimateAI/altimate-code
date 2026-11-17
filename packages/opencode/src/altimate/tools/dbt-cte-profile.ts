@@ -112,10 +112,38 @@ async function projectDir(): Promise<string | undefined> {
   return getDbtProjectRoot()
 }
 
-// True when a Jinja tag (comments and quoted strings inside it left out) calls is_incremental() or names this.
+// The Jinja tags of a query, found by a scan that steps over quoted strings so a `}}` inside one does not end the tag early.
+function jinjaTags(sql: string): string[] {
+  const text = sql.replace(/\{#[\s\S]*?#\}/g, "").replace(/\{%-?\s*raw\s*-?%\}[\s\S]*?\{%-?\s*endraw\s*-?%\}/g, "")
+  const tags: string[] = []
+  for (let i = 0; i < text.length - 1; i++) {
+    const open = text.substr(i, 2)
+    if (open !== "{{" && open !== "{%") continue
+    const close = open === "{{" ? "}}" : "%}"
+    let j = i + 2
+    while (j < text.length && !text.startsWith(close, j)) {
+      const ch = text[j]
+      if (ch === "'" || ch === '"') {
+        j++
+        while (j < text.length && text[j] !== ch) j += text[j] === "\\" ? 2 : 1
+      }
+      j++
+    }
+    tags.push(text.substring(i, j))
+    i = j + 1
+  }
+  return tags
+}
+
+// True when a Jinja tag (quoted strings inside it left out) calls is_incremental() or names this.
 function readsModelContext(sql: string): boolean {
-  const tags = sql.replace(/\{#[\s\S]*?#\}/g, "").match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []
-  return tags.some((tag) => /\bis_incremental\s*\(|\bthis\b/.test(tag.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''")))
+  return jinjaTags(sql).some((tag) => /\bis_incremental\s*\(|\bthis\b/.test(tag.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''")))
+}
+
+// The CTEs a typed name picks: those spelled exactly so, else those that differ only in letter case.
+function nameMatches(list: CteInfo[], typed: string): CteInfo[] {
+  const exact = list.filter((c) => bareName(c.name) === typed)
+  return exact.length > 0 ? exact : list.filter((c) => bareName(c.name).toLowerCase() === typed.toLowerCase())
 }
 
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
@@ -124,7 +152,7 @@ function failure(title: string, output: string, extra: Record<string, unknown> =
 
 export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
   description:
-    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the elapsed milliseconds and the row count; that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE.",
+    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the elapsed milliseconds and the row count; that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE that reads is_incremental() or this is not run, because the count runs outside the model.",
   parameters: z.object({
     model: z
       .string()
@@ -185,14 +213,12 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
       if (!target) return failure("CTE not found", `${args.model} has ${ctes.length} CTEs: there is none at position ${args.position}.${incompleteNote}`, { model: args.model })
       // The name as typed wins here too: another CTE spelled exactly so is the one meant, whatever the case of this one.
       const typed = args.cte === undefined ? undefined : bareName(args.cte)
-      const spelledSo = typed === undefined ? false : ctes.some((c) => bareName(c.name) === typed)
-      if (typed !== undefined && (spelledSo ? bareName(target.name) !== typed : bareName(target.name).toLowerCase() !== typed.toLowerCase()))
+      if (typed !== undefined && !nameMatches(ctes, typed).includes(target))
         return failure("CTE not found", `The CTE at position ${args.position} of ${args.model} is ${stripColumnList(target.name)}, not ${args.cte}.`, { model: args.model })
     } else {
       // The name as typed wins; letter case only decides when nothing matches it exactly.
       const wanted = bareName(args.cte ?? "")
-      const exact = ctes.filter((c) => bareName(c.name) === wanted)
-      const matches = exact.length > 0 ? exact : ctes.filter((c) => bareName(c.name).toLowerCase() === wanted.toLowerCase())
+      const matches = nameMatches(ctes, wanted)
       if (matches.length === 0)
         return failure("CTE not found", `${args.model} has no CTE named ${args.cte}${names ? `; it has: ${names}` : ""}.${incompleteNote}`, { model: args.model })
       if (matches.length > 1) {
@@ -217,7 +243,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     if (block) return failure("no query", `${name} is inside a Jinja {% ${block} %} block of ${args.model}, which cannot be cut off at that CTE and stay valid: compile the model and profile the compiled SQL, or move the WITH out of the block.`, { model: args.model, cte: name })
 
     // The adapter runs the query as an inline node, not as the model, so is_incremental() and this would resolve for that node instead.
-    if (readsModelContext(query)) return failure("not run", `${name} depends on is_incremental() or this in ${args.model}. A count query runs outside the model, so those would resolve differently and the count would not match what the model reads. Compile the model and profile the compiled SQL instead.`, { model: args.model, cte: name })
+    if (readsModelContext(query)) return failure("not run", `${name} depends on is_incremental() or this in ${args.model}. Where the count runs as an inline node (the CLI and Fusion modes), those resolve for that node, not the model, so the count would not match what the model reads. Compile the model and profile the compiled SQL instead.`, { model: args.model, cte: name })
 
     const access = await dbtAdapterFor(ctx)
     if (!access.adapter) return failure("not run", access.reason ?? "the dbt adapter is not available", { model: args.model, cte: name, refusal: access.refusal })

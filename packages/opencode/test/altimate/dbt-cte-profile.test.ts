@@ -207,6 +207,20 @@ describe("dbt_cte_profile list", () => {
     expect(result.metadata.success).toBe(true)
   })
 
+  test("a {{ this }} inside a quoted config() hook does not stop the run, a {% raw %} block is skipped, and a real this after them still does", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    const body = "with a as (select 1 as x), b as (select * from a) select * from b"
+    for (const [model, sql, ok] of [
+      ["hook_this", `{{ config(post_hook="grant select on {{ this }} to role reporter") }}\n${body}`, true],
+      ["raw_this", `{% raw %}{{ this }}{% endraw %}\n${body}`, true],
+      ["hook_then_this", `{{ config(post_hook="grant on {{ this }}") }}\nwith a as (select * from {{ this }}), b as (select * from a) select * from b`, false],
+    ] as const) {
+      await writeFile(path.join(project, "models", "marts", `${model}.sql`), sql)
+      const result = await tool.execute({ model, cte: "b" }, ctx)
+      expect(result.metadata.success).toBe(ok)
+    }
+  })
+
   test("a model without CTEs lists none", async () => {
     const tool = await initTool(DbtCteProfileTool)
     const result = await tool.execute({ model: "plain" }, ctx)
