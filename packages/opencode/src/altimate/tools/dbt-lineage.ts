@@ -6,7 +6,7 @@ import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../native/types"
 import { loadRawManifest } from "../native/dbt/helpers"
 import { lineageGraph } from "../native/dbt/graph"
-import { sessionProject } from "./dbt-adapter-access"
+import { projectRoot } from "../native/connections/registry"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
 export type ModelLineage = {
@@ -357,6 +357,32 @@ async function defaultManifestPath(session: () => ReturnType<typeof sessionProje
   const project = await session()
   const root = project ? (project.other ?? project.root) : await (await import("../native/connections/register")).getDbtProjectRoot()
   return path.join(root ?? "", "target", "manifest.json")
+}
+
+/**
+ * The adapter's project root and, when the session's directory is in another dbt project, that one
+ * (`other`, both links resolved): a dbt.json saved for one project, or a server started in one,
+ * doesn't answer for a session in another. Undefined, the dbt config not read, when the session's
+ * directory is in no dbt project: the adapter's own discovery (a dbt.json, or a walk up from the
+ * process's working directory) decides then.
+ */
+async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
+  const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
+  const found = findProjectRoot(projectRoot())
+  if (!found) return undefined
+  const { getDbtProjectRoot } = await import("../native/connections/register")
+  const root = await getDbtProjectRoot()
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  const here = real(found)
+  // path.relative ignores case on win32.
+  if (!root) return { other: here }
+  return path.relative(real(root), here) ? { root: real(root), other: here } : { root }
 }
 
 const MAX_TEXT_EDGES = 200
