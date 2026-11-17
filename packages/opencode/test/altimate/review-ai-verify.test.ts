@@ -6,6 +6,7 @@ import { readStreamStep } from "../../src/altimate/llm/stream-text"
 import {
   aiVerifyEnabled,
   ANSWER_NOW,
+  ANSWER_DIRECT,
   applyTriage,
   batchFindings,
   retriage,
@@ -689,7 +690,8 @@ describe("runAiVerify: the bounded tool loop", () => {
     // A budget too small for a tool round and an answer: answer straight away, without tools.
     const res = await verify([aiFinding()], a.llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "500" } })
     expect(a.calls.map((c) => c.toolChoice)).toEqual(["none"])
-    expect(a.calls[0].messages.at(-1)?.content).not.toBe(ANSWER_NOW)
+    expect(a.calls[0].messages).toHaveLength(1)
+    expect(String(a.calls[0].messages[0].content).endsWith(ANSWER_DIRECT)).toBe(true)
     expect(res.status.state).toBe("budget")
 
     const long = "x".repeat(10_000)

@@ -640,6 +640,8 @@ const TOOL_OUTPUT_MAX = 2_500
 const PR_TEXT_MAX = 1_500
 const BATCH_CONCURRENCY = 2
 export const ANSWER_NOW = "Answer now with the evidence you have."
+/** Appended to the first message when the budget leaves no room for a tool round. */
+export const ANSWER_DIRECT = "No tool calls are available for this batch. Answer now with only the JSON array."
 
 /** One model step as the loop needs it: text, why it stopped, the tool calls, the messages to append. */
 export interface VerifierStep {
@@ -991,6 +993,9 @@ async function verifyBatch(
       const force = rounds >= VERIFY_MAX_ROUNDS || overBudget
       if (overBudget && rounds < VERIFY_MAX_ROUNDS) out.state = "budget"
       if (force && rounds > 0) messages.push({ role: "user", content: ANSWER_NOW })
+      // Forced on the first call: without this the model announces the tool
+      // calls it would make and returns no verdicts.
+      if (force && rounds === 0) messages[0] = { role: "user", content: `${message}\n\n${ANSWER_DIRECT}` }
       const req: VerifierStepRequest = {
         system: ctx.system,
         messages: [...messages],
