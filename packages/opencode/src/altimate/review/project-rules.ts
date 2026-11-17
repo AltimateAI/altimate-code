@@ -734,6 +734,23 @@ export function modelConfigFindings(
           ),
         )
     }
+    // BigQuery merges scan the whole target unless `incremental_predicates` bound it: the merge
+    // condition alone never prunes target partitions. (`merge` is BigQuery's default strategy.)
+    const bigquery = dialectKnown ? /bigquery/i.test(dialect) : /['"]field['"]\s*:/.test(cfg.partition_by ?? "")
+    const predicates = cfg.incremental_predicates ?? manifestConfig?.incremental_predicates
+    const hasPredicates = Array.isArray(predicates) ? predicates.length > 0 : !!predicates && !/^\s*(none|\[\s*\])\s*$/i.test(String(predicates))
+    if (bigquery && parts.length && uk.length && (strategy === "merge" || !strategy) && !hasPredicates)
+      out.push(
+        finding(
+          file,
+          "merge-no-incremental-predicates",
+          "suggestion",
+          "warehouse_cost",
+          "incremental merge has no `incremental_predicates`",
+          `This model merges on \`unique_key\` into a table partitioned by ${parts.map((p) => `\`${p}\``).join(", ")}, with no \`incremental_predicates\`. BigQuery can't prune the target from the merge condition, so every run scans the whole table. Add a predicate on the partition column, e.g. \`incremental_predicates=["DBT_INTERNAL_DEST.${parts[0]} >= <lookback>"]\`.`,
+          addedLine(file, /\b(unique_key|partition_by|incremental_strategy)\b/) ?? addedLine(file, /\bis_incremental\s*\(/),
+        ),
+      )
     // The incremental filter should constrain the partition column, or each run scans every partition.
     const filter = incrementalFilter(newSql)
     if (parts.length && filter && !parts.some((p) => new RegExp(`\\b${p}\\b`, "i").test(filter)))

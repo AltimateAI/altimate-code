@@ -868,6 +868,20 @@ const CORRECTNESS: Rule[] = [
     { add: "group by customer_id" },
   ),
   r(
+    "jinja-concat-missing-space",
+    "sql_correctness",
+    "suggestion",
+    "SQL text concatenated in Jinja without a space",
+    "A string of SQL is joined with `~` to a macro call or variable with no space at the seam, so the rendered SQL runs the two together (`ticket_id` + `, source_relation` works, `ticket_id` + `source_relation` does not). Put a space inside the string next to `~`.",
+    {
+      // A literal holding SQL (it has whitespace) that ends, or starts, with a word character right at the `~`.
+      added: /'[^'\n]*\s[^'\n]*[A-Za-z0-9]'\s*~\s*[A-Za-z_][\w.]*|[\w)]\s*~\s*'[A-Za-z0-9][^'\n]*\s[^'\n]*'/,
+      macros: true,
+    },
+    { add: "{{ dbt.datediff('a', 'lead(a) over (partition by ticket_id' ~ pkg.partition_cols() ~ ' order by a)', 'second') }}" },
+    { add: "{{ dbt.datediff('a', 'lead(a) over (partition by ticket_id ' ~ pkg.partition_cols() ~ ' order by a)', 'second') }}" },
+  ),
+  r(
     "macro-group-by-ordinal",
     "sql_quality",
     "suggestion",

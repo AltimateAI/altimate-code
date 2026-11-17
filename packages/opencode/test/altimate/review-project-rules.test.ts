@@ -18,7 +18,7 @@ import {
   yamlParseFindings,
 } from "../../src/altimate/review/project-rules"
 import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
-import { isSuppressiblePortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { inlineConfigSplats, isSuppressiblePortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { detectMacroPatterns } from "../../src/altimate/review/dbt-patterns"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
@@ -645,5 +645,54 @@ describe("package-lock.yml added to a dbt package", () => {
   })
   test("a lock file that was already committed (modified) is not this change", () => {
     expect(packageLockFindings({ path: "package-lock.yml", status: "modified", diff: plus(lock) }, true)).toHaveLength(0)
+  })
+})
+
+describe("BigQuery incremental merge without incremental_predicates", () => {
+  const sql = (extra = "") =>
+    [
+      "{% set meta_config = {",
+      '    "materialized": "incremental",',
+      '    "unique_key": ["event_id"],',
+      '    "partition_by": {"field": "event_at", "data_type": "timestamp", "granularity": "month"}' + extra,
+      "} %}",
+      "{{ config(**meta_config) }}",
+      "select * from {{ ref('ops') }}",
+      "{% if is_incremental() %}",
+      "where event_at >= timestamp('{{ var(\"batch_start\") }}')",
+      "{% endif %}",
+    ].join("\n")
+  const predicates = (body: string, dialect = "bigquery") =>
+    modelConfigFindings(
+      { path: "models/marts/ops.sql", status: "modified", diff: "@@ -8,2 +8,3 @@\n+{% if is_incremental() %}\n+where event_at >= timestamp('{{ var(\"batch_start\") }}')\n" },
+      inlineConfigSplats(body),
+      dialect,
+    ).filter((f) => f.rule === "dbt-project-rules:merge-no-incremental-predicates")
+  test("partitioned merge with a unique_key and no predicates, incremental filter changed: fires", () => {
+    const fs = predicates(sql())
+    expect(fs).toHaveLength(1)
+    expect(fs[0].body).toContain("`event_at`")
+  })
+  test("twin: incremental_predicates set", () => {
+    expect(predicates(sql(',\n    "incremental_predicates": ["DBT_INTERNAL_DEST.event_at >= current_date - 3"]'))).toHaveLength(0)
+  })
+  test("another engine is left to partition-not-in-merge-key", () => {
+    expect(predicates(sql(), "snowflake")).toHaveLength(0)
+  })
+})
+
+describe("SQL text concatenated in Jinja without a space", () => {
+  const seam = (line: string) => fires("jinja-concat-missing-space", line)
+  test("a SQL literal ending in a word right at `~`", () => {
+    expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(true)
+    expect(seam("{{ 'select id from' ~ relation }}")).toBe(true)
+  })
+  test("twin: the space is inside the string", () => {
+    expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id ' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(false)
+  })
+  test("identifier building is not SQL text", () => {
+    expect(seam("{{ ref('stg_' ~ source_name) }}")).toBe(false)
+    expect(seam("{% set rel = target.schema ~ '_staging' %}")).toBe(false)
+    expect(seam("{{ \"'\" ~ value ~ \"'\" }}")).toBe(false)
   })
 })
