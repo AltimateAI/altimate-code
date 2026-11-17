@@ -259,7 +259,7 @@ describe("dbt_health", () => {
   })
 
   test("says so when the manifest is older than this call's rebuild, as when the adapter's watcher replaced it", async () => {
-    const old = new Date(Date.now() - 3_600_000)
+    const old = new Date(Date.now() - 1_500)
     await utimes(path.join(project, "target", "manifest.json"), old, old)
     dbtAdapterInternals.create = async () => ({
       isInitialized: () => true,

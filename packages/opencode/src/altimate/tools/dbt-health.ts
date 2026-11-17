@@ -298,7 +298,8 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     // normally and writes nothing): a manifest older than the rebuild this call started is the last one.
     if (!stale && rebuiltAt !== undefined) {
       const written = fs.statSync(manifest).mtimeMs
-      if (written < rebuiltAt - 2000)
+      // A completed rebuild writes the manifest after it started; the second absorbs a coarse file clock.
+      if (written < Math.floor(rebuiltAt / 1000) * 1000)
         stale = {
           message: "The manifest was not rewritten by this call's rebuild (another rebuild may have replaced it and still be running), so these insights may not match the project as it is now; run dbt_health again in a moment.",
           manifest_path: manifest,
