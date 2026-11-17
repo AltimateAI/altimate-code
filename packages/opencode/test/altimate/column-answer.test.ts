@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, describeAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach, namesColumn } from "../../src/altimate/native/dbt/column-reach"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
-import { clearLineageCaches, hasNestedWith, howOf, itemName, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
+import { castColumn, clearLineageCaches, hasNestedWith, howOf, itemName, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -1317,7 +1317,8 @@ describe("both tools: names at the edges", () => {
   })
 
   test("a cast after a SELECT modifier is named after its column, so a settled model has it", () => {
-    // Each throws "r has no column amount" on main: the modifier or the parentheses hid the cast.
+    // Most throw "r has no column amount" on main, where the modifier or the parentheses hid the cast.
+    // `distinct on (id) id, …` and `top 5 amount…` already answer there; they stay as controls.
     for (const dialect of ["postgres", "redshift"]) {
       const lists = ["distinct(amount)::numeric, id", "all(amount)::numeric, id", "distinct ((amount))::numeric, id", "id, (amount)::numeric",
         "id, cast((amount) as numeric)"]
@@ -1335,6 +1336,29 @@ describe("both tools: names at the edges", () => {
         expect(carried(columnAnswer(path, "r", "amount"))).toEqual(["child.amount"])
       }
     }
+  })
+
+  test("a qualified column named like a literal keeps its name through a cast", () => {
+    for (const dialect of ["postgres", "redshift"]) {
+      for (const [name, cast] of [["end", "q.end::int"], ["end", "cast(q.end as int)"], ["end", "(q.end)::int"], ["null", "q.null::int"], ["true", "q.true::int"]]) {
+        const path = write(nodes(dialect, [
+          model("f", [], `select 1 as id, 2 as "${name}"`, ["id", name!]),
+          model("r", ["f"], `with q as (select * from ${T("f")}) select id, ${cast} from q`),
+          model("child", ["r"], `select * from ${T("r")}`),
+        ]))
+        expect(() => columnReach(path, "r", name!)).not.toThrow()
+        expect(carried(columnAnswer(path, "r", name!))).toEqual([`child.${name}`])
+      }
+    }
+  })
+
+  test("castColumn names a column through casts and parentheses, and nothing else", () => {
+    const named = { "amount::numeric": "amount", "(amount)::numeric": "amount", "cast((amount)as numeric)": "amount", "q.end::int": "end",
+      '("null")::int': "null", "(q.end)::int": "end", "cast(amount as numeric)::int": "amount", "((amount))::numeric": "amount" }
+    for (const [item, name] of Object.entries(named)) expect(castColumn(item)).toBe(name)
+    for (const item of ["amount", "(null)::int", "(1)::int", "(true)::boolean", "coalesce(amount)::numeric", "-(amount)::numeric",
+      "(amount)::numeric * 2", "(amount + 1)::int", "cast(amount as int) between 1 and 2"])
+      expect(castColumn(item)).toBeNull()
   })
 
   test("mixed and nested cast chains of a column are named after it", () => {

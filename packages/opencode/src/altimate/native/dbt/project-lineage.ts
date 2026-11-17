@@ -221,18 +221,21 @@ function lastOutsideParens(text: string, pattern: RegExp): { start: number; end:
  * The column a SELECT item casts, unaliased, through parentheses and any mix of casts (`amount::numeric`,
  * `cast(t.amount as numeric)`, `(amount)::numeric`, `cast(amount as numeric)::int`); null otherwise.
  */
-function castColumn(item: string, inner = false): string | null {
+export function castColumn(item: string, inner = false): string | null {
   const s = item.trim()
   const blank = s.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
   const ref = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(s)
   if (ref) {
     const name = ref[1]!
-    return inner && !/^\d/.test(name) && !ENDS_EXPRESSION.test(name) ? unquoteName(name) : null
+    // A bare `1` or `null` is a literal; `q.end` and `"null"` are columns.
+    const literal = ref[0] === name && (/^\d/.test(name) || ENDS_EXPRESSION.test(name))
+    return inner && !literal ? unquoteName(name) : null
   }
   if (blank.startsWith("(") && closingParen(blank, 0) === blank.length - 1) return castColumn(s.slice(1, -1), true)
   const call = /^cast\s*\(/i.exec(blank)
   if (call && closingParen(blank, call[0].length - 1) === blank.length - 1) {
-    const at = lastOutsideParens(blank.slice(call[0].length, -1), /\sas\s/)
+    // `as` after a space or a `)`: `cast((amount)as numeric)`.
+    const at = lastOutsideParens(blank.slice(call[0].length, -1), /(?:\s|(?<=\)))as\s/)
     if (!at) return null
     const body = s.slice(call[0].length, -1)
     return isType(body.slice(at.end)) ? castColumn(body.slice(0, at.start), true) : null
