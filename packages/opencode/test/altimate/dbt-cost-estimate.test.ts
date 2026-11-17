@@ -192,6 +192,12 @@ describe("dbt_cost_estimate", () => {
     expect(result.output).toContain("--allow-write")
   })
 
+  test("the tool description says compiling can run billed queries and the adapter start runs dbt deps", async () => {
+    const tool = await DbtCostEstimateTool.init()
+    expect(tool.description).toContain("runs `dbt deps`")
+    expect(tool.description).toContain("macros such as `run_query` run real queries that are billed")
+  })
+
   test("the tool description names the MCP server as a way to grant write", async () => {
     const tool = await initTool(DbtCostEstimateTool)
     expect(tool.description).toContain("`--allow-write` on `tool run` or the MCP server")
