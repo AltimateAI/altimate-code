@@ -101,6 +101,8 @@ describe("GitHub host policy", () => {
       { command: "node", args: ["/opt/github-mcp/dist/index.js"], env: { GITHUB_TOKEN: "ghp_x" } },
       // Every word is one the official setups use, but docker runs some other image.
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp"] },
+      // A second `run` is the image docker runs, not docker's own word.
+      { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "run", "ghcr.io/github/github-mcp-server"] },
       // An image called npx is not GitHub's, whatever follows it.
       { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "npx", "ghcr.io/github/github-mcp-server"] },
       // The official image named after the one docker actually runs.
@@ -3148,6 +3150,31 @@ describe("credentials flow", () => {
       expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
       expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(0)
       expect(core.loadStore().providers.github?.connectionId).toBeNull()
+    })
+
+    test("an update after the host name changed updates the recorded connection instead of adding another", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      const id = api.state.rows[0].id
+      api.state.rows[0].name = "GitHub (from old-host)"
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
+      expect([api.state.rows.filter((r) => !r.deleted).map((r) => r.id), core.loadStore().providers.github?.connectionId]).toEqual([[id], id])
+    })
+
+    test("a GitHub token named from the environment is refused beside another GitHub host", async () => {
+      process.env.SOME_GITHUB_TOKEN = GOOD
+      process.env.GH_HOST = "ghe.corp.example"
+      try {
+        await expect(creds.setSecretDraft("github", "github_token", { kind: "env", name: "SOME_GITHUB_TOKEN" })).rejects.toThrow("only github.com is supported")
+        delete process.env.GH_HOST
+        expect(await creds.setSecretDraft("github", "github_token", { kind: "env", name: "SOME_GITHUB_TOKEN" })).toBeTruthy()
+      } finally {
+        delete process.env.SOME_GITHUB_TOKEN
+        delete process.env.GH_HOST
+        await creds.discardDrafts("github")
+      }
     })
 
     test("Keep local removes the recorded workspace copy after the host name changed", async () => {

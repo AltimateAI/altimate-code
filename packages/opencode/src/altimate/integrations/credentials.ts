@@ -230,8 +230,11 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   if (command === "docker" && !args.some((a, j) => a === "-e" && args[j + 1] === "GITHUB_PERSONAL_ACCESS_TOKEN")) return false
   // Only each command's own leading words are skipped: docker's `run`, Windows' `/c npx`; an image called npx is still an image.
   const lead = command === "docker" ? ["run"] : command === "cmd" ? ["/c", "npx"] : []
+  // The leading words in order, once each (docker run, cmd /c npx), then only options until the program.
   let i = 0
-  while (i < args.length && (lead.includes(args[i]) || args[i].startsWith("-"))) i += args[i] === "-e" ? 2 : 1
+  while (i < lead.length && args[i] === lead[i]) i++
+  if (i < lead.length) return false
+  while (i < args.length && args[i].startsWith("-")) i += args[i] === "-e" ? 2 : 1
   if (command !== "github-mcp-server" && !GITHUB_MCP_PROGRAM.test(args[i] ?? "")) return false
   const settings = Object.entries(server.env ?? {}).every(
     ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
@@ -554,6 +557,9 @@ export async function setSecretDraft(id: ProviderId, name: string, source: Secre
     source.kind === "clipboard" ? await (deps.clipboard ?? readClipboard)() : source.kind === "env" ? process.env[source.name] : await (deps.stdin ?? readStdin)()
   const value = (raw ?? "").trim()
   const where = source.kind === "clipboard" ? "Clipboard" : source.kind === "env" ? `Environment variable ${source.name}` : "Standard input"
+  // A GitHub token named from the environment is validated against api.github.com: not while this shell or Claude Code points GitHub at another host.
+  if (id === "github" && source.kind === "env" && !surroundingHostsAreGithubDotCom())
+    throw new Error(`${where} sits beside a GitHub host other than github.com; only github.com is supported. Paste a github.com token instead.`)
   if (!value) throw new Error(source.kind === "clipboard" ? "Clipboard doesn't contain a token" : `${where} is empty`)
   if (/\s/.test(value) || (source.kind === "clipboard" && (value.length < MIN_TOKEN_LENGTH || value.includes("://"))))
     throw new Error(source.kind === "clipboard" ? "Clipboard doesn't contain a token" : `${where} doesn't contain a token`)

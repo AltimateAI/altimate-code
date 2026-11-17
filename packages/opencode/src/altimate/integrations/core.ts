@@ -992,7 +992,11 @@ export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.cre
  */
 export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>, share = false, retry: "sync" | "update" | "connect" = "sync"): Promise<UpsertResult> {
   const visible = await backend.listVisibleConnections(cfg)
-  const existing = findManaged(backend.ownConnections(visible), id)
+  // The connection this machine recorded on this backend comes first, so a changed host name updates it instead of adding another.
+  const own = backend.ownConnections(visible)
+  const rec = loadStore().providers[id]
+  const recorded = rec?.connectionId != null && rec.connectionBackend === backendKey(cfg) ? own.find((c) => c.id === rec.connectionId && c.integration_id === INTEGRATION_IDS[id]) : undefined
+  const existing = recorded ?? findManaged(own, id)
   // An update in place hands the new credential to everyone the connection is already shared with, so it needs the same consent as attaching to a shared workspace.
   const sharedConnection = existing != null && existing.privacy !== "private"
   if (sharedConnection && !share) throw new Error(SHARED_CONNECTION_REFUSAL(id, retry))
