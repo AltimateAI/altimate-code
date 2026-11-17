@@ -260,6 +260,58 @@ export async function loadReviewPolicy(opts: {
   return { config, source: baseText === undefined ? "default" : "base", hash: policyHash(config), changedInPr }
 }
 
+/** A repo instruction file read from the base branch; `scope` is its
+ *  directory ("" = repo root) and bounds which files it applies to. */
+export interface RepoInstruction {
+  path: string
+  scope: string
+  text: string
+}
+
+/** Instruction files looked up in the repo root and every ancestor directory of a changed path. */
+export const REPO_INSTRUCTION_FILES = ["REVIEW.md", ".altimate/REVIEW.md", "AGENTS.md", "CLAUDE.md"]
+const INSTRUCTION_FILE_CHARS = 4_000
+const INSTRUCTION_TOTAL_CHARS = 12_000
+
+/** Whether `file` (repo-relative) sits under the instruction scope `scope`. */
+export function inInstructionScope(scope: string, file: string): boolean {
+  return scope === "" || file.startsWith(scope + "/")
+}
+
+/**
+ * Load the repo's review instructions (REVIEW.md, .altimate/REVIEW.md,
+ * AGENTS.md, CLAUDE.md) at the root and at each ancestor directory of a
+ * changed path. `readBase` reads the BASE commit, so a PR cannot rewrite the
+ * instructions it is reviewed under. Root first, then shallower directories;
+ * each file is cut to 4,000 chars and the set to 12,000.
+ */
+export async function loadRepoInstructions(opts: {
+  readBase: (rel: string) => Promise<string | undefined>
+  changedPaths: string[]
+}): Promise<RepoInstruction[]> {
+  const scopes = new Set<string>([""])
+  for (const p of opts.changedPaths) {
+    const parts = p.split("/").slice(0, -1)
+    for (let i = 1; i <= parts.length; i++) scopes.add(parts.slice(0, i).join("/"))
+  }
+  const depth = (scope: string) => (scope ? scope.split("/").length : 0)
+  const ordered = [...scopes].sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))
+  const candidates = ordered.flatMap((scope) =>
+    REPO_INSTRUCTION_FILES.map((name) => ({ scope, path: scope ? `${scope}/${name}` : name })),
+  )
+  const texts = await Promise.all(candidates.map((c) => opts.readBase(c.path).catch(() => undefined)))
+  const out: RepoInstruction[] = []
+  let left = INSTRUCTION_TOTAL_CHARS
+  candidates.forEach((c, i) => {
+    const text = texts[i]?.trim()
+    if (!text || left <= 0) return
+    const cut = text.slice(0, Math.min(INSTRUCTION_FILE_CHARS, left))
+    out.push({ ...c, text: cut })
+    left -= cut.length
+  })
+  return out
+}
+
 /**
  * Load `.altimate/review.{yml,yaml,json}` from a project directory. Returns the
  * defaults when no config file is present. Throws on a malformed/invalid file
