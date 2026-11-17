@@ -1627,7 +1627,7 @@ describe("credentials flow", () => {
         const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
         calls.push({ method: req.method, path: url.pathname, query: url.search, auth, body })
         const deny = () => Response.json({ message: "Bad credentials" }, { status: 401 })
-        if (url.pathname === "/user") await onUser?.()
+        if (url.pathname === "/user" || url.pathname === "/rest/api/3/myself") await onUser?.()
         if (url.pathname === "/user")
           return auth === `Bearer ${GOOD}` ? Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } }) : deny()
         if (url.pathname === "/rest/api/3/myself") return auth === basic("me@acme.com", GOOD) ? Response.json({ emailAddress: "me@acme.com" }) : deny()
@@ -2136,6 +2136,20 @@ describe("credentials flow", () => {
         onUser = null
       }
       expect([await core.readSecret(core.secretKey("draft", "github", "github_token")), await core.readSecret(core.secretKey("draft", "github", "other_field"))]).toEqual(["ghp_entered_meanwhile_5678", "ghp_other_field_draft"])
+    })
+
+    test("a successful connect keeps a non-secret value typed again while it ran", async () => {
+      await creds.setDraft("jira", "jiraDomain", "acme")
+      await creds.setDraft("jira", "jiraEmail", "me@acme.com")
+      await token("jira", "jiraApiToken")
+      onUser = () => creds.setDraft("jira", "jiraEmail", "other@acme.com")
+      try {
+        expect((await creds.connectCredentials({ id: "jira", variant: "cloud", localOnly: true })).status).toBe("connected")
+      } finally {
+        onUser = null
+      }
+      // The value used is done with; the one typed meanwhile stays.
+      expect(core.loadStore().providers.jira?.drafts).toEqual({ jiraEmail: "other@acme.com" })
     })
 
     test("a recorded leftover is not offered again by connect", async () => {

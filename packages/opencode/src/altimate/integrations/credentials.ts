@@ -783,11 +783,13 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     rejected: false,
     // An offline check learns no expiry; the one already known stays only when the very same credential is being kept.
     expiresAt: check.ok ? check.expiresAt : sameCredential ? rec?.expiresAt : undefined,
-    drafts: undefined,
   }
   const record = (synced: boolean, extra: Partial<StoredProvider> = {}) =>
     core.updateStore((store) => {
-      store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
+      // A typed value this save used is done with; one typed again while it ran, or for a field it did not use, stays.
+      const left = Object.entries(store.providers[id]?.drafts ?? {}).filter(([k, v]) => r.values[k] !== v)
+      const drafts = left.length ? Object.fromEntries(left) : undefined
+      store.providers[id] = { ...store.providers[id], ...common, drafts, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
     })
   /** Clears what was entered in the form. What it follows has already happened, so a failure comes back as a note instead of stopping the rest. */
   const clearDrafts = async (): Promise<string | null> => {
