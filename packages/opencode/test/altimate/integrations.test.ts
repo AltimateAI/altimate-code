@@ -63,6 +63,8 @@ describe("GitHub host policy", () => {
       { command: "cmd", args: ["/c", "npx", "-y", "@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
       { ...official, args: ["run", "-it", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", `ghcr.io/github/github-mcp-server@sha256:${"a".repeat(64)}`] },
       { command: "github-mcp-server", args: ["stdio", "--toolsets=repos,issues"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "-e", "GITHUB_TOOLSETS=repos,issues", "ghcr.io/github/github-mcp-server"] },
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "mcp/github"] },
       { command: "/usr/local/bin/github-mcp-server", args: ["stdio", "--toolsets", "repos,issues", "--read-only"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x", GITHUB_TOOLSETS: "repos" } },
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v0.5.0"] },
     ]
@@ -571,11 +573,22 @@ describe("workspace connections", () => {
   test("a recorded leftover is removed even when the workspace marked its connection invalid", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     await core.storeSecret("github", "leftover_token")
-    await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+    {
+        const key = core.backendKey((await core.realConfig())!)
+        await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: key }))
+      }
     api.state.rows[0].is_valid = false
     const o = await core.syncProvider("github")
     expect([o.result, o.reason]).toEqual(["skipped", expect.stringContaining("invalid")])
     expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, false])
+  })
+
+  test("a leftover recorded for another backend is not removed here", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    await core.storeSecret("github", "leftover_token")
+    await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: "https://other.example#other-tenant" }))
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    expect(await core.readSecret("github")).toBe("leftover_token")
   })
 
   test("an attach-only sync never removes a local secret it did not record as a leftover", async () => {
@@ -944,7 +957,10 @@ describe("workspace connections", () => {
       expect(upload).not.toHaveBeenCalled()
       expect(await core.readSecret("github")).toBeUndefined()
       await core.storeSecret("github", "leftover_token")
-      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+      {
+        const key = core.backendKey((await core.realConfig())!)
+        await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: key }))
+      }
     } finally {
       upload.mockRestore()
     }
@@ -1953,7 +1969,7 @@ describe("credentials flow", () => {
         // A server may still be listed as usable in Claude, but nothing is offered for sync.
         expect(core.scan().find((d) => d.id === "github" && d.syncable)).toBeUndefined()
       }
-      const cases: { env?: Record<string, string>; server?: Record<string, unknown>; project?: true; name?: string }[] = [
+      const cases: { env?: Record<string, string>; server?: Record<string, unknown>; project?: true; name?: string; settings?: Record<string, string> }[] = [
         { env: { GITHUB_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
         { env: { GH_TOKEN: GOOD, GH_HOST: "ghe.corp.example" } },
         // The same token written literally into an enterprise server's config.
@@ -1971,6 +1987,9 @@ describe("credentials flow", () => {
         // A server set to another host with no token of its own reads this environment's, whatever it is called.
         { env: { GITHUB_TOKEN: GOOD }, name: "corp", server: { command: "corp-mcp", args: ["stdio"], env: { GITHUB_HOST: "https://ghe.corp" } } },
         { server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_BASE_URL: "https://ghe.corp/api/v3", GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        // A host Claude Code's own settings give the servers it starts.
+        { settings: { GITHUB_HOST: "https://ghe.corp" }, server: { command: "github-mcp-server", args: ["stdio"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: GOOD } } },
+        { settings: { GITHUB_HOST: "https://ghe.corp" }, env: { GITHUB_TOKEN: GOOD } },
         { env: { GITHUB_TOKEN: GOOD, GH_HOST: "${UNSET:-github.com-ghe.corp}" } },
         { env: { GITHUB_TOKEN: GOOD, GITHUB_API_URL: "https://github.com:x@ghe.corp/api/v3" } },
         // The user's own config ties the shell token to another host.
@@ -1992,9 +2011,15 @@ describe("credentials flow", () => {
           fs.mkdirSync(path.join(project, "sub"))
           process.chdir(path.join(project, "sub"))
         } else if (c.server) mcp(c.server, c.name)
+        const settings = path.join(home, ".claude", "settings.json")
+        if (c.settings) {
+          fs.mkdirSync(path.dirname(settings), { recursive: true })
+          fs.writeFileSync(settings, JSON.stringify({ env: c.settings }))
+        }
         try {
           await refused()
         } finally {
+          fs.rmSync(settings, { force: true })
           process.chdir(cwd)
           for (const k of Object.keys(c.env ?? {})) delete process.env[k]
           fs.rmSync(claude, { force: true })
@@ -2008,8 +2033,11 @@ describe("credentials flow", () => {
         { type: "http", url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } },
         // A remote server that is given no shell token cannot take it.
         { type: "http", url: "https://example.com/github/mcp" },
+        // A filesystem server over a folder called github is not a GitHub server.
+        { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/github"], name: "files" },
       ]) {
-        mcp(server)
+        const { name, ...config } = server as Record<string, unknown>
+        mcp(config, (name as string) ?? "github")
         process.env.GITHUB_TOKEN = GOOD
         try {
           expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
@@ -2175,18 +2203,21 @@ describe("credentials flow", () => {
         return rename(from, to)
       }) as any)
       try {
-        expect(await core.recordLeftover("github")).toBe("It could not be recorded for removal either (disk full).")
+        expect(await core.recordLeftover("github", { apiUrl: "http://x", tenant: "t", token: "k" })).toBe("It could not be recorded for removal either (disk full).")
       } finally {
         spy.mockRestore()
       }
-      expect(await core.recordLeftover("github")).toBe("Run altimate integrations sync github to remove it.")
+      expect(await core.recordLeftover("github", { apiUrl: "http://x", tenant: "t", token: "k" })).toBe("Run altimate integrations sync github to remove it.")
     })
 
     test("Keep local over a recorded leftover writes nothing until the leftover mark is cleared", async () => {
       real()
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
-      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+      {
+        const key = core.backendKey((await core.realConfig())!)
+        await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: key }))
+      }
       await token("github", "github_token")
       // Only the state write that clears the leftover mark fails.
       const rename = fs.renameSync
@@ -2207,7 +2238,10 @@ describe("credentials flow", () => {
       real()
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
-      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+      {
+        const key = core.backendKey((await core.realConfig())!)
+        await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: key }))
+      }
       api.state.valid = false
       await token("github", "github_token")
       try {
@@ -2215,7 +2249,7 @@ describe("credentials flow", () => {
       } finally {
         api.state.valid = true
       }
-      expect(core.loadStore().providers.github?.cleanupPending).toBe(true)
+      expect(core.loadStore().providers.github?.cleanupPending).toBe(core.backendKey((await core.realConfig())!))
       // A later update that is accepted removes what was left here, and the mark with it.
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
@@ -2226,7 +2260,10 @@ describe("credentials flow", () => {
       real()
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
-      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+      {
+        const key = core.backendKey((await core.realConfig())!)
+        await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: key }))
+      }
       await token("github", "github_token")
       const rename = fs.renameSync
       const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
@@ -2238,7 +2275,7 @@ describe("credentials flow", () => {
       } finally {
         spy.mockRestore()
       }
-      expect(core.loadStore().providers.github?.cleanupPending).toBe(true)
+      expect(core.loadStore().providers.github?.cleanupPending).toBe(core.backendKey((await core.realConfig())!))
     })
 
     test("a local cleanup that fails after the upload is a warning on a connected result, and the record says synced", async () => {
@@ -2262,7 +2299,7 @@ describe("credentials flow", () => {
       }
       expect(core.isSynced("github")).toBe(true)
       // Recorded as a leftover, so the sync the message names removes it, without uploading it.
-      expect(core.loadStore().providers.github?.cleanupPending).toBe(true)
+      expect(core.loadStore().providers.github?.cleanupPending).toBe(core.backendKey((await core.realConfig())!))
       const upload = spyOn(backend, "updateConnection")
       try {
         expect((await core.syncProvider("github")).result).toBe("synced")
@@ -3134,9 +3171,13 @@ describe("the CLI passes --share through and reports shared", () => {
       await (SyncCommand.handler as any)({ provider: "github", share: true, json: true })
       expect(sync.mock.calls[0][4]).toBe(true)
       expect(JSON.parse(logs[logs.length - 1]).results[0].shared).toBe(true)
-      // Text output shows a local cleanup warning on a failed sync too, as --json carries it.
+      // Text output shows a local cleanup warning on a failed or skipped sync too, as --json carries it.
       const warning = `${core.LOCAL_CLEANUP_FAILED_PREFIX}disk full. Run altimate integrations sync github to remove it.`
       sync.mockResolvedValue({ id: "github", result: "failed", reason: "boom", steps: [{ label: warning, ok: false }] })
+      logs.length = 0
+      await (SyncCommand.handler as any)({ provider: "github", json: false })
+      expect(logs.some((l) => clean(l).includes(warning))).toBe(true)
+      sync.mockResolvedValue({ id: "github", result: "skipped", reason: "invalid", steps: [{ label: warning, ok: false }] })
       logs.length = 0
       await (SyncCommand.handler as any)({ provider: "github", json: false })
       expect(logs.some((l) => clean(l).includes(warning))).toBe(true)

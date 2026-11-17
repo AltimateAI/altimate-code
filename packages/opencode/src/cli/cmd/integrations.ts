@@ -111,7 +111,10 @@ function renderSync(o: core.SyncOutcome) {
     out(`  ${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: sync failed (${clean(o.reason)})`)
     return warnings()
   }
-  if (o.result === "skipped") return out(`  ${S.TEXT_DIM}- ${name}: skipped (${clean(o.reason)})${S.TEXT_NORMAL}`)
+  if (o.result === "skipped") {
+    out(`  ${S.TEXT_DIM}- ${name}: skipped (${clean(o.reason)})${S.TEXT_NORMAL}`)
+    return warnings()
+  }
   out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${syncedTo(o)}`)
   warnings()
 }

@@ -84,8 +84,11 @@ export interface StoredProvider {
   credentialStamp?: string
   /** The last validation was refused by the provider. */
   rejected?: boolean
-  /** The workspace holds this credential, but removing the local copy failed; only then does a sync remove what is left here. */
-  cleanupPending?: boolean
+  /**
+   * The workspace of this backend (`backendKey`) holds this credential, but removing the local copy failed; only then, and
+   * only signed in to that same backend, does a sync remove what is left here.
+   */
+  cleanupPending?: string | false
   /** Kept on this machine while the provider could not be reached to check it. */
   unverified?: boolean
 }
@@ -943,9 +946,12 @@ export const RECORD_WRITE_FAILED = (error: string, retry: string) =>
  * provider removes it (and only then). Returns the advice to print: that sync, or, when even the record could not be
  * written, that the leftover is not recorded.
  */
-export async function recordLeftover(id: ProviderId): Promise<string> {
+/** Which backend and tenant a connection id belongs to: the same id elsewhere is another connection. */
+export const backendKey = (cfg: backend.BackendConfig) => `${cfg.apiUrl.replace(/\/+$/, "")}#${cfg.tenant}`
+
+export async function recordLeftover(id: ProviderId, cfg: backend.BackendConfig): Promise<string> {
   try {
-    await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: true }))
+    await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: backendKey(cfg) }))
     return `Run altimate integrations sync ${id} to remove it.`
   } catch (e) {
     return `It could not be recorded for removal either (${e instanceof Error ? e.message : String(e)}).`
@@ -1139,7 +1145,7 @@ async function syncReal(
       await deleteSecret(id)
       if (record?.cleanupPending) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
     } catch (e) {
-      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. ${await recordLeftover(id)}`, ok: false })
+      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. ${await recordLeftover(id, cfg)}`, ok: false })
     }
   }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false, rewritten = sharedConnection, uploaded = true): SyncOutcome => {
@@ -1172,7 +1178,7 @@ async function syncReal(
         if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
         // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for,
         // also when the workspace marked the connection invalid: it still holds it. Only a leftover recorded after an upload is removed: any other secret here may be the only copy of a credential.
-        if (known != null && store.providers[id]?.cleanupPending) await purgeLocal(store.providers[id])
+        if (known != null && store.providers[id]?.cleanupPending === backendKey(cfg)) await purgeLocal(store.providers[id])
         if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps }
         step("Connection already in the workspace")
         return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private", false, false)

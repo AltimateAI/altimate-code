@@ -164,9 +164,9 @@ const GITHUB_TOKEN_KEY = /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i
 // package, or GitHub's binary, each with only its own flags and settings. A server is a github.com token source only in
 // one of these shapes; anything else (other flags, files, mounts, URLs, hosts in any form) is not read here.
 const GITHUB_MCP_COMMAND = /^(?:.*[\\/])?(docker|npx|github-mcp-server|cmd)(\.exe|\.cmd)?$/i
-const GITHUB_MCP_PROGRAM = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+|@sha256:[a-f0-9]{64})?|@modelcontextprotocol\/server-github(@[\w.-]+)?)$/
+const GITHUB_MCP_PROGRAM = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+|@sha256:[a-f0-9]{64})?|mcp\/github(:[\w.-]+)?|@modelcontextprotocol\/server-github(@[\w.-]+)?)$/
 // Windows runs npx through `cmd /c`.
-const GITHUB_MCP_WORD = /^(run|-i|-t|-it|--rm|-e|-y|\/c|npx|stdio|--read-only|--dynamic-toolsets|--toolsets(=[a-z_]+(,[a-z_]+)*)?|[a-z_]+(,[a-z_]+)*|GITHUB_(PERSONAL_ACCESS_TOKEN|TOKEN|TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)|GH_TOKEN)$/
+const GITHUB_MCP_WORD = /^(run|-i|-t|-it|--rm|-e|-y|\/c|npx|stdio|--read-only|--dynamic-toolsets|--toolsets(=[a-z_]+(,[a-z_]+)*)?|[a-z_]+(,[a-z_]+)*|GITHUB_(PERSONAL_ACCESS_TOKEN|TOKEN|TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)|GITHUB_(TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)=[\w,.-]*|GH_TOKEN)$/
 const GITHUB_MCP_SETTING = /^GITHUB_(TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)$/
 
 /** Whether a host setting names github.com: a literal URL or host whose parsed hostname is github.com or api.github.com. A reference or an unparsable value does not. */
@@ -179,6 +179,25 @@ export function namesGithubDotCom(value: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * The env Claude Code's settings give the servers it starts: user settings, then this directory's and its parents'
+ * project settings. A host set there applies to a server's token just as one in this shell does.
+ */
+function claudeSettingsEnv(): Record<string, unknown> {
+  const files = [path.join(core.homeDir(), ".claude", "settings.json")]
+  for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
+    files.push(path.join(dir, ".claude", "settings.json"), path.join(dir, ".claude", "settings.local.json"))
+    if (path.dirname(dir) === dir) break
+  }
+  return Object.assign(
+    {},
+    ...files.map((f) => {
+      const env = core.readJson<any>(f, {})?.env
+      return env && typeof env === "object" ? env : {}
+    }),
+  )
 }
 
 /** Whether every host setting in an environment, if any, names github.com. */
@@ -203,7 +222,7 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   const settings = Object.entries(server.env ?? {}).every(
     ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
   )
-  return settings && hostSettingsAreGithubDotCom({ ...process.env, ...server.env })
+  return settings && hostSettingsAreGithubDotCom({ ...process.env, ...claudeSettingsEnv(), ...server.env })
 }
 
 /**
@@ -240,7 +259,9 @@ function claimedByOtherHost(name: string): boolean {
   const word = new RegExp(`(^|[^A-Z0-9_])${name}\\b`)
   const value = process.env[name]?.trim()
   return serversAround().some(([serverName, server]) => {
-    const github = core.providerMatchesMcp("github", serverName, server)
+    // A GitHub server by what it is called or runs, not by a folder path it is given (a filesystem server over ~/github is not one).
+    const named = [serverName, server.command, server.url, ...(server.args ?? []).filter((a) => typeof a === "string" && !/^([~/.]|[A-Za-z]:[\\/])/.test(a))]
+    const github = /github/i.test(named.filter(Boolean).join(" "))
     if (isGithubDotComRemote(server) || (github && mcpServerIsGithubDotCom(server))) return false
     const text = JSON.stringify(server)
     // docker passes a variable on by name in any of its forms: -e NAME, -eNAME, --env=NAME.
@@ -253,7 +274,7 @@ function claimedByOtherHost(name: string): boolean {
 
 /** Whether the shell's GitHub token variable may be read: the shell's host settings name github.com and no other-host server takes its token from it. */
 export function shellGithubTokenUsable(name: string): boolean {
-  return hostSettingsAreGithubDotCom(process.env) && !claimedByOtherHost(name)
+  return hostSettingsAreGithubDotCom({ ...process.env, ...claudeSettingsEnv() }) && !claimedByOtherHost(name)
 }
 
 /** Whether gh may be asked for the github.com token: gh hands back GH_TOKEN or GITHUB_TOKEN as that token whatever host they belong to, so it is asked only when each one set is usable. */
@@ -799,7 +820,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       if (opts.localOnly && !wasBlocked) await core.setBlocked([id], true)
       // A leftover recorded from an earlier upload is about to be replaced by this credential, so it stops being one before
       // anything is written: otherwise a later sync would remove the only copy of what is saved here.
-      const hadLeftover = Boolean(core.loadStore().providers[id]?.cleanupPending)
+      const hadLeftover = core.loadStore().providers[id]?.cleanupPending || false
       if (hadLeftover) {
         try {
           await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false }))
@@ -830,7 +851,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
           } catch {}
         }
         // The previous secrets are back, and with them the leftover they were.
-        if (hadLeftover) await core.recordLeftover(id)
+        if (hadLeftover) await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: hadLeftover })).catch(() => {})
         if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
         return local({ status: "failed", sync: hadCopy ? "synced" : "local", message: e instanceof Error ? e.message : String(e) })
       }
@@ -917,7 +938,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         // Whatever was left here from before is gone with it.
         if (core.loadStore().providers[id]?.cleanupPending) await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
       } catch (e) {
-        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. ${await core.recordLeftover(id)}`
+        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. ${await core.recordLeftover(id, cfg)}`
       }
       // What was typed in is the form's, not the credential's: discard removes it, as for any other draft.
       try {
