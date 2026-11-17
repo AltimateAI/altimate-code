@@ -26,7 +26,7 @@ export interface DocsCoverage {
 
 const hasText = (value: unknown) => typeof value === "string" && value.trim().length > 0
 
-/** Coverage of one manifest model node. Throws when the node has no compiled SQL, the engine cannot read it, or its select list cannot be read as column names and the manifest lists no columns. */
+/** Coverage of one manifest model node. Throws when the node has no compiled SQL, or when its select list cannot be read as column names and the manifest lists no columns; with manifest columns, those are counted instead (`source: "manifest_columns"`). */
 export function docsCoverage(node: any, dialect: string | undefined): DocsCoverage {
   const yamlColumns: Record<string, any> = node.columns ?? {}
   const described = new Set<string>()
