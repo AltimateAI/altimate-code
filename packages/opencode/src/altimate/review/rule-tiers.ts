@@ -126,6 +126,7 @@ const SUMMARY = [
   "dbt-project-rules:test-window-shrunk",
   "dbt-project-rules:yaml-parse-error",
   "dbt-project-rules:quickstart-public-model-missing",
+  "dbt-project-rules:doc-block-missing",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {
