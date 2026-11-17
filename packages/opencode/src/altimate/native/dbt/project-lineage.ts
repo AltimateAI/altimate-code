@@ -227,8 +227,8 @@ export function castColumn(item: string, inner = false): string | null {
   const ref = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(s)
   if (ref) {
     const name = ref[1]!
-    // A bare `1` or `null` is a literal; `q.end` and `"null"` are columns.
-    const literal = ref[0] === name && (/^\d/.test(name) || ENDS_EXPRESSION.test(name))
+    // A number (`1`, `1.5`) or a bare `null` is a literal; `q.end` and `"null"` are columns.
+    const literal = /^\d/.test(ref[0]!) || (ref[0] === name && ENDS_EXPRESSION.test(name))
     return inner && !literal ? unquoteName(name) : null
   }
   if (blank.startsWith("(") && closingParen(blank, 0) === blank.length - 1) return castColumn(s.slice(1, -1), true)

@@ -1356,7 +1356,7 @@ describe("both tools: names at the edges", () => {
     const named = { "amount::numeric": "amount", "(amount)::numeric": "amount", "cast((amount)as numeric)": "amount", "q.end::int": "end",
       '("null")::int': "null", "(q.end)::int": "end", "cast(amount as numeric)::int": "amount", "((amount))::numeric": "amount" }
     for (const [item, name] of Object.entries(named)) expect(castColumn(item)).toBe(name)
-    for (const item of ["amount", "(null)::int", "(1)::int", "(true)::boolean", "coalesce(amount)::numeric", "-(amount)::numeric",
+    for (const item of ["amount", "(null)::int", "(1)::int", "cast(1.5 as numeric)", "(1.0)::numeric", "(true)::boolean", "coalesce(amount)::numeric", "-(amount)::numeric",
       "(amount)::numeric * 2", "(amount + 1)::int", "cast(amount as int) between 1 and 2"])
       expect(castColumn(item)).toBeNull()
   })
