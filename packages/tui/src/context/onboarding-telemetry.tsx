@@ -33,6 +33,9 @@ export type OnboardingTelemetryEvent =
       searchAll?: boolean
       /** Set when the pick came from the full catalogue, i.e. after `searchAll`. */
       via_search?: boolean
+      // altimate_change — which subscription row was picked; tells "ChatGPT subscription" from the
+      // OpenAI API-key row, which share providerID "openai"
+      subscription?: "claude" | "chatgpt" | "copilot" | "supergrok" | "gitlab-duo"
     }
   // altimate_change — fixes #1301: "migration" covers a returning user whose implicit free
   // default (not only the retired Big Pickle id) is offered Altimate Base on relaunch. It is
