@@ -1,6 +1,8 @@
 import { describe, test, expect } from "bun:test"
 import {
   dbtProjectFindings,
+  dispatchKwargFindings,
+  dispatchVariants,
   jinjaBalance,
   jinjaFindings,
   joinTargets,
@@ -425,5 +427,44 @@ describe("parameter added to an existing macro without a default", () => {
     const h = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp(), b) %}{% endmacro %}"
     const fs = noDefault(`@@ -1 +1 @@\n-${o}\n+${h}\n`, o, h, "macros/m.sql")
     expect(fs.map((f) => f.title)).toEqual(["m: new parameter `b` of `m` has no default"])
+  })
+})
+
+describe("adapter.dispatch keyword a variant does not take", () => {
+  const head = (variantParams: string, body = "select 1") =>
+    [
+      "{%- macro ghost(col, dtype, size=none, scale=none) -%}",
+      "{{ return(adapter.dispatch('ghost', 'pkg')(col=col,",
+      "                                            dtype=dtype,",
+      "                                            size=size,",
+      "                                            scale=scale)) }}",
+      "{%- endmacro -%}",
+      "",
+      "{%- macro default__ghost(col, dtype, size, scale=none) -%}select 1{%- endmacro -%}",
+      `{%- macro snowflake__ghost(${variantParams}) -%}${body}{%- endmacro -%}`,
+    ].join("\n")
+  const diff = "@@ -3,2 +3,3 @@\n                                             dtype=dtype,\n                                             size=size,\n+                                            scale=scale)) }}\n"
+  const run = (sql: string) => {
+    const f: ChangedFile = { path: "macros/ghost.sql", status: "modified", diff }
+    return dispatchKwargFindings(f, sql, (name) => dispatchVariants(sql, name))
+  }
+  test("a variant without the new keyword: fires on the added keyword line", () => {
+    const fs = run(head("col, dtype, size"))
+    expect(fs).toHaveLength(1)
+    expect(fs[0].rule).toBe("dbt-project-rules:dispatch-kwarg-not-in-variant")
+    expect(fs[0].startLine).toBe(5)
+    expect(fs[0].body).toContain("`snowflake__ghost`")
+    expect(fs[0].body).not.toContain("`default__ghost`")
+  })
+  test("twin: every variant takes the keyword", () => {
+    expect(run(head("col, dtype, size, scale=none"))).toHaveLength(0)
+  })
+  test("a variant that reads `kwargs` accepts any keyword", () => {
+    expect(run(head("col, dtype, size", "{{ kwargs.get('scale') }}"))).toHaveLength(0)
+  })
+  test("keywords on unchanged lines are not this change", () => {
+    const f: ChangedFile = { path: "macros/ghost.sql", status: "modified", diff: "@@ -9 +9 @@\n-x\n+y\n" }
+    const sql = head("col, dtype, size")
+    expect(dispatchKwargFindings(f, sql, (name) => dispatchVariants(sql, name))).toHaveLength(0)
   })
 })
