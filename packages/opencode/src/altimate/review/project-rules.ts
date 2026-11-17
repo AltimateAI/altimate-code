@@ -7,6 +7,7 @@ import { type ChangedFile, walkDiffLines, walkDiffRows } from "./diff-filter"
 import { incrementalFilter, inlineConfig } from "./incremental-semantics"
 import { parenBody, topLevel } from "./rule-catalog"
 import { capabilityFor } from "./adapter-capabilities"
+import { ADAPTERS } from "./dbt-patterns"
 
 const nameOf = (p: string) => path.basename(p).replace(/\.(sql|py|ya?ml|csv)$/i, "")
 
@@ -250,6 +251,8 @@ function signatures(sql: string | undefined) {
   return out
 }
 
+const DISPATCH_VARIANT = new RegExp(`^(default|${ADAPTERS.join("|")})__\\w`, "i")
+
 /** The comment text on a line (`-- …`, `/* … *\/`, `{# … #}`), or "". */
 const commentOf = (l: string) => /--(.*)$|\/\*(.*?)(\*\/|$)|\{#(.*?)(#\}|$)/.exec(l)?.slice(1).filter(Boolean).join(" ") ?? ""
 const TEMP_MARKER =
@@ -302,7 +305,8 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
     const oldSigs = signatures(oldContent)
     for (const [name, sig] of signatures(newContent)) {
       const old = oldSigs.get(name)
-      if (!old) continue
+      // An `<adapter>__x` variant is called only by its dispatcher, which passes every argument.
+      if (!old || DISPATCH_VARIANT.test(name)) continue
       const known = new Set(old.params.map((p) => p.name))
       for (const p of sig.params) {
         // dbt itself passes `model` / `column_name` to a generic test.

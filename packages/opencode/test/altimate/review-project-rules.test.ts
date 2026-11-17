@@ -428,6 +428,13 @@ describe("parameter added to an existing macro without a default", () => {
     const renamedOnly = "@@ -1 +1 @@\n-{% macro m(a, b) %}\n+{% macro m(a, b) -%}\n"
     expect(noDefault(renamedOnly, "{% macro m(a, b) %}{% endmacro %}", "{% macro m(a, b) -%}{% endmacro %}", "macros/m.sql")).toHaveLength(0)
   })
+  test("an adapter variant gets every argument from its dispatcher: silent", () => {
+    const o = "{% macro snowflake__sat(a, b) %}{% endmacro %}"
+    const h = "{% macro snowflake__sat(a, b, skip_hwm) %}{% endmacro %}"
+    expect(noDefault(`@@ -1 +1 @@\n-${o}\n+${h}\n`, o, h, "macros/sat.sql")).toHaveLength(0)
+    const g = "{% macro sat(a, b, skip_hwm) %}{% endmacro %}"
+    expect(noDefault(`@@ -1 +1 @@\n-${o.replace("snowflake__", "")}\n+${g}\n`, o.replace("snowflake__", ""), g, "macros/sat.sql")).toHaveLength(1)
+  })
   test("defaults holding calls and lists do not split the parameter list", () => {
     const o = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp()) %}{% endmacro %}"
     const h = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp(), b) %}{% endmacro %}"
