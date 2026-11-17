@@ -21,6 +21,9 @@ import { WorkspaceApi, type ActAs, type DatamateRef } from "@/altimate/workspace
 import * as Manage from "@/altimate/workspace/manage"
 import { accountDigest, credentialDigest, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 import { ReviewApi } from "@/altimate/workspace/review-api"
+// altimate_change start — workspace review: request changes (one resend hint for the CLI and the TUI)
+import { resendHint } from "@/altimate/workspace/resend-hint"
+// altimate_change end
 import { printable, printableDeep } from "@/altimate/rules/printable"
 
 export const EXIT = { OK: 0, FAILED: 1, USAGE: 2, NOT_LINKED: 3 } as const
@@ -336,6 +339,9 @@ export const reviewStatusDeps: ReviewStatusDeps = {
 
 const REVIEW_STATUS: Record<ReviewApi.Contribution["status"], string> = {
   pending: "pending review",
+  // altimate_change start — workspace review: request changes
+  changes_requested: "changes requested",
+  // altimate_change end
   active: "approved",
   rejected: "rejected",
   superseded: "replaced by a newer request",
@@ -352,10 +358,15 @@ export function describeReviews(workspaceName: string, listed: Awaited<ReturnTyp
     const change = item.change === "edit" ? "update" : "new"
     const reviewer = item.reviewed_by_name ? ` by ${printable(item.reviewed_by_name)}` : ""
     const reason = item.review_reason ? `: ${printable(item.review_reason)}` : ""
-    const decided = item.status === "active" || item.status === "rejected" || item.status === "retired" ? `${reviewer}${reason}` : ""
+    // altimate_change start — workspace review: request changes (who sent it back, and what to change)
+    const decided = ["active", "rejected", "retired", "changes_requested"].includes(item.status) ? `${reviewer}${reason}` : ""
+    // altimate_change end
     // Expired requests stay pending and can still be approved: the label says they have waited past the window.
     const expired = item.status === "pending" && item.expired ? " (expired: waiting longer than 14 days)" : ""
     lines.push(`  ${item.kind} "${printable(item.name)}" (${change}): ${REVIEW_STATUS[item.status]}${decided}${expired}`)
+    // altimate_change start — workspace review: request changes
+    if (item.status === "changes_requested") lines.push(`    ${resendHint(item.kind, item.name)}`)
+    // altimate_change end
   }
   if (listed.skipped)
     lines.push(`${listed.skipped} request${listed.skipped === 1 ? "" : "s"} could not be read by this version of altimate-code.`)

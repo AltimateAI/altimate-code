@@ -153,6 +153,41 @@ describe("pulled", () => {
   })
 })
 
+describe("closed here (workspace review: request changes)", () => {
+  const sentBack = pending("bbbbbbbbbbbb", "Prefix marts with fct_.", { status: "changes_requested", version: 2, review_reason: "Which?" })
+  const reviewed = {
+    public_id: sentBack.public_id, rule_key: sentBack.rule_key, text: sentBack.text, change: "add", status: "changes_requested",
+    review_reason: "Which?", reviewed_by_name: "Olive", reviewed_at: "2026-11-02T00:00:00Z", updated_at: "2026-11-02T00:00:00Z",
+  }
+
+  test("a proposal withdrawn here while a pull was on its way is not brought back by it, nor its record overwritten", async () => {
+    answer = () => Response.json(syncBody([ACTIVE], { my_pending: [sentBack] }))
+    await RulesSync.pull(root, ready())
+    const now = new Date().toISOString()
+    await RulesStore.update(root, (s) => {
+      s.sent = [{ public_id: sentBack.public_id, text: sentBack.text, change: "add", status: "pending", sent_at: now, updated_at: now }]
+    })
+    // The answer was made before the withdraw reached the server; the withdraw is recorded while it is on its way.
+    answer = (async () => {
+      await RulesStore.update(root, (s) => {
+        s.my_pending = []
+        s.closed_locally.push({ public_id: sentBack.public_id, at: new Date().toISOString() })
+        s.sent[0].status = "withdrawn"
+      })
+      return Response.json(syncBody([ACTIVE], { my_pending: [sentBack], my_reviewed: [reviewed] }))
+    }) as never
+    await RulesSync.pull(root, ready())
+    const state = await RulesStore.read(root)
+    expect(state.my_pending).toEqual([])
+    expect(state.sent.map((x) => x.status)).toEqual(["withdrawn"])
+    expect(await vouchedTexts()).toEqual([[ACTIVE.text, "active"]])
+    // A pull that starts after it takes the server's answer as it is.
+    answer = () => Response.json(syncBody([ACTIVE], { my_pending: [sentBack] }))
+    await RulesSync.pull(root, ready())
+    expect((await RulesStore.read(root)).my_pending.map((p) => p.public_id)).toEqual([sentBack.public_id])
+  })
+})
+
 describe("delivered", () => {
   const limits = { core_lessons: 5, retrieved_lessons: 0, budget_tokens: 500, session_max_lessons: 40 }
   const pull = async (my_pending: unknown[]) => {

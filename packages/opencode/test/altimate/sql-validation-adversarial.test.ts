@@ -113,10 +113,12 @@ describe("Adversarial: sql-classify bypass attempts", () => {
     expect(r.blocked).toBe(false)
   })
 
-  test("TRUNCATE inside string literal is not blocked", () => {
+  test("TRUNCATE inside a write's string literal is blocked", () => {
+    // A write can run its literals as SQL (dynamic SQL, routine bodies), so a write's literal that
+    // names TRUNCATE is refused even with --allow-write: an accepted limit of the best-effort block.
     const r = classifyAndCheck("INSERT INTO logs VALUES ('TRUNCATE TABLE users happened')")
     expect(r.queryType).toBe("write")
-    expect(r.blocked).toBe(false) // string literal, not real TRUNCATE
+    expect(r.blocked).toBe(true)
   })
 
   test("DROP SCHEMA inside double-quoted identifier is not blocked", () => {

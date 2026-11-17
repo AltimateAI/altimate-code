@@ -435,7 +435,6 @@ export namespace AltimateApi {
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<any> {
-    // The body is whatever JSON the endpoint returns; each endpoint function in other files types its own result.
     signal?.throwIfAborted()
     let creds: AltimateCredentials
     try {
