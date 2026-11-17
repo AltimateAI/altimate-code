@@ -193,7 +193,7 @@ describe("dbt_cost_estimate", () => {
   })
 
   test("the tool description says compiling can run billed queries and the adapter start runs dbt deps", async () => {
-    const tool = await DbtCostEstimateTool.init()
+    const tool = await initTool(DbtCostEstimateTool)
     expect(tool.description).toContain("runs `dbt deps`")
     expect(tool.description).toContain("macros such as `run_query` run real queries that are billed")
   })
