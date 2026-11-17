@@ -249,18 +249,53 @@ export function excerptDiff(diff: string, maxChars: number): { text: string } & 
   return { text: out.join("\n"), truncated: cut || omitted.length > 0, hunksSent: sent, hunksTotal: hunks.length }
 }
 
+const COMPILED_UNLOCATED_MARKER = "\n… (compiled file: changed lines not located, head shown; windows would be approximate)"
+const JINJA = /\{\{|\{%/
+
+/**
+ * Where the diff's added lines sit in `lines` when the content is not the raw
+ * file (e.g. dbt-compiled SQL, whose line numbers drift once Jinja expands).
+ * Returns undefined when the raw line numbers already match (or nothing can be
+ * checked), the found line numbers when at least half of the eligible added
+ * lines (8+ non-space chars, no Jinja) are found by text, and "unlocated" otherwise.
+ */
+function locateAddedLines(lines: string[], rows: Array<{ line: number; text: string; kind: string }>): number[] | "unlocated" | undefined {
+  const eligible = rows.filter((r) => r.kind === "+" && !JINJA.test(r.text) && r.text.replace(/\s/g, "").length >= 8)
+  if (!eligible.length || eligible.every((r) => lines[r.line - 1]?.trim() === r.text.trim())) return undefined
+  const found: number[] = []
+  const used = new Set<number>()
+  let from = 0
+  for (const r of eligible) {
+    const want = r.text.trim()
+    let at = -1
+    for (let i = from; i < lines.length; i++)
+      if (!used.has(i) && lines[i].trim() === want) {
+        at = i
+        break
+      }
+    if (at < 0) continue
+    used.add(at)
+    found.push(at + 1)
+    from = at + 1
+  }
+  return found.length * 2 >= eligible.length ? found : "unlocated"
+}
+
 /**
  * The parts of a file around its changed lines (±20 head-side lines each,
  * merged), up to `maxChars`, then as much of the file head as still fits.
  * Gaps are marked with their real line numbers. Without changed lines the file
- * head is kept, as before.
+ * head is kept, as before. When the content is not the raw file (compiled SQL),
+ * windows are anchored on the added lines' text instead of raw line numbers.
  */
 export function excerptFile(content: string, diff: string | undefined, maxChars: number): { text: string; truncated: boolean } {
   if (content.length <= maxChars) return { text: content, truncated: false }
   const lines = content.split("\n")
   const n = lines.length
   const rows = [...walkDiffLines(diff)]
-  const added = rows.filter((r) => r.kind === "+").map((r) => r.line)
+  const located = locateAddedLines(lines, rows)
+  if (located === "unlocated") return { text: truncate(content, maxChars) + COMPILED_UNLOCATED_MARKER, truncated: true }
+  const added = located ?? rows.filter((r) => r.kind === "+").map((r) => r.line)
   const anchors = (added.length ? added : rows.map((r) => r.line)).filter((l) => l >= 1 && l <= n).sort((a, b) => a - b)
   if (!anchors.length) return { text: truncate(content, maxChars), truncated: true }
   const windows: Array<[number, number]> = []
