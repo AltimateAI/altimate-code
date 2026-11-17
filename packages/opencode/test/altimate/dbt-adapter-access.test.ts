@@ -463,15 +463,20 @@ describe("AltimateApi.apiRequest", () => {
       JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
     )
     const original = globalThis.fetch
+    let markFetchReady!: () => void
+    const fetchReady = new Promise<void>((resolve) => (markFetchReady = resolve))
     globalThis.fetch = ((_url: string, init: RequestInit) =>
       new Promise((_, reject) => {
         // Like fetch: a signal already aborted rejects at once, else the abort does.
         if (init.signal?.aborted) return reject(init.signal.reason)
         init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+        markFetchReady()
       })) as unknown as typeof fetch
     const controller = new AbortController()
     try {
       const pending = AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal)
+      // The abort comes while the request is in flight, not before it was sent.
+      await fetchReady
       controller.abort(new Error("cancelled by the user"))
       await expect(pending).rejects.toThrow("cancelled by the user")
     } finally {
