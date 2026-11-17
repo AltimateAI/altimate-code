@@ -880,6 +880,9 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     return await core.withLock(async (): Promise<CredentialResult> => {
       if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: syncState(), message: CHANGED_WHILE_CONNECTING })
       if (core.isBlocked(id)) return local({ status: "failed", sync: syncState(), message: "Sync is blocked for this provider, kept local." })
+      // A copy recorded on another sign-in would be forgotten by uploading here; that sign-in removes it first.
+      const elsewhere = core.recordedElsewhere(id, cfg)
+      if (elsewhere) return local({ status: "failed", sync: syncState(), message: elsewhere })
       const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true, opts.update ? "update" : "connect")
       exposure = core.exposureNotes(res)
       if (!res.isValid) {

@@ -1234,6 +1234,8 @@ async function syncReal(
       const cur = now.providers[id]
       if (!sameRecord(cur, rec))
         return { id, result: "failed", reason: "the connection changed while syncing, run sync again", steps: [] }
+      const elsewhere = recordedElsewhere(id, cfg)
+      if (elsewhere) return { id, result: "failed", reason: elsewhere, steps: [] }
       const res = await upsertManaged(cfg, id, upload, share)
       exposure = exposureNotes(res)
       if (!res.isValid) {

@@ -594,6 +594,16 @@ describe("workspace connections", () => {
     expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, false])
   })
 
+  test("sync does not upload while the recorded workspace copy is on another sign-in", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: "https://other.example#t" }))
+    process.env.ALTIMATE_TEST_GH_TOKEN = "gh_no_expiry"
+    const before = writes().length
+    const o = await core.syncProvider("github")
+    expect([o.result, o.reason]).toEqual(["failed", expect.stringContaining("another Altimate sign-in")])
+    expect(writes().length).toBe(before)
+  })
+
   test("a leftover's secret fields are removed even when a later save no longer lists them", async () => {
     expect((await core.syncProvider("github")).result).toBe("synced")
     await core.storeSecret(core.secretKey("cred", "github", "old_custom_token"), "old")
@@ -2268,6 +2278,24 @@ describe("credentials flow", () => {
       expect(creds.mcpEnvHasToken("github", { command: "github-mcp-server", env: { GITHUB_TOKEN: "ghp_real" } })).toBe(true)
     })
 
+    test("a sync whose cleanup fails records the uploaded credential's secret fields with the leftover", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      await core.setBlocked(["github"], false)
+      const rename = fs.renameSync
+      const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations-secrets.json")) throw new Error("disk full")
+        return rename(from, to)
+      }) as any)
+      try {
+        expect((await core.syncProvider("github")).result).toBe("synced")
+      } finally {
+        spy.mockRestore()
+      }
+      expect(core.loadStore().providers.github?.leftoverFields).toEqual(["github_token"])
+    })
+
     test("a leftover that cannot be recorded is not followed by advice to sync", async () => {
       const rename = fs.renameSync
       const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
@@ -2322,10 +2350,13 @@ describe("credentials flow", () => {
         api.state.valid = true
       }
       expect(core.loadStore().providers.github?.cleanupPending).toBe(core.backendKey((await core.realConfig())!))
-      // A later update that is accepted removes what was left here, and the mark with it.
+      // A later update that is accepted removes what was left here, fields the record no longer lists included, and the mark with it.
+      await core.storeSecret(core.secretKey("cred", "github", "old_custom_token"), "old")
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, leftoverFields: ["old_custom_token"] }))
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
       expect(core.loadStore().providers.github?.cleanupPending).toBe(false)
+      expect([await core.readSecret(core.secretKey("cred", "github", "old_custom_token")), core.loadStore().providers.github?.leftoverFields]).toEqual([undefined, undefined])
     })
 
     test("Keep local whose record write fails puts back the previous secrets and nothing old is purged", async () => {
@@ -2392,8 +2423,9 @@ describe("credentials flow", () => {
         spy.mockRestore()
       }
       expect(core.isSynced("github")).toBe(true)
-      // Recorded as a leftover, so the sync the message names removes it, without uploading it.
+      // Recorded as a leftover with the fields it had, so the sync the message names removes it, without uploading it.
       expect(core.loadStore().providers.github?.cleanupPending).toBe(core.backendKey((await core.realConfig())!))
+      expect(core.loadStore().providers.github?.leftoverFields).toEqual(["github_token"])
       const upload = spyOn(backend, "updateConnection")
       try {
         expect((await core.syncProvider("github")).result).toBe("synced")
@@ -3009,6 +3041,11 @@ describe("credentials flow", () => {
       const kept = await creds.connectCredentials({ id: "github", localOnly: true })
       expect([kept.status, kept.message]).toEqual(["failed", expect.stringContaining("another Altimate sign-in")])
       expect([api.state.rows.filter((r) => !r.deleted).length, core.loadStore().providers.github?.connectionId]).toEqual([1, recorded.connectionId])
+      // Uploading here would forget it too: a signed-in connect and a sync are refused before anything is written.
+      await token("github", "github_token")
+      const rows = api.state.rows.length
+      expect((await creds.connectCredentials({ id: "github" })).message).toContain("another Altimate sign-in")
+      expect(api.state.rows.length).toBe(rows)
       // A plain connect of a blocked provider is refused the same way, and signed out, disconnect asks for a sign-in first.
       await core.setBlocked(["github"], true)
       await token("github", "github_token")
