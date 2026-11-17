@@ -190,7 +190,7 @@ export async function buildSqlGraph(
   deps: SqlGraphDeps,
   signal: AbortSignal,
 ): Promise<SqlGraph> {
-  const manifest = await adapter.parseManifest()
+  const manifest = await untilAborted(adapter.parseManifest(), signal)
   signal.throwIfAborted()
   if (!manifest) throw new Error("the dbt manifest is not available")
   const node = manifest.nodeMetaMap.lookupByUniqueId(model) ?? manifest.nodeMetaMap.lookupByBaseName(model)
@@ -199,7 +199,7 @@ export async function buildSqlGraph(
   if (node.resource_type !== "model" || !node.path?.toLowerCase().endsWith(".sql"))
     throw new Error(`${node.name} is not a dbt model with a SQL file`)
   const file = path.isAbsolute(node.path) ? node.path : path.join(deps.projectRoot ?? "", node.path)
-  const compiled = await adapter.unsafeCompileQuery(deps.readFile(file), node.name)
+  const compiled = await untilAborted(adapter.unsafeCompileQuery(deps.readFile(file), node.name), signal)
   signal.throwIfAborted()
   if (!compiled) throw new Error(`unable to compile ${node.name}`)
 
@@ -260,7 +260,7 @@ export async function buildSqlGraph(
     })
   }
   // The warehouse metadata read: once per call, only for the parents.
-  const fromDb = requests.length ? await adapter.getBulkSchemaFromDB(requests, signal) : {}
+  const fromDb = requests.length ? await untilAborted(adapter.getBulkSchemaFromDB(requests, signal), signal) : {}
   signal.throwIfAborted()
   const hash = crypto.createHash("md5").update(compiled).digest("hex")
   const dialect = adapter.getAdapterType()

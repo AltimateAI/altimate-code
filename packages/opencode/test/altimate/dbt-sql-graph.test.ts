@@ -3,6 +3,7 @@
 // dbt_sql_graph: the request built from the compiled model and its parents' columns, and the
 // remap of the backend's reply (`__final_select__` to the model's node, relation nodes to dbt unique ids).
 // The adapter and the endpoint are fakes, so no dbt, warehouse or backend is involved.
+import { structuredResult } from "../../src/altimate/mcp-server/server"
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { realpathSync } from "node:fs"
@@ -481,12 +482,34 @@ describe("buildSqlGraph", () => {
         buildSqlGraph(adapter(), "orders", { ...deps, fetchLineage: async () => bad as any }, signal),
       ).rejects.toThrow("no SQL graph")
     }
+    // A compile that never settles does not hold the call past its cancellation.
+    const stalled = new AbortController()
+    const pending = buildSqlGraph(
+      adapter({ unsafeCompileQuery: () => new Promise(() => {}) }),
+      "orders",
+      deps,
+      stalled.signal,
+    )
+    stalled.abort(new Error("cancelled"))
+    await expect(pending).rejects.toThrow("cancelled")
     const aborted = AbortSignal.abort()
     let called = false
     await expect(
       buildSqlGraph(adapter(), "orders", { ...deps, fetchLineage: async () => ((called = true), reply) }, aborted),
     ).rejects.toThrow()
     expect(called).toBe(false)
+  })
+})
+
+describe("dbt_sql_graph over MCP", () => {
+  test("its graph travels as structured content", () => {
+    const nodes = [{ id: "a", name: "a", type: "cte", sql: "select 1", columns: [] }]
+    const out = structuredResult(
+      "dbt_sql_graph",
+      { model: "orders", nodes, edges: [], success: true },
+      "SQL graph for orders",
+    ) as any
+    expect(out).toEqual({ model: "orders", nodes, edges: [], report: "SQL graph for orders" })
   })
 })
 
