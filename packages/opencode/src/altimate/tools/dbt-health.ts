@@ -250,17 +250,26 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     // file: rebuild now and wait for it, so the run reads the project as it is. A rebuild that throws stops
     // the run; one that leaves only the last good manifest is said so in the answer.
     let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
+    let rebuiltAt: number | undefined
     if (typeof adapter.parseManifest === "function") {
       try {
-        if (typeof adapter.rebuildManifest === "function") await rebuildManifest(adapter, ctx.abort)
+        if (typeof adapter.rebuildManifest === "function") {
+          const startedAt = Date.now()
+          await rebuildManifest(adapter, ctx.abort)
+          rebuiltAt = startedAt
+        }
         // A rebuild that fails to compile returns normally and leaves the last manifest: its diagnostics say so.
         // The adapter's own getDiagnostics() answers nothing; the integration beneath it holds them.
         const source = typeof adapter.currentIntegration?.getDiagnostics === "function" ? adapter.currentIntegration : adapter
         const diagnostics = (typeof source.getDiagnostics === "function" ? source.getDiagnostics() : undefined)?.rebuildManifestDiagnostics
-        if (Array.isArray(diagnostics) && diagnostics.length > 0)
+        // A parse that succeeded can still report warnings (deprecations, unused config): only errors stop the run.
+        const errors = Array.isArray(diagnostics)
+          ? diagnostics.filter((d: { severity?: unknown }) => !(typeof d?.severity === "string" && /^(warn|info|hint)/i.test(d.severity)))
+          : []
+        if (errors.length > 0)
           return failure(
             "parse failed",
-            `dbt_health can't run: dbt couldn't parse the project: ${diagnostics.map((d: { message?: string }) => d?.message).filter(Boolean).join("; ") || "the manifest rebuild failed"}`,
+            `dbt_health can't run: dbt couldn't parse the project: ${errors.map((d: { message?: string }) => d?.message).filter(Boolean).join("; ") || "the manifest rebuild failed"}`,
           )
         const parsed = await adapter.parseManifest()
         if (parsed?.stale) {
@@ -285,6 +294,18 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     const manifest: string =
       (typeof adapter.getManifestPath === "function" ? adapter.getManifestPath() : undefined) ?? path.join(root, "target", "manifest.json")
     if (!fs.existsSync(manifest)) return failure("no manifest", `dbt_health can't run: no manifest at ${manifest}; run dbt parse or dbt compile first.`)
+    // The adapter's own watcher can replace this rebuild with one of its own (the replaced one resolves
+    // normally and writes nothing): a manifest older than the rebuild this call started is the last one.
+    if (!stale && rebuiltAt !== undefined) {
+      const written = fs.statSync(manifest).mtimeMs
+      if (written < rebuiltAt - 2000)
+        stale = {
+          message: "The manifest was not rewritten by this call's rebuild (another rebuild may have replaced it and still be running), so these insights may not match the project as it is now; run dbt_health again in a moment.",
+          manifest_path: manifest,
+          written_at: new Date(written).toISOString(),
+          age_seconds: Math.max(0, Math.round((Date.now() - written) / 1000)),
+        }
+    }
     const catalogFile = path.join(path.dirname(manifest), "catalog.json")
     const catalog = fs.existsSync(catalogFile) ? catalogFile : ""
     let configPath = ""

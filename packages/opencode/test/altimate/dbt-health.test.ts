@@ -1,7 +1,7 @@
 // dbt_health: the DataPilot run through the project's dbt adapter. The adapter and the Python run are
 // replaced through their seams, so these tests need no dbt, no Python and no DataPilot.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -92,6 +92,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await rm(project, { recursive: true, force: true })
+})
+
+beforeEach(async () => {
+  // A rebuild writes the manifest: the fakes don't, so the fixture reads as freshly written.
+  const soon = new Date(Date.now() + 60_000)
+  await utimes(path.join(project, "target", "manifest.json"), soon, soon)
 })
 
 beforeEach(() => {
@@ -250,6 +256,32 @@ describe("dbt_health", () => {
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("depends on a node named 'y'")
     expect(python.calls).toHaveLength(0)
+  })
+
+  test("says so when the manifest is older than this call's rebuild, as when the adapter's watcher replaced it", async () => {
+    const old = new Date(Date.now() - 3_600_000)
+    await utimes(path.join(project, "target", "manifest.json"), old, old)
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {},
+      parseManifest: async () => parsed,
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.stale_manifest.message).toContain("not rewritten")
+  })
+
+  test("a rebuild that reports only warnings still runs DataPilot", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {},
+      getDiagnostics: () => ({ rebuildManifestDiagnostics: [{ severity: "warning", message: "deprecated config" }] }),
+      parseManifest: async () => parsed,
+    })
+    await run()
+    expect(python.calls).toHaveLength(1)
   })
 
   test("reads the rebuild's diagnostics from the integration beneath the adapter, whose own getDiagnostics answers nothing", async () => {
