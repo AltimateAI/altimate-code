@@ -154,10 +154,10 @@ describe("consumers outside the DAG", () => {
     expect(plain.findings.some((x) => x.title.includes("declared consumers"))).toBe(false)
   })
 
-  test("nothing declared: a final-layer model still gets a suggestion, an intermediate model does not", async () => {
+  test("nothing declared: a final-layer model still gets a warning, an intermediate model does not", async () => {
     const none = { exposures: [], contractEnforced: false, contractColumns: [] }
     const mart = (await review(none)).findings.find((x) => x.title.includes("final-layer"))
-    expect(mart?.severity).toBe("suggestion")
+    expect(mart?.severity).toBe("warning")
     expect(mart?.body).toContain("`email`")
     const inter = await review(none, {
       changedFiles: [{ ...changed[0], path: "models/intermediate/int_x.sql" }],

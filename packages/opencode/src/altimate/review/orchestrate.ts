@@ -941,7 +941,7 @@ async function consumerContractLane(
   if (removed.length && !declared) {
     out.push(
       makeFinding({
-        severity: "suggestion",
+        severity: "warning",
         category: "lineage_breakage",
         title: `${model}: removed column(s) on a final-layer model`,
         body:
