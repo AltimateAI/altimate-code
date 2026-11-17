@@ -1,7 +1,7 @@
 import z from "zod"
 import fs from "fs"
 import path from "path"
-import { createScanner, parse as parseJsonc, stripComments, ScanError, type ParseError } from "jsonc-parser"
+import { createScanner, parse as parseJsonc, stripComments, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
 import { resolveEnvVars, resolveProfilesPath } from "../native/connections/dbt-profiles"
 
@@ -45,7 +45,7 @@ function expandVariables(value: string, workspaceFolder: string): string {
 function hasUnterminatedComment(text: string): boolean {
   const scanner = createScanner(text, false)
   while (scanner.scan() !== 17 /* SyntaxKind.EOF */) {
-    if (scanner.getTokenError() === ScanError.UnexpectedEndOfComment) return true
+    if (scanner.getTokenError() === 1 /* ScanError.UnexpectedEndOfComment */) return true
   }
   return false
 }
