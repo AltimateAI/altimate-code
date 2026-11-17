@@ -1140,7 +1140,7 @@ describe("what a surface says", () => {
 })
 
 // altimate_change start — workspace review: a member's skill is submitted for the owner's review
-const { ReviewDisabledError, SubmitFailedError, TooManyReviewRequestsError } = await import(
+const { ReviewDisabledError, SubmitFailedError, TooManyReviewRequestsError, UnchangedSinceSentBackError } = await import(
   "../../../src/altimate/workspace/skill-publish"
 )
 const { ReviewNotices } = await import("../../../src/altimate/workspace/review-notices")
@@ -1366,6 +1366,12 @@ describe("workspace review", () => {
     const err = await publish().catch((e) => e)
     expect(err).toBeInstanceOf(TooManyReviewRequestsError)
     expect(explainPublishError(err)).toContain("workspace review status")
+    // The version sent back for changes, sent again unchanged: publishing again does not help until it is changed.
+    server(() => reply(summary()), () => reply({ detail: { code: "unchanged", message: "This is the version sent back for changes." } }, 409))
+    const same = await publish().catch((e) => e)
+    expect(same).toBeInstanceOf(UnchangedSinceSentBackError)
+    expect(explainPublishError(same)).toContain("Change it as the reviewer asked")
+    expect(explainPublishError(same)).not.toContain("Publish again to retry")
   })
 
   test("a 401 or an outage on the submission is a failure to retry, never a rejection; the next publish updates and resubmits", async () => {
@@ -1430,6 +1436,7 @@ describe("refusal codes for clients", () => {
     const mod = await import("../../../src/altimate/workspace/skill-publish")
     expect(mod.publishErrorCode(new mod.ReviewDisabledError("Growth", "Olive"))).toBe("review_disabled")
     expect(mod.publishErrorCode(new mod.TooManyReviewRequestsError("Growth"))).toBe("too_many_requests")
+    expect(mod.publishErrorCode(new mod.UnchangedSinceSentBackError("c-1"))).toBe("unchanged")
     expect(mod.publishErrorCode(new mod.NotLinkedError())).toBe("not_linked")
     expect(mod.publishErrorCode(new Error("boom"))).toBeNull()
     // Every refusal class: an instance of each (its constructor's arguments do not matter to the code).

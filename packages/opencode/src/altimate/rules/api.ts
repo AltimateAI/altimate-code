@@ -55,6 +55,13 @@ export const MyPending = z.object({
   change: z.enum(["add", "edit", "retire"]),
   replaces_public_id: z.string().nullable().optional(),
   created_at: z.string(),
+  // altimate_change start — workspace review: request changes
+  /** `pending`, or `changes_requested`: sent back with the reviewer's comment (`review_reason`) until its proposer sends
+   * a new wording (at `version`) or withdraws it. Absent from older servers: pending. */
+  status: z.string().optional(),
+  version: z.number().int().nullable().optional(),
+  review_reason: z.string().nullable().optional(),
+  // altimate_change end
 })
 export type MyPending = z.infer<typeof MyPending>
 
@@ -242,6 +249,18 @@ export async function propose(actAs: ActAs, datamateId: number, body: { repo_rem
 export function review(actAs: ActAs, datamateId: number, publicId: string, body: { action: "approve" | "approve_anyway" | "reject"; expected_version: number; reason?: string }) {
   return call(RuleDetail, actAs, "POST", datamateId, `/${encodeURIComponent(publicId)}/review`, { ...body, source: "cli" })
 }
+
+// altimate_change start — workspace review: request changes
+/** Its proposer takes back a proposal waiting for review or sent back for changes. */
+export function withdraw(actAs: ActAs, datamateId: number, publicId: string, body: { expected_version: number }) {
+  return call(RuleDetail, actAs, "POST", datamateId, `/${encodeURIComponent(publicId)}/withdraw`, { ...body, source: "cli" })
+}
+
+/** Its proposer sends a new wording of a proposal sent back for changes: a new proposal, which replaces it. */
+export function resubmit(actAs: ActAs, datamateId: number, publicId: string, body: { expected_version: number; text: string }) {
+  return call(ProposalResult, actAs, "POST", datamateId, `/${encodeURIComponent(publicId)}/resubmit`, { ...body, source: "cli" })
+}
+// altimate_change end
 
 export function usage(actAs: ActAs, datamateId: number, body: { batch_id: string; items: UsageItem[] }) {
   return call(z.object({ duplicate: z.boolean(), applied_items: z.number(), skipped_items: z.number() }), actAs, "POST", datamateId, "/usage", body)
