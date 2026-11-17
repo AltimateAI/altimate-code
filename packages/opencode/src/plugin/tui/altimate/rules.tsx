@@ -778,7 +778,7 @@ async function showMenu(api: TuiPluginApi) {
 }
 
 // altimate_change start — workspace review: the person's requests (`GET /altimate/workspace/requests`)
-interface WorkspaceRequest {
+export interface WorkspaceRequest {
   kind: "rule" | "skill" | "knowledge"
   public_id: string
   name: string
@@ -831,6 +831,22 @@ function requestLine(r: WorkspaceRequest): string {
   return `${status}${by}${update}${expired}${r.reason ? ` — ${printable(r.reason)}` : ""}`
 }
 
+/** How the author sends a request sent back for changes again. */
+const RESEND_HINT = {
+  skill: "Change it, then send it again with `altimate-code skill publish`.",
+  knowledge: "Change it, then send it again from the workspace's Knowledge tab.",
+} as const
+
+/** The title of a skill or knowledge request's dialog: its status, who decided it, and their whole comment (the list
+ * row cuts a long one off), plus how to send it again when it was sent back for changes. */
+export function requestActionsTitle(request: WorkspaceRequest): string {
+  const what = `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
+  const hint = request.status === "changes_requested" ? ` ${RESEND_HINT[request.kind === "skill" ? "skill" : "knowledge"]}` : ""
+  const line = requestLine(request)
+  // No second stop after a comment that already ends one ("Which column?").
+  return `Your ${what}: ${line}${/[.!?…]$/.test(line) ? "" : "."}${hint}`
+}
+
 /** Withdraw a waiting request, or remove an approved one from the workspace. Removing stops serving it to the
  * whole team, so it asks again, opening on "No" so a stray Enter cannot remove it. */
 function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
@@ -846,7 +862,7 @@ function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
   ]
   api.ui.dialog.replace(() => (
     <api.ui.DialogSelect
-      title={`Your ${what}`}
+      title={requestActionsTitle(request)}
       options={options}
       onSelect={(option) => {
         if (option.value === "withdraw") return void runRequestAction(api, request, what, "withdraw")

@@ -3,7 +3,8 @@
 // The `/rules` menu's pure helpers: how a shown decision is remembered, and why the skill and knowledge part is missing
 // or short.
 import { describe, expect, test } from "bun:test"
-import { combinedToast, decisionToast, decisionToaster, requestsProblem, shownKey } from "../../../src/plugin/tui/altimate/rules"
+import { combinedToast, decisionToast, decisionToaster, requestActionsTitle, requestsProblem, shownKey } from "../../../src/plugin/tui/altimate/rules"
+import type { WorkspaceRequest } from "../../../src/plugin/tui/altimate/rules"
 
 describe("rules TUI", () => {
   test("a decision is remembered by kind, id and status: a rule and a skill with one id do not hide each other", () => {
@@ -93,5 +94,39 @@ describe("rules TUI", () => {
     toaster.flush()
     expect(shown).toHaveLength(1)
     toaster.dispose()
+  })
+})
+
+describe("requestActionsTitle", () => {
+  const request = (over: Partial<WorkspaceRequest>): WorkspaceRequest => ({
+    kind: "skill",
+    public_id: "c-1",
+    name: "demo-naming",
+    status: "pending",
+    actions: ["withdraw"],
+    ...over,
+  })
+
+  test("a request sent back carries the reviewer's whole comment and how to send it again", () => {
+    const comment = "Also cover mart models (fct_ / dim_), and say whether snapshots follow this too"
+    expect(requestActionsTitle(request({ status: "changes_requested", reviewer: "Local Admin", reason: comment }))).toBe(
+      `Your skill "demo-naming": changes requested by Local Admin — ${comment}. Change it, then send it again with \`altimate-code skill publish\`.`,
+    )
+    expect(
+      requestActionsTitle(request({ kind: "knowledge", name: "Glossary", status: "changes_requested", reviewer: "Ann", reason: "Add ARR" })),
+    ).toBe(`Your knowledge base "Glossary": changes requested by Ann — Add ARR. Change it, then send it again from the workspace's Knowledge tab.`)
+  })
+
+  test("a comment that already ends a sentence gets no second stop", () => {
+    expect(requestActionsTitle(request({ status: "rejected", reviewer: "Ann", reason: "Which column?" }))).toBe(
+      `Your skill "demo-naming": rejected by Ann — Which column?`,
+    )
+  })
+
+  test("a waiting or rejected request says its status, with no resend hint", () => {
+    expect(requestActionsTitle(request({}))).toBe(`Your skill "demo-naming": pending review.`)
+    expect(requestActionsTitle(request({ status: "rejected", reviewer: "Ann", reason: "Covered elsewhere" }))).toBe(
+      `Your skill "demo-naming": rejected by Ann — Covered elsewhere.`,
+    )
   })
 })
