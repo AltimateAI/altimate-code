@@ -584,6 +584,12 @@ describe("new model missing from the quickstart public_models", () => {
     ])
     expect(ruleIds(env.findings)).not.toContain("dbt-project-rules:quickstart-public-model-missing")
   })
+  test("an unrelated duplicate key elsewhere in the quickstart file doesn't hide the list", () => {
+    const dup = qs + "table_variables:\n  crm_enabled:\n    - a\n  crm_enabled:\n    - b\n"
+    const m: ChangedFile = { path: "models/crm__new.sql", status: "added" }
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", dup, ["crm__new"])).toHaveLength(1)
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", dup, ["crm__deals"])).toHaveLength(0)
+  })
   test("quickstart unchanged: the finding goes on the new model", () => {
     const m: ChangedFile = { path: "models/crm__new.sql", status: "added" }
     expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["crm__new"])[0].file).toBe("models/crm__new.sql")
@@ -636,6 +642,13 @@ describe("package-lock.yml added to a dbt package", () => {
     expect(f.file).toBe("package-lock.yml")
     expect((f.evidence!.result as { line?: string }).line).toBe("packages:")
     expect((env.scope?.notReviewed ?? []).map((n) => n.path)).not.toContain("package-lock.yml")
+  })
+  test("a package whose integration project is nested under integration_tests/<name>/", async () => {
+    const env = await prReview([{ path: "package-lock.yml", status: "added", head: lock }], {
+      tree: { "dbt_project.yml": "name: pkg\nprofile: dev\n" },
+      grepProject: async (_p, glob) => (glob === "integration_tests/*dbt_project.yml" ? [{ path: "integration_tests/project/dbt_project.yml", line: 1, text: "name: pkg_tests" }] : []),
+    })
+    expect(ruleIds(env.findings)).toContain("dbt-project-rules:package-lock-in-package")
   })
   test("a package with no profile and no integration tests also counts", async () => {
     expect(ruleIds((await run({ "dbt_project.yml": "name: pkg\n" })).findings)).toContain("dbt-project-rules:package-lock-in-package")
