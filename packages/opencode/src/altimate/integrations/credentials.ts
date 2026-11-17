@@ -224,8 +224,10 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   if (server.args != null && !Array.isArray(server.args)) return false
   const args = server.args ?? []
   if (!command || !args.every((a) => typeof a === "string" && (GITHUB_MCP_WORD.test(a) || GITHUB_MCP_PROGRAM.test(a)))) return false
-  // docker and npx must be running GitHub's server; the binary is it.
-  if (command !== "github-mcp-server" && !args.some((a) => GITHUB_MCP_PROGRAM.test(a))) return false
+  // docker and npx must be running GitHub's server, as the first word that is not one of their own options; the binary is it.
+  let i = 0
+  while (i < args.length && (args[i] === "run" || args[i] === "/c" || args[i] === "npx" || args[i].startsWith("-"))) i += args[i] === "-e" ? 2 : 1
+  if (command !== "github-mcp-server" && !GITHUB_MCP_PROGRAM.test(args[i] ?? "")) return false
   const settings = Object.entries(server.env ?? {}).every(
     ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
   )

@@ -326,7 +326,7 @@ export function mcpServerMaps(home: string, cwd: string): { scope: "user" | "pro
   ]
 }
 export const providerMatchesMcp = (id: ProviderId, name: string, server: McpServer) =>
-  MCP_MATCHERS[id].test([name, server.command, server.url, ...(server.args ?? [])].filter(Boolean).join(" "))
+  MCP_MATCHERS[id].test([name, server.command, server.url, ...(Array.isArray(server.args) ? server.args : [])].filter(Boolean).join(" "))
 
 // ---------------------------------------------------------------- detection
 
@@ -351,7 +351,7 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
   const found: Detection[] = []
   for (const [name, server] of Object.entries(servers ?? {})) {
     if (!server || typeof server !== "object") continue
-    const haystack = [name, server.command, server.url, ...(server.args ?? [])].filter(Boolean).join(" ")
+    const haystack = [name, server.command, server.url, ...(Array.isArray(server.args) ? server.args : [])].filter(Boolean).join(" ")
     for (const id of PROVIDER_IDS) {
       if (!MCP_MATCHERS[id].test(haystack)) continue
       const remote = Boolean(server.url) || server.type === "http" || server.type === "sse"

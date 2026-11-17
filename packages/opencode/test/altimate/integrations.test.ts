@@ -101,6 +101,8 @@ describe("GitHub host policy", () => {
       { command: "node", args: ["/opt/github-mcp/dist/index.js"], env: { GITHUB_TOKEN: "ghp_x" } },
       // Every word is one the official setups use, but docker runs some other image.
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp"] },
+      // The official image named after the one docker actually runs.
+      { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp", "ghcr.io/github/github-mcp-server"] },
     ]
     for (const server of others) expect(creds.mcpServerIsGithubDotCom(server)).toBe(false)
     // A host exported in this shell blocks the server, even one that names github.com itself: each source is checked on its own.
@@ -2087,6 +2089,7 @@ describe("credentials flow", () => {
 
     test("a config file whose args are not a list neither throws nor counts as GitHub's setup", async () => {
       expect(creds.mcpServerIsGithubDotCom({ command: "npx", args: "stdio" as any, env: { GITHUB_TOKEN: GOOD } })).toBe(false)
+      expect(() => core.detectFromMcpServers({ github: { command: "npx", args: {} as any, env: { GITHUB_TOKEN: GOOD } } }, "user")).not.toThrow()
       fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "npx", args: "stdio", env: { GITHUB_TOKEN: GOOD } } } }))
       process.env.GITHUB_TOKEN = GOOD
       try {
