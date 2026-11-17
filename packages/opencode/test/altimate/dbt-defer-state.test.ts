@@ -65,6 +65,14 @@ describe("dbt_defer_state", () => {
     expect(result.targets).toEqual(["dev"])
   })
 
+  test("a target written as a Jinja expression this does not evaluate is unknown, not that text", async () => {
+    write("profiles/profiles.yml", "shop:\n  target: '{{ env_var(\"DEFER_TEST_UNSET_ENV\", \"DEV\") | lower }}'\n  outputs:\n    dev:\n      type: duckdb\n")
+    settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${workspaceFolder}/prod-state" } })
+    const result = await resolveDeferState(path.join(root, "analytics"))
+    expect(result.defaultTarget).toBeUndefined()
+    expect(result.targets).toEqual(["dev"])
+  })
+
   test("a profile with an output named default and no target runs that output, as dbt does", async () => {
     write("profiles/profiles.yml", "shop:\n  outputs:\n    default:\n      type: duckdb\n    prod:\n      type: duckdb\n")
     settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${workspaceFolder}/prod-state" } })

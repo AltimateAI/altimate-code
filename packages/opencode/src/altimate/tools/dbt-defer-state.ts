@@ -165,7 +165,8 @@ export async function readProfileTargets(projectDir: string) {
     if (profile && typeof profile === "object") {
       const target = resolveEnvVars(profile.target)
       if (profile.outputs && typeof profile.outputs === "object") out.targets = Object.keys(profile.outputs)
-      if (typeof target === "string" && target !== "") out.defaultTarget = target
+      // A target dbt would render from an expression this does not evaluate is unknown, not that text.
+      if (typeof target === "string" && target !== "" && !/\{[{%#]/.test(target)) out.defaultTarget = target
       // With no `target`, dbt runs the output named "default".
       else if (profile.target === undefined && out.targets.includes("default")) out.defaultTarget = "default"
     }
