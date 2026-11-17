@@ -251,6 +251,28 @@ describe("docs_share_comments list", () => {
     expect(posted.output).toContain("nothing was sent")
   })
 
+  test("a post is refused when the permission prompt is declined, and nothing is sent", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const declined = { ...ctx, ask: () => Effect.fail(new Error("denied")) } as unknown as Tool.Context
+    await expect(tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "hi" }, declined)).rejects.toThrow()
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0)
+  })
+
+  test("a listing is cut at an overall size, whatever the number of threads and messages", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    const big = "x".repeat(1900)
+    const conv = Array.from({ length: 100 }, (_, i) => ({ conversation_id: i + 1, user_id: 1, timestamp: `2026-11-01T10:00:${String(i % 60).padStart(2, "0")}Z`, message: big }))
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? [{ ...SHARES[0], conversation_group: Array.from({ length: 50 }, (_, g) => ({ ...group, conversation_group_id: g + 1, conversations: conv })) }]
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    expect(result.output.length).toBeLessThan(101_000 + 1000)
+    expect((result.metadata as any).truncated).toBe(true)
+    expect(result.output).toContain("characters")
+  })
+
   test("escape and control characters and overlong text in comments are neutralised", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     const group = SHARES[0]!.conversation_group[0]!

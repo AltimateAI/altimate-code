@@ -31,6 +31,8 @@ export interface OpenThread {
 
 const MAX_THREADS = 200
 const MAX_MESSAGES = 100
+/** The whole listing is cut here: the tool sets `truncated`, so the shared output limit does not apply. */
+const MAX_OUTPUT = 100_000
 
 const fullName = (u: DocsShareUser) => [u.first_name, u.last_name].filter(Boolean).join(" ").trim()
 
@@ -184,14 +186,21 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         const threads = all.slice(0, MAX_THREADS)
         const cutThreads = threads.length < all.length
         const cutMessages = all.some((t) => t.dropped_messages > 0)
-        const truncated = cutThreads || cutMessages
-        const cutNote = [cutThreads && `the first ${MAX_THREADS} threads`, cutMessages && `the newest ${MAX_MESSAGES} messages of each thread`]
+        let body = formatThreads(threads)
+        const cutBytes = body.length > MAX_OUTPUT
+        if (cutBytes) body = `${body.slice(0, body.lastIndexOf("\n", MAX_OUTPUT) > 0 ? body.lastIndexOf("\n", MAX_OUTPUT) : MAX_OUTPUT)}\n…`
+        const truncated = cutThreads || cutMessages || cutBytes
+        const cutNote = [
+          cutThreads && `the first ${MAX_THREADS} threads`,
+          cutMessages && `the newest ${MAX_MESSAGES} messages of each thread`,
+          cutBytes && `the first ${MAX_OUTPUT} characters (narrow it with a more specific project)`,
+        ]
           .filter(Boolean)
           .join(" and ")
         return {
           title: `Comments: ${all.length} open`,
           metadata: { success: true, project, count: all.length, truncated, incomplete: Boolean(missing), threads },
-          output: `Project ${project}\n${formatThreads(threads)}${truncated ? `\nShowing ${cutNote}.` : ""}${missing ? `\nINCOMPLETE: the service holds ${missing} more shares than it sent, and this tool reads only the first page, so threads on those are not listed.` : ""}\n${SCOPE_NOTE}`,
+          output: `Project ${project}\n${body}${truncated ? `\nShowing ${cutNote}.` : ""}${missing ? `\nINCOMPLETE: the service holds ${missing} more shares than it sent, and this tool reads only the first page, so threads on those are not listed.` : ""}\n${SCOPE_NOTE}`,
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -218,6 +227,13 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
     if (args.action === "reply" && !args.text?.trim()) {
       return failure("docs_share_comments: reply", "reply needs non-empty text.", "missing_text")
     }
+    // Posting speaks for the person: it goes through the permission prompt like any other write.
+    await ctx.ask({
+      permission: "docs_share_comments",
+      patterns: [`${args.action}:${args.share_id}/${args.group_id}`],
+      always: ["*"],
+      metadata: { action: args.action, share_id: args.share_id, group_id: args.group_id },
+    })
     try {
       // The service accepts any pair of ids, and stores a reply where nobody reads it when the thread is
       // not on the share: check the pair against the project's open threads first.
