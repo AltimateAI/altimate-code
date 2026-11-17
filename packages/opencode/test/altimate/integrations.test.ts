@@ -2123,6 +2123,19 @@ describe("credentials flow", () => {
         onUser = null
       }
       expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe("ghp_entered_meanwhile_1234")
+      // The same for a save to the workspace, and a draft for a field this save did not use stays too.
+      real()
+      await core.setBlocked(["github"], false)
+      await token("github", "github_token")
+      await core.storeSecret(core.secretKey("draft", "github", "other_field"), "ghp_other_field_draft")
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, secretFields: ["github_token", "other_field"] }))
+      onUser = () => creds.setSecretDraft("github", "github_token", { kind: "clipboard" }, clip("ghp_entered_meanwhile_5678"))
+      try {
+        expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      } finally {
+        onUser = null
+      }
+      expect([await core.readSecret(core.secretKey("draft", "github", "github_token")), await core.readSecret(core.secretKey("draft", "github", "other_field"))]).toEqual(["ghp_entered_meanwhile_5678", "ghp_other_field_draft"])
     })
 
     test("a recorded leftover is not offered again by connect", async () => {
@@ -3175,6 +3188,11 @@ describe("credentials flow", () => {
       // It takes this machine's name again, so status still knows it as this machine's.
       expect(api.state.rows[0].name).toBe(`GitHub (from ${HOST})`)
       expect(await core.managedInWorkspace("github")).toBe(true)
+      // A name the user gave the connection is kept.
+      api.state.rows[0].name = "My GitHub"
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
+      expect(api.state.rows[0].name).toBe("My GitHub")
     })
 
     test("a GitHub token named from the environment is refused beside another GitHub host", async () => {

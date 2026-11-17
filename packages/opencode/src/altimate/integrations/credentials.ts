@@ -496,19 +496,22 @@ export async function catalogSecretFields(id: ProviderId): Promise<Set<string>> 
   return names
 }
 const draftSecretNames = async (id: ProviderId) => new Set([...core.BUILTIN_SECRET_FIELDS[id], ...(core.loadStore().providers[id]?.secretFields ?? []), ...(await catalogSecretFields(id))])
-/** Deletes the pasted secret drafts of every field the provider can ask for: those of each catalog variant and of the connected credential. */
-/** After a save: removes the drafts it used, but not one entered again while it ran, which is newer than what was saved. */
+/**
+ * After a save: removes the drafts it used, while they still hold what was saved. One entered again while it ran is newer, and
+ * a draft for a field this save did not use (another variant's) was not part of it; both stay for `discard` to remove.
+ */
 async function discardCheckedDrafts(id: ProviderId, checked: Record<string, string>) {
   const names = await draftSecretNames(id)
   await core.withLock(async () => {
     for (const name of names) {
       const key = core.secretKey("draft", id, name)
-      if (checked[name] !== undefined && (await core.readSecret(key)) !== checked[name]) continue
+      if (checked[name] === undefined || (await core.readSecret(key)) !== checked[name]) continue
       await core.deleteSecret(key)
     }
   })
 }
 
+/** Deletes the pasted secret drafts of every field the provider can ask for: those of each catalog variant and of the connected credential. */
 export async function discardDraftSecrets(id: ProviderId) {
   const names = await draftSecretNames(id)
   await core.withLock(async () => {

@@ -262,6 +262,11 @@ function runSecurity(args: string[], opts: { input?: string; stdout?: boolean; s
 export async function storeSecret(id: string, secret: string) {
   // A token is one line. A line break cannot be quoted for `security -i` either, so such a value is refused rather than parked in a file.
   if (/[\r\n]/.test(secret)) throw new Error("The value is not a token: it contains a line break")
+  // Under the store lock like the file store, so a write cannot land between another step's read and delete of the same secret.
+  return withLock(() => storeSecretLocked(id, secret))
+}
+
+async function storeSecretLocked(id: string, secret: string) {
   if (useKeychain()) {
     if (!/^[A-Za-z0-9:._-]+$/.test(id)) throw new Error("The credential id is not valid")
     // The secret goes to `security -i` on stdin so it never shows in the process list. On macOS it is kept in the keychain only; a failed write is an error, never a plaintext file.
@@ -291,7 +296,11 @@ export async function readSecret(id: string): Promise<string | undefined> {
   }
   return readJsonStrict<Record<string, string>>(secretsPath(), {})[id]
 }
-export async function deleteSecret(id: string) {
+export function deleteSecret(id: string) {
+  return withLock(() => deleteSecretLocked(id))
+}
+
+async function deleteSecretLocked(id: string) {
   if (useKeychain()) {
     const r = await runSecurity(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id])
     if (r.status !== 0 && !keychainItemMissing(r)) throw new Error(`Could not remove a stored credential from the macOS keychain${keychainDetail(r)}`)
@@ -1002,7 +1011,7 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
   if (sharedConnection && !share) throw new Error(SHARED_CONNECTION_REFUSAL(id, retry))
   const saved = existing
     ? // The recorded connection found under an older host name takes this machine's name again, so every lookup by name finds it.
-      await backend.updateConnection(cfg, existing.id, existing.name === managedName(id) ? { config } : { config, name: managedName(id) })
+      await backend.updateConnection(cfg, existing.id, existing.name !== managedName(id) && existing.name.startsWith(`${PROVIDER_NAMES[id]} (from `) ? { config, name: managedName(id) } : { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
   const isValid = saved.is_valid !== false
   const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }), ...(sharedConnection || (existing && saved.privacy != null && saved.privacy !== "private") ? { shared: true as const } : {}) }
