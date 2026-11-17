@@ -23,7 +23,7 @@ function bareName(name: string): string {
   const plain = stripColumnList(name)
   const quote = plain[0]
   if ((quote === '"' || quote === "`") && plain.length > 1 && plain.endsWith(quote)) return plain.slice(1, -1).replaceAll(quote + quote, quote)
-  if (quote === "[" && plain.endsWith("]")) return plain.slice(1, -1)
+  if (quote === "[" && plain.endsWith("]")) return plain.slice(1, -1).replaceAll("]]", "]")
   return plain
 }
 

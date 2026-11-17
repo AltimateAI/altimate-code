@@ -74,6 +74,7 @@ beforeAll(async () => {
     path.join(project, "models", "marts", "twins.sql"),
     'with "Foo" as (select 1 as a), foo as (select 2 as a), keep as (select 3 as a)\nselect * from keep\n',
   )
+  await writeFile(path.join(project, "models", "marts", "bracketed.sql"), "with [we]]ird] as (select 1 as a) select * from [we]]ird]\n")
   await writeFile(
     path.join(project, "models", "marts", "wrapped.sql"),
     "{% if is_incremental() %}\nwith a as (select 1 as x) select * from a\n{% else %}\nwith b as (select 2 as x) select * from b\n{% endif %}\n",
@@ -235,6 +236,17 @@ describe("dbt_cte_profile model lookup", () => {
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("largest file read")
     await rm(path.join(project, "models", "huge.sql"))
+  })
+})
+
+describe("dbt_cte_profile bracket-quoted names", () => {
+  test("a ]] inside a bracketed name is one ], so the CTE is reachable by its plain name", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    for (const cte of ["we]ird", "[we]]ird]"]) {
+      const run = await tool.execute({ model: "bracketed", cte }, ctx)
+      expect(run.metadata.success).toBe(true)
+      expect(run.metadata.position).toBe(0)
+    }
   })
 })
 
