@@ -61,7 +61,7 @@ export const dbtHealthInternals = {
  * edited files after it read them, so it waits for a rebuild that starts after it arrived; calls that
  * arrive in the same window share that one.
  */
-type Slot = { running: Promise<unknown>; queued?: Promise<unknown>; abandoned?: boolean }
+type Slot = { running: Promise<unknown>; queued?: Promise<unknown>; waiters?: { count: number }; abandoned?: boolean }
 const rebuilding = new WeakMap<object, Slot>()
 /** The rebuild a timed-out call abandoned while it was still running: no other starts until it settles, so two parses never write target/ at once. */
 const abandonedRunning = new WeakMap<object, Promise<unknown>>()
@@ -85,6 +85,8 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
   if (!slot && abandonedRunning.has(adapter))
     throw new Error("a manifest rebuild that timed out is still running: try again once it has finished")
   let shared: Promise<unknown>
+  // The calls waiting on the queued rebuild: it starts only if one of them still wants it.
+  let waiters: { count: number } | undefined
   if (!slot) {
     shared = Promise.resolve().then(() => adapter.rebuildManifest())
     slot = { running: shared }
@@ -92,12 +94,19 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
     trackRebuild(adapter, slot)
   } else {
     const owner = slot
-    // A slot a timed-out call abandoned starts no rebuild of its own: its waiters fail and the next call starts afresh.
-    owner.queued ??= owner.running.catch(() => {}).then(() => {
-      if (owner.abandoned) throw new Error("the manifest rebuild it waited for was abandoned after a timeout")
-      return adapter.rebuildManifest()
-    })
-    owner.queued.catch(() => {})
+    if (!owner.queued) {
+      const mine = { count: 0 }
+      owner.waiters = mine
+      // A slot a timed-out call abandoned starts no rebuild of its own, nor does one every waiter has left.
+      owner.queued = owner.running.catch(() => {}).then(() => {
+        if (owner.abandoned) throw new Error("the manifest rebuild it waited for was abandoned after a timeout")
+        if (mine.count === 0) throw new Error("the manifest rebuild it waited for was cancelled")
+        return adapter.rebuildManifest()
+      })
+      owner.queued.catch(() => {})
+    }
+    waiters = owner.waiters
+    waiters!.count++
     shared = owner.queued
   }
   let stop = () => {}
@@ -106,7 +115,7 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
     stop = () => reject(signal.reason)
     signal.addEventListener("abort", stop, { once: true })
     timer = setTimeout(() => {
-      // A rebuild that never settles must not hold the queue: drop this slot so the next call starts a fresh one.
+      // A rebuild that never settles must not hold the queue: drop this slot; no other rebuild starts until the abandoned one ends.
       if (rebuilding.get(adapter) === slot) {
         slot.abandoned = true
         rebuilding.delete(adapter)
@@ -122,6 +131,7 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
   })
   waited.catch(() => {})
   await Promise.race([shared, waited]).finally(() => {
+    if (waiters) waiters.count--
     signal.removeEventListener("abort", stop)
     clearTimeout(timer)
   })
@@ -217,7 +227,7 @@ export function flattenInsights(modelInsights: unknown, root = "", nodes: Record
 }
 
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
-  return { title: `dbt_health: ${title}`, metadata: { success: false, insights: [], ...extra }, output }
+  return { title: `dbt_health: ${title}`, metadata: { success: false, insights: [], error: output, ...extra }, output }
 }
 
 export const DbtHealthTool = Tool.define("dbt_health", {
@@ -244,7 +254,9 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       try {
         if (typeof adapter.rebuildManifest === "function") await rebuildManifest(adapter, ctx.abort)
         // A rebuild that fails to compile returns normally and leaves the last manifest: its diagnostics say so.
-        const diagnostics = (typeof adapter.getDiagnostics === "function" ? adapter.getDiagnostics() : undefined)?.rebuildManifestDiagnostics
+        // The adapter's own getDiagnostics() answers nothing; the integration beneath it holds them.
+        const source = typeof adapter.currentIntegration?.getDiagnostics === "function" ? adapter.currentIntegration : adapter
+        const diagnostics = (typeof source.getDiagnostics === "function" ? source.getDiagnostics() : undefined)?.rebuildManifestDiagnostics
         if (Array.isArray(diagnostics) && diagnostics.length > 0)
           return failure(
             "parse failed",
@@ -263,7 +275,11 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         }
       } catch (e) {
         if (ctx.abort.aborted) throw e
-        return failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${e instanceof Error ? e.message : String(e)}`)
+        const reason = e instanceof Error ? e.message : String(e)
+        // The wait's own failures are not parse errors.
+        return /^(the|a) manifest rebuild/.test(reason)
+          ? failure("rebuild unavailable", `dbt_health can't run: ${reason}`)
+          : failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${reason}`)
       }
     }
     const manifest: string =
@@ -328,7 +344,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       output: [
         stale?.message,
         insights.length ? lines.join("\n") : "No health insights.",
-        insights.length > LISTED_LINES ? `…and ${insights.length - LISTED_LINES} more insights, all in the result's \`insights\`.` : undefined,
+        insights.length > LISTED_LINES ? `…and ${insights.length - LISTED_LINES} more insights, all in the \`insights\` of the CLI's --json output.` : undefined,
       ]
         .filter(Boolean)
         .join("\n"),

@@ -9,6 +9,7 @@ import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import { DbtHealthTool, dbtHealthInternals, flattenInsights } from "@/altimate/tools/dbt-health"
+import { resultFailed } from "@/altimate/mcp-server/adapter"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -249,6 +250,61 @@ describe("dbt_health", () => {
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("depends on a node named 'y'")
     expect(python.calls).toHaveLength(0)
+  })
+
+  test("reads the rebuild's diagnostics from the integration beneath the adapter, whose own getDiagnostics answers nothing", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {},
+      getDiagnostics: () => undefined,
+      currentIntegration: { getDiagnostics: () => ({ rebuildManifestDiagnostics: [{ message: "Compilation Error: no node 'y'" }] }) },
+      parseManifest: async () => parsed,
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("no node 'y'")
+    expect(python.calls).toHaveLength(0)
+  })
+
+  test("a refusal or failure is a failed tool call for the CLI and MCP, not a success", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {
+        throw new Error("boom")
+      },
+      parseManifest: async () => parsed,
+    })
+    const failed = await run()
+    expect(failed.metadata.success).toBe(false)
+    expect(resultFailed(failed)).toBe(true)
+    const refused = await run({}, { extra: { forceReadOnly: true } })
+    expect(resultFailed(refused)).toBe(true)
+  })
+
+  test("a queued call that is cancelled starts no rebuild once the running one ends", async () => {
+    let rebuilds = 0
+    let rootReads = 0
+    let release!: () => void
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => (rootReads++, project),
+      rebuildManifest: () => (++rebuilds === 1 ? new Promise<void>((r) => (release = r)) : Promise.resolve()),
+      parseManifest: async () => parsed,
+    })
+    const first = run()
+    while (rebuilds < 1) await new Promise((r) => setTimeout(r, 2))
+    const abort = new AbortController()
+    const queued = run({}, { abort: abort.signal })
+    while (rootReads < 2) await new Promise((r) => setTimeout(r, 2))
+    abort.abort(new Error("cancelled"))
+    await expect(queued).rejects.toThrow("cancelled")
+    release()
+    expect((await first).metadata.success).toBe(true)
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+    expect(rebuilds).toBe(1)
   })
 
   test("the DataPilot script keeps the project folder off the module path", async () => {
