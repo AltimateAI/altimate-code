@@ -447,34 +447,18 @@ describe("dbt_health", () => {
       rebuildManifest: () => new Promise(() => {}),
       parseManifest: async () => parsed,
     })
-    dbtHealthInternals.rebuildTimeoutMs = 20
-    const timedOut = await run()
-    expect(timedOut.metadata.success).toBe(false)
-    expect(timedOut.output).toContain("didn't finish within")
     const abort = new AbortController()
     setTimeout(() => abort.abort(new Error("cancelled")), 5)
     dbtHealthInternals.rebuildTimeoutMs = 60_000
     await expect(run({}, { abort: abort.signal })).rejects.toThrow("cancelled")
     expect(python.calls).toHaveLength(0)
-  })
-
-  test("a rebuild that never finishes does not block a later call: it starts a fresh rebuild", async () => {
-    let rebuilds = 0
-    dbtAdapterInternals.create = async () => ({
-      isInitialized: () => true,
-      getProjectRoot: () => project,
-      rebuildManifest: () => (++rebuilds === 1 ? new Promise(() => {}) : Promise.resolve()),
-      parseManifest: async () => parsed,
-    })
     dbtHealthInternals.rebuildTimeoutMs = 20
-    const hung = await run()
-    expect(hung.metadata.success).toBe(false)
-    const next = await run()
-    expect(next.metadata.success).toBe(true)
-    expect(rebuilds).toBe(2)
+    const timedOut = await run()
+    expect(timedOut.metadata.success).toBe(false)
+    expect(timedOut.output).toContain("didn't finish within")
   })
 
-  test("a call queued behind a rebuild that is abandoned after a timeout fails and starts no rebuild of its own", async () => {
+  test("while a rebuild that timed out is still running, no second rebuild starts; once it ends, the next call rebuilds", async () => {
     let rebuilds = 0
     let settle!: () => void
     dbtAdapterInternals.create = async () => ({
@@ -483,16 +467,43 @@ describe("dbt_health", () => {
       rebuildManifest: () => (++rebuilds === 1 ? new Promise<void>((r) => (settle = r)) : Promise.resolve()),
       parseManifest: async () => parsed,
     })
-    dbtHealthInternals.rebuildTimeoutMs = 40
+    dbtHealthInternals.rebuildTimeoutMs = 20
+    const hung = await run()
+    expect(hung.metadata.success).toBe(false)
+    const during = await run()
+    expect(during.metadata.success).toBe(false)
+    expect(during.output).toContain("still running")
+    expect(rebuilds).toBe(1)
+    settle()
+    await new Promise((r) => setImmediate(r))
+    const next = await run()
+    expect(next.metadata.success).toBe(true)
+    expect(rebuilds).toBe(2)
+  })
+
+  test("a call queued behind a rebuild that is abandoned after a timeout fails and starts no rebuild of its own", async () => {
+    let rebuilds = 0
+    let rootReads = 0
+    let settle!: () => void
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => (rootReads++, project),
+      rebuildManifest: () => (++rebuilds === 1 ? new Promise<void>((r) => (settle = r)) : Promise.resolve()),
+      parseManifest: async () => parsed,
+    })
+    dbtHealthInternals.rebuildTimeoutMs = 300
     const first = run()
     while (rebuilds < 1) await new Promise((r) => setTimeout(r, 2))
     const queued = run()
+    // The queued call has joined once it has read the project root: its rebuild call is the next step.
+    while (rootReads < 2) await new Promise((r) => setTimeout(r, 2))
     const [a, b] = await Promise.all([first, queued])
     expect(a.metadata.success).toBe(false)
     expect(b.metadata.success).toBe(false)
     // the abandoned rebuild settling late does not fire the rebuild queued behind it
     settle()
-    await new Promise((r) => setTimeout(r, 20))
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
     expect(rebuilds).toBe(1)
     const later = await run()
     expect(later.metadata.success).toBe(true)

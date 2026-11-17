@@ -50,7 +50,7 @@ export const dbtHealthInternals = {
       )
       child.stdin?.end()
     }),
-  /** How long a call waits for the manifest rebuild. The rebuild itself goes on; a call that times out abandons it, so the next call starts a fresh one. */
+  /** How long a call waits for the manifest rebuild. The rebuild itself goes on; a call that times out abandons it, and no other rebuild starts until it has finished. */
   rebuildTimeoutMs: 120_000,
   /** The Python found for a project when the dbt config names none. */
   discoverPython: async (root: string) => (await import("../../../../dbt-tools/src/config")).discoverPython(root),
@@ -63,6 +63,8 @@ export const dbtHealthInternals = {
  */
 type Slot = { running: Promise<unknown>; queued?: Promise<unknown>; abandoned?: boolean }
 const rebuilding = new WeakMap<object, Slot>()
+/** The rebuild a timed-out call abandoned while it was still running: no other starts until it settles, so two parses never write target/ at once. */
+const abandonedRunning = new WeakMap<object, Promise<unknown>>()
 
 function trackRebuild(adapter: object, slot: Slot) {
   const next = () => {
@@ -80,6 +82,8 @@ function trackRebuild(adapter: object, slot: Slot) {
 async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted()
   let slot = rebuilding.get(adapter)
+  if (!slot && abandonedRunning.has(adapter))
+    throw new Error("a manifest rebuild that timed out is still running: try again once it has finished")
   let shared: Promise<unknown>
   if (!slot) {
     shared = Promise.resolve().then(() => adapter.rebuildManifest())
@@ -106,6 +110,12 @@ async function rebuildManifest(adapter: { rebuildManifest: () => unknown }, sign
       if (rebuilding.get(adapter) === slot) {
         slot.abandoned = true
         rebuilding.delete(adapter)
+        const running = slot.running
+        abandonedRunning.set(adapter, running)
+        const clear = () => {
+          if (abandonedRunning.get(adapter) === running) abandonedRunning.delete(adapter)
+        }
+        running.then(clear, clear)
       }
       reject(new Error(`the manifest rebuild didn't finish within ${dbtHealthInternals.rebuildTimeoutMs / 1000} s`))
     }, dbtHealthInternals.rebuildTimeoutMs)
