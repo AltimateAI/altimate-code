@@ -59,6 +59,7 @@ import {
   yamlParseFindings,
 } from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
+import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -204,6 +205,10 @@ export interface ReviewRunner {
   >
   /** A model's or snapshot's merged dbt `config` from the manifest (project + yml + inline). */
   modelConfig?(name: string): Promise<Record<string, unknown> | undefined>
+  /** Manifest facts about a model, snapshot or seed for the AI lane's context card. Never throws. */
+  modelCard?(name: string): Promise<ModelCard | undefined>
+  /** A macro's callers and adapter variants (by name, else the first macro defined in `path`). Never throws. */
+  macroCard?(name: string, opts?: { path?: string; changedModels?: string[] }): Promise<MacroCard | undefined>
   /** Column sets the model's `unique` / `unique_combination_of_columns` tests declare unique. */
   declaredUniqueKeys?(model: string): Promise<string[][]>
   /** Column-lineage edges for a query: source `"table"."col"` → target output column. */
@@ -274,6 +279,8 @@ export interface OrchestrateInput {
   aiModel?: string
   /** Send the changed files' unchanged dbt parents to the AI lane as context. */
   aiGraphContext?: boolean
+  /** Attach a dbt manifest context card to each AI file (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`; needs a manifest). */
+  aiContextCard?: boolean
   /** Give the AI lane what the dbt-grounded verifier reads (`ALTIMATE_REVIEW_AI_VERIFY=1`). */
   aiVerify?: boolean
   /** Fixed-string search over the dbt project at head, for the verifier. */
@@ -2559,6 +2566,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
   let aiStatus: AiLaneStatus | undefined
+  let aiUnsent: string[] = []
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2585,6 +2593,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     )
     // Only the files within the AI lane's file cap are reached; the rest stay in the ledger.
     touch(selectAiFiles(aiFiles, aiInputBudget().maxFiles))
+    if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
     const evidence: AiVerifyEvidence | undefined = input.aiVerify
@@ -2616,7 +2625,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(evidence ? { evidence } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
-      aiStatus = Array.isArray(res) ? { state: "ok" } : res.status
+      if (Array.isArray(res)) aiStatus = { state: "ok" }
+      else {
+        const { unsent, ...status } = res.status
+        aiStatus = status
+        aiUnsent = unsent ?? []
+      }
       // Defense in depth: the AI never blocks, regardless of what it returns.
       for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
     } catch (err) {
@@ -2653,6 +2667,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ...(manifestMissing && !anyManifest
       ? modelFiles.map((f) => ({ path: f.path, reason: "no dbt manifest: lineage, config and graph checks skipped" }))
       : []),
+    ...aiUnsent.map((p) => ({ path: p, reason: "not sent to the AI (file quota)" })),
   ]
   const seen = new Set<string>()
   const notReviewed = ledger.filter((e) => !seen.has(e.path) && !!seen.add(e.path))

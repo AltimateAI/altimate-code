@@ -237,6 +237,20 @@ export const VerdictEnvelope = z.object({
       replayed: z.boolean().optional(),
       /** The replayed envelope did not list every generator finding. */
       replayIncomplete: z.boolean().optional(),
+      /** What each file sent to the model carried (opt-in coverage, context cards or dry run). */
+      input: z
+        .array(
+          z.object({
+            path: z.string(),
+            kind: z.string(),
+            chars: z.number().int().nonnegative(),
+            truncated: z.boolean(),
+            hunksSent: z.number().int().nonnegative(),
+            hunksTotal: z.number().int().nonnegative(),
+            card: z.boolean(),
+          }),
+        )
+        .optional(),
       /** The opt-in dbt-grounded verifier (`ALTIMATE_REVIEW_AI_VERIFY=1`): what it kept and dropped. */
       verifier: z
         .object({
