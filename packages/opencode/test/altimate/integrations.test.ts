@@ -2108,6 +2108,8 @@ describe("credentials flow", () => {
         fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ env: { GH_HOST: "ghe.example" } }))
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).not.toBe("connected")
         fs.rmSync(path.join(dir, "settings.json"))
+        // Detection looks there too.
+        expect(core.detectFromClaudeConfigs(home, process.cwd()).find((d) => d.id === "github")?.syncable).toBe(true)
         expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
       } finally {
         delete process.env.CLAUDE_CONFIG_DIR
@@ -2989,6 +2991,26 @@ describe("credentials flow", () => {
       api.state.rows.forEach((r) => (r.name = "GitHub (from old-host)"))
       await core.disconnect("github")
       expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(1)
+    })
+
+    test("Keep local whose workspace removal fails keeps the recorded connection, so connecting again removes it", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      api.state.rows[0].name = "GitHub (from old-host)"
+      const remove = spyOn(backend, "deleteConnection").mockRejectedValueOnce(new Error("backend down"))
+      try {
+        await token("github", "github_token")
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("failed")
+      } finally {
+        remove.mockRestore()
+      }
+      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(1)
+      expect(core.loadStore().providers.github?.connectionId).toBe(api.state.rows[0].id)
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      expect(api.state.rows.filter((r) => !r.deleted)).toHaveLength(0)
+      expect(core.loadStore().providers.github?.connectionId).toBeNull()
     })
 
     test("Keep local removes the recorded workspace copy after the host name changed", async () => {

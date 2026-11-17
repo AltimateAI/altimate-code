@@ -388,7 +388,7 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
 
 export function detectFromClaudeConfigs(home: string, cwd: string): Detection[] {
   const out: Detection[] = []
-  const claude = readJson<any>(path.join(home, ".claude.json"), {})
+  const claude = readJson<any>(claudeJsonPath(home), {})
   out.push(...detectFromMcpServers(claude.mcpServers ?? {}, "~/.claude.json"))
   out.push(...detectFromMcpServers(claude.projects?.[cwd]?.mcpServers ?? {}, "~/.claude.json"))
   try {

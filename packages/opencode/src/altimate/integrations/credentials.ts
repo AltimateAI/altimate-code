@@ -772,7 +772,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       let removeFailure: string | null = null
       const wasBlocked = core.isBlocked(id)
       const signedIn = await core.realConfig()
-      let hadCopy = Boolean(core.loadStore().providers[id]?.synced) || remoteManaged
+      // A connection id still recorded means a workspace copy whose removal has not finished yet.
+      let hadCopy = Boolean(core.loadStore().providers[id]?.synced) || Boolean(core.loadStore().providers[id]?.connectionId) || remoteManaged
       if (opts.localOnly && signedIn && !hadCopy) {
         try {
           hadCopy = await core.managedInWorkspace(id)
@@ -809,7 +810,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         }
         if (secretFields[0] && r.values[secretFields[0]]) await put(id, r.values[secretFields[0]])
         // The record is written before anything old is purged, so a failed write is undone like a failed secret write.
-        await record(false, { connectionId: null })
+        // The recorded connection stays until its workspace copy is removed, so a removal that fails can be retried.
+        await record(false)
       } catch (e) {
         for (const [key, prev] of undo.reverse()) {
           try {
@@ -834,13 +836,17 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       const draftNote = await clearDrafts()
       if (signedIn && hadCopy) {
         try {
-          // The record was just rewritten for this machine, so the connection it had is passed on.
+          // The record as it was before this save, which names the connection.
           detachNote = (await core.removeManaged(id, signedIn, rec)).detachError
+          await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], connectionId: null, connectionBackend: undefined })).catch(() => {})
         } catch (e) {
           removeFailure = e instanceof Error ? e.message : String(e)
         }
       }
-      if (hadCopy && !signedIn) await core.removeMockRemote(id)
+      if (hadCopy && !signedIn) {
+        await core.removeMockRemote(id)
+        await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], connectionId: null, connectionBackend: undefined })).catch(() => {})
+      }
       const notSignedIn = wantSync && !blocked
       const notes = [
         removeFailure ? "The credential is kept on this machine, but the workspace copy is still there." : null,
