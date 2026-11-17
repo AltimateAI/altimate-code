@@ -1,0 +1,1018 @@
+PR title: Rework revenue marts
+PR description:
+Moves cents conversion into a macro.
+
+Also adds tests.
+
+## GROUNDING — deterministic engine findings (DO NOT repeat these):
+- [warning] warehouse_cost · models/marts/fct_big.sql: SELECT * in a mart
+
+## CHANGED FILES (review for what the engine missed):
+
+### models/marts/fct_big.sql (modified)
+Diff:
+```diff
+@@ -10,22 +10,24 @@
+ select 0 as ctx_before
++  , coalesce(col_0_0, 'unknown_value_0') as renamed_column_0_0
++  , coalesce(col_0_1, 'unknown_value_1') as renamed_column_0_1
++  , coalesce(col_0_2, 'unknown_value_2') as renamed_column_0_2
++  , coalesce(col_0_3, 'unknown_value_3') as renamed_column_0_3
++  , coalesce(col_0_4, 'unknown_value_4') as renamed_column_0_4
++  , coalesce(col_0_5, 'unknown_value_5') as renamed_column_0_5
++  , coalesce(col_0_6, 'unknown_value_6') as renamed_column_0_6
++  , coalesce(col_0_7, 'unknown_value_7') as renamed_column_0_7
++  , coalesce(col_0_8, 'unknown_value_8') as renamed_column_0_8
++  , coalesce(col_0_9, 'unknown_value_9') as renamed_column_0_9
++  , coalesce(col_0_10, 'unknown_value_10') as renamed_column_0_10
++  , coalesce(col_0_11, 'unknown_value_11') as renamed_column_0_11
++  , coalesce(col_0_12, 'unknown_value_12') as renamed_column_0_12
++  , coalesce(col_0_13, 'unknown_value_13') as renamed_column_0_13
++  , coalesce(col_0_14, 'unknown_value_14') as renamed_column_0_14
++  , coalesce(col_0_15, 'unknown_value_15') as renamed_column_0_15
++  , coalesce(col_0_16, 'unknown_value_16') as renamed_column_0_16
++  , coalesce(col_0_17, 'unknown_value_17') as renamed_column_0_17
++  , coalesce(col_0_18, 'unknown_value_18') as renamed_column_0_18
++  , coalesce(col_0_19, 'unknown_value_19') as renamed_column_0_19
+-  , old_col_0
+   from {{ ref('stg_0') }}
+@@ -110,22 +110,24 @@
+ select 1 as ctx_before
++  , coalesce(col_1_0, 'unknown_value_0') as renamed_column_1_0
++  , coalesce(col_1_1, 'unknown_value_1') as renamed_column_1_1
++  , coalesce(col_1_2, 'unknown_value_2') as renamed_column_1_2
++  , coalesce(col_1_3, 'unknown_value_3') as renamed_column_1_3
++  , coalesce(col_1_4, 'unknown_value_4') as renamed_column_1_4
++  , coalesce(col_1_5, 'unknown_value_5') as renamed_column_1_5
++  , coalesce(col_1_6, 'unknown_value_6') as renamed_column_1_6
++  , coalesce(col_1_7, 'unknown_value_7') as renamed_column_1_7
++  , coalesce(col_1_8, 'unknown_value_8') as renamed_column_1_8
++  , coalesce(col_1_9, 'unknown_value_9') as renamed_column_1_9
++  , coalesce(col_1_10, 'unknown_value_10') as renamed_column_1_10
++  , coalesce(col_1_11, 'unknown_value_11') as renamed_column_1_11
++  , coalesce(col_1_12, 'unknown_value_12') as renamed_column_1_12
++  , coalesce(col_1_13, 'unknown_value_13') as renamed_column_1_13
++  , coalesce(col_1_14, 'unknown_value_14') as renamed_column_1_14
++  , coalesce(col_1_15, 'unknown_value_15') as renamed_column_1_15
++  , coalesce(col_1_16, 'unknown_value_16') as renamed_column_1_16
++  , coalesce(col_1_17, 'unknown_value_17') as renamed_column_1_17
++  , coalesce(col_1_18, 'unknown_value_18') as renamed_column_1_18
++  , coalesce(col_1_19, 'unknown_value_19') as renamed_column_1_19
+-  , old_col_1
+   from {{ ref('stg_1') }}
+@@ -210,22 +210,24 @@
+ select 2 as ctx_before
++  , coalesce(col_2_0, 'unknown_value_0') as renamed_column_2_0
++  , coalesce(col_2_1, 'unknown_value_1') as renamed_column_2_1
++  , coalesce(col_2_2, 'unknown_value_2') as renamed_column_2_2
++  , coalesce(col_2_3, 'unknown_value_3') as renamed_column_2_3
++  , coalesce(col_2_4, 'unknown_value_4') as renamed_column_2_4
++  , coalesce(col_2_5, 'unknown_value_5') as renamed_column_2_5
++  , coalesce(col_2_6, 'unknown_value_6') as renamed_column_2_6
++  , coalesce(col_2_7, 'unknown_value_7') as renamed_column_2_7
++  , coalesce(col_2_8, 'unknown_value_8') as renamed_column_2_8
++  , coalesce(col_2_9, 'unknown_value_9') as renamed_column_2_9
++  , coalesce(col_2_10, 'unknown_value_10') as renamed_column_2_10
++  , coalesce(col_2_11, 'unknown_value_11') as renamed_column_2_11
++  , coalesce(col_2_12, 'unknown_value_12') as renamed_column_2_12
++  , coalesce(col_2_13, 'unknown_value_13') as renamed_column_2_13
++  , coalesce(col_2_14, 'unknown_value_14') as renamed_column_2_14
++  , coalesce(col_2_15, 'unknown_value_15') as renamed_column_2_15
++  , coalesce(col_2_16, 'unknown_value_16') as renamed_column_2_16
++  , coalesce(col_2_17, 'unknown_value_17') as renamed_column_2_17
++  , coalesce(col_2_18, 'unknown_value_18') as renamed_column_2_18
++  , coalesce(col_2_19, 'unknown_value_19') as renamed_column_2_19
+-  , old_col_2
+   from {{ ref('stg_2') }}
+@@ -310,22 +310,24 @@
+ select 3 as ctx_before
++  , coalesce(col_3_0, 'unknown_value_0') as renamed_column_3_0
++  , coalesce(col_3_1, 'unknown_value_1') as renamed_column_3_1
++  , coalesce(col_3_2, 'unknown_value_2') as renamed_column_3_2
++  , coalesce(col_3_3, 'unknown_value_3') as renamed_column_3_3
++  , coalesce(col_3_4, 'unknown_value_4') as renamed_column_3_4
++  , coalesce(col_3_5, 'unknown_value_5') as renamed_column_3_5
++  , coalesce(col_3_6, 'unknown_value_6') as renamed_column_3_6
++  , coalesce(col_3_7, 'unknown_value_7') as renamed_column_3_7
++  , coalesce(col_3_8, 'unknown_value_8') as renamed_column_3_8
++  , coalesce(col_3_9, 'unknown_value_9') as renamed_column_3_9
++  , coalesce(col_3_10, 'unknown_value_10') as renamed_column_3_10
++  , coalesce(col_3_11, 'unknown_value_11') as renamed_column_3_11
++  , coalesce(col_3_12, 'unknown_value_12') as renamed_column_3_12
++  , coalesce(col_3_13, 'unknown_value_13') as renamed_column_3_13
++  , coalesce(col_3_14, 'unknown_value_14') as renamed_column_3_14
++  , coalesce(col_3_15, 'unknown_value_15') as renamed_column_3_15
++  , coalesce(col_3_16, 'unknown_value_16') as renamed_column_3_16
++  , coalesce(col_3_17, 'unknown_value_17') as renamed_column_3_17
++  , coalesce(col_3_18, 'unknown_value_18') as renamed_column_3_18
++  , coalesce(col_3_19, 'unknown_value_19') as renamed_column_3_19
+-  , old_col_3
+   from {{ ref('stg_3') }}
+@@ -410,22 +410,24 @@
+ select 4 as ctx_before
++  , coalesce(col_4_0, 'unknown_value_0') as renamed_column_4_0
++  , coalesce(col_4_1, 'unknown_value_1') as renamed_column_4_1
++  , coalesce(col_4_2, 'unknown_value_2') as renamed_column_4_2
++  , coalesce(col_4_3, 'unknown_value_3') as renamed_column_4_3
++  , coalesce(col_4_4, 'unknown_value_4') as renamed_column_4_4
++  , coalesce(col_4_5, 'unknown_value_5') as
+… (truncated)
+```
+Current SQL:
+```sql
+  , cast(field_0 as varchar) as field_0_text -- line 1
+  , cast(field_1 as varchar) as field_1_text -- line 2
+  , cast(field_2 as varchar) as field_2_text -- line 3
+  , cast(field_3 as varchar) as field_3_text -- line 4
+  , cast(field_4 as varchar) as field_4_text -- line 5
+  , cast(field_5 as varchar) as field_5_text -- line 6
+  , cast(field_6 as varchar) as field_6_text -- line 7
+  , cast(field_7 as varchar) as field_7_text -- line 8
+  , cast(field_8 as varchar) as field_8_text -- line 9
+  , cast(field_9 as varchar) as field_9_text -- line 10
+  , cast(field_10 as varchar) as field_10_text -- line 11
+  , cast(field_11 as varchar) as field_11_text -- line 12
+  , cast(field_12 as varchar) as field_12_text -- line 13
+  , cast(field_13 as varchar) as field_13_text -- line 14
+  , cast(field_14 as varchar) as field_14_text -- line 15
+  , cast(field_15 as varchar) as field_15_text -- line 16
+  , cast(field_16 as varchar) as field_16_text -- line 17
+  , cast(field_17 as varchar) as field_17_text -- line 18
+  , cast(field_18 as varchar) as field_18_text -- line 19
+  , cast(field_19 as varchar) as field_19_text -- line 20
+  , cast(field_20 as varchar) as field_20_text -- line 21
+  , cast(field_21 as varchar) as field_21_text -- line 22
+  , cast(field_22 as varchar) as field_22_text -- line 23
+  , cast(field_23 as varchar) as field_23_text -- line 24
+  , cast(field_24 as varchar) as field_24_text -- line 25
+  , cast(field_25 as varchar) as field_25_text -- line 26
+  , cast(field_26 as varchar) as field_26_text -- line 27
+  , cast(field_27 as varchar) as field_27_text -- line 28
+  , cast(field_28 as varchar) as field_28_text -- line 29
+  , cast(field_29 as varchar) as field_29_text -- line 30
+  , cast(field_30 as varchar) as field_30_text -- line 31
+  , cast(field_31 as varchar) as field_31_text -- line 32
+  , cast(field_32 as varchar) as field_32_text -- line 33
+  , cast(field_33 as varchar) as field_33_text -- line 34
+  , cast(field_34 as varchar) as field_34_text -- line 35
+  , cast(field_35 as varchar) as field_35_text -- line 36
+  , cast(field_36 as varchar) as field_36_text -- line 37
+  , cast(field_37 as varchar) as field_37_text -- line 38
+  , cast(field_38 as varchar) as field_38_text -- line 39
+  , cast(field_39 as varchar) as field_39_text -- line 40
+  , cast(field_40 as varchar) as field_40_text -- line 41
+  , cast(field_41 as varchar) as field_41_text -- line 42
+  , cast(field_42 as varchar) as field_42_text -- line 43
+  , cast(field_43 as varchar) as field_43_text -- line 44
+  , cast(field_44 as varchar) as field_44_text -- line 45
+  , cast(field_45 as varchar) as field_45_text -- line 46
+  , cast(field_46 as varchar) as field_46_text -- line 47
+  , cast(field_47 as varchar) as field_47_text -- line 48
+  , cast(field_48 as varchar) as field_48_text -- line 49
+  , cast(field_49 as varchar) as field_49_text -- line 50
+  , cast(field_50 as varchar) as field_50_text -- line 51
+  , cast(field_51 as varchar) as field_51_text -- line 52
+  , cast(field_52 as varchar) as field_52_text -- line 53
+  , cast(field_53 as varchar) as field_53_text -- line 54
+  , cast(field_54 as varchar) as field_54_text -- line 55
+  , cast(field_55 as varchar) as field_55_text -- line 56
+  , cast(field_56 as varchar) as field_56_text -- line 57
+  , cast(field_57 as varchar) as field_57_text -- line 58
+  , cast(field_58 as varchar) as field_58_text -- line 59
+  , cast(field_59 as varchar) as field_59_text -- line 60
+  , cast(field_60 as varchar) as field_60_text -- line 61
+  , cast(field_61 as varchar) as field_61_text -- line 62
+  , cast(field_62 as varchar) as field_62_text -- line 63
+  , cast(field_63 as varchar) as field_63_text -- line 64
+  , cast(field_64 as varchar) as field_64_text -- line 65
+  , cast(field_65 as varchar) as field_65_text -- line 66
+  , cast(field_66 as varchar) as field_66_text -- line 67
+  , cast(field_67 as varchar) as field_67_text -- line 68
+  , cast(field_68 as varchar) as field_68_text -- line 69
+  , cast(field_69 as varchar) as field_69_text -- line 70
+  , cast(field_70 as varchar) as field_70_text -- line 71
+  , cast(field_71 as varchar) as field_71_text -- line 72
+  , cast(field_72 as varchar) as field_72_text -- line 73
+  , cast(field_73 as varchar) as field_73_text -- line 74
+  , cast(field_74 as varchar) as field_74_text -- line 75
+  , cast(field_75 as varchar) as field_75_text -- line 76
+  , cast(field_76 as varchar) as field_76_text -- line 77
+  , cast(field_77 as varchar) as field_77_text -- line 78
+  , cast(field_78 as varchar) as field_78_text -- line 79
+  , cast(field_79 as varchar) as field_79_text -- line 80
+  , cast(field_80 as varchar) as field_80_text -- line 81
+  , cast(field_81 as varchar) as field_81_text -- line 82
+  , cast(field_82 as varchar) as field_82_text -- line 83
+  , cast(field_83 as varchar) as field_83_text -- line 84
+  , cast(field_84 as varchar) as field_84_text -- line 85
+  , cast(field_85 as varchar) as field_85_text -- line 86
+  , cast(field_86 as varchar) as field_86_text -- line 87
+  , cast(field_87 as varchar) as field_87_text -- line 88
+  , cast(field_88 as varchar) as field_88_text -- line 89
+  , cast(field_89 as varchar) as field_89_text -- line 90
+  , cast(field_90 as varchar) as field_90_text -- line 91
+  , cast(field_91 as varchar) as field_91_text -- line 92
+  , cast(field_92 as varchar) as field_92_text -- line 93
+  , cast(field_93 as varchar) as field_93_text -- line 94
+  , cast(field_94 as varchar) as field_94_text -- line 95
+  , cast(field_95 as varchar) as field_95_text -- line 96
+  , cast(field_96 as varchar) as field_96_text -- line 97
+  , cast(field_97 as varchar) as field_97_text -- line 98
+  , cast(field_98 as varchar) as field_98_text -- line 99
+  , cast(field_99 as varchar) as field_99_text -- line 100
+  , cast(field_100 as varchar) as field_100_text -- line 101
+  , cast(field_101 as varchar) as field_101_text -- line 102
+  , cast(field_102 as varchar) as field_102_text -- line 103
+  , cast(field_103 as varchar) as field_103_t
+… (truncated)
+```
+
+### models/staging/stg_0.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_0
++  b_0
+
+```
+Current SQL:
+```sql
+select b_0 from {{ source('raw', 't0') }}
+```
+
+### models/staging/stg_1.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_1
++  b_1
+
+```
+Current SQL:
+```sql
+select b_1 from {{ source('raw', 't1') }}
+```
+
+### models/staging/stg_2.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_2
++  b_2
+
+```
+Current SQL:
+```sql
+select b_2 from {{ source('raw', 't2') }}
+```
+
+### models/staging/stg_3.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_3
++  b_3
+
+```
+Current SQL:
+```sql
+select b_3 from {{ source('raw', 't3') }}
+```
+
+### models/staging/stg_4.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_4
++  b_4
+
+```
+Current SQL:
+```sql
+select b_4 from {{ source('raw', 't4') }}
+```
+
+### models/staging/stg_5.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_5
++  b_5
+
+```
+Current SQL:
+```sql
+select b_5 from {{ source('raw', 't5') }}
+```
+
+### models/staging/stg_6.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_6
++  b_6
+
+```
+Current SQL:
+```sql
+select b_6 from {{ source('raw', 't6') }}
+```
+
+### models/staging/stg_7.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_7
++  b_7
+
+```
+Current SQL:
+```sql
+select b_7 from {{ source('raw', 't7') }}
+```
+
+### models/staging/stg_8.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_8
++  b_8
+
+```
+Current SQL:
+```sql
+select b_8 from {{ source('raw', 't8') }}
+```
+
+### models/staging/stg_9.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_9
++  b_9
+
+```
+Current SQL:
+```sql
+select b_9 from {{ source('raw', 't9') }}
+```
+
+### models/staging/stg_10.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_10
++  b_10
+
+```
+Current SQL:
+```sql
+select b_10 from {{ source('raw', 't10') }}
+```
+
+### models/staging/stg_11.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_11
++  b_11
+
+```
+Current SQL:
+```sql
+select b_11 from {{ source('raw', 't11') }}
+```
+
+### models/staging/stg_12.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_12
++  b_12
+
+```
+Current SQL:
+```sql
+select b_12 from {{ source('raw', 't12') }}
+```
+
+### models/staging/stg_13.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_13
++  b_13
+
+```
+Current SQL:
+```sql
+select b_13 from {{ source('raw', 't13') }}
+```
+
+### models/staging/stg_14.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_14
++  b_14
+
+```
+Current SQL:
+```sql
+select b_14 from {{ source('raw', 't14') }}
+```
+
+### models/staging/stg_15.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_15
++  b_15
+
+```
+Current SQL:
+```sql
+select b_15 from {{ source('raw', 't15') }}
+```
+
+### models/staging/stg_16.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_16
++  b_16
+
+```
+Current SQL:
+```sql
+select b_16 from {{ source('raw', 't16') }}
+```
+
+### models/staging/stg_17.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_17
++  b_17
+
+```
+Current SQL:
+```sql
+select b_17 from {{ source('raw', 't17') }}
+```
+
+### models/py/pm.py (added, Python model)
+Diff:
+```diff
++def model(dbt, session):
+
+```
+Current file:
+```python
+def model(dbt, session):
+    return dbt.ref('fct')
+
+```
+
+## RELATED FILES — unchanged dbt parents of the changed files (context only; comment on the changed files, not these):
+
+### models/staging/stg_orders.sql (model `stg_orders`, used by models/marts/fct_big.sql)
+```sql
+select id, amount from raw.orders
+```
+
+Return ONLY the JSON array per the output contract.
+=====BATCH=====
+PR title: Rework revenue marts
+PR description:
+Moves cents conversion into a macro.
+
+Also adds tests.
+
+## GROUNDING — deterministic engine findings (DO NOT repeat these):
+- [warning] warehouse_cost · models/marts/fct_big.sql: SELECT * in a mart
+
+## CHANGED FILES (review for what the engine missed):
+
+### models/marts/fct_big.sql (modified)
+Diff:
+```diff
+@@ -10,22 +10,24 @@
+ select 0 as ctx_before
++  , coalesce(col_0_0, 'unknown_value_0') as renamed_column_0_0
++  , coalesce(col_0_1, 'unknown_value_1') as renamed_column_0_1
++  , coalesce(col_0_2, 'unknown_value_2') as renamed_column_0_2
++  , coalesce(col_0_3, 'unknown_value_3') as renamed_column_0_3
++  , coalesce(col_0_4, 'unknown_value_4') as renamed_column_0_4
++  , coalesce(col_0_5, 'unknown_value_5') as renamed_column_0_5
++  , coalesce(col_0_6, 'unknown_value_6') as renamed_column_0_6
++  , coalesce(col_0_7, 'unknown_value_7') as renamed_column_0_7
++  , coalesce(col_0_8, 'unknown_value_8') as renamed_column_0_8
++  , coalesce(col_0_9, 'unknown_value_9') as renamed_column_0_9
++  , coalesce(col_0_10, 'unknown_value_10') as renamed_column_0_10
++  , coalesce(col_0_11, 'unknown_value_11') as renamed_column_0_11
++  , coalesce(col_0_12, 'unknown_value_12') as renamed_column_0_12
++  , coalesce(col_0_13, 'unknown_value_13') as renamed_column_0_13
++  , coalesce(col_0_14, 'unknown_value_14') as renamed_column_0_14
++  , coalesce(col_0_15, 'unknown_value_15') as renamed_column_0_15
++  , coalesce(col_0_16, 'unknown_value_16') as renamed_column_0_16
++  , coalesce(col_0_17, 'unknown_value_17') as renamed_column_0_17
++  , coalesce(col_0_18, 'unknown_value_18') as renamed_column_0_18
++  , coalesce(col_0_19, 'unknown_value_19') as renamed_column_0_19
+-  , old_col_0
+   from {{ ref('stg_0') }}
+@@ -110,22 +110,24 @@
+ select 1 as ctx_before
++  , coalesce(col_1_0, 'unknown_value_0') as renamed_column_1_0
++  , coalesce(col_1_1, 'unknown_value_1') as renamed_column_1_1
++  , coalesce(col_1_2, 'unknown_value_2') as renamed_column_1_2
++  , coalesce(col_1_3, 'unknown_value_3') as renamed_column_1_3
++  , coalesce(col_1_4, 'unknown_value_4') as renamed_column_1_4
++  , coalesce(col_1_5, 'unknown_value_5') as renamed_column_1_5
++  , coalesce(col_1_6, 'unknown_value_6') as renamed_column_1_6
++  , coalesce(col_1_7, 'unknown_value_7') as renamed_column_1_7
++  , coalesce(col_1_8, 'unknown_value_8') as renamed_column_1_8
++  , coalesce(col_1_9, 'unknown_value_9') as renamed_column_1_9
++  , coalesce(col_1_10, 'unknown_value_10') as renamed_column_1_10
++  , coalesce(col_1_11, 'unknown_value_11') as renamed_column_1_11
++  , coalesce(col_1_12, 'unknown_value_12') as renamed_column_1_12
++  , coalesce(col_1_13, 'unknown_value_13') as renamed_column_1_13
++  , coalesce(col_1_14, 'unknown_value_14') as renamed_column_1_14
++  , coalesce(col_1_15, 'unknown_value_15') as renamed_column_1_15
++  , coalesce(col_1_16, 'unknown_value_16') as renamed_column_1_16
++  , coalesce(col_1_17, 'unknown_value_17') as renamed_column_1_17
++  , coalesce(col_1_18, 'unknown_value_18') as renamed_column_1_18
++  , coalesce(col_1_19, 'unknown_value_19') as renamed_column_1_19
+-  , old_col_1
+   from {{ ref('stg_1') }}
+@@ -210,22 +210,24 @@
+ select 2 as ctx_before
++  , coalesce(col_2_0, 'unknown_value_0') as renamed_column_2_0
++  , coalesce(col_2_1, 'unknown_value_1') as renamed_column_2_1
++  , coalesce(col_2_2, 'unknown_value_2') as renamed_column_2_2
++  , coalesce(col_2_3, 'unknown_value_3') as renamed_column_2_3
++  , coalesce(col_2_4, 'unknown_value_4') as renamed_column_2_4
++  , coalesce(col_2_5, 'unknown_value_5') as renamed_column_2_5
++  , coalesce(col_2_6, 'unknown_value_6') as renamed_column_2_6
++  , coalesce(col_2_7, 'unknown_value_7') as renamed_column_2_7
++  , coalesce(col_2_8, 'unknown_value_8') as renamed_column_2_8
++  , coalesce(col_2_9, 'unknown_value_9') as renamed_column_2_9
++  , coalesce(col_2_10, 'unknown_value_10') as renamed_column_2_10
++  , coalesce(col_2_11, 'unknown_value_11') as renamed_column_2_11
++  , coalesce(col_2_12, 'unknown_value_12') as renamed_column_2_12
++  , coalesce(col_2_13, 'unknown_value_13') as renamed_column_2_13
++  , coalesce(col_2_14, 'unknown_value_14') as renamed_column_2_14
++  , coalesce(col_2_15, 'unknown_value_15') as renamed_column_2_15
++  , coalesce(col_2_16, 'unknown_value_16') as renamed_column_2_16
++  , coalesce(col_2_17, 'unknown_value_17') as renamed_column_2_17
++  , coalesce(col_2_18, 'unknown_value_18') as renamed_column_2_18
++  , coalesce(col_2_19, 'unknown_value_19') as renamed_column_2_19
+-  , old_col_2
+   from {{ ref('stg_2') }}
+@@ -310,22 +310,24 @@
+ select 3 as ctx_before
++  , coalesce(col_3_0, 'unknown_value_0') as renamed_column_3_0
++  , coalesce(col_3_1, 'unknown_value_1') as renamed_column_3_1
++  , coalesce(col_3_2, 'unknown_value_2') as renamed_column_3_2
++  , coalesce(col_3_3, 'unknown_value_3') as renamed_column_3_3
++  , coalesce(col_3_4, 'unknown_value_4') as renamed_column_3_4
++  , coalesce(col_3_5, 'unknown_value_5') as renamed_column_3_5
++  , coalesce(col_3_6, 'unknown_value_6') as renamed_column_3_6
++  , coalesce(col_3_7, 'unknown_value_7') as renamed_column_3_7
++  , coalesce(col_3_8, 'unknown_value_8') as renamed_column_3_8
++  , coalesce(col_3_9, 'unknown_value_9') as renamed_column_3_9
++  , coalesce(col_3_10, 'unknown_value_10') as renamed_column_3_10
++  , coalesce(col_3_11, 'unknown_value_11') as renamed_column_3_11
++  , coalesce(col_3_12, 'unknown_value_12') as renamed_column_3_12
++  , coalesce(col_3_13, 'unknown_value_13') as renamed_column_3_13
++  , coalesce(col_3_14, 'unknown_value_14') as renamed_column_3_14
++  , coalesce(col_3_15, 'unknown_value_15') as renamed_column_3_15
++  , coalesce(col_3_16, 'unknown_value_16') as renamed_column_3_16
++  , coalesce(col_3_17, 'unknown_value_17') as renamed_column_3_17
++  , coalesce(col_3_18, 'unknown_value_18') as renamed_column_3_18
++  , coalesce(col_3_19, 'unknown_value_19') as renamed_column_3_19
+-  , old_col_3
+   from {{ ref('stg_3') }}
+@@ -410,22 +410,24 @@
+ select 4 as ctx_before
++  , coalesce(col_4_0, 'unknown_value_0') as renamed_column_4_0
++  , coalesce(col_4_1, 'unknown_value_1') as renamed_column_4_1
++  , coalesce(col_4_2, 'unknown_value_2') as renamed_column_4_2
++  , coalesce(col_4_3, 'unknown_value_3') as renamed_column_4_3
++  , coalesce(col_4_4, 'unknown_value_4') as renamed_column_4_4
++  , coalesce(col_4_5, 'unknown_value_5') as
+… (truncated)
+```
+Current SQL:
+```sql
+  , cast(field_0 as varchar) as field_0_text -- line 1
+  , cast(field_1 as varchar) as field_1_text -- line 2
+  , cast(field_2 as varchar) as field_2_text -- line 3
+  , cast(field_3 as varchar) as field_3_text -- line 4
+  , cast(field_4 as varchar) as field_4_text -- line 5
+  , cast(field_5 as varchar) as field_5_text -- line 6
+  , cast(field_6 as varchar) as field_6_text -- line 7
+  , cast(field_7 as varchar) as field_7_text -- line 8
+  , cast(field_8 as varchar) as field_8_text -- line 9
+  , cast(field_9 as varchar) as field_9_text -- line 10
+  , cast(field_10 as varchar) as field_10_text -- line 11
+  , cast(field_11 as varchar) as field_11_text -- line 12
+  , cast(field_12 as varchar) as field_12_text -- line 13
+  , cast(field_13 as varchar) as field_13_text -- line 14
+  , cast(field_14 as varchar) as field_14_text -- line 15
+  , cast(field_15 as varchar) as field_15_text -- line 16
+  , cast(field_16 as varchar) as field_16_text -- line 17
+  , cast(field_17 as varchar) as field_17_text -- line 18
+  , cast(field_18 as varchar) as field_18_text -- line 19
+  , cast(field_19 as varchar) as field_19_text -- line 20
+  , cast(field_20 as varchar) as field_20_text -- line 21
+  , cast(field_21 as varchar) as field_21_text -- line 22
+  , cast(field_22 as varchar) as field_22_text -- line 23
+  , cast(field_23 as varchar) as field_23_text -- line 24
+  , cast(field_24 as varchar) as field_24_text -- line 25
+  , cast(field_25 as varchar) as field_25_text -- line 26
+  , cast(field_26 as varchar) as field_26_text -- line 27
+  , cast(field_27 as varchar) as field_27_text -- line 28
+  , cast(field_28 as varchar) as field_28_text -- line 29
+  , cast(field_29 as varchar) as field_29_text -- line 30
+  , cast(field_30 as varchar) as field_30_text -- line 31
+  , cast(field_31 as varchar) as field_31_text -- line 32
+  , cast(field_32 as varchar) as field_32_text -- line 33
+  , cast(field_33 as varchar) as field_33_text -- line 34
+  , cast(field_34 as varchar) as field_34_text -- line 35
+  , cast(field_35 as varchar) as field_35_text -- line 36
+  , cast(field_36 as varchar) as field_36_text -- line 37
+  , cast(field_37 as varchar) as field_37_text -- line 38
+  , cast(field_38 as varchar) as field_38_text -- line 39
+  , cast(field_39 as varchar) as field_39_text -- line 40
+  , cast(field_40 as varchar) as field_40_text -- line 41
+  , cast(field_41 as varchar) as field_41_text -- line 42
+  , cast(field_42 as varchar) as field_42_text -- line 43
+  , cast(field_43 as varchar) as field_43_text -- line 44
+  , cast(field_44 as varchar) as field_44_text -- line 45
+  , cast(field_45 as varchar) as field_45_text -- line 46
+  , cast(field_46 as varchar) as field_46_text -- line 47
+  , cast(field_47 as varchar) as field_47_text -- line 48
+  , cast(field_48 as varchar) as field_48_text -- line 49
+  , cast(field_49 as varchar) as field_49_text -- line 50
+  , cast(field_50 as varchar) as field_50_text -- line 51
+  , cast(field_51 as varchar) as field_51_text -- line 52
+  , cast(field_52 as varchar) as field_52_text -- line 53
+  , cast(field_53 as varchar) as field_53_text -- line 54
+  , cast(field_54 as varchar) as field_54_text -- line 55
+  , cast(field_55 as varchar) as field_55_text -- line 56
+  , cast(field_56 as varchar) as field_56_text -- line 57
+  , cast(field_57 as varchar) as field_57_text -- line 58
+  , cast(field_58 as varchar) as field_58_text -- line 59
+  , cast(field_59 as varchar) as field_59_text -- line 60
+  , cast(field_60 as varchar) as field_60_text -- line 61
+  , cast(field_61 as varchar) as field_61_text -- line 62
+  , cast(field_62 as varchar) as field_62_text -- line 63
+  , cast(field_63 as varchar) as field_63_text -- line 64
+  , cast(field_64 as varchar) as field_64_text -- line 65
+  , cast(field_65 as varchar) as field_65_text -- line 66
+  , cast(field_66 as varchar) as field_66_text -- line 67
+  , cast(field_67 as varchar) as field_67_text -- line 68
+  , cast(field_68 as varchar) as field_68_text -- line 69
+  , cast(field_69 as varchar) as field_69_text -- line 70
+  , cast(field_70 as varchar) as field_70_text -- line 71
+  , cast(field_71 as varchar) as field_71_text -- line 72
+  , cast(field_72 as varchar) as field_72_text -- line 73
+  , cast(field_73 as varchar) as field_73_text -- line 74
+  , cast(field_74 as varchar) as field_74_text -- line 75
+  , cast(field_75 as varchar) as field_75_text -- line 76
+  , cast(field_76 as varchar) as field_76_text -- line 77
+  , cast(field_77 as varchar) as field_77_text -- line 78
+  , cast(field_78 as varchar) as field_78_text -- line 79
+  , cast(field_79 as varchar) as field_79_text -- line 80
+  , cast(field_80 as varchar) as field_80_text -- line 81
+  , cast(field_81 as varchar) as field_81_text -- line 82
+  , cast(field_82 as varchar) as field_82_text -- line 83
+  , cast(field_83 as varchar) as field_83_text -- line 84
+  , cast(field_84 as varchar) as field_84_text -- line 85
+  , cast(field_85 as varchar) as field_85_text -- line 86
+  , cast(field_86 as varchar) as field_86_text -- line 87
+  , cast(field_87 as varchar) as field_87_text -- line 88
+  , cast(field_88 as varchar) as field_88_text -- line 89
+  , cast(field_89 as varchar) as field_89_text -- line 90
+  , cast(field_90 as varchar) as field_90_text -- line 91
+  , cast(field_91 as varchar) as field_91_text -- line 92
+  , cast(field_92 as varchar) as field_92_text -- line 93
+  , cast(field_93 as varchar) as field_93_text -- line 94
+  , cast(field_94 as varchar) as field_94_text -- line 95
+  , cast(field_95 as varchar) as field_95_text -- line 96
+  , cast(field_96 as varchar) as field_96_text -- line 97
+  , cast(field_97 as varchar) as field_97_text -- line 98
+  , cast(field_98 as varchar) as field_98_text -- line 99
+  , cast(field_99 as varchar) as field_99_text -- line 100
+  , cast(field_100 as varchar) as field_100_text -- line 101
+  , cast(field_101 as varchar) as field_101_text -- line 102
+  , cast(field_102 as varchar) as field_102_text -- line 103
+  , cast(field_103 as varchar) as field_103_t
+… (truncated)
+```
+
+## RELATED FILES — unchanged dbt parents of the changed files (context only; comment on the changed files, not these):
+
+### models/staging/stg_orders.sql (model `stg_orders`, used by models/marts/fct_big.sql)
+```sql
+select id, amount from raw.orders
+```
+
+Return ONLY the JSON array per the output contract.
+=====BATCH=====
+PR title: Rework revenue marts
+PR description:
+Moves cents conversion into a macro.
+
+Also adds tests.
+
+## GROUNDING — deterministic engine findings (DO NOT repeat these):
+- [warning] warehouse_cost · models/marts/fct_big.sql: SELECT * in a mart
+
+## CHANGED FILES (review for what the engine missed):
+
+### models/staging/stg_0.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_0
++  b_0
+
+```
+Current SQL:
+```sql
+select b_0 from {{ source('raw', 't0') }}
+```
+
+### models/staging/stg_1.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_1
++  b_1
+
+```
+Current SQL:
+```sql
+select b_1 from {{ source('raw', 't1') }}
+```
+
+### models/staging/stg_2.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_2
++  b_2
+
+```
+Current SQL:
+```sql
+select b_2 from {{ source('raw', 't2') }}
+```
+
+### models/staging/stg_3.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_3
++  b_3
+
+```
+Current SQL:
+```sql
+select b_3 from {{ source('raw', 't3') }}
+```
+
+### models/staging/stg_4.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_4
++  b_4
+
+```
+Current SQL:
+```sql
+select b_4 from {{ source('raw', 't4') }}
+```
+
+### models/staging/stg_5.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_5
++  b_5
+
+```
+Current SQL:
+```sql
+select b_5 from {{ source('raw', 't5') }}
+```
+
+### models/staging/stg_6.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_6
++  b_6
+
+```
+Current SQL:
+```sql
+select b_6 from {{ source('raw', 't6') }}
+```
+
+### models/staging/stg_7.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_7
++  b_7
+
+```
+Current SQL:
+```sql
+select b_7 from {{ source('raw', 't7') }}
+```
+
+### models/staging/stg_8.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_8
++  b_8
+
+```
+Current SQL:
+```sql
+select b_8 from {{ source('raw', 't8') }}
+```
+
+### models/staging/stg_9.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_9
++  b_9
+
+```
+Current SQL:
+```sql
+select b_9 from {{ source('raw', 't9') }}
+```
+
+### models/staging/stg_10.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_10
++  b_10
+
+```
+Current SQL:
+```sql
+select b_10 from {{ source('raw', 't10') }}
+```
+
+### models/staging/stg_11.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_11
++  b_11
+
+```
+Current SQL:
+```sql
+select b_11 from {{ source('raw', 't11') }}
+```
+
+### models/staging/stg_12.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_12
++  b_12
+
+```
+Current SQL:
+```sql
+select b_12 from {{ source('raw', 't12') }}
+```
+
+### models/staging/stg_13.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_13
++  b_13
+
+```
+Current SQL:
+```sql
+select b_13 from {{ source('raw', 't13') }}
+```
+
+### models/staging/stg_14.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_14
++  b_14
+
+```
+Current SQL:
+```sql
+select b_14 from {{ source('raw', 't14') }}
+```
+
+### models/staging/stg_15.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_15
++  b_15
+
+```
+Current SQL:
+```sql
+select b_15 from {{ source('raw', 't15') }}
+```
+
+### models/staging/stg_16.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_16
++  b_16
+
+```
+Current SQL:
+```sql
+select b_16 from {{ source('raw', 't16') }}
+```
+
+### models/staging/stg_17.sql (modified)
+Diff:
+```diff
+@@ -1,2 +1,2 @@
+ select
+-  a_17
++  b_17
+
+```
+Current SQL:
+```sql
+select b_17 from {{ source('raw', 't17') }}
+```
+
+### models/py/pm.py (added, Python model)
+Diff:
+```diff
++def model(dbt, session):
+
+```
+Current file:
+```python
+def model(dbt, session):
+    return dbt.ref('fct')
+
+```
+
+Return ONLY the JSON array per the output contract.

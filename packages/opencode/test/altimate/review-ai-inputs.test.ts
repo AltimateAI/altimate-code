@@ -7,19 +7,26 @@ import {
   aiInputBudget,
   batchAiFiles,
   buildUserMessage,
+  excerptDiff,
+  excerptFile,
   laneUsage,
+  planAiInput,
+  runAiReview,
   selectAiFiles,
+  selectAiFilesByQuota,
   streamUsage,
   type AiLaneStatus,
   type AiReviewFile,
   type AiReviewInput,
 } from "../../src/altimate/review/ai-review"
+import { renderContextCard, type ModelCard } from "../../src/altimate/review/ai-context-card"
+import { defaultPromptInput } from "./fixtures/review-ai-prompt-input"
 import { inlineComments, renderSummary } from "../../src/altimate/review/format"
 import { makeFinding } from "../../src/altimate/review/finding"
 import { emitReviewRun } from "../../src/altimate/review/telemetry"
 import { Telemetry } from "../../src/altimate/telemetry"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
-import { writeFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { tmpdir } from "../fixture/fixture"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
@@ -456,5 +463,318 @@ describe("verifier evidence (opt-in)", () => {
     expect([...ev.addedLines.get("models/marts/m.sql")!]).toEqual([1])
     expect(ev.files.map((f) => f.path)).toEqual(["models/marts/m.sql"])
     expect(ev.dialect).toBe(DEFAULT_REVIEW_CONFIG.dialect)
+  })
+})
+
+describe("input coverage (opt-in ALTIMATE_REVIEW_AI_COVERAGE=1)", () => {
+  const COVERAGE = { ALTIMATE_REVIEW_AI_COVERAGE: "1" }
+  const f = (path: string, kind: string, changed = 1): AiReviewFile => ({
+    path,
+    status: "modified",
+    kind,
+    model: path,
+    diff: "@@ -1,1 +1,1 @@\n" + "+x\n".repeat(changed),
+  })
+
+  test("with both switches unset the prompt is byte-identical to the pre-change snapshot", () => {
+    const input = defaultPromptInput()
+    const messages = [{}, { ALTIMATE_REVIEW_AI_BATCH_CHARS: "12000" }].flatMap((env) => planAiInput(input, env).messages)
+    const snapshot = readFileSync(path.join(import.meta.dir, "fixtures/review-ai-prompt-default.txt"), "utf8")
+    expect(messages.join("\n=====BATCH=====\n")).toBe(snapshot)
+    // Default selection is the old cap; nothing is recorded as unsent to the AI on the envelope.
+    expect(planAiInput(input, {}).files).toEqual(selectAiFiles(input.files))
+  })
+
+  test("30 models + 3 macros + 2 yml: every macro and yml goes, models fill the rest up to 30", () => {
+    const models = Array.from({ length: 30 }, (_, i) => f(`m${i}.sql`, "model_sql", i + 1))
+    const files = [...models, f("a.sql", "macro"), f("b.sql", "macro"), f("c.sql", "macro"), f("_a.yml", "schema_yml"), f("_b.yml", "source_yml")]
+    const { sent, unsent } = selectAiFilesByQuota(files)
+    expect(sent).toHaveLength(30)
+    const paths = sent.map((x) => x.path)
+    for (const p of ["a.sql", "b.sql", "c.sql", "_a.yml", "_b.yml"]) expect(paths).toContain(p)
+    // Most-changed models first; the five least-changed are left out.
+    expect(paths.slice(0, 3)).toEqual(["m29.sql", "m28.sql", "m27.sql"])
+    expect(unsent.map((x) => x.path)).toEqual(["m0.sql", "m1.sql", "m2.sql", "m3.sql", "m4.sql"])
+    // Today's cap would have sent no macro at all.
+    expect(selectAiFiles(files).some((x) => x.kind === "macro")).toBe(false)
+  })
+
+  test("unused quota flows to other kinds; env overrides the quotas", () => {
+    const files = [...Array.from({ length: 40 }, (_, i) => f(`m${i}.sql`, "model_sql")), f("mac.sql", "macro")]
+    const { sent } = selectAiFilesByQuota(files)
+    expect(sent.filter((x) => x.kind === "model_sql")).toHaveLength(29)
+    expect(sent.map((x) => x.path)).toContain("mac.sql")
+    const budget = aiInputBudget({ ...COVERAGE, ALTIMATE_REVIEW_AI_QUOTA_MODEL: "2", ALTIMATE_REVIEW_AI_QUOTA_MACRO: "1", ALTIMATE_REVIEW_AI_QUOTA_TEST: "1", ALTIMATE_REVIEW_AI_QUOTA_YML: "1" })
+    expect(budget.coverage?.quotas).toEqual({ model: 2, macro: 1, test: 1, yml: 1 })
+    expect(selectAiFilesByQuota(files, budget.coverage!.quotas).sent).toHaveLength(5)
+    expect(aiInputBudget({}).coverage).toBeUndefined()
+  })
+
+  test("a 20k-char file with one hunk near char 15k: the hunk and its ±20-line window are sent", () => {
+    const lines = Array.from({ length: 400 }, (_, i) => `  , col_${String(i + 1).padStart(3, "0")} as alias_${String(i + 1).padStart(3, "0")} -- padding text, more padding`)
+    lines[299] = "  , amount / 0 as broken_ratio"
+    const sql = lines.join("\n")
+    expect(sql.length).toBeGreaterThan(19_000)
+    expect(sql.indexOf("broken_ratio")).toBeGreaterThan(14_000)
+    const diff = "@@ -298,5 +298,5 @@\n" + [lines[297], lines[298]].map((l) => " " + l).join("\n") + "\n-  , amount as ratio\n+" + lines[299] + "\n " + lines[300] + "\n " + lines[301] + "\n"
+    const file: AiReviewFile = { path: "models/wide.sql", status: "modified", model: "wide", diff, sql }
+    // Today: the head cut drops the changed line.
+    const today = buildUserMessage({ grounding: [], files: [file] })
+    expect(today.slice(today.indexOf("Current SQL"))).not.toContain("broken_ratio")
+    const msg = buildUserMessage({ grounding: [], files: [file] }, 6_000, true)
+    const current = msg.slice(msg.indexOf("Current SQL"))
+    expect(current).toContain(lines[279]) // line 280
+    expect(current).toContain(lines[319]) // line 320
+    expect(current).toContain("broken_ratio")
+    const markers = [...current.matchAll(/… \(lines (\d+)–(\d+) omitted\)/g)].map((m) => [Number(m[1]), Number(m[2])])
+    expect(markers.length).toBe(2)
+    // The head fills the budget up to the first gap; the gap ends at line 279; the tail runs to the last line.
+    expect(markers[0][1]).toBe(279)
+    expect(markers[1]).toEqual([321, 400])
+    expect(excerptFile(sql, diff, 6_000).text.length).toBeLessThanOrEqual(6_000)
+  })
+
+  test("diff excerpts keep whole hunks and name the omitted ones by line; one oversized hunk keeps its head", () => {
+    const hunk = (start: number) => `@@ -${start},40 +${start},40 @@\n` + Array.from({ length: 40 }, (_, i) => `+  , value_${start}_${i} as column_${start}_${i}`).join("\n")
+    const diff = [10, 200, 400, 600, 800].map(hunk).join("\n") + "\n"
+    expect(diff.length).toBeGreaterThan(6_000)
+    const ex = excerptDiff(diff, 6_000)
+    expect(ex.text.length).toBeLessThanOrEqual(6_100)
+    expect(ex.hunksTotal).toBe(5)
+    expect(ex.hunksSent).toBeGreaterThan(0)
+    expect(ex.hunksSent).toBeLessThan(5)
+    // Every hunk sent is whole.
+    for (const start of [10, 200, 400, 600, 800].slice(0, ex.hunksSent)) expect(ex.text).toContain(hunk(start))
+    const omitted = [10, 200, 400, 600, 800].slice(ex.hunksSent).map((s) => `${s}–${s + 39}`)
+    expect(ex.text).toContain(`omitted, at lines ${omitted.join(", ")})`)
+    const one = excerptDiff(hunk(5) + "\n" + hunk(5).split("\n").slice(1).join("\n").repeat(3), 1_000)
+    expect(one.text).toContain("… (hunk truncated)")
+    expect(one).toMatchObject({ hunksSent: 1, hunksTotal: 1, truncated: true })
+  })
+
+  test("dry run records ai.input, lists files over quota as not reviewed and skips the model", async () => {
+    const saved = { ...process.env }
+    try {
+      Object.assign(process.env, COVERAGE, { ALTIMATE_REVIEW_AI_DRYRUN: "1" })
+      const env = await runReview({
+        changedFiles: [mod("models/marts/m.sql", "@@ -1 +1 @@\n-select 1\n+select 2 as id\n"), mod("models/marts/n.sql"), mod("macros/to_cents.sql")],
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        forceTier: "full",
+        getContent: async (p, side) => (side === "old" ? undefined : FILES[p] ?? "select 1"),
+        generatedAt: "2026-11-14T00:00:00Z",
+        aiReview: runAiReview,
+      })
+      expect(env.ai?.state).toBe("skipped")
+      expect(env.ai?.reason).toContain("dry run")
+      expect(env.ai?.input?.map((r) => r.path).sort()).toEqual(["macros/to_cents.sql", "models/marts/m.sql", "models/marts/n.sql"])
+      const m = env.ai?.input?.find((r) => r.path === "models/marts/m.sql")
+      expect(m).toMatchObject({ kind: "model_sql", truncated: false, hunksSent: 1, hunksTotal: 1, card: false })
+      expect(m!.chars).toBeGreaterThan(0)
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
+      Object.assign(process.env, saved)
+    }
+  })
+
+  test("files over quota reach scope.notReviewed; the default lane records nothing new", async () => {
+    const saved = { ...process.env }
+    // Quotas of 1 each make a total of 4: one macro and three of the six models (most changed first).
+    const changed = [
+      mod("models/marts/m.sql", "@@ -1 +1 @@\n-select 1\n+select 2 as id\n"),
+      ...["n", "o", "p", "q", "r"].map((n) => mod(`models/marts/${n}.sql`)),
+      mod("macros/to_cents.sql"),
+    ]
+    const run = () =>
+      runReview({
+        changedFiles: changed,
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        forceTier: "full",
+        getContent: async (p, side) => (side === "old" ? undefined : FILES[p] ?? "select 1"),
+        generatedAt: "2026-11-14T00:00:00Z",
+        aiReview: runAiReview,
+      })
+    try {
+      Object.assign(process.env, { ALTIMATE_REVIEW_AI_DRYRUN: "1" })
+      const plain = await run()
+      expect(plain.ai?.input?.length).toBe(7)
+      expect(plain.scope?.notReviewed?.some((e) => e.reason.includes("file quota")) ?? false).toBe(false)
+      const one = { ALTIMATE_REVIEW_AI_QUOTA_MODEL: "1", ALTIMATE_REVIEW_AI_QUOTA_MACRO: "1", ALTIMATE_REVIEW_AI_QUOTA_TEST: "1", ALTIMATE_REVIEW_AI_QUOTA_YML: "1" }
+      Object.assign(process.env, COVERAGE, one)
+      const env = await run()
+      expect(env.ai?.input?.map((r) => r.path)).toEqual(["models/marts/m.sql", "models/marts/n.sql", "models/marts/o.sql", "macros/to_cents.sql"])
+      const quota = env.scope?.notReviewed?.filter((e) => e.reason === "not sent to the AI (file quota)").map((e) => e.path)
+      expect(quota).toEqual(["models/marts/p.sql", "models/marts/q.sql", "models/marts/r.sql"])
+      expect("unsent" in (env.ai ?? {})).toBe(false)
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
+      Object.assign(process.env, saved)
+    }
+  })
+})
+
+describe("dbt manifest context card (opt-in ALTIMATE_REVIEW_AI_CONTEXT_CARD=1)", () => {
+  const card: ModelCard = {
+    resourceType: "model",
+    materialized: "incremental",
+    uniqueKey: "order_id",
+    incrementalStrategy: "merge",
+    contractEnforced: true,
+    parents: ["stg_orders", "raw.payments"],
+    children: ["fct_revenue"],
+    exposures: ["finance_dash"],
+    columns: [{ name: "order_id", dataType: "int", tests: ["unique", "not_null"] }, { name: "amount", tests: [] }],
+    siblings: ["fct_refunds"],
+  }
+
+  test("a model card names keys, parents, children, columns with tests and siblings", () => {
+    const text = renderContextCard({ name: "fct_orders", model: card })
+    expect(text).toBe(
+      [
+        "model `fct_orders`: materialized: incremental; strategy: merge; unique_key: order_id; contract: enforced",
+        "parents: stg_orders, raw.payments",
+        "children: fct_revenue",
+        "exposures: finance_dash",
+        "columns: order_id int [unique, not_null], amount",
+        "siblings: fct_refunds",
+      ].join("\n"),
+    )
+  })
+
+  test("a macro card lists callers and adapter variants; long lists shrink to +N more within 600 chars", () => {
+    const text = renderContextCard({
+      name: "hash",
+      macro: { name: "hash", callers: ["a", "b"], variants: ["snowflake__hash (macros/sf/hash.sql)", "default__hash (macros/hash.sql)"] },
+    })
+    expect(text).toBe("macro `hash`\ncallers: a, b\nvariants: snowflake__hash (macros/sf/hash.sql), default__hash (macros/hash.sql)")
+    const big = renderContextCard({
+      name: "wide",
+      model: { ...card, children: Array.from({ length: 60 }, (_, i) => `downstream_model_number_${i}`), columns: Array.from({ length: 25 }, (_, i) => ({ name: `column_${i}`, tests: ["not_null"] })) },
+    })
+    expect(big.length).toBeLessThanOrEqual(600)
+    expect(big).toMatch(/children: .*\+\d+ more/)
+  })
+
+  test("the card sits right under the file header; a call holds at most 6,000 chars of cards", () => {
+    const files: AiReviewFile[] = Array.from({ length: 15 }, (_, i) => ({ path: `m${i}.sql`, status: "modified", model: `m${i}`, sql: "select 1", card: "c".repeat(500) }))
+    const plan = planAiInput({ grounding: [], files }, {})
+    expect(plan.messages[0]).toContain("### m0.sql (modified)\ndbt context (from manifest):\n" + "c".repeat(500) + "\nCurrent SQL:")
+    expect(plan.input.filter((r) => r.card)).toHaveLength(12)
+  })
+
+  const cardRunner = {
+    ...runner,
+    async manifestAvailable() {
+      return true
+    },
+    async modelCard(name: string) {
+      return name === "m" ? card : undefined
+    },
+    async macroCard(name: string) {
+      return { name, callers: ["m"], variants: [] }
+    },
+    async graphParents(paths: string[]) {
+      return paths[0].endsWith(".yml") ? [{ path: "models/marts/m.sql", kind: "model", name: "m", forPaths: paths }] : []
+    },
+  } as ReviewRunner
+  const run = async (aiContextCard: boolean, r: ReviewRunner = cardRunner) => {
+    let seen: AiReviewInput | undefined
+    await runReview({
+      changedFiles: [mod("models/marts/m.sql"), mod("macros/to_cents.sql"), mod("models/marts/_marts.yml")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: r,
+      forceTier: "full",
+      aiContextCard,
+      getContent: async (p, side) => (side === "old" ? undefined : FILES[p]),
+      generatedAt: "2026-11-14T00:00:00Z",
+      aiReview: async (input) => {
+        seen = input
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    return new Map(seen!.files.map((f) => [f.path, f.card]))
+  }
+
+  test("the orchestrator attaches cards only with the switch on and a manifest", async () => {
+    const on = await run(true)
+    expect(on.get("models/marts/m.sql")).toContain("model `m`")
+    expect(on.get("macros/to_cents.sql")).toBe("macro `to_cents`\ncallers: m")
+    expect(on.get("models/marts/_marts.yml")).toContain("model `m`")
+    expect([...(await run(false)).values()].every((c) => c === undefined)).toBe(true)
+    const noManifest = {
+      ...cardRunner,
+      async manifestAvailable() {
+        return false
+      },
+      async impact() {
+        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+    } as ReviewRunner
+    expect([...(await run(true, noManifest)).values()].every((c) => c === undefined)).toBe(true)
+  })
+
+  test("modelCard and macroCard read the manifest and never throw", async () => {
+    await using tmp = await tmpdir()
+    const manifestPath = path.join(tmp.path, "manifest.json")
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        metadata: { project_name: "shop" },
+        nodes: {
+          "model.shop.fct": {
+            resource_type: "model", name: "fct", original_file_path: "models/marts/fct.sql",
+            config: { materialized: "incremental", unique_key: ["order_id", "line"], incremental_strategy: "merge", partition_by: { field: "day", data_type: "date" }, contract: { enforced: true } },
+            columns: { order_id: { name: "order_id", data_type: "int" }, amount: { name: "amount" } },
+            depends_on: { nodes: ["model.shop.stg", "source.shop.raw.orders"], macros: ["macro.shop.hash"] },
+          },
+          "model.shop.fct_refunds": { resource_type: "model", name: "fct_refunds", original_file_path: "models/marts/fct_refunds.sql", depends_on: { nodes: ["model.shop.stg"], macros: ["macro.shop.hash"] } },
+          "model.shop.other_dir": { resource_type: "model", name: "other_dir", original_file_path: "models/x/other_dir.sql", depends_on: { nodes: ["model.shop.stg"] } },
+          "model.shop.rev": { resource_type: "model", name: "rev", original_file_path: "models/marts/rev.sql", depends_on: { nodes: ["model.shop.fct"] } },
+          "model.shop.stg": { resource_type: "model", name: "stg", original_file_path: "models/stg.sql", depends_on: { nodes: [] } },
+          "test.shop.unique_fct_order_id": { resource_type: "test", name: "unique_fct_order_id", attached_node: "model.shop.fct", column_name: "order_id", test_metadata: { name: "unique" }, depends_on: { nodes: ["model.shop.fct"] } },
+        },
+        sources: { "source.shop.raw.orders": { source_name: "raw", name: "orders", original_file_path: "models/_sources.yml" } },
+        exposures: { "exposure.shop.dash": { name: "dash", depends_on: { nodes: ["model.shop.fct"] } } },
+        macros: {
+          "macro.shop.hash": { name: "hash", package_name: "shop", original_file_path: "macros/hash.sql" },
+          "macro.shop.snowflake__hash": { name: "snowflake__hash", package_name: "shop", original_file_path: "macros/sf/hash.sql" },
+          "macro.shop.default__hash": { name: "default__hash", package_name: "shop", original_file_path: "macros/hash.sql" },
+          "macro.shop.hash_other": { name: "hash_other", package_name: "shop", original_file_path: "macros/o.sql" },
+        },
+      }),
+    )
+    const r = createDispatcherRunner({ manifestPath })
+    expect(await r.modelCard!("fct")).toEqual({
+      resourceType: "model",
+      materialized: "incremental",
+      uniqueKey: "order_id, line",
+      incrementalStrategy: "merge",
+      partitionBy: "day",
+      clusterBy: undefined,
+      contractEnforced: true,
+      parents: ["stg", "raw.orders"],
+      children: ["rev"],
+      exposures: ["dash"],
+      columns: [{ name: "order_id", dataType: "int", tests: ["unique"] }, { name: "amount", tests: [] }],
+      siblings: ["fct_refunds"],
+    })
+    expect(await r.modelCard!("missing")).toBeUndefined()
+    expect(await r.macroCard!("hash", { changedModels: ["fct_refunds"] })).toEqual({
+      name: "hash",
+      callers: ["fct_refunds", "fct"],
+      variants: ["snowflake__hash (macros/sf/hash.sql)", "default__hash (macros/hash.sql)"],
+    })
+    // A file whose base name is no macro resolves through its path.
+    expect((await r.macroCard!("sf_file", { path: "proj/macros/sf/hash.sql" }))?.variants).toEqual(["hash (macros/hash.sql)", "default__hash (macros/hash.sql)"])
+    const broken = createDispatcherRunner({ manifestPath: path.join(tmp.path, "nope.json") })
+    expect(await broken.modelCard!("fct")).toBeUndefined()
+    expect(await broken.macroCard!("hash")).toBeUndefined()
   })
 })

@@ -6,6 +6,7 @@ import { columnReach } from "../native/dbt/column-reach"
 import { isExistenceError } from "../native/existence-error"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
+import type { MacroCard, ModelCard } from "./ai-context-card"
 import { errorReason } from "./verdict"
 
 /**
@@ -560,6 +561,129 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         return hit?.[1]?.config as Record<string, unknown> | undefined
       } catch (err) {
         fail("modelConfig", err)
+        return undefined
+      }
+    },
+
+    async modelCard(name: string): Promise<ModelCard | undefined> {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw) return undefined
+        const nodes = Object.entries<any>(raw.nodes ?? {})
+        const isModel = (id: string) => id.startsWith("model.")
+        const hit =
+          nodes.find(([id, n]) => isModel(id) && n?.name === name) ??
+          nodes.find(([id, n]) => (id.startsWith("snapshot.") || id.startsWith("seed.")) && n?.name === name)
+        if (!hit) return undefined
+        const [uid, node] = hit
+        const config = node.config ?? {}
+        const text = (v: unknown): string | undefined => {
+          if (v === undefined || v === null || v === "") return undefined
+          if (Array.isArray(v)) return v.length ? v.map(String).join(", ") : undefined
+          if (typeof v === "object") return String((v as any).field ?? JSON.stringify(v))
+          return String(v)
+        }
+        const nameOf = (id: string): string | undefined => {
+          const n = raw.nodes?.[id]
+          if (n?.name) return String(n.name)
+          const src = raw.sources?.[id]
+          return src ? `${src.source_name}.${src.name}` : undefined
+        }
+        const parentIds = asArray<string>(node.depends_on?.nodes)
+        const parents = parentIds.map(nameOf).filter((n): n is string => !!n)
+        const children = nodes
+          .filter(([id, n]) => isModel(id) && asArray<string>(n?.depends_on?.nodes).includes(uid))
+          .map(([, n]) => String(n.name))
+        const exposures = Object.values<any>(raw.exposures ?? {})
+          .filter((e) => asArray<string>(e?.depends_on?.nodes).includes(uid))
+          .map((e) => String(e.name ?? ""))
+          .filter(Boolean)
+        const testsByColumn = new Map<string, string[]>()
+        for (const [, n] of nodes) {
+          if (n?.resource_type !== "test" || n.attached_node !== uid || !n.column_name) continue
+          const col = String(n.column_name).toLowerCase()
+          const testName = String(n.test_metadata?.name ?? n.name ?? "")
+          if (!testName) continue
+          testsByColumn.set(col, [...(testsByColumn.get(col) ?? []), testName])
+        }
+        const columns = Object.values<any>(node.columns ?? {})
+          .filter((c) => c?.name)
+          .slice(0, 25)
+          .map((c) => ({
+            name: String(c.name),
+            ...(c.data_type ? { dataType: String(c.data_type) } : {}),
+            tests: testsByColumn.get(String(c.name).toLowerCase()) ?? [],
+          }))
+        const dir = (p: unknown) => (typeof p === "string" ? p.slice(0, p.lastIndexOf("/") + 1) : undefined)
+        const ownDir = dir(node.original_file_path)
+        const parentSet = new Set(parentIds)
+        const siblings = nodes
+          .filter(
+            ([id, n]) =>
+              isModel(id) &&
+              id !== uid &&
+              ownDir !== undefined &&
+              dir(n?.original_file_path) === ownDir &&
+              asArray<string>(n?.depends_on?.nodes).some((p) => parentSet.has(p)),
+          )
+          .slice(0, 8)
+          .map(([, n]) => String(n.name))
+        return {
+          resourceType: String(node.resource_type ?? uid.split(".")[0]),
+          materialized: text(config.materialized),
+          uniqueKey: text(config.unique_key),
+          incrementalStrategy: text(config.incremental_strategy),
+          partitionBy: text(config.partition_by),
+          clusterBy: text(config.cluster_by),
+          contractEnforced: config.contract?.enforced === true || node.contract?.enforced === true,
+          parents,
+          children,
+          exposures,
+          columns,
+          siblings,
+        }
+      } catch (err) {
+        fail("modelCard", err)
+        return undefined
+      }
+    },
+
+    async macroCard(name: string, cardOpts?: { path?: string; changedModels?: string[] }): Promise<MacroCard | undefined> {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw) return undefined
+        const project = raw.metadata?.project_name
+        const macros = Object.entries<any>(raw.macros ?? {})
+        const byName = macros.filter(([, m]) => m?.name === name)
+        const path = cardOpts?.path
+        const hit =
+          byName.find(([, m]) => m.package_name === project) ??
+          byName[0] ??
+          (path
+            ? macros.find(([, m]) => typeof m?.original_file_path === "string" && (path === m.original_file_path || path.endsWith("/" + m.original_file_path)))
+            : undefined)
+        if (!hit) return undefined
+        const [uid, macro] = hit
+        const changed = new Set(cardOpts?.changedModels ?? [])
+        const callers = Object.entries<any>(raw.nodes ?? {})
+          .filter(([id, n]) => id.startsWith("model.") && asArray<string>(n?.depends_on?.macros).includes(uid))
+          .map(([, n]) => String(n.name))
+          .sort((a, b) => Number(changed.has(b)) - Number(changed.has(a)))
+          .slice(0, 10)
+        const macroName = String(macro.name)
+        const sep = macroName.indexOf("__")
+        const base = sep > 0 ? macroName.slice(sep + 2) : macroName
+        const variants = macros
+          .filter(([id, m]) => {
+            if (id === uid || m?.package_name !== macro.package_name) return false
+            const n = String(m.name ?? "")
+            const i = n.indexOf("__")
+            return n === base || (i > 0 && n.slice(i + 2) === base)
+          })
+          .map(([, m]) => `${m.name}${m.original_file_path ? ` (${m.original_file_path})` : ""}`)
+        return { name: macroName, callers, variants }
+      } catch (err) {
+        fail("macroCard", err)
         return undefined
       }
     },
