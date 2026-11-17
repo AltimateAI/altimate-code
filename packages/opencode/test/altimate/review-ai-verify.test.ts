@@ -493,7 +493,9 @@ describe("triage (first match wins)", () => {
       {
         id: c.id,
         file: c.file,
+        ...(c.startLine ? { startLine: c.startLine } : {}),
         title: c.title,
+        body: c.body,
         category: c.category,
         severity: c.severity,
         decision: "discard",
