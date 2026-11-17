@@ -128,6 +128,9 @@ const SUMMARY = [
   "dbt-project-rules:quickstart-public-model-missing",
   "dbt-project-rules:doc-block-missing",
   "dbt-project-rules:package-lock-in-package",
+  "dbt-project-rules:merge-no-incremental-predicates",
+  "dbt-patterns:redundant-join-predicate",
+  "rule-catalog:jinja-concat-missing-space",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {

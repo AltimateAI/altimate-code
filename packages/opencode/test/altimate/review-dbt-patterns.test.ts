@@ -1605,3 +1605,39 @@ describe("dbt-patterns extended battery", () => {
   test("safe_divide is NOT flagged", () =>
     expect(has(fire("x", ["select safe_divide(a, b) as r"]), "sql_correctness")).toBe(false))
 })
+
+describe("join predicate repeated from an earlier join", () => {
+  const sql = (extra: string) =>
+    [
+      "select e.member_id, s.score",
+      "from {{ ref('accounts') }} as e",
+      "inner join",
+      "    {{ ref('expected') }} as a",
+      "    on e.region = a.target_region",
+      "    and e.level = a.target_level",
+      "inner join",
+      "    scores as s",
+      "    on a.target_metric = s.metric",
+      `    ${extra}`,
+    ].join("\n")
+  const redundant = (body: string, added: string[]) =>
+    detectModelPatterns(modelFile("models/m.sql", body, added), body, DEFAULT_RUBRIC).filter((f) => f.rule === "dbt-patterns:redundant-join-predicate")
+  test("a later join restating an earlier join's predicate: fires on that added line", () => {
+    const body = sql("and a.target_region = e.region")
+    const fs = redundant(body, ["    and a.target_region = e.region"])
+    expect(fs).toHaveLength(1)
+    expect((fs[0].evidence?.result as { line?: string }).line?.trim()).toBe("and a.target_region = e.region")
+  })
+  test("twin: a predicate on the newly joined relation is silent", () => {
+    const body = sql("and s.region = e.region")
+    expect(redundant(body, ["    and s.region = e.region"])).toHaveLength(0)
+  })
+  test("the same predicate in a separate query (another CTE) is not the same join chain", () => {
+    const body = [
+      "with x as (select * from e join a on e.region = a.target_region),",
+      "y as (select * from e join s on e.id = s.id where 1 = 1)",
+      "select * from y join a on e.region = a.target_region",
+    ].join("\n")
+    expect(redundant(body, ["select * from y join a on e.region = a.target_region"])).toHaveLength(0)
+  })
+})
