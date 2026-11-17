@@ -30,8 +30,11 @@ const hasText = (value: unknown) => typeof value === "string" && value.trim().le
 export function docsCoverage(node: any, dialect: string | undefined): DocsCoverage {
   const yamlColumns: Record<string, any> = node.columns ?? {}
   const described = new Set<string>()
+  const listed = new Set<string>()
   for (const [key, col] of Object.entries<any>(yamlColumns)) {
-    if (hasText(col?.description)) described.add(String(col?.name || key))
+    const name = String(col?.name || key)
+    listed.add(name)
+    if (hasText(col?.description)) described.add(name)
   }
 
   const sql: string = node.compiled_code || node.compiled_sql || ""
@@ -65,8 +68,10 @@ export function docsCoverage(node: any, dialect: string | undefined): DocsCovera
   const byCase = new Map<string, number>()
   for (const c of columns) byCase.set(c.toLowerCase(), (byCase.get(c.toLowerCase()) ?? 0) + 1)
   const describedFolded = new Set([...described].map((c) => c.toLowerCase()))
+  // A YAML entry with exactly this name speaks for the column, blank or not; only without one is the
+  // name matched ignoring case.
   const isDocumented = (c: string) =>
-    byCase.get(c.toLowerCase()) === 1 ? describedFolded.has(c.toLowerCase()) : described.has(c)
+    byCase.get(c.toLowerCase()) === 1 && !listed.has(c) ? describedFolded.has(c.toLowerCase()) : described.has(c)
   const documented = columns.filter(isDocumented)
   const missing = columns.filter((c) => !isDocumented(c))
   const percent = columns.length === 0 ? 100 : Math.round((documented.length / columns.length) * 1000) / 10

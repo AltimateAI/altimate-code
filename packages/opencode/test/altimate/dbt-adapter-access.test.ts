@@ -546,6 +546,23 @@ describe("AltimateApi.apiRequest", () => {
     }
   })
 
+  test("a TypeError carrying a code or cause is a network failure, not a bad header", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => {
+      throw Object.assign(new TypeError("fetch failed: Bearer k1"), { cause: { code: "ECONNREFUSED" } })
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: TypeError (ECONNREFUSED).")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
   test("never shows the stored key when a header refusal races the caller's abort", async () => {
     await Bun.write(
       path.join(home, ".altimate", "altimate.json"),

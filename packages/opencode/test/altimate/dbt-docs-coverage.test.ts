@@ -65,6 +65,20 @@ describe("docsCoverage", () => {
     expect(r.missing).toEqual([])
   })
 
+  test("a blank entry with the column's exact name is not overridden by another entry's description", () => {
+    const r = docsCoverage(
+      {
+        ...orders,
+        columns: { Foo: { name: "Foo", description: "described" }, foo: { name: "foo", description: "" } },
+        compiled_code: 'select "foo" from t',
+      },
+      "snowflake",
+    )
+    expect(r.documented).toEqual([])
+    expect(r.missing).toEqual(["foo"])
+    expect(r.percent).toBe(0)
+  })
+
   test("a model without a description reports it", () => {
     expect(docsCoverage({ ...orders, description: "" }, "snowflake").has_description).toBe(false)
   })

@@ -143,6 +143,56 @@ describe("columnReach", () => {
     expect(found?.lens_types).toEqual({ net: "Alias", revenue: "Original" })
   })
 
+  test("outputs that differ only by case publish no rating, as the lower-cased key could name either", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_case"] = model(
+      "stg_case",
+      ["model.shop.fct_orders"],
+      'select revenue as "Foo", gross_revenue as "foo" from "shop"."main"."fct_orders"',
+      ["Foo", "foo"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_case")
+    expect(found?.lens_types).toBeUndefined()
+  })
+
+  test("a parent that lists no YAML columns is rated by the columns its SQL gives it", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_bare"] = model(
+      "stg_bare",
+      ["model.shop.fct_orders"],
+      'select revenue, gross_revenue from "shop"."main"."fct_orders"',
+      [],
+    )
+    nodes["model.shop.mart_bare"] = model(
+      "mart_bare",
+      ["model.shop.stg_bare"],
+      'select revenue as net from "shop"."main"."stg_bare"',
+      ["net"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "mart_bare")?.lens_types).toEqual({ net: "Alias" })
+  })
+
+  test("two qualified relations sharing a column name are rated each by its own read", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.dim_rates"] = model("dim_rates", [], "select order_id, revenue from raw.rates", [
+      "order_id",
+      "revenue",
+    ])
+    nodes["model.shop.stg_two"] = model(
+      "stg_two",
+      ["model.shop.fct_orders", "model.shop.dim_rates"],
+      'select o.revenue as kept, r.revenue * 2 as scaled from "shop"."main"."fct_orders" o join "shop"."main"."dim_rates" r on o.order_id = r.order_id',
+      ["kept", "scaled"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "stg_two")?.lens_types).toEqual({ kept: "Alias" })
+  })
+
   test("a column named __proto__ keeps its rating", () => {
     const value = manifest()
     const nodes = value.nodes as Record<string, any>

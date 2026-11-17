@@ -333,11 +333,16 @@ export namespace AltimateApi {
    * stored key can be relied on: only the error's name and code are shown.
    */
   function sendFailure(e: unknown): string {
-    if (e instanceof TypeError)
-      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
     const word = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined)
+    // A refused header is a TypeError with no code and no cause; a failed connection is a TypeError too
+    // (`fetch failed`) but carries one or the other.
+    const cause = (e as { cause?: unknown } | null)?.cause
+    const evidence = word((e as { code?: unknown } | null)?.code) || cause !== undefined
+    if (e instanceof TypeError && !evidence)
+      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
     const name = (e instanceof Error && word(e.name)) || "Error"
-    const code = word((e as { code?: unknown } | null)?.code)
+    const code =
+      word((e as { code?: unknown } | null)?.code) || word((cause as { code?: unknown } | null | undefined)?.code)
     return code ? `${name} (${code}).` : `${name}.`
   }
 

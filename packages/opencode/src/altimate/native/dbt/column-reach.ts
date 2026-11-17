@@ -127,16 +127,20 @@ function rated(
   dialect: string,
   parents: string[],
   lookup: (id: string) => any,
+  columnsOf: (id: string) => { name: string; type?: string }[],
 ): LineageEdge[] {
   if (!sql || parents.length === 0 || !edges.some((edge) => edge.lens_type === "Not sure")) return edges
   try {
     const tables: Record<string, { columns: { name: string; type: string }[] }> = {}
     for (const parent of parents) {
       const node = lookup(parent)
-      const columns = Object.entries<any>(node?.columns ?? {}).map(([key, col]) => ({
+      // The columns the first trace reads the parent against: the YAML's, or the compiled SQL's when it lists none.
+      const declared = Object.entries<any>(node?.columns ?? {}).map(([key, col]) => ({
         name: String(col?.name ?? key),
         type: String(col?.data_type ?? col?.type ?? ""),
       }))
+      const columns =
+        declared.length > 0 ? declared : columnsOf(parent).map((col) => ({ name: col.name, type: String(col.type ?? "") }))
       if (columns.length === 0) continue
       for (const key of relationKeys(node)) tables[key] = { columns }
     }
@@ -396,7 +400,14 @@ export function columnReach(manifestPath: string, model: string, column: string,
     // cannot say which one is read; a `select *` from a parent whose schema does not list the
     // column cannot be expanded to it. Both are possible reads with unknown outputs.
     const sqlText: string = nodes[id]?.compiled_code || nodes[id]?.compiled_sql || ""
-    const edges = rated(listed, sqlText, dialect ?? detectDialect(manifest), allParents, lookup)
+    const edges = rated(
+      listed,
+      sqlText,
+      dialect || detectDialect(manifest),
+      allParents,
+      lookup,
+      (id) => project.columns(id),
+    )
     const bareName = (p: string) => {
       const node = lookup(p)
       return String(node?.alias || node?.identifier || node?.name || p).toLowerCase()
@@ -447,6 +458,17 @@ export function columnReach(manifestPath: string, model: string, column: string,
         carriedExact.add(edge.target)
       }
     }
+    // Outputs whose names differ only by case are different columns, but the result keys them in lower
+    // case: a rating there could name either one, so none is published.
+    // Every output the engine traced counts, not only those carrying the column: a sibling output
+    // that shares the lower-cased name is the one a rating could be mistaken for.
+    const exactByLower = new Map<string, Set<string>>()
+    for (const edge of edges) {
+      if (typeof edge.target !== "string") continue
+      const lower = edge.target.toLowerCase()
+      exactByLower.set(lower, (exactByLower.get(lower) ?? new Set<string>()).add(edge.target))
+    }
+    for (const [out, exact] of exactByLower) if (exact.size > 1) carriedLens.set(out, undefined)
     // The engine has no schema for the tables inside an inlined ephemeral parent, so it reports no
     // edge through it: unknown, not unread, even when another parent's edges are traced.
     const viaEphemeral = parents.some((p) => lookup(p)?.config?.materialized === "ephemeral")
