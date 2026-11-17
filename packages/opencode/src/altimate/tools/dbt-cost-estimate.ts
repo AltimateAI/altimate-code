@@ -55,7 +55,7 @@ function failure(title: string, message: string, extra: Record<string, unknown> 
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run. Only BigQuery has a dry run: any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter, so it needs write permission (`--allow-write` on `tool run`). Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run. Only BigQuery has a dry run: any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter, so it needs write permission (`--allow-write` on `tool run` or the MCP server). Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),

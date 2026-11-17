@@ -192,6 +192,11 @@ describe("dbt_cost_estimate", () => {
     expect(result.output).toContain("--allow-write")
   })
 
+  test("the tool description names the MCP server as a way to grant write", async () => {
+    const tool = await initTool(DbtCostEstimateTool)
+    expect(tool.description).toContain("`--allow-write` on `tool run` or the MCP server")
+  })
+
   test("rejects a call that passes both a model and SQL, estimating neither", async () => {
     useAdapter(calls)
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", sql: "select 1" }, ctx)
