@@ -44,6 +44,6 @@ export type SqlLineageResponse = {
 export const SQL_LINEAGE_ENDPOINT = "/dbt/v3/sql_lineage"
 
 /** The backend's graph of a compiled model's CTEs, joins and filters. */
-export async function sqlLineage(req: SqlLineageRequest): Promise<SqlLineageResponse> {
-  return (await AltimateApi.apiRequest("POST", SQL_LINEAGE_ENDPOINT, req)) as SqlLineageResponse
+export async function sqlLineage(req: SqlLineageRequest, signal?: AbortSignal): Promise<SqlLineageResponse> {
+  return (await AltimateApi.apiRequest("POST", SQL_LINEAGE_ENDPOINT, req, signal)) as SqlLineageResponse
 }

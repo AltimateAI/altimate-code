@@ -6,6 +6,7 @@ import { Tool } from "../../tool/tool"
 import {
   sqlLineage,
   type SqlLineageModelNode,
+  type SqlLineageNodeDetails,
   type SqlLineageRequest,
   type SqlLineageResponse,
 } from "../api/sql-lineage"
@@ -66,7 +67,7 @@ export type SqlGraphAdapter = {
 }
 
 export type SqlGraphDeps = {
-  fetchLineage: (req: SqlLineageRequest) => Promise<SqlLineageResponse>
+  fetchLineage: (req: SqlLineageRequest, signal?: AbortSignal) => Promise<SqlLineageResponse>
   readFile: (file: string) => string
   /** The dbt project's root, to resolve a model's project-relative path. */
   projectRoot: string | undefined
@@ -124,8 +125,9 @@ export function remapSqlLineage(
     resourceType: string
   }[],
 ): SqlGraph {
-  const details = { ...response.details }
-  const mapping: Record<string, { nodeId: string; type: string }> = {}
+  // Null-prototype maps: a model or relation named `__proto__` is an ordinary key.
+  const details: Record<string, SqlLineageNodeDetails> = Object.assign(Object.create(null), response.details)
+  const mapping: Record<string, { nodeId: string; type: string }> = Object.create(null)
   // A relation that more than one parent could be is tied to none: an arbitrary dbt node would be shown as the real one.
   const claimed = new Map<string, Set<string>>()
   for (const p of parents) {
@@ -263,18 +265,28 @@ export async function buildSqlGraph(
   const hash = crypto.createHash("md5").update(compiled).digest("hex")
   const dialect = adapter.getAdapterType()
   const response = await untilAborted(
-    deps.fetchLineage({
-      compiled_sql: compiled,
-      model_info: infos.map((n) => ({
-        model_node: { ...n, columns: mergeColumns(n.columns, fromDb[n.uniqueId], dialect) },
-      })),
-      model_dialect: dialect,
-      session_id: `${deps.sessionId}-${hash}`,
-    }),
+    deps.fetchLineage(
+      {
+        compiled_sql: compiled,
+        model_info: infos.map((n) => ({
+          model_node: { ...n, columns: mergeColumns(n.columns, fromDb[n.uniqueId], dialect) },
+        })),
+        model_dialect: dialect,
+        session_id: `${deps.sessionId}-${hash}`,
+      },
+      signal,
+    ),
     signal,
   )
   signal.throwIfAborted()
-  if (!Array.isArray(response?.tableEdges) || !response.details) throw new Error("the backend returned no SQL graph")
+  const isRecord = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v)
+  if (
+    !Array.isArray(response?.tableEdges) ||
+    !isRecord(response.details) ||
+    !response.tableEdges.every((e) => Array.isArray(e) && e.length === 2 && e.every((x) => typeof x === "string")) ||
+    !Object.values(response.details).every(isRecord)
+  )
+    throw new Error("the backend returned no SQL graph")
   return remapSqlLineage(
     response,
     { name: node.name, uniqueId: node.unique_id, resourceType: node.resource_type },

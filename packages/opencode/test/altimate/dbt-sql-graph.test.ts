@@ -468,6 +468,19 @@ describe("buildSqlGraph", () => {
       sessionId: "ses_1",
     }
     await expect(buildSqlGraph(adapter(), "orders", deps, signal)).rejects.toThrow("status 500")
+    // The tool's abort signal reaches the backend request, and a malformed reply is a failure, not an empty graph.
+    let seen: AbortSignal | undefined
+    await buildSqlGraph(adapter(), "orders", { ...deps, fetchLineage: async (_req, s) => ((seen = s), reply) }, signal)
+    expect(seen).toBe(signal)
+    for (const bad of [
+      { ...reply, details: [] },
+      { ...reply, details: { a: 1 } },
+      { ...reply, tableEdges: [["a"]] },
+    ]) {
+      await expect(
+        buildSqlGraph(adapter(), "orders", { ...deps, fetchLineage: async () => bad as any }, signal),
+      ).rejects.toThrow("no SQL graph")
+    }
     const aborted = AbortSignal.abort()
     let called = false
     await expect(
@@ -685,31 +698,45 @@ describe("the tool's own answer", () => {
     expect(result.output).toContain("Not available")
   })
 
+  test("a model named __proto__ keeps its final node", () => {
+    const out = remapSqlLineage(
+      JSON.parse(
+        '{"tableEdges":[["t","__final_select__"]],"details":{"t":{"name":"t","type":"table"},"__final_select__":{"type":"final","sql":"select 1"}}}',
+      ),
+      { name: "__proto__", uniqueId: "model.shop.__proto__", resourceType: "model" },
+      [],
+    )
+    expect(out.edges).toEqual([["t", "__proto__"]])
+    expect(out.nodes.map((n) => n.id)).toEqual(["t", "__proto__"])
+  })
+
   test("a model the manifest lacks is a failure with the reason", async () => {
     const project = realpathSync(await mkdtemp(path.join(os.tmpdir(), "dbt-sql-graph-")))
-    await writeFile(path.join(project, "dbt_project.yml"), "name: shop\n")
-    dbtAdapterInternals.readConfig = async () => ({
-      projectRoot: project,
-      pythonPath: "python3",
-      dbtIntegration: "corecommand",
-      queryLimit: 500,
-    })
-    dbtAdapterInternals.create = async () => ({
-      isInitialized: () => true,
-      dispose: async () => {},
-      parseManifest: async () => ({
-        nodeMetaMap: { lookupByUniqueId: () => undefined, lookupByBaseName: () => undefined },
-        sourceMetaMap: { get: () => undefined },
-      }),
-    })
-    const tool = await initTool(DbtSqlGraphTool as any)
-    const result = await tool
-      .execute({ model: "nope" }, ctx)
-      .finally(() => rm(project, { recursive: true, force: true }))
-    expect(result.metadata).toMatchObject({
-      success: false,
-      model: "nope",
-      error: "no model named nope in the manifest",
-    })
+    try {
+      await writeFile(path.join(project, "dbt_project.yml"), "name: shop\n")
+      dbtAdapterInternals.readConfig = async () => ({
+        projectRoot: project,
+        pythonPath: "python3",
+        dbtIntegration: "corecommand",
+        queryLimit: 500,
+      })
+      dbtAdapterInternals.create = async () => ({
+        isInitialized: () => true,
+        dispose: async () => {},
+        parseManifest: async () => ({
+          nodeMetaMap: { lookupByUniqueId: () => undefined, lookupByBaseName: () => undefined },
+          sourceMetaMap: { get: () => undefined },
+        }),
+      })
+      const tool = await initTool(DbtSqlGraphTool as any)
+      const result = await tool.execute({ model: "nope" }, ctx)
+      expect(result.metadata).toMatchObject({
+        success: false,
+        model: "nope",
+        error: "no model named nope in the manifest",
+      })
+    } finally {
+      await rm(project, { recursive: true, force: true })
+    }
   })
 })
