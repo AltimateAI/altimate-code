@@ -75,6 +75,16 @@ describe("prerequisites in dbt Fusion mode", () => {
     expect(issue).toContain("fusion: dbt Fusion was not found: no dbt 2.x binary in ~/.local/bin or on PATH")
   })
 
+  test("name the interpreter they looked next to, when the config has one", async () => {
+    fusionBinary.find = async () => undefined
+
+    const issue = await validate(config({ pythonPath: "/no/venv/bin/python" }))
+
+    expect(issue).toContain(
+      "fusion: dbt Fusion was not found: no dbt 2.x binary next to /no/venv/bin/python, in ~/.local/bin or on PATH",
+    )
+  })
+
   test("still require the project", async () => {
     fusionBinary.find = async () => FUSION
 
@@ -86,16 +96,39 @@ describe("prerequisites in dbt Fusion mode", () => {
 })
 
 describe("prerequisites in other modes", () => {
-  test("still require Python and dbt-core, and never look for Fusion", async () => {
-    fusionBinary.find = async () => {
-      throw new Error("the Fusion lookup must not run outside Fusion mode")
-    }
+  const noFusion = async (): Promise<never> => {
+    throw new Error("the Fusion lookup must not run outside Fusion mode")
+  }
+
+  test("still require a Python path, and never look for Fusion", async () => {
+    fusionBinary.find = noFusion
 
     for (const dbtIntegration of ["core", "corecommand", "cloud"]) {
       const result = await all(config({ dbtIntegration }))
       expect(result.passed).toBe(false)
       expect(Object.keys(result.checks).sort()).toEqual(["dbt", "project", "python"])
       expect(result.checks).toMatchObject({ python: { ok: false, error: "No Python path configured" } })
+    }
+  })
+
+  // A stand-in interpreter that runs but has no dbt-core: `--version` works, every other run fails.
+  test.skipIf(process.platform === "win32")("still require dbt-core in a working Python", async () => {
+    fusionBinary.find = noFusion
+    const dir = mkdtempSync(join(tmpdir(), "dbt-check-py-"))
+    dirs.push(dir)
+    const python = join(dir, "python")
+    writeFileSync(python, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "Python 3.11.0"; exit 0; fi\nexit 1\n', {
+      mode: 0o755,
+    })
+
+    for (const dbtIntegration of ["core", "corecommand", "cloud"]) {
+      const result = await all(config({ dbtIntegration, pythonPath: python }))
+      expect(result.passed).toBe(false)
+      expect(result.checks.python?.ok).toBe(true)
+      expect(result.checks).toMatchObject({
+        dbt: { ok: false, error: "dbt-core is not installed in the configured Python environment" },
+      })
+      expect(result.checks.project?.ok).toBe(true)
     }
   })
 })
