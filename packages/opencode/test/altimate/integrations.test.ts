@@ -1824,6 +1824,8 @@ describe("credentials flow", () => {
         const r = await creds.connectCredentials({ id: "jira", localOnly: true })
         expect([r.status, r.account]).toEqual(["connected", "Server Me"])
         expect(core.loadStore().providers.jira?.variant).toBe("server")
+        // Not a Cloud API token: the Cloud form does not take it.
+        expect((await creds.describeFields("jira", "cloud")).fields.find((f) => f.name === "jiraApiToken")?.hasValue).toBe(false)
       } finally {
         fs.rmSync(path.join(home, ".config/.jira/.config.yml"), { force: true })
       }
@@ -2163,6 +2165,8 @@ describe("credentials flow", () => {
       await token("jira", "jiraApiToken")
       await creds.connectCredentials({ id: "jira", localOnly: true })
       expect(core.loadStore().providers.jira?.variant).toBe("cloud")
+      // fields and the token page follow the same variant as connect.
+      expect((await creds.describeFields("jira")).variant).toBe("cloud")
     })
 
     test("a successful connect keeps a non-secret value typed again while it ran", async () => {

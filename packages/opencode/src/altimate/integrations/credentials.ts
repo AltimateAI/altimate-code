@@ -355,7 +355,9 @@ export interface Resolved {
 export async function resolve(id: ProviderId, variantId?: string, offline = false, detectedOnly = false): Promise<Resolved> {
   const variants = await loadCatalog(id, offline)
   const rec = detectedOnly ? undefined : core.loadStore().providers[id]
-  let want = variantId
+  // One rule for every caller (connect, update, fields, open-token-page): a connected provider stays on its variant unless one is
+  // asked for, so a draft left for the other variant cannot switch it. Only an unconnected one is guessed from its site.
+  let want = variantId || (rec?.registered ? rec.variant : undefined)
   if (!want && id === "jira") {
     const site = rec?.drafts?.jiraBaseUrl || rec?.drafts?.jiraDomain || rec?.values?.jiraBaseUrl || rec?.values?.jiraDomain || detectField(id, "jiraBaseUrl")?.value || process.env.JIRA_DOMAIN
     want = jiraVariantFor(site)
@@ -743,7 +745,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
 
   const blocked = core.isBlocked(id)
   // A connected provider keeps its variant unless one is asked for: a draft left for the other variant does not switch it.
-  const r = await resolve(id, opts.variant ?? (opts.update || rec?.registered ? rec?.variant : undefined), Boolean(opts.localOnly) || blocked)
+  const r = await resolve(id, opts.variant, Boolean(opts.localOnly) || blocked)
   const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
   if (missing.length)
     return local({ status: "missing_fields", sync: syncState(), message: [`Missing: ${missing.map((f) => f.label).join(", ")}`, ...missing.map((f) => r.notes[f.name]).filter(Boolean)].join(". "), code: "missing_fields", missing: missing.map((f) => f.name) })
