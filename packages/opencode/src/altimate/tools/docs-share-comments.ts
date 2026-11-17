@@ -172,7 +172,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
       try {
         const { name: project, problem } = await resolveProject(args.project)
         if (!project) return noProject(problem)
-        const [shares, users] = await Promise.all([
+        const [{ shares, missing }, users] = await Promise.all([
           listSharedDocs([project], ctx.abort),
           listTenantUsers(ctx.abort).catch((error) => {
             // The names are optional; a cancelled call is not.
@@ -190,8 +190,8 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
           .join(" and ")
         return {
           title: `Comments: ${all.length} open`,
-          metadata: { success: true, project, count: all.length, truncated, threads },
-          output: `Project ${project}\n${formatThreads(threads)}${truncated ? `\nShowing ${cutNote}.` : ""}\n${SCOPE_NOTE}`,
+          metadata: { success: true, project, count: all.length, truncated, incomplete: Boolean(missing), threads },
+          output: `Project ${project}\n${formatThreads(threads)}${truncated ? `\nShowing ${cutNote}.` : ""}${missing ? `\nINCOMPLETE: the service holds ${missing} more shares than it sent, and this tool reads only the first page, so threads on those are not listed.` : ""}\n${SCOPE_NOTE}`,
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -223,18 +223,25 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
       // not on the share: check the pair against the project's open threads first.
       const { name: project, problem } = await resolveProject(args.project)
       if (!project) return noProject(problem)
-      let shares: Awaited<ReturnType<typeof listSharedDocs>>
+      let listed: Awaited<ReturnType<typeof listSharedDocs>>
       try {
-        shares = await listSharedDocs([project], ctx.abort)
+        listed = await listSharedDocs([project], ctx.abort)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         return failure(`docs_share_comments: ${args.action}`, `Could not check the thread: ${msg}. Nothing was sent.`, msg)
       }
-      const known = shares.some(
+      const known = listed.shares.some(
         (s) =>
           s.share_id === args.share_id &&
           s.conversation_group.some((g) => g.conversation_group_id === args.group_id && g.status === "Pending"),
       )
+      if (!known && listed.missing) {
+        return failure(
+          `docs_share_comments: ${args.action}`,
+          `Thread ${args.group_id} of share ${args.share_id} is not among the ${listed.shares.length} shares the service sent, and it holds ${listed.missing} more that this tool does not read: nothing was sent, because the thread cannot be checked.`,
+          "incomplete_list",
+        )
+      }
       if (!known) {
         return failure(
           `docs_share_comments: ${args.action}`,

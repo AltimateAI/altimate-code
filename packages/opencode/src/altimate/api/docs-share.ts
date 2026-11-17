@@ -77,7 +77,10 @@ const SharesAnswer = z.array(
 )
 
 /** The shares of the given dbt projects, each with its comment threads. */
-export async function listSharedDocs(projects: string[], signal?: AbortSignal): Promise<DocsShare[]> {
+export async function listSharedDocs(
+  projects: string[],
+  signal?: AbortSignal,
+): Promise<{ shares: DocsShare[]; /** Set when the service says it holds more shares than it sent. */ missing?: number }> {
   const params = new URLSearchParams()
   for (const project of projects) params.append("projects", project)
   const shares = await AltimateApi.apiRequest("GET", `/dbt/dbt_docs_share/all?${params.toString()}`, undefined, signal)
@@ -85,7 +88,9 @@ export async function listSharedDocs(projects: string[], signal?: AbortSignal): 
   const list = shares && !Array.isArray(shares) && Array.isArray(shares.items) ? shares.items : shares
   const parsed = SharesAnswer.safeParse(list)
   if (!parsed.success) throw new Error("The shared docs service returned an unexpected answer for the shares.")
-  return parsed.data as DocsShare[]
+  const total = shares && !Array.isArray(shares) && typeof shares.total === "number" ? shares.total : undefined
+  const missing = total !== undefined && total > parsed.data.length ? total - parsed.data.length : undefined
+  return { shares: parsed.data as DocsShare[], missing }
 }
 
 /** The people in the tenant, for naming who wrote each message. */

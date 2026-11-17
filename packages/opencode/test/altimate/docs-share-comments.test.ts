@@ -238,6 +238,19 @@ describe("docs_share_comments list", () => {
     expect((result.metadata as any).count).toBe(2)
   })
 
+  test("a page that is not the whole answer is reported as incomplete, and a post is not refused as unknown", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all") ? { items: [SHARES[0]], total: 5 } : undefined
+    const listed = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    expect((listed.metadata as any).incomplete).toBe(true)
+    expect(listed.output).toContain("INCOMPLETE")
+    const posted = await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 99, group_id: 1, text: "hi" }, ctx)
+    expect(posted.metadata.success).toBe(false)
+    expect((posted.metadata as any).error).toBe("incomplete_list")
+    expect(posted.output).toContain("nothing was sent")
+  })
+
   test("escape and control characters and overlong text in comments are neutralised", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     const group = SHARES[0]!.conversation_group[0]!
