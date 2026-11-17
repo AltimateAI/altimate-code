@@ -22,8 +22,10 @@ import { classify } from "../rules/api"
 import { printable } from "../rules/printable"
 import { altimateRequest, type ActAs } from "./api-client"
 
-/** How many changes one look reads (the server allows up to 100): room for the ones the overlap reads again. */
+/** How many changes one look reads: room for the ones the overlap reads again. */
 export const LIMIT = 50
+/** The most the server gives in one answer: a look whose page was cut inside the overlap reads again with this. */
+export const MAX_LIMIT = 100
 /** How far behind the mark each look asks again, for changes that committed late. */
 export const OVERLAP_MS = 5 * 60_000
 /** How many names the line gives for one kind of change. */
@@ -68,12 +70,14 @@ export async function fetchActivity(datamateId: number, since: string | undefine
 }
 
 /** One client's last look: the server time of the newest change it was given ("" when it first looked at an empty
- * window), the ids it reported within `OVERLAP_MS` of that, and whether the server gives ids (then each look asks
- * from `OVERLAP_MS` before the mark). */
+ * window), the ids it reported within `OVERLAP_MS` of that, whether the server gives ids (then each look asks from
+ * `OVERLAP_MS` before the mark), and `from`: when that look's page was cut, the oldest time it read. Below `from` the
+ * ids are incomplete, so an unrecorded change there is taken as already seen ("" when the ids are complete). */
 export const Mark = z.object({
   at: z.string(),
   ids: z.array(z.object({ id: z.string(), at: z.string() })).default([]),
   overlap: z.boolean().default(false),
+  from: z.string().default(""),
 })
 export type Mark = z.infer<typeof Mark>
 
@@ -87,7 +91,7 @@ type Seen = z.infer<typeof Seen>
 type Scope = Seen["scope"]
 
 export const markOf = (value: Seen["seen"][string] | undefined): Mark | undefined =>
-  value === undefined ? undefined : typeof value === "string" ? { at: value, ids: [], overlap: false } : value
+  value === undefined ? undefined : typeof value === "string" ? { at: value, ids: [], overlap: false, from: "" } : value
 
 /** A server time in milliseconds; one without a zone is UTC, as the server keeps them. */
 const ms = (at: string) => Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(at) ? at : `${at}Z`)
@@ -100,19 +104,32 @@ export function sinceOf(mark: Mark): string | undefined {
   return Number.isNaN(at) ? mark.at : new Date(at - OVERLAP_MS).toISOString()
 }
 
-/** The mark after a look (or after merging two): the newest time, and the ids within `OVERLAP_MS` of it. */
-export function advance(mark: Mark | undefined, items: Pick<Item, "id" | "at">[]): Mark {
+/** The mark after a look (or after merging two): the newest time, and the ids within `OVERLAP_MS` of it. `cut`: the
+ * look's page did not hold every change it asked for, so its ids are complete only from its oldest item. */
+export function advance(mark: Mark | undefined, items: Pick<Item, "id" | "at">[], options: { cut?: boolean } = {}): Mark {
   const times = [...(mark?.at ? [mark.at] : []), ...items.map((i) => i.at)].filter((at) => !Number.isNaN(ms(at)))
   const at = times.reduce<string>((a, b) => (a && ms(a) >= ms(b) ? a : b), "") || mark?.at || ""
   const floor = at ? ms(at) - OVERLAP_MS : Number.NEGATIVE_INFINITY
   const ids = new Map<string, string>()
   for (const entry of [...(mark?.ids ?? []), ...items.flatMap((i) => (i.id ? [{ id: i.id, at: i.at }] : []))])
     if (ms(entry.at) > floor) ids.set(entry.id, entry.at)
+  const oldest = items.at(-1)?.at
+  const from = options.cut && oldest && ms(oldest) > floor ? oldest : ""
   return {
     at,
     ids: [...ids].map(([id, at]) => ({ id, at })).slice(-200),
     overlap: (mark?.overlap ?? false) || items.some((i) => i.id !== undefined),
+    from,
   }
+}
+
+/** Whether a change on a look's page is news: not reported before, and not an unrecorded change from below where the
+ * last look's ids stop being complete (`from`), which is history. A server without ids: everything after the mark. */
+function isFresh(mark: Mark | undefined, reported: Set<string>, item: Item): boolean {
+  if (item.id === undefined) return true
+  if (reported.has(item.id)) return false
+  if (!mark?.at || !mark.from) return true
+  return !(ms(item.at) <= ms(mark.at) && ms(item.at) <= ms(mark.from))
 }
 
 /** Where each client's last look is kept. */
@@ -240,10 +257,19 @@ export async function changesSince(directory: string, host: string, options: { d
       // Undefined: never looked. "": looked when nothing had changed in the window, so everything listed since is new
       // (no local clock is involved). Otherwise the newest change it was given.
       const mark = markOf(state.seen[host])
-      const { items, hasMore } = await fetchActivity(workspace.id, mark && sinceOf(mark), actAs, LIMIT)
+      const since = mark && sinceOf(mark)
+      // Whether a page reached back to the mark: then it holds every change after the mark, and `has_more` is about the
+      // overlap the look read again, not about news.
+      const reached = (items: Item[]) =>
+        Boolean(mark?.at) && items.length > 0 && ms(items[items.length - 1].at) <= ms(mark!.at)
+      let page = await fetchActivity(workspace.id, since, actAs, LIMIT)
+      // Cut inside the overlap: read again with the most the server gives, so a change that committed late is in it.
+      if (page.hasMore && mark?.overlap && reached(page.items)) page = await fetchActivity(workspace.id, since, actAs, MAX_LIMIT)
+      const { items } = page
+      const hasMore = page.hasMore && !reached(items)
       const reported = new Set(mark?.ids.map((entry) => entry.id))
-      const fresh = items.filter((item) => item.id === undefined || !reported.has(item.id))
-      const next = advance(mark, items)
+      const fresh = items.filter((item) => isFresh(mark, reported, item))
+      const next = advance(mark, items, { cut: page.hasMore })
       const save = () =>
         JSON.stringify(next) === JSON.stringify(mark) ? Promise.resolve() : writeSeen({ ...state, seen: { ...state.seen, [host]: next } })
       if (mark === undefined) {
@@ -269,7 +295,13 @@ export async function acknowledge(directory: string, host: string, seen: Mark): 
     return await locked(scope, async () => {
       const state = await readSeen(scope)
       const current = markOf(state.seen[host])
-      const merged = advance(current ? { ...current, overlap: current.overlap || seen.overlap } : seen, [...seen.ids, ...(seen.at ? [{ at: seen.at }] : [])])
+      const merged = advance(current ? { ...current, overlap: current.overlap || seen.overlap } : seen, [
+        ...seen.ids,
+        ...(seen.at ? [{ at: seen.at }] : []),
+      ])
+      // Where either look's ids stop being complete, the later one holds.
+      const froms = [current?.from, seen.from].filter((at): at is string => Boolean(at)).sort((a, b) => ms(b) - ms(a))
+      if (froms[0] && ms(froms[0]) > ms(merged.at) - OVERLAP_MS) merged.from = froms[0]
       await writeSeen({ ...state, seen: { ...state.seen, [host]: merged } })
       return { status: "ok" as const }
     })

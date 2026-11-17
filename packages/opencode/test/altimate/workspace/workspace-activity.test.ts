@@ -43,14 +43,23 @@ const tracked = (id: string, name: string, action: string, at: string, kind = "s
   subject,
 })
 
-/** The `since` each activity request sent (undefined: none), and the answer it gets. */
+/** The `since` (undefined: none) and `limit` each activity request sent, and the answer it gets. */
 let asked: (string | undefined)[] = []
-let activity: (since: string | undefined) => Response = () => reply({ items: [], has_more: false })
+let limits: number[] = []
+let activity: (since: string | undefined, limit: number) => Response = () => reply({ items: [], has_more: false })
+/** A server holding `changes`: newest first (ties by id, newest first), after `since`, at most `limit`. */
+const server = (changes: ReturnType<typeof tracked>[]) => (since: string | undefined, limit: number) => {
+  const after = changes
+    .filter((c) => since === undefined || Date.parse(c.at) > Date.parse(since))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || b.id.localeCompare(a.id, undefined, { numeric: true }))
+  return reply({ items: after.slice(0, limit), has_more: after.length > limit })
+}
 let project = ""
 
 beforeEach(async () => {
   configured = true
   asked = []
+  limits = []
   activity = () => reply({ items: [], has_more: false })
   rmSync(WorkspaceActivity.dir(), { recursive: true, force: true })
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
@@ -59,8 +68,10 @@ beforeEach(async () => {
     if (url.pathname.endsWith("/users/me")) return reply({ id: 7 })
     if (url.pathname.endsWith("/datamates/42/activity")) {
       const since = url.searchParams.get("since") ?? undefined
+      const limit = Number(url.searchParams.get("limit"))
       asked.push(since)
-      return activity(since)
+      limits.push(limit)
+      return activity(since, limit)
     }
     return reply({ items: [], total: 0, page: 1, size: 50, pages: 1 })
   }) as typeof fetch
@@ -159,11 +170,50 @@ describe("changes that commit late, and what was already reported", () => {
   })
 
   test("an older server without ids is asked from the mark itself, as before", () => {
-    expect(WorkspaceActivity.sinceOf({ at: "2026-11-12T10:00:00Z", ids: [], overlap: false })).toBe("2026-11-12T10:00:00Z")
+    expect(WorkspaceActivity.sinceOf({ at: "2026-11-12T10:00:00Z", ids: [], overlap: false, from: "" })).toBe(
+      "2026-11-12T10:00:00Z",
+    )
     // A mark written before ids, read back.
-    expect(WorkspaceActivity.markOf("2026-11-12T10:00:00Z")).toEqual({ at: "2026-11-12T10:00:00Z", ids: [], overlap: false })
+    expect(WorkspaceActivity.markOf("2026-11-12T10:00:00Z")).toEqual({
+      at: "2026-11-12T10:00:00Z",
+      ids: [],
+      overlap: false,
+      from: "",
+    })
     // A server time without a zone is UTC.
-    expect(WorkspaceActivity.sinceOf({ at: "2026-11-12T10:00:00", ids: [], overlap: true })).toBe("2026-11-12T09:55:00.000Z")
+    expect(WorkspaceActivity.sinceOf({ at: "2026-11-12T10:00:00", ids: [], overlap: true, from: "" })).toBe(
+      "2026-11-12T09:55:00.000Z",
+    )
+  })
+})
+
+describe("more changes than a page, under the overlap", () => {
+  const bulk = (n: number, at: string) =>
+    Array.from({ length: n }, (_, i) => tracked(`a${i}`, `bulk-${i}`, "added", at))
+
+  test("changes it already saw in the overlap do not make the line say there were more", async () => {
+    // 60 skills attached in one save: the first look reads 50 of them and records where to start.
+    const changes = bulk(60, "2026-11-12T10:00:00Z")
+    activity = server(changes)
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    // A day later, exactly two new changes.
+    changes.push(tracked("n1", "naming", "added", "2026-11-13T09:00:00Z"), tracked("n2", "cost-guard", "removed", "2026-11-13T10:00:00Z"))
+    const next = await WorkspaceActivity.changesSince(project, "tui")
+    expect(next.status === "ok" && next.line).toBe(
+      "Since your last session in Growth: 1 skill removed (cost-guard), 1 skill added (naming).",
+    )
+    // The page was cut inside the overlap, so it was read again with the most the server gives.
+    expect(limits).toEqual([WorkspaceActivity.LIMIT, WorkspaceActivity.LIMIT, WorkspaceActivity.MAX_LIMIT])
+    const quiet = await WorkspaceActivity.changesSince(project, "tui")
+    expect(quiet.status === "ok" && quiet.line).toBeUndefined()
+  })
+
+  test("more changes after the mark than a page holds still say there were more", async () => {
+    activity = server([tracked("o1", "old", "added", "2026-11-12T10:00:00Z")])
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    activity = server([tracked("o1", "old", "added", "2026-11-12T10:00:00Z"), ...bulk(70, "2026-11-13T10:00:00Z")])
+    const next = await WorkspaceActivity.changesSince(project, "tui")
+    expect(next.status === "ok" && next.line).toStartWith("Since your last session in Growth: more than 50 changes")
   })
 })
 
@@ -181,6 +231,23 @@ describe("a deferred look", () => {
     expect(await WorkspaceActivity.acknowledge(project, "tui", again.seen)).toEqual({ status: "ok" })
     const after = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
     expect(after.status === "ok" && after.line).toBeUndefined()
+  })
+
+  test("acknowledging an older look keeps what a look in between recorded", async () => {
+    activity = () => reply({ items: [], has_more: false })
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    const changes = [tracked("e1", "naming", "added", "2026-11-12T10:00:00Z")]
+    activity = server(changes)
+    const older = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    if (older.status !== "ok" || !older.seen) throw new Error("expected a mark to acknowledge")
+    // Another look, not deferred, records a newer change before the older one is acknowledged.
+    changes.push(tracked("e2", "cost-guard", "added", "2026-11-12T11:00:00Z"))
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("ok")
+    await WorkspaceActivity.acknowledge(project, "tui", older.seen)
+    // The newer mark holds: nothing is said again.
+    const after = await WorkspaceActivity.changesSince(project, "tui")
+    expect(after.status === "ok" && after.line).toBeUndefined()
+    expect(asked.at(-1)).toBe("2026-11-12T10:55:00.000Z")
   })
 })
 
