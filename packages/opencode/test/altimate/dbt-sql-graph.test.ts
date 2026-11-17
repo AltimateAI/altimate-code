@@ -796,3 +796,32 @@ describe("the tool's own answer", () => {
     }
   })
 })
+
+describe("final-select identity and the text output", () => {
+  test("a replacement final-select key never overwrites another node", () => {
+    const response = {
+      details: {
+        orders: { type: "cte", sql: "select 1", columns: [] },
+        "orders (final select)": { type: "cte", sql: "select 2", columns: [] },
+        __final_select__: { type: "select", sql: "select 3", columns: [] },
+      },
+      tableEdges: [["orders (final select)", "__final_select__"]],
+    } as unknown as SqlLineageResponse
+    const graph = remapSqlLineage(response, { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }, [])
+    const ids = graph.nodes.map((n) => n.id)
+    expect(new Set(ids).size).toBe(3)
+    const [from, to] = graph.edges[0]
+    expect(from).toBe("orders (final select)")
+    expect(to).not.toBe(from)
+    expect(graph.nodes.find((n) => n.id === to)?.sql).toBe("select 3")
+  })
+
+  test("the text lists each node's columns and SQL", () => {
+    const text = formatSqlGraph("m", {
+      nodes: [{ id: "a", name: "a", type: "cte", sql: "select\n  id from t", columns: [{ name: "id" }, { name: "x" }] }],
+      edges: [],
+    } as any)
+    expect(text).toContain("    columns: id, x")
+    expect(text).toContain("    sql: select id from t")
+  })
+})

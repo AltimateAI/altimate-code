@@ -155,7 +155,9 @@ export function remapSqlLineage(
   }
   for (const [k, owners] of claimed) if (owners.size > 1) delete mapping[k]
   // A CTE the SQL names like the model (`with customers as (…)`) keeps its node: the model's own select is told apart.
-  const finalKey = Object.hasOwn(details, model.name) ? `${model.name} (final select)` : model.name
+  // The replacement key is one no node already uses, so it can't overwrite another CTE.
+  let finalKey = model.name
+  while (Object.hasOwn(details, finalKey)) finalKey = `${finalKey} (final select)`
   mapping[finalKey] = { nodeId: model.uniqueId, type: model.resourceType }
   const edges = response.tableEdges.map(
     (edge) => edge.map((item) => (item === FINAL_SELECT ? finalKey : item)) as [string, string],
@@ -317,6 +319,8 @@ export function formatSqlGraph(model: string, graph: SqlGraph): string {
     lines.push(
       `- ${n.name} (${n.type}${n.nodeId ? `, ${n.nodeId}` : ""}): ${n.columns.length} columns${from?.length ? `, from ${from.join(", ")}` : ""}`,
     )
+    if (n.columns.length) lines.push(`    columns: ${n.columns.map((c) => c.name).join(", ")}`)
+    if (n.sql) lines.push(`    sql: ${n.sql.length > 400 ? `${n.sql.slice(0, 400)}…` : n.sql}`.replace(/\s*\n\s*/g, " "))
   }
   return lines.join("\n")
 }
