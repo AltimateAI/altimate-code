@@ -2,7 +2,7 @@
 // one gate the new dbt-adapter-backed tools go through, and the API helper for new endpoint files. The
 // dbt adapter is replaced through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { realpathSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -92,6 +92,25 @@ describe("feature tools in the allow-list", () => {
       expect(resultFailed(result)).toBe(true)
     }
   })
+
+  test("each placeholder still checks its arguments before it refuses", async () => {
+    for (const id of FEATURE_TOOLS) {
+      const tool = await initTool(EXPOSED[id] as any)
+      // A string where an object is expected fails every schema, whatever its required fields.
+      const failed = await Promise.resolve()
+        .then(() => tool.execute("not an object" as any, ctx))
+        .then(
+          (result) => ({ result }),
+          (error: unknown) => ({ error }),
+        )
+      if ("result" in failed) {
+        expect(failed.result.title).not.toBe(`${id}: not implemented`)
+        expect(resultFailed(failed.result)).toBe(true)
+      } else {
+        expect(String(failed.error)).toContain("invalid arguments")
+      }
+    }
+  })
 })
 
 describe("dbtAdapterFor", () => {
@@ -156,7 +175,7 @@ describe("dbtAdapterFor", () => {
     dbtAdapterAccessInternals.adapterStartTimeoutMs = 20
     try {
       const access = await dbtAdapterFor(ctx)
-      expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter didn't start within 0.02 s" })
+      expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter wasn't ready within 0.02 s" })
     } finally {
       dbtAdapterAccessInternals.adapterStartTimeoutMs = saved
     }
@@ -231,7 +250,7 @@ describe("dbtAdapterFor", () => {
     dbtAdapterAccessInternals.adapterStartTimeoutMs = 20
     try {
       const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
-      expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter didn't start within 0.02 s" })
+      expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter wasn't ready within 0.02 s" })
       expect(created).toBe(0)
     } finally {
       release()
@@ -264,19 +283,26 @@ describe("dbtAdapterFor", () => {
   })
 
   test("removes its abort listener and its timer whatever the outcome", async () => {
-    const controller = new AbortController()
-    const signal = controller.signal
-    let listening = 0
-    const add = signal.addEventListener.bind(signal)
-    const remove = signal.removeEventListener.bind(signal)
-    signal.addEventListener = ((...a: Parameters<typeof add>) => {
-      if (a[0] === "abort") listening += 1
-      return add(...a)
-    }) as typeof signal.addEventListener
-    signal.removeEventListener = ((...a: Parameters<typeof remove>) => {
-      if (a[0] === "abort") listening -= 1
-      return remove(...a)
-    }) as typeof signal.removeEventListener
+    /** A signal that counts the abort listeners still attached to it. */
+    const tracked = () => {
+      const controller = new AbortController()
+      const signal = controller.signal
+      const state = { controller, signal, listening: 0 }
+      const add = signal.addEventListener.bind(signal)
+      const remove = signal.removeEventListener.bind(signal)
+      signal.addEventListener = ((...a: Parameters<typeof add>) => {
+        if (a[0] === "abort") state.listening += 1
+        return add(...a)
+      }) as typeof signal.addEventListener
+      signal.removeEventListener = ((...a: Parameters<typeof remove>) => {
+        if (a[0] === "abort") state.listening -= 1
+        return remove(...a)
+      }) as typeof signal.removeEventListener
+      return state
+    }
+    const settled = tracked()
+    const cancelled = tracked()
+    const signal = settled.signal
     const timers = new Set<unknown>()
     const set = globalThis.setTimeout
     const clear = globalThis.clearTimeout
@@ -296,11 +322,37 @@ describe("dbtAdapterFor", () => {
       }
       resetDbtAdapter()
       expect((await dbtAdapterFor({ ...ctx, abort: signal })).refusal).toBe("not_started")
+      // Timed out.
+      dbtAdapterInternals.create = () => new Promise(() => {})
+      resetDbtAdapter()
+      const saved = dbtAdapterAccessInternals.adapterStartTimeoutMs
+      dbtAdapterAccessInternals.adapterStartTimeoutMs = 20
+      try {
+        expect(await dbtAdapterFor({ ...ctx, abort: signal })).toEqual({
+          refusal: "not_started",
+          reason: "the dbt adapter wasn't ready within 0.02 s",
+        })
+      } finally {
+        dbtAdapterAccessInternals.adapterStartTimeoutMs = saved
+      }
+      // Cancelled while waiting.
+      let entered = () => {}
+      const starting = new Promise<void>((resolve) => (entered = resolve))
+      dbtAdapterInternals.create = () => {
+        entered()
+        return new Promise(() => {})
+      }
+      resetDbtAdapter()
+      const pending = dbtAdapterFor({ ...ctx, abort: cancelled.signal })
+      await starting
+      cancelled.controller.abort(new Error("cancelled"))
+      await expect(pending).rejects.toThrow("cancelled")
     } finally {
       globalThis.setTimeout = set
       globalThis.clearTimeout = clear
     }
-    expect(listening).toBe(0)
+    expect(settled.listening).toBe(0)
+    expect(cancelled.listening).toBe(0)
     expect(timers.size).toBe(0)
   })
 
@@ -434,17 +486,71 @@ describe("AltimateApi.apiRequest", () => {
     expect(error.message).not.toContain("sk_SECRET123")
   })
 
-  test("never shows the stored key when sending the request fails", async () => {
-    const key = "sk_SECRET123\r\nX: y"
+  const HEADER_REFUSED =
+    "could not be sent: the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+
+  /** Every substring of `key` long enough to identify it, so a trimmed or split copy is caught too. */
+  function expectNoPartOf(text: string, key: string) {
+    for (const part of key.split(/\s+/).filter((p) => p.length >= 4)) expect(text).not.toContain(part)
+    expect(text).not.toContain("Bearer")
+  }
+
+  // The real fetch: Bun refuses a header value with CR/LF, quoting it after trimming its whitespace.
+  for (const key of [
+    "sk_SECRET123\r\nX: y",
+    "sk_SECRET123ABCDEFGH\nPART2\n",
+    "sk_SECRET123ABCDEFGH\r\nX \t",
+    " sk_SECRET123ABCDEFGH\nPART2 ",
+  ]) {
+    test(`never shows any part of a key that isn't a valid header value: ${JSON.stringify(key)}`, async () => {
+      await Bun.write(
+        path.join(home, ".altimate", "altimate.json"),
+        JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: key }),
+      )
+      const viaRequest = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+      expect(viaRequest).toBeInstanceOf(Error)
+      expect(viaRequest.message).toBe(`API GET /dbt/v1/x ${HEADER_REFUSED}`)
+      expectNoPartOf(`${viaRequest.message}\n${viaRequest.stack}`, key)
+      const viaList = (await AltimateApi.listDatamates().catch((e: Error) => e)) as Error
+      expect(viaList).toBeInstanceOf(Error)
+      expect(viaList.message).toBe(`API GET /datamates/ ${HEADER_REFUSED}`)
+      expectNoPartOf(`${viaList.message}\n${viaList.stack}`, key)
+    })
+  }
+
+  test("a fetch that rejects with no reason is a send failure, not taken for an abort", async () => {
     await Bun.write(
       path.join(home, ".altimate", "altimate.json"),
-      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: key }),
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: "k1" }),
     )
-    // The real fetch: it rejects a header value with CR/LF, quoting the value.
-    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
-    expect(error).toBeInstanceOf(Error)
-    expect(error.message).not.toContain("sk_SECRET123")
-    expect(error.message).toContain("API GET /dbt/v1/x could not be sent")
+    const original = globalThis.fetch
+    globalThis.fetch = (() => Promise.reject(undefined)) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, new AbortController().signal).catch(
+        (e: unknown) => e,
+      )
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe("API GET /dbt/v1/x could not be sent: Error.")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("names a network failure by its code, never by the error's text", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => {
+      throw Object.assign(new Error("Unable to connect: Bearer k1"), { code: "ConnectionRefused" })
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: Error (ConnectionRefused).")
+    } finally {
+      globalThis.fetch = original
+    }
   })
 
   test("never shows the stored key when a header refusal races the caller's abort", async () => {
@@ -466,32 +572,46 @@ describe("AltimateApi.apiRequest", () => {
       const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal).catch(
         (e: Error) => e,
       )
-      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: bad header: 'Bearer [redacted]'")
+      expect(error.message).toBe(`API GET /dbt/v1/x ${HEADER_REFUSED}`)
     } finally {
       globalThis.fetch = original
     }
   })
 
-  test("never shows the stored key from any fetch failure", async () => {
+  test("never quotes the credentials file when an ${env:…} variable it names isn't set", async () => {
+    const file = path.join(home, ".altimate", "altimate.json")
     await Bun.write(
-      path.join(home, ".altimate", "altimate.json"),
+      file,
       JSON.stringify({
-        altimateUrl: "https://api.example.test",
+        altimateUrl: "https://x.test",
         altimateInstanceName: "acme",
-        altimateApiKey: "sk_SECRET123",
+        altimateApiKey: "${env:sk_SECRET123_UNSET}",
       }),
     )
-    const original = globalThis.fetch
-    globalThis.fetch = (async (_url: string, init: RequestInit) => {
-      throw new TypeError(`bad header: '${(init.headers as Record<string, string>).Authorization}'`)
-    }) as unknown as typeof fetch
-    try {
-      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
-      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: bad header: 'Bearer [redacted]'")
-    } finally {
-      globalThis.fetch = original
-    }
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error.message).toBe(
+      `The Altimate credentials in ${file} can't be used: an \${env:…} variable it refers to is not set.`,
+    )
   })
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "says the credentials can't be read, not that none are stored, when their directory can't be searched",
+    async () => {
+      const dir = path.join(home, ".altimate")
+      const file = path.join(dir, "altimate.json")
+      await Bun.write(
+        file,
+        JSON.stringify({ altimateUrl: "https://x.test", altimateInstanceName: "a", altimateApiKey: "k" }),
+      )
+      await chmod(dir, 0o600)
+      try {
+        const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+        expect(error.message).toBe(`The Altimate credentials in ${file} can't be read (EACCES).`)
+      } finally {
+        await chmod(dir, 0o700)
+      }
+    },
+  )
 
   test("a timed-out request says it timed out", async () => {
     await Bun.write(
