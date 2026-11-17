@@ -642,7 +642,10 @@ describe("workspace connections", () => {
     // Said to be on that other sign-in, not removed.
     expect([o.result, o.reason]).toEqual(["failed", expect.stringContaining("another Altimate sign-in (https://other.example)")])
     expect(core.loadStore().providers.github?.cleanupPending).toBe("https://other.example#other-tenant")
-    expect((await core.statusRemote()).providers.find((p) => p.id === "github")?.note).toContain("another Altimate sign-in")
+    // Status shows what this machine knows, with where the copy is, not a removed connection, though this backend has no such connection.
+    api.state.rows.forEach((r) => (r.deleted = true))
+    const shown = (await core.statusRemote()).providers.find((p) => p.id === "github")!
+    expect([shown.state, shown.sync, shown.note]).toEqual(["connected", "synced", expect.stringContaining("another Altimate sign-in")])
   })
 
   test("an attach-only sync never removes a local secret it did not record as a leftover", async () => {
