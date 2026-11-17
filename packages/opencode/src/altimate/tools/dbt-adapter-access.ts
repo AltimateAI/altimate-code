@@ -31,7 +31,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
-      reason: "this needs the dbt adapter, which a read-only call (no write permission, or plan mode) doesn't start: re-run with --allow-write outside plan mode",
+      reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
     }
   // One deadline and the call's abort bound every wait below, the dbt config reads included: a stalled
   // read gives up with the start's timeout, and a cancelled call stops waiting at once.
@@ -74,6 +74,15 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
         ? { refusal: "not_started", reason: "the dbt adapter didn't start" }
         : { refusal: "no_project", reason: "no dbt project here" }
     }
+    if (project?.root) {
+      // The adapter starts from its own read of the config, which can differ from the one checked above.
+      const published = await bounded(getDbtProjectRoot())
+      if (!published || path.relative(real(published), real(project.root)))
+        return {
+          refusal: "other_project",
+          reason: `the dbt adapter is set up for ${published ?? "no project"}, not ${project.root}`,
+        }
+    }
     if (adapter.isInitialized?.() === false)
       return { refusal: "not_loaded", reason: "the dbt adapter didn't load the project" }
     return { adapter }
@@ -83,6 +92,15 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   } finally {
     signal.removeEventListener("abort", stop)
     clearTimeout(timer)
+  }
+}
+
+/** `p` with its links resolved, or as given when it can't be. */
+function real(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return path.resolve(p)
   }
 }
 
@@ -97,13 +115,6 @@ async function sessionProject(): Promise<{ root?: string; other?: string } | und
   if (!found) return undefined
   const { getDbtProjectRoot } = await import("../native/connections/register")
   const root = await getDbtProjectRoot()
-  const real = (p: string) => {
-    try {
-      return fs.realpathSync(p)
-    } catch {
-      return path.resolve(p)
-    }
-  }
   const here = real(found)
   // path.relative ignores case on win32.
   if (!root) return { other: here }

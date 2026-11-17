@@ -333,12 +333,15 @@ export namespace AltimateApi {
    * stored key can be relied on: only the error's name and code are shown.
    */
   function sendFailure(e: unknown): string {
-    if (e instanceof TypeError)
-      return "the request was refused before it was sent (TypeError)."
     const word = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined)
     const name = (e instanceof Error && word(e.name)) || "Error"
     const code = word((e as { code?: unknown } | null)?.code)
-    return code ? `${name} (${code}).` : `${name}.`
+    // A network failure carries its code, whatever its class.
+    if (code) return `${name} (${code}).`
+    // The URL and the body are checked before sending, so an uncoded TypeError is the header check.
+    if (e instanceof TypeError)
+      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+    return `${name}.`
   }
 
   async function request(
@@ -349,6 +352,13 @@ export namespace AltimateApi {
     signal?: AbortSignal,
   ) {
     const url = `${creds.altimateUrl}${endpoint}`
+    // Checked here so that only the header check can make fetch throw a TypeError before sending. Only
+    // http(s) is sent: "localhost:3000" parses as a URL with the scheme "localhost:".
+    if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol))
+      throw new Error(`API ${method} ${endpoint} could not be sent: the stored API URL is not an http(s) URL.`)
+    // Any body but undefined is sent: null, false, 0 and "" are JSON values too. A body that can't be
+    // serialised fails here with its own error, which quotes no credential.
+    const payload = body !== undefined ? JSON.stringify(body) : undefined
     // Bun's fetch throws at once, not as a rejection, when it refuses a header: both are caught.
     const send = async (start: () => Promise<Response>) => {
       try {
@@ -384,8 +394,7 @@ export namespace AltimateApi {
             "x-tenant": creds.altimateInstanceName,
             ...clientHeaders(),
           },
-          // Any body but undefined is sent: null, false, 0 and "" are JSON values too.
-          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          ...(payload !== undefined ? { body: payload } : {}),
         }),
       )
       if (!res.ok) {

@@ -1434,6 +1434,51 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — workspace review: request changes. The person's own rule proposal, still open on the
+      // server: withdraw it, or send a new wording of one sent back for changes (`text`).
+      .post("/altimate/rules/:id/:action", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const action = c.req.param("action")
+        if (action !== "withdraw" && action !== "resubmit")
+          return c.json({ ok: false, code: "unknown_action", error: "action must be withdraw or resubmit." }, 404)
+        const read = await readJsonObject(() => c.req.text(), `rule ${action}`)
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const text = read.body.text
+        if (action === "resubmit" && (typeof text !== "string" || !text.trim()))
+          return c.json({ ok: false, code: "invalid_text", error: "text must be the new wording." }, 400)
+        // Optional: the version the client read. Without it, the last pull's version is sent.
+        const expected = read.body.expected_version
+        if (expected !== undefined && (typeof expected !== "number" || !Number.isInteger(expected) || expected < 1))
+          return c.json({ ok: false, code: "invalid_version", error: "expected_version must be a positive integer." }, 400)
+        try {
+          const { ReviewRequests } = await import("../altimate/workspace/review-requests")
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          const result = await ReviewRequests.actOnRule(root, Instance.directory, c.req.param("id"), action, typeof text === "string" ? text : undefined, expected)
+          const [{ RuleEvents }, { Bus }] = await Promise.all([import("../altimate/rules/events"), import("@/bus")])
+          const changed = () => Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
+          if (!result.ok) {
+            // The server may have acted (no answer), or the proposal changed since the last pull: a sync records what
+            // it holds, so `/rules` stops offering an action that no longer applies.
+            if (result.uncertain) {
+              const [{ RulesService }, { Config }] = await Promise.all([import("../altimate/rules/service"), import("@/config/config")])
+              void RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+                // The run publishes its own change event.
+                .then((learn) => RulesService.syncNow(root, Instance.directory, learn, "refresh"))
+                .catch((error) => log.warn("rules sync after a rule action failed", { error: error instanceof Error ? error.message : String(error) }))
+              return c.json({ ok: false, code: result.code, error: `${result.error} Syncing rules to check what the workspace has.` }, result.status)
+            }
+            return c.json({ ok: false, code: result.code, error: result.error }, result.status)
+          }
+          await changed()
+          return c.json({ ok: true as const, request: result.request })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error(`rule ${action} failed`, { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — workspace review: the person's own requests (rules, skills, knowledge) for clients, and
       // withdrawing or removing a skill or knowledge request. Approving and rejecting stay in the web app.
       .get("/altimate/workspace/requests", async (c) => {
