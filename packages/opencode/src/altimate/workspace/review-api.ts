@@ -43,7 +43,9 @@ export const Contribution = z.object({
   // `withdrawn`: the author withdrew it (or it was withdrawn when the author deleted the item or lost access);
   // `retired`: removed from the workspace after approval, by an owner, an admin or the author. A status this version
   // does not know makes the row unreadable (skipped and counted), never misread.
-  status: z.enum(["pending", "active", "rejected", "superseded", "withdrawn", "retired"]),
+  // altimate_change start — workspace review: request changes (`changes_requested`: sent back to its author)
+  status: z.enum(["pending", "changes_requested", "active", "rejected", "superseded", "withdrawn", "retired"]),
+  // altimate_change end
   version: z.number().int(),
   is_mine: z.boolean(),
   proposed_by_name: z.string().nullable().optional(),

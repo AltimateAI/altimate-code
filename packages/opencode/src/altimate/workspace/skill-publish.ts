@@ -293,6 +293,20 @@ export class TooManyReviewRequestsError extends Error {
   }
 }
 
+// altimate_change start — workspace review: request changes
+/** The skill was sent back for changes, and this publish sent the same content again (409 `unchanged`). The skill was
+ * uploaded; publishing again only helps once it is changed. */
+export class UnchangedSinceSentBackError extends Error {
+  constructor(readonly publicId: string) {
+    super(
+      `The skill was uploaded (id ${publicId}), but it is the version that was sent back for changes, so it was not sent ` +
+        `again. Change it as the reviewer asked, then publish it again; \`altimate-code workspace review status\` shows the comment.`,
+    )
+    this.name = "UnchangedSinceSentBackError"
+  }
+}
+// altimate_change end
+
 /** The skill exists on the server but could not be sent for review. The next publish takes the update path and submits
  * again (a submission of unchanged content is answered as a duplicate), so nothing is stranded. */
 export class SubmitFailedError extends Error {
@@ -995,6 +1009,9 @@ function submitError(err: unknown, publicId: string, workspaceName: string, owne
   const code = err instanceof RulesApiError && err.kind === "conflict" ? err.code : undefined
   if (code === "review_disabled") return new ReviewDisabledError(workspaceName, ownerName)
   if (code === "too_many_requests") return new TooManyReviewRequestsError(publicId)
+  // altimate_change start — workspace review: request changes
+  if (code === "unchanged") return new UnchangedSinceSentBackError(publicId)
+  // altimate_change end
   return new SubmitFailedError(publicId, err)
 }
 
@@ -1004,7 +1021,10 @@ function isAfterUpload(err: unknown): boolean {
     err instanceof AttachFailedError ||
     err instanceof SubmitFailedError ||
     err instanceof ReviewDisabledError ||
-    err instanceof TooManyReviewRequestsError
+    err instanceof TooManyReviewRequestsError ||
+    // altimate_change start — workspace review: request changes
+    err instanceof UnchangedSinceSentBackError
+    // altimate_change end
   )
 }
 
@@ -1095,6 +1115,9 @@ const PUBLISH_ERRORS: readonly [new (...args: never[]) => Error, string][] = [
   [AttachFailedError, "attach_failed"],
   [ReviewDisabledError, "review_disabled"],
   [TooManyReviewRequestsError, "too_many_requests"],
+  // altimate_change start — workspace review: request changes
+  [UnchangedSinceSentBackError, "unchanged"],
+  // altimate_change end
   [SubmitFailedError, "submit_failed"],
 ]
 
