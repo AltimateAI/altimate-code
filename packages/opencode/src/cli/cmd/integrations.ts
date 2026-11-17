@@ -198,11 +198,14 @@ const DisconnectCommand = cmd({
   command: "disconnect <provider>",
   describe: "remove the local credential and the workspace connection",
   builder: (yargs: Argv) =>
-    yargs.positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true }).option("json", jsonOption),
+    yargs
+      .positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true })
+      .option("local-only", { describe: "remove it from this machine only and leave any workspace copy, such as one on a sign-in you can no longer use", type: "boolean", default: false })
+      .option("json", jsonOption),
   handler: async (args) => {
     try {
       const id = parseProviders(args.provider, false)[0]
-      const { removedLocal, removedRemote, detached, detachMessage, workspaceUnchecked } = await core.disconnect(id)
+      const { removedLocal, removedRemote, detached, detachMessage, workspaceUnchecked } = await core.disconnect(id, { localOnly: args["local-only"] })
       const removed = removedLocal || removedRemote > 0
       if (args.json) return json({ provider: id, status: "disconnected", removed, removedFromWorkspace: removedRemote, detached, ...(workspaceUnchecked ? { workspaceChecked: false, workspaceNote: `The workspace was not checked for a copy of this connection: ${workspaceUnchecked}` } : {}), ...(detachMessage ? { message: `Could not detach it from the linked workspace: ${detachMessage}` } : {}) })
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} disconnected${removed ? "" : S.TEXT_DIM + " (nothing was stored)" + S.TEXT_NORMAL}`)

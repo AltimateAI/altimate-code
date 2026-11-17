@@ -957,21 +957,21 @@ const INVALID_MESSAGE = "The workspace saved the connection but marked it invali
 const REFUSED_MESSAGE = "The workspace refused the connection as invalid. Check the fields and try again."
 export const RECORD_WRITE_FAILED = (error: string, retry: string) =>
   `Saved to your workspace, but the record on this machine could not be written (${error}). ${retry} to update the same connection.`
+/** Why a workspace copy cannot be removed from the backend signed in to: it was recorded on another one. Null when it can. */
+export function recordedElsewhere(id: ProviderId, cfg: backend.BackendConfig | null): string | null {
+  const rec = loadStore().providers[id]
+  if (!cfg || rec?.connectionId == null || !rec.connectionBackend || rec.connectionBackend === backendKey(cfg)) return null
+  return `${PROVIDER_NAMES[id]} is saved in a workspace on another Altimate sign-in (${rec.connectionBackend.split("#")[0]}). Sign in to that one to remove it there, then run this again, or run altimate integrations disconnect ${id} --local-only to remove it from this machine only.`
+}
+
+/** Which backend and tenant a connection id belongs to: the same id elsewhere is another connection. */
+export const backendKey = (cfg: backend.BackendConfig) => `${cfg.apiUrl.replace(/\/+$/, "")}#${cfg.tenant}`
+
 /**
  * Records that the local copy of a credential the workspace now holds could not be removed, so that the next sync for the
  * provider removes it (and only then). Returns the advice to print: that sync, or, when even the record could not be
  * written, that the leftover is not recorded.
  */
-/** Which backend and tenant a connection id belongs to: the same id elsewhere is another connection. */
-/** Why a workspace copy cannot be removed from the backend signed in to: it was recorded on another one. Null when it can. */
-export function recordedElsewhere(id: ProviderId, cfg: backend.BackendConfig | null): string | null {
-  const rec = loadStore().providers[id]
-  if (!cfg || rec?.connectionId == null || !rec.connectionBackend || rec.connectionBackend === backendKey(cfg)) return null
-  return `${PROVIDER_NAMES[id]} is saved in a workspace on another Altimate sign-in (${rec.connectionBackend.split("#")[0]}). Sign in to that one to remove it there, then run this again.`
-}
-
-export const backendKey = (cfg: backend.BackendConfig) => `${cfg.apiUrl.replace(/\/+$/, "")}#${cfg.tenant}`
-
 export async function recordLeftover(id: ProviderId, cfg: backend.BackendConfig, fields: string[] = []): Promise<string> {
   try {
     await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: backendKey(cfg), leftoverFields: [...new Set([...(next.providers[id]?.leftoverFields ?? []), ...fields])] }))
@@ -1197,11 +1197,10 @@ async function syncReal(
         const own = backend.ownConnections(visible)
         // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
         // A recorded id names a connection only on the backend it was recorded for.
-        const sameBackend = (store.providers[id]?.connectionBackend ?? backendKey(cfg)) === backendKey(cfg)
         // Kept on another sign-in, not removed: say where it is.
         const elsewhere = recordedElsewhere(id, cfg)
         if (known != null && elsewhere) return { id, result: "failed", reason: elsewhere, steps: [] }
-        const found = known == null ? findManaged(own, id) : sameBackend ? own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id]) : undefined
+        const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
         // A connection this machine saved that is gone from the workspace is not attached; it was deleted there. What was left here
         // as its leftover is then the only copy, so it is kept and stops being a leftover.
         if (!found) {
@@ -1303,9 +1302,16 @@ export interface DisconnectResult {
 }
 
 /** Removes the workspace copies first and the local credential only once that worked, so a failure can be retried. */
-export function disconnect(id: ProviderId): Promise<DisconnectResult> {
+/** `localOnly` removes the credential from this machine only and leaves any workspace copy, for one no sign-in here can reach. */
+export function disconnect(id: ProviderId, opts: { localOnly?: boolean } = {}): Promise<DisconnectResult> {
   // One locked step, so an upload cannot land between the workspace delete and the local purge.
   return withLock(async () => {
+    // Asked for explicitly: the workspace copy, wherever it is, is left alone and only this machine is cleared.
+    if (opts.localOnly) {
+      const removedLocal = await disconnectLocal(id)
+      await creds.discardDraftSecrets(id)
+      return { removedLocal, removedRemote: 0, detached: true }
+    }
     // An unreadable login only matters for a credential saved in the workspace (synced, or a copy whose removal is still recorded); a local one is removed without it.
     const synced = isSynced(id) || loadStore().providers[id]?.connectionId != null
     let workspaceUnchecked: string | undefined

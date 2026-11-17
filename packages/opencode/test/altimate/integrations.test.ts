@@ -3074,6 +3074,12 @@ describe("credentials flow", () => {
         process.env.ALTIMATE_INTEGRATIONS_TOKEN = signedIn
       }
       expect(core.loadStore().providers.github?.connectionId).toBe(recorded.connectionId)
+      // A sign-in that can never come back is not a dead end: --local-only clears this machine and leaves the workspace copy.
+      await core.storeSecret(core.secretKey("cred", "github", "github_token"), GOOD)
+      const saved = core.loadStore().providers.github!
+      expect((await core.disconnect("github", { localOnly: true })).removedRemote).toBe(0)
+      expect([await core.readSecret(core.secretKey("cred", "github", "github_token")), api.state.rows.filter((r) => !r.deleted).length]).toEqual([undefined, 1])
+      await core.updateStore((st) => void (st.providers.github = saved))
       // On its own backend the renamed connection is removed.
       await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: recorded.connectionBackend }))
       await core.disconnect("github")
