@@ -43,7 +43,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
     signal.addEventListener("abort", stop, { once: true })
     const seconds = dbtAdapterAccessInternals.adapterStartTimeoutMs / 1000
     timer = setTimeout(
-      () => reject(new Error(`the dbt adapter didn't start within ${seconds} s`)),
+      () => reject(new Error(`the dbt adapter wasn't ready within ${seconds} s`)),
       dbtAdapterAccessInternals.adapterStartTimeoutMs,
     )
   })

@@ -1,6 +1,6 @@
 import z from "zod"
 import path from "path"
-import { rm } from "node:fs/promises"
+import { rm, stat } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
 import { currentCredentials } from "./credentials-context"
@@ -86,11 +86,14 @@ export namespace AltimateApi {
     return Filesystem.exists(credentialsPath())
   }
 
+  /** A `${env:NAME}` in the credentials file names a variable that isn't set. */
+  class MissingEnvVar extends Error {}
+
   function resolveEnvVars(obj: unknown): unknown {
     if (typeof obj === "string") {
       return obj.replace(/\$\{env:([^}]+)\}/g, (_, envVar) => {
         const value = process.env[envVar]
-        if (value === undefined) throw new Error(`Environment variable ${envVar} not found`)
+        if (value === undefined) throw new MissingEnvVar(`Environment variable ${envVar} not found`)
         return value
       })
     }
@@ -324,9 +327,18 @@ export namespace AltimateApi {
     timeoutMs: 15_000,
   }
 
-  /** `text` with every occurrence of `secret` replaced, so an error can be shown without the key. */
-  function redact(text: string, secret: string): string {
-    return secret ? text.split(secret).join("[redacted]") : text
+  /**
+   * Why a request couldn't be sent, never quoting the error's text. Bun refuses a header value with a
+   * control character as a TypeError that quotes the value after trimming it, so no redaction of the
+   * stored key can be relied on: only the error's name and code are shown.
+   */
+  function sendFailure(e: unknown): string {
+    if (e instanceof TypeError)
+      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+    const word = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined)
+    const name = (e instanceof Error && word(e.name)) || "Error"
+    const code = word((e as { code?: unknown } | null)?.code)
+    return code ? `${name} (${code}).` : `${name}.`
   }
 
   async function request(
@@ -344,10 +356,11 @@ export namespace AltimateApi {
       } catch (e) {
         // A timeout or the caller's abort rejects with its own reason, which holds no header. An abort
         // that raced a refused header leaves the header error, so match the reason, not the flag.
-        if (e === controller.signal.reason || e === signal?.reason) throw e
+        // A signal that isn't aborted has no reason yet: a rejection with none is a send failure.
+        if ((controller.signal.aborted && e === controller.signal.reason) || (signal?.aborted && e === signal.reason))
+          throw e
         // Others can quote a header: Bun's check of a header value with CR/LF quotes `Bearer <key>`.
-        const message = redact(e instanceof Error ? e.message : String(e), creds.altimateApiKey)
-        throw new Error(`API ${method} ${endpoint} could not be sent: ${message}`)
+        throw new Error(`API ${method} ${endpoint} could not be sent: ${sendFailure(e)}`)
       }
     }
     // altimate_change start — upstream_fix: bound every API request. Without a
@@ -394,7 +407,9 @@ export namespace AltimateApi {
       if (fields.length === 0 || fields.includes("")) return "the file does not hold the credentials object."
       return `${fields.join(", ")} ${fields.length === 1 ? "is" : "are"} missing or not valid.`
     }
-    // A file system error or a missing ${env:NAME} variable: names a path or a variable, no value.
+    // The variable's name is the file's text, which can be a key written in its place.
+    if (e instanceof MissingEnvVar) return "an ${env:…} variable it refers to is not set."
+    // A file system error names a path, not a value.
     return e instanceof Error ? e.message : String(e)
   }
 
@@ -403,7 +418,7 @@ export namespace AltimateApi {
    * returns the parsed JSON body. Endpoint functions in other files go through this. Fails with a
    * message naming the credentials file when none are stored or they can't be read. `signal` (a tool
    * call's `ctx.abort`) cancels the request as well as the 15 s timeout. No error it raises quotes the
-   * stored key.
+   * stored key or the credentials file's text.
    */
   export async function apiRequest(
     method: string,
@@ -418,7 +433,14 @@ export namespace AltimateApi {
       creds = await getCredentials()
     } catch (e) {
       const p = credentialsPath()
-      if (!(await Filesystem.exists(p)))
+      // Only a file that isn't there is "not stored": a directory without search permission hides it too.
+      const unseen = await stat(p).then(
+        () => undefined,
+        (err: NodeJS.ErrnoException) => err,
+      )
+      if (unseen && unseen.code !== "ENOENT" && unseen.code !== "ENOTDIR")
+        throw new Error(`The Altimate credentials in ${p} can't be read (${unseen.code ?? unseen.name}).`)
+      if (unseen)
         throw new Error(
           `No Altimate credentials are stored: sign in to Altimate in altimate-code first (they are saved to ${p}).`,
         )
