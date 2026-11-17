@@ -7,6 +7,7 @@ import {
   addUsage,
   aiInputBudget,
   aiOptionalFields,
+  aiEvidenceResult,
   batchAiFiles,
   buildUserMessage,
   laneUsage,
@@ -536,6 +537,39 @@ describe("core output fields: evidence line, pre-existing, suggestion, cites", (
   test("an AI-set pre_existing survives anchoring on an added line", async () => {
     const f = await reviewWith({ pre_existing: true, evidence_line: "from a" }, DIFF)
     expect(f).toMatchObject({ startLine: 2, preExisting: true, evidenceLine: "from a" })
+  })
+
+  test("a quoted line with no line number anchors the AI finding to the diff", async () => {
+    expect(aiEvidenceResult(item({ line: 2, evidence_line: "from a" }))).not.toHaveProperty("line")
+    expect(aiEvidenceResult(item({ line: undefined, evidence_line: " from a " }))).toMatchObject({ line: "from a" })
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: DIFF }],
+      config: { ...DEFAULT_REVIEW_CONFIG, severityThreshold: "suggestion" },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async (_f, side) => (side === "old" ? undefined : "select 1\nfrom a\nwhere x = 1\n"),
+      generatedAt: "2026-11-14T00:00:00Z",
+      forceTier: "full",
+      aiReview: async () => ({
+        findings: [
+          makeFinding({
+            severity: "warning",
+            category: "sql_correctness",
+            title: "m: q",
+            body: "b",
+            file: "models/marts/m.sql",
+            model: "m",
+            confidence: "high",
+            evidence: { tool: "ai-review", result: aiEvidenceResult(item({ line: undefined, evidence_line: "from a" })) },
+            ruleKey: "ai:sql_correctness:q",
+            rule: "ai-review:sql_correctness",
+          }),
+        ],
+        status: { state: "ok" },
+      }),
+    })
+    expect(env.findings.find((f) => f.title === "m: q")).toMatchObject({ startLine: 2 })
   })
 
   test("an AI suggestion goes through suggestion validation", async () => {
