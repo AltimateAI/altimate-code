@@ -69,7 +69,7 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
  * project itself) whose `.vscode/settings.json` has an entry under the project's relative path. A settings
  * file that cannot be read or parsed ends the search.
  */
-export function findDeferSetting(projectDir: string, workspaceDir?: string) {
+function lookupDeferSetting(projectDir: string, workspaceDir?: string) {
   const real = (p: string) => {
     try {
       return fs.realpathSync(path.resolve(p))
@@ -90,7 +90,7 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
       const file = path.join(folder, ".vscode", "settings.json")
       const settings = readSettings(file)
       // The nearest settings file that cannot be read ends the search: an outer folder's entry must not stand in for it.
-      if (settings === UNREADABLE) return UNREADABLE
+      if (settings === UNREADABLE) return { unreadable: file }
       const perProject = settings?.[SETTING]
       if (!perProject || typeof perProject !== "object") continue
       const key = path.relative(folder, start)
@@ -114,8 +114,8 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
   for (const [i, [start, workspace]] of passes.entries()) {
     const found = search(start, workspace)
     // An unreadable file ends the search of its own pass; the pass over the real paths may still reach a readable one.
-    if (found === UNREADABLE) {
-      if (i === passes.length - 1) return undefined
+    if (found && "unreadable" in found) {
+      if (i === passes.length - 1) return found
       continue
     }
     if (found) return found
@@ -176,12 +176,20 @@ function isDirectory(dir: string): boolean {
   }
 }
 
+/** The entry for the project; undefined when there is none or the settings file cannot be trusted. */
+export function findDeferSetting(projectDir: string, workspaceDir?: string) {
+  const found = lookupDeferSetting(projectDir, workspaceDir)
+  return found && "unreadable" in found ? undefined : found
+}
+
 export async function resolveDeferState(projectDir: string, workspaceDir?: string): Promise<DeferStateResult> {
   const root = path.resolve(projectDir)
   const targets = await readProfileTargets(root)
   const base: DeferStateResult = { enabled: false, favorState: false, mode: "none", ...targets }
-  const found = findDeferSetting(root, workspaceDir)
+  const found = lookupDeferSetting(root, workspaceDir)
   if (!found) return base
+  // Said outright: the same silence as "no setting" would send the caller on without --defer and no one the wiser.
+  if ("unreadable" in found) return { ...base, settingsFile: found.unreadable, reason: `The settings file could not be read or parsed, so defer is left off: ${found.unreadable}` }
 
   const { entry } = found
   const result: DeferStateResult = {
@@ -212,10 +220,10 @@ export async function resolveDeferState(projectDir: string, workspaceDir?: strin
   const expanded = expandVariables(raw, root)
   const stateDir = path.isAbsolute(expanded) ? expanded : path.resolve(root, expanded)
   if (!isDirectory(stateDir)) {
-    return { ...result, reason: `manifestPathForDeferral is not a directory: ${stateDir}` }
+    return { ...result, reason: `manifestPathForDeferral is not a directory: ${raw}` }
   }
   if (!isFile(path.join(stateDir, "manifest.json"))) {
-    return { ...result, reason: `No manifest.json in manifestPathForDeferral: ${stateDir}` }
+    return { ...result, reason: `No manifest.json in manifestPathForDeferral: ${raw}` }
   }
   return { ...result, enabled: wanted, stateDir }
 }

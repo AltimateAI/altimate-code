@@ -115,6 +115,21 @@ describe("dbt_defer_state", () => {
     settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${workspaceFolder}/prod-state" } })
     const result = await resolveDeferState(path.join(root, "analytics"))
     expect(result).toMatchObject({ enabled: false, mode: "none" })
+    expect(result.reason).toContain(path.join(root, "analytics", ".vscode", "settings.json"))
+  })
+
+  test("an error about the state path names the setting as written, not an expanded environment variable", async () => {
+    const saved = process.env.DEFER_TEST_SECRET
+    process.env.DEFER_TEST_SECRET = "s3cr3t-value"
+    try {
+      settings({ analytics: { deferToProduction: true, manifestPathForDeferral: "${env:DEFER_TEST_SECRET}" } })
+      const result = await resolveDeferState(path.join(root, "analytics"))
+      expect(result.reason).toContain("${env:DEFER_TEST_SECRET}")
+      expect(result.reason).not.toContain("s3cr3t-value")
+    } finally {
+      if (saved === undefined) delete process.env.DEFER_TEST_SECRET
+      else process.env.DEFER_TEST_SECRET = saved
+    }
   })
 
   test("an unknown manifest type does not enable defer", async () => {
