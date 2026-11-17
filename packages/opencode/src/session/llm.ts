@@ -52,6 +52,9 @@ import { LLMRequestEvent } from "@/altimate/observability/tracing"
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
 import { activeRun, effortOverride, hasActiveRuns, toolsDisabled } from "@/altimate/session/run-budget-effort"
 import { analystEffortOptions } from "@/altimate/session/analyst-effort"
+// altimate_change start — Claude Agent provider request routing
+import { ClaudeAgent } from "@/altimate/provider/claude-agent"
+// altimate_change end
 import { Session } from "@/session"
 import { SessionID } from "@/session/schema"
 // altimate_change end
@@ -160,7 +163,11 @@ export namespace LLM {
     // altimate_change start — upstream_fix: keep per-session environment last. Providers with explicit
     // cache breakpoints get it as its own trailing message (after the marked prefix); others keep a
     // single system message with the environment at the end. Either way plugins still see it.
-    const environment = input.environment?.length ? input.environment.join("\n") : undefined
+    // Claude Agent: a utility request (title, summary) sends these system messages as Claude's prompt,
+    // so the environment block is left out there too.
+    const claudeUtility =
+      ClaudeAgent.matches(input.model) && ClaudeAgent.isUtility({ agent: input.agent.name, small: input.small })
+    const environment = !claudeUtility && input.environment?.length ? input.environment.join("\n") : undefined
     const splitEnvironment = environment !== undefined && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
     if (environment !== undefined) {
       if (splitEnvironment) system.push(environment)
@@ -168,10 +175,16 @@ export namespace LLM {
     }
 
     const header = system[0]
+    // Claude Agent chats send only the instruction sources (Claude Code supplies its own prompt and
+    // environment), so plugins transform that list, and their edits reach Claude. Utility requests send
+    // the system messages themselves, so plugins transform those, as for other providers.
+    const claudeInstructions = ClaudeAgent.matches(input.model) && !claudeUtility
+      ? [...input.system, input.user.system].filter((text): text is string => !!text)
+      : undefined
     await Plugin.trigger(
       "experimental.chat.system.transform",
       { sessionID: input.sessionID, model: input.model },
-      { system },
+      { system: claudeInstructions ?? system },
     )
     // rejoin to maintain 2-part structure for caching if header unchanged
     if (system.length > 2 && system[0] === header) {
@@ -211,6 +224,19 @@ export namespace LLM {
     if (isCodex) {
       options.instructions = SystemPrompt.instructions()
     }
+    // altimate_change start — Claude Agent: Claude Code's own prompt replaces the provider prompt, so the
+    // agent prompt and instruction sources travel as options; the environment block is left out
+    const claudeAgent = ClaudeAgent.matches(input.model)
+      ? ClaudeAgent.request({
+          sessionID: input.sessionID,
+          agent: input.agent.name,
+          agentPrompt: input.agent.prompt,
+          small: input.small,
+          instructions: claudeInstructions ?? [],
+        })
+      : undefined
+    if (claudeAgent) Object.assign(options, claudeAgent.options)
+    // altimate_change end
 
     // altimate_change start — pass maxOutputTokens INTO chat.params hook so plugins
     // (codex, github-copilot, third-party) can override it. Upstream PRs #21220 + #21225
@@ -233,8 +259,9 @@ export namespace LLM {
           : undefined,
         topP: input.agent.topP ?? ProviderTransform.topP(input.model),
         topK: ProviderTransform.topK(input.model),
+        // Claude Agent: without an explicit cap from a plugin, Claude Code picks its own output budget
         maxOutputTokens:
-          isCodex || provider.id.includes("github-copilot")
+          isCodex || provider.id.includes("github-copilot") || claudeAgent
             ? undefined
             : ProviderTransform.maxOutputTokens(input.model),
         options,
@@ -265,14 +292,15 @@ export namespace LLM {
             "x-opencode-request": input.user.id,
             "x-opencode-client": Flag.OPENCODE_CLIENT,
           }
-        : input.model.providerID !== "anthropic"
-          ? {
-              "User-Agent": `altimate-code/${Installation.VERSION}`,
-            }
-          : undefined,
+        : {
+            "User-Agent": `altimate-code/${Installation.VERSION}`,
+          },
       input.model.headers,
       headers,
     )
+    // altimate_change end
+    // altimate_change start — Claude Agent: request kind and session, read by its language model
+    if (claudeAgent) Object.assign(requestHeaders, claudeAgent.headers)
     // altimate_change end
 
     // altimate_change start — finalization must have no executable catalog, even for unsolicited tool calls

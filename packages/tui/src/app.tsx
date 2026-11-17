@@ -46,6 +46,7 @@ import {
   resetSetupComplete,
   useFirstRunOpenedThisLaunch,
   useAltimateBaseDisclosureNotice,
+  useRetiredAnthropicLoginNotice,
 } from "./component/altimate-onboarding"
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
@@ -430,6 +431,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const toast = useToast()
   // altimate_change start — non-blocking replacement for the old consent dialog's disclosure text
   useAltimateBaseDisclosureNotice()
+  // altimate_change — once: an old Claude Pro/Max login from the removed Anthropic sign-in no longer connects
+  useRetiredAnthropicLoginNotice()
   // altimate_change end
   const themeState = useTheme()
   const { theme, mode, setMode, locked, lock, unlock } = themeState

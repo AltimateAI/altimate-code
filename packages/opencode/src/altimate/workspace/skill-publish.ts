@@ -1074,7 +1074,7 @@ export function describePublish(report: PublishReport): string {
     return `Already waiting for review: "${name}" was sent to ${owner} with the same content. Nothing new was sent.`
   if (review.duplicate) return `Already approved: "${name}" is in "${workspace}" with the same content. Nothing new was sent.`
   if (review.status === "active") return `Published "${name}" to "${workspace}" ${detail}.`
-  return `Sent "${name}" for review to ${owner} ${detail}. It reaches the workspace once approved; \`altimate-code workspace review status\` shows where it stands.`
+  return `Sent "${name}" for review to ${owner} ${detail}. It reaches the workspace once approved in the Altimate web app; \`altimate-code workspace review status\` shows where it stands.`
 }
 
 /** Every error this module raises on purpose, with its stable code for clients that explain it in their own words

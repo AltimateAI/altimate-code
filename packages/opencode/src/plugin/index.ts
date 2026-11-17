@@ -33,6 +33,9 @@ import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
 // altimate_change start — onboarding activation-funnel telemetry plugin
 import { OnboardingTelemetryPlugin } from "../altimate/plugin/onboarding-telemetry"
 // altimate_change end
+// altimate_change start — Claude Agent provider: /connect login check and idle-session release
+import { ClaudeAgentPlugin } from "../altimate/provider/claude-agent/plugin"
+// altimate_change end
 // altimate_change start — wire plugin experimental_workspace.register into the
 // control-plane adapter registry consumed by control-plane/workspace.ts
 import { registerAdapter } from "../control-plane/adapters"
@@ -44,7 +47,11 @@ import { InstanceRef } from "../effect/instance-ref"
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
 
-  const BUILTIN = ["opencode-anthropic-auth@0.0.13"]
+  // altimate_change start — no default npm plugins. The opencode-anthropic-auth plugin offered a direct Claude Pro/Max
+  // login that Anthropic does not support for third-party tools (upstream removed it in "anthropic legal
+  // requests", 1ac1a0287c). Claude Pro/Max now goes through the Claude Agent provider (Claude Code's own login).
+  const BUILTIN: string[] = []
+  // altimate_change end
 
   // Built-in plugins that are directly imported (not installed from npm)
   // GitlabAuthPlugin uses a different version of @opencode-ai/plugin (from npm)
@@ -64,6 +71,7 @@ export namespace Plugin {
     DatabricksAuthPlugin,
     AltimateAuthPlugin,
     OnboardingTelemetryPlugin,
+    ClaudeAgentPlugin,
   ]
   // altimate_change end
 
