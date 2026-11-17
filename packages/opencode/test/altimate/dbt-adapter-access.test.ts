@@ -512,7 +512,7 @@ describe("AltimateApi.apiRequest", () => {
   function expectNoPartOf(text: string, key: string) {
     for (const piece of key.split(/\s+/).filter((p) => p.length >= 4))
       for (let i = 0; i + Math.min(8, piece.length) <= piece.length; i++)
-        expect(text).not.toContain(piece.slice(i, i + Math.min(8, piece.length)))
+        expect(text).not.toContain(piece.slice(i, i + 8))
     expect(text).not.toContain("Bearer")
   }
 
