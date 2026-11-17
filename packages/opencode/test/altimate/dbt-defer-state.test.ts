@@ -144,6 +144,7 @@ describe("dbt_defer_state", () => {
     write(".vscode/settings.json", '{ "dbt.deferConfigPerProject": { "analytics": { "deferToProduction": true, "manifestPathForDeferral": "${workspaceFolder}/prod-state" } } } oops')
     const result = await resolveDeferState(path.join(root, "analytics"))
     expect(result).toMatchObject({ enabled: false, mode: "none" })
+    expect(result.reason).toContain("could not be read or parsed")
   })
 
   test("${env:NAME} in the state path is expanded, and an unset one is left as written", async () => {
@@ -299,6 +300,24 @@ describe("dbt_defer_state", () => {
     fs.symlinkSync(path.join(real, "analytics"), link)
     try {
       expect(findDeferSetting(link)?.entry.deferToProduction).toBe(true)
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true })
+      fs.rmSync(holder, { recursive: true, force: true })
+    }
+  })
+
+  test("an unparseable settings file above a symlinked project is named when the real path has no entry", async () => {
+    const real = fs.mkdtempSync(path.join(path.dirname(root), "real-"))
+    fs.mkdirSync(path.join(real, "analytics"))
+    const holder = fs.mkdtempSync(path.join(path.dirname(root), "hold-"))
+    fs.mkdirSync(path.join(holder, ".vscode"))
+    fs.writeFileSync(path.join(holder, ".vscode", "settings.json"), "{ not json")
+    const link = path.join(holder, "analytics")
+    fs.symlinkSync(path.join(real, "analytics"), link)
+    try {
+      const result = await resolveDeferState(link)
+      expect(result.enabled).toBe(false)
+      expect(result.reason).toContain("settings.json")
     } finally {
       fs.rmSync(real, { recursive: true, force: true })
       fs.rmSync(holder, { recursive: true, force: true })

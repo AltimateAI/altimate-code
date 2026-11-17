@@ -24,7 +24,7 @@ export interface DeferStateResult {
   mode: "local" | "remote" | "none"
   /** Directory holding the manifest to defer to; set whenever the configured local one can be used, also while defer is off. */
   stateDir?: string
-  /** Why the configured defer cannot be used: no usable state directory, remote mode, an unknown manifest type. */
+  /** Why the configured defer cannot be used: no usable state directory, remote mode, an unknown manifest type, a settings file that cannot be read. */
   reason?: string
   /** The settings key that matched, relative to the workspace folder. */
   settingsKey?: string
@@ -111,16 +111,17 @@ function lookupDeferSetting(projectDir: string, workspaceDir?: string) {
   const lexical = [path.resolve(projectDir), workspaceDir ? path.resolve(workspaceDir) : undefined] as const
   const resolved = [real(projectDir), workspaceDir ? real(workspaceDir) : undefined] as const
   const passes = lexical[0] === resolved[0] && lexical[1] === resolved[1] ? [lexical] : [lexical, resolved]
-  for (const [i, [start, workspace]] of passes.entries()) {
+  let unreadable: { unreadable: string } | undefined
+  for (const [start, workspace] of passes) {
     const found = search(start, workspace)
     // An unreadable file ends the search of its own pass; the pass over the real paths may still reach a readable one.
-    if (found && "unreadable" in found) {
-      if (i === passes.length - 1) return found
+    if (found && typeof found.unreadable === "string") {
+      unreadable ??= { unreadable: found.unreadable }
       continue
     }
     if (found) return found
   }
-  return undefined
+  return unreadable
 }
 
 function profilesFile(projectDir: string): string | undefined {
