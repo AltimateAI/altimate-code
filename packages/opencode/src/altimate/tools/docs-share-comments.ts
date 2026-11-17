@@ -1,5 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import { projectRoot } from "../native/connections/registry"
 import { detectDbtProject } from "./project-scan"
 import {
   listSharedDocs,
@@ -122,7 +123,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
   async execute(args, ctx) {
     if (args.action === "list") {
       try {
-        const project = args.project ?? (await detectDbtProject(process.cwd())).name
+        const project = args.project ?? (await detectDbtProject(projectRoot())).name
         if (!project) {
           return failure(
             "docs_share_comments: no project",
@@ -130,7 +131,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
             "no_project",
           )
         }
-        const [shares, users] = await Promise.all([listSharedDocs([project]), listTenantUsers().catch(() => [])])
+        const [shares, users] = await Promise.all([listSharedDocs([project], ctx.abort), listTenantUsers(ctx.abort).catch(() => [])])
         const threads = openThreads(shares, users)
         return {
           title: `Comments: ${threads.length} open`,
@@ -163,7 +164,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
       if (args.action === "reply") {
         const text = args.text?.trim()
         if (!text) return failure("docs_share_comments: reply", "reply needs non-empty text.", "missing_text")
-        const res = await replyToThread(args.share_id, args.group_id, text)
+        const res = await replyToThread(args.share_id, args.group_id, text, ctx.abort)
         if (res?.ok !== true) return notAccepted("reply")
         return {
           title: `Comments: replied to thread ${args.group_id}`,
@@ -171,7 +172,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
           output: `Replied to thread ${args.group_id} on share ${args.share_id}.`,
         }
       }
-      const res = await resolveThread(args.share_id, args.group_id)
+      const res = await resolveThread(args.share_id, args.group_id, ctx.abort)
       if (res?.ok !== true) return notAccepted("resolve")
       return {
         title: `Comments: resolved thread ${args.group_id}`,

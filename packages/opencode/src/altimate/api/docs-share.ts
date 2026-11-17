@@ -74,10 +74,10 @@ const SharesAnswer = z.array(
 )
 
 /** The shares of the given dbt projects, each with its comment threads. */
-export async function listSharedDocs(projects: string[]): Promise<DocsShare[]> {
+export async function listSharedDocs(projects: string[], signal?: AbortSignal): Promise<DocsShare[]> {
   const params = new URLSearchParams()
   for (const project of projects) params.append("projects", project)
-  const shares = await AltimateApi.apiRequest("GET", `/dbt/dbt_docs_share/all?${params.toString()}`)
+  const shares = await AltimateApi.apiRequest("GET", `/dbt/dbt_docs_share/all?${params.toString()}`, undefined, signal)
   // A paginated answer wraps the shares in `items`; a bare array is accepted too.
   const list = shares && !Array.isArray(shares) && Array.isArray(shares.items) ? shares.items : shares
   const parsed = SharesAnswer.safeParse(list)
@@ -86,19 +86,15 @@ export async function listSharedDocs(projects: string[]): Promise<DocsShare[]> {
 }
 
 /** The people in the tenant, for naming who wrote each message. */
-export async function listTenantUsers(): Promise<DocsShareUser[]> {
-  const users = await AltimateApi.apiRequest("GET", "/users/chat")
+export async function listTenantUsers(signal?: AbortSignal): Promise<DocsShareUser[]> {
+  const users = await AltimateApi.apiRequest("GET", "/users/chat", undefined, signal)
   return Array.isArray(users) ? users : []
 }
 
-export async function replyToThread(shareId: number, groupId: number, message: string): Promise<{ ok: boolean }> {
-  return AltimateApi.apiRequest("POST", `/dbt/dbt_docs_share/${shareId}/conversation_group/${groupId}/conversation`, {
-    message,
-  })
+export async function replyToThread(shareId: number, groupId: number, message: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
+  return AltimateApi.apiRequest("POST", `/dbt/dbt_docs_share/${shareId}/conversation_group/${groupId}/conversation`, { message }, signal)
 }
 
-export async function resolveThread(shareId: number, groupId: number): Promise<{ ok: boolean }> {
-  return AltimateApi.apiRequest("POST", `/dbt/dbt_docs_share/${shareId}/conversation_group/${groupId}/resolve`, {
-    resolved: true,
-  })
+export async function resolveThread(shareId: number, groupId: number, signal?: AbortSignal): Promise<{ ok: boolean }> {
+  return AltimateApi.apiRequest("POST", `/dbt/dbt_docs_share/${shareId}/conversation_group/${groupId}/resolve`, { resolved: true }, signal)
 }

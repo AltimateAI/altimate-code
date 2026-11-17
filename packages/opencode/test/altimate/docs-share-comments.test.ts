@@ -287,6 +287,24 @@ describe("docs_share_comments list", () => {
 })
 
 describe("docs_share_comments reply and resolve", () => {
+  test("the call's abort signal reaches every request it makes", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const seen: (AbortSignal | undefined)[] = []
+    ;(AltimateApi.apiRequest as any).mockImplementation(
+      async (_m: string, endpoint: string, _b?: unknown, signal?: AbortSignal) => {
+        seen.push(signal)
+        if (endpoint.startsWith("/dbt/dbt_docs_share/all")) return SHARES
+        if (endpoint === "/users/chat") return USERS
+        return { ok: true }
+      },
+    )
+    await tool.execute({ action: "list", project: "shop" }, ctx)
+    await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
+    await tool.execute({ action: "resolve", share_id: 7, group_id: 11 }, ctx)
+    expect(seen).toHaveLength(4)
+    for (const signal of seen) expect(signal).toBe(ctx.abort)
+  })
+
   test("a read-only call refuses reply and sends nothing", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     const result = await tool.execute({ action: "reply", share_id: 7, group_id: 11, text: "Thanks" }, readOnly)
