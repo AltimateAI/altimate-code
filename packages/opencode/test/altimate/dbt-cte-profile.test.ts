@@ -218,6 +218,7 @@ describe("dbt_cte_profile list", () => {
       await writeFile(path.join(project, "models", "marts", `${model}.sql`), sql)
       const result = await tool.execute({ model, cte: "b" }, ctx)
       expect(result.metadata.success).toBe(ok)
+      if (!ok) expect(result.output).toContain("is_incremental() or this")
     }
   })
 
