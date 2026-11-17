@@ -51,7 +51,6 @@ export async function serverInstructions(): Promise<string> {
 // fields are passed, and the whole is capped.
 const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
   dbt_lineage: ["model_name", "model_unique_id", "confidence", "confidence_factors", "upstream", "columns", "edges", "error"],
-  dbt_sql_graph: ["model", "nodes", "edges", "error"],
   impact_analysis: [
     "model",
     "column",
