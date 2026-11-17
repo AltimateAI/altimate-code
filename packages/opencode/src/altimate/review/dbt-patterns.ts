@@ -943,14 +943,18 @@ function predKey(p: string): string {
 }
 
 /**
- * Predicates in a JOIN's ON clause that an earlier join of the same join chain already states and
- * that don't reference the newly joined relation: they repeat the earlier join and filter nothing.
- * Returns each such predicate as written (whitespace collapsed).
+ * Predicates in a JOIN's ON clause that an earlier INNER join of the same join chain already states
+ * and that don't reference the newly joined relation: the inner join already dropped every row they
+ * would reject, so they filter nothing. (After a LEFT join the same predicate is not redundant: the
+ * left join keeps the rows it rejects.) Literals are compared as written. Returns each such
+ * predicate as written (whitespace collapsed).
  */
 export function redundantJoinPredicates(sql: string): string[] {
-  const s = stripLiterals(stripComments(sql)).replace(/\{\{[\s\S]*?\}\}/g, "__jinja__").replace(/\{%[\s\S]*?%\}/g, " ")
-  const joins: { alias?: string; preds: { raw: string; key: string }[]; start: number; end: number }[] = []
+  // Literal text stays (`= 'a'` and `= 'b'` differ); `and`/parens inside a literal are rare enough here.
+  const s = stripComments(sql).replace(/\{\{[\s\S]*?\}\}/g, "__jinja__").replace(/\{%[\s\S]*?%\}/g, " ")
+  const joins: { alias?: string; preds: { raw: string; key: string }[]; start: number; end: number; inner: boolean }[] = []
   for (const m of s.matchAll(/\bjoin\b/gi)) {
+    const inner = !/\b(left|right|full|cross|natural|outer)\s+(?:outer\s+)?$/i.test(s.slice(Math.max(0, m.index! - 20), m.index))
     let i = m.index! + 4
     const rest = s.slice(i)
     let rel = /^\s*(\S+)/.exec(rest)
@@ -966,7 +970,7 @@ export function redundantJoinPredicates(sql: string): string[] {
     } else if (rel) i += rel[0].length
     const tail = /^\s+(?:as\s+)?(\w+)\s+on\b/i.exec(s.slice(i)) ?? /^\s+on\b/i.exec(s.slice(i))
     if (!tail) {
-      joins.push({ preds: [], start: m.index!, end: i })
+      joins.push({ preds: [], start: m.index!, end: i, inner })
       continue
     }
     const alias = tail[1] && tail[1].toLowerCase() !== "on" ? tail[1].toLowerCase() : rel?.[1].split(".").pop()?.toLowerCase()
@@ -985,7 +989,7 @@ export function redundantJoinPredicates(sql: string): string[] {
     const preds = /\bor\b/i.test(clause)
       ? []
       : topLevelAnd(clause).map((raw) => ({ raw: raw.replace(/\s+/g, " ").trim(), key: predKey(raw) })).filter((p) => p.key)
-    joins.push({ alias, preds, start: m.index!, end: j })
+    joins.push({ alias, preds, start: m.index!, end: j, inner })
   }
   const out: string[] = []
   let seen: Set<string> = new Set()
@@ -996,7 +1000,7 @@ export function redundantJoinPredicates(sql: string): string[] {
     const { alias, preds } = joins[k]
     for (const p of preds)
       if (chained && seen.has(p.key) && /=/.test(p.key) && !(alias && new RegExp(`\\b${alias}\\.`, "i").test(p.raw))) out.push(p.raw)
-    for (const p of preds) seen.add(p.key)
+    if (joins[k].inner) for (const p of preds) seen.add(p.key)
   }
   return out
 }
@@ -1021,7 +1025,7 @@ function topLevelAnd(clause: string): string[] {
 // 46. A join predicate an earlier join of the same chain already states.
 const detectRedundantJoinPredicate: Detector = (c) => {
   if (!c.added.some((l) => /=/.test(l))) return null
-  const norm = (t: string) => stripLiterals(stripComments(t)).replace(/\s+/g, "").toLowerCase()
+  const norm = (t: string) => stripComments(t).replace(/\s+/g, "").toLowerCase()
   for (const pred of redundantJoinPredicates(c.newSql)) {
     const key = norm(pred)
     const hit = c.added.find((l) => norm(l).includes(key))

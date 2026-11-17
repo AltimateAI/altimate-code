@@ -1632,6 +1632,20 @@ describe("join predicate repeated from an earlier join", () => {
     const body = sql("and s.region = e.region")
     expect(redundant(body, ["    and s.region = e.region"])).toHaveLength(0)
   })
+  test("after a LEFT JOIN the repeated predicate still filters: silent", () => {
+    const body = sql("and a.target_region = e.region").replace("inner join\n    {{ ref('expected') }}", "left join\n    {{ ref('expected') }}")
+    expect(redundant(body, ["    and a.target_region = e.region"])).toHaveLength(0)
+  })
+  test("predicates comparing to different literals are different predicates", () => {
+    const body = [
+      "select * from p",
+      "inner join a on a.id = p.id and p.platform = 'web'",
+      "inner join b on b.id = p.id and p.platform = 'app'",
+    ].join("\n")
+    expect(redundant(body, ["inner join b on b.id = p.id and p.platform = 'app'"])).toHaveLength(0)
+    const same = body.replace("'app'", "'web'")
+    expect(redundant(same, ["inner join b on b.id = p.id and p.platform = 'web'"])).toHaveLength(1)
+  })
   test("the same predicate in a separate query (another CTE) is not the same join chain", () => {
     const body = [
       "with x as (select * from e join a on e.region = a.target_region),",
