@@ -206,10 +206,11 @@ function closingParen(text: string, open: number): number {
 function lastOutsideParens(text: string, pattern: RegExp): { start: number; end: number } | null {
   const depth: number[] = []
   let d = 0
-  for (const ch of text) {
-    if (ch === ")") d--
+  // By UTF-16 index, as matchAll reports them.
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === ")") d--
     depth.push(d)
-    if (ch === "(") d++
+    if (text[i] === "(") d++
   }
   let last: { start: number; end: number } | null = null
   for (const m of text.matchAll(new RegExp(pattern.source, "gi"))) if (depth[m.index] === 0) last = { start: m.index, end: m.index + m[0].length }
