@@ -685,7 +685,7 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
   test("a recursive WITH sees every CTE of its list; MySQL index hints and STRAIGHT_JOIN keep their qualifiers", () => {
     expect(mapRelations(["orders"], "with recursive a as (select * from orders), orders as (select 1) select * from a", [], "postgres")).toEqual([])
     expect(raws("select * from raw.items use index (idx_id), archive.orders", "mysql")).toEqual(["raw.items", "archive.orders"])
-    expect(raws("select * from raw.items force index for join (i) a straight_join correct.orders b on a.id = b.id", "mysql")).toEqual(["raw.items", "correct.orders"])
+    expect(raws("select * from raw.items a force index for join (i) straight_join correct.orders b on a.id = b.id", "mysql")).toEqual(["raw.items", "correct.orders"])
   })
 
   test("an unquoted name is matched as the dialect folds it", () => {
