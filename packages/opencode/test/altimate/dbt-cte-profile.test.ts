@@ -276,9 +276,13 @@ describe("dbt_cte_profile same-named CTEs", () => {
     expect(cased.metadata.success).toBe(true)
     const wrong = await tool.execute({ model: "twins", cte: "foo", position: 2 }, ctx)
     expect(wrong.metadata.success).toBe(false)
+    const shadowed = await tool.execute({ model: "twins", cte: "foo", position: 0 }, ctx)
+    expect(shadowed.metadata.success).toBe(false)
+    const exactAt = await tool.execute({ model: "twins", cte: "foo", position: 1 }, ctx)
+    expect(exactAt.metadata.success).toBe(true)
     const missing = await tool.execute({ model: "twins", position: 9 }, ctx)
     expect(missing.metadata.success).toBe(false)
-    expect(queries).toHaveLength(2)
+    expect(queries).toHaveLength(3)
   })
 
   test("a CTE of a second WITH clause has no query of its own and runs nothing", async () => {

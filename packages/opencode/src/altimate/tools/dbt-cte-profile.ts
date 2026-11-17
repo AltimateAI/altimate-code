@@ -172,7 +172,10 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     if (args.position !== undefined) {
       target = ctes[args.position]
       if (!target) return failure("CTE not found", `${args.model} has ${ctes.length} CTEs: there is none at position ${args.position}.`, { model: args.model })
-      if (args.cte !== undefined && bareName(target.name) !== bareName(args.cte) && bareName(target.name).toLowerCase() !== bareName(args.cte).toLowerCase())
+      // The name as typed wins here too: another CTE spelled exactly so is the one meant, whatever the case of this one.
+      const typed = args.cte === undefined ? undefined : bareName(args.cte)
+      const spelledSo = typed === undefined ? false : ctes.some((c) => bareName(c.name) === typed)
+      if (typed !== undefined && (spelledSo ? bareName(target.name) !== typed : bareName(target.name).toLowerCase() !== typed.toLowerCase()))
         return failure("CTE not found", `The CTE at position ${args.position} of ${args.model} is ${stripColumnList(target.name)}, not ${args.cte}.`, { model: args.model })
     } else {
       // The name as typed wins; letter case only decides when nothing matches it exactly.

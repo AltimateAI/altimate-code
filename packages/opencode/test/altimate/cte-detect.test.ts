@@ -1418,6 +1418,11 @@ select * from last`
     expect(detectCtesInText("with [we]]ird] as (select 1) select * from [we]]ird]").map((c) => c.name)).toEqual(["[we]]ird]"])
   })
 
+  it("a ) inside a captured {% set %} block does not close the CTE body around it", () => {
+    const sql = "with a as (\n{% set helper %}){% endset %}\nselect 1), b as (select 2)\nselect * from b"
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["a", "b"])
+  })
+
   it("keeps CTEs that follow a Jinja tag between them, and reads WITH RECURSIVE and MATERIALIZED", () => {
     const jinja = "with a as (select 1),\n{% if x %}\nb as (select 2),\n{% endif %}\nc as (select 3)\nselect * from c"
     expect(detectCtesInText(jinja).map((c) => c.name)).toEqual(["a", "b", "c"])

@@ -84,6 +84,11 @@ function findMatchingClosingParen(text: string, openParenPos: number): number {
       pos = end
       continue
     }
+    // A captured block (`{% set x %}…{% endset %}`) is not the CTE's SQL: a `)` written there does not close it.
+    if (text[pos] === "{" && text[pos + 1] === "%") {
+      pos = skipJinjaBlock(text, pos)
+      continue
+    }
     if (text[pos] === "(") depth++
     else if (text[pos] === ")" && --depth === 0) return pos
     pos++
