@@ -28,6 +28,8 @@ import {
   numberedSlice,
   parseVerifierOutput,
   VERIFY_SYSTEM_PROMPT,
+  verifyBudget,
+  verifySystemPrompt,
 } from "../../src/altimate/review/ai-verify"
 import { makeFinding, type Finding } from "../../src/altimate/review/finding"
 import { inlineEligible } from "../../src/altimate/review/format"
@@ -665,6 +667,55 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(toolResults(last)).toHaveLength(3)
     expect(toolResults(last)[0]).toContain("coalesce(amount_cents, 0) / 100")
     expect(status).toMatchObject({ state: "ok", turns: 4, toolCalls: 3 })
+  })
+
+  test("budget env overrides: tokens, tool-output characters and rounds; defaults otherwise", () => {
+    expect(verifyBudget({})).toEqual({ maxTokens: 12_000, maxToolChars: 16_000, maxRounds: 3 })
+    expect(
+      verifyBudget({
+        ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "24000",
+        ALTIMATE_REVIEW_AI_VERIFY_MAX_TOOL_CHARS: "32000",
+        ALTIMATE_REVIEW_AI_VERIFY_MAX_ROUNDS: "5",
+      }),
+    ).toEqual({ maxTokens: 24_000, maxToolChars: 32_000, maxRounds: 5 })
+    expect(verifyBudget({ ALTIMATE_REVIEW_AI_VERIFY_MAX_ROUNDS: "0", ALTIMATE_REVIEW_AI_VERIFY_MAX_TOOL_CHARS: "x" })).toEqual(
+      { maxTokens: 12_000, maxToolChars: 16_000, maxRounds: 3 },
+    )
+    expect(verifySystemPrompt()).toBe(VERIFY_SYSTEM_PROMPT)
+    expect(verifySystemPrompt(5)).toContain("At most 5 rounds of tool calls")
+  })
+
+  test("ALTIMATE_REVIEW_AI_VERIFY_MAX_ROUNDS limits the rounds and the prompt states it", async () => {
+    const { llm, calls } = scripted((req) =>
+      req.toolChoice === "none"
+        ? { text: JSON.stringify([verdict("c1")]) }
+        : toolStep([["compiled_sql", { path: "models/fct.sql" }]]),
+    )
+    await verify([aiFinding()], llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_ROUNDS: "1" } })
+    expect(calls.map((c) => c.toolChoice)).toEqual(["auto", "none"])
+    expect(calls[0].system).toContain("At most 1 rounds of tool calls")
+  })
+
+  test("ALTIMATE_REVIEW_AI_VERIFY_MAX_TOOL_CHARS caps the tool output before the answer is forced", async () => {
+    const long = "x".repeat(10_000)
+    const step = () =>
+      scripted((req) =>
+        req.toolChoice === "none" ? { text: "[]" } : toolStep([["read_file", { path: "models/fct.sql" }]]),
+      )
+    const env = { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "1000000" }
+    const wide = step()
+    await verify([aiFinding()], wide.llm, { readFile: async () => long }, { env })
+    expect(wide.calls.map((c) => c.toolChoice)).toEqual(["auto", "auto", "auto", "none"])
+    const narrow = step()
+    const res = await verify(
+      [aiFinding()],
+      narrow.llm,
+      { readFile: async () => long },
+      { env: { ...env, ALTIMATE_REVIEW_AI_VERIFY_MAX_TOOL_CHARS: "2000" } },
+    )
+    // One read (about 2,500 characters) spends the 2,000-character budget: the next call must answer.
+    expect(narrow.calls.map((c) => c.toolChoice)).toEqual(["auto", "none"])
+    expect(res.status.state).toBe("budget")
   })
 
   test("a spent token budget forces the answer early and reports budget", async () => {

@@ -120,6 +120,7 @@ export function emitReviewRun(input: {
       ai_tokens_output: env.ai?.tokens?.output,
       ai_cost: env.ai?.cost,
       ai_calls: env.ai?.calls,
+      ai_replayed: env.ai?.replayed,
       ai_verify_state: env.ai?.verifier?.state,
       ai_verify_tokens_total: env.ai?.verifier?.tokens
         ? env.ai.verifier.tokens.inputTotal + env.ai.verifier.tokens.output

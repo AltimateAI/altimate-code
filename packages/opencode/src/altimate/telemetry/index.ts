@@ -1669,6 +1669,8 @@ export namespace Telemetry {
         ai_cost?: number
         /** Model calls the AI lane made. */
         ai_calls?: number
+        /** The AI lane replayed stored generator findings: its tokens, cost and calls are from that earlier run. */
+        ai_replayed?: boolean
         /** Opt-in AI verifier outcome: ok | skipped | timeout | error | budget. */
         ai_verify_state?: string
         /** Verifier tokens: input (including cached) plus output, across batches and tool rounds. */
