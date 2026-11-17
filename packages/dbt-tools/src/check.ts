@@ -39,7 +39,13 @@ function project(root: string): Status {
   return { ok: true }
 }
 
-type FusionLookup = { pythonPath?: string; cwd?: string; env?: Record<string, string | undefined> }
+type FusionLookup = {
+  pythonPath?: string
+  cwd?: string
+  env?: Record<string, string | undefined>
+  timeoutMs?: number
+  skipScripts?: boolean
+}
 
 /** How the Fusion check finds dbt: dbt-integration's own lookup, loaded only in Fusion mode.
  * A field so tests can replace it. */
@@ -48,10 +54,14 @@ export const fusionBinary = {
 }
 
 async function fusion(cfg: Config): Promise<Status> {
+  // Judge candidates as the adapter does: it runs any `dbt` whose `--version` reports 2.x,
+  // script launchers (asdf, nix and company wrappers) included, and allows 15 s for it.
   const binary = await fusionBinary.find({
     pythonPath: cfg.pythonPath || undefined,
     cwd: cfg.projectRoot || undefined,
     env: process.env,
+    skipScripts: false,
+    timeoutMs: 15_000,
   })
   if (binary) return { ok: true }
   const nextTo = cfg.pythonPath ? `next to ${cfg.pythonPath}, ` : ""

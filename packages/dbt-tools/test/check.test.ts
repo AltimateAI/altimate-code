@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "fs"
-import { tmpdir } from "os"
+import { execFileSync } from "child_process"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { homedir, tmpdir } from "os"
 import { join } from "path"
 import { all, fusionBinary, validate } from "../src/check"
 import type { Config } from "../src/config"
@@ -42,6 +43,8 @@ describe("prerequisites in dbt Fusion mode", () => {
     expect(result.passed).toBe(true)
     expect(Object.keys(result.checks).sort()).toEqual(["fusion", "project"])
     expect(asked[0]).toMatchObject({ pythonPath: undefined, cwd: cfg.projectRoot })
+    // As the adapter judges a candidate: script launchers count, and `--version` gets 15 s.
+    expect(asked[0]).toMatchObject({ skipScripts: false, timeoutMs: 15_000 })
     expect(await validate(cfg)).toBeNull()
   })
 
@@ -92,6 +95,56 @@ describe("prerequisites in dbt Fusion mode", () => {
 
     expect(result.passed).toBe(false)
     expect(result.checks.project?.ok).toBe(false)
+  })
+})
+
+// The real lookup, through the CLI in its own process: another test file here mocks
+// `child_process`, and bun's module mocks reach every file of the run. A stand-in `dbt` is the
+// only thing on PATH. The lookup always tries ~/.local/bin/dbt first (Bun ignores HOME for that),
+// so the rejection test can't run where that is a real Fusion.
+function realFusionInLocalBin(): boolean {
+  const dbt = join(homedir(), ".local", "bin", "dbt")
+  if (!existsSync(dbt)) return false
+  try {
+    return /^dbt(-fusion)? 2\./m.test(execFileSync(dbt, ["--version"], { encoding: "utf-8", timeout: 15_000 }))
+  } catch {
+    return false
+  }
+}
+
+describe.skipIf(process.platform === "win32")("the Fusion lookup, run by `altimate-dbt doctor`", () => {
+  const entry = join(import.meta.dir, "../src/index.ts")
+
+  /** `doctor` in Fusion mode with no Python path, and a `dbt` on PATH that prints `versionLine`. */
+  function doctorWith(versionLine: string): { passed: boolean; checks: { check: string; status: string }[] } {
+    const home = mkdtempSync(join(tmpdir(), "dbt-check-home-"))
+    dirs.push(home)
+    const bin = join(home, "bin")
+    mkdirSync(bin)
+    writeFileSync(join(bin, "dbt"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${versionLine}"; fi\nexit 0\n`, {
+      mode: 0o755,
+    })
+    mkdirSync(join(home, ".altimate-code"))
+    writeFileSync(
+      join(home, ".altimate-code", "dbt.json"),
+      JSON.stringify({ projectRoot: project(), dbtIntegration: "fusion", queryLimit: 500 }),
+    )
+    const result = Bun.spawnSync([process.execPath, entry, "doctor"], { env: { HOME: home, PATH: bin } })
+    return JSON.parse(result.stdout.toString())
+  }
+
+  test("accepts a Fusion behind a script launcher that reports 2.x", () => {
+    const report = doctorWith("dbt 2.0.9")
+
+    expect(report.passed).toBe(true)
+    expect(report.checks).toContainEqual({ check: "fusion", status: "ok" })
+  })
+
+  test.skipIf(realFusionInLocalBin())("still rejects dbt Core", () => {
+    const report = doctorWith("Core: installed: 1.10.23")
+
+    expect(report.passed).toBe(false)
+    expect(report.checks).toContainEqual(expect.objectContaining({ check: "fusion", status: "fail" }))
   })
 })
 
