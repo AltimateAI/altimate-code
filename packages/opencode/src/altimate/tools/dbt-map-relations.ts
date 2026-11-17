@@ -109,6 +109,7 @@ const DOLLAR_QUOTE = new Set(["snowflake", "postgres", "redshift", "duckdb"])
 const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "mssql", "fabric", "synapse", "oracle"])
 // Dialects whose block comments nest: an inner comment does not end the outer one.
 const NESTED_COMMENTS = new Set(["postgres", "postgresql", "redshift", "cockroachdb", "duckdb", "tsql", "sqlserver", "mssql", "fabric", "synapse"])
+const ESCAPE_STRING = new Set(["postgres", "postgresql", "redshift", "cockroachdb"])
 const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb", "clickhouse"])
 // Dialects where a double-quoted name keeps its case while an unquoted one is folded, so `"orders"` and `ORDERS` differ.
 const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower", redshift: "lower" }
@@ -184,10 +185,10 @@ function tokenize(sql: string, dialect: string): Token[] {
   const backslash = BACKSLASH_ESCAPE.has(dialect)
   const push = (kind: Token["kind"], start: number, end: number) =>
     out.push({ kind, start, end, text: sql.slice(start, end) })
-  const skipString = (quote: string, from: number) => {
+  const skipString = (quote: string, from: number, escaped = false) => {
     let j = from
     while (j < n) {
-      if (backslash && sql[j] === "\\") j += 2
+      if ((backslash || escaped) && sql[j] === "\\") j += 2
       else if (sql[j] === quote) {
         if (sql[j + 1] === quote) j += 2
         else return j + 1
@@ -224,7 +225,12 @@ function tokenize(sql: string, dialect: string): Token[] {
       if (triple) {
         const end = sql.indexOf(ch.repeat(3), i + 3)
         i = end < 0 ? n : end + 3
-      } else i = skipString(ch, i + 1)
+      } else {
+        // PostgreSQL's E'...' string reads a backslash as an escape.
+        const prefix = out[out.length - 1]
+        const escapeString = ch === "'" && ESCAPE_STRING.has(dialect) && prefix?.kind === "word" && prefix.end === i && /^e$/i.test(prefix.text)
+        i = skipString(ch, i + 1, escapeString)
+      }
     } else if (
       ch === "$" &&
       DOLLAR_QUOTE.has(dialect) &&
@@ -245,14 +251,14 @@ function tokenize(sql: string, dialect: string): Token[] {
       const end = Math.min(j + 1, n)
       push("quoted", i, end)
       i = end
-    } else if (/[A-Za-z_]/.test(ch)) {
+    } else if (/[\p{L}_]/u.test(ch)) {
       let j = i + 1
-      while (j < n && /[A-Za-z0-9_$]/.test(sql[j])) j++
+      while (j < n && /[\p{L}\p{N}_$]/u.test(sql[j])) j++
       // BigQuery project ids may contain hyphens (`my-proj.ds.tbl` unquoted), but only where a table is named.
       if (dialect === "bigquery" && (TABLE_KEYWORDS.has(lastWord()) || out[out.length - 1]?.text === ",")) {
         while (sql[j] === "-" && /[A-Za-z0-9_]/.test(sql[j + 1] ?? "")) {
           j++
-          while (j < n && /[A-Za-z0-9_$]/.test(sql[j])) j++
+          while (j < n && /[\p{L}\p{N}_$]/u.test(sql[j])) j++
         }
       }
       push("word", i, j)
@@ -330,7 +336,6 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       else if (isPunct(tokens[k], ")") && depth-- === 0) (scopeEnd = tokens[k].start), (k = tokens.length)
       else if (tokens[k].text === ";" && depth === 0) (scopeEnd = tokens[k].start), (k = tokens.length)
     }
-    const scope: [number, number] = [tokens[start - 1].start, scopeEnd]
     while (tokens[i] && (tokens[i].kind === "word" || tokens[i].kind === "quoted")) {
       const name = identityOf(nameOf(tokens[i], dialect)[0], tokens[i].kind === "quoted" && tokens[i].text[0] === '"', dialect)
       let j = i + 1
@@ -344,7 +349,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       j = afterParens(tokens, j)
       const known = ctes.get(name) ?? { recursive, bodies: [], scopes: [] }
       known.bodies.push([open, tokens[j - 1].end])
-      known.scopes.push(scope)
+      // Visible after its own definition, so an earlier CTE or its own body names the real table; a recursive one sees itself.
+      known.scopes.push([recursive ? open : tokens[j - 1].end, scopeEnd])
       ctes.set(name, known)
       if (!isPunct(tokens[j], ",")) return
       i = j + 1
@@ -384,13 +390,20 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
         if (!first || (first.kind !== "word" && first.kind !== "quoted")) return
         if (first.kind === "word" && RESERVED.has(first.text.toLowerCase())) return
         // PostgreSQL's `FROM ONLY name` leaves out the table's children; the name follows.
-        if (dialect.startsWith("postgres") && first.kind === "word" && first.text.toLowerCase() === "only" && ["word", "quoted"].includes(tokens[i + 1]?.kind ?? "")) {
+        if (dialect.startsWith("postgres") && first.kind === "word" && first.text.toLowerCase() === "only" && (["word", "quoted"].includes(tokens[i + 1]?.kind ?? "") || (isPunct(tokens[i + 1], "(") && ["word", "quoted"].includes(tokens[i + 2]?.kind ?? "")))) {
           i++
           continue
         }
         const parts: string[] = [...nameOf(first, dialect)]
         let at = i
-        while (isPunct(tokens[at + 1], ".") && ["word", "quoted"].includes(tokens[at + 2]?.kind ?? "")) {
+        for (;;) {
+          // T-SQL's `db..table` leaves the schema out: the gap is kept, so the name stays as written and matches nothing it should not.
+          const gap = isPunct(tokens[at + 1], ".") && isPunct(tokens[at + 2], ".") && ["word", "quoted"].includes(tokens[at + 3]?.kind ?? "")
+          if (gap) {
+            parts.push("")
+            at += 1
+          }
+          if (!isPunct(tokens[at + 1], ".") || !["word", "quoted"].includes(tokens[at + 2]?.kind ?? "")) break
           at += 2
           parts.push(...nameOf(tokens[at], dialect))
         }
@@ -583,9 +596,7 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
     const named = ctes.get(identityOf(last, !!r.quoted, dialect))
     // A CTE hides a table only where it is visible: a later statement can name a real table the same way.
     const cte = named && named.scopes.some(([from, to]) => r.start! >= from && r.start! < to) ? named : undefined
-    // A CTE's own name inside its own body is the real table unless the WITH is recursive.
-    const inOwnBody = !!cte && !cte.recursive && cte.bodies.some(([from, to]) => r.start! >= from && r.start! < to)
-    if (r.parts.length === 1 && cte && !inOwnBody) continue
+    if (r.parts.length === 1 && cte) continue
     if (wanted.has(last.toLowerCase()) || wanted.has(whole.toLowerCase())) {
       add(r)
       covered.add(last.toLowerCase())

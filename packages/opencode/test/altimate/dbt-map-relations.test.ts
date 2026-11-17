@@ -667,6 +667,21 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(mapRelations(["orders"], "with orders as (select 1) select * from orders", [], "postgres")).toEqual([])
   })
 
+  test("a CTE hides a table only after its own definition", () => {
+    expect(mapRelations(["orders"], "with a as (select * from orders), orders as (select 1) select * from a", [], "postgres").map((r) => r.raw)).toEqual(["orders"])
+    expect(mapRelations(["orders"], "with recursive orders as (select 1 union all select * from orders) select * from orders", [], "postgres")).toEqual([])
+    expect(
+      mapRelations(["orders"], "with recursive orders as (select 1 union all select * from orders) select 1; with orders as (select * from orders) select * from orders", [], "postgres").map((r) => r.raw),
+    ).toEqual(["orders"])
+  })
+
+  test("an escape string, a parenthesized ONLY, an omitted schema and non-ASCII names are read as written", () => {
+    expect(raws("select E'it\\'s from wrong.orders' as s from real.orders", "postgres")).toEqual(["real.orders"])
+    expect(raws("select * from only (raw.orders) a join other.orders b on true", "postgres")).toEqual(["raw.orders", "other.orders"])
+    expect(raws("select * from db..orders a join other.orders b on 1=1", "mssql")).toEqual(["db..orders", "other.orders"])
+    expect(raws("select * from public.café", "postgres")).toEqual(["public.café"])
+  })
+
   test("T-SQL table hints and PIVOT do not end the list", () => {
     expect(raws("select * from db.a.orders with (nolock), db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
     expect(raws("select * from db.a.orders pivot (sum(x) for y in ([a])) p, db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
