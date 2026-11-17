@@ -50,6 +50,7 @@ import {
   missingRefFindings,
   modelConfigFindings,
   packagesFindings,
+  testWindowFindings,
   testsOnNullColumns,
 } from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
@@ -2278,7 +2279,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             file.status === "added" ? Promise.resolve(undefined) : getContent?.(file.oldPath ?? file.path, "old")?.catch(() => undefined),
           ])
           if (file.kind === "project_config") return [...packagesFindings(file, newContent), ...dbtProjectFindings(file, oldContent, newContent)]
-          return jinjaFindings(file, oldContent, newContent)
+          return [...jinjaFindings(file, oldContent, newContent), ...(file.kind === "test" ? testWindowFindings(file) : [])]
         } catch (err) {
           failedFile(file, err)
           return []
