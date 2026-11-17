@@ -144,6 +144,18 @@ describe("dbt_cte_profile list", () => {
     expect(result.metadata.ctes.map((c: { name: string }) => c.name)).toEqual(["base"])
     expect(result.metadata.incomplete).toBe(true)
     expect(result.output).toContain("The list is incomplete: a CTE after line 1")
+    const absent = await tool.execute({ model: "looped", cte: "final" }, ctx)
+    expect(absent.metadata.success).toBe(false)
+    expect(absent.output).toContain("The list is incomplete")
+    await writeFile(
+      path.join(project, "models", "marts", "firstloop.sql"),
+      "{% if true %}\nwith a as (select 1 as x), {{ y }}_c as (select 1 as x) select * from a\n{% else %}\nwith b as (select 2 as x) select * from b\n{% endif %}\n",
+    )
+    const multi = await tool.execute({ model: "firstloop" }, ctx)
+    expect(multi.output).toContain("after line 2 could not be read")
+    await writeFile(path.join(project, "models", "marts", "loopfirst.sql"), "with {{ x }}_c as (select 1 as a), final as (select 1 as a) select * from final\n")
+    const first = await tool.execute({ model: "loopfirst" }, ctx)
+    expect(first.metadata.incomplete).toBe(true)
     const whole = await tool.execute({ model: "customers" }, ctx)
     expect(whole.metadata.incomplete).toBeUndefined()
   })

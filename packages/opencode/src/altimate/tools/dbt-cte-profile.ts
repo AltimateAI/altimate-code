@@ -159,7 +159,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
         position,
       }))
       const stop = unreadCteAfter(text, ctes)
-      const note = stop === undefined ? "" : `\nThe list is incomplete: a CTE after line ${lineAt(stop)} could not be read (its name is built by a Jinja expression or loop).`
+      const note = stop === undefined ? "" : `\nThe list is incomplete: a CTE after line ${text.substring(0, stop).split("\n").length} could not be read (its name is built by a Jinja expression or loop).`
       const output = (list.length
         ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `position ${c.position}: ${c.name} (line ${c.line})`)].join("\n")
         : `No CTEs in ${file}.`) + note
@@ -170,11 +170,13 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
       }
     }
 
+    const unread = unreadCteAfter(text, ctes) !== undefined
+    const incompleteNote = unread ? " The list is incomplete: a CTE built by a Jinja expression or loop could not be read." : ""
     const names = ctes.map((c) => stripColumnList(c.name)).join(", ")
     let target: CteInfo | undefined
     if (args.position !== undefined) {
       target = ctes[args.position]
-      if (!target) return failure("CTE not found", `${args.model} has ${ctes.length} CTEs: there is none at position ${args.position}.`, { model: args.model })
+      if (!target) return failure("CTE not found", `${args.model} has ${ctes.length} CTEs: there is none at position ${args.position}.${incompleteNote}`, { model: args.model })
       // The name as typed wins here too: another CTE spelled exactly so is the one meant, whatever the case of this one.
       const typed = args.cte === undefined ? undefined : bareName(args.cte)
       const spelledSo = typed === undefined ? false : ctes.some((c) => bareName(c.name) === typed)
@@ -186,7 +188,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
       const exact = ctes.filter((c) => bareName(c.name) === wanted)
       const matches = exact.length > 0 ? exact : ctes.filter((c) => bareName(c.name).toLowerCase() === wanted.toLowerCase())
       if (matches.length === 0)
-        return failure("CTE not found", `${args.model} has no CTE named ${args.cte}${names ? `; it has: ${names}` : ""}.`, { model: args.model })
+        return failure("CTE not found", `${args.model} has no CTE named ${args.cte}${names ? `; it has: ${names}` : ""}.${incompleteNote}`, { model: args.model })
       if (matches.length > 1) {
         const at = matches.map((c) => ctes.indexOf(c)).join(", ")
         return failure("CTE ambiguous", `${args.model} has ${matches.length} CTEs that match ${args.cte} (positions ${at}): pass position.`, { model: args.model })

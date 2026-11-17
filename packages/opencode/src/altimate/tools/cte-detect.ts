@@ -302,16 +302,24 @@ export function detectCtes(text: string): CteInfo[] {
 }
 
 /**
- * Line-independent offset of a comma that follows the last CTE read of a WITH clause: another CTE comes
- * after it but could not be read (its name is built by a Jinja expression or loop), so the list is short.
+ * Offset where a CTE that could not be read begins or is announced, or undefined when every CTE was read: the
+ * comma after the last CTE read of a WITH clause that goes on, or the start of a clause where none was read
+ * (its first name is built by a Jinja expression or loop). The list is short from there on.
  */
 export function unreadCteAfter(text: string, ctes: CteInfo[]): number | undefined {
-  for (const c of ctes) {
-    if (ctes.some((other) => other.withClauseStart === c.withClauseStart && other.index === c.index + 1)) continue
-    const next = skipTrivia(text, c.queryEnd + 1, true)
-    if (text[next] === ",") return next
+  const found: number[] = []
+  for (const withPos of findTopLevelWithKeywords(text)) {
+    const own = ctes.filter((c) => c.withClauseStart === withPos)
+    if (own.length === 0) {
+      const first = skipTrivia(text, withPos + 4, true)
+      if (text[first] === "{" && text[first + 1] === "{") found.push(first)
+      continue
+    }
+    const last = own[own.length - 1]
+    const next = skipTrivia(text, last.queryEnd + 1, true)
+    if (text[next] === ",") found.push(next)
   }
-  return undefined
+  return found.length ? Math.min(...found) : undefined
 }
 
 /** Drop a trailing column list: `my_cte (id, name)` -> `my_cte`. */
