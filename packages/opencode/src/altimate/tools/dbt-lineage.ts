@@ -6,7 +6,6 @@ import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../native/types"
 import { loadRawManifest } from "../native/dbt/helpers"
 import { lineageGraph } from "../native/dbt/graph"
-import { projectRoot } from "../native/connections/registry"
 import { sessionProject } from "./dbt-adapter-access"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
