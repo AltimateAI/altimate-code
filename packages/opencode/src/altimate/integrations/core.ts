@@ -91,6 +91,8 @@ export interface StoredProvider {
    * only signed in to that same backend, does a sync remove what is left here.
    */
   cleanupPending?: string | false
+  /** The secret fields of the credential left behind, which a later save may no longer list. */
+  leftoverFields?: string[]
   /** Kept on this machine while the provider could not be reached to check it. */
   unverified?: boolean
 }
@@ -963,9 +965,9 @@ export function recordedElsewhere(id: ProviderId, cfg: backend.BackendConfig | n
 
 export const backendKey = (cfg: backend.BackendConfig) => `${cfg.apiUrl.replace(/\/+$/, "")}#${cfg.tenant}`
 
-export async function recordLeftover(id: ProviderId, cfg: backend.BackendConfig): Promise<string> {
+export async function recordLeftover(id: ProviderId, cfg: backend.BackendConfig, fields: string[] = []): Promise<string> {
   try {
-    await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: backendKey(cfg) }))
+    await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: backendKey(cfg), leftoverFields: [...new Set([...(next.providers[id]?.leftoverFields ?? []), ...fields])] }))
     return `Run altimate integrations sync ${id} to remove it.`
   } catch (e) {
     return `It could not be recorded for removal either (${e instanceof Error ? e.message : String(e)}).`
@@ -1155,11 +1157,11 @@ async function syncReal(
   // sync that retries it, and is recorded so that sync, and only it, removes the leftover later.
   const purgeLocal = async (record: StoredProvider | undefined) => {
     try {
-      await purgeCredentialSecrets(id, record, false)
+      await purgeCredentialSecrets(id, record && { ...record, secretFields: [...(record.secretFields ?? []), ...(record.leftoverFields ?? [])] }, false)
       await deleteSecret(id)
-      if (record?.cleanupPending) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
+      if (record?.cleanupPending) await updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false, leftoverFields: undefined })).catch(() => {})
     } catch (e) {
-      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. ${await recordLeftover(id, cfg)}`, ok: false })
+      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. ${await recordLeftover(id, cfg, record?.secretFields)}`, ok: false })
     }
   }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false, rewritten = sharedConnection, uploaded = true): SyncOutcome => {
@@ -1292,8 +1294,8 @@ export interface DisconnectResult {
 export function disconnect(id: ProviderId): Promise<DisconnectResult> {
   // One locked step, so an upload cannot land between the workspace delete and the local purge.
   return withLock(async () => {
-    // An unreadable login only matters for a credential saved in the workspace; a local one is removed without it.
-    const synced = isSynced(id)
+    // An unreadable login only matters for a credential saved in the workspace (synced, or a copy whose removal is still recorded); a local one is removed without it.
+    const synced = isSynced(id) || loadStore().providers[id]?.connectionId != null
     let workspaceUnchecked: string | undefined
     const login = await realConfig().catch((e) => {
       if (synced) throw e

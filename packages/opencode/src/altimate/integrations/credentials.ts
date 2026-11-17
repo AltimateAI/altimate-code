@@ -225,8 +225,10 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   const args = server.args ?? []
   if (!command || !args.every((a) => typeof a === "string" && (GITHUB_MCP_WORD.test(a) || GITHUB_MCP_PROGRAM.test(a)))) return false
   // docker and npx must be running GitHub's server, as the first word that is not one of their own options; the binary is it.
+  // Only each command's own leading words are skipped: docker's `run`, Windows' `/c npx`; an image called npx is still an image.
+  const lead = command === "docker" ? ["run"] : command === "cmd" ? ["/c", "npx"] : []
   let i = 0
-  while (i < args.length && (args[i] === "run" || args[i] === "/c" || args[i] === "npx" || args[i].startsWith("-"))) i += args[i] === "-e" ? 2 : 1
+  while (i < args.length && (lead.includes(args[i]) || args[i].startsWith("-"))) i += args[i] === "-e" ? 2 : 1
   if (command !== "github-mcp-server" && !GITHUB_MCP_PROGRAM.test(args[i] ?? "")) return false
   const settings = Object.entries(server.env ?? {}).every(
     ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
@@ -775,7 +777,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       const wasBlocked = core.isBlocked(id)
       const signedIn = await core.realConfig()
       // A copy recorded on another backend cannot be removed from this one; nothing is changed until that login is used.
-      const elsewhere = opts.localOnly ? core.recordedElsewhere(id, signedIn) : null
+      const elsewhere = core.recordedElsewhere(id, signedIn)
       if (elsewhere) return local({ status: "failed", sync: syncState(), message: elsewhere })
       // A connection id still recorded means a workspace copy whose removal has not finished yet.
       let hadCopy = Boolean(core.loadStore().providers[id]?.synced) || Boolean(core.loadStore().providers[id]?.connectionId) || remoteManaged
@@ -911,12 +913,12 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       }
       let leftover: string | null = null
       try {
-        await core.purgeCredentialSecrets(id, rec, false)
+        await core.purgeCredentialSecrets(id, rec && { ...rec, secretFields: [...(rec.secretFields ?? []), ...(rec.leftoverFields ?? [])] }, false)
         await core.deleteSecret(id)
         // Whatever was left here from before is gone with it.
-        if (core.loadStore().providers[id]?.cleanupPending) await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
+        if (core.loadStore().providers[id]?.cleanupPending) await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false, leftoverFields: undefined })).catch(() => {})
       } catch (e) {
-        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. ${await core.recordLeftover(id, cfg)}`
+        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. ${await core.recordLeftover(id, cfg, rec?.secretFields)}`
       }
       // What was typed in is the form's, not the credential's: discard removes it, as for any other draft.
       try {

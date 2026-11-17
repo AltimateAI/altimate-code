@@ -101,6 +101,8 @@ describe("GitHub host policy", () => {
       { command: "node", args: ["/opt/github-mcp/dist/index.js"], env: { GITHUB_TOKEN: "ghp_x" } },
       // Every word is one the official setups use, but docker runs some other image.
       { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp"] },
+      // An image called npx is not GitHub's, whatever follows it.
+      { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "npx", "ghcr.io/github/github-mcp-server"] },
       // The official image named after the one docker actually runs.
       { ...official, args: ["run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp", "ghcr.io/github/github-mcp-server"] },
     ]
@@ -590,6 +592,14 @@ describe("workspace connections", () => {
     const o = await core.syncProvider("github")
     expect([o.result, o.reason]).toEqual(["skipped", expect.stringContaining("invalid")])
     expect([await core.readSecret("github"), core.loadStore().providers.github?.cleanupPending]).toEqual([undefined, false])
+  })
+
+  test("a leftover's secret fields are removed even when a later save no longer lists them", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    await core.storeSecret(core.secretKey("cred", "github", "old_custom_token"), "old")
+    await core.recordLeftover("github", (await core.realConfig())!, ["old_custom_token"])
+    expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("synced")
+    expect([await core.readSecret(core.secretKey("cred", "github", "old_custom_token")), core.loadStore().providers.github?.leftoverFields]).toEqual([undefined, undefined])
   })
 
   test("a leftover whose workspace connection was deleted is kept and stops being a leftover", async () => {
@@ -2999,6 +3009,20 @@ describe("credentials flow", () => {
       const kept = await creds.connectCredentials({ id: "github", localOnly: true })
       expect([kept.status, kept.message]).toEqual(["failed", expect.stringContaining("another Altimate sign-in")])
       expect([api.state.rows.filter((r) => !r.deleted).length, core.loadStore().providers.github?.connectionId]).toEqual([1, recorded.connectionId])
+      // A plain connect of a blocked provider is refused the same way, and signed out, disconnect asks for a sign-in first.
+      await core.setBlocked(["github"], true)
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).message).toContain("another Altimate sign-in")
+      await core.setBlocked(["github"], false)
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, synced: false }))
+      const signedIn = process.env.ALTIMATE_INTEGRATIONS_TOKEN
+      delete process.env.ALTIMATE_INTEGRATIONS_TOKEN
+      try {
+        await expect(core.disconnect("github")).rejects.toThrow("Sign in to Altimate")
+      } finally {
+        process.env.ALTIMATE_INTEGRATIONS_TOKEN = signedIn
+      }
+      expect(core.loadStore().providers.github?.connectionId).toBe(recorded.connectionId)
       // On its own backend the renamed connection is removed.
       await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, connectionBackend: recorded.connectionBackend }))
       await core.disconnect("github")
