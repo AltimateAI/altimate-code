@@ -490,6 +490,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
           (FROM_INSIDE_CALL.has(calls[calls.length - 1] ?? "") || tokens[i - 1]?.text.toLowerCase() === "distinct")
         )
           continue
+        // `FOR JOIN` inside a MySQL index hint names no table.
+        if (word === "join" && tokens[i - 1]?.text.toLowerCase() === "for") continue
         // A name followed by "(" after FROM, JOIN or USING is a table function; after INTO or UPDATE it is a table.
         readList(
           word === "into" && tokens[i + 1]?.text.toLowerCase() === "table" ? i + 2 : i + 1,
