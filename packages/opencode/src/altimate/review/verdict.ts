@@ -233,6 +233,10 @@ export const VerdictEnvelope = z.object({
       /** Estimated USD cost from the model's price table. */
       cost: z.number().nonnegative().optional(),
       calls: z.number().int().nonnegative().optional(),
+      /** Generator findings replayed from an earlier envelope: tokens, cost and calls are that run's. */
+      replayed: z.boolean().optional(),
+      /** The replayed envelope did not list every generator finding. */
+      replayIncomplete: z.boolean().optional(),
       /** The opt-in dbt-grounded verifier (`ALTIMATE_REVIEW_AI_VERIFY=1`): what it kept and dropped. */
       verifier: z
         .object({

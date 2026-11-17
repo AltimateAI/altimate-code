@@ -10,6 +10,7 @@ import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
+import { aiReplayPath, runAiReplay } from "./ai-replay"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -160,6 +161,11 @@ export interface AiLaneStatus {
   calls?: number
   /** The dbt-grounded verifier's outcome, when it ran (opt-in). */
   verifier?: VerifierStatus
+  /** The generator's findings came from an earlier envelope (`ALTIMATE_REVIEW_AI_REPLAY`);
+   *  tokens, cost and calls are that run's, so only `verifier` was spent now. */
+  replayed?: boolean
+  /** The replayed envelope did not list every generator finding. */
+  replayIncomplete?: boolean
 }
 /** Token counts as `Session.getUsage` reports them: `input` excludes cached
  *  tokens, `inputTotal` includes them. */
@@ -258,6 +264,8 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
  * envelope and the PR comment.
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
+  const replay = aiReplayPath()
+  if (replay) return runAiReplay(input, replay)
   const startedAt = Date.now()
   const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
     findings,
