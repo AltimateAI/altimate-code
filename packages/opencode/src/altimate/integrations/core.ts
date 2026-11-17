@@ -84,6 +84,8 @@ export interface StoredProvider {
   credentialStamp?: string
   /** The last validation was refused by the provider. */
   rejected?: boolean
+  /** The workspace holds this credential, but removing the local copy failed; only then does a sync remove what is left here. */
+  cleanupPending?: boolean
   /** Kept on this machine while the provider could not be reached to check it. */
   unverified?: boolean
 }
@@ -344,7 +346,7 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
     for (const id of PROVIDER_IDS) {
       if (!MCP_MATCHERS[id].test(haystack)) continue
       const remote = Boolean(server.url) || server.type === "http" || server.type === "sse"
-      const hasToken = creds.mcpEnvHasToken(id, server.env, server.args ?? [])
+      const hasToken = creds.mcpEnvHasToken(id, server)
       if (remote) {
         found.push({
           id,
@@ -403,15 +405,14 @@ function onPath(bin: string): boolean {
 
 function detectGithub(): Detection | undefined {
   // Only github.com: GH_HOST may point gh at an enterprise host, whose token must never go to api.github.com.
-  const auth = creds.ghMayReturnOtherHostToken() ? null : spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: process.env })
+  const auth = !creds.ghTokenUsable() ? null : spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore", timeout: 5000, env: process.env })
   if (auth?.status === 0) {
     const who = spawnSync("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
     const login = who.status === 0 ? who.stdout.trim() : ""
     return { id: "github", source: { kind: "cli", label: "gh CLI" }, account: login || null, syncable: true, note: null }
   }
-  if ((process.env.GITHUB_TOKEN || process.env.GH_TOKEN) && !creds.githubHostElsewhere(process.env)) {
-    return { id: "github", source: { kind: "env", label: process.env.GITHUB_TOKEN ? "GITHUB_TOKEN" : "GH_TOKEN" }, account: null, syncable: true, note: null }
-  }
+  const envToken = ["GITHUB_TOKEN", "GH_TOKEN"].find((name) => process.env[name]?.trim() && creds.shellGithubTokenUsable(name))
+  if (envToken) return { id: "github", source: { kind: "env", label: envToken }, account: null, syncable: true, note: null }
 }
 
 function detectJira(home: string): Detection | undefined {
@@ -956,7 +957,7 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
     ? await backend.updateConnection(cfg, existing.id, { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
   const isValid = saved.is_valid !== false
-  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }), ...(sharedConnection ? { shared: true as const } : {}) }
+  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }), ...(sharedConnection || (existing && saved.privacy != null && saved.privacy !== "private") ? { shared: true as const } : {}) }
   if (!isValid) return result
   return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id, visible.map((c) => c.id), share) }
 }
@@ -1115,13 +1116,17 @@ async function syncReal(
     steps.push({ label: l, ok: true })
     onStep?.(l, true)
   }
-  // Removes what is left of the credential on this machine once the workspace holds it; a failure is a warning naming the sync that retries it.
-  const purgeLocal = async (record: StoredProvider | undefined) => {
+  // Removes what is left of the credential on this machine once the workspace holds it. A failure is a warning naming the
+  // sync that retries it, and is recorded so that sync, and only it, removes the leftover later.
+  const purgeLocal = async (record: StoredProvider | undefined, shared: boolean) => {
+    const mark = (pending: boolean) => updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: pending })).catch(() => {})
     try {
       await purgeCredentialSecrets(id, record, false)
       await deleteSecret(id)
+      if (record?.cleanupPending) await mark(false)
     } catch (e) {
-      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id} to remove it.`, ok: false })
+      await mark(true)
+      steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id}${shared ? " --share" : ""} to remove it.`, ok: false })
     }
   }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false, rewritten = sharedConnection, uploaded = true): SyncOutcome => {
@@ -1155,7 +1160,8 @@ async function syncReal(
         if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
         step("Connection already in the workspace")
         // A synced record keeps no secret here; one left by an earlier cleanup that failed is removed now, which is what that failure told the user to run sync for.
-        if (known != null) await purgeLocal(store.providers[id])
+        // Only a leftover recorded after an upload is removed: any other secret here may be the only copy of a credential.
+        if (known != null && store.providers[id]?.cleanupPending) await purgeLocal(store.providers[id], found.privacy !== "private")
         return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private", false, false)
       })
     } catch (e) {
@@ -1215,6 +1221,7 @@ async function syncReal(
             unverified: false,
             connectionId: res.connectionId,
             expiresAt,
+            cleanupPending: false,
             updatedAt: new Date().toISOString(),
           }
         })
@@ -1222,7 +1229,7 @@ async function syncReal(
         return { id, result: "failed", reason: [RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), ...exposure.notes].join(" "), steps, ...(exposure.shared ? { shared: true as const } : {}) }
       }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
-      await purgeLocal(rec)
+      await purgeLocal({ ...rec, cleanupPending: false }, exposure.shared)
       return reportWorkspace(res.workspace ?? { notLinked: true }, res.shared === true)
     })
   } catch (e) {

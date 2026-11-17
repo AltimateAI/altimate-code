@@ -153,40 +153,64 @@ const isEnvReference = (value: string) => {
   return v.length === 0 || /^\$\{[^}]*\}$/.test(v) || /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(v)
 }
 
-/**
- * Whether a GitHub token's surroundings name a host other than github.com (GitHub Enterprise). Only github.com is
- * supported, and its validation goes to api.github.com, so such a token is never read: it would be sent to the wrong host.
- */
-export function githubHostElsewhere(env: Record<string, unknown> | undefined, args: unknown[] = []): boolean {
-  // Arguments are not parsed (quoting, docker -e/--env=, shell wrappers): any mention of a host setting there blocks the token.
-  if (args.some((a) => typeof a === "string" && GITHUB_HOST_MENTION.test(a))) return true
-  return Object.entries(env ?? {}).some(([key, v]) => {
-    if (!GITHUB_HOST_KEY.test(key) || typeof v !== "string" || !v.trim()) return false
-    // A reference is resolved from this environment, falling back to its ${NAME:-default}; one that resolves to nothing cannot be confirmed as github.com.
-    const value = isEnvReference(v) ? resolveReference(v) : v
-    if (!value?.trim()) return true
-    const host = value.trim().replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase()
-    return host !== "github.com" && host !== "api.github.com"
-  })
-}
+// ---------------------------------------------------------------- GitHub host
+// Only github.com is supported and a GitHub token is validated against api.github.com, so a token is read only from a
+// source that is confirmed to be for github.com. Anything that may name another host, in a form not read here, counts
+// as another host: the check allows what it can confirm instead of refusing the forms it knows.
 
 const GITHUB_HOST_KEY = /^(GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE_URL)$/i
-const GITHUB_HOST_MENTION = /GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE|gh-host/i
+/** Text that may set a GitHub host where it is not read here: a host setting, an enterprise setting, a gh flag, or a file the server loads. */
+const GITHUB_HOST_HINT = /GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE|GH_ENTERPRISE|gh-host|env-file|--volume|--mount|--config|(^|\s)-v(\s|$)/i
 
-function resolveReference(ref: string): string | undefined {
-  const inner = ref.trim().replace(/^\$\{?|\}$/g, "")
-  const [name, fallback] = inner.split(/:?-/, 2)
-  return process.env[name]?.trim() || fallback
+/** Whether a host setting names github.com: a literal URL or host whose parsed hostname is github.com or api.github.com. A reference or an unparsable value does not. */
+export function namesGithubDotCom(value: string): boolean {
+  const v = value.trim()
+  if (!v) return false
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? v : `https://${v}`)
+    return !url.username && !url.password && (url.hostname === "github.com" || url.hostname === "api.github.com")
+  } catch {
+    return false
+  }
 }
 
-/** gh hands out GH_TOKEN or GITHUB_TOKEN as the github.com token whatever host they belong to, so it is not asked while they sit beside another host. */
-export const ghMayReturnOtherHostToken = () => Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN) && githubHostElsewhere(process.env)
+/** Whether every host setting in an environment, if any, names github.com. */
+function hostSettingsAreGithubDotCom(env: Record<string, unknown>): boolean {
+  return Object.entries(env).every(([key, value]) => !GITHUB_HOST_KEY.test(key) || value == null || (typeof value === "string" && (value.trim() === "" || namesGithubDotCom(value))))
+}
+
+/** Whether a GitHub MCP server is confirmed to be for github.com: run locally, nothing in its command or arguments that may set a host, and every host setting it sees (its own or this environment's) names github.com. */
+export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
+  // A remote server is reached over its URL, not with the token in its environment.
+  if (server.url || server.type === "http" || server.type === "sse") return false
+  if ([server.command, ...(server.args ?? [])].some((w) => typeof w === "string" && GITHUB_HOST_HINT.test(w))) return false
+  if (Object.keys(server.env ?? {}).some((k) => !GITHUB_HOST_KEY.test(k) && GITHUB_HOST_HINT.test(k))) return false
+  return hostSettingsAreGithubDotCom({ ...process.env, ...server.env })
+}
+
+/** Whether a GitHub MCP server that is not confirmed for github.com names a shell variable: that variable may then hold the other host's token. */
+function claimedByOtherHost(name: string): boolean {
+  const word = new RegExp(`\\b${name}\\b`)
+  return core.mcpServerMaps(core.homeDir(), process.cwd()).some(({ servers }) =>
+    Object.entries(servers ?? {}).some(([serverName, server]) => !!server && typeof server === "object" && core.providerMatchesMcp("github", serverName, server) && !mcpServerIsGithubDotCom(server) && word.test(JSON.stringify(server))),
+  )
+}
+
+/** Whether the shell's GitHub token variable may be read: the shell's host settings name github.com and no other-host server takes its token from it. */
+export function shellGithubTokenUsable(name: string): boolean {
+  return hostSettingsAreGithubDotCom(process.env) && !claimedByOtherHost(name)
+}
+
+/** Whether gh may be asked for the github.com token: gh hands back GH_TOKEN or GITHUB_TOKEN as that token whatever host they belong to, so it is asked only when each one set is usable. */
+export function ghTokenUsable(): boolean {
+  return ["GH_TOKEN", "GITHUB_TOKEN"].every((name) => !process.env[name]?.trim() || shellGithubTokenUsable(name))
+}
 
 /** Whether an MCP server's environment holds a credential this flow reads for the provider, not just any value. */
-export function mcpEnvHasToken(id: ProviderId, env: Record<string, string> | undefined, args: unknown[] = []): boolean {
-  if (id === "github" && githubHostElsewhere({ ...process.env, ...env }, args)) return false
+export function mcpEnvHasToken(id: ProviderId, server: core.McpServer): boolean {
+  if (id === "github" && !mcpServerIsGithubDotCom(server)) return false
   const patterns = core.BUILTIN_SECRET_FIELDS[id].flatMap((field) => FIELD_SOURCES[field]?.mcp ?? [])
-  return Object.entries(env ?? {}).some(([key, value]) => typeof value === "string" && !isEnvReference(value) && patterns.some((p) => p.test(key)))
+  return Object.entries(server.env ?? {}).some(([key, value]) => typeof value === "string" && !isEnvReference(value) && patterns.some((p) => p.test(key)))
 }
 
 function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
@@ -195,8 +219,7 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
   for (const { scope, servers } of core.mcpServerMaps(core.homeDir(), process.cwd())) {
     for (const [name, server] of Object.entries(servers ?? {})) {
       if (!server || typeof server !== "object" || !core.providerMatchesMcp(id, name, server)) continue
-      // The server runs with this environment plus its own, so a host set in either applies to its token.
-      if (id === "github" && githubHostElsewhere({ ...process.env, ...server.env }, server.args ?? [])) continue
+      if (id === "github" && !mcpServerIsGithubDotCom(server)) continue
       for (const [key, value] of Object.entries(server.env ?? {}))
         if (pattern.test(key) && typeof value === "string" && !isEnvReference(value)) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name}, ${scope})` } }
     }
@@ -204,8 +227,8 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
 }
 
 function fromEnv(field: string): Found | undefined {
-  if (field === "github_token" && githubHostElsewhere(process.env)) return undefined
   for (const name of FIELD_SOURCES[field]?.env ?? []) {
+    if (field === "github_token" && !shellGithubTokenUsable(name)) continue
     const value = process.env[name]?.trim()
     if (value) return { value, source: { kind: "env", label: name } }
   }
@@ -226,7 +249,7 @@ function gitEmail(): string | undefined {
 
 function detectField(id: ProviderId, field: string): Found | undefined {
   if (core.demoMode()) return undefined
-  if (field === "github_token" && !ghMayReturnOtherHostToken()) {
+  if (field === "github_token" && ghTokenUsable()) {
     // The token for github.com only, the host it is validated against, whatever GH_HOST says.
     const r = spawnSync("gh", ["auth", "token", "--hostname", "github.com"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"], env: process.env })
     if (r.status === 0 && r.stdout.trim()) return { value: r.stdout.trim(), source: { kind: "cli", label: "gh CLI" } }
@@ -687,7 +710,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   }
   const record = (synced: boolean, extra: Partial<StoredProvider> = {}) =>
     core.updateStore((store) => {
-      store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
+      store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, cleanupPending: false, ...extra }
     })
   /** Clears what was entered in the form. What it follows has already happened, so a failure comes back as a note instead of stopping the rest. */
   const clearDrafts = async (): Promise<string | null> => {
@@ -825,7 +848,9 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         await core.deleteSecret(id)
         await discardDraftSecrets(id)
       } catch (e) {
-        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}`
+        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id}${exposure.shared ? " --share" : ""} to remove it.`
+        // Recorded so that sync removes this leftover, and only a leftover, later.
+        await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: true })).catch(() => {})
       }
       const sharedNote = res.shared ? `Updated the shared connection${core.SHARED_CONNECTION_AUDIENCE}.` : null
       const message = [sharedNote, workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
