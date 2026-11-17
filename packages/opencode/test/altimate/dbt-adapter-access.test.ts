@@ -490,7 +490,7 @@ describe("AltimateApi.apiRequest", () => {
   })
 
   const HEADER_REFUSED =
-    "could not be sent: the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+    "could not be sent: the request was refused before it was sent (TypeError): the stored Altimate URL, API key or tenant name may be invalid."
 
   /** Every substring of `key` long enough to identify it, so a trimmed or split copy is caught too. */
   function expectNoPartOf(text: string, key: string) {
