@@ -25,6 +25,7 @@ export interface OpenThread {
   field?: string
   highlight?: string
   range?: DocsShareRange
+  dropped_messages: number
   messages: { id: number; user_id: number; author: string; at: string; text: string }[]
 }
 
@@ -63,6 +64,7 @@ export function openThreads(shares: DocsShare[], users: DocsShareUser[]): OpenTh
         highlight: clean(group.meta?.highlight),
         range: group.meta?.range ?? undefined,
         // The service gives no order: oldest first, the newest MAX_MESSAGES kept.
+        dropped_messages: Math.max(0, group.conversations.length - MAX_MESSAGES),
         messages: [...group.conversations]
           .sort((a, b) => (Date.parse(a.timestamp) || 0) - (Date.parse(b.timestamp) || 0) || a.conversation_id - b.conversation_id)
           .slice(-MAX_MESSAGES)
@@ -141,9 +143,10 @@ async function resolveProject(project: string | undefined): Promise<{ name?: str
   if (project) return { name: project }
   let info = await detectDbtProject(projectRoot())
   const marker = `${path.sep}dbt_packages${path.sep}`
-  if (info.found && info.path && `${info.path}${path.sep}`.includes(marker)) {
-    info = await detectDbtProject(info.path.slice(0, info.path.indexOf(marker)) || path.sep)
-  }
+  const full = info.found && info.path ? `${info.path}${path.sep}` : ""
+  const at = full.indexOf(marker)
+  // Inside dbt_packages means something below it: a project directory merely named so is the project.
+  if (at >= 0 && at + marker.length < full.length) info = await detectDbtProject(info.path!.slice(0, at) || path.sep)
   if (!info.name) return {}
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(info.name)) {
     return { problem: "the project's name in dbt_project.yml is not a plain name (is it a template?): pass `project`." }
@@ -179,11 +182,16 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         ])
         const all = openThreads(shares, users)
         const threads = all.slice(0, MAX_THREADS)
-        const truncated = threads.length < all.length || all.some((t) => t.messages.length >= MAX_MESSAGES)
+        const cutThreads = threads.length < all.length
+        const cutMessages = all.some((t) => t.dropped_messages > 0)
+        const truncated = cutThreads || cutMessages
+        const cutNote = [cutThreads && `the first ${MAX_THREADS} threads`, cutMessages && `the newest ${MAX_MESSAGES} messages of each thread`]
+          .filter(Boolean)
+          .join(" and ")
         return {
           title: `Comments: ${all.length} open`,
           metadata: { success: true, project, count: all.length, truncated, threads },
-          output: `${formatThreads(threads)}${truncated ? `\nShowing the first ${MAX_THREADS} threads and the newest ${MAX_MESSAGES} messages of each.` : ""}\n${SCOPE_NOTE}`,
+          output: `Project ${project}\n${formatThreads(threads)}${truncated ? `\nShowing ${cutNote}.` : ""}\n${SCOPE_NOTE}`,
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -215,7 +223,13 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
       // not on the share: check the pair against the project's open threads first.
       const { name: project, problem } = await resolveProject(args.project)
       if (!project) return noProject(problem)
-      const shares = await listSharedDocs([project], ctx.abort)
+      let shares: Awaited<ReturnType<typeof listSharedDocs>>
+      try {
+        shares = await listSharedDocs([project], ctx.abort)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return failure(`docs_share_comments: ${args.action}`, `Could not check the thread: ${msg}. Nothing was sent.`, msg)
+      }
       const known = shares.some(
         (s) =>
           s.share_id === args.share_id &&

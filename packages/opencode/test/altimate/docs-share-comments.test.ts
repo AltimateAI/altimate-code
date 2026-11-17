@@ -260,6 +260,29 @@ describe("docs_share_comments list", () => {
     expect(result.output).toContain("list")
   })
 
+  test("a failed check of the thread before a post says nothing was sent", async () => {
+    failOn = "/dbt/dbt_docs_share/all"
+    const tool = await initTool(DocsShareCommentsTool)
+    const result = await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 11, text: "Thanks" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("Nothing was sent")
+    expect(result.output).not.toContain("may already have been posted")
+  })
+
+  test("a thread of exactly 100 messages is not reported as cut, and the list names its project", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    const exact = Array.from({ length: 100 }, (_, i) => ({ conversation_id: i + 1, user_id: 1, timestamp: `2026-11-01T10:00:${String(i % 60).padStart(2, "0")}Z`, message: "m" }))
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? [{ ...SHARES[0], conversation_group: [{ ...group, conversations: exact }] }]
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    expect((result.metadata as any).truncated).toBe(false)
+    expect(result.output).not.toContain("Showing")
+    expect(result.output).toContain("Project jaffle_shop")
+  })
+
   test("comment text is one line and marked as data, so it cannot pose as another thread", async () => {
     answer = (endpoint) =>
       endpoint.startsWith("/dbt/dbt_docs_share/all")
@@ -310,6 +333,23 @@ describe("docs_share_comments list", () => {
     const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("status 500")
+  })
+
+  test("a project directory that is itself named dbt_packages is still the session's project", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "docs-share-"))
+    const cwd = process.cwd()
+    try {
+      const proj = path.join(dir, "dbt_packages")
+      await mkdir(proj)
+      await writeFile(path.join(proj, "dbt_project.yml"), "name: 'jaffle_shop'\nversion: '1.0'\n")
+      process.chdir(proj)
+      const tool = await initTool(DocsShareCommentsTool)
+      const result = await tool.execute({ action: "list" }, ctx)
+      expect(result.metadata.project).toBe("jaffle_shop")
+    } finally {
+      process.chdir(cwd)
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("takes the project from the dbt project holding the working directory", async () => {
