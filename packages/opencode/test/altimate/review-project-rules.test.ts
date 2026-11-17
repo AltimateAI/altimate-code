@@ -10,6 +10,7 @@ import {
   missingRefFindings,
   modelConfigFindings,
   packagesFindings,
+  testWindowFindings,
   testsOnNullColumns,
 } from "../../src/altimate/review/project-rules"
 import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
@@ -466,5 +467,29 @@ describe("adapter.dispatch keyword a variant does not take", () => {
     const f: ChangedFile = { path: "macros/ghost.sql", status: "modified", diff: "@@ -9 +9 @@\n-x\n+y\n" }
     const sql = head("col, dtype, size")
     expect(dispatchKwargFindings(f, sql, (name) => dispatchVariants(sql, name))).toHaveLength(0)
+  })
+})
+
+describe("singular test lookback window shortened", () => {
+  const edit = (before: string, after: string) =>
+    testWindowFindings({ path: "tests/recent_rows.sql", status: "modified", diff: `@@ -5,3 +5,3 @@\n from t\n-${before}\n+${after}\n group by 1\n` })
+  test("1 day to 30 minutes: fires on the added line", () => {
+    const fs = edit(
+      "where event_at >= timestamp_sub(current_timestamp(), interval 1 day)",
+      "where event_at >= timestamp_sub(current_timestamp(), interval 30 minute)",
+    )
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine).toBe(6)
+    expect(fs[0].body).toContain("from 1 day to 30 minutes")
+  })
+  test("dbt.dateadd with a negative day count", () => {
+    expect(edit("where d >= {{ dbt.dateadd('day', -7, 'current_date') }}", "where d >= {{ dbt.dateadd('day', -3, 'current_date') }}")).toHaveLength(1)
+  })
+  test("twin: the same window written another way, or a longer window, is silent", () => {
+    expect(edit("where d >= current_date - interval 1 day", "where d >= current_date - interval 24 hour")).toHaveLength(0)
+    expect(edit("where d >= current_date - interval 1 day", "where d >= current_date - interval 2 day")).toHaveLength(0)
+  })
+  test("a rewritten filter (window replaced by a var) is not a literal shrink", () => {
+    expect(edit("where d >= timestamp_sub(ts, interval 1 hour)", "where d >= timestamp('{{ var(\"batch_start\") }}')")).toHaveLength(0)
   })
 })

@@ -3,7 +3,7 @@
 import path from "path"
 import YAML from "yaml"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
-import { type ChangedFile, walkDiffLines } from "./diff-filter"
+import { type ChangedFile, walkDiffLines, walkDiffRows } from "./diff-filter"
 import { incrementalFilter, inlineConfig } from "./incremental-semantics"
 import { parenBody, topLevel } from "./rule-catalog"
 import { capabilityFor } from "./adapter-capabilities"
@@ -379,6 +379,62 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
       ),
     )
   return out
+}
+
+// ── singular test windows ───────────────────────────────────────────────────
+
+const UNIT_SECONDS: Record<string, number> = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000, quarter: 7776000, year: 31536000 }
+const UNIT = "(second|minute|hour|day|week|month|quarter|year)s?"
+// `interval 1 day`, `interval '1' day`, `interval '30 minutes'`, `dateadd('day', -3, …)` / `dbt.dateadd(datepart='day', interval=-3, …)`.
+const WINDOW_RES = [
+  new RegExp(`\\binterval\\s+'?\\s*(\\d+)\\s*'?\\s*'?${UNIT}\\b'?`, "gi"),
+  new RegExp(`\\bdate_?add\\s*\\(\\s*(?:datepart\\s*=\\s*)?['"]?${UNIT}['"]?\\s*,\\s*(?:interval\\s*=\\s*)?-\\s*(\\d+)`, "gi"),
+]
+
+/** Window lengths on a line in seconds, and the line with every window masked (for pairing edits). */
+function windows(line: string): { secs: number[]; shape: string } {
+  const secs: number[] = []
+  let shape = line.replace(/--.*$/, "")
+  WINDOW_RES.forEach((re, i) => {
+    shape = shape.replace(re, (_m, a: string, b: string) => {
+      const [n, unit] = i === 0 ? [a, b] : [b, a]
+      secs.push(Number(n) * UNIT_SECONDS[unit.toLowerCase()])
+      return "<window>"
+    })
+  })
+  return { secs, shape: shape.replace(/\s+/g, " ").trim().toLowerCase() }
+}
+
+/** A singular test whose lookback window literal got shorter: it now checks less data. */
+export function testWindowFindings(file: ChangedFile): Finding[] {
+  if (file.status !== "modified" || !/\.sql$/i.test(file.path)) return []
+  const rows = [...walkDiffRows(file.diff)]
+  const removed = rows.filter((r) => r.kind === "-").map((r) => windows(r.text)).filter((w) => w.secs.length)
+  if (!removed.length) return []
+  for (const r of rows) {
+    if (r.kind !== "+") continue
+    const now = windows(r.text)
+    if (!now.secs.length) continue
+    const was = removed.find((w) => w.shape === now.shape && w.secs.length === now.secs.length)
+    const shrunk = was && now.secs.some((s, i) => s < was.secs[i])
+    if (!was || !shrunk) continue
+    const fmt = (s: number) => {
+      const [u, n] = Object.entries(UNIT_SECONDS).reverse().find(([, n]) => s % n === 0 && s >= n) ?? ["second", 1]
+      return `${s / n} ${u}${s / n === 1 ? "" : "s"}`
+    }
+    const i = now.secs.findIndex((s, k) => s < was.secs[k])
+    const f = finding(
+      file,
+      "test-window-shrunk",
+      "suggestion",
+      "test_coverage",
+      "test lookback window got shorter",
+      `The window this test checks shrank from ${fmt(was.secs[i])} to ${fmt(now.secs[i])}, so rows outside the new window are no longer tested. If the test now runs on that schedule, say so; otherwise keep the longer window.`,
+      r.text,
+    )
+    return [{ ...f, startLine: r.line, endLine: r.line }]
+  }
+  return []
 }
 
 // ── adapter.dispatch variants ───────────────────────────────────────────────
