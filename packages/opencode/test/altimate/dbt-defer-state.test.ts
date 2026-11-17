@@ -324,7 +324,7 @@ describe("dbt_defer_state", () => {
     try {
       const result = await resolveDeferState(link)
       expect(result.enabled).toBe(false)
-      expect(result.reason).toContain("settings.json")
+      expect(result.reason).toContain(path.join(holder, ".vscode", "settings.json"))
     } finally {
       fs.rmSync(real, { recursive: true, force: true })
       fs.rmSync(holder, { recursive: true, force: true })
