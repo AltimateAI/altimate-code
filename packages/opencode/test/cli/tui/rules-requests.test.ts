@@ -3,7 +3,8 @@
 // The `/rules` menu's pure helpers: how a shown decision is remembered, and why the skill and knowledge part is missing
 // or short.
 import { describe, expect, test } from "bun:test"
-import { announceWhenClear, combinedToast, decisionToast, decisionToaster, requestsProblem, shownKey } from "../../../src/plugin/tui/altimate/rules"
+import { announceWhenClear, combinedToast, decisionToast, decisionToaster, requestActionsTitle, requestsProblem, shownKey } from "../../../src/plugin/tui/altimate/rules"
+import type { WorkspaceRequest } from "../../../src/plugin/tui/altimate/rules"
 
 describe("rules TUI", () => {
   test("a decision is remembered by kind, id and status: a rule and a skill with one id do not hide each other", () => {
@@ -39,6 +40,21 @@ describe("rules TUI", () => {
     expect(decisionToast({ public_id: "r", text: "x", status: "superseded" })).toBeUndefined()
     expect(combinedToast([approved])).toEqual(decisionToast(approved))
     expect(combinedToast([])).toBeUndefined()
+  })
+
+  test("a request sent back for changes is a warning with the comment and how to send it again", () => {
+    const sentBack = { ...approved, status: "changes_requested", reason: "Name the table" }
+    expect(decisionToast(sentBack)).toEqual({
+      variant: "warning",
+      message:
+        'Changes requested on your skill "cost-guard" by Olive — Name the table. Change the skill, then send it again with `altimate-code skill publish cost-guard` (or from your IDE).',
+      duration: 20000,
+    })
+    expect(decisionToast({ public_id: "r", text: "Name tables", status: "changes_requested", reviewer: "Olive", reason: "Which schema?" })?.message).toBe(
+      'Changes requested on your rule by Olive: "Name tables" — Which schema? Open /rules to see what you can do.',
+    )
+    expect(combinedToast([approved, sentBack])).toMatchObject({ variant: "warning" })
+    expect(combinedToast([approved, sentBack])?.message).toContain('skill "cost-guard" sent back for changes by Olive — Name the table')
   })
 
   test("decisions that arrive together are one toast, a warning when any is a rejection or a removal", () => {
@@ -106,5 +122,43 @@ describe("the activity line waits for decision toasts", () => {
 
   test("shows nothing once the TUI is closing", async () => {
     expect(await run([true, false], 1)).toEqual({ ok: false, shown: [], checks: 1 })
+  })
+})
+
+describe("requestActionsTitle", () => {
+  const request = (over: Partial<WorkspaceRequest> & { kind?: "skill" | "knowledge" }): WorkspaceRequest & { kind: "skill" | "knowledge" } => ({
+    kind: "skill",
+    public_id: "c-1",
+    name: "demo-naming",
+    status: "pending",
+    actions: ["withdraw"],
+    ...over,
+  })
+
+  test("a request sent back carries the reviewer's whole comment and how to send it again", () => {
+    const comment = "Also cover mart models (fct_ / dim_), and say whether snapshots follow this too"
+    expect(requestActionsTitle(request({ status: "changes_requested", reviewer: "Local Admin", reason: comment }))).toBe(
+      `Your skill "demo-naming": changes requested by Local Admin — ${comment}. Change the skill, then send it again with \`altimate-code skill publish demo-naming\` (or from your IDE).`,
+    )
+    expect(
+      requestActionsTitle(request({ kind: "knowledge", name: "Glossary", status: "changes_requested", reviewer: "Ann", reason: "Add ARR" })),
+    ).toBe(`Your knowledge base "Glossary": changes requested by Ann — Add ARR. Change the knowledge base, then send it again from the workspace's Knowledge tab.`)
+    // A name that is not a plain slug is quoted, so the printed command runs as written.
+    expect(requestActionsTitle(request({ name: "cost guard", status: "changes_requested" }))).toBe(
+      `Your skill "cost guard": changes requested. Change the skill, then send it again with \`altimate-code skill publish "cost guard"\` (or from your IDE).`,
+    )
+  })
+
+  test("a comment that already ends a sentence gets no second stop", () => {
+    expect(requestActionsTitle(request({ status: "rejected", reviewer: "Ann", reason: "Which column?" }))).toBe(
+      `Your skill "demo-naming": rejected by Ann — Which column?`,
+    )
+  })
+
+  test("a waiting or rejected request says its status, with no resend hint", () => {
+    expect(requestActionsTitle(request({}))).toBe(`Your skill "demo-naming": pending review.`)
+    expect(requestActionsTitle(request({ status: "rejected", reviewer: "Ann", reason: "Covered elsewhere" }))).toBe(
+      `Your skill "demo-naming": rejected by Ann — Covered elsewhere.`,
+    )
   })
 })
