@@ -164,10 +164,10 @@ const RESERVED = new Set([
   "in",
 ])
 // Clause words that start a list of tables. `from` inside these calls reads a column or a string instead.
-const TABLE_KEYWORDS = new Set(["from", "join", "into", "update", "using"])
+const TABLE_KEYWORDS = new Set(["from", "join", "straight_join", "into", "update", "using"])
 // Words that end a join's ON condition: the next join, or the next clause of the query.
 const JOIN_CONDITION_END = new Set([
-  "join", "inner", "left", "right", "full", "cross", "natural", "outer", "where", "group", "order", "having",
+  "join", "straight_join", "inner", "left", "right", "full", "cross", "natural", "outer", "where", "group", "order", "having",
   "union", "intersect", "except", "minus", "limit", "offset", "fetch", "window", "qualify", "for", "returning",
   "when", "set", "do", "select", "lateral", "distribute", "cluster", "sort", "settings",
 ])
@@ -349,8 +349,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       j = afterParens(tokens, j)
       const known = ctes.get(name) ?? { recursive, bodies: [], scopes: [] }
       known.bodies.push([open, tokens[j - 1].end])
-      // Visible after its own definition, so an earlier CTE or its own body names the real table; a recursive one sees itself.
-      known.scopes.push([recursive ? open : tokens[j - 1].end, scopeEnd])
+      // Visible after its own definition, so an earlier CTE or its own body names the real table; a recursive one sees every CTE of its WITH, later ones included.
+      known.scopes.push([recursive ? tokens[start - 1].start : tokens[j - 1].end, scopeEnd])
       ctes.set(name, known)
       if (!isPunct(tokens[j], ",")) return
       i = j + 1
@@ -423,7 +423,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       // An alias with or without AS, then its column list, then a comma continues a FROM list.
       if (tokens[i]?.text.toLowerCase() === "as") i++
       const alias = tokens[i]
-      const startsSample = alias?.kind === "word" && ["sample", "tablesample", "pivot", "unpivot"].includes(alias.text.toLowerCase()) && (isPunct(tokens[i + 1], "(") || ["bernoulli", "system", "block", "row"].includes(tokens[i + 1]?.text.toLowerCase() ?? ""))
+      const startsHint = alias?.kind === "word" && ["use", "force", "ignore"].includes(alias.text.toLowerCase()) && ["index", "key"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")
+      const startsSample = startsHint || alias?.kind === "word" && ["sample", "tablesample", "pivot", "unpivot"].includes(alias.text.toLowerCase()) && (isPunct(tokens[i + 1], "(") || ["bernoulli", "system", "block", "row"].includes(tokens[i + 1]?.text.toLowerCase() ?? ""))
       if (alias && !startsSample && (alias.kind === "quoted" || (alias.kind === "word" && !RESERVED.has(alias.text.toLowerCase())))) {
         i++
         if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
@@ -439,13 +440,21 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
   const skipSampleAndCondition = (start: number) => {
     let i = start
     const word = () => (tokens[i]?.kind === "word" ? tokens[i].text.toLowerCase() : "")
+    // MySQL's `USE|FORCE|IGNORE INDEX|KEY [FOR ...] (...)` also sits there.
+    const indexHint = () => ["use", "force", "ignore"].includes(word()) && ["index", "key"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")
     while (
+      indexHint() ||
       ["tablesample", "sample", "repeatable", "seed", "bernoulli", "system", "block", "row"].includes(word()) ||
       (["with", "pivot", "unpivot"].includes(word()) && isPunct(tokens[i + 1], "("))
     ) {
       // T-SQL table hints `WITH (...)` and PIVOT / UNPIVOT (with their alias) sit between a table and the comma that continues the list.
       const pivot = ["pivot", "unpivot"].includes(word())
+      const hint = indexHint()
       i++
+      if (hint) {
+        i++
+        while (tokens[i] && !isPunct(tokens[i], "(") && tokens[i].kind === "word" && ["for", "join", "order", "group", "by"].includes(tokens[i].text.toLowerCase())) i++
+      }
       if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
       if (pivot) {
         if (tokens[i]?.text.toLowerCase() === "as") i++
@@ -484,7 +493,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
         // A name followed by "(" after FROM, JOIN or USING is a table function; after INTO or UPDATE it is a table.
         readList(
           word === "into" && tokens[i + 1]?.text.toLowerCase() === "table" ? i + 2 : i + 1,
-          word === "from" || word === "join" || word === "using",
+          word === "from" || word === "join" || word === "straight_join" || word === "using",
         )
       }
     }
@@ -608,7 +617,11 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
     add({ raw: t, parts: splitQualified(t, dialect === "bigquery") })
   }
   return entries.map((entry) => {
-    const hits: (RelationCandidate & { root: boolean })[] = []
+    const hits: (RelationCandidate & { root: boolean; folds: boolean })[] = []
+    // Where an unquoted name is folded (Snowflake reads `orders` as ORDERS), the relation it really names comes first.
+    const direction = FOLDS_UNQUOTED[dialect]
+    const written = entry.parts[entry.parts.length - 1]
+    const folded = direction && !entry.raw.includes('"') && written ? (direction === "upper" ? written.toUpperCase() : written.toLowerCase()) : null
     for (const rel of relations) {
       const how = matchParts(entry.parts, rel.parts)
       if (!how) continue
@@ -620,10 +633,12 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
         relationName: rel.relationName,
         match: how,
         root: rel.root,
+        folds: folded === null || rel.parts[rel.parts.length - 1] === folded,
       })
     }
     hits.sort(
       (a, b) =>
+        Number(!a.folds) - Number(!b.folds) ||
         RANK[a.match] - RANK[b.match] || KIND_RANK[a.kind] - KIND_RANK[b.kind] ||
         Number(b.root) - Number(a.root) ||
         a.uniqueId.localeCompare(b.uniqueId),
@@ -633,7 +648,7 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
       raw: entry.raw,
       replaceWith: best ? best.replaceWith : entry.raw,
       match: best ? best.match : "none",
-      candidates: hits.map(({ root: _root, ...candidate }) => candidate),
+      candidates: hits.map(({ root: _root, folds: _folds, ...candidate }) => candidate),
     }
   })
 }

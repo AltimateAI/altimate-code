@@ -682,6 +682,18 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(raws("select * from public.café", "postgres")).toEqual(["public.café"])
   })
 
+  test("a recursive WITH sees every CTE of its list; MySQL index hints and STRAIGHT_JOIN keep their qualifiers", () => {
+    expect(mapRelations(["orders"], "with recursive a as (select * from orders), orders as (select 1) select * from a", [], "postgres")).toEqual([])
+    expect(raws("select * from raw.items use index (idx_id), archive.orders", "mysql")).toEqual(["raw.items", "archive.orders"])
+    expect(raws("select * from raw.items force index for join (i) a straight_join correct.orders b on a.id = b.id", "mysql")).toEqual(["raw.items", "correct.orders"])
+  })
+
+  test("an unquoted name is matched as the dialect folds it", () => {
+    const rel = (name: string, id: string) => ({ parts: ["DB", "S", name], call: `{{ ref('${id}') }}`, kind: "model" as const, name: id, uniqueId: id, relationName: `"DB"."S"."${name}"`, root: true })
+    const rows = mapRelations(["orders"], "select * from DB.S.orders", [rel("orders", "a_lower"), rel("ORDERS", "b_upper")], "snowflake")
+    expect(rows[0].replaceWith).toBe("{{ ref('b_upper') }}")
+  })
+
   test("T-SQL table hints and PIVOT do not end the list", () => {
     expect(raws("select * from db.a.orders with (nolock), db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
     expect(raws("select * from db.a.orders pivot (sum(x) for y in ([a])) p, db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
