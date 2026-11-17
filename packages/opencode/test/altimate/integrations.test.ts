@@ -2186,6 +2186,15 @@ describe("credentials flow", () => {
       } finally {
         fetchSpy.mockRestore()
       }
+      // A value quoted trimmed, or cut at a control character, is taken out too.
+      const quoted = spyOn(globalThis, "fetch").mockImplementation((async (_u: unknown, init: any) => {
+        throw new TypeError(`Header has invalid value: "${String(init?.headers?.Authorization ?? "").trim()}"`)
+      }) as any)
+      try {
+        await backend.listVisibleConnections({ apiUrl: "http://x", tenant: "t", token: "altimate_key_9876\rXYZW " }).catch((e) => expect(String(e)).not.toContain("altimate_key_9876"))
+      } finally {
+        quoted.mockRestore()
+      }
     })
 
     test("a config file whose args are not a list neither throws nor counts as GitHub's setup", async () => {
@@ -3188,11 +3197,13 @@ describe("credentials flow", () => {
       // It takes this machine's name again, so status still knows it as this machine's.
       expect(api.state.rows[0].name).toBe(`GitHub (from ${HOST})`)
       expect(await core.managedInWorkspace("github")).toBe(true)
-      // A name the user gave the connection is kept.
+      // A name the user gave the connection is kept, and it is still known as this machine's connection.
       api.state.rows[0].name = "My GitHub"
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
       expect(api.state.rows[0].name).toBe("My GitHub")
+      expect(await core.managedInWorkspace("github")).toBe(true)
+      expect(core.deriveRemote(api.state.rows as any, HOST, { github: id }).find((r) => r.integration_id === "github")?.managed).toBe(true)
     })
 
     test("a GitHub token named from the environment is refused beside another GitHub host", async () => {

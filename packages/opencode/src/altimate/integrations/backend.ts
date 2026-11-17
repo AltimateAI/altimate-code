@@ -37,6 +37,15 @@ export interface Connection {
   privacy?: string
 }
 
+/**
+ * Takes credentials out of an error message before it goes anywhere. An error can quote a value trimmed or cut at a control
+ * character (Bun's invalid-header error does), so each such piece is taken out as well as the whole value.
+ */
+export function redactSecrets(text: string, secrets: string[]): string {
+  const pieces = secrets.flatMap((v) => [v, v.trim(), ...v.split(/[\s\x00-\x1f]+/)]).filter((v) => v.length >= 6)
+  return [...new Set(pieces)].sort((a, b) => b.length - a.length).reduce((m, v) => m.split(v).join("<redacted>"), text)
+}
+
 /** The login used for backend calls, or null when there is none. */
 export async function backendConfig(): Promise<BackendConfig | null> {
   const env = { url: process.env.ALTIMATE_INTEGRATIONS_API_URL, tenant: process.env.ALTIMATE_INTEGRATIONS_TENANT, token: process.env.ALTIMATE_INTEGRATIONS_TOKEN }
@@ -124,7 +133,7 @@ async function call<T>(cfg: BackendConfig, method: string, path: string, body?: 
   } catch (e) {
     if (e instanceof BackendError) throw e
     // A transport error can quote the request, the key in its header included (Bun's invalid-header error does).
-    const text = (e instanceof Error ? e.message : String(e)).split(cfg.token).join("<redacted>")
+    const text = redactSecrets(e instanceof Error ? e.message : String(e), [cfg.token])
     throw new BackendError(`Could not reach the Altimate API: ${text}`, 0, null)
   } finally {
     clearTimeout(timer)

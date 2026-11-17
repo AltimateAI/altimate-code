@@ -616,8 +616,7 @@ async function request(url: string, init: RequestInit) {
     } catch (e) {
       // A transport error can quote the request, credentials in its headers included: each header value, and the token after
       // its scheme, is taken out before the message goes anywhere.
-      const secrets = Object.values((init.headers ?? {}) as Record<string, string>).flatMap((v) => [String(v), ...String(v).split(/\s+/).slice(1)]).filter((v) => v.length >= 8)
-      const message = secrets.reduce((m, v) => m.split(v).join("<redacted>"), e instanceof Error ? e.message : String(e))
+      const message = backend.redactSecrets(e instanceof Error ? e.message : String(e), Object.values((init.headers ?? {}) as Record<string, string>).map(String))
       throw Object.assign(new Error(message), { name: e instanceof Error ? e.name : "Error" })
     }
     const text = await res.text()

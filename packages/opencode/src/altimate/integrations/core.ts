@@ -592,7 +592,10 @@ const connectionExpiry = (c: backend.Connection): string | null => {
 const validatedAt = (c: backend.Connection) => Date.parse(c.last_validated_at ?? "") || 0
 
 /** The connection this tool manages for a provider: matched on integration and name. */
-export function findManaged(connections: backend.Connection[], id: ProviderId, host = os.hostname()): backend.Connection | undefined {
+/** This tool's connection for a provider: the one recorded on this backend first (it may have been renamed), else the one named for this machine. */
+export function findManaged(connections: backend.Connection[], id: ProviderId, host = os.hostname(), recorded: number | null = null): backend.Connection | undefined {
+  const mine = recorded == null ? undefined : connections.find((c) => c.id === recorded && c.integration_id === INTEGRATION_IDS[id])
+  if (mine) return mine
   const name = managedName(id, host)
   return connections.filter((c) => c.integration_id === INTEGRATION_IDS[id] && c.name === name).sort((a, b) => b.id - a.id)[0]
 }
@@ -602,11 +605,11 @@ export function findManaged(connections: backend.Connection[], id: ProviderId, h
  * most recently validated one (the managed one on a tie); `managedId` is the connection this tool
  * made, which update, disconnect and the removed-connection check follow.
  */
-export function deriveRemote(connections: backend.Connection[], host = os.hostname()): RemoteProvider[] {
+export function deriveRemote(connections: backend.Connection[], host = os.hostname(), recorded: Partial<Record<ProviderId, number | null>> = {}): RemoteProvider[] {
   const out: RemoteProvider[] = []
   for (const id of PROVIDER_IDS) {
     const own = connections.filter((c) => c.integration_id === INTEGRATION_IDS[id])
-    const managed = findManaged(connections, id, host)
+    const managed = findManaged(connections, id, host, recorded[id] ?? null)
     const pick = own.sort((a, b) => validatedAt(b) - validatedAt(a) || Number(b.id === managed?.id) - Number(a.id === managed?.id) || b.id - a.id)[0]
     if (!pick) continue
     out.push({
@@ -720,7 +723,7 @@ export async function statusRemote(): Promise<StatusResult> {
   }
   if (!cfg) return local
   try {
-    const remote = deriveRemote(await backend.listOwnConnections(cfg))
+    const remote = deriveRemote(await backend.listOwnConnections(cfg), os.hostname(), recordedIds(cfg))
     const detections = Object.values(loadStore().providers).flatMap((rec) => (rec?.detection ? [rec.detection] : []))
     const merged = mergeRemote(local, remote, Date.now(), detections)
     // A connection recorded on another sign-in is not in this workspace view; it is shown as this machine knows it, with where it is.
@@ -780,7 +783,13 @@ export const isSynced = (id: ProviderId) => {
 /** This tool's workspace connection for the provider exists in the workspace. Throws when the workspace cannot be read, so a caller never mistakes a failed lookup for an absent connection. */
 export async function managedInWorkspace(id: ProviderId): Promise<boolean> {
   const cfg = await realConfig()
-  return cfg ? Boolean(findManaged(await backend.listOwnConnections(cfg), id)) : false
+  return cfg ? Boolean(findManaged(await backend.listOwnConnections(cfg), id, os.hostname(), recordedIds(cfg)[id] ?? null)) : false
+}
+
+/** The connection id each provider recorded on this backend, for lookups that follow it before the name. */
+export function recordedIds(cfg: backend.BackendConfig): Partial<Record<ProviderId, number | null>> {
+  const store = loadStore()
+  return Object.fromEntries(PROVIDER_IDS.map((id) => [id, store.providers[id]?.connectionBackend === backendKey(cfg) ? (store.providers[id]?.connectionId ?? null) : null]))
 }
 
 // ---------------------------------------------------------------- mock workspace sync
