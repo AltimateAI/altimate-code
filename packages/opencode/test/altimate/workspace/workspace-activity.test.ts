@@ -269,6 +269,22 @@ describe("when the server starts giving ids", () => {
   })
 })
 
+describe("when the server starts giving ids, on a deferred look", () => {
+  test("the change reported without an id is not reported again after the acknowledgement", async () => {
+    const changes: { at: string; id?: string }[] = [change("before", "added", "2026-11-12T10:00:00Z")]
+    activity = server(changes)
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    changes.splice(0, 1, tracked("e0", "before", "added", "2026-11-12T10:00:00Z"))
+    changes.push(tracked("e1", "after", "added", "2026-11-12T10:01:00Z"))
+    const shown = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    expect(shown.status === "ok" && shown.line).toBe("Since your last session in Growth: 1 skill added (after).")
+    if (shown.status !== "ok" || !shown.seen) throw new Error("expected a mark to acknowledge")
+    expect(await WorkspaceActivity.acknowledge(project, "tui", shown.seen)).toEqual({ status: "ok" })
+    const next = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    expect(next.status === "ok" && next.line).toBeUndefined()
+  })
+})
+
 describe("more ids in the window than a mark keeps", () => {
   test("the oldest go, and the cut point moves up to cover them", () => {
     const items = Array.from({ length: 250 }, (_, i) => ({
@@ -329,6 +345,8 @@ describe("a deferred look", () => {
       { awaitBackfill: true },
     )
     expect(await WorkspaceActivity.acknowledge(project, "tui", shown.seen)).toEqual({ status: "scope_changed" })
+    // Nothing was written for the new workspace: its first look only records where to start.
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
   })
 
   test("acknowledging an older look keeps what a look in between recorded", async () => {
@@ -364,6 +382,10 @@ describe("a deferred look", () => {
       .filter((f) => f.endsWith(".json"))
       .map((f) => JSON.parse(readFileSync(path.join(WorkspaceActivity.dir(), f), "utf8")))
     expect(stored.map((state) => state.seen?.tui?.from)).toEqual([""])
+    // A change that commits late, stamped below that cut point, is still reported.
+    changes.push(tracked("e3", "late", "added", "2026-11-12T09:59:30Z"))
+    const next = await WorkspaceActivity.changesSince(project, "tui")
+    expect(next.status === "ok" && next.line).toBe("Since your last session in Growth: 1 skill added (late).")
   })
 })
 

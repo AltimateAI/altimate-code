@@ -320,10 +320,11 @@ export async function changesSince(directory: string, host: string, options: { d
 
 /** Where the ids of two looks merged stop being complete. A cut point holds where the other look does not vouch
  * for it: after the other's newest time (the other never read there), or when the other was cut too (then the older
- * point, below which neither read). A look that read its whole window up to and past a cut point vouches for it. */
+ * point, below which neither read). A look that read its whole window up to and past a cut point vouches for it; a
+ * look recorded without ids (an older server) vouches for nothing. */
 export function mergedFrom(current: Mark | undefined, seen: Mark): string {
   const holds = (x: Mark | undefined, y: Mark | undefined) =>
-    Boolean(x?.from) && (!y?.at || key(x!.from) > key(y.at) || Boolean(y.from))
+    Boolean(x?.from) && (!y?.at || !y.overlap || key(x!.from) > key(y.at) || Boolean(y.from))
   const points = [...(holds(seen, current) ? [seen.from] : []), ...(holds(current, seen) ? [current!.from] : [])]
   if (points.length < 2) return points[0] ?? ""
   // Both hold. After the other's newest time, each is the only one that read there: the newer point covers both.
@@ -353,7 +354,8 @@ export async function acknowledge(
         ...look.ids,
         ...(look.at ? [{ at: look.at }] : []),
       ])
-      const from = mergedFrom(current, look)
+      // The newer of the merged looks' cut point and one `advance` set when it evicted ids.
+      const from = [mergedFrom(current, look), merged.from].filter(Boolean).reduce((a, b) => newest(a, b), "")
       merged.from = from && key(from) > ((merged.at && precise(merged.at, -OVERLAP_MS)) || "") ? from : ""
       await writeSeen({ ...state, seen: { ...state.seen, [host]: merged } })
       return { status: "ok" as const }
