@@ -48,7 +48,10 @@ export type Decision = "keep" | "discard" | "summary"
 export interface DroppedFinding {
   id: string
   file: string
+  startLine?: number
   title: string
+  /** The finding's body, clamped, so a discard can be judged without the model output. */
+  body: string
   category: string
   severity: string
   decision: Decision
@@ -532,6 +535,7 @@ export function retriage(
 
 /** Most discarded findings listed on the envelope. */
 export const DROPPED_MAX = 20
+const DROPPED_BODY_MAX = 600
 
 /** The verifier's record on a kept finding, under `evidence.result.verification`. */
 export interface Verification {
@@ -579,7 +583,9 @@ export function applyTriage(
         dropped.push({
           id: f.id,
           file: f.file,
+          ...(f.startLine ? { startLine: f.startLine } : {}),
           title: f.title,
+          body: f.body.slice(0, DROPPED_BODY_MAX),
           category: f.category,
           severity: f.severity,
           decision,

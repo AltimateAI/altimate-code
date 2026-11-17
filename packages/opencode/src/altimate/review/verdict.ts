@@ -254,7 +254,9 @@ export const VerdictEnvelope = z.object({
               z.object({
                 id: z.string(),
                 file: z.string(),
+                startLine: z.number().int().positive().optional(),
                 title: z.string(),
+                body: z.string(),
                 category: z.string(),
                 severity: z.string(),
                 decision: z.enum(["keep", "discard", "summary"]),
