@@ -393,6 +393,35 @@ export async function streamUsage(
   }
 }
 
+/** A core suggestion (`start_line`/`end_line`/`replacement`) the Finding schema accepts, else undefined. */
+function aiSuggestion(raw: unknown): Finding["suggestion"] {
+  const s = raw as { start_line?: unknown; end_line?: unknown; replacement?: unknown } | null | undefined
+  const start = s?.start_line
+  const end = s?.end_line
+  if (!Number.isInteger(start) || !Number.isInteger(end) || typeof s?.replacement !== "string") return undefined
+  if ((start as number) < 1 || (end as number) < (start as number) || s.replacement.length > 2_000) return undefined
+  return { startLine: start as number, endLine: end as number, replacement: s.replacement }
+}
+
+/** Optional fields core >= 0.10 returns (`evidence_line`, `pre_existing`,
+ *  `suggestion`, `cites`); older cores omit them, so each defaults to absent. */
+export function aiOptionalFields(item: Record<string, unknown>): {
+  body: string
+  evidenceLine?: string
+  preExisting?: true
+  suggestion?: Finding["suggestion"]
+} {
+  const evidence = typeof item.evidence_line === "string" ? item.evidence_line.trim().slice(0, 200) : ""
+  const cites = typeof item.cites === "string" ? item.cites.trim() : ""
+  const suggestion = aiSuggestion(item.suggestion)
+  return {
+    body: String(item.body) + (cites ? ` (per \`${cites}\`)` : ""),
+    ...(evidence ? { evidenceLine: evidence } : {}),
+    ...(item.pre_existing === true ? { preExisting: true as const } : {}),
+    ...(suggestion ? { suggestion } : {}),
+  }
+}
+
 /** One model call over a group of files: send, wait (bounded), parse and clamp in core. */
 async function reviewBatch(
   input: AiReviewInput,
@@ -477,7 +506,7 @@ async function reviewBatch(
             severity,
             category: item.category as ReviewCategory,
             title: `${file.model}: ${item.title}`,
-            body: String(item.body),
+            ...aiOptionalFields(item),
             file: file.path,
             model: file.model,
             startLine: typeof item.line === "number" ? item.line : undefined,
