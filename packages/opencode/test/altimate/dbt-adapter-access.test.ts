@@ -1,5 +1,5 @@
 // The tools the dbt Power User features call: their allow-list entries and placeholder answers, the
-// one gate every dbt-adapter-backed tool goes through, and the API helper for new endpoint files. The
+// one gate the new dbt-adapter-backed tools go through, and the API helper for new endpoint files. The
 // dbt adapter is replaced through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"

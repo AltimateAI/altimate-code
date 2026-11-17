@@ -18,11 +18,11 @@ export const dbtAdapterAccessInternals = {
 }
 
 /**
- * The dbt adapter for a tool call, which the adapter-backed tools added after dbt_lineage go through. Starting the adapter
- * runs dbt deps and writes target/, and compiling renders Jinja, which can run SQL: a read-only call
- * (no write permission, or plan mode) never starts or uses it. Nor does a session in a dbt project the
- * adapter isn't set up for. Every wait, the project lookup and the adapter's start, is bounded by one
- * deadline and follows the call's abort.
+ * The dbt adapter for a tool call, which the adapter-backed tools added after dbt_lineage go through.
+ * Starting the adapter runs dbt deps and writes target/, and compiling renders Jinja, which can run
+ * SQL: a read-only call (no write permission, or plan mode) never starts or uses it. Nor does a
+ * session in a dbt project the adapter isn't set up for. Every wait, the project lookup and the
+ * adapter's start, is bounded by one deadline and follows the call's abort.
  */
 export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | "extra">): Promise<DbtAdapterAccess> {
   const signal = ctx.abort
