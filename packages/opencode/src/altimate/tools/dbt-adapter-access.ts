@@ -21,7 +21,8 @@ export const dbtAdapterAccessInternals = {
  * The dbt adapter for a tool call, which every adapter-backed tool goes through. Starting the adapter
  * runs dbt deps and writes target/, and compiling renders Jinja, which can run SQL: a read-only call
  * (no write permission, or plan mode) never starts or uses it. Nor does a session in a dbt project the
- * adapter isn't set up for. The wait for the adapter to start is bounded and follows the call's abort.
+ * adapter isn't set up for. Every wait, the project lookup and the adapter's start, is bounded by one
+ * deadline and follows the call's abort.
  */
 export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | "extra">): Promise<DbtAdapterAccess> {
   const signal = ctx.abort
@@ -32,12 +33,30 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
       refusal: "read_only",
       reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
     }
+  // One deadline and the call's abort bound every wait below, the dbt config reads included: a stalled
+  // read gives up with the start's timeout, and a cancelled call stops waiting at once.
+  let stop = () => {}
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const waited = new Promise<never>((_, reject) => {
+    stop = () => reject(signal.reason)
+    signal.addEventListener("abort", stop, { once: true })
+    const seconds = dbtAdapterAccessInternals.adapterStartTimeoutMs / 1000
+    timer = setTimeout(
+      () => reject(new Error(`the dbt adapter didn't start within ${seconds} s`)),
+      dbtAdapterAccessInternals.adapterStartTimeoutMs,
+    )
+  })
+  // It can reject between two races, when nothing awaits it: the next race still sees the rejection.
+  waited.catch(() => {})
+  const bounded = async <T>(work: Promise<T>): Promise<T> => {
+    const value = await Promise.race([work, waited])
+    // An abort queued while the work settled still wins.
+    signal.throwIfAborted()
+    return value
+  }
   try {
-    const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
-    // The import yields: a call cancelled meanwhile starts nothing.
-    signal.throwIfAborted()
-    const project = await sessionProject()
-    signal.throwIfAborted()
+    const { getDbtAdapter, getDbtProjectRoot } = await bounded(import("../native/connections/register"))
+    const project = await bounded(sessionProject())
     if (project?.other) {
       return {
         refusal: "other_project",
@@ -46,24 +65,10 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
           : `the dbt adapter isn't set up for ${project.other}`,
       }
     }
-    let stop = () => {}
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const waited = new Promise<never>((_, reject) => {
-      stop = () => reject(signal.reason)
-      signal.addEventListener("abort", stop, { once: true })
-      const seconds = dbtAdapterAccessInternals.adapterStartTimeoutMs / 1000
-      timer = setTimeout(
-        () => reject(new Error(`the dbt adapter didn't start within ${seconds} s`)),
-        dbtAdapterAccessInternals.adapterStartTimeoutMs,
-      )
-    })
-    const adapter = await Promise.race([getDbtAdapter(), waited]).finally(() => {
-      signal.removeEventListener("abort", stop)
-      clearTimeout(timer)
-    })
+    const adapter = await bounded(getDbtAdapter())
     if (!adapter) {
       // No adapter also when the project exists but the adapter failed to start: say which.
-      const root = await getDbtProjectRoot()
+      const root = await bounded(getDbtProjectRoot())
       const found = !!root && fs.existsSync(path.join(root, "dbt_project.yml"))
       return found
         ? { refusal: "not_started", reason: "the dbt adapter didn't start" }
@@ -75,6 +80,9 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   } catch (e) {
     if (signal.aborted) throw e
     return { refusal: "not_started", reason: e instanceof Error ? e.message : String(e) }
+  } finally {
+    signal.removeEventListener("abort", stop)
+    clearTimeout(timer)
   }
 }
 

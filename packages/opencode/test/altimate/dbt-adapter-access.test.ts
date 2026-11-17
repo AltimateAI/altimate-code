@@ -215,6 +215,86 @@ describe("dbtAdapterFor", () => {
     }
   })
 
+  test("a stalled dbt config read gives up at the start timeout", async () => {
+    let release = () => {}
+    dbtAdapterInternals.readConfig = () => new Promise((resolve) => (release = () => resolve(null)))
+    const saved = dbtAdapterAccessInternals.adapterStartTimeoutMs
+    dbtAdapterAccessInternals.adapterStartTimeoutMs = 20
+    try {
+      const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
+      expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter didn't start within 0.02 s" })
+      expect(created).toBe(0)
+    } finally {
+      release()
+      dbtAdapterAccessInternals.adapterStartTimeoutMs = saved
+      await disposeInstance(project)
+    }
+  })
+
+  test("a call cancelled during a stalled dbt config read throws at once", async () => {
+    let release = () => {}
+    let entered = () => {}
+    const reading = new Promise<void>((resolve) => (entered = resolve))
+    dbtAdapterInternals.readConfig = () => {
+      entered()
+      return new Promise((resolve) => (release = () => resolve(null)))
+    }
+    const controller = new AbortController()
+    try {
+      const pending = Instance.provide({
+        directory: project,
+        fn: () => dbtAdapterFor({ ...ctx, abort: controller.signal }),
+      })
+      await reading
+      controller.abort(new Error("cancelled"))
+      await expect(pending).rejects.toThrow("cancelled")
+    } finally {
+      release()
+      await disposeInstance(project)
+    }
+  })
+
+  test("removes its abort listener and its timer whatever the outcome", async () => {
+    const controller = new AbortController()
+    const signal = controller.signal
+    let listening = 0
+    const add = signal.addEventListener.bind(signal)
+    const remove = signal.removeEventListener.bind(signal)
+    signal.addEventListener = ((...a: Parameters<typeof add>) => {
+      if (a[0] === "abort") listening += 1
+      return add(...a)
+    }) as typeof signal.addEventListener
+    signal.removeEventListener = ((...a: Parameters<typeof remove>) => {
+      if (a[0] === "abort") listening -= 1
+      return remove(...a)
+    }) as typeof signal.removeEventListener
+    const timers = new Set<unknown>()
+    const set = globalThis.setTimeout
+    const clear = globalThis.clearTimeout
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      const t = set(fn, ms)
+      timers.add(t)
+      return t
+    }) as typeof setTimeout
+    globalThis.clearTimeout = ((t: ReturnType<typeof setTimeout>) => {
+      timers.delete(t)
+      return clear(t)
+    }) as typeof clearTimeout
+    try {
+      expect((await dbtAdapterFor({ ...ctx, abort: signal })).adapter).toBeDefined()
+      dbtAdapterInternals.create = async () => {
+        throw new Error("dbt-integration missing")
+      }
+      resetDbtAdapter()
+      expect((await dbtAdapterFor({ ...ctx, abort: signal })).refusal).toBe("not_started")
+    } finally {
+      globalThis.setTimeout = set
+      globalThis.clearTimeout = clear
+    }
+    expect(listening).toBe(0)
+    expect(timers.size).toBe(0)
+  })
+
   test("a session in another dbt project than the adapter's says which", async () => {
     const other = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-other-"))
     await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
@@ -323,10 +403,101 @@ describe("AltimateApi.apiRequest", () => {
     }
   })
 
-  test("names the file when the stored credentials can't be read", async () => {
-    await Bun.write(path.join(home, ".altimate", "altimate.json"), "{not json")
-    await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow(
-      `The Altimate credentials in ${path.join(home, ".altimate", "altimate.json")} can't be used`,
+  test("names the file and the failure, never the file's text, when the credentials aren't valid JSON", async () => {
+    const file = path.join(home, ".altimate", "altimate.json")
+    await Bun.write(
+      file,
+      '{"altimateUrl":"https://x.test","altimateInstanceName":"acme","altimateApiKey": sk_SECRET123}',
     )
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe(`The Altimate credentials in ${file} can't be used: the file is not valid JSON.`)
+    expect(error.message).not.toContain("sk_SECRET123")
+  })
+
+  test("names the missing field, never a value, when the credentials are incomplete", async () => {
+    const file = path.join(home, ".altimate", "altimate.json")
+    await Bun.write(file, JSON.stringify({ altimateUrl: "https://x.test", altimateApiKey: "sk_SECRET123" }))
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error.message).toBe(
+      `The Altimate credentials in ${file} can't be used: altimateInstanceName is missing or not valid.`,
+    )
+    expect(error.message).not.toContain("sk_SECRET123")
+  })
+
+  test("never shows the stored key when sending the request fails", async () => {
+    const key = "sk_SECRET123\r\nX: y"
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: key }),
+    )
+    // The real fetch: it rejects a header value with CR/LF, quoting the value.
+    const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).not.toContain("sk_SECRET123")
+    expect(error.message).toContain("API GET /dbt/v1/x could not be sent")
+  })
+
+  test("never shows the stored key from any fetch failure", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({
+        altimateUrl: "https://api.example.test",
+        altimateInstanceName: "acme",
+        altimateApiKey: "sk_SECRET123",
+      }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      throw new TypeError(`bad header: '${(init.headers as Record<string, string>).Authorization}'`)
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: bad header: 'Bearer [redacted]'")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("a timed-out request says it timed out", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "https://api.example.test", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise((_, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      })) as unknown as typeof fetch
+    const saved = AltimateApi.requestInternals.timeoutMs
+    AltimateApi.requestInternals.timeoutMs = 10
+    try {
+      await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow(
+        "API GET /dbt/v1/x timed out after 0.01 s",
+      )
+    } finally {
+      AltimateApi.requestInternals.timeoutMs = saved
+      globalThis.fetch = original
+    }
+  })
+
+  test("a call cancelled before it starts reads no credentials and sends nothing", async () => {
+    const original = globalThis.fetch
+    let sent = 0
+    globalThis.fetch = (async () => {
+      sent += 1
+      return new Response("{}")
+    }) as unknown as typeof fetch
+    const controller = new AbortController()
+    controller.abort(new Error("cancelled by the user"))
+    try {
+      // No credentials are stored: reading them would fail with another message.
+      await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x", undefined, controller.signal)).rejects.toThrow(
+        "cancelled by the user",
+      )
+      expect(sent).toBe(0)
+    } finally {
+      globalThis.fetch = original
+    }
   })
 })

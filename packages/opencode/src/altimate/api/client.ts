@@ -318,6 +318,17 @@ export namespace AltimateApi {
     return data.auth_token
   }
 
+  /** Test seams. */
+  export const requestInternals = {
+    /** How long an API request may take, body included, before it is aborted. */
+    timeoutMs: 15_000,
+  }
+
+  /** `text` with every occurrence of `secret` replaced, so an error can be shown without the key. */
+  function redact(text: string, secret: string): string {
+    return secret ? text.split(secret).join("[redacted]") : text
+  }
+
   async function request(
     creds: AltimateCredentials,
     method: string,
@@ -326,24 +337,43 @@ export namespace AltimateApi {
     signal?: AbortSignal,
   ) {
     const url = `${creds.altimateUrl}${endpoint}`
+    // Bun's fetch throws at once, not as a rejection, when it refuses a header: both are caught.
+    const send = async (start: () => Promise<Response>) => {
+      try {
+        return await start()
+      } catch (e) {
+        // A timeout or the caller's abort rejects with its own reason, which holds no header.
+        if (controller.signal.aborted || signal?.aborted) throw e
+        // Others can quote a header: Bun's check of a header value with CR/LF quotes `Bearer <key>`.
+        const message = redact(e instanceof Error ? e.message : String(e), creds.altimateApiKey)
+        throw new Error(`API ${method} ${endpoint} could not be sent: ${message}`)
+      }
+    }
     // altimate_change start — upstream_fix: bound every API request. Without a
     // signal a stalled server holds the caller indefinitely. The abort stays
     // armed until the BODY is read: `fetch` resolves on headers.
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15_000)
+    const seconds = requestInternals.timeoutMs / 1000
+    const timeout = setTimeout(
+      () =>
+        controller.abort(new DOMException(`API ${method} ${endpoint} timed out after ${seconds} s`, "TimeoutError")),
+      requestInternals.timeoutMs,
+    )
     try {
-      const res = await fetch(url, {
-        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${creds.altimateApiKey}`,
-          "x-tenant": creds.altimateInstanceName,
-          ...clientHeaders(),
-        },
-        // Any body but undefined is sent: null, false, 0 and "" are JSON values too.
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      })
+      const res = await send(() =>
+        fetch(url, {
+          signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+          method,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creds.altimateApiKey}`,
+            "x-tenant": creds.altimateInstanceName,
+            ...clientHeaders(),
+          },
+          // Any body but undefined is sent: null, false, 0 and "" are JSON values too.
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        }),
+      )
       if (!res.ok) {
         throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
       }
@@ -354,11 +384,25 @@ export namespace AltimateApi {
     // altimate_change end
   }
 
+  /** What is wrong with the stored credentials, naming fields but never quoting the file's text. */
+  function credentialsProblem(e: unknown): string {
+    // The parser's message quotes the text it stopped at, which can be the key.
+    if (e instanceof SyntaxError) return "the file is not valid JSON."
+    if (e instanceof z.ZodError) {
+      const fields = [...new Set(e.issues.map((issue) => issue.path.join(".")))]
+      if (fields.length === 0 || fields.includes("")) return "the file does not hold the credentials object."
+      return `${fields.join(", ")} ${fields.length === 1 ? "is" : "are"} missing or not valid.`
+    }
+    // A file system error or a missing ${env:NAME} variable: names a path or a variable, no value.
+    return e instanceof Error ? e.message : String(e)
+  }
+
   /**
    * Calls an Altimate API endpoint with the stored credentials (Bearer key and x-tenant headers) and
    * returns the parsed JSON body. Endpoint functions in other files go through this. Fails with a
    * message naming the credentials file when none are stored or they can't be read. `signal` (a tool
-   * call's `ctx.abort`) cancels the request as well as the 15 s timeout.
+   * call's `ctx.abort`) cancels the request as well as the 15 s timeout. No error it raises quotes the
+   * stored key.
    */
   export async function apiRequest(
     method: string,
@@ -366,6 +410,7 @@ export namespace AltimateApi {
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<any> {
+    signal?.throwIfAborted()
     let creds: AltimateCredentials
     try {
       creds = await getCredentials()
@@ -375,7 +420,7 @@ export namespace AltimateApi {
         throw new Error(
           `No Altimate credentials are stored: sign in to Altimate in altimate-code first (they are saved to ${p}).`,
         )
-      throw new Error(`The Altimate credentials in ${p} can't be used: ${e instanceof Error ? e.message : String(e)}`)
+      throw new Error(`The Altimate credentials in ${p} can't be used: ${credentialsProblem(e)}`)
     }
     return request(creds, method, endpoint, body, signal)
   }
