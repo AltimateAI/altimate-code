@@ -10,11 +10,14 @@ import {
   missingRefFindings,
   modelConfigFindings,
   packagesFindings,
+  quickstartModelFindings,
   testWindowFindings,
   testsOnNullColumns,
+  yamlParseFindings,
 } from "../../src/altimate/review/project-rules"
 import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
-import { isSuppressiblePortability } from "../../src/altimate/review/orchestrate"
+import { isSuppressiblePortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { detectMacroPatterns } from "../../src/altimate/review/dbt-patterns"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
@@ -491,5 +494,97 @@ describe("singular test lookback window shortened", () => {
   })
   test("a rewritten filter (window replaced by a var) is not a literal shrink", () => {
     expect(edit("where d >= timestamp_sub(ts, interval 1 hour)", "where d >= timestamp('{{ var(\"batch_start\") }}')")).toHaveLength(0)
+  })
+})
+
+/** A whole review over files given as head/base contents (diff = every head line added). */
+async function prReview(
+  files: { path: string; status?: ChangedFile["status"]; head?: string; base?: string; diff?: string }[],
+  extra: Partial<Parameters<typeof runReview>[0]> & { tree?: Record<string, string> } = {},
+) {
+  const runner: ReviewRunner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "A" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true, differences: [], confidence: "high" } as any
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  }
+  const byPath = new Map(files.map((f) => [f.path, f]))
+  const { tree = {}, ...rest } = extra
+  return runReview({
+    changedFiles: files.map((f) => ({ path: f.path, status: f.status ?? "modified", diff: f.diff ?? plus(f.head ?? "") })),
+    config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+    rubric: DEFAULT_RUBRIC,
+    mode: "comment",
+    runner,
+    forceTier: "full",
+    getContent: async (p, side) => (side === "old" ? byPath.get(p)?.base : (byPath.get(p)?.head ?? tree[p])),
+    ...rest,
+  })
+}
+const ruleIds = (fs: { rule?: string }[]) => fs.map((f) => f.rule)
+
+describe("YAML that stops parsing", () => {
+  const base = "supported_vars:\n  order_metadata:\n    type: dictionary\n    display_name: Customer\n"
+  const good = base + "\n  refund_metadata:\n    type: dictionary\n    display_name: Charge\n"
+  const bad = base + "\n    refund_metadata:\n    type: dictionary\n    display_name: Charge\n"
+  const f = (head: string): ChangedFile => ({ path: ".quickstart/quickstart.yml", status: "modified", diff: `@@ -4,0 +5,4 @@\n+\n+${head.split("\n").slice(5, 8).join("\n+")}\n` })
+  test("a key indented under the previous entry duplicates its keys: fires on the error line", () => {
+    const fs = yamlParseFindings(f(bad), base, bad)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].rule).toBe("dbt-project-rules:yaml-parse-error")
+    expect(fs[0].title).toContain("YAML key defined twice")
+    expect(fs[0].startLine).toBe(6)
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe("    refund_metadata:")
+  })
+  test("twin: the same key at the right indentation is silent", () => {
+    expect(yamlParseFindings(f(good), base, good)).toHaveLength(0)
+  })
+  test("a file that already failed at base is not this change", () => {
+    expect(yamlParseFindings(f(bad), bad, bad)).toHaveLength(0)
+  })
+  test("runs on a quickstart file the review otherwise doesn't classify, and lists it as reviewed", async () => {
+    const env = await prReview([{ path: ".quickstart/quickstart.yml", head: bad, base }])
+    expect(ruleIds(env.findings)).toContain("dbt-project-rules:yaml-parse-error")
+    expect((env.scope?.notReviewed ?? []).map((n) => n.path)).not.toContain(".quickstart/quickstart.yml")
+  })
+})
+
+describe("new model missing from the quickstart public_models", () => {
+  const qs = 'public_models: [\n  "crm__deals",\n  "crm__contacts",\n  "crm__companies"\n]\n'
+  const model = "select 1 as id"
+  test("a new crm__ model not listed: fires on the quickstart file", async () => {
+    const env = await prReview([
+      { path: ".quickstart/quickstart.yml", head: qs + "# touched\n", base: qs },
+      { path: "models/history/crm__daily_deal_history.sql", status: "added", head: model },
+      { path: "models/intermediate/int_crm__deal_spine.sql", status: "added", head: model },
+    ])
+    const f = env.findings.find((x) => x.rule === "dbt-project-rules:quickstart-public-model-missing")!
+    expect(f.file).toBe(".quickstart/quickstart.yml")
+    expect(f.body).toContain("`crm__daily_deal_history`")
+    expect(f.body).not.toContain("int_crm__deal_spine")
+  })
+  test("twin: the new model is listed", async () => {
+    const listed = qs.replace('"crm__companies"', '"crm__companies",\n  "crm__daily_deal_history"')
+    const env = await prReview([
+      { path: ".quickstart/quickstart.yml", head: listed, base: qs },
+      { path: "models/history/crm__daily_deal_history.sql", status: "added", head: model },
+    ])
+    expect(ruleIds(env.findings)).not.toContain("dbt-project-rules:quickstart-public-model-missing")
+  })
+  test("quickstart unchanged: the finding goes on the new model", () => {
+    const m: ChangedFile = { path: "models/crm__new.sql", status: "added" }
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["crm__new"])[0].file).toBe("models/crm__new.sql")
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["other__new"])).toHaveLength(0)
   })
 })
