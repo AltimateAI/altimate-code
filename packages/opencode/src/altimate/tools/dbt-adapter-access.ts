@@ -28,7 +28,12 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   const signal = ctx.abort
   // A cancelled call answers nothing, refused or not.
   signal.throwIfAborted()
-  if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
+  if (ctx.agent === "plan" && ctx.extra?.forceReadOnly !== true)
+    return {
+      refusal: "read_only",
+      reason: "this needs the dbt adapter, which plan mode doesn't start: switch to the build agent",
+    }
+  if (ctx.extra?.forceReadOnly === true)
     return {
       refusal: "read_only",
       reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
