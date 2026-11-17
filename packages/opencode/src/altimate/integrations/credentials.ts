@@ -497,6 +497,18 @@ export async function catalogSecretFields(id: ProviderId): Promise<Set<string>> 
 }
 const draftSecretNames = async (id: ProviderId) => new Set([...core.BUILTIN_SECRET_FIELDS[id], ...(core.loadStore().providers[id]?.secretFields ?? []), ...(await catalogSecretFields(id))])
 /** Deletes the pasted secret drafts of every field the provider can ask for: those of each catalog variant and of the connected credential. */
+/** After a save: removes the drafts it used, but not one entered again while it ran, which is newer than what was saved. */
+async function discardCheckedDrafts(id: ProviderId, checked: Record<string, string>) {
+  const names = await draftSecretNames(id)
+  await core.withLock(async () => {
+    for (const name of names) {
+      const key = core.secretKey("draft", id, name)
+      if (checked[name] !== undefined && (await core.readSecret(key)) !== checked[name]) continue
+      await core.deleteSecret(key)
+    }
+  })
+}
+
 export async function discardDraftSecrets(id: ProviderId) {
   const names = await draftSecretNames(id)
   await core.withLock(async () => {
@@ -778,7 +790,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   /** Clears what was entered in the form. What it follows has already happened, so a failure comes back as a note instead of stopping the rest. */
   const clearDrafts = async (): Promise<string | null> => {
     try {
-      await discardDraftSecrets(id)
+      await discardCheckedDrafts(id, r.values)
       return null
     } catch (e) {
       return `What was entered could not be cleared from this machine: ${e instanceof Error ? e.message : String(e)}`
@@ -946,7 +958,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       }
       // What was typed in is the form's, not the credential's: discard removes it, as for any other draft.
       try {
-        await discardDraftSecrets(id)
+        await discardCheckedDrafts(id, r.values)
       } catch (e) {
         leftover = [leftover, `What was entered could not be cleared from this machine: ${e instanceof Error ? e.message : String(e)}. Run altimate integrations discard ${id} to remove it.`].filter(Boolean).join(" ")
       }

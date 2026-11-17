@@ -147,7 +147,7 @@ export async function listOwnConnections(cfg: BackendConfig): Promise<Connection
 }
 export const createConnection = (cfg: BackendConfig, body: { name: string; integration_id: string; config: Record<string, unknown> }) =>
   call<Connection>(cfg, "POST", "/connections/", body)
-export const updateConnection = (cfg: BackendConfig, id: number, body: { config: Record<string, unknown> }) =>
+export const updateConnection = (cfg: BackendConfig, id: number, body: { config: Record<string, unknown>; name?: string }) =>
   call<Connection>(cfg, "PATCH", `/connections/${id}`, body)
 export const deleteConnection = (cfg: BackendConfig, id: number) => call<unknown>(cfg, "DELETE", `/connections/${id}`)
 /** The workspace integrations catalog: what each provider's web form asks for. */

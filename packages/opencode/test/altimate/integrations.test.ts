@@ -260,7 +260,7 @@ function connectionsStub() {
     const row = state.rows.find((r) => r.id === id && r.is_owner && !r.deleted)
     if (!row) return Response.json({ detail: "Connection not found" }, { status: 404 })
     if (req.method === "PATCH" && url.pathname === `/connections/${id}`) {
-      Object.assign(row, { config: body.config, is_valid: state.valid, updated_at: "2030-07-01T00:00:00Z" })
+      Object.assign(row, { config: body.config, is_valid: state.valid, updated_at: "2030-07-01T00:00:00Z", ...(body.name ? { name: body.name } : {}) })
       return Response.json(row)
     }
     if (req.method === "DELETE" && url.pathname === `/connections/${id}`) {
@@ -2114,6 +2114,17 @@ describe("credentials flow", () => {
       expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(GOOD)
     })
 
+    test("a successful connect keeps a draft entered again while it ran", async () => {
+      await token("github", "github_token")
+      onUser = () => creds.setSecretDraft("github", "github_token", { kind: "clipboard" }, clip("ghp_entered_meanwhile_1234"))
+      try {
+        expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      } finally {
+        onUser = null
+      }
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe("ghp_entered_meanwhile_1234")
+    })
+
     test("a recorded leftover is not offered again by connect", async () => {
       real()
       await core.storeSecret(core.secretKey("cred", "github", "github_token"), GOOD)
@@ -3161,6 +3172,9 @@ describe("credentials flow", () => {
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
       expect([api.state.rows.filter((r) => !r.deleted).map((r) => r.id), core.loadStore().providers.github?.connectionId]).toEqual([[id], id])
+      // It takes this machine's name again, so status still knows it as this machine's.
+      expect(api.state.rows[0].name).toBe(`GitHub (from ${HOST})`)
+      expect(await core.managedInWorkspace("github")).toBe(true)
     })
 
     test("a GitHub token named from the environment is refused beside another GitHub host", async () => {
