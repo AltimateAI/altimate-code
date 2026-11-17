@@ -489,6 +489,9 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
         let at = i + 1
         while (["if", "not", "exists"].includes(tokens[at]?.text.toLowerCase() ?? "")) at++
         readList(at, false)
+      } else if (word === "overwrite" && !["table", "directory", "local"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")) {
+        // Databricks' `INSERT OVERWRITE name`, without the optional TABLE.
+        readList(i + 1, false)
       } else if (TABLE_KEYWORDS.has(word)) {
         if (
           word === "from" &&

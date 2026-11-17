@@ -698,6 +698,7 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
 
   test("the target of INSERT OVERWRITE TABLE and CREATE TABLE keeps its qualifiers", () => {
     expect(raws("insert overwrite table main.live.orders select * from main.raw.input", "databricks")).toEqual(["main.live.orders", "main.raw.input"])
+    expect(raws("insert overwrite main.live.orders select * from main.raw.input", "databricks")).toEqual(["main.live.orders", "main.raw.input"])
     expect(raws("create or replace table main.live.orders as select * from main.raw.input", "snowflake")).toEqual(["main.live.orders", "main.raw.input"])
     expect(raws("create table if not exists main.live.orders as select * from main.raw.input", "postgres")).toEqual(["main.live.orders", "main.raw.input"])
   })
