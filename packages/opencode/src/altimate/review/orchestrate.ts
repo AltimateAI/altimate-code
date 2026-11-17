@@ -51,6 +51,8 @@ import {
   joinTargets,
   missingRefFindings,
   modelConfigFindings,
+  isPackageProject,
+  packageLockFindings,
   packagesFindings,
   quickstartModelFindings,
   testWindowFindings,
@@ -2314,6 +2316,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }),
     )
     for (const findings of sets) all.push(findings)
+
+    for (const file of reviewable.filter((f) => f.status === "added" && /(^|\/)package-lock\.yml$/.test(f.path))) {
+      const dir = file.path.slice(0, file.path.length - "package-lock.yml".length)
+      const [projectYml, testsYml] = await Promise.all([read(`${dir}dbt_project.yml`, "new"), read(`${dir}integration_tests/dbt_project.yml`, "new")])
+      if (projectYml === undefined && testsYml === undefined) continue
+      checkedOther(file)
+      all.push(packageLockFindings(file, isPackageProject(projectYml, testsYml)))
+    }
 
     const newModels = reviewable.filter((f) => f.kind === "model_sql" && f.status === "added")
     if (newModels.length) {
