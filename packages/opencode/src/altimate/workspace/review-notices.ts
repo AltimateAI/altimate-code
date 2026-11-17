@@ -66,7 +66,9 @@ export const Notice = z.object({
   kind: z.enum(["skill", "knowledge"]),
   name: z.string(),
   /** `retired`: removed from the workspace after approval. */
-  status: z.enum(["active", "rejected", "retired"]),
+  // altimate_change start — workspace review: request changes
+  status: z.enum(["active", "rejected", "retired", "changes_requested"]),
+  // altimate_change end
   reason: z.string().optional(),
   reviewer: z.string().optional(),
   /** When it was decided (the server's `reviewed_at`, else `updated_at`). */
@@ -185,6 +187,12 @@ const newestFirst = (notices: readonly Notice[]) => [...notices].sort((a, b) => 
 /** How every client remembers a decision it showed: rule and skill ids live in different id spaces. */
 export const decisionKey = (n: Pick<Notice, "kind" | "public_id" | "status">) => `${n.kind}:${n.public_id}:${n.status}`
 
+// altimate_change start — workspace review: request changes
+/** Decisions reported to the author once: approved, rejected, or sent back for changes. */
+const DECIDED: ReadonlySet<string> = new Set(["active", "rejected", "changes_requested"])
+const isDecided = (status: string): status is "active" | "rejected" | "changes_requested" => DECIDED.has(status)
+// altimate_change end
+
 /** The decisions in `items` this client has not recorded yet: the caller's own, seen pending (or, for a removal, approved)
  * before or decided after `state.since`; never one the person decided themselves. Pure. */
 export function decided(state: State, items: readonly ReviewApi.Contribution[]): Notice[] {
@@ -198,7 +206,9 @@ export function decided(state: State, items: readonly ReviewApi.Contribution[]):
     if (item.status === "retired") {
       // Removed by someone else from a workspace this client saw it in (approved, or still pending before that).
       if (item.decided_by_me || (!approved.has(item.public_id) && !pending.has(item.public_id) && !fresh(item))) return []
-    } else if (item.status !== "active" && item.status !== "rejected") return []
+    // altimate_change start — workspace review: request changes (a decision too, though the item stays open)
+    } else if (!isDecided(item.status)) return []
+    // altimate_change end
     else if (!pending.has(item.public_id) && !fresh(item)) return []
     return [
       {
@@ -228,7 +238,7 @@ export function advance(state: State, items: readonly ReviewApi.Contribution[], 
           item.status === "superseded" ||
           item.status === "withdrawn" ||
           item.status === "retired" ||
-          ((item.status === "active" || item.status === "rejected") && (shownIds.has(item.public_id) || !state.pending.includes(item.public_id))),
+          (isDecided(item.status) && (shownIds.has(item.public_id) || !state.pending.includes(item.public_id))),
       )
       .map((item) => item.public_id),
   )

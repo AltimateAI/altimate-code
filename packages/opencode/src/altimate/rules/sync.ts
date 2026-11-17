@@ -150,10 +150,70 @@ export async function adopt(root: string, ctx: Ready): Promise<{ state: State; s
 /** The state belongs to this run's account and workspace, or to none yet. */
 const ownedBy = (state: State, ctx: Ready) => !state.scope || RulesStore.sameScope(state.scope, ctx.scope)
 
+// altimate_change start — workspace review: request changes
+/** How long a proposal closed from here is remembered against pulls that started before it (well past any pull). */
+const CLOSED_LOCALLY_MS = 10 * 60_000
+/** Statuses only the author sets (`actOnRule`): withdrawn, or replaced by a new wording. */
+const AUTHOR_CLOSED: ReadonlySet<string> = new Set(["withdrawn", "superseded"])
+
+/** The closures a pull that started at `startedSeq` (and `started`, for one recorded before sequence numbers) cannot
+ * know about. */
+function fenced(closed: State["closed_locally"], startedSeq: number, started: string): State["closed_locally"] {
+  return closed.filter((c) => (c.seq !== undefined ? c.seq > startedSeq : c.at >= started))
+}
+
+/** A proposal sent back for changes that a pull no longer lists, while a new one of the same kind (`change`) on its rule
+ * key appeared: sent again (this client's answer was lost, or another machine sent it). `/rules` lists `sent`, so the
+ * old row reads replaced and the new one is added, to be withdrawn from here. Of two that fit, the latest one. */
+function resentElsewhere(state: State, previous: State["my_pending"]): void {
+  const listed = new Set(state.my_pending.map((p) => p.public_id))
+  for (const next of state.my_pending) {
+    if (state.sent.some((s) => s.public_id === next.public_id)) continue
+    const old = previous
+      .filter(
+        (p) =>
+          p.rule_key === next.rule_key &&
+          p.change === next.change &&
+          p.status === "changes_requested" &&
+          !listed.has(p.public_id) &&
+          state.sent.some((s) => s.public_id === p.public_id),
+      )
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0]
+    if (!old) continue
+    const at = next.created_at
+    const sent = state.sent.find((s) => s.public_id === old.public_id)!
+    Object.assign(sent, { status: "superseded", updated_at: at })
+    delete sent.reason
+    delete sent.reviewer
+    state.sent.push({ public_id: next.public_id, text: next.text, change: next.change, status: next.status ?? "pending", sent_at: at, updated_at: at })
+  }
+}
+
+/** A sent row still read as waiting although a decision on it is recorded (an answer that came after the decision was
+ * pulled wrote it back): it takes the latest recorded decision. */
+function settleDecided(state: State, closed: ReadonlySet<string>): void {
+  for (const sent of state.sent) {
+    if (sent.status !== "pending" || closed.has(sent.public_id)) continue
+    const latest = state.notices
+      .filter((n) => n.public_id === sent.public_id)
+      .reduce<State["notices"][number] | undefined>((a, n) => (!a || Date.parse(n.at) >= Date.parse(a.at) ? n : a), undefined)
+    if (!latest) continue
+    Object.assign(sent, { status: latest.status, updated_at: latest.at })
+    if (latest.reason) sent.reason = latest.reason
+    if (latest.reviewer) sent.reviewer = latest.reviewer
+  }
+}
+// altimate_change end
+
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
   const { credentialDigest } = await import("../workspace/state")
   const pulledWith = credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey)
   const { state: before, same } = await adopt(root, ctx)
+  // altimate_change start — workspace review: request changes
+  const started = new Date().toISOString()
+  // Closures recorded after this are later than anything this answer can know (`fenced`).
+  const startedSeq = before.close_seq
+  // altimate_change end
   try {
     const response = await RulesApi.sync(ctx.actAs, ctx.scope.datamateId, {
       repo_remote: ctx.scope.repoRemote,
@@ -182,7 +242,6 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       // (a known revision would answer `unchanged` and the rule would stay missing).
       state.revision = response.skipped ? undefined : response.revision
       state.cursor = response.cursor
-      state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
       if (current) state.pulled_with = pulledWith
       else delete state.pulled_with
@@ -198,7 +257,31 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.last_error = unreadable.length ? unreadable.join("; ") : undefined
       if (!response.unchanged) state.rules = response.rules
       // Always in the answer, `unchanged` or not (none from a server older than workspace review).
-      state.my_pending = response.my_pending
+      // altimate_change start — workspace review: request changes
+      // Closed here after this pull started: not brought back, and a resend's new proposal, which this answer cannot
+      // know, stays open. The waiting count follows the same correction.
+      const fence = fenced(state.closed_locally, startedSeq, started)
+      const closed = new Set(fence.map((c) => c.public_id))
+      const listed = response.my_pending.filter((p) => !closed.has(p.public_id))
+      // Not one closed here since (the new proposal withdrawn too), nor one this answer, or an earlier one, says was
+      // decided already.
+      const decidedIds = new Set([...response.my_reviewed.map((r) => r.public_id), ...state.notices.map((n) => n.public_id)])
+      const reopened = fence.flatMap((c) =>
+        c.replaced_by &&
+        !closed.has(c.replaced_by.public_id) &&
+        !decidedIds.has(c.replaced_by.public_id) &&
+        !listed.some((p) => p.public_id === c.replaced_by!.public_id)
+          ? [c.replaced_by]
+          : [],
+      )
+      const waiting = (p: { status?: string }) => (p.status ?? "pending") === "pending"
+      const dropped = response.my_pending.filter((p) => closed.has(p.public_id) && waiting(p)).length
+      state.pending_count = Math.max(0, response.pending_count - dropped + reopened.filter(waiting).length)
+      const previous = state.my_pending
+      state.my_pending = [...listed, ...reopened]
+      resentElsewhere(state, previous)
+      state.closed_locally = state.closed_locally.filter((c) => Date.now() - Date.parse(c.at) < CLOSED_LOCALLY_MS)
+      // altimate_change end
       for (const reviewed of response.my_reviewed) {
         if (state.notices.some((n) => n.public_id === reviewed.public_id && n.status === reviewed.status)) continue
         const notice = {
@@ -212,8 +295,15 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
         state.notices.push(notice)
         fresh.push(notice)
         const sent = state.sent.find((s) => s.public_id === reviewed.public_id)
-        if (sent) Object.assign(sent, { status: reviewed.status, reason: notice.reason, reviewer: notice.reviewer, updated_at: notice.at })
+        // altimate_change start — workspace review: request changes (the author's own closure is not undone by an
+        // earlier send-back reported again)
+        if (sent && !closed.has(sent.public_id) && !(AUTHOR_CLOSED.has(sent.status) && reviewed.status === "changes_requested"))
+          Object.assign(sent, { status: reviewed.status, reason: notice.reason, reviewer: notice.reviewer, updated_at: notice.at })
+        // altimate_change end
       }
+      // altimate_change start — workspace review: request changes
+      settleDecided(state, closed)
+      // altimate_change end
     })
     if (!applied) log.info("rules pull answer superseded; not applied")
     return { ok: true, rules: state.rules.length, pending: state.pending_count, notices: fresh }
@@ -320,7 +410,7 @@ const refusedWhole = new Map<string, string>()
 /** `RulesStore.update`, tried again while the learn lock is busy: what it records was already sent. Only a lock that was
  * never acquired is retried: then `change` did not run. Any other failure may come after the state was written (the
  * mirror), and running `change` again would apply it twice. */
-async function record(root: string, change: (state: State) => State | void): Promise<State> {
+export async function record(root: string, change: (state: State) => State | void): Promise<State> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await RulesStore.update(root, change)

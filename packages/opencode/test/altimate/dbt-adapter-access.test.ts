@@ -31,8 +31,6 @@ const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
   dbt_cte_profile: { model: "customers" },
 }
 const FEATURE_TOOLS = Object.keys(MINIMAL_ARGS)
-/** Tools that have their own implementation and tests. */
-const IMPLEMENTED = new Set(["dbt_health"])
 
 const ctx: Tool.Context = {
   sessionID: SessionID.make("ses_dbt_adapter_access"),
@@ -85,7 +83,7 @@ describe("feature tools in the allow-list", () => {
   })
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
-    for (const id of FEATURE_TOOLS.filter((id) => !IMPLEMENTED.has(id))) {
+    for (const id of FEATURE_TOOLS) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
@@ -351,6 +349,29 @@ describe("dbtAdapterFor", () => {
     expect(timers.size).toBe(0)
   })
 
+  test("refuses an adapter started from a later config read naming another project", async () => {
+    const other = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-moved-"))
+    await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
+    let reads = 0
+    // The session check reads the session's project; the adapter's own start reads another.
+    dbtAdapterInternals.readConfig = async () => ({
+      projectRoot: reads++ === 0 ? project : other,
+      pythonPath: "python3",
+      dbtIntegration: "corecommand",
+      queryLimit: 500,
+    })
+    try {
+      const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
+      expect(access).toEqual({
+        refusal: "other_project",
+        reason: `the dbt adapter is set up for ${other}, not ${project}`,
+      })
+    } finally {
+      await disposeInstance(project)
+      await rm(other, { recursive: true, force: true })
+    }
+  })
+
   test("a session in another dbt project than the adapter's says which", async () => {
     const other = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-other-"))
     await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
@@ -484,9 +505,11 @@ describe("AltimateApi.apiRequest", () => {
   const HEADER_REFUSED =
     "could not be sent: the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
 
-  /** Every substring of `key` long enough to identify it, so a trimmed or split copy is caught too. */
+  /** No 8-character run of `key` (or of a shorter piece of it) appears, so a trimmed or split copy is caught too. */
   function expectNoPartOf(text: string, key: string) {
-    for (const part of key.split(/\s+/).filter((p) => p.length >= 4)) expect(text).not.toContain(part)
+    for (const piece of key.split(/\s+/).filter((p) => p.length >= 4))
+      for (let i = 0; i + Math.min(8, piece.length) <= piece.length; i++)
+        expect(text).not.toContain(piece.slice(i, i + Math.min(8, piece.length)))
     expect(text).not.toContain("Bearer")
   }
 
@@ -526,6 +549,60 @@ describe("AltimateApi.apiRequest", () => {
       )
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).message).toBe("API GET /dbt/v1/x could not be sent: Error.")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("a coded TypeError is a network failure, not a header refusal", async () => {
+    await Bun.write(
+      path.join(home, ".altimate", "altimate.json"),
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "acme", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => {
+      throw Object.assign(new TypeError("fetch failed"), { code: "ECONNREFUSED" })
+    }) as unknown as typeof fetch
+    try {
+      const error = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+      expect(error.message).toBe("API GET /dbt/v1/x could not be sent: TypeError (ECONNREFUSED).")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("a stored URL that isn't one, or a body that can't be serialised, is not called a bad header", async () => {
+    const file = path.join(home, ".altimate", "altimate.json")
+    await Bun.write(
+      file,
+      JSON.stringify({ altimateUrl: "api.example.test", altimateInstanceName: "a", altimateApiKey: "k1" }),
+    )
+    const realFetch = globalThis.fetch
+    let urlSends = 0
+    globalThis.fetch = (async () => (urlSends++, new Response("{}"))) as unknown as typeof fetch
+    try {
+      // Not a URL, or a URL whose scheme isn't http(s): "localhost:3000" parses with the scheme "localhost:".
+      for (const altimateUrl of ["api.example.test", "localhost:3000", "file:///tmp", "ftp://api.example.test"]) {
+        await Bun.write(file, JSON.stringify({ altimateUrl, altimateInstanceName: "a", altimateApiKey: "k1" }))
+        const badUrl = await AltimateApi.apiRequest("GET", "/dbt/v1/x").catch((e: Error) => e)
+        expect(badUrl.message).toBe("API GET /dbt/v1/x could not be sent: the stored API URL is not an http(s) URL.")
+      }
+      expect(urlSends).toBe(0)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    await Bun.write(
+      file,
+      JSON.stringify({ altimateUrl: "http://127.0.0.1:9", altimateInstanceName: "a", altimateApiKey: "k1" }),
+    )
+    const original = globalThis.fetch
+    let sent = 0
+    globalThis.fetch = (async () => (sent++, new Response("{}"))) as unknown as typeof fetch
+    try {
+      const badBody = await AltimateApi.apiRequest("POST", "/dbt/v1/x", { n: 1n }).catch((e: Error) => e)
+      expect(badBody).toBeInstanceOf(TypeError)
+      expect(badBody.message).not.toContain("header")
+      expect(sent).toBe(0)
     } finally {
       globalThis.fetch = original
     }

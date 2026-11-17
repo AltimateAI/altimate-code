@@ -609,11 +609,10 @@ describe("dbt_health", () => {
     expect(python.calls).toHaveLength(0)
   })
 
-  test("plan mode says to switch agents, and --allow-write is kept for the forced read-only call", async () => {
+  test("plan mode is refused as a read-only call", async () => {
     const plan = await run({}, { agent: "plan" })
     expect(plan.metadata).toMatchObject({ success: false, refusal: "read_only" })
-    expect(plan.output).toContain("build agent")
-    expect(plan.output).not.toContain("--allow-write")
+    expect(plan.output).toContain("--allow-write")
   })
 
   test("an answer whose model_insights is an array, or holds a non-list, is a failure, not an empty report", async () => {
