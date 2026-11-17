@@ -661,6 +661,23 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(mapRelations(["orders"], 'with "Orders" as (select 1) select * from orders', [], "redshift").map((r) => r.raw)).toEqual(["orders"])
   })
 
+  test("a CTE hides a table only inside its own statement", () => {
+    const rows = mapRelations(["orders"], "with orders as (select 1) select * from orders; select * from orders", [], "postgres")
+    expect(rows.map((r) => r.raw)).toEqual(["orders"])
+    expect(mapRelations(["orders"], "with orders as (select 1) select * from orders", [], "postgres")).toEqual([])
+  })
+
+  test("T-SQL table hints and PIVOT do not end the list", () => {
+    expect(raws("select * from db.a.orders with (nolock), db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
+    expect(raws("select * from db.a.orders pivot (sum(x) for y in ([a])) p, db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
+  })
+
+  test("block comments nest where the dialect says so", () => {
+    expect(raws("select * from db.a.orders /* outer /* nested */ from db.wrong.orders */", "postgres")).toEqual(["db.a.orders"])
+    expect(raws("select /* a /* b */ from fake.orders */ * from real.orders", "mssql")).toEqual(["real.orders"])
+    expect(raws("select * from a.orders /* x /* y */ join a.payments", "mysql")).toEqual(["a.orders", "a.payments"])
+  })
+
   test("each of them reaches the mapped rows with the schema as written", () => {
     const relations = manifestRelations(MANIFEST)
     const rows = mapRelations(

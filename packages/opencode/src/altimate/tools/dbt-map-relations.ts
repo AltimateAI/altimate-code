@@ -98,8 +98,8 @@ type Reference = { raw: string; parts: string[]; start?: number; /** The last pa
 /** What the scan of a query found: its table references in text order, and the names its CTEs define. */
 export type Scan = {
   refs: Reference[]
-  /** By identity (see `identityOf`): whether the WITH is recursive, and the text offsets of each body that defines the name. */
-  ctes: Map<string, { recursive: boolean; bodies: [number, number][] }>
+  /** By identity (see `identityOf`): whether the WITH is recursive, the text offsets of each body that defines the name, and the text range each definition is visible in (its statement or enclosing parentheses). */
+  ctes: Map<string, { recursive: boolean; bodies: [number, number][]; scopes: [number, number][] }>
 }
 
 // Dialects whose double quotes (and, for some, backslashes) belong to string literals.
@@ -107,6 +107,8 @@ const DOUBLE_QUOTE_STRING = new Set(["bigquery", "databricks", "spark", "mysql",
 const BACKSLASH_ESCAPE = new Set(["bigquery", "databricks", "spark", "mysql", "hive", "clickhouse", "snowflake"])
 const DOLLAR_QUOTE = new Set(["snowflake", "postgres", "redshift", "duckdb"])
 const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "mssql", "fabric", "synapse", "oracle"])
+// Dialects whose block comments nest: an inner comment does not end the outer one.
+const NESTED_COMMENTS = new Set(["postgres", "postgresql", "redshift", "cockroachdb", "duckdb", "tsql", "sqlserver", "mssql", "fabric", "synapse"])
 const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb", "clickhouse"])
 // Dialects where a double-quoted name keeps its case while an unquoted one is folded, so `"orders"` and `ORDERS` differ.
 const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower", redshift: "lower" }
@@ -204,8 +206,19 @@ function tokenize(sql: string, dialect: string): Token[] {
     else if (two === "--" || (ch === "#" && HASH_COMMENT.has(dialect)) || (two === "//" && (dialect === "snowflake" || dialect === "clickhouse"))) {
       while (i < n && sql[i] !== "\n") i++
     } else if (two === "/*") {
-      const end = sql.indexOf("*/", i + 2)
-      i = end < 0 ? n : end + 2
+      if (NESTED_COMMENTS.has(dialect)) {
+        let depth = 1
+        let j = i + 2
+        while (j < n && depth > 0) {
+          if (sql.startsWith("/*", j)) (depth++, (j += 2))
+          else if (sql.startsWith("*/", j)) (depth--, (j += 2))
+          else j++
+        }
+        i = j
+      } else {
+        const end = sql.indexOf("*/", i + 2)
+        i = end < 0 ? n : end + 2
+      }
     } else if (ch === "'" || (ch === '"' && doubleIsString)) {
       const triple = dialect === "bigquery" && sql.startsWith(ch.repeat(3), i)
       if (triple) {
@@ -309,6 +322,15 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
     const keyword = tokens[i]?.text.toLowerCase() === "recursive"
     if (keyword) i++
     const recursive = keyword || IMPLICIT_RECURSION.has(dialect)
+    // A CTE is visible to the end of its statement, or of the parentheses around its WITH.
+    let depth = 0
+    let scopeEnd = sql.length
+    for (let k = start; k < tokens.length; k++) {
+      if (isPunct(tokens[k], "(")) depth++
+      else if (isPunct(tokens[k], ")") && depth-- === 0) (scopeEnd = tokens[k].start), (k = tokens.length)
+      else if (tokens[k].text === ";" && depth === 0) (scopeEnd = tokens[k].start), (k = tokens.length)
+    }
+    const scope: [number, number] = [tokens[start - 1].start, scopeEnd]
     while (tokens[i] && (tokens[i].kind === "word" || tokens[i].kind === "quoted")) {
       const name = identityOf(nameOf(tokens[i], dialect)[0], tokens[i].kind === "quoted" && tokens[i].text[0] === '"', dialect)
       let j = i + 1
@@ -320,8 +342,9 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       if (!isPunct(tokens[j], "(")) return
       const open = tokens[j].start
       j = afterParens(tokens, j)
-      const known = ctes.get(name) ?? { recursive, bodies: [] }
+      const known = ctes.get(name) ?? { recursive, bodies: [], scopes: [] }
       known.bodies.push([open, tokens[j - 1].end])
+      known.scopes.push(scope)
       ctes.set(name, known)
       if (!isPunct(tokens[j], ",")) return
       i = j + 1
@@ -387,7 +410,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       // An alias with or without AS, then its column list, then a comma continues a FROM list.
       if (tokens[i]?.text.toLowerCase() === "as") i++
       const alias = tokens[i]
-      const startsSample = alias?.kind === "word" && ["sample", "tablesample"].includes(alias.text.toLowerCase()) && (isPunct(tokens[i + 1], "(") || ["bernoulli", "system", "block", "row"].includes(tokens[i + 1]?.text.toLowerCase() ?? ""))
+      const startsSample = alias?.kind === "word" && ["sample", "tablesample", "pivot", "unpivot"].includes(alias.text.toLowerCase()) && (isPunct(tokens[i + 1], "(") || ["bernoulli", "system", "block", "row"].includes(tokens[i + 1]?.text.toLowerCase() ?? ""))
       if (alias && !startsSample && (alias.kind === "quoted" || (alias.kind === "word" && !RESERVED.has(alias.text.toLowerCase())))) {
         i++
         if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
@@ -403,9 +426,18 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
   const skipSampleAndCondition = (start: number) => {
     let i = start
     const word = () => (tokens[i]?.kind === "word" ? tokens[i].text.toLowerCase() : "")
-    while (["tablesample", "sample", "repeatable", "seed", "bernoulli", "system", "block", "row"].includes(word())) {
+    while (
+      ["tablesample", "sample", "repeatable", "seed", "bernoulli", "system", "block", "row"].includes(word()) ||
+      (["with", "pivot", "unpivot"].includes(word()) && isPunct(tokens[i + 1], "("))
+    ) {
+      // T-SQL table hints `WITH (...)` and PIVOT / UNPIVOT (with their alias) sit between a table and the comma that continues the list.
+      const pivot = ["pivot", "unpivot"].includes(word())
       i++
       if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
+      if (pivot) {
+        if (tokens[i]?.text.toLowerCase() === "as") i++
+        if (tokens[i] && (tokens[i].kind === "quoted" || (tokens[i].kind === "word" && !RESERVED.has(word())))) i++
+      }
     }
     if (word() !== "on") return i
     i++
@@ -548,7 +580,9 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
   for (const r of refs) {
     const last = r.parts[r.parts.length - 1]
     const whole = r.parts.join(".")
-    const cte = ctes.get(identityOf(last, !!r.quoted, dialect))
+    const named = ctes.get(identityOf(last, !!r.quoted, dialect))
+    // A CTE hides a table only where it is visible: a later statement can name a real table the same way.
+    const cte = named && named.scopes.some(([from, to]) => r.start! >= from && r.start! < to) ? named : undefined
     // A CTE's own name inside its own body is the real table unless the WITH is recursive.
     const inOwnBody = !!cte && !cte.recursive && cte.bodies.some(([from, to]) => r.start! >= from && r.start! < to)
     if (r.parts.length === 1 && cte && !inOwnBody) continue
