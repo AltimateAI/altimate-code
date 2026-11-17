@@ -455,6 +455,20 @@ describe("dbt_health", () => {
     }
   })
 
+  test("the byte limit counts UTF-8 bytes, not characters", async () => {
+    const cjk = "漢".repeat(20_000)
+    const many = Object.fromEntries(
+      Array.from({ length: 100 }, (_, n) => [
+        `model.shop.m${n}`,
+        [{ unique_id: `model.shop.m${n}`, original_file_path: `models/m${n}.sql`, severity: "WARNING", insight: { name: "Big", message: cjk, recommendation: "" } }],
+      ]),
+    )
+    python.stdout = JSON.stringify({ model_insights: many, nodes: {}, project: "shop" }) + "\n"
+    const result = await run()
+    expect(result.metadata.truncated).toBe(true)
+    expect(Buffer.byteLength(JSON.stringify(result.metadata.insights), "utf8")).toBeLessThanOrEqual(RESULT_BYTES)
+  })
+
   test("a result over the byte limit is cut, with the total said", async () => {
     const big = "x".repeat(40_000)
     const many = Object.fromEntries(
@@ -528,7 +542,7 @@ describe("dbt_health", () => {
       process.env.PYTHONPATH = pythonPath
       try {
         // The interpreter runs isolated, so PYTHONPATH is not read: the stub folder is added to the path inside the process.
-        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originalRun(py, `import sys\nsys.path.append(${JSON.stringify(pythonPath)})\n${script}`, args, cwd, signal)
+        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originalRun(py, `import sys\nsys.path.insert(0, ${JSON.stringify(pythonPath)})\n${script}`, args, cwd, signal)
         return await run()
       } finally {
         if (saved === undefined) delete process.env.PYTHONPATH
@@ -737,7 +751,7 @@ describe("dbt_health", () => {
       const saved = process.env.PYTHONPATH
       process.env.PYTHONPATH = pkg
       try {
-        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originals.runPython(py, `import sys\nsys.path.append(${JSON.stringify(pkg)})\n${script}`, args, cwd, signal)
+        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originals.runPython(py, `import sys\nsys.path.insert(0, ${JSON.stringify(pkg)})\n${script}`, args, cwd, signal)
         dbtAdapterInternals.create = async () => ({ isInitialized: () => true, getProjectRoot: () => dir, parseManifest: async () => parsed })
         const result = await run()
         expect(result.output).not.toContain("json.py")

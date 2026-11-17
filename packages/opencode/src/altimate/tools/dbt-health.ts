@@ -214,6 +214,16 @@ except Exception as e:
     print(json.dumps({"error": "failed", "detail": str(e), "version": datapilot_version}))
 `
 
+/** The root project's `name:` from dbt_project.yml, for a manifest whose metadata has no project_name. */
+function projectName(root: string): string | undefined {
+  try {
+    const m = /^name:\s*['"]?([^'"\s#]+)['"]?/m.exec(fs.readFileSync(path.join(root, "dbt_project.yml"), "utf8"))
+    return m?.[1]
+  } catch {
+    return undefined
+  }
+}
+
 /** A manifest `patch_path` (`package://models/schema.yml`) as the path inside its package. */
 function patchFile(patch: string | undefined): string {
   return patch ? patch.replace(/^[^:/]*:\/\//, "") : ""
@@ -279,7 +289,6 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     // the run; one that leaves only the last good manifest is said so in the answer.
     let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
     let rebuiltAt: number | undefined
-    let parsed_stale_path: string | undefined
     if (typeof adapter.parseManifest === "function") {
       try {
         if (typeof adapter.rebuildManifest === "function") {
@@ -302,7 +311,6 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         if (parsed?.stale) {
           // The same shape the other dbt tools give a stale manifest.
           const writtenAt = typeof parsed.stale.writtenAt === "number" && Number.isFinite(parsed.stale.writtenAt) ? parsed.stale.writtenAt : undefined
-          parsed_stale_path = typeof parsed.stale.manifestPath === "string" ? parsed.stale.manifestPath : undefined
           stale = {
             message: `The dbt project check failed, so these insights come from the manifest of the last successful parse${writtenAt === undefined ? "" : `, written ${new Date(writtenAt).toISOString()}`}. They may not match the project as it is now.`,
             manifest_path: parsed.stale.manifestPath,
@@ -322,7 +330,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     let manifest: string =
       (typeof adapter.getManifestPath === "function" ? adapter.getManifestPath() : undefined) ?? path.join(root, "target", "manifest.json")
     // The manifest the adapter read when it fell back to the last good one may sit under a configured target-path.
-    if (stale && typeof parsed_stale_path === "string" && parsed_stale_path) manifest = parsed_stale_path
+    if (stale && typeof stale.manifest_path === "string" && stale.manifest_path) manifest = stale.manifest_path
     if (!fs.existsSync(manifest)) return failure("no manifest", `dbt_health can't run: no manifest at ${manifest}; run dbt parse or dbt compile first.`)
     // The adapter's own watcher can replace this rebuild with one of its own (the replaced one resolves
     // normally and writes nothing): a manifest older than the rebuild this call started is the last one.
@@ -403,12 +411,12 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     try {
       realRoot = fs.realpathSync(root)
     } catch {}
-    const all = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project)
+    const all = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project ?? projectName(realRoot))
     // The structured result is read by a plugin that accepts at most 4 MiB: keep it well under that.
     let bytes = 0
     let keep = 0
     for (const i of all) {
-      bytes += JSON.stringify(i).length + 1
+      bytes += Buffer.byteLength(JSON.stringify(i), "utf8") + 1
       if (bytes > RESULT_BYTES) break
       keep++
     }
