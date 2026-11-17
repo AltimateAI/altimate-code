@@ -224,6 +224,32 @@ const macroSignatures = (sql: string | undefined) => {
   return out
 }
 
+/** Each `{% macro name(…) %}` / `{% test name(…) %}` with its parameters (name and whether it has a default)
+ *  and the head line range of its signature. Defaults may hold calls and lists. */
+function signatures(sql: string | undefined) {
+  const out = new Map<string, { params: { name: string; hasDefault: boolean }[]; first: number; last: number; test: boolean }>()
+  const text = sql ?? ""
+  for (const m of text.matchAll(/\{%-?\s*(macro|test)\s+([\w.]+)\s*\(/g)) {
+    const open = m.index! + m[0].length - 1
+    const body = parenBody(text, open)
+    const params: { name: string; hasDefault: boolean }[] = []
+    let depth = 0
+    let cur = ""
+    for (const ch of body + ",") {
+      if ("([{".includes(ch)) depth++
+      else if (")]}".includes(ch)) depth--
+      if (ch === "," && depth === 0) {
+        const name = /^\s*(\w+)/.exec(cur)?.[1]
+        if (name) params.push({ name, hasDefault: /=/.test(cur) })
+        cur = ""
+      } else cur += ch
+    }
+    const first = text.slice(0, m.index).split("\n").length
+    out.set(m[2], { params, first, last: first + (m[0] + body).split("\n").length - 1, test: m[1] === "test" })
+  }
+  return out
+}
+
 /** The comment text on a line (`-- …`, `/* … *\/`, `{# … #}`), or "". */
 const commentOf = (l: string) => /--(.*)$|\/\*(.*?)(\*\/|$)|\{#(.*?)(#\}|$)/.exec(l)?.slice(1).filter(Boolean).join(" ") ?? ""
 const TEMP_MARKER =
@@ -269,6 +295,33 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
         name,
       )
       out.push(at ? { ...f, startLine: at.line, endLine: at.line } : f)
+    }
+
+    // A parameter added to an existing macro with no default: every existing caller omits it, and Jinja
+    // binds an omitted parameter to Undefined, which is not `none` (an `is none` fallback never runs).
+    const oldSigs = signatures(oldContent)
+    for (const [name, sig] of signatures(newContent)) {
+      const old = oldSigs.get(name)
+      if (!old) continue
+      const known = new Set(old.params.map((p) => p.name))
+      for (const p of sig.params) {
+        // dbt itself passes `model` / `column_name` to a generic test.
+        if (p.hasDefault || known.has(p.name) || (sig.test && ["model", "column_name"].includes(p.name))) continue
+        const at = [...walkDiffLines(file.diff)].find(
+          (r) => r.kind === "+" && r.line >= sig.first && r.line <= sig.last && new RegExp(`\\b${p.name}\\b`).test(r.text),
+        )
+        if (!at) continue
+        const f = finding(
+          file,
+          "macro-param-no-default",
+          "warning",
+          "sql_correctness",
+          `new parameter \`${p.name}\` of \`${name}\` has no default`,
+          `\`${p.name}\` was added to the existing ${sig.test ? "test" : "macro"} \`${name}\` without a default. Every call written before this change omits it, and Jinja passes an omitted parameter as Undefined, not \`none\`: an \`is none\` fallback is skipped and the value renders as an empty string. Give it a default (\`${p.name}=none\`) unless every caller is updated in this change.`,
+          at.text,
+        )
+        out.push({ ...f, startLine: at.line, endLine: at.line })
+      }
     }
 
     // A var() key renamed with no fallback: projects that set the old key lose their override silently.
