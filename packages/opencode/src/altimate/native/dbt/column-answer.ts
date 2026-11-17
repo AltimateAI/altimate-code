@@ -465,6 +465,6 @@ export function describeAnswer(a: ColumnAnswer): string {
   const c = a.counts
   const what = a.direction === "downstream" ? "Column impact" : "Column trace (upstream)"
   const reach = `${c.columns} column${c.columns === 1 ? "" : "s"} in ${c.models} model${c.models === 1 ? "" : "s"}, ${c.hops} hop${c.hops === 1 ? "" : "s"}, ${c.ends} end${c.ends === 1 ? "" : "s"}`
-  const tiers = `${c.may_carry_models} more of the ${c.model_level} ${a.direction} may carry it${c.not_traced_models ? `, ${c.not_traced_models} of them with no sign (not traced)` : ""}`
+  const tiers = `${c.may_carry_models} more of the ${c.model_level} ${a.direction} may carry it${c.not_traced_models ? `, ${c.not_traced_models} of them not traced (no sign either way)` : ""}`
   return `${what}: ${reach}; ${tiers}${a.truncated ? " (truncated)" : ""} (metadata.column_answer)`
 }

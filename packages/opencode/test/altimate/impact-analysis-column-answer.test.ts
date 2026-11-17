@@ -157,6 +157,8 @@ describe("impact_analysis: column answer", () => {
     expect(result.metadata.column_reach_error).toBe(error)
     expect(result.metadata.column_answer_error).toBe(error)
     expect(result.output).toContain(`Column Reach: not traced (${error}); the model-level impact above stands`)
+    // The shared reason is said once.
+    expect(result.output).not.toContain("Column answer unavailable")
   })
 
   test("the MCP structured result carries it", async () => {

@@ -167,11 +167,15 @@ export const ProviderRoutes = lazy(() =>
       async (c) => {
         const providerID = c.req.valid("param").providerID
         const { method, code } = c.req.valid("json")
-        await ProviderAuth.callback({
-          providerID,
-          method,
-          code,
-        })
+        // altimate_change — the request's signal stops a polling login once the client goes away
+        await ProviderAuth.callback(
+          {
+            providerID,
+            method,
+            code,
+          },
+          c.req.raw.signal,
+        )
         return c.json(true)
       },
     ),

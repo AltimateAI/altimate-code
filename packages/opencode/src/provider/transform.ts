@@ -6,6 +6,9 @@ import type { Provider } from "./provider"
 import type { ModelsDev } from "./models"
 import { iife } from "@/util/iife"
 import { Flag } from "@/flag/flag"
+// altimate_change start — Claude Agent provider package ID
+import { ClaudeAgentID } from "@/altimate/provider/claude-agent/id"
+// altimate_change end
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -780,6 +783,9 @@ export namespace ProviderTransform {
   // altimate_change end
 
   export function variants(model: Provider.Model): Record<string, Record<string, any>> {
+    // altimate_change start — Claude Agent variants are the effort levels Claude Code reported
+    if (model.api.npm === ClaudeAgentID.PACKAGE) return { ...model.variants }
+    // altimate_change end
     if (!model.capabilities.reasoning) return {}
 
     const id = model.id.toLowerCase()
