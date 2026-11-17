@@ -188,12 +188,40 @@ export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
   return hostSettingsAreGithubDotCom({ ...process.env, ...server.env })
 }
 
-/** Whether a GitHub MCP server that is not confirmed for github.com names a shell variable: that variable may then hold the other host's token. */
+/**
+ * Every GitHub MCP server that may run from here: user level, this directory's and its parents' project entries, and their
+ * .mcp.json files. A repository's file is read here only to refuse a token, never to read one.
+ */
+function githubServersAround(): core.McpServer[] {
+  const claude = core.readJson<any>(path.join(core.homeDir(), ".claude.json"), {})
+  const maps: unknown[] = [claude.mcpServers]
+  for (let dir = path.resolve(process.cwd()); ; dir = path.dirname(dir)) {
+    maps.push(claude.projects?.[dir]?.mcpServers, core.readJson<any>(path.join(dir, ".mcp.json"), {})?.mcpServers)
+    if (path.dirname(dir) === dir) break
+  }
+  return maps.flatMap((m) =>
+    m && typeof m === "object" ? Object.entries(m as Record<string, core.McpServer>).filter(([n, sv]) => !!sv && typeof sv === "object" && core.providerMatchesMcp("github", n, sv)).map(([, sv]) => sv) : [],
+  )
+}
+
+/** GitHub's own remote MCP endpoint works only with github.com tokens, so a token it is given belongs to github.com. */
+const isGithubDotComRemote = (server: core.McpServer) => {
+  try {
+    return new URL(String(server.url)).hostname === "api.githubcopilot.com"
+  } catch {
+    return false
+  }
+}
+
+/** Whether a GitHub MCP server that is not confirmed for github.com names a shell variable, or holds its value: that token may then be the other host's. */
 function claimedByOtherHost(name: string): boolean {
   const word = new RegExp(`\\b${name}\\b`)
-  return core.mcpServerMaps(core.homeDir(), process.cwd()).some(({ servers }) =>
-    Object.entries(servers ?? {}).some(([serverName, server]) => !!server && typeof server === "object" && core.providerMatchesMcp("github", serverName, server) && !mcpServerIsGithubDotCom(server) && word.test(JSON.stringify(server))),
-  )
+  const value = process.env[name]?.trim()
+  return githubServersAround().some((server) => {
+    if (mcpServerIsGithubDotCom(server) || isGithubDotComRemote(server)) return false
+    const text = JSON.stringify(server)
+    return word.test(text) || (!!value && text.includes(value))
+  })
 }
 
 /** Whether the shell's GitHub token variable may be read: the shell's host settings name github.com and no other-host server takes its token from it. */
@@ -742,6 +770,16 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       if (hadCopy && !signedIn && !core.mockMode())
         return local({ status: "failed", sync: "synced", message: `${name} is saved in your workspace. Sign in to Altimate first.` })
       if (opts.localOnly && !wasBlocked) await core.setBlocked([id], true)
+      // A leftover recorded from an earlier upload is about to be replaced by this credential, so it stops being one before
+      // anything is written: otherwise a later sync would remove the only copy of what is saved here.
+      if (core.loadStore().providers[id]?.cleanupPending) {
+        try {
+          await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false }))
+        } catch (e) {
+          if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
+          return local({ status: "failed", sync: syncState(), message: e instanceof Error ? e.message : String(e) })
+        }
+      }
       // The local copy is made durable before the workspace copy is touched, so a failed write never leaves the credential nowhere.
       // A write that fails part way puts back every secret this attempt touched and leaves the previous record as it was.
       const written = new Set<string>()
@@ -846,11 +884,16 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       try {
         await core.purgeCredentialSecrets(id, rec, false)
         await core.deleteSecret(id)
-        await discardDraftSecrets(id)
       } catch (e) {
         leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id}${exposure.shared ? " --share" : ""} to remove it.`
         // Recorded so that sync removes this leftover, and only a leftover, later.
         await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: true })).catch(() => {})
+      }
+      // What was typed in is the form's, not the credential's: discard removes it, as for any other draft.
+      try {
+        await discardDraftSecrets(id)
+      } catch (e) {
+        leftover = [leftover, `What was entered could not be cleared from this machine: ${e instanceof Error ? e.message : String(e)}. Run altimate integrations discard ${id} to remove it.`].filter(Boolean).join(" ")
       }
       const sharedNote = res.shared ? `Updated the shared connection${core.SHARED_CONNECTION_AUDIENCE}.` : null
       const message = [sharedNote, workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
