@@ -437,6 +437,12 @@ export function aiOptionalFields(item: Record<string, unknown>): {
   }
 }
 
+/** Evidence for an AI finding. A quoted line with no line number lets `anchorByEvidence` place it on the diff. */
+export function aiEvidenceResult(item: Record<string, unknown>): Record<string, unknown> {
+  const quoted = typeof item.evidence_line === "string" ? item.evidence_line.trim() : ""
+  return { confidence: item.confidence, ...(typeof item.line !== "number" && quoted ? { line: quoted.slice(0, 200) } : {}) }
+}
+
 /** One model call over a group of files: send, wait (bounded), parse and clamp in core. */
 async function reviewBatch(
   input: AiReviewInput,
@@ -527,7 +533,7 @@ async function reviewBatch(
             startLine: typeof item.line === "number" ? item.line : undefined,
             endLine: typeof item.line === "number" ? item.line : undefined,
             confidence: item.confidence === "high" ? "high" : item.confidence === "low" ? "low" : "medium",
-            evidence: { tool: "ai-review", result: { confidence: item.confidence } },
+            evidence: { tool: "ai-review", result: aiEvidenceResult(item) },
             ruleKey: `ai:${item.category}:${String(item.title).slice(0, 60)}`,
             rule: ruleId("ai-review", String(item.category)),
           }),
