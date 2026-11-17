@@ -269,6 +269,8 @@ describe("docs_share_comments list", () => {
         : undefined
     const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
     expect(result.output.length).toBeLessThan(101_000 + 1000)
+    // The metadata is held to the same budget as the output.
+    expect(JSON.stringify((result.metadata as any).threads).length).toBeLessThan(200_000)
     expect((result.metadata as any).truncated).toBe(true)
     expect(result.output).toContain("characters")
   })

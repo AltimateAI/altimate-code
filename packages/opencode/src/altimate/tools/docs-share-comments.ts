@@ -183,7 +183,9 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
           }),
         ])
         const all = openThreads(shares, users)
-        const threads = all.slice(0, MAX_THREADS)
+        let threads = all.slice(0, MAX_THREADS)
+        // The metadata carries the same threads as the output, so both are cut together to the size budget.
+        while (threads.length > 1 && formatThreads(threads).length > MAX_OUTPUT) threads = threads.slice(0, Math.max(1, Math.floor(threads.length * 0.8)))
         const cutThreads = threads.length < all.length
         const cutMessages = all.some((t) => t.dropped_messages > 0)
         let body = formatThreads(threads)
@@ -191,9 +193,9 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         if (cutBytes) body = `${body.slice(0, body.lastIndexOf("\n", MAX_OUTPUT) > 0 ? body.lastIndexOf("\n", MAX_OUTPUT) : MAX_OUTPUT)}\n…`
         const truncated = cutThreads || cutMessages || cutBytes
         const cutNote = [
-          cutThreads && `the first ${MAX_THREADS} threads`,
+          cutThreads && `the first ${threads.length} threads`,
           cutMessages && `the newest ${MAX_MESSAGES} messages of each thread`,
-          cutBytes && `the first ${MAX_OUTPUT} characters (narrow it with a more specific project)`,
+          cutBytes && `the first ${MAX_OUTPUT} characters of one thread`,
         ]
           .filter(Boolean)
           .join(" and ")
