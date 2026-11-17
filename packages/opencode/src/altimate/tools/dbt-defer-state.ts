@@ -1,7 +1,7 @@
 import z from "zod"
 import fs from "fs"
 import path from "path"
-import { parse as parseJsonc, stripComments, type ParseError } from "jsonc-parser"
+import { createScanner, parse as parseJsonc, stripComments, ScanError, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
 import { resolveEnvVars, resolveProfilesPath } from "../native/connections/dbt-profiles"
 
@@ -41,6 +41,15 @@ function expandVariables(value: string, workspaceFolder: string): string {
     .replace(/\$\{workspaceFolder\}/g, () => workspaceFolder)
 }
 
+/** A `/* ...` block comment that never closes: stripComments drops it silently, but VS Code cannot read the file. */
+function hasUnterminatedComment(text: string): boolean {
+  const scanner = createScanner(text, false)
+  while (scanner.scan() !== 17 /* SyntaxKind.EOF */) {
+    if (scanner.getTokenError() === ScanError.UnexpectedEndOfComment) return true
+  }
+  return false
+}
+
 const UNREADABLE = Symbol("unreadable settings")
 
 /** The parsed settings; undefined when there is no file, UNREADABLE when there is one that cannot be trusted. */
@@ -58,7 +67,7 @@ function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE
   const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
   // A file that does not parse cannot be trusted to say defer is on.
   // A file holding only comments has no value to parse, which VS Code reads as empty settings; a stray token is not that.
-  if (parsed === undefined && stripComments(text).trim() === "") return {}
+  if (parsed === undefined && stripComments(text).trim() === "" && !hasUnterminatedComment(text)) return {}
   if (errors.length > 0) return UNREADABLE
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return UNREADABLE
   return parsed as Record<string, unknown>

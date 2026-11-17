@@ -215,6 +215,13 @@ describe("dbt_defer_state", () => {
     expect(findDeferSetting(path.join(root, "analytics"))).toBeUndefined()
   })
 
+  test("a settings file with a block comment that never closes is unreadable and ends the search", () => {
+    settings({ analytics: { deferToProduction: true } })
+    fs.mkdirSync(path.join(root, "analytics", ".vscode"), { recursive: true })
+    fs.writeFileSync(path.join(root, "analytics", ".vscode", "settings.json"), "/* unfinished")
+    expect(findDeferSetting(path.join(root, "analytics"))).toBeUndefined()
+  })
+
   test("an env_var() default may hold the other quote character", async () => {
     write("analytics/dbt_project.yml", "name: shop\nprofile: shop\n")
     write("profiles/profiles.yml", "shop:\n  target: \"{{ env_var('DEFER_TEST_Q', 'say \\\"hi\\\"') }}\"\n  outputs:\n    dev:\n      type: duckdb\n")
