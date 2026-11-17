@@ -216,8 +216,8 @@ altimate integrates with Codex in two ways:
 **As an LLM provider** — if you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backend at no additional API cost:
 
 1. Run `/connect` in the TUI
-2. Select **Codex** as your provider
-3. Authenticate via browser OAuth
+2. Select **ChatGPT subscription**
+3. Sign in with ChatGPT in the browser
 4. Your subscription covers all usage, so no API keys are needed
 
 See [Using with Codex](data-engineering/guides/using-with-codex.md) for details.
