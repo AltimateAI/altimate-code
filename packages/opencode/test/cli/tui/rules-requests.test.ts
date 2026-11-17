@@ -3,7 +3,7 @@
 // The `/rules` menu's pure helpers: how a shown decision is remembered, and why the skill and knowledge part is missing
 // or short.
 import { describe, expect, test } from "bun:test"
-import { combinedToast, decisionToast, decisionToaster, requestsProblem, shownKey } from "../../../src/plugin/tui/altimate/rules"
+import { announceWhenClear, combinedToast, decisionToast, decisionToaster, requestsProblem, shownKey } from "../../../src/plugin/tui/altimate/rules"
 
 describe("rules TUI", () => {
   test("a decision is remembered by kind, id and status: a rule and a skill with one id do not hide each other", () => {
@@ -79,5 +79,32 @@ describe("rules TUI", () => {
     toaster.flush()
     expect(shown).toHaveLength(1)
     toaster.dispose()
+  })
+})
+
+describe("the activity line waits for decision toasts", () => {
+  const run = (busy: boolean[], disposedAfter = Infinity) => {
+    let checks = 0
+    const shown: string[] = []
+    const result = announceWhenClear({
+      busy: () => busy[Math.min(checks++, busy.length - 1)],
+      wait: async () => {},
+      waits: 3,
+      disposed: () => checks >= disposedAfter,
+      show: () => shown.push("line"),
+    })
+    return result.then((ok) => ({ ok, shown, checks }))
+  }
+
+  test("shows once the toast is gone", async () => {
+    expect(await run([true, true, false])).toEqual({ ok: true, shown: ["line"], checks: 3 })
+  })
+
+  test("never shows over a toast that is still up: it gives up, so the line comes next time", async () => {
+    expect(await run([true])).toEqual({ ok: false, shown: [], checks: 4 })
+  })
+
+  test("shows nothing once the TUI is closing", async () => {
+    expect(await run([true, false], 1)).toEqual({ ok: false, shown: [], checks: 1 })
   })
 })

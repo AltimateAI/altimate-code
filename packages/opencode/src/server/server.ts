@@ -1461,7 +1461,8 @@ export namespace Server {
         }
       })
       // altimate_change start — workspace activity: what changed in the workspace's skills and knowledge since this
-      // client (`host`) last looked, as one line to show when a session starts. Marks it seen; the first look says nothing.
+      // client (`host`) last looked, as one line to show when a session starts. Marks it seen; the first look says
+      // nothing. With `defer=1` a line leaves the mark for `POST .../activity/seen` once the client showed it.
       .get("/altimate/workspace/activity", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
@@ -1469,13 +1470,31 @@ export namespace Server {
         if (!/^[a-z][a-z0-9-]{0,31}$/.test(host)) return c.json({ ok: false, error: "host must name the client, e.g. vscode." }, 400)
         try {
           const { WorkspaceActivity } = await import("../altimate/workspace/workspace-activity")
-          const changes = await WorkspaceActivity.changesSince(Instance.directory, host)
+          const changes = await WorkspaceActivity.changesSince(Instance.directory, host, { defer: c.req.query("defer") === "1" })
           // `status`: ok, first (nothing said the first time), signed_out, not_linked, account_changed, unconfirmed,
           // unsupported, failed.
           return c.json({ ok: true as const, ...changes })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("workspace activity failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/workspace/activity/seen", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "workspace activity seen")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const host = typeof read.body.host === "string" ? read.body.host : ""
+        if (!/^[a-z][a-z0-9-]{0,31}$/.test(host)) return c.json({ ok: false, error: "host must name the client, e.g. vscode." }, 400)
+        try {
+          const { WorkspaceActivity } = await import("../altimate/workspace/workspace-activity")
+          const seen = WorkspaceActivity.Mark.safeParse(read.body.seen)
+          if (!seen.success) return c.json({ ok: false, error: "seen must be the mark a deferred look returned." }, 400)
+          return c.json({ ok: true as const, ...(await WorkspaceActivity.acknowledge(Instance.directory, host, seen.data)) })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace activity seen failed", { error })
           return c.json({ ok: false, error }, 500)
         }
       })
