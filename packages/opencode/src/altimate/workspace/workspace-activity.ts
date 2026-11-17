@@ -299,9 +299,13 @@ export async function acknowledge(directory: string, host: string, seen: Mark): 
         ...seen.ids,
         ...(seen.at ? [{ at: seen.at }] : []),
       ])
-      // Where either look's ids stop being complete, the later one holds.
-      const froms = [current?.from, seen.from].filter((at): at is string => Boolean(at)).sort((a, b) => ms(b) - ms(a))
-      if (froms[0] && ms(froms[0]) > ms(merged.at) - OVERLAP_MS) merged.from = froms[0]
+      // Ids are incomplete only below where both looks stopped reading: a look that read its whole window
+      // vouches for it, so only when both were cut does the older cut point hold.
+      const froms = [current?.from, seen.from]
+      if (froms.every(Boolean)) {
+        const older = (froms as string[]).sort((a, b) => ms(a) - ms(b))[0]
+        if (ms(older) > ms(merged.at) - OVERLAP_MS) merged.from = older
+      }
       await writeSeen({ ...state, seen: { ...state.seen, [host]: merged } })
       return { status: "ok" as const }
     })

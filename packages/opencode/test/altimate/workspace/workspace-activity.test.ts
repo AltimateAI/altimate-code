@@ -4,7 +4,7 @@
 // and each client's own last look. Network is stubbed at `globalThis.fetch`; files are real, in a sandbox state
 // directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -248,6 +248,24 @@ describe("a deferred look", () => {
     const after = await WorkspaceActivity.changesSince(project, "tui")
     expect(after.status === "ok" && after.line).toBeUndefined()
     expect(asked.at(-1)).toBe("2026-11-12T10:55:00.000Z")
+  })
+
+  test("a cut look acknowledged after a complete one does not hide later changes as history", async () => {
+    activity = () => reply({ items: [], has_more: false })
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("first")
+    const changes = [tracked("e1", "naming", "added", "2026-11-12T10:00:00Z")]
+    activity = server(changes)
+    const older = await WorkspaceActivity.changesSince(project, "tui", { defer: true })
+    if (older.status !== "ok" || !older.seen) throw new Error("expected a mark to acknowledge")
+    // A look in between read its whole window; the deferred one is acknowledged as if its page had been cut.
+    changes.push(tracked("e2", "cost-guard", "added", "2026-11-12T10:04:00Z"))
+    expect((await WorkspaceActivity.changesSince(project, "tui")).status).toBe("ok")
+    await WorkspaceActivity.acknowledge(project, "tui", { ...older.seen, from: "2026-11-12T10:00:00Z" })
+    const stored = readdirSync(WorkspaceActivity.dir(), { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => JSON.parse(readFileSync(path.join(WorkspaceActivity.dir(), f), "utf8")))
+    expect(stored.map((state) => state.seen?.tui?.from)).toEqual([""])
   })
 })
 
