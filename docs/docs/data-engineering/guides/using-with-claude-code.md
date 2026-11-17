@@ -102,7 +102,7 @@ The plugin runs `altimate-code run` in your project for each task, with the mode
 
 #### dbt helpers beside the chat
 
-Plugin 1.7.0 or later brings five dbt Power User helpers into the Claude Code session when you work in a dbt project. They are on by default; to turn them off, set the plugin's `dbt_mods` option to false in `/config`. To update an existing install, run the command that matches how you installed it, then start a new session:
+Plugin 1.8.0 or later brings five dbt Power User helpers into the Claude Code session when you work in a dbt project. They are on by default; to turn them off, set the plugin's `dbt_mods` option to false in `/config`. To update an existing install, run the command that matches how you installed it, then start a new session:
 
 ```bash
 # Installed from Anthropic's plugin directory
