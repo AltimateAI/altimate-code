@@ -58,6 +58,12 @@ describe("GitHub host policy", () => {
   })
   test("an MCP server is confirmed for github.com only when nothing in it may name another host", () => {
     expect(creds.mcpServerIsGithubDotCom(official)).toBe(true)
+    for (const ok of [
+      { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" } },
+      { command: "/usr/local/bin/github-mcp-server", args: ["stdio", "--toolsets", "repos,issues", "--read-only"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x", GITHUB_TOOLSETS: "repos" } },
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v0.5.0"] },
+    ])
+      expect(creds.mcpServerIsGithubDotCom(ok)).toBe(true)
     expect(creds.mcpServerIsGithubDotCom({ ...official, env: { ...official.env, GITHUB_HOST: "https://github.com" } })).toBe(true)
     const others: core.McpServer[] = [
       { ...official, env: { ...official.env, GITHUB_HOST: "https://ghe.corp" } },
@@ -77,6 +83,16 @@ describe("GitHub host policy", () => {
       { command: "github-mcp-server", args: ["stdio", "--host", "ghe.corp"], env: { GITHUB_TOKEN: "ghp_x" } },
       { command: "github-mcp-server", args: ["stdio", "--url=https://git.corp.example"], env: { GITHUB_TOKEN: "ghp_x" } },
       { ...official, env: { ...official.env, GITHUB_TOOLSETS: "${TOOLSETS}" } },
+      // A host in any form, not just a dotted name.
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "-e", "GITHUB_HOST=https://10.0.0.5", "ghcr.io/github/github-mcp-server"] },
+      { command: "github-mcp-server", args: ["stdio", "--gh-host", "https://ghes"], env: { GITHUB_TOKEN: "ghp_x" } },
+      { command: "github-mcp-server", args: ["stdio", "--gh-host", "localhost:8080"], env: { GITHUB_TOKEN: "ghp_x" } },
+      // Not one of the official setups: a different image or package, or a script run by node.
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/acme/github-mcp-server"] },
+      { command: "npx", args: ["-y", "@acme/server-github"], env: { GITHUB_TOKEN: "ghp_x" } },
+      { command: "node", args: ["/opt/github-mcp/dist/index.js"], env: { GITHUB_TOKEN: "ghp_x" } },
+      // Every word is one the official setups use, but docker runs some other image.
+      { ...official, args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghes_mcp"] },
     ]
     for (const server of others) expect(creds.mcpServerIsGithubDotCom(server)).toBe(false)
     // A host exported in this shell applies to the server too, unless the server sets its own.
@@ -115,7 +131,7 @@ describe("detection parsing", () => {
   })
 
   test("an MCP server env value counts as a credential only when it is one the provider reads", () => {
-    const github = (env: Record<string, string>) => core.detectFromMcpServers({ github: { command: "npx", args: ["server-github"], env } }, "~/.claude.json")
+    const github = (env: Record<string, string>) => core.detectFromMcpServers({ github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env } }, "~/.claude.json")
     expect(github({ LOG_LEVEL: "debug", GITHUB_API_URL: "https://x" })).toEqual([])
     expect(github({ GITHUB_PERSONAL_ACCESS_TOKEN: "   " })).toEqual([])
     expect(github({ GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" })[0].syncable).toBe(true)
@@ -2151,6 +2167,25 @@ describe("credentials flow", () => {
       }
       // Nothing of the new credential was written, so no later sync can remove its only copy.
       expect([await core.readSecret(core.secretKey("cred", "github", "github_token")), await core.readSecret("github")]).toEqual([undefined, undefined])
+    })
+
+    test("an update the workspace marks invalid keeps a recorded leftover marked, so sync still removes it", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      await core.updateStore((st) => void (st.providers.github = { ...st.providers.github, cleanupPending: true }))
+      api.state.valid = false
+      await token("github", "github_token")
+      try {
+        expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("rejected")
+      } finally {
+        api.state.valid = true
+      }
+      expect(core.loadStore().providers.github?.cleanupPending).toBe(true)
+      // A later update that is accepted removes what was left here, and the mark with it.
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
+      expect(core.loadStore().providers.github?.cleanupPending).toBe(false)
     })
 
     test("Keep local whose secret write fails puts back the leftover mark with the previous secrets", async () => {

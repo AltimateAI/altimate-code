@@ -160,11 +160,13 @@ const isEnvReference = (value: string) => {
 
 const GITHUB_HOST_KEY = /^(GITHUB_HOST|GH_HOST|GITHUB_API_URL|GITHUB_SERVER_URL|GITHUB_ENTERPRISE_URL)$/i
 const GITHUB_TOKEN_KEY = /^(GITHUB_(PERSONAL_ACCESS_)?TOKEN|GH_TOKEN)$/i
-/** Hosts a github.com setup names: the site, its API, GitHub's container registry and GitHub's own remote MCP endpoint. */
-const GITHUB_DOT_COM_HOSTS = new Set(["github.com", "api.github.com", "ghcr.io", "api.githubcopilot.com"])
-const HOSTNAME = /(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]/gi
-/** Settings that are not read here (a reference, an env file, a mount or config file) or that say enterprise. */
-const UNREADABLE = /\$|env-file|--volume|--mount|--config|(^|\s)-v(\s|$)|enterprise|\bghe\b/i
+// The official GitHub MCP server setups, word for word: docker running GitHub's image, npx running the reference
+// package, or GitHub's binary, each with only its own flags and settings. A server is a github.com token source only in
+// one of these shapes; anything else (other flags, files, mounts, URLs, hosts in any form) is not read here.
+const GITHUB_MCP_COMMAND = /^(?:.*[\\/])?(docker|npx|github-mcp-server)(\.exe|\.cmd)?$/i
+const GITHUB_MCP_PROGRAM = /^(ghcr\.io\/github\/github-mcp-server(:[\w.-]+)?|@modelcontextprotocol\/server-github(@[\w.-]+)?)$/
+const GITHUB_MCP_WORD = /^(run|-i|--rm|-e|-y|stdio|--read-only|--dynamic-toolsets|--toolsets|[a-z_]+(,[a-z_]+)*|GITHUB_(PERSONAL_ACCESS_TOKEN|TOKEN|TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)|GH_TOKEN)$/
+const GITHUB_MCP_SETTING = /^GITHUB_(TOOLSETS|READ_ONLY|DYNAMIC_TOOLSETS)$/
 
 /** Whether a host setting names github.com: a literal URL or host whose parsed hostname is github.com or api.github.com. A reference or an unparsable value does not. */
 export function namesGithubDotCom(value: string): boolean {
@@ -183,23 +185,24 @@ function hostSettingsAreGithubDotCom(env: Record<string, unknown>): boolean {
   return Object.entries(env).every(([key, value]) => !GITHUB_HOST_KEY.test(key) || value == null || (typeof value === "string" && (value.trim() === "" || namesGithubDotCom(value))))
 }
 
-/** Whether a piece of a server's config names only github.com: nothing unreadable, and every hostname in it is a github.com one. */
-function namesOnlyGithubDotCom(text: string): boolean {
-  return !UNREADABLE.test(text) && [...text.matchAll(HOSTNAME)].every((m) => GITHUB_DOT_COM_HOSTS.has(m[0].toLowerCase()))
-}
-
 const isRemote = (server: core.McpServer) => Boolean(server.url) || server.type === "http" || server.type === "sse"
 
 /**
- * Whether a GitHub MCP server is confirmed to be for github.com: run locally; its command, arguments and every setting
- * other than its token name only github.com hosts and nothing unreadable; and every host setting it sees (its own or
- * this environment's) names github.com. Its token is read only then.
+ * Whether a GitHub MCP server is confirmed to be for github.com: one of the official setups word for word, whose settings
+ * are its token, its toolset options and host settings that name github.com, and which sees no other host in this
+ * environment either. Its token is read only then.
  */
 export function mcpServerIsGithubDotCom(server: core.McpServer): boolean {
-  if (isRemote(server)) return false
-  if (![server.command, ...(server.args ?? [])].every((w) => w == null || (typeof w === "string" && namesOnlyGithubDotCom(w)))) return false
-  if (!Object.entries(server.env ?? {}).every(([k, v]) => GITHUB_TOKEN_KEY.test(k) || (typeof v === "string" && namesOnlyGithubDotCom(`${k}=${v}`)))) return false
-  return hostSettingsAreGithubDotCom({ ...process.env, ...server.env })
+  if (isRemote(server) || typeof server.command !== "string") return false
+  const command = server.command.match(GITHUB_MCP_COMMAND)?.[1]?.toLowerCase()
+  const args = server.args ?? []
+  if (!command || !args.every((a) => typeof a === "string" && (GITHUB_MCP_WORD.test(a) || GITHUB_MCP_PROGRAM.test(a)))) return false
+  // docker and npx must be running GitHub's server; the binary is it.
+  if (command !== "github-mcp-server" && !args.some((a) => GITHUB_MCP_PROGRAM.test(a))) return false
+  const settings = Object.entries(server.env ?? {}).every(
+    ([k, v]) => typeof v === "string" && (GITHUB_TOKEN_KEY.test(k) || (GITHUB_MCP_SETTING.test(k) && /^[\w,.-]*$/.test(v)) || (GITHUB_HOST_KEY.test(k) && namesGithubDotCom(v))),
+  )
+  return settings && hostSettingsAreGithubDotCom({ ...process.env, ...server.env })
 }
 
 /**
@@ -756,7 +759,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   }
   const record = (synced: boolean, extra: Partial<StoredProvider> = {}) =>
     core.updateStore((store) => {
-      store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, cleanupPending: false, ...extra }
+      store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
     })
   /** Clears what was entered in the form. What it follows has already happened, so a failure comes back as a note instead of stopping the rest. */
   const clearDrafts = async (): Promise<string | null> => {
@@ -905,6 +908,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       try {
         await core.purgeCredentialSecrets(id, rec, false)
         await core.deleteSecret(id)
+        // Whatever was left here from before is gone with it.
+        if (core.loadStore().providers[id]?.cleanupPending) await core.updateStore((next) => void (next.providers[id] = { ...next.providers[id], cleanupPending: false })).catch(() => {})
       } catch (e) {
         leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}. ${await core.recordLeftover(id)}`
       }
