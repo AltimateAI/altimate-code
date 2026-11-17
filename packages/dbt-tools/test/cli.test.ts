@@ -43,6 +43,13 @@ describe("cli", () => {
     expect(parsed.error).toBeDefined()
   })
 
+  test("usage gives children and parents' answer on a stale manifest", async () => {
+    const result = Bun.spawnSync(["bun", entry], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const parsed = JSON.parse(result.stdout.toString())
+    expect(parsed.commands.children).toContain("{ stale_manifest, models }")
+    expect(parsed.commands.parents).toContain("{ stale_manifest, models }")
+  })
+
   test("usage includes doctor command", async () => {
     const result = Bun.spawnSync(["bun", entry], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
     const parsed = JSON.parse(result.stdout.toString())
