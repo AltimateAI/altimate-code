@@ -312,9 +312,9 @@ describe("altimate features: anthropic provider stays bundled", () => {
     expect(src).toMatch(/"@ai-sdk\/anthropic"\s*:\s*createAnthropic/)
   })
 
-  test("anthropic-beta header includes claude-code-20250219", async () => {
+  test("anthropic-beta header does not claim Claude Code (an API key is not Claude Code)", async () => {
     const src = await readSrc("provider", "provider.ts")
-    expect(src).toContain("claude-code-20250219")
+    expect(src).not.toContain("claude-code-20250219")
   })
 
   test("provider.ts wires altimate-specific snowflake-cortex and databricks loaders", async () => {
@@ -323,10 +323,9 @@ describe("altimate features: anthropic provider stays bundled", () => {
     expect(src).toContain("databricks:")
   })
 
-  test("plugin/index.ts has BUILTIN list with opencode-anthropic-auth", async () => {
+  test("plugin/index.ts does not load opencode-anthropic-auth (Claude Pro/Max goes through Claude Agent)", async () => {
     const src = await readSrc("plugin", "index.ts")
-    expect(src).toContain("BUILTIN")
-    expect(src).toContain("opencode-anthropic-auth")
+    expect(src).not.toMatch(/["'`]opencode-anthropic-auth/)
   })
 })
 

@@ -38,6 +38,8 @@ export const PROVIDER_PRIORITY: Record<string, number> = {
   // between Google and Zen.
   "altimate-backend": 0,
   anthropic: 1,
+  // Claude Agent: a Claude subscription through the local Claude Code login
+  "claude-agent": 1.5,
   openai: 2,
   google: 3,
   "altimate-free": 4,
@@ -91,6 +93,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
         description: {
           "altimate-backend": "Recommended · best tool-calling · 1M free tokens",
           anthropic: "(API key)",
+          "claude-agent": "(Claude Pro/Max subscription via Claude Code)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
           "altimate-free": ALTIMATE_BASE_HINT,
@@ -187,7 +190,12 @@ export function createDialogProviderOptions() {
           footer: consoleManaged ? sync.data.console_state.activeOrgName : undefined,
           category: provider.category,
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
-          async onSelect() {
+          // altimate_change start — the welcome picker passes a label pattern that picks this provider's
+          // login method directly, so a subscription row skips the method list (the list still shows when
+          // nothing matches). DialogSelect passes its own context here, which is ignored.
+          async onSelect(choice?: unknown) {
+            const methodPattern = choice instanceof RegExp ? choice : undefined
+            // altimate_change end
             if (consoleManaged) return
             // altimate_change start — register (if needed) and select Altimate Base directly, no dialog
             if (providerID === "altimate-free") {
@@ -227,7 +235,11 @@ export function createDialogProviderOptions() {
               },
             ]
             let index: number | null = 0
-            if (methods.length > 1) {
+            // altimate_change start — a method chosen by the caller skips the method list
+            const preferred = methodPattern ? methods.findIndex((x) => methodPattern.test(x.label)) : -1
+            if (preferred >= 0) index = preferred
+            else if (methods.length > 1) {
+            // altimate_change end
               index = await new Promise<number | null>((resolve) => {
                 dialog.replace(
                   () => (
@@ -401,8 +413,11 @@ function AutoMethod(props: AutoMethodProps) {
   // Guard against a late callback / auto-close firing after the dialog is dismissed.
   let disposed = false
   let closeTimer: ReturnType<typeof setTimeout> | undefined
+  // altimate_change — dismissing the dialog aborts the waiting callback request, which stops a polling login
+  const waiting = new AbortController()
   onCleanup(() => {
     disposed = true
+    waiting.abort()
     if (closeTimer) clearTimeout(closeTimer)
   })
 
@@ -427,21 +442,32 @@ function AutoMethod(props: AutoMethodProps) {
   }))
 
   onMount(async () => {
-    const result = await sdk.client.provider.oauth.callback({
-      providerID: props.providerID,
-      method: props.index,
-    })
-    if (disposed) return
+    const result = await sdk.client.provider.oauth
+      .callback(
+        {
+          providerID: props.providerID,
+          method: props.index,
+        },
+        { signal: waiting.signal },
+      )
+      .catch((error: unknown) => {
+        if (disposed) return undefined
+        throw error
+      })
+    if (disposed || !result) return
     if (result.error) {
       // altimate_change — surface the failure instead of clearing silently. The
       // precise reason is also logged server-side by the plugin callback.
-      toast.show({
-        variant: "error",
-        message:
-          "name" in result.error && result.error.name === "ProviderAuthOauthCallbackFailed"
-            ? "OAuth authorization failed. Try /connect again."
-            : JSON.stringify(result.error),
-      })
+      let message = JSON.stringify(result.error)
+      if ("name" in result.error && result.error.name === "ProviderAuthOauthCallbackFailed") {
+        // A Claude subscription waits for a Claude Code login instead of running an OAuth flow, and the
+        // check also fails when `claude` cannot start or reach Anthropic.
+        message =
+          props.providerID === "claude-agent"
+            ? "No Claude Code login was found, or Claude Code could not start. Run `claude auth login` in a terminal (Claude Code 2.1.296 or later, see `claude --version`). If you are logged in, check the network and any proxy (HTTPS_PROXY) or custom CA (NODE_EXTRA_CA_CERTS), then /connect again."
+            : "OAuth authorization failed. Try /connect again."
+      }
+      toast.show({ variant: "error", message })
       dialog.clear()
       return
     }
