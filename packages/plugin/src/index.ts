@@ -165,7 +165,8 @@ export type AuthHook = {
 export type AuthOAuthResult = { url: string; instructions: string } & (
   | {
       method: "auto"
-      callback(): Promise<
+      // altimate_change — `signal` aborts when the client stops waiting (the dialog was dismissed)
+      callback(options?: { signal?: AbortSignal }): Promise<
         | ({
             type: "success"
             provider?: string

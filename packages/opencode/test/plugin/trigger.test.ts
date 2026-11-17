@@ -85,14 +85,9 @@ const triggerSystemTransform = Effect.fn("PluginTriggerTest.triggerSystemTransfo
 })
 
 describe("plugin.trigger", () => {
-  // BUG: src/plugin/index.ts is still the legacy pre-merge loader and does not consume
-  // RuntimeFlags — `disableDefaultPlugins: true` is ignored, so the built-in
-  // opencode-anthropic-auth plugin still loads and its experimental.chat.system.transform
-  // hook injects "You are Claude Code, Anthropic's official CLI for Claude." into output.system.
-  // The assertion (only the user hook's "sync"/"async" entry) is correct; making it pass
-  // requires wiring index.ts to RuntimeFlags.Service (the v1.17.9 index.ts rewrite owned by
-  // another worker). Re-enable once index.ts honors RuntimeFlags.disableDefaultPlugins.
-  it.instance.skip("runs synchronous hooks without crashing", () =>
+  // These were skipped while the built-in opencode-anthropic-auth plugin loaded by default and its
+  // system-prompt hook added "You are Claude Code, …" to every request. No default plugin loads now.
+  it.instance("runs synchronous hooks without crashing", () =>
     withProject(
       [
         "export default async () => ({",
@@ -108,10 +103,7 @@ describe("plugin.trigger", () => {
     ),
   )
 
-  // BUG: same root cause as above — index.ts ignores RuntimeFlags.disableDefaultPlugins,
-  // so the built-in anthropic plugin injects the Claude Code system prefix. Blocked on the
-  // v1.17.9 index.ts rewrite.
-  it.instance.skip("awaits asynchronous hooks", () =>
+  it.instance("awaits asynchronous hooks", () =>
     withProject(
       [
         "export default async () => ({",
