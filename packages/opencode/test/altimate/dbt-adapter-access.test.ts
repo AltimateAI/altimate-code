@@ -3,7 +3,7 @@
 // dbt adapter is replaced through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { realpathSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -31,6 +31,12 @@ const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
   dbt_cte_profile: { model: "customers" },
 }
 const FEATURE_TOOLS = Object.keys(MINIMAL_ARGS)
+
+/** The sentence every stub's answer carries; a real tool replaces the whole file, so it no longer has it. */
+const PLACEHOLDER_MARKER = "is not implemented in this build of altimate-code yet."
+const toolSource = (id: string) => path.join(import.meta.dir, "../../src/altimate/tools", `${id.replaceAll("_", "-")}.ts`)
+const isPlaceholder = (id: string) => readFileSync(toolSource(id), "utf8").includes(PLACEHOLDER_MARKER)
+const PLACEHOLDERS = FEATURE_TOOLS.filter(isPlaceholder)
 
 const ctx: Tool.Context = {
   sessionID: SessionID.make("ses_dbt_adapter_access"),
@@ -82,8 +88,20 @@ describe("feature tools in the allow-list", () => {
     expect(listed).toEqual([...listed].sort())
   })
 
-  test("each placeholder answers that it isn't implemented, as a failure", async () => {
+  test("every feature tool has its source file, so the placeholder marker is always read", () => {
+    for (const id of FEATURE_TOOLS) expect(existsSync(toolSource(id))).toBe(true)
+  })
+
+  test("a tool is classed a placeholder by its source's marker exactly when it answers that it isn't implemented", async () => {
     for (const id of FEATURE_TOOLS) {
+      const tool = await initTool(EXPOSED[id] as any)
+      const result = await tool.execute(MINIMAL_ARGS[id], ctx)
+      expect(result.title === `${id}: not implemented`).toBe(isPlaceholder(id))
+    }
+  })
+
+  test("each placeholder answers that it isn't implemented, as a failure", async () => {
+    for (const id of PLACEHOLDERS) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)

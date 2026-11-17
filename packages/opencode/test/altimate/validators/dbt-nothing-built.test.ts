@@ -1,5 +1,5 @@
 // altimate_change start — tests for the nothing-built inverse completion gate
-import { describe, expect, test, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test"
 import { promises as fs } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -272,6 +272,75 @@ describe("run_results and inventory helpers", () => {
     await makeProject()
     process.env.DBT_TARGET_PATH = "alt_target"
     expect(await resolveDbtTargetPath(dir)).toBe(join(dir, "alt_target"))
+  })
+
+  test("resolveDbtTargetPath lets a caller-named folder win over DBT_TARGET_PATH and the project file", async () => {
+    await makeProject()
+    await fs.appendFile(join(dir, "dbt_project.yml"), 'target-path: "build_out"\n')
+    process.env.DBT_TARGET_PATH = "alt_target"
+    expect(await resolveDbtTargetPath(dir, "chosen")).toBe(join(dir, "chosen"))
+    expect(await resolveDbtTargetPath(dir, join(dir, "abs"))).toBe(join(dir, "abs"))
+    expect(await resolveDbtTargetPath(dir, "  ")).toBe(join(dir, "alt_target"))
+  })
+
+  test("readRunResults reads a caller-named folder and returns the invocation id, elapsed time and per-node time", async () => {
+    await makeProject()
+    await fs.mkdir(join(dir, "chosen"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "chosen", "run_results.json"),
+      JSON.stringify({
+        metadata: { invocation_id: "abc-123" },
+        elapsed_time: 4.5,
+        args: { which: "build" },
+        results: [
+          { unique_id: "model.t.a", status: "success", execution_time: 1.25 },
+          { unique_id: "model.t.b", status: "success" },
+        ],
+      }),
+    )
+    expect(await readRunResults(dir)).toBeNull()
+    const artifact = await readRunResults(dir, "chosen")
+    expect(artifact?.invocationId).toBe("abc-123")
+    expect(artifact?.elapsedSec).toBe(4.5)
+    expect(artifact?.results.map((r) => r.executionTimeSec)).toEqual([1.25, null])
+  })
+
+  test("readRunResults returns null for a file rewritten while it was being read", async () => {
+    await makeProject()
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    const file = join(dir, "target", "run_results.json")
+    await fs.writeFile(file, JSON.stringify({ args: { which: "build" }, results: [] }))
+    const real = fs.stat
+    let bigints = 0
+    const spy = spyOn(fs, "stat").mockImplementation((async (p: any, o?: any) => {
+      const stat: any = await real(p, o)
+      if (String(p) === file && o?.bigint && ++bigints === 2) return { ...stat, isFile: () => true, size: stat.size + 1n }
+      return stat
+    }) as any)
+    try {
+      expect(await readRunResults(dir)).toBeNull()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("readRunResults takes the time from between the two identity stats, so it describes the version the rows came from", async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), "rr-order-"))
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(join(dir, "target", "run_results.json"), JSON.stringify({ args: { which: "build" }, results: [] }))
+    const real = fs.stat
+    const kinds: string[] = []
+    const spy = spyOn(fs, "stat").mockImplementation(((p: any, o?: any) => {
+      if (String(p).endsWith("run_results.json")) kinds.push(o?.bigint ? "bigint" : "plain")
+      return real(p, o)
+    }) as any)
+    try {
+      await readRunResults(dir)
+    } finally {
+      spy.mockRestore()
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+    expect(kinds).toEqual(["bigint", "plain", "bigint"])
   })
 
   test("readRunResults returns null when the artifact is missing", async () => {
