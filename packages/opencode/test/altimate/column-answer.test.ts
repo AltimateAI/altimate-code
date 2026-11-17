@@ -1352,14 +1352,38 @@ describe("both tools: names at the edges", () => {
     }
   })
 
-  test("castColumn names a column through casts and parentheses, and nothing else", () => {
-    const named = { "amount::numeric": "amount", "(amount)::numeric": "amount", "cast((amount)as numeric)": "amount", "q.end::int": "end",
-      'cast("amount"as numeric)': "amount", 'cast(amount as"numeric")': "amount", "cast(amount as int)": "amount", "cast(t.has as int)": "has",
-      '("null")::int': "null", "(q.end)::int": "end", "cast(amount as numeric)::int": "amount", "((amount))::numeric": "amount" }
-    for (const [item, name] of Object.entries(named)) expect(castColumn(item)).toBe(name)
-    for (const item of ["amount", "(null)::int", "(1)::int", "cast(1.5 as numeric)", "(1.0)::numeric", "(true)::boolean", "coalesce(amount)::numeric", "-(amount)::numeric",
-      "(amount)::numeric * 2", "(amount + 1)::int", "cast(amount as int) between 1 and 2"])
-      expect(castColumn(item)).toBeNull()
+  // Every cast form the reviews of this reader found, with the name Postgres gives it (null: not a cast of a column, so
+  // the engine's `_col_N` stays). Items are as `selectItems` hands them over: string literals already stripped to `''`.
+  const CAST_FORMS: [string, string | null][] = [
+    // Whole-item casts of a column.
+    ["amount::numeric", "amount"], ["cast(amount as numeric)", "amount"], ["t.amount::numeric", "amount"],
+    ["cast(t.amount as numeric)", "amount"], ["amount::int[]", "amount"], ["cast(amount as int[])", "amount"],
+    ["amount::int[3]", "amount"], ['amount::"numeric"', "amount"], ["amount::pg_catalog.numeric", "amount"],
+    ["amount::double precision", "amount"], ["amount::numeric(10, 2)", "amount"], ["cast(amount as numeric(10, 2))", "amount"],
+    ["amount::timestamp(3) with time zone", "amount"],
+    // Chains and parentheses.
+    ["amount::numeric::int", "amount"], ["cast(amount as numeric)::int", "amount"], ["cast(cast(amount as numeric) as int)", "amount"],
+    ["(amount::numeric)::int", "amount"], ["(amount)::numeric", "amount"], ["((amount))::numeric", "amount"],
+    ["cast((amount) as numeric)", "amount"], ["(amount)", "amount"],
+    // No space beside `as`, and quoted names.
+    ["cast((amount)as numeric)", "amount"], ['cast("amount"as numeric)', "amount"], ['cast(amount as"numeric")', "amount"],
+    ['"Amount"::int', "amount"], ['("a""b")::numeric', 'a"b'], ['("null")::int', "null"],
+    // Qualified names that read like literals or keywords.
+    ["q.end::int", "end"], ["cast(q.end as int)", "end"], ["(q.end)::int", "end"], ["q.null::int", "null"], ["q.true::int", "true"],
+    ["cast(t.has as int)", "has"], ["allé::numeric", "allé"],
+    // Not a cast of a column.
+    ["amount", null], ["t.amount", null], ["(null)::int", null], ["(true)::boolean", null], ["(1)::int", null], ["1::int", null],
+    ["cast(1.5 as numeric)", null], ["(1.0)::numeric", null], ["''::int", null], ["coalesce(amount)::numeric", null],
+    ["-(amount)::numeric", null], ["(amount)::numeric * 2", null], ["(amount + 1)::int", null], ["amount::numeric + 1", null],
+    ["cast(amount as int) * 2", null], ["amount::text || ''", null], ["cast(amount as int) between 1 and 2", null],
+    ["amount::numeric is not null", null], ["amount::int in (1, 2)", null], ["amount::numeric as _col_1", null],
+    ["amount::timestamp at time zone ''", null], ["amount::text collate \"C\"", null], ["arr[1]::int", null], ["cast(amount)", null],
+    ["cast(amount as)", null], ["amount::", null], ["(amount", null],
+  ]
+
+  test("castColumn reads every cast form found so far", () => {
+    const wrong = CAST_FORMS.filter(([item, name]) => castColumn(item) !== name).map(([item, name]) => `${item} → ${castColumn(item)} (want ${name})`)
+    expect(wrong).toEqual([])
   })
 
   test("mixed and nested cast chains of a column are named after it", () => {
