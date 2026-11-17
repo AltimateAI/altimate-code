@@ -162,16 +162,23 @@ function fenced(closed: State["closed_locally"], startedSeq: number, started: st
   return closed.filter((c) => (c.seq !== undefined ? c.seq > startedSeq : c.at >= started))
 }
 
-/** A proposal sent back for changes that a pull no longer lists, while a new one with its rule key appeared: sent again
- * (this client's answer was lost, or another machine sent it). `/rules` lists `sent`, so the old row reads replaced
- * and the new one is added, to be withdrawn from here. */
+/** A proposal sent back for changes that a pull no longer lists, while a new one of the same kind (`change`) on its rule
+ * key appeared: sent again (this client's answer was lost, or another machine sent it). `/rules` lists `sent`, so the
+ * old row reads replaced and the new one is added, to be withdrawn from here. Of two that fit, the latest one. */
 function resentElsewhere(state: State, previous: State["my_pending"]): void {
   const listed = new Set(state.my_pending.map((p) => p.public_id))
   for (const next of state.my_pending) {
     if (state.sent.some((s) => s.public_id === next.public_id)) continue
-    const old = previous.find(
-      (p) => p.rule_key === next.rule_key && p.status === "changes_requested" && !listed.has(p.public_id) && state.sent.some((s) => s.public_id === p.public_id),
-    )
+    const old = previous
+      .filter(
+        (p) =>
+          p.rule_key === next.rule_key &&
+          p.change === next.change &&
+          p.status === "changes_requested" &&
+          !listed.has(p.public_id) &&
+          state.sent.some((s) => s.public_id === p.public_id),
+      )
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0]
     if (!old) continue
     const at = next.created_at
     const sent = state.sent.find((s) => s.public_id === old.public_id)!
@@ -256,9 +263,16 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       const fence = fenced(state.closed_locally, startedSeq, started)
       const closed = new Set(fence.map((c) => c.public_id))
       const listed = response.my_pending.filter((p) => !closed.has(p.public_id))
-      // Not one closed here since (the new proposal withdrawn too).
+      // Not one closed here since (the new proposal withdrawn too), nor one this answer, or an earlier one, says was
+      // decided already.
+      const decidedIds = new Set([...response.my_reviewed.map((r) => r.public_id), ...state.notices.map((n) => n.public_id)])
       const reopened = fence.flatMap((c) =>
-        c.replaced_by && !closed.has(c.replaced_by.public_id) && !listed.some((p) => p.public_id === c.replaced_by!.public_id) ? [c.replaced_by] : [],
+        c.replaced_by &&
+        !closed.has(c.replaced_by.public_id) &&
+        !decidedIds.has(c.replaced_by.public_id) &&
+        !listed.some((p) => p.public_id === c.replaced_by!.public_id)
+          ? [c.replaced_by]
+          : [],
       )
       const waiting = (p: { status?: string }) => (p.status ?? "pending") === "pending"
       const dropped = response.my_pending.filter((p) => closed.has(p.public_id) && waiting(p)).length

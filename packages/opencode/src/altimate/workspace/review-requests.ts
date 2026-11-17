@@ -128,7 +128,9 @@ function ruleActions(status: string, change: string): RequestAction[] {
 
 export type ActionResult =
   | { ok: true; request: Request }
-  | { ok: false; status: ActionStatus; code: string; error: string }
+  // altimate_change start — workspace review: request changes (`uncertain`: the server's answer leaves its state unknown)
+  | { ok: false; status: ActionStatus; code: string; error: string; uncertain?: true }
+  // altimate_change end
 
 const UNCONFIRMED = "Could not confirm the project's workspace link just now. Try again shortly."
 const PASSED: readonly number[] = [400, 401, 403, 404, 409, 422]
@@ -187,15 +189,16 @@ function failure(error: unknown): ActionResult {
     // a client tells a server refusal from the serve route's own 409s by it.
     const status = (error.status === 412 ? 409 : error.status && PASSED.includes(error.status) ? error.status : 502) as ActionStatus
     const code = error.code ?? (error.status === 412 ? "version_conflict" : status === 502 ? "upstream_failed" : "refused")
-    return { ok: false, status, code, error: printable(error.message) }
+    return { ok: false, status, code, error: printable(error.message), ...(UNCERTAIN.has(code) ? { uncertain: true as const } : {}) }
   }
-  return { ok: false, status: 502, code: "upstream_failed", error: printable(error instanceof Error ? error.message : String(error)) }
+  return { ok: false, status: 502, code: "upstream_failed", error: printable(error instanceof Error ? error.message : String(error)), uncertain: true }
 }
 
 // altimate_change start — workspace review: request changes
 /** Server answers that leave the proposal's state unknown here (no answer, or a conflict meaning it changed since the
- * last pull): the caller syncs, so `/rules` shows what the server has. */
-export const UNCERTAIN: ReadonlySet<string> = new Set(["upstream_failed", "invalid_status", "version_conflict"])
+ * last pull), marked `uncertain` on the result: the caller syncs, so `/rules` shows what the server has. A refusal
+ * decided here, before any server call, is not one. */
+const UNCERTAIN: ReadonlySet<string> = new Set(["upstream_failed", "invalid_status", "version_conflict"])
 
 /** Withdraw one of the person's rule proposals, or send a new wording of one sent back for changes, on the project's
  * workspace. The proposal's version comes from the last pull (`my_pending`); `expectedVersion`, when the caller read
@@ -257,7 +260,7 @@ export async function actOnRule(
     const typed = text?.trim() ?? ""
     if (!typed) return { ok: false, status: 400, code: "invalid_text", error: "Write the new wording of the rule." }
     const problem = lint(typed)
-    if (problem) return { ok: false, status: 400, code: "invalid_text", error: `The new wording ${problem}.` }
+    if (problem) return { ok: false, status: 400, code: "invalid_text", error: `The new wording was not sent: ${problem}.` }
     const wording = normalizeText(typed).trim()
     const result = await RulesApi.resubmit(ctx.actAs, ctx.datamateId, publicId, { expected_version: pending.version, text: wording })
     if (result.status !== "pending" || !result.public_id)

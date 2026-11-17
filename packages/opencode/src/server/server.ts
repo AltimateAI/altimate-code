@@ -1460,7 +1460,7 @@ export namespace Server {
           if (!result.ok) {
             // The server may have acted (no answer), or the proposal changed since the last pull: a sync records what
             // it holds, so `/rules` stops offering an action that no longer applies.
-            if (ReviewRequests.UNCERTAIN.has(result.code)) {
+            if (result.uncertain) {
               const [{ RulesService }, { Config }] = await Promise.all([import("../altimate/rules/service"), import("@/config/config")])
               void RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
                 // The run publishes its own change event.

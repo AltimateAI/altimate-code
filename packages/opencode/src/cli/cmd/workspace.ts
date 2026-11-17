@@ -349,7 +349,6 @@ const REVIEW_STATUS: Record<ReviewApi.Contribution["status"], string> = {
   retired: "removed from the workspace",
 }
 
-
 /** One line per request for `workspace review status`. Pure, so the wording is testable. Server text is made printable. */
 export function describeReviews(workspaceName: string, listed: Awaited<ReturnType<typeof ReviewApi.listMine>>): string[] {
   const workspace = printable(workspaceName)
