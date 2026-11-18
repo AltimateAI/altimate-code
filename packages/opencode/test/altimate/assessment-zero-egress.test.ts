@@ -189,6 +189,21 @@ describe("assessment mode on the packaged CLI", () => {
     expect(connectionEnvKey({ ALTIMATE_ASSESSMENT_MODE: "true" })).not.toBe(connectionEnvKey({}))
   })
 
+  posixOnly("altimate-core's own usage event stays off too: a core-backed tool starts no core telemetry", async () => {
+    // Core writes ~/.altimate/machine-id when its telemetry worker starts, and its client does not
+    // go through the proxy above, so the machine id is what shows it. Telemetry is left on here:
+    // assessment mode alone has to switch core off.
+    const result = await run(
+      ["tool", "run", "sql_analyze", "--args", JSON.stringify({ sql: "select a from t where b = 1", dialect: "snowflake" }), "--json", "--no-daemon"],
+      { ALTIMATE_ASSESSMENT_MODE: "true" },
+      (home) => rm(path.join(home, ".altimate", "machine-id")),
+    )
+    expect(JSON.parse(result.stdout).status).toBe("ok")
+    await new Promise((resolve) => setTimeout(resolve, 2_000))
+    expect(await readdir(path.join(result.home, ".altimate"))).toEqual([])
+    expect(result.hosts).toEqual([])
+  }, 120_000)
+
   posixOnly("the opt-out marker and machine id are untouched", async () => {
     const result = await run(savings, assessment)
     const altimate = await readdir(path.join(result.home, ".altimate"))

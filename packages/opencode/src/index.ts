@@ -71,6 +71,7 @@ import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
 // altimate_change start - telemetry import
 import { Telemetry } from "./telemetry"
+import { CoreTelemetry } from "./altimate/native/core-telemetry"
 // altimate_change end
 // altimate_change start - welcome banner
 import { showWelcomeBannerIfNeeded } from "./cli/welcome"
@@ -217,6 +218,8 @@ let cli = yargs(args)
           : undefined,
     )
     if (!noNetwork) Telemetry.init().catch(() => {})
+    // Assessment mode also silences altimate-core's own usage event; awaited so no command reaches core first.
+    if (Flag.ALTIMATE_ASSESSMENT_MODE) await CoreTelemetry.silence()
     // altimate_change end
   })
   .usage("")
