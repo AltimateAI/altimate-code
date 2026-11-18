@@ -5,6 +5,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { dbtAdapterInternals } from "../native/connections/register"
 import { dbtAdapterFor } from "./dbt-adapter-access"
+import { dbtProjectName } from "../review/compiled"
 
 /** One DataPilot finding for a model. */
 export interface HealthInsight {
@@ -214,16 +215,6 @@ except Exception as e:
     print(json.dumps({"error": "failed", "detail": str(e), "version": datapilot_version}))
 `
 
-/** The root project's `name:` from dbt_project.yml, for a manifest whose metadata has no project_name. */
-function projectName(root: string): string | undefined {
-  try {
-    const m = /^name:\s*['"]?([^'"\s#]+)['"]?/m.exec(fs.readFileSync(path.join(root, "dbt_project.yml"), "utf8"))
-    return m?.[1]
-  } catch {
-    return undefined
-  }
-}
-
 /** A manifest `patch_path` (`package://models/schema.yml`) as the path inside its package. */
 function patchFile(patch: string | undefined): string {
   return patch ? patch.replace(/^[^:/]*:\/\//, "") : ""
@@ -411,7 +402,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     try {
       realRoot = fs.realpathSync(root)
     } catch {}
-    const all = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project ?? projectName(realRoot))
+    const all = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project ?? (await dbtProjectName(realRoot)))
     // The structured result is read by a plugin that accepts at most 4 MiB: keep it well under that.
     let bytes = 0
     let keep = 0

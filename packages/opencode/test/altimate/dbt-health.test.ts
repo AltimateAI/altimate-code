@@ -210,6 +210,17 @@ describe("dbt_health", () => {
     expect(python.calls[0].python).toBe("/discovered/python")
   })
 
+  test("takes the project name from dbt_project.yml when the manifest metadata has none", async () => {
+    const { project: _omitted, ...withoutProject } = HEALTHCHECK
+    python.stdout = JSON.stringify(withoutProject) + "\n"
+    const result = await run()
+    const own = result.metadata.insights[0]
+    expect(own.file).toBe(path.join(project, "models", "staging", "stg_orders.sql"))
+    expect(own.properties).toBe(path.join(project, "models", "staging", "_staging.yml"))
+    const dep = result.metadata.insights.find((i: { uniqueId: string }) => i.uniqueId === "model.dep.base")
+    if (dep) expect(dep.file).toBe("")
+  })
+
   test("names a model's files under the real folder when the project is reached through a symlink", async () => {
     const link = path.join(await mkdtemp(path.join(os.tmpdir(), "dbt-health-link-")), "project")
     await symlink(project, link)
