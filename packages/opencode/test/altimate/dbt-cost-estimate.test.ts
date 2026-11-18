@@ -185,6 +185,27 @@ describe("dbt_cost_estimate", () => {
     expect(result.output).not.toContain("at most")
   })
 
+  test.each([
+    "select 1; select * from big",
+    "select 1; execute immediate 'select * from big'",
+    "execute immediate 'select * from big'",
+  ])("a script (%s) is a lower bound, not an upper bound", async (sql) => {
+    useAdapter(calls, { bytes: "1.0 GiB" })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql }, ctx)
+    expect(result.metadata).toMatchObject({ bytes: 1024 ** 3, lowerBound: true })
+    expect(result.metadata).not.toHaveProperty("maxBytes")
+    expect(result.output).not.toContain("at most")
+  })
+
+  test("a semicolon in a string or a comment is not a script", async () => {
+    useAdapter(calls, { bytes: "1.0 GiB" })
+    const tool = await initTool(DbtCostEstimateTool)
+    for (const sql of ["select 'a;b' from t", "select 1 -- x; y\nfrom t", "select `p.d;t`.c from `p.d.t`"]) {
+      const result = await tool.execute({ sql }, ctx)
+      expect(result.metadata).toHaveProperty("maxBytes")
+    }
+  })
+
   test.each(["snowflake", "databricks", "duckdb"])("answers supported:false on %s and compiles nothing", async (type) => {
     useAdapter(calls, { type })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)

@@ -20,6 +20,15 @@ const UNITS = ["Bytes", "KiB", "MiB", "GiB", "TiB", "PiB"] as const
  * rounded: the true count is within half a tenth of its unit. Undefined for anything else, so a changed
  * format is reported, never read as a count.
  */
+/** Whether the SQL is a script (more than one statement, or EXECUTE IMMEDIATE): a dry run only sees its first statements. */
+export function isScript(sql: string): boolean {
+  const bare = sql
+    .replace(/--[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\//g, " ")
+    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g, " ")
+    .replace(/;\s*$/, "")
+  return bare.includes(";") || /\bexecute\s+immediate\b/i.test(bare)
+}
+
 export function parseBytesProcessed(display: unknown): { bytes: number; maxBytes: number } | undefined {
   if (typeof display === "number") {
     if (!Number.isFinite(display) || display < 0) return undefined
@@ -124,21 +133,23 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     }
     const name = args.model
     const shown = typeof display === "number" ? `${parsed.bytes} Bytes` : String(display)
-    // A dry run can report 0 for a query that still reads data (BigQuery federated sources), so 0 is a
-    // lower bound and carries no upper bound.
+    // A dry run can report 0 for a query that still reads data (BigQuery federated sources), and it skips
+    // what a script runs after its first statement or inside EXECUTE IMMEDIATE: those figures are lower
+    // bounds and carry no upper bound.
     const zero = parsed.bytes === 0
+    const lower = zero || isScript(compiled as string)
     return {
       title: `dbt_cost_estimate: ${shown}`,
       metadata: {
         success: true,
         supported: true,
         adapter: type,
-        ...(zero ? { bytes: 0, lowerBound: true } : parsed),
+        ...(lower ? { bytes: parsed.bytes, lowerBound: true } : parsed),
         display: shown,
         ...(name && { model: name }),
       },
       output: `${name ? `${name} ` : "The query "}would process ${shown} ${
-        zero ? "(a dry run can report 0 for a query that still reads data, so this is a lower bound, not a cap)." : `(at most ${parsed.maxBytes} bytes).`
+        lower ? "(a dry run can undercount a script or a zero estimate, so this is a lower bound, not a cap)." : `(at most ${parsed.maxBytes} bytes).`
       }`,
     }
   },
