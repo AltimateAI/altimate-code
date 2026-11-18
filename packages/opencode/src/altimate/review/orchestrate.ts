@@ -2392,6 +2392,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     return docLookups.get(name)!
   }
+  // The project defines docs blocks of its own (any `{% docs x %}` in its .md files).
+  let docsAny: Promise<boolean> | undefined
+  const projectHasDocs = () =>
+    (docsAny ??= (input.grepProject?.("docs", "*.md") ?? Promise.resolve([]))
+      .then((hits) => hits.some((h) => /\{%-?\s*docs\s+\w+\s*-?%\}/.test(h.text)))
+      // A failed search is no evidence: stay silent.
+      .catch(() => false))
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
   touch(schemaFiles)
   const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
@@ -2410,7 +2417,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ...detectUnitTestFixtures(file, oldContent, newContent),
             ...snapshotYmlFindings(file, oldContent, newContent),
             ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
-            ...(lanes.has("dbt_patterns") && input.grepProject ? await docRefFindings(file, oldContent, newContent, docExists) : []),
+            ...(lanes.has("dbt_patterns") && input.grepProject ? await docRefFindings(file, oldContent, newContent, docExists, projectHasDocs) : []),
           ]
         } catch (err) {
           // One malformed schema file degrades that file only.
