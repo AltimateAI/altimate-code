@@ -134,6 +134,12 @@ export namespace Plugin {
       // ignore old codex plugin since it is supported first party now
       if (plugin.includes("opencode-openai-codex-auth") || plugin.includes("opencode-copilot-auth")) continue
       log.info("loading plugin", { path: plugin })
+      // altimate_change start — assessment mode installs no npm plugin; local file plugins still load
+      if (!plugin.startsWith("file://") && Flag.assessmentMode()) {
+        log.warn("skipping npm plugin: assessment mode installs nothing", { path: plugin })
+        continue
+      }
+      // altimate_change end
       if (!plugin.startsWith("file://")) {
         const lastAtIndex = plugin.lastIndexOf("@")
         const pkg = lastAtIndex > 0 ? plugin.substring(0, lastAtIndex) : plugin
