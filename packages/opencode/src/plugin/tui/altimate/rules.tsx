@@ -461,8 +461,8 @@ function installCards(api: TuiPluginApi) {
   }
   // `live`: a decision that arrived as an event before the first replay. It is news even when the replay is the scope's
   // first, which records what was kept before it silently.
-  const replay = (live?: Shown) =>
-    void summaryOf(api).then((summary) => {
+  const replay = (live?: Shown): Promise<void> =>
+    summaryOf(api).then((summary) => {
       if (!summary) return
       scope = summary.notices_scope ?? "none"
       const first = api.kv.get<string[] | undefined>(seenKey(), undefined) === undefined
@@ -477,8 +477,8 @@ function installCards(api: TuiPluginApi) {
       if (live) notify(live)
     })
   // Before the first replay this TUI does not know whose decisions they are: the replay learns it, then shows this one.
-  listen("rule.proposal.reviewed", (event) => (scope ? notify(event.properties) : replay(event.properties)))
-  listen("altimate.rules.changed", () => replay())
+  listen("rule.proposal.reviewed", (event) => (scope ? notify(event.properties) : void replay(event.properties)))
+  listen("altimate.rules.changed", () => void replay())
   // This TUI shows proposal cards: it holds the server's renderer lease for its project while it runs, renewed at the
   // interval the server asks for. Without a live lease, the save tools save as before cards and the after-turn check
   // waits. No answer (the server may still be starting): tried again in a few seconds. A refusal (workspaces off, an
@@ -499,15 +499,56 @@ function installCards(api: TuiPluginApi) {
   void lease()
   // A plugin that goes away (reloaded, another server) stops renewing and stops listening, so its lease lapses.
   // Startup: after the session-start sync had a moment, catch up on reviews and cards from before this TUI listened.
+  // altimate_change start — workspace activity: the startup replay, which the activity line waits for
+  let replayed: () => void = () => {}
+  const startupReplay = new Promise<void>((resolve) => (replayed = resolve))
+  // altimate_change end
   const startup = setTimeout(() => {
     if (disposed) return
-    replay()
+    // altimate_change start — workspace activity: the activity line waits for the startup replay
+    void replay().finally(() => replayed())
+    // altimate_change end
     void load()
   }, 4_000)
+  // altimate_change start — workspace activity: what changed in the workspace since this TUI last looked, once, after
+  // the startup replay (its decisions are queued for their toast first). The TUI shows one toast at a time, so the line
+  // waits while a decision toast is up; if one is still up after `ACTIVITY_WAIT_MS`, it is not shown. The look is
+  // deferred: the server moves this TUI's mark only when the line was shown, so a TUI that closes first, or gives up
+  // waiting, shows it next time.
+  let activityTimer: ReturnType<typeof setTimeout> | undefined
+  const wait = (ms: number) =>
+    new Promise<void>((resolve) => {
+      activityTimer = setTimeout(resolve, ms)
+      activityTimer.unref?.()
+    })
+  const showActivity = async () => {
+    await Promise.race([startupReplay, wait(ACTIVITY_REPLAY_WAIT_MS)])
+    // The replay may have won: its wait is not left running, so dispose clears every timer still pending.
+    if (activityTimer) clearTimeout(activityTimer)
+    if (disposed) return
+    const answer = await get<{ ok: boolean; status?: string; line?: string; seen?: unknown }>(
+      api,
+      "/altimate/workspace/activity?host=tui&defer=1",
+    )
+    if (disposed || typeof answer?.line !== "string") return
+    const line = printable(answer.line)
+    const shown = await announceWhenClear({
+      busy: () => toasterOf(api).shownSince(Date.now() - DECISION_TOAST_MS),
+      wait: () => wait(ACTIVITY_RETRY_MS),
+      waits: Math.ceil(ACTIVITY_WAIT_MS / ACTIVITY_RETRY_MS),
+      disposed: () => disposed,
+      show: () => api.ui.toast({ variant: "info", message: line, duration: 12_000 }),
+    })
+    if (shown && answer.seen !== undefined) await post(api, "/altimate/workspace/activity/seen", { host: "tui", seen: answer.seen }).catch(() => undefined)
+  }
+  activityTimer = setTimeout(() => void showActivity(), 6_000)
+  activityTimer.unref?.()
+  // altimate_change end
   api.lifecycle?.onDispose?.(() => {
     disposed = true
     if (leaseTimer) clearTimeout(leaseTimer)
     clearTimeout(startup)
+    if (activityTimer) clearTimeout(activityTimer)
     disposeToaster(api)
     for (const off of offs.splice(0)) off()
     disposeEffects()
@@ -567,6 +608,34 @@ export function decisionToast(raw: Shown): DecisionToast | undefined {
     return { variant: "warning", message: `${sentence(`Changes requested on your rule${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`)} Open /rules to see what you can do.`, duration: 20000 }
   // altimate_change end
   return undefined
+}
+
+/** The longest a decision toast stays up: the activity line waits for it. */
+const DECISION_TOAST_MS = 15_000
+const ACTIVITY_RETRY_MS = 5_000
+/** How long the activity line waits for decision toasts to clear before it gives up (it shows next time). */
+const ACTIVITY_WAIT_MS = 60_000
+/** How long the activity line waits for the startup replay. */
+const ACTIVITY_REPLAY_WAIT_MS = 10_000
+
+/** Shows a line once nothing else is showing: checks `busy`, and waits between checks up to `waits` times. Shows
+ * nothing if it is still busy after that, or once `disposed`. Returns whether it showed. */
+export async function announceWhenClear(options: {
+  busy: () => boolean
+  wait: () => Promise<void>
+  waits: number
+  disposed: () => boolean
+  show: () => void
+}): Promise<boolean> {
+  for (let tries = 0; ; tries++) {
+    if (options.disposed()) return false
+    if (!options.busy()) {
+      options.show()
+      return true
+    }
+    if (tries >= options.waits) return false
+    await options.wait()
+  }
 }
 
 /** How many decisions a combined toast names. */
