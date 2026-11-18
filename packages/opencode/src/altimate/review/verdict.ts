@@ -248,6 +248,8 @@ export const VerdictEnvelope = z.object({
             hunksSent: z.number().int().nonnegative(),
             hunksTotal: z.number().int().nonnegative(),
             card: z.boolean(),
+            /** Index of the call that carried the file (focused batching only). */
+            batch: z.number().int().nonnegative().optional(),
           }),
         )
         .optional(),
