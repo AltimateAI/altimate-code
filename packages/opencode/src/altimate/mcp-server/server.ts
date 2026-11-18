@@ -99,12 +99,12 @@ export function structuredResult(tool: string, metadata: Record<string, unknown>
   const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))
   // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`, and dbt_sql_graph's
   // text lists the same nodes as `nodes`: keep only the header.
-  const head =
-    tool === "dbt_lineage" && "columns" in fields
-      ? report.split(/\n(?:Column Mappings|Lineage Edges):/)[0]!.trim()
-      : tool === "dbt_sql_graph" && "nodes" in fields
-        ? report.split("\n")[0]!.trim()
-        : report
+  let head = report
+  if (tool === "dbt_lineage" && "columns" in fields) {
+    head = report.split(/\n(?:Column Mappings|Lineage Edges):/)[0]!.trim()
+  } else if (tool === "dbt_sql_graph" && "nodes" in fields) {
+    head = report.split("\n")[0]!.trim()
+  }
   const full = { ...fields, report: head }
   if (Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES) return full
   // The column answer is the largest field: past the cap it goes first, so the model-level fields
