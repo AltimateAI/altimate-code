@@ -209,14 +209,16 @@ describe.skipIf(!HAS_DATABRICKS)("Databricks FinOps Integration", () => {
   // Databricks SQL warehouse savings (facts measured here, rules in altimate-core)
   // -------------------------------------------------------------------------
   describe("databricks_savings", () => {
-    test("measures every warehouse of the workspace and returns core's report", async () => {
+    test("measures every warehouse the system tables show and returns core's report", async () => {
       const result = await databricksSavings({ warehouse: WH })
-      expectValidResult(result)
-      if (result.success) {
-        expect(result.warehouses_checked).toBeGreaterThan(0)
-        expect(Array.isArray(result.report!.findings)).toBe(true)
-        expect(result.report!.total.resources).toBe(new Set(result.report!.findings.map((f) => `${f.resource_type}:${f.resource_id}`)).size)
-      }
+      // A core without the rules, or a refused warehouse query, is a failure here, not a pass.
+      expect(result.error).toBeUndefined()
+      expect(result.success).toBe(true)
+      expect(result.warehouses_checked).toBeGreaterThan(0)
+      expect(Array.isArray(result.report!.findings)).toBe(true)
+      expect(result.report!.total.resources).toBe(
+        new Set(result.report!.findings.map((f) => `${f.resource_type}:${f.workspace_id ?? ""}:${f.resource_id}`)).size,
+      )
     }, 300000)
   })
 })

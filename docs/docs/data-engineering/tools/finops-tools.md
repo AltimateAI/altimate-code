@@ -187,7 +187,7 @@ Check a Databricks workspace for savings with Altimate's rules, on a Databricks 
 - **Idle Cluster Detection:** an all-purpose cluster with idle workers and auto-termination off or an hour or more.
 - **Job Running on All-Purpose Compute:** a scheduled job that would bill at the jobs-compute rate on a job cluster.
 
-The tool measures each resource's usage; altimate-core decides what qualifies and what it saves. Prices are list prices. Each resource is counted once in the total, and each flagged warehouse also gets what it would cost at every smaller size and as serverless. A check whose tables the connection cannot read is named as not checked; the others still report.
+The tool measures each resource's usage; altimate-core decides what qualifies and what it saves. Prices are list prices. Each resource is counted once in the total, and each flagged warehouse also gets what it would cost at every smaller size and as serverless. If the connection cannot read the cluster or job tables, that check is named as not checked and the warehouse checks still report; the warehouse tables themselves are required.
 
 ```
 > finops_databricks_savings --warehouse prod_dbx
