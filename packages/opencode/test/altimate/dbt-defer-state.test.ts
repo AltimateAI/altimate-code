@@ -202,14 +202,28 @@ describe("dbt_defer_state", () => {
   test("a project or target written as env_var() is resolved, with its default", async () => {
     write("analytics/dbt_project.yml", "name: shop\nprofile: \"{{ env_var('DEFER_TEST_PROFILE', 'shop') }}\"\n")
     write("profiles/profiles.yml", "shop:\n  target: \"{{ env_var('DEFER_TEST_TARGET', 'dev') }}\"\n  outputs:\n    dev:\n      type: duckdb\n    qa:\n      type: duckdb\n")
+    const saved = { profile: process.env.DEFER_TEST_PROFILE, target: process.env.DEFER_TEST_TARGET }
+    delete process.env.DEFER_TEST_PROFILE
     process.env.DEFER_TEST_TARGET = "qa"
     try {
       const result = await resolveDeferState(path.join(root, "analytics"))
       expect(result).toMatchObject({ profile: "shop", defaultTarget: "qa", targets: ["dev", "qa"] })
-    } finally {
       delete process.env.DEFER_TEST_TARGET
+      expect((await resolveDeferState(path.join(root, "analytics"))).defaultTarget).toBe("dev")
+    } finally {
+      if (saved.profile === undefined) delete process.env.DEFER_TEST_PROFILE
+      else process.env.DEFER_TEST_PROFILE = saved.profile
+      if (saved.target === undefined) delete process.env.DEFER_TEST_TARGET
+      else process.env.DEFER_TEST_TARGET = saved.target
     }
-    expect((await resolveDeferState(path.join(root, "analytics"))).defaultTarget).toBe("dev")
+  })
+
+  test("a profile written as an expression this does not evaluate is unknown, not that text", async () => {
+    write("analytics/dbt_project.yml", "name: shop\nprofile: \"{{ var('p') }}\"\n")
+    write("profiles/profiles.yml", "shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n")
+    const result = await resolveDeferState(path.join(root, "analytics"))
+    expect(result.profile).toBeUndefined()
+    expect(result.targets).toEqual([])
   })
 
   test("double-quoted env_var() names and defaults are resolved too", async () => {

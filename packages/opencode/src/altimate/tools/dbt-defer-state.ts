@@ -175,7 +175,8 @@ export async function readProfileTargets(projectDir: string) {
   try {
     const project = await parseYaml(fs.readFileSync(path.join(projectDir, "dbt_project.yml"), "utf-8"))
     const profile = resolveEnvVars(project?.profile)
-    if (typeof profile === "string" && profile !== "") out.profile = profile
+    // A profile dbt would render from an expression this does not evaluate is unknown, not that text.
+    if (typeof profile === "string" && profile !== "" && !/\{[{%#]/.test(profile)) out.profile = profile
   } catch {
     return out
   }
