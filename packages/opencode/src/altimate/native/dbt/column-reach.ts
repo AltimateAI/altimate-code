@@ -9,7 +9,7 @@
 import * as core from "@altimateai/altimate-core"
 import { loadRawManifest, findModel, detectDialect } from "./helpers"
 import { dbtLineage } from "./lineage"
-import { missingColumn, projectLineage, selectsStar, stripSql } from "./project-lineage"
+import { engineMade, missingColumn, projectLineage, selectsStar, stripSql } from "./project-lineage"
 
 export interface ColumnReachModel {
   name: string
@@ -477,9 +477,9 @@ export function columnReach(manifestPath: string, model: string, column: string,
     // A name the engine invents for an unaliased calculation (`_0`) is no column of the model: it gets no rating.
     const realNames = new Set(project.columns(id).map((col) => col.name))
     // A documented `_0` is the engine's placeholder all the same unless the SQL writes that name itself.
-    const writes = (name: string) => new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`, "i").test(sqlText)
+    const strippedSql = stripSql(sqlText)
     for (const out of carriedLens.keys())
-      if (!realNames.has(out) || (/^_(col_)?\d+$/.test(out) && !writes(out))) carriedLens.set(out, undefined)
+      if (!realNames.has(out) || engineMade(out, strippedSql)) carriedLens.set(out, undefined)
     // The engine has no schema for the tables inside an inlined ephemeral parent, so it reports no
     // edge through it: unknown, not unread, even when another parent's edges are traced.
     const viaEphemeral = parents.some((p) => lookup(p)?.config?.materialized === "ephemeral")

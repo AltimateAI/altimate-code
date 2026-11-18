@@ -173,6 +173,20 @@ describe("columnReach", () => {
     expect(found?.lens_types).toBeUndefined()
   })
 
+  test("an engine-style output name the SQL writes itself keeps its rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_named"] = model(
+      "stg_named",
+      ["model.shop.fct_orders"],
+      'select revenue as _0 from "shop"."main"."fct_orders"',
+      ["_0"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_named")
+    expect(found?.lens_types).toEqual({ _0: "Alias" })
+  })
+
   test("a documented engine-style name the SQL never writes gets no rating", () => {
     const value = manifest()
     const nodes = value.nodes as Record<string, any>
