@@ -184,13 +184,27 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         ])
         const all = openThreads(shares, users)
         let threads = all.slice(0, MAX_THREADS)
-        // The metadata carries the same threads as the output, so both are cut together to the size budget.
-        while (threads.length > 1 && formatThreads(threads).length > MAX_OUTPUT) threads = threads.slice(0, Math.max(1, Math.floor(threads.length * 0.8)))
+        // The metadata carries the same threads as the output, so both are cut together to the size
+        // budget: the longest prefix of threads whose listing fits (at least one).
+        if (formatThreads(threads).length > MAX_OUTPUT) {
+          let fit = 1
+          let over = threads.length
+          while (over - fit > 1) {
+            const mid = Math.floor((fit + over) / 2)
+            if (formatThreads(threads.slice(0, mid)).length > MAX_OUTPUT) over = mid
+            else fit = mid
+          }
+          threads = threads.slice(0, fit)
+        }
         const cutThreads = threads.length < all.length
-        const cutMessages = all.some((t) => t.dropped_messages > 0)
+        // Only the threads shown count: a long thread past the cut loses nothing the reader sees.
+        const cutMessages = threads.some((t) => t.dropped_messages > 0)
         let body = formatThreads(threads)
         const cutBytes = body.length > MAX_OUTPUT
-        if (cutBytes) body = `${body.slice(0, body.lastIndexOf("\n", MAX_OUTPUT) > 0 ? body.lastIndexOf("\n", MAX_OUTPUT) : MAX_OUTPUT)}\n…`
+        if (cutBytes) {
+          const at = body.lastIndexOf("\n", MAX_OUTPUT)
+          body = `${body.slice(0, at > 0 ? at : MAX_OUTPUT)}\n…`
+        }
         const truncated = cutThreads || cutMessages || cutBytes
         const cutNote = [
           cutThreads && `the first ${threads.length} threads`,
@@ -229,13 +243,8 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
     if (args.action === "reply" && !args.text?.trim()) {
       return failure("docs_share_comments: reply", "reply needs non-empty text.", "missing_text")
     }
-    // Posting speaks for the person: it goes through the permission prompt like any other write.
-    await ctx.ask({
-      permission: "docs_share_comments",
-      patterns: [`${args.action}:${args.share_id}/${args.group_id}`],
-      always: ["*"],
-      metadata: { action: args.action, share_id: args.share_id, group_id: args.group_id },
-    })
+    // A refused prompt ends the call: it is no failed post.
+    let refused: { error: unknown } | undefined
     try {
       // The service accepts any pair of ids, and stores a reply where nobody reads it when the thread is
       // not on the share: check the pair against the project's open threads first.
@@ -248,15 +257,13 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         const msg = e instanceof Error ? e.message : String(e)
         return failure(`docs_share_comments: ${args.action}`, `Could not check the thread: ${msg}. Nothing was sent.`, msg)
       }
-      const known = listed.shares.some(
-        (s) =>
-          s.share_id === args.share_id &&
-          s.conversation_group.some((g) => g.conversation_group_id === args.group_id && g.status === "Pending"),
-      )
-      if (!known && listed.missing) {
+      const share = listed.shares.find((s) => s.share_id === args.share_id)
+      const known = share?.conversation_group.some((g) => g.conversation_group_id === args.group_id && g.status === "Pending") === true
+      // The thread cannot be checked only when its share was not among the ones the service sent.
+      if (!known && !share && listed.missing) {
         return failure(
           `docs_share_comments: ${args.action}`,
-          `Thread ${args.group_id} of share ${args.share_id} is not among the ${listed.shares.length} shares the service sent, and it holds ${listed.missing} more that this tool does not read: nothing was sent, because the thread cannot be checked.`,
+          `Share ${args.share_id} is not among the ${listed.shares.length} shares the service sent, and it holds ${listed.missing} more that this tool does not read: nothing was sent, because the thread cannot be checked.`,
           "incomplete_list",
         )
       }
@@ -266,6 +273,19 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
           `Thread ${args.group_id} is not an open thread of share ${args.share_id} in project ${project}: nothing was sent. Run list for the ids.`,
           "unknown_thread",
         )
+      }
+      // Posting speaks for the person: it goes through the permission prompt like any other write, and
+      // only for a post that will be sent.
+      try {
+        await ctx.ask({
+          permission: "docs_share_comments",
+          patterns: [`${args.action}:${args.share_id}/${args.group_id}`],
+          always: ["*"],
+          metadata: { action: args.action, share_id: args.share_id, group_id: args.group_id },
+        })
+      } catch (error) {
+        refused = { error }
+        throw error
       }
       if (args.action === "reply") {
         const text = args.text!.trim()
@@ -285,6 +305,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
         output: `Resolved thread ${args.group_id} on share ${args.share_id}.`,
       }
     } catch (e) {
+      if (refused) throw refused.error
       const msg = e instanceof Error ? e.message : String(e)
       return failure(
         "docs_share_comments: ERROR",

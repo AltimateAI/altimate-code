@@ -85,10 +85,11 @@ export async function listSharedDocs(
   for (const project of projects) params.append("projects", project)
   const shares = await AltimateApi.apiRequest("GET", `/dbt/dbt_docs_share/all?${params.toString()}`, undefined, signal)
   // A paginated answer wraps the shares in `items`; a bare array is accepted too.
-  const list = shares && !Array.isArray(shares) && Array.isArray(shares.items) ? shares.items : shares
+  const wrapped = shares && !Array.isArray(shares) ? shares : undefined
+  const list = Array.isArray(wrapped?.items) ? wrapped.items : shares
   const parsed = SharesAnswer.safeParse(list)
   if (!parsed.success) throw new Error("The shared docs service returned an unexpected answer for the shares.")
-  const total = shares && !Array.isArray(shares) && typeof shares.total === "number" ? shares.total : undefined
+  const total = typeof wrapped?.total === "number" ? wrapped.total : undefined
   const missing = total !== undefined && total > parsed.data.length ? total - parsed.data.length : undefined
   return { shares: parsed.data as DocsShare[], missing }
 }

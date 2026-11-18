@@ -251,6 +251,46 @@ describe("docs_share_comments list", () => {
     expect(posted.output).toContain("nothing was sent")
   })
 
+  test("a share that was read in full, with the thread not open, is an unknown thread even when the page is partial", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    let asked = 0
+    const counting = { ...ctx, ask: () => Effect.sync(() => void asked++) } as unknown as Tool.Context
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all") ? { items: [SHARES[0]], total: 5 } : undefined
+    const posted = await tool.execute({ action: "reply", project: "jaffle_shop", share_id: 7, group_id: 99, text: "hi" }, counting)
+    expect((posted.metadata as any).error).toBe("unknown_thread")
+    // No prompt for a post that will not be sent.
+    expect(asked).toBe(0)
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0)
+  })
+
+  test("a post to an open thread asks for permission once, before it is sent", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const postsWhenAsked: number[] = []
+    const watching = { ...ctx, ask: () => Effect.sync(() => void postsWhenAsked.push(calls.filter((c) => c.method === "POST").length)) } as unknown as Tool.Context
+    await tool.execute({ action: "resolve", project: "jaffle_shop", share_id: 7, group_id: 11 }, watching)
+    expect(postsWhenAsked).toEqual([0])
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(1)
+  })
+
+  test("a listing only slightly over the size budget keeps most of its threads, and counts only shown threads as message-cut", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const group = SHARES[0]!.conversation_group[0]!
+    const conv = (n: number) => Array.from({ length: n }, (_, i) => ({ conversation_id: i + 1, user_id: 1, timestamp: `2026-11-01T10:00:${String(i % 60).padStart(2, "0")}Z`, message: "y".repeat(1900) }))
+    // 30 threads of 10 messages are ~570k characters: the cut must keep about a sixth of them, not a fifth of the cut each pass.
+    answer = (endpoint) =>
+      endpoint.startsWith("/dbt/dbt_docs_share/all")
+        ? [{ ...SHARES[0], conversation_group: Array.from({ length: 30 }, (_, g) => ({ ...group, conversation_group_id: g + 1, conversations: conv(10) })) }]
+        : undefined
+    const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+    const shown = (result.metadata as any).threads.length as number
+    expect(result.output.length).toBeLessThanOrEqual(100_000 + 1000)
+    // One more thread would not have fitted.
+    expect(shown).toBeGreaterThanOrEqual(5)
+    expect(shown).toBeLessThan(30)
+    expect(result.output).not.toContain("newest 100 messages")
+  })
+
   test("a post is refused when the permission prompt is declined, and nothing is sent", async () => {
     const tool = await initTool(DocsShareCommentsTool)
     const declined = { ...ctx, ask: () => Effect.fail(new Error("denied")) } as unknown as Tool.Context
@@ -596,6 +636,8 @@ describe("helpers and exposure", () => {
 
   test("is reachable from `tool run` and is not a write tool the MCP server opens", () => {
     expect(Object.keys(EXPOSED)).toContain("docs_share_comments")
+    // `tool run` and the MCP server run the implemented tool, not a placeholder.
+    expect(EXPOSED.docs_share_comments).toBe(DocsShareCommentsTool)
     expect(WRITE_TOOLS.has("docs_share_comments")).toBe(false)
     expect(MCP_OPEN_WRITE_TOOLS.has("docs_share_comments")).toBe(false)
   })
