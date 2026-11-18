@@ -284,8 +284,21 @@ describe("cluster and job findings", () => {
             monthly_max: 1530,
             evidence: { kind: "idle_cluster", idle_pattern: "zombie", idle_ratio: 0.85, auto_termination_minutes: null, active_days: 5, avg_cpu_active_pct: 8, peak_cpu_active_pct: 30, total_cost: 700, wasted_cost: 595 },
           },
+          {
+            check_id: "jobs_on_all_purpose_compute",
+            title: "Job Running on All-Purpose Compute",
+            resource_type: "job",
+            resource_id: "42",
+            resource_name: "nightly",
+            severity: "medium",
+            daily_min: 24,
+            daily_max: 36,
+            monthly_min: 720,
+            monthly_max: 1080,
+            evidence: { kind: "job_on_all_purpose", host_cluster_id: "0101-abc", host_cluster_name: "shared\nanalytics", trigger_type: "CRON", task_runs: 1234, task_hours: 70, estimated_dbus: 1700, all_purpose_rate_per_dbu: 0.55, jobs_rate_per_dbu: 0.33, jobs_rate_estimated: true, wasted_cost: 280 },
+          },
         ],
-        total: { monthly_min: 765, monthly_max: 1530, resources: 1 },
+        total: { monthly_min: 1485, monthly_max: 2610, resources: 2 },
         what_if: [],
       },
     }))
@@ -295,7 +308,10 @@ describe("cluster and job findings", () => {
     expect(result.output).toContain("Not checked: Job Running on All-Purpose Compute ([INSUFFICIENT_PERMISSIONS] system.lakeflow.jobs)")
     expect(result.output).toContain("shared-analytics (cluster) · Idle Cluster Detection · $765–$1,530 a month (critical)")
     expect(result.output).toContain("All-purpose cluster 85% idle across 5 active days (zombie), average worker CPU 8%, peak 30%")
-    expect(result.output).toContain("Auto-termination off; $700.00 billed outside job runs over the window")
+    expect(result.output).toContain("Auto-termination off; $700.00 billed on all-purpose compute over the window")
+    expect(result.output).toContain("nightly (job) · Job Running on All-Purpose Compute · $720–$1,080 a month (medium)")
+    expect(result.output).toContain('1,234 task runs (cron), 70.0 hours on all-purpose compute, mostly cluster "shared analytics", about 1,700.0 DBUs')
+    expect(result.output).toContain("$0.550 a DBU now; a job cluster would be about $0.330 (estimated: the workspace billed no jobs compute)")
   })
 
   test("the cluster and job queries each take only the window end, and key every resource by its workspace", () => {
@@ -310,33 +326,57 @@ describe("cluster and job findings", () => {
     expect(DATABRICKS_CLUSTER_FACTS_SQL).toContain("PARTITION BY workspace_id, cluster_id")
     // Job ids repeat across workspaces: every job key pairs the workspace with the id.
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("PARTITION BY workspace_id, job_id")
-    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY workspace_id, job_id")
-    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN inv ON inv.workspace_id = jb.workspace_id AND inv.job_id = jb.job_id")
-    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN jobs_rate jr ON jr.workspace_id = jb.workspace_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY tl.workspace_id, tl.job_id, tl.task_key, tl.job_run_id, tl.run_id, tl.period_start_time")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY workspace_id, job_id, task_key, job_run_id, cluster_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY workspace_id, job_id, task_key, job_run_id\n")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY tr.workspace_id, tr.job_id, tr.task_key, tr.cluster_id, rt.trigger_type")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN inv ON inv.workspace_id = t.workspace_id AND inv.job_id = t.job_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("rt.workspace_id = tr.workspace_id AND rt.run_id = tr.job_run_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN cluster_bill cb ON cb.workspace_id = t.workspace_id AND cb.cluster_id = t.cluster_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN jobs_rate jr ON jr.workspace_id = t.workspace_id")
+  })
+
+  test("the job query finds runs through the compute they used, on live all-purpose clusters, for jobs not deleted", () => {
+    // Billing leaves the job id empty on all-purpose compute, so it cannot find these jobs.
+    expect(DATABRICKS_JOB_FACTS_SQL).not.toContain("usage_metadata.job_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("explode(t.compute_ids) AS compute_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("c.workspace_id = tl.workspace_id AND c.cluster_id = tl.compute_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("WHERE delete_time IS NULL AND cluster_source IN ('UI', 'API')")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("WHERE inv.delete_time IS NULL")
+    // A row naming two all-purpose clusters counts once, and a run's hours add up its hourly rows.
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("MAX(timestampdiff(SECOND, tl.period_start_time, tl.period_end_time)) AS seconds")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("SUM(seconds) / 3600.0 AS hours")
+    // A run is credited to the cluster it spent most of its time on, the lowest id on a tie.
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("MIN_BY(cluster_id, struct(-seconds, cluster_id)) AS cluster_id")
+    // Latest inventory rows, the window on both timelines, one duration per billed period, the
+    // jobs rate from jobs compute, and the largest rows first when the row limit cuts the list.
+    expect(DATABRICKS_JOB_FACTS_SQL.match(/ORDER BY change_time DESC\) = 1/g)).toHaveLength(2)
+    expect(DATABRICKS_JOB_FACTS_SQL.match(/period_start_time >= CAST\(DATE_SUB\(p\.we_date, 7\) AS TIMESTAMP\) AND \w+\.period_start_time < CAST\(p\.we_date AS TIMESTAMP\)/g)).toHaveLength(2)
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY workspace_id, cluster_id, usage_start_time, usage_end_time")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("FROM bill WHERE product = 'JOBS' GROUP BY workspace_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("ORDER BY t.task_hours DESC")
+    // A task run with no parent run id is its own run, so it still finds its trigger.
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("COALESCE(NULLIF(t.job_run_id, ''), t.run_id) AS job_run_id")
+    // The thresholds stay in core: every trigger is measured and handed over.
+    expect(DATABRICKS_JOB_FACTS_SQL).not.toMatch(/CRON|PERIODIC|CONTINUOUS|HAVING/)
   })
 
   test("cluster and job rows are coerced to the facts core reads", () => {
     const cluster = toClusterFacts({ cluster_id: "c1", cluster_name: null, auto_termination_minutes: "120", total_node_minutes: 900n, active_util_days: "4", total_worker_minutes: 900, idle_node_minutes: 450, total_cost: "70.5" })
     expect(cluster).toMatchObject({ cluster_id: "c1", cluster_name: "c1", auto_termination_minutes: 120, total_node_minutes: 900, active_util_days: 4, total_cost: 70.5 })
     expect(toClusterFacts({ cluster_id: "c2" }).auto_termination_minutes).toBeNull()
-    const job = toJobFacts({ job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 7n, job_share_of_cluster: 1.2, jobs_rate_per_dbu: null })
-    expect(job).toMatchObject({ job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 7, job_share_of_cluster: 1, jobs_rate_per_dbu: null })
-    // A job the inventory does not list arrives with false, or with nothing at all.
-    expect(toJobFacts({ job_id: "j2", listed_in_job_inventory: false }).listed_in_job_inventory).toBe(false)
-    expect(toJobFacts({ job_id: "j3" })).toMatchObject({ listed_in_job_inventory: false, run_trigger_type: null })
-  })
-
-  test("the job query hands the inventory's trigger and the runs' trigger to core separately", () => {
-    expect(DATABRICKS_JOB_FACTS_SQL).toContain("inv.trigger_type AS trigger_type")
-    expect(DATABRICKS_JOB_FACTS_SQL).toContain("inv.job_id IS NOT NULL AS listed_in_job_inventory")
-    expect(DATABRICKS_JOB_FACTS_SQL).toContain("runs.run_trigger AS run_trigger_type")
-    expect(DATABRICKS_JOB_FACTS_SQL).not.toContain("COALESCE(inv.trigger_type")
+    const job = toJobFacts({ workspace_id: 222n, job_id: 42n, job_name: "nightly", task_key: "main", trigger_type: "CRON", host_cluster_id: "c1", host_cluster_name: null, task_runs: 7n, task_hours: "3.5", host_cluster_cost: "55", host_cluster_dbus: 100, host_cluster_billed_hours: "10", jobs_rate_per_dbu: null })
+    expect(job).toEqual({ job_id: "42", workspace_id: "222", job_name: "nightly", task_key: "main", trigger_type: "CRON", host_cluster_id: "c1", host_cluster_name: "c1", task_runs: 7, task_hours: 3.5, host_cluster_cost: 55, host_cluster_dbus: 100, host_cluster_billed_hours: 10, jobs_rate_per_dbu: null })
+    expect(toJobFacts({ job_id: "j", host_cluster_id: "c1", host_cluster_name: "" }).host_cluster_name).toBe("c1")
+    expect(toJobFacts({ job_id: "j", task_key: "" }).task_key).toBe("(no task key)")
+    // A run whose trigger the timeline does not give stays unknown, and core does not count it.
+    expect(toJobFacts({ job_id: "j2", task_key: "t", host_cluster_id: "c" })).toMatchObject({ trigger_type: null, job_name: "job j2", task_runs: 0, host_cluster_dbus: 0 })
   })
 })
 
 describe("databricks savings handler over a stubbed connection", () => {
   const WAREHOUSE_ROW = { workspace_id: "111", warehouse_id: "abc123", warehouse_name: "BI", warehouse_type: "PRO", warehouse_size: "SMALL", total_cost: 27.5 }
-  const JOB_ROW = { workspace_id: "222", job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 9 }
+  const JOB_ROW = { workspace_id: "222", job_id: "j1", job_name: "nightly", task_key: "main", trigger_type: "CRON", host_cluster_id: "c1", host_cluster_name: "shared", task_runs: 9, task_hours: 4.5, host_cluster_cost: 55, host_cluster_dbus: 100, host_cluster_billed_hours: 10, jobs_rate_per_dbu: 0.15 }
   const table = (row: Record<string, unknown>, truncated = false) => ({ columns: Object.keys(row), rows: [Object.values(row)], truncated })
   let calls: { sql: string; limit: number; binds: unknown[]; timeout?: number; clientTimeout?: number; signal?: AbortSignal }[]
   let sent: any
@@ -390,8 +430,23 @@ describe("databricks savings handler over a stubbed connection", () => {
     expect(sent.warehouses[0]).toMatchObject({ workspace_id: "111", warehouse_id: "abc123", warehouse_size: "SMALL", total_cost: 27.5 })
     expect(result.warehouses?.[0]).toMatchObject({ id: "abc123", workspace_id: "111" })
     expect(sent.clusters).toEqual([])
-    expect(sent.jobs[0]).toMatchObject({ workspace_id: "222", job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME" })
+    expect(sent.jobs[0]).toMatchObject({ workspace_id: "222", job_id: "j1", task_key: "main", trigger_type: "CRON", host_cluster_id: "c1", task_runs: 9, task_hours: 4.5 })
     expect(result.limited).toEqual([])
+  })
+
+  test("a job counts once however many task rows it has, and the same id in two workspaces is two jobs", async () => {
+    const row = (workspace: string, task: string) => Object.values({ ...JOB_ROW, workspace_id: workspace, task_key: task })
+    const spy = connect((sql) =>
+      sql === DATABRICKS_WAREHOUSE_FACTS_SQL
+        ? table(WAREHOUSE_ROW)
+        : sql === DATABRICKS_JOB_FACTS_SQL
+          ? { columns: Object.keys(JOB_ROW), rows: [row("222", "a"), row("222", "b"), row("333", "a")], truncated: false }
+          : { columns: [], rows: [], truncated: false },
+    )
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(sent.jobs).toHaveLength(3)
+    expect(result.jobs_checked).toBe(2)
   })
 
   test("a query past its limit fails the check with a plain reason, or skips an optional check", async () => {
@@ -482,8 +537,8 @@ describe("databricks savings handler over a stubbed connection", () => {
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
     spy.mockRestore()
     expect(calls.every((one) => one.limit === 10_000)).toBe(true)
-    expect(result.limited).toEqual(["jobs"])
-    expect(formatSavings(result)).toContain("Only the first 10,000 jobs were read; any beyond them were not checked.")
+    expect(result.limited).toEqual(["job task rows"])
+    expect(formatSavings(result)).toContain("Only the first 10,000 job task rows were read; any beyond them were not checked.")
   })
 
   test("when core refuses the cluster or job facts, the warehouse findings still report and those checks are named", async () => {
@@ -492,7 +547,7 @@ describe("databricks savings handler over a stubbed connection", () => {
     const picky = (input: string) => {
       const parsed = JSON.parse(input)
       calls.push(parsed)
-      if (parsed.clusters.length > 0 || parsed.jobs.length > 0) throw new Error("invalid input: jobs[0].job_total_cost must not be negative")
+      if (parsed.clusters.length > 0 || parsed.jobs.length > 0) throw new Error("invalid input: jobs[0].task_hours must not be negative")
       return rules(input)
     }
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, picky)
@@ -501,7 +556,7 @@ describe("databricks savings handler over a stubbed connection", () => {
     expect(calls.length).toBe(2)
     expect(sent.warehouses[0].warehouse_id).toBe("abc123")
     expect(result.skipped?.map((one) => one.check)).toEqual(["Idle Cluster Detection", "Job Running on All-Purpose Compute"])
-    expect(result.skipped?.[0]?.reason).toContain("core refused their facts: invalid input: jobs[0].job_total_cost")
+    expect(result.skipped?.[0]?.reason).toContain("core refused their facts: invalid input: jobs[0].task_hours")
     expect([result.clusters_checked, result.jobs_checked]).toEqual([0, 0])
   })
 

@@ -166,7 +166,8 @@ const LIST_PRICE_JOIN = `LEFT JOIN system.billing.list_prices lp
  * Per all-purpose cluster (created from the UI or API, not deleted) of every workspace the
  * connection's system tables cover: worker node minutes, active days, idle worker minutes (CPU
  * under 5%, CPU wait under 5%, under 10 MB of network a minute), CPU averages, and the
- * all-purpose cost billed outside job runs. Seven full days before the window end, the parameter.
+ * all-purpose cost it billed (Databricks does not mark job runs on these billing rows, so their
+ * time is included). Seven full days before the window end, the parameter.
  */
 export const DATABRICKS_CLUSTER_FACTS_SQL = `
 WITH p AS (
@@ -218,73 +219,108 @@ ORDER BY COALESCE(bill.total_cost, 0.0) DESC, inv.cluster_name
 `
 
 /**
- * Per job of every workspace the connection's system tables cover that billed in the window: its
- * cost on every product and on all-purpose compute, its share of the all-purpose cluster it used
- * most, its runs and trigger, and its workspace's jobs-compute rate. Job ids repeat across
- * workspaces, so every key pairs the workspace with the id. Seven full days before the window end,
- * the parameter.
+ * Per job task of every workspace the connection's system tables cover that ran on an all-purpose
+ * cluster (created from the UI or API, not deleted) in the window, one row per job, task, cluster
+ * and trigger: its runs and hours, what started them, and the cluster's own all-purpose billing and
+ * the workspace's jobs-compute rate to price them. The task timeline names the compute a run used
+ * (billing does not name the job on all-purpose compute). It splits a run into contiguous rows cut
+ * at each hour, so a run's hours are the sum of its rows, credited to the cluster it spent most of
+ * them on. Deleted jobs are left out. Job ids repeat across workspaces, so every key pairs the
+ * workspace with the id. Seven full days before the window end, the parameter.
  */
 export const DATABRICKS_JOB_FACTS_SQL = `
 WITH p AS (
   SELECT CAST(? AS DATE) AS we_date
 ),
+clusters AS (
+  SELECT workspace_id, cluster_id, cluster_name FROM (
+    SELECT workspace_id, cluster_id, cluster_name, cluster_source, delete_time
+    FROM system.compute.clusters
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) = 1
+  )
+  WHERE delete_time IS NULL AND cluster_source IN ('UI', 'API')
+),
+timeline AS (
+  SELECT t.workspace_id, t.job_id, t.task_key, COALESCE(NULLIF(t.job_run_id, ''), t.run_id) AS job_run_id,
+         t.run_id, t.period_start_time, t.period_end_time, explode(t.compute_ids) AS compute_id
+  FROM system.lakeflow.job_task_run_timeline t CROSS JOIN p
+  WHERE t.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND t.period_start_time < CAST(p.we_date AS TIMESTAMP)
+),
+timeline_row AS (
+  SELECT tl.workspace_id, tl.job_id, tl.task_key, tl.job_run_id, tl.run_id, tl.period_start_time,
+         MIN(c.cluster_id) AS cluster_id,
+         MAX(timestampdiff(SECOND, tl.period_start_time, tl.period_end_time)) AS seconds
+  FROM timeline tl
+  JOIN clusters c ON c.workspace_id = tl.workspace_id AND c.cluster_id = tl.compute_id
+  GROUP BY tl.workspace_id, tl.job_id, tl.task_key, tl.job_run_id, tl.run_id, tl.period_start_time
+),
+run_on_cluster AS (
+  SELECT workspace_id, job_id, task_key, job_run_id, cluster_id, SUM(seconds) AS seconds
+  FROM timeline_row
+  GROUP BY workspace_id, job_id, task_key, job_run_id, cluster_id
+),
+task_run AS (
+  SELECT workspace_id, job_id, task_key, job_run_id,
+         MIN_BY(cluster_id, struct(-seconds, cluster_id)) AS cluster_id,
+         SUM(seconds) / 3600.0 AS hours
+  FROM run_on_cluster
+  GROUP BY workspace_id, job_id, task_key, job_run_id
+),
+run_trigger AS (
+  SELECT r.workspace_id, r.run_id, MAX(r.trigger_type) AS trigger_type
+  FROM system.lakeflow.job_run_timeline r CROSS JOIN p
+  WHERE r.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND r.period_start_time < CAST(p.we_date AS TIMESTAMP)
+  GROUP BY r.workspace_id, r.run_id
+),
+task AS (
+  SELECT tr.workspace_id, tr.job_id, tr.task_key, tr.cluster_id, rt.trigger_type,
+         COUNT(*) AS task_runs, SUM(tr.hours) AS task_hours
+  FROM task_run tr
+  LEFT JOIN run_trigger rt ON rt.workspace_id = tr.workspace_id AND rt.run_id = tr.job_run_id
+  GROUP BY tr.workspace_id, tr.job_id, tr.task_key, tr.cluster_id, rt.trigger_type
+),
 bill AS (
-  SELECT u.workspace_id, u.usage_metadata.job_id AS job_id, u.usage_metadata.cluster_id AS cluster_id,
-         u.billing_origin_product AS product, u.usage_quantity AS dbus, u.usage_quantity * lp.pricing.default AS cost
+  SELECT u.workspace_id, u.usage_metadata.cluster_id AS cluster_id, u.billing_origin_product AS product,
+         u.usage_start_time, u.usage_end_time, u.usage_quantity AS dbus, u.usage_quantity * lp.pricing.default AS cost
   FROM system.billing.usage u CROSS JOIN p
   ${LIST_PRICE_JOIN}
-  WHERE u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
+  WHERE u.billing_origin_product IN ('ALL_PURPOSE', 'JOBS')
+    AND u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
 ),
-job_bill AS (
-  SELECT workspace_id, job_id,
-         SUM(COALESCE(cost, 0))                                                AS job_total_cost,
-         SUM(CASE WHEN product = 'ALL_PURPOSE' THEN COALESCE(cost, 0) ELSE 0 END) AS job_all_purpose_cost,
-         SUM(CASE WHEN product = 'ALL_PURPOSE' THEN dbus ELSE 0 END)             AS job_all_purpose_dbus
-  FROM bill WHERE job_id IS NOT NULL AND job_id <> '' GROUP BY workspace_id, job_id
+billed_period AS (
+  SELECT workspace_id, cluster_id, usage_start_time, usage_end_time,
+         SUM(COALESCE(cost, 0)) AS cost, SUM(dbus) AS dbus,
+         timestampdiff(SECOND, usage_start_time, usage_end_time) AS seconds
+  FROM bill WHERE product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL
+  GROUP BY workspace_id, cluster_id, usage_start_time, usage_end_time
 ),
-job_cluster AS (
-  SELECT workspace_id, job_id, cluster_id, SUM(COALESCE(cost, 0)) AS cost
-  FROM bill WHERE product = 'ALL_PURPOSE' AND job_id IS NOT NULL AND job_id <> '' AND cluster_id IS NOT NULL
-  GROUP BY workspace_id, job_id, cluster_id
-),
-main_cluster AS (
-  SELECT workspace_id, job_id, cluster_id, cost FROM job_cluster
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY cost DESC, cluster_id) = 1
-),
-cluster_total AS (
-  SELECT workspace_id, cluster_id, SUM(COALESCE(cost, 0)) AS cost
-  FROM bill WHERE product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL GROUP BY workspace_id, cluster_id
+cluster_bill AS (
+  SELECT workspace_id, cluster_id, SUM(cost) AS cost, SUM(dbus) AS dbus, SUM(seconds) / 3600.0 AS billed_hours
+  FROM billed_period GROUP BY workspace_id, cluster_id
 ),
 jobs_rate AS (
   SELECT workspace_id, CASE WHEN SUM(dbus) > 0 THEN SUM(COALESCE(cost, 0)) / SUM(dbus) END AS rate
   FROM bill WHERE product = 'JOBS' GROUP BY workspace_id
 ),
-runs AS (
-  SELECT r.workspace_id, r.job_id, COUNT(DISTINCT r.run_id) AS run_count, MAX(r.trigger_type) AS run_trigger
-  FROM system.lakeflow.job_run_timeline r CROSS JOIN p
-  WHERE r.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND r.period_start_time < CAST(p.we_date AS TIMESTAMP)
-  GROUP BY r.workspace_id, r.job_id
-),
 inv AS (
-  SELECT workspace_id, job_id, name, trigger_type FROM system.lakeflow.jobs
+  SELECT workspace_id, job_id, name, delete_time FROM system.lakeflow.jobs
   QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) = 1
 )
-SELECT jb.workspace_id, jb.job_id, COALESCE(inv.name, 'job ' || jb.job_id) AS job_name,
-       inv.trigger_type AS trigger_type,
-       inv.job_id IS NOT NULL AS listed_in_job_inventory,
-       runs.run_trigger AS run_trigger_type,
-       COALESCE(runs.run_count, 0) AS run_count,
-       jb.job_total_cost, jb.job_all_purpose_cost, jb.job_all_purpose_dbus,
-       CASE WHEN mc.cluster_id IS NULL OR COALESCE(ct.cost, 0) <= 0 THEN 1.0 ELSE mc.cost / ct.cost END AS job_share_of_cluster,
+SELECT t.workspace_id, t.job_id, COALESCE(NULLIF(inv.name, ''), 'job ' || t.job_id) AS job_name,
+       t.task_key, t.trigger_type, t.cluster_id AS host_cluster_id,
+       COALESCE(NULLIF(TRIM(c.cluster_name), ''), t.cluster_id) AS host_cluster_name,
+       t.task_runs, t.task_hours,
+       COALESCE(cb.cost, 0) AS host_cluster_cost,
+       COALESCE(cb.dbus, 0) AS host_cluster_dbus,
+       COALESCE(cb.billed_hours, 0) AS host_cluster_billed_hours,
        jr.rate AS jobs_rate_per_dbu
-FROM job_bill jb
-LEFT JOIN runs ON runs.workspace_id = jb.workspace_id AND runs.job_id = jb.job_id
-LEFT JOIN inv ON inv.workspace_id = jb.workspace_id AND inv.job_id = jb.job_id
-LEFT JOIN main_cluster mc ON mc.workspace_id = jb.workspace_id AND mc.job_id = jb.job_id
-LEFT JOIN cluster_total ct ON ct.workspace_id = mc.workspace_id AND ct.cluster_id = mc.cluster_id
-LEFT JOIN jobs_rate jr ON jr.workspace_id = jb.workspace_id
-WHERE jb.job_all_purpose_cost > 0
-ORDER BY jb.job_all_purpose_cost DESC
+FROM task t
+JOIN clusters c ON c.workspace_id = t.workspace_id AND c.cluster_id = t.cluster_id
+LEFT JOIN inv ON inv.workspace_id = t.workspace_id AND inv.job_id = t.job_id
+LEFT JOIN cluster_bill cb ON cb.workspace_id = t.workspace_id AND cb.cluster_id = t.cluster_id
+LEFT JOIN jobs_rate jr ON jr.workspace_id = t.workspace_id
+WHERE inv.delete_time IS NULL
+ORDER BY t.task_hours DESC, t.workspace_id, t.job_id, t.task_key, t.cluster_id, t.trigger_type
 `
 
 /** Core's rules: a `DatabricksSavingsInput` as JSON in, the report out. */
@@ -362,22 +398,25 @@ export function toClusterFacts(row: Record<string, unknown>) {
   }
 }
 
-/** One job row as the facts core reads. */
+/** One job task row as the facts core reads. */
 export function toJobFacts(row: Record<string, unknown>) {
   const id = String(row.job_id ?? "")
+  const cluster = String(row.host_cluster_id ?? "")
   const rate = row.jobs_rate_per_dbu
   return {
     job_id: id,
     workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
     job_name: String(row.job_name ?? `job ${id}`),
+    // Core refuses an empty key, and with it every cluster and job fact of the run.
+    task_key: String(row.task_key || "(no task key)"),
     trigger_type: row.trigger_type == null ? null : String(row.trigger_type),
-    listed_in_job_inventory: [true, 1, "true"].includes(row.listed_in_job_inventory as never),
-    run_trigger_type: row.run_trigger_type == null ? null : String(row.run_trigger_type),
-    run_count: Math.round(num(row.run_count)),
-    job_total_cost: num(row.job_total_cost),
-    job_all_purpose_cost: num(row.job_all_purpose_cost),
-    job_all_purpose_dbus: num(row.job_all_purpose_dbus),
-    job_share_of_cluster: Math.min(1, num(row.job_share_of_cluster)),
+    host_cluster_id: cluster,
+    host_cluster_name: String(row.host_cluster_name || cluster),
+    task_runs: Math.round(num(row.task_runs)),
+    task_hours: num(row.task_hours),
+    host_cluster_cost: num(row.host_cluster_cost),
+    host_cluster_dbus: num(row.host_cluster_dbus),
+    host_cluster_billed_hours: num(row.host_cluster_billed_hours),
     jobs_rate_per_dbu: rate == null ? null : num(rate),
   }
 }
@@ -461,13 +500,13 @@ export async function databricksSavings(
     const binds = [window.end]
     // A query that fills the row limit reads only its first rows; the result names it.
     const limited: string[] = []
-    const read = async (what: string, sql: string) => {
+    const read = async (what: string, sql: string, rows = what) => {
       signal?.throwIfAborted()
       const left = stopsAt - Date.now()
       if (left <= 0) throw new Error(`The ${what} query was not started: it would run past ${limitName}.`)
       try {
         const result = await connector.execute(sql, ROW_LIMIT, binds, { cancelAfterMs: left, signal })
-        if (result.truncated) limited.push(what)
+        if (result.truncated) limited.push(rows)
         return records(result)
       } catch (e) {
         if (!isQueryTimeoutError(e)) throw e
@@ -483,9 +522,9 @@ export async function databricksSavings(
     }
     // A table the connection may not read stops only its own check; the rest still report.
     const skipped: { check: string; reason: string }[] = []
-    const optional = async (check: string, what: string, sql: string) => {
+    const optional = async (check: string, what: string, sql: string, rows = what) => {
       try {
-        return await read(what, sql)
+        return await read(what, sql, rows)
       } catch (e) {
         if (signal?.aborted) throw e
         skipped.push({ check, reason: (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 300) })
@@ -493,7 +532,7 @@ export async function databricksSavings(
       }
     }
     const clusters = await optional("Idle Cluster Detection", "all-purpose clusters", DATABRICKS_CLUSTER_FACTS_SQL)
-    const jobs = await optional("Job Running on All-Purpose Compute", "jobs", DATABRICKS_JOB_FACTS_SQL)
+    const jobs = await optional("Job Running on All-Purpose Compute", "jobs", DATABRICKS_JOB_FACTS_SQL, "job task rows")
     const input = {
       lookback_days: LOOKBACK_DAYS,
       warehouses: warehouses.map(toFacts),
@@ -521,7 +560,8 @@ export async function databricksSavings(
       ran_on: runsOn,
       warehouses_checked: warehouses.length,
       clusters_checked: clusters.length,
-      jobs_checked: jobs.length,
+      // The query gives a row per task, cluster and trigger: each job is counted once.
+      jobs_checked: new Set(jobs.map((row) => JSON.stringify([row.workspace_id ?? null, row.job_id]))).size,
       skipped,
       limited,
       // What each warehouse is and costs now, so a later run can tell what changed.

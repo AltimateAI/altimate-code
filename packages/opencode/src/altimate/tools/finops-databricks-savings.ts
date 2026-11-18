@@ -42,6 +42,13 @@ function size(value: unknown): string {
 
 const percentOf = (value: unknown) => `${Math.round(Number(value))}%`
 
+/** One decimal; a figure that would round to 0.0 reads "under 0.1". */
+const tenths = (value: unknown) =>
+  Number(value) < 0.05 ? "under 0.1" : Number(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+
+/** Free text from the workspace on one line, with control and invisible characters gone. */
+const oneLine = (value: unknown) => String(value ?? "").replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim()
+
 /** What a finding rests on, one short line each. */
 export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
   const e = finding.evidence as Record<string, number | string | null | boolean> & { kind: string }
@@ -60,11 +67,11 @@ export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
     case "idle_cluster":
       return [
         `All-purpose cluster ${percent(e.idle_ratio)} idle across ${e.active_days} active days (${String(e.idle_pattern).replace(/_/g, " ")}), average worker CPU ${percentOf(e.avg_cpu_active_pct)}, peak ${percentOf(e.peak_cpu_active_pct)}`,
-        `Auto-termination ${e.auto_termination_minutes ? `${e.auto_termination_minutes} minutes` : "off"}; $${Number(e.total_cost).toFixed(2)} billed outside job runs over the window`,
+        `Auto-termination ${e.auto_termination_minutes ? `${e.auto_termination_minutes} minutes` : "off"}; $${Number(e.total_cost).toFixed(2)} billed on all-purpose compute over the window`,
       ]
     case "job_on_all_purpose":
       return [
-        `${e.run_count} runs (${String(e.trigger_type ?? "manual").toLowerCase()}), ${percent(e.all_purpose_share)} of its cost on all-purpose compute, ${percent(e.job_share_of_cluster)} of its cluster's`,
+        `${Number(e.task_runs).toLocaleString("en-US")} task ${Number(e.task_runs) === 1 ? "run" : "runs"} (${String(e.trigger_type).toLowerCase()}), ${tenths(e.task_hours)} hours on all-purpose compute, mostly cluster ${JSON.stringify(oneLine(e.host_cluster_name))}, about ${tenths(e.estimated_dbus)} DBUs`,
         `$${Number(e.all_purpose_rate_per_dbu).toFixed(3)} a DBU now; a job cluster would be about $${Number(e.jobs_rate_per_dbu).toFixed(3)}${e.jobs_rate_estimated ? " (estimated: the workspace billed no jobs compute)" : ""}`,
       ]
     default:
@@ -109,7 +116,7 @@ export function formatSavings(result: DatabricksSavingsResult): string {
 
 export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_savings", {
   description:
-    "Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes. Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.",
+    "Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled or continuous jobs running on all-purpose clusters. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes. Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.",
   parameters: z.object({
     warehouse: z
       .string()
