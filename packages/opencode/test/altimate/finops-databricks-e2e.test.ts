@@ -215,7 +215,7 @@ describe.skipIf(!HAS_DATABRICKS)("Databricks FinOps Integration", () => {
       if (result.success) {
         expect(result.warehouses_checked).toBeGreaterThan(0)
         expect(Array.isArray(result.report!.findings)).toBe(true)
-        expect(result.report!.total.warehouses).toBe(new Set(result.report!.findings.map((f) => f.warehouse_id)).size)
+        expect(result.report!.total.resources).toBe(new Set(result.report!.findings.map((f) => `${f.resource_type}:${f.resource_id}`)).size)
       }
     }, 300000)
   })

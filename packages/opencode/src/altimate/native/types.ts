@@ -644,26 +644,37 @@ export interface DatabricksSavingsParams {
   now_ms?: number
 }
 
-/** One saving on one SQL warehouse, as altimate-core reports it. */
+/** One saving on one resource, as altimate-core reports it. */
 export interface DatabricksSavingsFinding {
-  check_id: "wh_classic_pro_to_serverless" | "wh_oversized"
+  check_id: "wh_classic_pro_to_serverless" | "wh_oversized" | "ap_idle_cluster" | "jobs_on_all_purpose_compute"
   title: string
-  warehouse_id: string
-  warehouse_name: string
+  resource_type: "sql_warehouse" | "cluster" | "job"
+  resource_id: string
+  resource_name: string
   severity: "critical" | "high" | "medium" | "low"
   daily_min: number
   daily_max: number
   monthly_min: number
   monthly_max: number
-  evidence: Record<string, unknown> & { kind: "serverless" | "over_sized" }
+  evidence: Record<string, unknown> & { kind: "serverless" | "over_sized" | "idle_cluster" | "job_on_all_purpose" }
+}
+
+/** A flagged SQL warehouse's cost at each alternative, as altimate-core computes it. */
+export interface DatabricksWhatIf {
+  resource_id: string
+  resource_name: string
+  current_label: string
+  current_monthly_cost: number
+  choices: { label: string; monthly_cost: number; monthly_saving: number; fits: boolean; cores: number; cores_needed: number }[]
 }
 
 export interface DatabricksSavingsReport {
   lookback_days: number
   /** Largest monthly saving first. */
   findings: DatabricksSavingsFinding[]
-  /** Each warehouse counted once, at its largest low end and largest high end. */
-  total: { monthly_min: number; monthly_max: number; warehouses: number }
+  /** Each resource counted once, at its largest low end and largest high end. */
+  total: { monthly_min: number; monthly_max: number; resources: number }
+  what_if: DatabricksWhatIf[]
 }
 
 export interface DatabricksSavingsResult {
@@ -674,6 +685,12 @@ export interface DatabricksSavingsResult {
   warehouse?: string
   ran_on?: string
   warehouses_checked?: number
+  clusters_checked?: number
+  jobs_checked?: number
+  /** Checks whose system tables the connection could not read. */
+  skipped?: { check: string; reason: string }[]
+  /** Each SQL warehouse as it is now, and its cost over the window. */
+  warehouses?: { id: string; name: string; type: string; size: string | null; window_cost: number }[]
   report?: DatabricksSavingsReport
   error?: string
 }

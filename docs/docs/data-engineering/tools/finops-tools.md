@@ -178,6 +178,30 @@ Recommendations:
 
 ---
 
+## finops_databricks_savings
+
+Check a Databricks workspace for savings with Altimate's rules, on a Databricks connection whose `http_path` is a SQL warehouse (`/sql/1.0/warehouses/<id>`). It reads seven days of system tables (`system.billing`, `system.compute`, `system.query`, `system.lakeflow`) for the workspace that warehouse belongs to, on that warehouse, which Databricks starts if it is stopped. Nothing is written. Four checks:
+
+- **Migrate Classic/Pro to Serverless:** a Classic or Pro warehouse that bills for time it sits idle.
+- **Over-Sized Warehouse:** a warehouse whose queries never use the cores it pays for.
+- **Idle Cluster Detection:** an all-purpose cluster with idle workers and auto-termination off or an hour or more.
+- **Job Running on All-Purpose Compute:** a scheduled job that would bill at the jobs-compute rate on a job cluster.
+
+The tool measures each resource's usage; altimate-core decides what qualifies and what it saves. Prices are list prices. Each resource is counted once in the total, and each flagged warehouse also gets what it would cost at every smaller size and as serverless. A check whose tables the connection cannot read is named as not checked; the others still report.
+
+```
+> finops_databricks_savings --warehouse prod_dbx
+
+Databricks savings: 5 SQL warehouses, 3 all-purpose clusters, 12 jobs checked, the 7 days to 2026-11-17, at list price.
+Total: $85.17–$106 a month on 1 resource, each counted once at its largest saving.
+
+Classic (sql warehouse) · Migrate Classic/Pro to Serverless · $85.17–$106 a month (critical)
+  CLASSIC SMALL warehouse, 95% idle over 10.8 running hours (2,988 queries)
+  $29.29 in DBUs over the window; serverless would bill $4.44 for the busy time alone
+```
+
+---
+
 ## finops_role_grants
 
 Analyze role permissions and access patterns (RBAC).

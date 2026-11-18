@@ -139,11 +139,152 @@ WHERE inv.delete_time IS NULL
 ORDER BY inv.warehouse_name
 `
 
+/** The workspace of the warehouse the connection runs on: every input is cut to it. */
+const WORKSPACE_OF_WAREHOUSE = "(SELECT MAX(workspace_id) FROM system.compute.warehouses WHERE warehouse_id = ?)"
+
+/** List price of a usage row: the price in force when the usage started. */
+const LIST_PRICE_JOIN = `LEFT JOIN system.billing.list_prices lp
+    ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+   AND u.usage_start_time >= lp.price_start_time
+   AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)`
+
+/**
+ * Per all-purpose cluster (created from the UI or API, not deleted) of the workspace: worker node
+ * minutes, active days, idle worker minutes (CPU under 5%, CPU wait under 5%, under 10 MB of network
+ * a minute), CPU averages, and the all-purpose cost billed outside job runs. Seven full days before
+ * the window end. Parameters: the window end, then the warehouse id.
+ */
+export const DATABRICKS_CLUSTER_FACTS_SQL = `
+WITH p AS (
+  SELECT CAST(? AS DATE) AS we_date
+),
+ws AS (
+  SELECT ${WORKSPACE_OF_WAREHOUSE} AS workspace_id
+),
+inv AS (
+  SELECT cluster_id, cluster_name, auto_termination_minutes, cluster_source, delete_time
+  FROM system.compute.clusters
+  WHERE workspace_id = (SELECT workspace_id FROM ws)
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY change_time DESC) = 1
+),
+nodes AS (
+  SELECT n.cluster_id, n.start_time, n.end_time,
+         COALESCE(n.cpu_user_percent, 0) + COALESCE(n.cpu_system_percent, 0)        AS cpu_active,
+         COALESCE(n.cpu_wait_percent, 0)                                              AS cpu_wait,
+         COALESCE(n.network_sent_bytes, 0) + COALESCE(n.network_received_bytes, 0)    AS network_bytes
+  FROM system.compute.node_timeline n CROSS JOIN p
+  WHERE n.workspace_id = (SELECT workspace_id FROM ws)
+    AND n.start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND n.start_time < CAST(p.we_date AS TIMESTAMP)
+    AND NOT COALESCE(n.driver, false)
+    AND n.cluster_id IN (SELECT cluster_id FROM inv)
+),
+util AS (
+  SELECT cluster_id,
+         COUNT(DISTINCT CAST(start_time AS DATE))                                       AS active_util_days,
+         SUM(timestampdiff(MINUTE, start_time, end_time))                              AS total_node_minutes,
+         COUNT(*)                                                                      AS total_worker_minutes,
+         COUNT_IF(cpu_active < 5.0 AND cpu_wait < 5.0 AND network_bytes < 10485760)    AS idle_node_minutes,
+         AVG(cpu_active)                                                               AS avg_cpu_active_pct,
+         MAX(cpu_active)                                                               AS peak_cpu_active_pct
+  FROM nodes GROUP BY cluster_id
+),
+bill AS (
+  SELECT u.usage_metadata.cluster_id AS cluster_id, SUM(u.usage_quantity * lp.pricing.default) AS total_cost
+  FROM system.billing.usage u CROSS JOIN p
+  ${LIST_PRICE_JOIN}
+  WHERE u.workspace_id = (SELECT workspace_id FROM ws)
+    AND u.billing_origin_product = 'ALL_PURPOSE'
+    AND u.usage_metadata.cluster_id IS NOT NULL AND u.usage_metadata.job_id IS NULL
+    AND u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
+  GROUP BY u.usage_metadata.cluster_id
+)
+SELECT inv.cluster_id, inv.cluster_name, inv.auto_termination_minutes,
+       util.total_node_minutes, util.active_util_days, util.total_worker_minutes, util.idle_node_minutes,
+       util.avg_cpu_active_pct, util.peak_cpu_active_pct,
+       COALESCE(bill.total_cost, 0.0) AS total_cost
+FROM inv
+JOIN util ON util.cluster_id = inv.cluster_id
+LEFT JOIN bill ON bill.cluster_id = inv.cluster_id
+WHERE inv.delete_time IS NULL AND inv.cluster_source IN ('UI', 'API')
+ORDER BY inv.cluster_name
+`
+
+/**
+ * Per job of the workspace that billed in the window: its cost on every product and on all-purpose
+ * compute, its share of the all-purpose cluster it used most, its runs and trigger, and the
+ * workspace's jobs-compute rate. Seven full days before the window end. Parameters: the window end,
+ * then the warehouse id.
+ */
+export const DATABRICKS_JOB_FACTS_SQL = `
+WITH p AS (
+  SELECT CAST(? AS DATE) AS we_date
+),
+ws AS (
+  SELECT ${WORKSPACE_OF_WAREHOUSE} AS workspace_id
+),
+bill AS (
+  SELECT u.usage_metadata.job_id AS job_id, u.usage_metadata.cluster_id AS cluster_id, u.billing_origin_product AS product,
+         u.usage_quantity AS dbus, u.usage_quantity * lp.pricing.default AS cost
+  FROM system.billing.usage u CROSS JOIN p
+  ${LIST_PRICE_JOIN}
+  WHERE u.workspace_id = (SELECT workspace_id FROM ws)
+    AND u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
+),
+job_bill AS (
+  SELECT job_id,
+         SUM(COALESCE(cost, 0))                                                AS job_total_cost,
+         SUM(CASE WHEN product = 'ALL_PURPOSE' THEN COALESCE(cost, 0) ELSE 0 END) AS job_all_purpose_cost,
+         SUM(CASE WHEN product = 'ALL_PURPOSE' THEN dbus ELSE 0 END)             AS job_all_purpose_dbus
+  FROM bill WHERE job_id IS NOT NULL AND job_id <> '' GROUP BY job_id
+),
+job_cluster AS (
+  SELECT job_id, cluster_id, SUM(COALESCE(cost, 0)) AS cost
+  FROM bill WHERE product = 'ALL_PURPOSE' AND job_id IS NOT NULL AND job_id <> '' AND cluster_id IS NOT NULL
+  GROUP BY job_id, cluster_id
+),
+main_cluster AS (
+  SELECT job_id, cluster_id, cost FROM job_cluster
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY cost DESC, cluster_id) = 1
+),
+cluster_total AS (
+  SELECT cluster_id, SUM(COALESCE(cost, 0)) AS cost
+  FROM bill WHERE product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL GROUP BY cluster_id
+),
+jobs_rate AS (
+  SELECT CASE WHEN SUM(dbus) > 0 THEN SUM(COALESCE(cost, 0)) / SUM(dbus) END AS rate FROM bill WHERE product = 'JOBS'
+),
+runs AS (
+  SELECT r.job_id, COUNT(DISTINCT r.run_id) AS run_count, MAX(r.trigger_type) AS run_trigger
+  FROM system.lakeflow.job_run_timeline r CROSS JOIN p
+  WHERE r.workspace_id = (SELECT workspace_id FROM ws)
+    AND r.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND r.period_start_time < CAST(p.we_date AS TIMESTAMP)
+  GROUP BY r.job_id
+),
+inv AS (
+  SELECT job_id, name, trigger_type FROM system.lakeflow.jobs
+  WHERE workspace_id = (SELECT workspace_id FROM ws)
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1
+)
+SELECT jb.job_id, COALESCE(inv.name, 'job ' || jb.job_id) AS job_name,
+       COALESCE(inv.trigger_type, runs.run_trigger) AS trigger_type,
+       COALESCE(runs.run_count, 0) AS run_count,
+       jb.job_total_cost, jb.job_all_purpose_cost, jb.job_all_purpose_dbus,
+       CASE WHEN mc.cluster_id IS NULL OR COALESCE(ct.cost, 0) <= 0 THEN 1.0 ELSE mc.cost / ct.cost END AS job_share_of_cluster,
+       (SELECT rate FROM jobs_rate) AS jobs_rate_per_dbu
+FROM job_bill jb
+LEFT JOIN runs ON runs.job_id = jb.job_id
+LEFT JOIN inv ON inv.job_id = jb.job_id
+LEFT JOIN main_cluster mc ON mc.job_id = jb.job_id
+LEFT JOIN cluster_total ct ON ct.cluster_id = mc.cluster_id
+WHERE jb.job_all_purpose_cost > 0
+ORDER BY jb.job_all_purpose_cost DESC
+`
+
 type RulesEngine = (input: string) => DatabricksSavingsReport
 
 /** The installed core's rules, or null when its binary predates them. */
 function rulesEngine(): RulesEngine | null {
-  const found = (core as unknown as { databricksWarehouseSavings?: unknown }).databricksWarehouseSavings
+  const found = (core as unknown as { databricksSavings?: unknown }).databricksSavings
   return typeof found === "function" ? (found as RulesEngine) : null
 }
 
@@ -185,12 +326,60 @@ export function toFacts(row: Record<string, unknown>) {
   }
 }
 
+/** One cluster row as the facts core reads. */
+export function toClusterFacts(row: Record<string, unknown>) {
+  const id = String(row.cluster_id ?? "")
+  const autoTermination = row.auto_termination_minutes
+  return {
+    cluster_id: id,
+    cluster_name: String(row.cluster_name ?? id),
+    auto_termination_minutes: autoTermination == null ? null : Math.max(0, Math.round(num(autoTermination))),
+    total_node_minutes: num(row.total_node_minutes),
+    active_util_days: Math.round(num(row.active_util_days)),
+    total_worker_minutes: num(row.total_worker_minutes),
+    idle_node_minutes: num(row.idle_node_minutes),
+    avg_cpu_active_pct: num(row.avg_cpu_active_pct),
+    peak_cpu_active_pct: num(row.peak_cpu_active_pct),
+    total_cost: num(row.total_cost),
+  }
+}
+
+/** One job row as the facts core reads. */
+export function toJobFacts(row: Record<string, unknown>) {
+  const id = String(row.job_id ?? "")
+  const rate = row.jobs_rate_per_dbu
+  return {
+    job_id: id,
+    job_name: String(row.job_name ?? `job ${id}`),
+    trigger_type: row.trigger_type == null ? null : String(row.trigger_type),
+    run_count: Math.round(num(row.run_count)),
+    job_total_cost: num(row.job_total_cost),
+    job_all_purpose_cost: num(row.job_all_purpose_cost),
+    job_all_purpose_dbus: num(row.job_all_purpose_dbus),
+    job_share_of_cluster: Math.min(1, num(row.job_share_of_cluster)),
+    jobs_rate_per_dbu: rate == null ? null : num(rate),
+  }
+}
+
+function records(result: { columns: string[]; rows: unknown[][] }): Record<string, unknown>[] {
+  return result.rows.map((row) => Object.fromEntries(result.columns.map((name, at) => [name, row[at]])))
+}
+
+/** With no connection named: the first Databricks connection that runs through a SQL warehouse, if any. */
+function preferredConnection(): string | undefined {
+  return Registry.list().warehouses.find((one) => {
+    if (one.type.toLowerCase() !== "databricks") return false
+    const config = Registry.getConfig(one.name) as Record<string, unknown> | undefined
+    return WAREHOUSE_PATH.test(String(config?.http_path ?? config?.httpPath ?? ""))
+  })?.name
+}
+
 export async function databricksSavings(params: DatabricksSavingsParams): Promise<DatabricksSavingsResult> {
   const window = savingsWindow(params.now_ms ?? Date.now())
   const failed = (error: string): DatabricksSavingsResult => ({ success: false, window, error })
 
   const resolved = resolveFinopsWarehouse({
-    requested: params.warehouse,
+    requested: params.warehouse ?? preferredConnection(),
     supportedTypes: SUPPORTED_TYPES,
     operationName: "The Databricks savings check",
   })
@@ -213,13 +402,50 @@ export async function databricksSavings(params: DatabricksSavingsParams): Promis
 
   try {
     const connector = await Registry.get(resolved.warehouse)
-    const result = await connector.execute(DATABRICKS_WAREHOUSE_FACTS_SQL, 10_000, [window.end, runsOn])
-    const rows = result.rows.map((row) => Object.fromEntries(result.columns.map((name, at) => [name, row[at]])))
-    if (rows.length === 0) {
+    const binds = [window.end, runsOn]
+    const warehouses = records(await connector.execute(DATABRICKS_WAREHOUSE_FACTS_SQL, 10_000, binds))
+    if (warehouses.length === 0) {
       return failed(`No SQL warehouses were found for warehouse ${runsOn} in system.compute.warehouses.`)
     }
-    const report = rules(JSON.stringify({ lookback_days: LOOKBACK_DAYS, warehouses: rows.map(toFacts) }))
-    return { success: true, window, warehouse: resolved.warehouse, ran_on: runsOn, warehouses_checked: rows.length, report }
+    // A table the connection may not read stops only its own check; the rest still report.
+    const skipped: { check: string; reason: string }[] = []
+    const optional = async (check: string, sql: string) => {
+      try {
+        return records(await connector.execute(sql, 10_000, binds))
+      } catch (e) {
+        skipped.push({ check, reason: (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 300) })
+        return []
+      }
+    }
+    const clusters = await optional("Idle Cluster Detection", DATABRICKS_CLUSTER_FACTS_SQL)
+    const jobs = await optional("Job Running on All-Purpose Compute", DATABRICKS_JOB_FACTS_SQL)
+    const report = rules(
+      JSON.stringify({
+        lookback_days: LOOKBACK_DAYS,
+        warehouses: warehouses.map(toFacts),
+        clusters: clusters.map(toClusterFacts),
+        jobs: jobs.map(toJobFacts),
+      }),
+    )
+    return {
+      success: true,
+      window,
+      warehouse: resolved.warehouse,
+      ran_on: runsOn,
+      warehouses_checked: warehouses.length,
+      clusters_checked: clusters.length,
+      jobs_checked: jobs.length,
+      skipped,
+      // What each warehouse is and costs now, so a later run can tell what changed.
+      warehouses: warehouses.map((row) => ({
+        id: String(row.warehouse_id ?? ""),
+        name: String(row.warehouse_name ?? row.warehouse_id ?? ""),
+        type: String(row.warehouse_type ?? ""),
+        size: row.warehouse_size == null ? null : String(row.warehouse_size),
+        window_cost: num(row.total_cost),
+      })),
+      report,
+    }
   } catch (e) {
     return failed(e instanceof Error ? e.message : String(e))
   }
