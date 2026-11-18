@@ -502,6 +502,17 @@ describe("dbt_health", () => {
     expect(python.calls).toHaveLength(0)
   })
 
+  test("a config path that is a symlink to a file outside the project is refused", async () => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), "dbt-health-outside-"))
+    await writeFile(path.join(outside, "secret.yml"), "a: 1\n")
+    await symlink(path.join(outside, "secret.yml"), path.join(project, "linked.yml"))
+    const result = await run({ config_path: "linked.yml" })
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("inside the dbt project")
+    expect(python.calls).toHaveLength(0)
+    await rm(outside, { recursive: true, force: true })
+  })
+
   test("several rebuild errors each keep their head, and a long one does not hide the rest", async () => {
     dbtAdapterInternals.create = async () => ({
       isInitialized: () => true,
@@ -518,12 +529,13 @@ describe("dbt_health", () => {
   test("a message with line breaks stays one listed line", async () => {
     python.stdout =
       JSON.stringify({
-        model_insights: { "model.shop.m": [{ unique_id: "model.shop.m", original_file_path: "models/m.sql", severity: "WARNING", insight: { name: "Multi", message: "a\nb\nc", recommendation: "d\ne" } }] },
+        model_insights: { "model.shop.m": [{ unique_id: "model.shop.m", original_file_path: "models/m.sql", severity: "WARNING", insight: { name: "Multi", message: "a\nb\rc", recommendation: "d\ne" } }] },
         nodes: {},
         project: "shop",
       }) + "\n"
     const result = await run()
     expect(result.output.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(1)
+    expect(result.output).not.toContain("\r")
     expect(result.output).not.toContain("a\nb")
   })
 

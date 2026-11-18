@@ -352,8 +352,19 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     if (args.config_path) {
       configPath = path.resolve(root, args.config_path)
       // The config is read from the dbt project: a path outside it is refused before anything about it is checked.
-      const rel = path.relative(root, configPath)
-      if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
+      // By real path: a symlink inside the project that points outside it is outside too.
+      const inside = (base: string, target: string) => {
+        const rel = path.relative(base, target)
+        return !(rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
+      }
+      const real = (p: string) => {
+        try {
+          return fs.realpathSync(p)
+        } catch {
+          return p
+        }
+      }
+      if (!inside(root, configPath) || !inside(real(root), real(configPath)))
         return failure("config outside project", "dbt_health can't run: config_path must be inside the dbt project.")
       if (!fs.existsSync(configPath)) return failure("no config", `dbt_health can't run: no DataPilot config at ${configPath}.`)
     }
@@ -423,7 +434,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     }
     const insights = all.slice(0, keep)
     const truncated = keep < all.length
-    const lines = insights.slice(0, LISTED_LINES).map((i) => clip(`- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`.replace(/\s*\n\s*/g, " "), LINE_CHARS))
+    const lines = insights.slice(0, LISTED_LINES).map((i) => clip(`- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`.replace(/\s*[\r\n]\s*/g, " "), LINE_CHARS))
     return {
       title: `dbt_health: ${all.length} insight${all.length === 1 ? "" : "s"}`,
       // `truncated` is always set: the tool wrapper's own output truncation must not mark a complete insight list as cut.
