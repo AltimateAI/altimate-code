@@ -97,7 +97,10 @@ export const Flag = {
   OPENCODE_DISABLE_TERMINAL_TITLE: truthy("OPENCODE_DISABLE_TERMINAL_TITLE"),
   OPENCODE_SHOW_TTFD: truthy("OPENCODE_SHOW_TTFD"),
   OPENCODE_DISABLE_AUTOCOMPACT: truthy("OPENCODE_DISABLE_AUTOCOMPACT"),
-  OPENCODE_DISABLE_MODELS_FETCH: truthy("OPENCODE_DISABLE_MODELS_FETCH"),
+  // altimate_change start — assessment mode: nothing leaves the machine except the customer's own warehouse calls
+  ALTIMATE_ASSESSMENT_MODE: truthy("ALTIMATE_ASSESSMENT_MODE"),
+  OPENCODE_DISABLE_MODELS_FETCH: truthy("OPENCODE_DISABLE_MODELS_FETCH") || truthy("ALTIMATE_ASSESSMENT_MODE"),
+  // altimate_change end
   OPENCODE_DISABLE_MOUSE: truthy("OPENCODE_DISABLE_MOUSE"),
   // altimate_change start — documented ALTIMATE_CLI_ name read first (see `env`)
   OPENCODE_FAKE_VCS: env("OPENCODE_FAKE_VCS"),

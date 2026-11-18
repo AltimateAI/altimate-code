@@ -2510,6 +2510,13 @@ export namespace Telemetry {
 
   async function doInit() {
     try {
+      // altimate_change start — assessment mode sends nothing to Altimate, not even the one-time
+      // opt-out event: no sink is resolved and no marker or machine id is touched.
+      if (Flag.truthyEnv("ALTIMATE_ASSESSMENT_MODE")) {
+        buffer = []
+        return
+      }
+      // altimate_change end
       // altimate_change — accept "true"/"TRUE"/"1" (case-insensitive) via truthyEnv,
       // and honor the OPENCODE_DISABLE_TELEMETRY fallback promised by v0.9.4's CHANGELOG
       // (previously only wired in test fixtures, silent no-op in product).
