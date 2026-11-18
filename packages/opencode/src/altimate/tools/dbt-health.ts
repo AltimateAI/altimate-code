@@ -257,6 +257,8 @@ export function flattenInsights(modelInsights: unknown, root = "", nodes: Record
 
 const FAILURE_CHARS = 2000
 const LINE_CHARS = 500
+// One diagnostic's share of the parse-failure text, so a long first error does not hide the rest.
+const ERROR_CHARS = 400
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}… (${text.length - max} more characters)` : text)
 
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
@@ -300,7 +302,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         if (errors.length > 0)
           return failure(
             "parse failed",
-            `dbt_health can't run: dbt couldn't parse the project: ${clip(errors.map((d: { message?: string }) => d?.message).filter(Boolean).join("; ") || "the manifest rebuild failed", FAILURE_CHARS)}`,
+            `dbt_health can't run: dbt couldn't parse the project: ${clip(errors.map((d: { message?: string }) => d?.message && clip(d.message, ERROR_CHARS)).filter(Boolean).join("; ") || "the manifest rebuild failed", FAILURE_CHARS)}`,
           )
         const parsed = await adapter.parseManifest()
         if (parsed?.stale) {
@@ -349,6 +351,10 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     let configPath = ""
     if (args.config_path) {
       configPath = path.resolve(root, args.config_path)
+      // The config is read from the dbt project: a path outside it is refused before anything about it is checked.
+      const rel = path.relative(root, configPath)
+      if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
+        return failure("config outside project", "dbt_health can't run: config_path must be inside the dbt project.")
       if (!fs.existsSync(configPath)) return failure("no config", `dbt_health can't run: no DataPilot config at ${configPath}.`)
     }
     let python: string
@@ -387,7 +393,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       )
     if (parsed.error) {
       const detail = String(parsed.detail ?? parsed.error)
-      const shown = detail.length > 2000 ? `${detail.slice(0, 2000)}… (${detail.length - 2000} more characters)` : detail
+      const shown = clip(detail, FAILURE_CHARS)
       const version = parsed.version ? ` (altimate-datapilot-cli ${parsed.version})` : ""
       const hint = /validation error|invalid manifest/i.test(detail)
         ? `\nThe installed DataPilot${version} may be too old for this dbt version's manifest: upgrade it with \`${python} -m pip install -U altimate-datapilot-cli\`.`
@@ -417,7 +423,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     }
     const insights = all.slice(0, keep)
     const truncated = keep < all.length
-    const lines = insights.slice(0, LISTED_LINES).map((i) => clip(`- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`, LINE_CHARS))
+    const lines = insights.slice(0, LISTED_LINES).map((i) => clip(`- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`.replace(/\s*\n\s*/g, " "), LINE_CHARS))
     return {
       title: `dbt_health: ${all.length} insight${all.length === 1 ? "" : "s"}`,
       // `truncated` is always set: the tool wrapper's own output truncation must not mark a complete insight list as cut.

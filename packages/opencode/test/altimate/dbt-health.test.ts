@@ -493,6 +493,40 @@ describe("dbt_health", () => {
     expect(result.output.length).toBeLessThan(1000)
   })
 
+  test("a config path outside the project is refused before it is read", async () => {
+    for (const bad of ["../outside.yml", path.join(os.tmpdir(), "x.yml")]) {
+      const result = await run({ config_path: bad })
+      expect(result.metadata.success).toBe(false)
+      expect(result.output).toContain("inside the dbt project")
+    }
+    expect(python.calls).toHaveLength(0)
+  })
+
+  test("several rebuild errors each keep their head, and a long one does not hide the rest", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {},
+      getDiagnostics: () => ({ rebuildManifestDiagnostics: [{ message: "first " + "a".repeat(5000) }, { message: "second error" }] }),
+      parseManifest: async () => parsed,
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("second error")
+  })
+
+  test("a message with line breaks stays one listed line", async () => {
+    python.stdout =
+      JSON.stringify({
+        model_insights: { "model.shop.m": [{ unique_id: "model.shop.m", original_file_path: "models/m.sql", severity: "WARNING", insight: { name: "Multi", message: "a\nb\nc", recommendation: "d\ne" } }] },
+        nodes: {},
+        project: "shop",
+      }) + "\n"
+    const result = await run()
+    expect(result.output.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(1)
+    expect(result.output).not.toContain("a\nb")
+  })
+
   test("the byte limit counts UTF-8 bytes, not characters", async () => {
     const cjk = "漢".repeat(20_000)
     const many = Object.fromEntries(
