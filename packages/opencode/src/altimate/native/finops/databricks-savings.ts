@@ -1,9 +1,9 @@
 // altimate_change - new file
 /**
- * Databricks SQL warehouse savings: measures one row of usage facts per SQL warehouse of
- * the connection's workspace from Databricks system tables, and hands them to
- * altimate-core, which decides which warehouses qualify and what that saves. The rules
- * and prices live in core; this file only measures.
+ * Databricks savings: measures usage facts per SQL warehouse, all-purpose cluster and job of
+ * every workspace the connection's system tables show, and hands them to altimate-core, which
+ * decides what qualifies and what that saves. The rules and prices live in core; this file only
+ * measures.
  */
 
 import * as core from "@altimateai/altimate-core"
@@ -400,7 +400,7 @@ export async function databricksSavings(
   if (!runsOn) {
     return failed(
       `Connection ${JSON.stringify(resolved.warehouse)} does not go through a SQL warehouse. ` +
-        "Its http_path must name one (/sql/1.0/warehouses/<id>): the check reads that warehouse's workspace.",
+        "Its http_path must name one (/sql/1.0/warehouses/<id>): the check's queries run on that warehouse.",
     )
   }
 

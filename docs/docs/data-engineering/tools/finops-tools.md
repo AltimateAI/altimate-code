@@ -192,10 +192,10 @@ The tool measures each resource's usage; altimate-core decides what qualifies an
 ```
 > finops_databricks_savings --warehouse prod_dbx
 
-Databricks savings: 5 SQL warehouses, 3 all-purpose clusters, 12 jobs checked, the 7 days to 2026-11-17, at list price.
+Databricks savings: 7 SQL warehouses, 3 all-purpose clusters, 12 jobs checked, the 7 days to 2026-11-17, at list price.
 Total: $85.17–$106 a month on 1 resource, each counted once at its largest saving.
 
-Classic (sql warehouse) · Migrate Classic/Pro to Serverless · $85.17–$106 a month (critical)
+Classic (sql warehouse, workspace 525779153077873) · Migrate Classic/Pro to Serverless · $85.17–$106 a month (critical)
   CLASSIC SMALL warehouse, 95% idle over 10.8 running hours (2,988 queries)
   $29.29 in DBUs over the window; serverless would bill $4.44 for the busy time alone
 ```
