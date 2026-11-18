@@ -57,6 +57,13 @@ export function credentialDigest(apiUrl: string, tenant: string, apiKey: string)
   return createHash("sha256").update(`${apiUrl}|${tenant}|${apiKey}`).digest("hex")
 }
 
+/** The account a request runs as: tenant, API URL and the `credentialDigest` of the credential.
+ * Per-account memos key on all three, so two keys on one tenant never share an answer. */
+export type AccountScope = { tenant: string; apiUrl: string; account: string }
+export function accountScopeOf(c: { url: string; instance: string; apiKey: string }): AccountScope {
+  return { tenant: c.instance, apiUrl: c.url, account: credentialDigest(c.url, c.instance, c.apiKey) }
+}
+
 const log = Log.create({ service: "altimate-workspace-state" })
 
 export interface CachedBinding {

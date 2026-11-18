@@ -75,6 +75,9 @@ export namespace LLM {
     // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
     environment?: string[]
     // altimate_change end
+    // altimate_change start — upstream_fix: step-only reminders kept out of the environment message
+    reminders?: string[]
+    // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
     small?: boolean
@@ -161,17 +164,23 @@ export namespace LLM {
     )
 
     // altimate_change start — upstream_fix: keep per-session environment last. Providers with explicit
-    // cache breakpoints get it as its own trailing message (after the marked prefix); others keep a
-    // single system message with the environment at the end. Either way plugins still see it.
+    // cache breakpoints get it as its own trailing message (after the marked prefix), and step-only
+    // reminders (task pin, plan switch) as one more message after it: the environment message carries
+    // the last system breakpoint, so it stays byte-identical whether or not a reminder is present.
+    // Others keep a single system message with the environment, then the reminders, at the end.
+    // Either way plugins still see them.
     // Claude Agent: a utility request (title, summary) sends these system messages as Claude's prompt,
-    // so the environment block is left out there too.
+    // so the environment and reminders are left out there too.
     const claudeUtility =
       ClaudeAgent.matches(input.model) && ClaudeAgent.isUtility({ agent: input.agent.name, small: input.small })
-    const environment = !claudeUtility && input.environment?.length ? input.environment.join("\n") : undefined
-    const splitEnvironment = environment !== undefined && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
-    if (environment !== undefined) {
-      if (splitEnvironment) system.push(environment)
-      else system[0] = [system[0], environment].filter((x) => x).join("\n")
+    const ambient = claudeUtility ? [] : [...(input.environment ?? []), ...(input.reminders ?? [])]
+    const splitEnvironment = ambient.length > 0 && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
+    const tail = splitEnvironment
+      ? [input.environment, input.reminders].filter((x) => x?.length).map((x) => x!.join("\n"))
+      : []
+    if (ambient.length) {
+      if (splitEnvironment) system.push(...tail)
+      else system[0] = [system[0], ambient.join("\n")].filter((x) => x).join("\n")
     }
 
     const header = system[0]
@@ -186,14 +195,23 @@ export namespace LLM {
       { sessionID: input.sessionID, model: input.model },
       { system: claudeInstructions ?? system },
     )
-    // rejoin to maintain 2-part structure for caching if header unchanged
-    if (system.length > 2 && system[0] === header) {
+    // rejoin to maintain the header / rest / tail structure for caching if header unchanged
+    if (system.length > 1 + Math.max(tail.length, 1) && system[0] === header) {
       const rest = system.slice(1)
-      const at = splitEnvironment ? rest.lastIndexOf(environment!) : -1
-      if (at >= 0) rest.splice(at, 1)
+      const kept: string[] = []
+      for (const message of tail) {
+        const at = rest.lastIndexOf(message)
+        if (at < 0) continue
+        rest.splice(at, 1)
+        kept.push(message)
+      }
       system.length = 0
-      system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...(at >= 0 ? [environment!] : []))
+      system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...kept)
     }
+    // The reminders message is sent flagged, so it never takes one of the two system cache marks:
+    // with no environment message it would otherwise be the second system message and be marked.
+    const reminderText = splitEnvironment && input.reminders?.length ? input.reminders.join("\n") : undefined
+    const reminderAt = reminderText === undefined ? -1 : system.lastIndexOf(reminderText)
     // altimate_change end
 
     const variant =
@@ -472,12 +490,17 @@ export namespace LLM {
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
+        // altimate_change start — upstream_fix: the reminders message is never a cache-marked one
         ...system.map(
-          (x): ModelMessage => ({
-            role: "system",
-            content: x,
-          }),
+          (x, index): ModelMessage =>
+            index > 0 && index === reminderAt
+              ? ProviderTransform.unmarkedSystem(x)
+              : {
+                  role: "system",
+                  content: x,
+                },
         ),
+        // altimate_change end
         // altimate_change start — a request that declares no tools must not carry tool-call
         // messages. The toolless agents (compaction, title, summary) summarize a session's own
         // history, so they would otherwise send tool calls referencing functions the request
