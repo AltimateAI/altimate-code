@@ -469,6 +469,31 @@ describe("dbt_map_relations tool", () => {
     }
   })
 
+  test("project_dir names the project, and its manifest is found as dbt finds it: DBT_TARGET_PATH first, then a templated target-path at its env_var default", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-pd-")))
+    dirs.push(dir)
+    writeFileSync(join(dir, "dbt_project.yml"), "name: jaffle\ntarget-path: \"{{ env_var('MAP_REL_TARGET', 'built') }}\"\n")
+    for (const folder of ["built", "ci_out"]) {
+      mkdirSync(join(dir, folder))
+      writeFileSync(join(dir, folder, "manifest.json"), JSON.stringify(MANIFEST))
+    }
+    const saved = { target: process.env.DBT_TARGET_PATH, own: process.env.MAP_REL_TARGET }
+    try {
+      delete process.env.DBT_TARGET_PATH
+      delete process.env.MAP_REL_TARGET
+      expect((await run({ sql: "select * from legacy.thing", project_dir: dir })).metadata.manifest_path).toBe(join(dir, "built", "manifest.json"))
+      process.env.MAP_REL_TARGET = "ci_out"
+      expect((await run({ sql: "select * from legacy.thing", project_dir: dir })).metadata.manifest_path).toBe(join(dir, "ci_out", "manifest.json"))
+      process.env.DBT_TARGET_PATH = "built"
+      expect((await run({ sql: "select * from legacy.thing", project_dir: dir })).metadata.manifest_path).toBe(join(dir, "built", "manifest.json"))
+    } finally {
+      for (const [key, value] of [["DBT_TARGET_PATH", saved.target], ["MAP_REL_TARGET", saved.own]] as const) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
   test("outside a dbt project, without manifest_path, the error says so", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-bare-")))
     dirs.push(dir)

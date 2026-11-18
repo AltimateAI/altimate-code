@@ -711,6 +711,10 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
       .string()
       .optional()
       .describe("manifest.json to match against (default: the dbt project's target/manifest.json)"),
+    project_dir: z
+      .string()
+      .optional()
+      .describe("dbt project folder whose manifest to use, found as dbt finds it (DBT_TARGET_PATH, then target-path); ignored when manifest_path is given"),
   }),
   async execute(args): Promise<{ title: string; metadata: MapRelationsMetadata; output: string }> {
     const fail = (msg: string) => ({
@@ -719,7 +723,7 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
       output: msg,
     })
     try {
-      const manifestPath = args.manifest_path ?? (await defaultManifestPath())
+      const manifestPath = args.manifest_path ?? (await defaultManifestPath(args.project_dir))
       if (!manifestPath) return fail("No dbt project found here. Run from a dbt project or pass manifest_path.")
       const manifest = loadRawManifest(manifestPath)
       if (!manifest) return fail(`No manifest at ${manifestPath}. Run \`dbt parse\` or pass manifest_path.`)
@@ -744,9 +748,9 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
   },
 })
 
-async function defaultManifestPath(): Promise<string | null> {
+async function defaultManifestPath(projectDir?: string): Promise<string | null> {
   const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
-  const found = findProjectRoot(projectRoot())
+  const found = projectDir ?? findProjectRoot(projectRoot())
   const root = found ?? (await (await import("../native/connections/register")).getDbtProjectRoot())
   if (!root) return null
   let real = root
