@@ -116,7 +116,7 @@ async function run(args: string[], env: Record<string, string>, setup?: (home: s
 }
 
 const assessment = { ALTIMATE_ASSESSMENT_MODE: "true", ALTIMATE_TELEMETRY_DISABLED: "true" }
-const savings = ["tool", "run", "finops_databricks_savings", "--args", "{}", "--json", "--no-daemon"]
+const savings = ["tool", "run", "finops_databricks_savings", "--args", '{"confirm":true}', "--json", "--no-daemon"]
 
 describe("assessment mode on the packaged CLI", () => {
   posixOnly("control: without assessment mode, telemetry off still sends the opt-out event to the telemetry endpoint", async () => {
@@ -128,6 +128,13 @@ describe("assessment mode on the packaged CLI", () => {
     const result = await run(savings, assessment)
     expect(result.hosts).toEqual([])
     expect(JSON.parse(result.stdout).status).toBe("error")
+  }, 120_000)
+
+  posixOnly("without the user's go-ahead the check does not run and no host is contacted", async () => {
+    const unconfirmed = ["tool", "run", "finops_databricks_savings", "--args", "{}", "--json", "--no-daemon"]
+    const result = await run(unconfirmed, assessment)
+    expect(result.hosts).toEqual([])
+    expect(JSON.parse(result.stdout).output).toContain("call this tool again with confirm: true")
   }, 120_000)
 
   posixOnly("startup path (`tool list`): no host is contacted", async () => {

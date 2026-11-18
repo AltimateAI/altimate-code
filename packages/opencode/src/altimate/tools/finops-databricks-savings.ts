@@ -18,6 +18,8 @@ type SavingsMetadata = {
   warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]
   report?: DatabricksSavingsReport
   error?: string
+  /** True when the check did not run because `confirm` was not set. */
+  needs_confirmation?: boolean
 }
 
 function dollars(value: number): string {
@@ -107,16 +109,37 @@ export function formatSavings(result: DatabricksSavingsResult): string {
 
 export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_savings", {
   description:
-    "Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes.",
+    "Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes. Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.",
   parameters: z.object({
     warehouse: z
       .string()
       .optional()
       .describe("Databricks connection name. Optional — omit to use the first configured Databricks connection."),
+    confirm: z
+      .boolean()
+      .optional()
+      .describe(
+        "Set to true only after the user has agreed to run the check. It runs three queries on their SQL warehouse, which Databricks starts if it is stopped and bills while it runs; the check stops after 9 minutes, cancelling any query still running.",
+      ),
   }),
-  async execute(args) {
+  async execute(args, ctx) {
+    if (args.confirm !== true) {
+      // Asking first is the expected first step, not a failed run.
+      return {
+        title: "Databricks Savings: not run, needs the user's go-ahead",
+        metadata: { success: true, needs_confirmation: true } as SavingsMetadata,
+        output:
+          "Not run. The Databricks savings check runs three queries over seven days of system tables on the connection's SQL warehouse, " +
+          "which Databricks starts if it is stopped and bills while it runs. It stops after 9 minutes, cancelling any query still running. " +
+          "Ask the user whether to run it; if they agree, call this tool again with confirm: true.",
+      }
+    }
     try {
-      const result = await Dispatcher.call("finops.databricks_savings", { warehouse: args.warehouse })
+      const result = await Dispatcher.call(
+        "finops.databricks_savings",
+        { warehouse: args.warehouse },
+        { signal: ctx.abort, sessionID: ctx.sessionID },
+      )
       if (!result.success || !result.report) {
         const error = result.error ?? "Unknown error"
         return {

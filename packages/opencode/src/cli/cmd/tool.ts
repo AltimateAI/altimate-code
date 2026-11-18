@@ -12,6 +12,7 @@ import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import type { Runner, ToolResult } from "../../altimate/tool-cli/runner"
 import { resolveWorkspaceTools, workspaceContextSection } from "../../altimate/tool-cli/workspace-tools"
+import { withStopSignals } from "../../altimate/tool-cli/stop-signals"
 
 /** Reads all of stdin; `readFileSync(0)` works for pipes and for here-docs, which Bun exposes as files. */
 function readStdin(): string {
@@ -64,7 +65,9 @@ async function inProcess(
   workspaceTools: boolean,
 ): Promise<ToolResult> {
   process.chdir(directory)
-  return withRunner(directory, connections, workspaceTools, (runner) => runner.run(name, toolArgs, { allowWrite }))
+  return withStopSignals((signal) =>
+    withRunner(directory, connections, workspaceTools, (runner) => runner.run(name, toolArgs, { allowWrite, signal })),
+  )
 }
 
 /** Reloads the connections when a source file was created, edited or removed since the last reload. */

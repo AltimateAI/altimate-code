@@ -201,7 +201,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const info = (): DaemonInfo => ({ pid: process.pid, directory, version: options.version, startedAt, idleMs: idle, requests })
 
-  const handle = async (request: Request, afterReply: (action: () => void) => void): Promise<Response> => {
+  const handle = async (request: Request, afterReply: (action: () => void) => void, signal: AbortSignal): Promise<Response> => {
     if (request.op === "status") return { id: request.id, status: "ok", title: "Tool daemon", output: "running", metadata: { ...info() } }
     if (request.op === "stop") {
       afterReply(() => void stop())
@@ -226,7 +226,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
     }
     dirty = true
-    const result = await options.runner.run(request.name, request.args ?? {}, { allowWrite: request.allowWrite === true })
+    const result = await options.runner.run(request.name, request.args ?? {}, { allowWrite: request.allowWrite === true, signal })
     return { id: request.id, ...result }
   }
 
@@ -240,18 +240,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const server = net.createServer((socket) => {
     sockets.add(socket)
-    socket.on("close", () => sockets.delete(socket))
+    // A client that goes away (its `tool run` was stopped) stops its runs: tools that honour the
+    // signal cancel their work, so a warehouse query does not run on for nobody.
+    const running = new Set<AbortController>()
+    socket.on("close", () => {
+      sockets.delete(socket)
+      for (const controller of running) controller.abort(new Error("The client disconnected."))
+    })
     socket.on("error", () => {})
     lines(socket, (line) => {
       inflight++
       arm()
+      const controller = new AbortController()
+      running.add(controller)
       let afterReply: (() => void) | undefined
       let stopRequest = false
       Promise.resolve()
         .then(() => {
           const request = JSON.parse(line) as Request
           stopRequest = request.op === "stop"
-          return handle(request, (action) => (afterReply = action))
+          return handle(request, (action) => (afterReply = action), controller.signal)
         })
         .catch((error): Response => ({
           id: "",
@@ -261,6 +269,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           metadata: {},
         }))
         .then(async (response) => {
+          running.delete(controller)
           inflight--
           // Release DuckDB/SQLite file locks once idle, before replying, so a client running `dbt build` next finds the file free.
           // A request that arrives meanwhile waits for the release (see `handle`). Whichever request

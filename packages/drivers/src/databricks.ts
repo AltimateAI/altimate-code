@@ -3,6 +3,8 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { QueryTimeoutError } from "./types"
+import { MAX_TIMER_MS } from "./query-timeout"
 import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -15,6 +17,85 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   function escapeIdentifier(value: string): string {
     return value.replace(/`/g, "``")
+  }
+
+  // How long to wait for the server to acknowledge a cancel before reporting the statement as
+  // possibly still running.
+  const CANCEL_WAIT_MS = 30_000
+  const STOPPED = Symbol("stopped")
+
+  async function cancelAndClose(operation: any): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const cancelled = await Promise.race([
+      operation.cancel().then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), CANCEL_WAIT_MS)
+      }),
+    ]).finally(() => clearTimeout(timer))
+    operation.close().catch(() => {})
+    return cancelled
+  }
+
+  // `cancelAfterMs` is an opt-in deadline: past it, or when `signal` aborts, the statement is
+  // cancelled on the warehouse. SQL warehouses ignore the client's server-side `queryTimeout`.
+  async function runStatement(
+    query: string,
+    stmtOptions: Record<string, any>,
+    options?: ExecuteOptions,
+  ): Promise<any[]> {
+    const deadlineMs = options?.cancelAfterMs
+    if (!deadlineMs || deadlineMs <= 0) {
+      const operation = await session.executeStatement(query, stmtOptions)
+      const rows = await operation.fetchAll()
+      await operation.close()
+      return rows
+    }
+    const signal = options?.signal
+    signal?.throwIfAborted()
+    let stopped: "deadline" | "aborted" | undefined
+    let stop: () => void = () => {}
+    const stopping = new Promise<typeof STOPPED>((resolve) => (stop = () => resolve(STOPPED)))
+    const timer = setTimeout(
+      () => {
+        stopped ??= "deadline"
+        stop()
+      },
+      Math.min(deadlineMs, MAX_TIMER_MS),
+    )
+    const onAbort = () => {
+      stopped ??= "aborted"
+      stop()
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+    let operation: any
+    const work = (async () => {
+      const started = await session.executeStatement(query, stmtOptions)
+      // A statement the server accepted only after the stop is cancelled as soon as it exists.
+      if (stopped) {
+        await cancelAndClose(started)
+        return [] as any[]
+      }
+      operation = started
+      return operation.fetchAll() as Promise<any[]>
+    })()
+    let outcome: any[] | typeof STOPPED
+    try {
+      outcome = await Promise.race([work, stopping])
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+    }
+    if (outcome !== STOPPED) {
+      await operation.close()
+      return outcome
+    }
+    work.catch(() => {})
+    const cancelled = operation ? await cancelAndClose(operation) : false
+    if (stopped === "aborted") throw signal!.reason
+    throw new QueryTimeoutError({ engine: "databricks", timeoutMs: deadlineMs, cancelled })
   }
 
   return {
@@ -55,9 +136,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       if (binds?.length) {
         stmtOptions.ordinalParameters = binds
       }
-      const operation = await session.executeStatement(query, stmtOptions)
-      const rows = await operation.fetchAll()
-      await operation.close()
+      const rows = await runStatement(query, stmtOptions, options)
 
       const columns = rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = effectiveLimit > 0 && rows.length > effectiveLimit

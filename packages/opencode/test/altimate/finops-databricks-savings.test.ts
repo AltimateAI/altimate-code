@@ -6,6 +6,7 @@ import {
   DATABRICKS_CLUSTER_FACTS_SQL,
   DATABRICKS_JOB_FACTS_SQL,
   DATABRICKS_WAREHOUSE_FACTS_SQL,
+  SAVINGS_RUN_LIMIT_MS,
   databricksSavings,
   rulesEngine,
   savingsWindow,
@@ -106,7 +107,7 @@ describe("finops_databricks_savings tool", () => {
   test("gives Claude the total, each finding with its evidence, and the whole report as metadata", async () => {
     Dispatcher.register("finops.databricks_savings" as any, async () => REPORT)
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({}, stubCtx())
+    const result = await tool.execute({ confirm: true }, stubCtx())
 
     expect(result.title).toBe("Databricks Savings: $53.20–$66.50 a month on 1 resource(s)")
     expect(result.output).toContain("Total: $53.20–$66.50 a month on 1 resource, each counted once at its largest saving.")
@@ -120,13 +121,45 @@ describe("finops_databricks_savings tool", () => {
     expect(result.metadata.window).toEqual({ start: "2026-11-05", end: "2026-11-12" })
   })
 
+  test("without the user's go-ahead nothing runs: the agent is told to ask first", async () => {
+    let ran = 0
+    Dispatcher.register("finops.databricks_savings" as any, async () => {
+      ran++
+      return REPORT
+    })
+    const tool = await initTool(FinopsDatabricksSavingsTool)
+    for (const args of [{}, { confirm: false }, { warehouse: "dbx" }]) {
+      const result = await tool.execute(args as any, stubCtx())
+      expect(result.title).toBe("Databricks Savings: not run, needs the user's go-ahead")
+      // Asking first is the expected step, so it is not recorded as a failed run.
+      expect(result.metadata).toMatchObject({ success: true, needs_confirmation: true })
+      expect(result.metadata.report).toBeUndefined()
+      expect(result.output).toContain("Ask the user whether to run it; if they agree, call this tool again with confirm: true.")
+      expect(result.output).toContain("runs three queries")
+      expect(result.output).toContain("It stops after 9 minutes, cancelling any query still running.")
+    }
+    expect(ran).toBe(0)
+  })
+
+  test("the session's stop signal reaches the check", async () => {
+    let seen: unknown
+    Dispatcher.register("finops.databricks_savings" as any, async (_params: unknown, context: unknown) => {
+      seen = context
+      return REPORT
+    })
+    const tool = await initTool(FinopsDatabricksSavingsTool)
+    const ctx = stubCtx()
+    await tool.execute({ confirm: true }, ctx)
+    expect(seen).toEqual({ signal: ctx.abort, sessionID: "test" })
+  })
+
   test("no findings says so and still reports how many warehouses were checked", async () => {
     Dispatcher.register("finops.databricks_savings" as any, async () => ({
       ...REPORT,
       report: { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] },
     }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({}, stubCtx())
+    const result = await tool.execute({ confirm: true }, stubCtx())
     expect(result.output).toContain("5 SQL warehouses, 0 all-purpose clusters, 0 jobs checked")
     expect(result.output).toContain("No savings found")
   })
@@ -138,7 +171,7 @@ describe("finops_databricks_savings tool", () => {
       error: "[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`compute`.`warehouse_events` cannot be found.",
     }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({}, stubCtx())
+    const result = await tool.execute({ confirm: true }, stubCtx())
     expect(result.title).toBe("Databricks Savings: FAILED")
     expect(result.metadata.error).toContain("TABLE_OR_VIEW_NOT_FOUND")
     expect(result.output).not.toContain("No savings found")
@@ -256,7 +289,7 @@ describe("cluster and job findings", () => {
       },
     }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({}, stubCtx())
+    const result = await tool.execute({ confirm: true }, stubCtx())
     expect(result.output).toContain("5 SQL warehouses, 3 all-purpose clusters, 4 jobs checked")
     expect(result.output).toContain("Not checked: Job Running on All-Purpose Compute ([INSUFFICIENT_PERMISSIONS] system.lakeflow.jobs)")
     expect(result.output).toContain("shared-analytics (cluster) · Idle Cluster Detection · $765–$1,530 a month (critical)")
@@ -304,7 +337,7 @@ describe("databricks savings handler over a stubbed connection", () => {
   const WAREHOUSE_ROW = { workspace_id: "111", warehouse_id: "abc123", warehouse_name: "BI", warehouse_type: "PRO", warehouse_size: "SMALL", total_cost: 27.5 }
   const JOB_ROW = { workspace_id: "222", job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 9 }
   const table = (row: Record<string, unknown>, truncated = false) => ({ columns: Object.keys(row), rows: [Object.values(row)], truncated })
-  let calls: { sql: string; limit: number; binds: unknown[] }[]
+  let calls: { sql: string; limit: number; binds: unknown[]; timeout?: number; clientTimeout?: number }[]
   let sent: any
 
   beforeEach(() => {
@@ -325,8 +358,8 @@ describe("databricks savings handler over a stubbed connection", () => {
 
   const connect = (answer: (sql: string) => unknown) =>
     spyOn(Registry, "get").mockResolvedValue({
-      execute: async (sql: string, limit: number, binds: unknown[]) => {
-        calls.push({ sql, limit, binds })
+      execute: async (sql: string, limit: number, binds: unknown[], options?: { cancelAfterMs?: number; queryTimeoutMs?: number }) => {
+        calls.push({ sql, limit, binds, timeout: options?.cancelAfterMs, clientTimeout: options?.queryTimeoutMs })
         return answer(sql)
       },
     } as any)
@@ -344,12 +377,81 @@ describe("databricks savings handler over a stubbed connection", () => {
     // Every query takes only the window end: it reads every workspace the system tables show.
     expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL, DATABRICKS_CLUSTER_FACTS_SQL, DATABRICKS_JOB_FACTS_SQL])
     for (const one of calls) expect(one.binds).toEqual(["2026-11-18"])
+    // Each query gets what is left of the check's 9 minutes, cancelled on the warehouse when it runs
+    // out; none sets a client-only timeout that would abandon a query still running.
+    expect(SAVINGS_RUN_LIMIT_MS).toBe(540_000)
+    for (const one of calls) {
+      expect(one.timeout).toBeGreaterThan(SAVINGS_RUN_LIMIT_MS - 5_000)
+      expect(one.timeout).toBeLessThanOrEqual(SAVINGS_RUN_LIMIT_MS)
+      expect(one.clientTimeout).toBeUndefined()
+    }
     expect(sent.lookback_days).toBe(7)
     expect(sent.warehouses[0]).toMatchObject({ workspace_id: "111", warehouse_id: "abc123", warehouse_size: "SMALL", total_cost: 27.5 })
     expect(result.warehouses?.[0]).toMatchObject({ id: "abc123", workspace_id: "111" })
     expect(sent.clusters).toEqual([])
     expect(sent.jobs[0]).toMatchObject({ workspace_id: "222", job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME" })
     expect(result.limited).toEqual([])
+  })
+
+  test("a query past its limit fails the check with a plain reason, or skips an optional check", async () => {
+    const timeout = (cancelled: boolean) => Object.assign(new Error("QUERY_TIMEOUT: databricks query exceeded"), { code: "QUERY_TIMEOUT", cancelled })
+    let spy = connect((sql) => {
+      if (sql === DATABRICKS_WAREHOUSE_FACTS_SQL) throw timeout(true)
+      return table(JOB_ROW)
+    })
+    let result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(false)
+    expect(result.error).toBe("The SQL warehouses query ran past the check's 9-minute limit and was cancelled on the warehouse.")
+
+    calls = []
+    spy = connect((sql) => {
+      if (sql === DATABRICKS_JOB_FACTS_SQL) throw timeout(false)
+      return sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : table({ cluster_id: "c1" })
+    })
+    result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.skipped).toEqual([
+      { check: "Job Running on All-Purpose Compute", reason: "The jobs query ran past the check's 9-minute limit and may still be running on the warehouse." },
+    ])
+  })
+
+  test("a query is not started once the check's 9 minutes are used up", async () => {
+    const realNow = Date.now
+    let now = realNow()
+    const clock = spyOn(Date, "now").mockImplementation(() => now)
+    const spy = connect((sql) => {
+      // The warehouse query takes the whole limit.
+      if (sql === DATABRICKS_WAREHOUSE_FACTS_SQL) now += SAVINGS_RUN_LIMIT_MS
+      return table(WAREHOUSE_ROW)
+    })
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    clock.mockRestore()
+    expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL])
+    expect(result.success).toBe(true)
+    expect(result.skipped).toEqual([
+      { check: "Idle Cluster Detection", reason: "The check reached its 9-minute limit before the all-purpose clusters query." },
+      { check: "Job Running on All-Purpose Compute", reason: "The check reached its 9-minute limit before the jobs query." },
+    ])
+  })
+
+  test("stopping the session cancels the running query and starts no other", async () => {
+    const controller = new AbortController()
+    const spy = connect((sql) => {
+      if (sql === DATABRICKS_CLUSTER_FACTS_SQL) {
+        controller.abort(new Error("session stopped"))
+        throw new Error("session stopped")
+      }
+      return table(WAREHOUSE_ROW)
+    })
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { signal: controller.signal })
+    spy.mockRestore()
+    expect(result.success).toBe(false)
+    expect(result.error).toBe("session stopped")
+    // The jobs query never started, and the stop is not reported as a skipped check.
+    expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL, DATABRICKS_CLUSTER_FACTS_SQL])
   })
 
   test("a query that fills the row limit is named, and the tool says so", async () => {

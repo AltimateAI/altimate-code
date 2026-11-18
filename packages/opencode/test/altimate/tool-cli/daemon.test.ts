@@ -5,6 +5,7 @@ import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
+  connect,
   socketName,
   socketPath,
   runViaDaemon,
@@ -84,6 +85,33 @@ describe("daemon round trip", () => {
       { name: "sql_format", args: { sql: "select 1" }, allowWrite: false },
       { name: "sql_format", args: {}, allowWrite: true },
     ])
+  })
+
+  test("a client that disconnects stops its run: the tool's signal aborts", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    const started = Promise.withResolvers<void>()
+    const stopped = Promise.withResolvers<unknown>()
+    const runner: Runner = {
+      ...fakeRunner(),
+      async run(_name, _args, options) {
+        started.resolve()
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener("abort", () => {
+            stopped.resolve(options.signal!.reason)
+            resolve()
+          }),
+        )
+        return { status: "error", title: "stopped", output: "", metadata: {} }
+      },
+    }
+    const daemon = await startDaemon({ directory: dir, version: "9.9.9", runner, file, idleMs: 60_000 })
+    cleanups.push(() => daemon.stop())
+    const socket = await connect(file)
+    socket!.write(JSON.stringify({ id: "1", name: "slow", args: {} }) + "\n")
+    await started.promise
+    socket!.destroy()
+    expect(((await stopped.promise) as Error).message).toBe("The client disconnected.")
   })
 
   test("tool errors and malformed requests come back as error responses", async () => {

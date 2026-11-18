@@ -9,6 +9,8 @@
 import * as core from "@altimateai/altimate-core"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Registry from "../connections/registry"
+import { isQueryTimeoutError } from "@altimateai/drivers/types"
+import type { QueryContext } from "../query-execution"
 import { resolveFinopsWarehouse } from "./warehouse-resolver"
 import type { DatabricksSavingsParams, DatabricksSavingsResult, DatabricksSavingsReport } from "../types"
 
@@ -24,6 +26,10 @@ const WINDOW_END_MS = 6 * 3_600_000
 
 /** Rows read per query; a query that fills it says so in the result. */
 const ROW_LIMIT = 10_000
+// The whole check stops after this long; a query still running then is cancelled on the warehouse.
+// Claude Code runs a plugin's process for ten minutes at most, so the check ends before it is killed.
+export const SAVINGS_RUN_LIMIT_MS = 9 * 60_000
+const LIMIT_TEXT = "9-minute limit"
 
 /** A SQL warehouse's id in a connection's HTTP path (`/sql/1.0/warehouses/<id>`, or the older `/sql/1.0/endpoints/<id>`). */
 const WAREHOUSE_PATH = /\/(?:warehouses|endpoints)\/([0-9a-z]+)\/?$/i
@@ -392,6 +398,7 @@ function preferredConnection(): string | undefined {
 export async function databricksSavings(
   params: DatabricksSavingsParams,
   rules: RulesEngine | null = rulesEngine(),
+  context?: QueryContext,
 ): Promise<DatabricksSavingsResult> {
   const window = savingsWindow(params.now_ms ?? Date.now())
   const failed = (error: string): DatabricksSavingsResult => ({ success: false, window, error })
@@ -422,10 +429,24 @@ export async function databricksSavings(
     const binds = [window.end]
     // A query that fills the row limit reads only its first rows; the result names it.
     const limited: string[] = []
+    // Stopping the session cancels the running query and starts no other.
+    const signal = context?.signal
+    const stopsAt = Date.now() + SAVINGS_RUN_LIMIT_MS
     const read = async (what: string, sql: string) => {
-      const result = await connector.execute(sql, ROW_LIMIT, binds)
-      if (result.truncated) limited.push(what)
-      return records(result)
+      signal?.throwIfAborted()
+      const left = stopsAt - Date.now()
+      if (left <= 0) throw new Error(`The check reached its ${LIMIT_TEXT} before the ${what} query.`)
+      try {
+        const result = await connector.execute(sql, ROW_LIMIT, binds, { cancelAfterMs: left, signal })
+        if (result.truncated) limited.push(what)
+        return records(result)
+      } catch (e) {
+        if (!isQueryTimeoutError(e)) throw e
+        const outcome = (e as { cancelled?: boolean }).cancelled
+          ? "and was cancelled on the warehouse"
+          : "and may still be running on the warehouse"
+        throw new Error(`The ${what} query ran past the check's ${LIMIT_TEXT} ${outcome}.`)
+      }
     }
     const warehouses = await read("SQL warehouses", DATABRICKS_WAREHOUSE_FACTS_SQL)
     if (warehouses.length === 0) {
@@ -437,6 +458,7 @@ export async function databricksSavings(
       try {
         return await read(what, sql)
       } catch (e) {
+        if (signal?.aborted) throw e
         skipped.push({ check, reason: (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 300) })
         return []
       }

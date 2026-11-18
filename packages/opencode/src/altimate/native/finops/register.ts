@@ -49,8 +49,8 @@ register("finops.warehouse_advice", async (params: WarehouseAdvisorParams): Prom
   return adviseWarehouse(params)
 })
 
-register("finops.databricks_savings", async (params: DatabricksSavingsParams): Promise<DatabricksSavingsResult> => {
-  return databricksSavings(params)
+register("finops.databricks_savings", async (params: DatabricksSavingsParams, context): Promise<DatabricksSavingsResult> => {
+  return databricksSavings(params, undefined, context)
 })
 
 register("finops.unused_resources", async (params: UnusedResourcesParams): Promise<UnusedResourcesResult> => {
