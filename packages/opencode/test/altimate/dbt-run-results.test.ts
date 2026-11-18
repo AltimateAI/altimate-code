@@ -224,6 +224,16 @@ describe("dbt_run_results", () => {
     expect(result.output).toContain("not a run artifact")
   })
 
+  test("a missing target_path longer than the bound is cut in the answer", async () => {
+    const dir = await project("long-target", BUILD)
+
+    const result = await run(dir, "y".repeat(5000))
+
+    expect((result.metadata as any).found).toBe(false)
+    expect(result.output).toContain(`(in ${"y".repeat(300)}…)`)
+    expect(result.output.length).toBeLessThan(1000)
+  })
+
   test("a node id longer than the bound is cut, so the answer stays small", async () => {
     const long = "x".repeat(5000)
     const dir = await project("long-id", {

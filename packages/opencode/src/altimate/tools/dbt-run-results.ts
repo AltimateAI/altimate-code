@@ -1,9 +1,8 @@
-import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { projectRoot } from "../native/connections/registry"
-import { isFailedRunStatus, readRunResults, type RunResultsArtifact } from "../validators/validator-utils"
+import { isFailedRunStatus, readRunResults } from "../validators/validator-utils"
 
 /** A message longer than this is cut: a build of thousands of nodes must stay readable and small. */
 const MAX_MESSAGE = 2000
@@ -65,88 +64,19 @@ function cut(text: string | null, max = MAX_MESSAGE): string | null {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
-/** The fields `readRunResults` does not carry, from the same file version it parsed (null when the file changed since). */
-async function extraFields(
-  file: string,
-  mtimeMs: number,
-): Promise<{ invocationId: string | null; elapsedSec: number | null; times: Map<string, number> } | null> {
-  try {
-    const before = await fs.stat(file)
-    if (before.mtimeMs !== mtimeMs) return null
-    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as {
-      metadata?: { invocation_id?: unknown }
-      elapsed_time?: unknown
-      results?: unknown
-    }
-    const after = await fs.stat(file)
-    if (after.mtimeMs !== mtimeMs || after.size !== before.size || after.ino !== before.ino) return null
-    const times = new Map<string, number>()
-    if (Array.isArray(parsed.results)) {
-      for (const r of parsed.results as Array<Record<string, unknown>>) {
-        if (r && typeof r["unique_id"] === "string" && typeof r["execution_time"] === "number" && Number.isFinite(r["execution_time"]))
-          times.set(r["unique_id"], r["execution_time"])
-      }
-    }
-    const id = parsed.metadata?.invocation_id
-    const elapsed = typeof parsed.elapsed_time === "number" && Number.isFinite(parsed.elapsed_time) ? parsed.elapsed_time : null
-    return { invocationId: typeof id === "string" && id ? id : null, elapsedSec: elapsed, times }
-  } catch {
-    return null
-  }
-}
-
-/**
- * The artifact of a run that wrote to a folder of its own (`--target-path`): `readRunResults` only knows the project's configured
- * folder, so a folder the caller names is read here, with the same fields and the same rule that a file without `results` is no artifact.
- */
-async function readRunResultsIn(file: string): Promise<RunResultsArtifact | null> {
-  try {
-    const stat = await fs.stat(file)
-    if (!stat.isFile()) return null
-    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as { results?: unknown; args?: unknown }
-    if (!Array.isArray(parsed.results)) return null
-    const which = typeof parsed.args === "object" && parsed.args !== null ? (parsed.args as Record<string, unknown>)["which"] : undefined
-    const results: RunResultsArtifact["results"] = []
-    for (const row of parsed.results as unknown[]) {
-      if (typeof row !== "object" || row === null) continue
-      const r = row as Record<string, unknown>
-      const uniqueId = typeof r["unique_id"] === "string" ? r["unique_id"] : ""
-      if (!uniqueId) continue
-      const parts = uniqueId.split(".")
-      const last = (parts[parts.length - 1] ?? "").toLowerCase()
-      const versioned = parts.length > 3 && /^v\d+$/.test(last)
-      results.push({
-        uniqueId,
-        name: versioned ? (parts[parts.length - 2] ?? "").toLowerCase() : last,
-        version: versioned ? last : null,
-        status: typeof r["status"] === "string" ? r["status"].toLowerCase() : "",
-        message: typeof r["message"] === "string" ? r["message"] : null,
-      })
-    }
-    return { path: file, mtimeMs: stat.mtimeMs, results, command: (typeof which === "string" ? which.trim().toLowerCase() : "") || null }
-  } catch {
-    return null
-  }
-}
-
 /**
  * The last dbt run of a project: `readRunResults` gives the path, the command and each row's status and
- * message; the invocation id, elapsed time and execution times are read from the same file version.
+ * message, the invocation id, the elapsed time and the execution times, all from one parse of the file.
  */
 export async function readRunView(dbtRoot: string, targetPath?: string): Promise<DbtRunResultsView> {
-  const named = targetPath?.trim()
-  const artifact = named
-    ? await readRunResultsIn(path.join(path.isAbsolute(named) ? named : path.join(dbtRoot, named), "run_results.json"))
-    : await readRunResults(dbtRoot)
+  const artifact = await readRunResults(dbtRoot, targetPath)
   if (!artifact) return NONE
-  const extra = await extraFields(artifact.path, artifact.mtimeMs)
-  if (!extra) return NONE
   const all = artifact.results.map(
     (node): DbtRunResultRow => ({
       uniqueId: cut(node.uniqueId, MAX_IDENTIFIER) ?? "",
       name: cut(displayName(node.uniqueId, node.name), MAX_IDENTIFIER) ?? "",
       status: cut(node.status, MAX_IDENTIFIER) ?? "",
-      executionTimeSec: extra.times.get(node.uniqueId) ?? null,
+      executionTimeSec: node.executionTimeSec,
       message: cut(node.message),
     }),
   )
@@ -158,9 +88,9 @@ export async function readRunView(dbtRoot: string, targetPath?: string): Promise
   return {
     found: true,
     projectDir: dbtRoot,
-    invocationId: cut(extra.invocationId, MAX_IDENTIFIER),
+    invocationId: cut(artifact.invocationId, MAX_IDENTIFIER),
     command: cut(artifact.command, MAX_IDENTIFIER),
-    elapsedSec: extra.elapsedSec,
+    elapsedSec: artifact.elapsedSec,
     completedAt: new Date(artifact.mtimeMs).toISOString(),
     total: all.length,
     passed: all.length - failed.length - skipped,
@@ -190,7 +120,7 @@ export const DbtRunResultsTool = Tool.define("dbt_run_results", {
       return {
         title: "dbt run results: none",
         metadata: { ...view },
-        output: `No readable run_results.json for the dbt project at ${root}${args.target_path ? ` (in ${args.target_path})` : ""}: no dbt command has written one there yet, or the file is not a run artifact.`,
+        output: `No readable run_results.json for the dbt project at ${root}${args.target_path?.trim() ? ` (in ${cut(args.target_path.trim(), MAX_IDENTIFIER)})` : ""}: no dbt command has written one there yet, or the file is not a run artifact.`,
       }
     }
     const command = view.command ? `dbt ${view.command}` : "dbt (unknown command)"

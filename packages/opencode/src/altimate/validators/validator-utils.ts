@@ -1191,6 +1191,8 @@ export interface RunResultNode {
   status: string
   /** dbt's message for the node, when present. */
   message: string | null
+  /** dbt's `execution_time` for the node, when it is a finite number. */
+  executionTimeSec: number | null
 }
 
 /** A parsed `run_results.json` plus its freshness. */
@@ -1212,6 +1214,10 @@ export interface RunResultsArtifact {
    * not evidence that anything was built.
    */
   command: string | null
+  /** `metadata.invocation_id`, read from the same parse as `results`. */
+  invocationId: string | null
+  /** `elapsed_time` in seconds, read from the same parse as `results`. */
+  elapsedSec: number | null
 }
 
 /**
@@ -1348,14 +1354,21 @@ export function isFailedRunStatus(status: string): boolean {
  * Read and parse `<target>/run_results.json`. Returns null when the artifact
  * is absent or unparseable — callers decide what that means for their gate.
  */
-export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifact | null> {
-  const targetPath = await resolveDbtTargetPath(dbtRoot)
+export async function readRunResults(dbtRoot: string, folder?: string): Promise<RunResultsArtifact | null> {
+  // `folder` is a run's own `--target-path`; a relative one is from the project.
+  const named = folder?.trim()
+  const targetPath = named ? (isAbsolutePath(named) ? named : join(dbtRoot, named)) : await resolveDbtTargetPath(dbtRoot)
   const path = join(targetPath, "run_results.json")
   try {
     const stat = await fs.stat(path)
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
-    const parsed = JSON.parse(raw) as { results?: unknown; args?: unknown }
+    const parsed = JSON.parse(raw) as {
+      results?: unknown
+      args?: unknown
+      metadata?: { invocation_id?: unknown }
+      elapsed_time?: unknown
+    }
     // A file that parses but carries no `results` array is not a run artifact.
     // Returning an empty one would read as "a build happened and recorded
     // nothing", which lets an unbuilt model through; null means "no evidence".
@@ -1383,9 +1396,20 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
         version: versioned ? last : null,
         status: typeof r["status"] === "string" ? r["status"].toLowerCase() : "",
         message: typeof r["message"] === "string" ? r["message"] : null,
+        executionTimeSec:
+          typeof r["execution_time"] === "number" && Number.isFinite(r["execution_time"]) ? r["execution_time"] : null,
       })
     }
-    return { path, mtimeMs: stat.mtimeMs, results, command }
+    const id = parsed.metadata?.invocation_id
+    const elapsed = typeof parsed.elapsed_time === "number" && Number.isFinite(parsed.elapsed_time) ? parsed.elapsed_time : null
+    return {
+      path,
+      mtimeMs: stat.mtimeMs,
+      results,
+      command,
+      invocationId: typeof id === "string" && id ? id : null,
+      elapsedSec: elapsed,
+    }
   } catch {
     return null
   }
