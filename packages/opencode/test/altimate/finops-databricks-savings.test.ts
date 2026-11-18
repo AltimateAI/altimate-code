@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import * as Registry from "../../src/altimate/native/connections/registry"
+import { RunBudget } from "../../src/altimate/run-budget"
 import {
   DATABRICKS_CLUSTER_FACTS_SQL,
   DATABRICKS_JOB_FACTS_SQL,
@@ -337,7 +338,7 @@ describe("databricks savings handler over a stubbed connection", () => {
   const WAREHOUSE_ROW = { workspace_id: "111", warehouse_id: "abc123", warehouse_name: "BI", warehouse_type: "PRO", warehouse_size: "SMALL", total_cost: 27.5 }
   const JOB_ROW = { workspace_id: "222", job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 9 }
   const table = (row: Record<string, unknown>, truncated = false) => ({ columns: Object.keys(row), rows: [Object.values(row)], truncated })
-  let calls: { sql: string; limit: number; binds: unknown[]; timeout?: number; clientTimeout?: number }[]
+  let calls: { sql: string; limit: number; binds: unknown[]; timeout?: number; clientTimeout?: number; signal?: AbortSignal }[]
   let sent: any
 
   beforeEach(() => {
@@ -358,8 +359,8 @@ describe("databricks savings handler over a stubbed connection", () => {
 
   const connect = (answer: (sql: string) => unknown) =>
     spyOn(Registry, "get").mockResolvedValue({
-      execute: async (sql: string, limit: number, binds: unknown[], options?: { cancelAfterMs?: number; queryTimeoutMs?: number }) => {
-        calls.push({ sql, limit, binds, timeout: options?.cancelAfterMs, clientTimeout: options?.queryTimeoutMs })
+      execute: async (sql: string, limit: number, binds: unknown[], options?: { cancelAfterMs?: number; queryTimeoutMs?: number; signal?: AbortSignal }) => {
+        calls.push({ sql, limit, binds, timeout: options?.cancelAfterMs, clientTimeout: options?.queryTimeoutMs, signal: options?.signal })
         return answer(sql)
       },
     } as any)
@@ -432,9 +433,29 @@ describe("databricks savings handler over a stubbed connection", () => {
     expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL])
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([
-      { check: "Idle Cluster Detection", reason: "The check reached its 9-minute limit before the all-purpose clusters query." },
-      { check: "Job Running on All-Purpose Compute", reason: "The check reached its 9-minute limit before the jobs query." },
+      { check: "Idle Cluster Detection", reason: "The all-purpose clusters query was not started: it would run past the check's 9-minute limit." },
+      { check: "Job Running on All-Purpose Compute", reason: "The jobs query was not started: it would run past the check's 9-minute limit." },
     ])
+  })
+
+  test("connecting counts toward the limit: a connection that never comes up ends the check in time", async () => {
+    // A 30 ms session budget stands in for the last moments of the 9 minutes.
+    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 30)
+    const get = spyOn(Registry, "get").mockReturnValue(new Promise(() => {}) as any)
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { sessionID: "s1" })
+    get.mockRestore()
+    budget.mockRestore()
+    expect(result.success).toBe(false)
+    expect(result.error).toBe("Connecting to the warehouse took longer than the run's time budget.")
+  })
+
+  test("a session time budget shorter than 9 minutes is the limit", async () => {
+    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 60_000)
+    const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : table(JOB_ROW)))
+    await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { sessionID: "s1" })
+    spy.mockRestore()
+    budget.mockRestore()
+    for (const one of calls) expect(one.timeout).toBeLessThanOrEqual(60_000)
   })
 
   test("stopping the session cancels the running query and starts no other", async () => {
@@ -450,6 +471,8 @@ describe("databricks savings handler over a stubbed connection", () => {
     spy.mockRestore()
     expect(result.success).toBe(false)
     expect(result.error).toBe("session stopped")
+    // Each query got the session's signal, so the driver cancels it on the warehouse.
+    for (const one of calls) expect(one.signal).toBe(controller.signal)
     // The jobs query never started, and the stop is not reported as a skipped check.
     expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL, DATABRICKS_CLUSTER_FACTS_SQL])
   })

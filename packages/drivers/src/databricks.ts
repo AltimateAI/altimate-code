@@ -89,7 +89,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       signal?.removeEventListener("abort", onAbort)
     }
     if (outcome !== STOPPED) {
-      await operation.close()
+      // Closing frees the server's result; a slow or failed close must not hold up or fail a query
+      // that already returned.
+      operation.close().catch(() => {})
       return outcome
     }
     work.catch(() => {})
