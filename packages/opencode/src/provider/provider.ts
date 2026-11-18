@@ -35,6 +35,10 @@ import { AltimateApi } from "../altimate/api/client"
 // altimate_change start — managed Altimate Base provider and credential boundary
 import { FreeTier } from "../altimate/free/client"
 // altimate_change end
+// altimate_change start — Claude Agent provider (Claude Code login through the Claude Agent SDK)
+import { ClaudeAgent } from "../altimate/provider/claude-agent"
+import { ClaudeAgentCatalog } from "../altimate/provider/claude-agent/catalog"
+// altimate_change end
 
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
@@ -398,6 +402,9 @@ export namespace Provider {
     "@gitlab/gitlab-ai-provider": createGitLab,
     // @ts-ignore (TODO: kill this code so we dont have to maintain it)
     "@ai-sdk/github-copilot": createGitHubCopilotOpenAICompatible,
+    // altimate_change start — Claude Agent models run through the user's local `claude`
+    [ClaudeAgent.PACKAGE]: ClaudeAgent.createSDK,
+    // altimate_change end
   }
 
   // altimate_change start — loaders may need the resolved model to choose SDK APIs
@@ -525,8 +532,9 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "anthropic-beta":
-              "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            // altimate_change start — no Claude Code beta flag: an API key is not Claude Code (upstream 1ac1a0287c)
+            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            // altimate_change end
           },
         },
       }
@@ -1782,6 +1790,13 @@ export namespace Provider {
     }
     // altimate_change end
 
+    // altimate_change start — Claude Agent: models Claude Code last reported, priced from the login's provider
+    database[ClaudeAgent.ID] = ClaudeAgentCatalog.provider(
+      await ClaudeAgentCatalog.load(ClaudeAgent.connectionEnv(configProviderMap[ClaudeAgent.ID]?.options ?? {})),
+      database,
+    )
+    // altimate_change end
+
     function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
       const existing = providers[providerID]
       if (existing) {
@@ -2270,7 +2285,8 @@ export namespace Provider {
       const availableProviders = Object.keys(s.providers)
       const matches = fuzzysort.go(providerID, availableProviders, { limit: 3, threshold: -10000 })
       const suggestions = matches.map((m) => m.target)
-      throw new ModelNotFoundError({ providerID, modelID, suggestions })
+      // altimate_change — mark a missing provider, so the error can say how to connect it
+      throw new ModelNotFoundError({ providerID, modelID, suggestions, providerMissing: true })
     }
 
     const info = provider.models[modelID]
@@ -2404,6 +2420,9 @@ export namespace Provider {
         // prioritize free models for github copilot
         priority = ["gpt-5-mini", "claude-haiku-4.5", ...priority]
       }
+      // altimate_change start — Claude Agent lists Claude Code's model aliases
+      if (providerID === ClaudeAgent.ID) priority = ["haiku"]
+      // altimate_change end
       for (const item of priority) {
         if (providerID === ProviderID.amazonBedrock) {
           const crossRegionPrefixes = ["global.", "us.", "eu."]
@@ -2577,6 +2596,8 @@ export namespace Provider {
     providerID: ProviderID,
     modelID: ModelID,
     suggestions: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
+    // altimate_change — true when the provider itself is not available, not only the model
+    providerMissing: Schema.optional(Schema.Boolean),
   })
 
   export const InitError = NamedError.create("ProviderInitError", {
