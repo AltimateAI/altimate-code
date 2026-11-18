@@ -5,7 +5,7 @@
 // read as-is.
 // The rule itself lives in core's `flag/flag.ts` (`env`), which the core `Flag` object, this
 // namespace and the Effect `Config`-backed services (`effect/config-service.ts`) all share.
-import { env as read } from "@opencode-ai/core/flag/flag"
+import { env as read, killSwitchSet } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 
 function truthy(key: string) {
@@ -116,8 +116,7 @@ export namespace Flag {
   // altimate_change start — assessment mode: nothing leaves the machine except the customer's own warehouse calls
   /** Read live; fails closed (any value but empty, `0` or `false` turns it on). */
   export function assessmentMode(): boolean {
-    const value = process.env["ALTIMATE_ASSESSMENT_MODE"]?.trim().toLowerCase()
-    return value !== undefined && value !== "" && value !== "0" && value !== "false"
+    return killSwitchSet(process.env["ALTIMATE_ASSESSMENT_MODE"])
   }
   export const OPENCODE_DISABLE_MODELS_FETCH = truthy("OPENCODE_DISABLE_MODELS_FETCH") || assessmentMode()
   // altimate_change end

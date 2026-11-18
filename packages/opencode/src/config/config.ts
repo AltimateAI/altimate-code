@@ -535,12 +535,12 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(auth)) {
-          // altimate_change start — assessment mode fetches no remote config
-          if (value.type === "wellknown" && Flag.ALTIMATE_ASSESSMENT_MODE) continue
-          // altimate_change end
           if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
+            // altimate_change start — assessment mode fetches no remote config; the token stays available for substitution
+            if (Flag.ALTIMATE_ASSESSMENT_MODE) continue
+            // altimate_change end
             const wellknownURL = `${url}/.well-known/opencode`
             yield* Effect.logDebug("fetching remote config", { url: wellknownURL })
             const wellknown = yield* fetchRemoteJson(wellknownURL, undefined, ConfigV1.WellKnown, url)

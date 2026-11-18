@@ -212,12 +212,12 @@ describe("assessment mode on the packaged CLI", () => {
     expect(off.hosts.some((host) => host.startsWith("models.dev"))).toBe(true)
   }, 90_000)
 
-  test.each(["true", "1", "yes", "on"])("assessment mode `%s` turns every switch on, and off values leave them off", async (value) => {
+  posixOnly.each(["true", "1", "yes", "on"])("assessment mode `%s` turns every switch on, and off values leave them off", async (value) => {
     const on = JSON.parse((await probe("fixtures/assessment-flags-probe.ts", { ALTIMATE_ASSESSMENT_MODE: value })).stdout)
     expect(on).toEqual({ coreMode: true, coreModelsOff: true, coreWorkspaceOff: true, mode: true, modelsOff: true })
   }, 60_000)
 
-  test.each(["", "0", "false"])("assessment mode `%s` leaves the switches off", async (value) => {
+  posixOnly.each(["", "0", "false"])("assessment mode `%s` leaves the switches off", async (value) => {
     const off = JSON.parse((await probe("fixtures/assessment-flags-probe.ts", { ALTIMATE_ASSESSMENT_MODE: value })).stdout)
     expect(off).toEqual({ coreMode: false, coreModelsOff: false, coreWorkspaceOff: false, mode: false, modelsOff: false })
   }, 60_000)
