@@ -169,7 +169,23 @@ describe("columnReach", () => {
     )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     const found = reach.models.find((m) => m.name === "stg_calc")
-    expect(Object.values(found?.lens_types ?? {})).not.toContain("Original")
+    expect(found?.columns).toEqual(["_0", "_col_0"])
+    expect(found?.lens_types).toBeUndefined()
+  })
+
+  test("a documented engine-style name the SQL never writes gets no rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_doc"] = model(
+      "stg_doc",
+      ["model.shop.fct_orders"],
+      'select revenue + 1 from "shop"."main"."fct_orders"',
+      ["_0"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_doc")
+    expect(found).toBeDefined()
+    expect(found?.lens_types).toBeUndefined()
   })
 
   test("a parent that lists no YAML columns is rated by the columns its SQL gives it", () => {

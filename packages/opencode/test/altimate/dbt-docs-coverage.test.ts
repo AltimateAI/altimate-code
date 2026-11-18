@@ -6,6 +6,7 @@ import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:tes
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Telemetry } from "../../src/telemetry"
 import { initTool } from "./tool-fixture"
 import { DbtDocsCoverageTool, docsCoverage } from "../../src/altimate/tools/dbt-docs-coverage"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -14,7 +15,9 @@ const inheritedTelemetry = process.env.ALTIMATE_TELEMETRY_DISABLED
 beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
-afterAll(() => {
+afterAll(async () => {
+  // Drops any events the tool buffered while telemetry was disabled, so a later suite cannot flush them.
+  await Telemetry.shutdown()
   if (inheritedTelemetry === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
   else process.env.ALTIMATE_TELEMETRY_DISABLED = inheritedTelemetry
 })
