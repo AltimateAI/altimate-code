@@ -158,6 +158,20 @@ describe("columnReach", () => {
     expect(found?.lens_types).toBeUndefined()
   })
 
+  test("an unaliased calculation's engine-made output name gets no rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_calc"] = model(
+      "stg_calc",
+      ["model.shop.fct_orders"],
+      'select revenue + 1 from "shop"."main"."fct_orders"',
+      [],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_calc")
+    expect(Object.values(found?.lens_types ?? {})).not.toContain("Original")
+  })
+
   test("a parent that lists no YAML columns is rated by the columns its SQL gives it", () => {
     const value = manifest()
     const nodes = value.nodes as Record<string, any>
