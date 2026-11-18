@@ -96,7 +96,9 @@ export function mergeColumns(
 ): SqlLineageModelNode["columns"] {
   // A Map: a column named `constructor` or `__proto__` is a column, not an inherited property.
   const merged = new Map<string, SqlLineageModelNode["columns"][string]>()
-  for (const [k, v] of Object.entries(manifestColumns ?? {})) merged.set(columnKey(k, adapter), { ...v })
+  // A manifest name is documentation spelling: it is case-sensitive only when the column is declared `quote: true`.
+  for (const [k, v] of Object.entries(manifestColumns ?? {}))
+    merged.set((v as { quote?: boolean }).quote === true ? columnKey(k, adapter) : k.toLowerCase(), { ...v })
   for (const c of fromDb ?? []) {
     const key = columnKey(c.column, adapter)
     const existing = merged.get(key)

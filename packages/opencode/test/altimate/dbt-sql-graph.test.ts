@@ -163,6 +163,12 @@ describe("mergeColumns", () => {
     expect(rs.foo.data_type).toBe("text")
   })
 
+  test("a manifest column documented in upper case meets the warehouse's unquoted lower-case name on Postgres", () => {
+    const merged = mergeColumns({ ID: col("ID") }, [{ column: "id", dtype: "BIGINT" }], "postgres")
+    expect(Object.keys(merged)).toEqual(["id"])
+    expect(merged.id.data_type).toBe("bigint")
+  })
+
   test("a manifest column and the warehouse's name for it meet under one key in the adapter's case", () => {
     const merged = mergeColumns({ id: col("id") }, [{ column: "id", dtype: "BIGINT" }], "postgres")
     expect(Object.keys(merged)).toEqual(["id"])
@@ -809,7 +815,11 @@ describe("final-select identity and the text output", () => {
       },
       tableEdges: [["orders (final select)", "__final_select__"]],
     } as unknown as SqlLineageResponse
-    const graph = remapSqlLineage(response, { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }, [])
+    const graph = remapSqlLineage(
+      response,
+      { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" },
+      [],
+    )
     const ids = graph.nodes.map((n) => n.id)
     expect(new Set(ids).size).toBe(3)
     const [from, to] = graph.edges[0]
@@ -820,7 +830,9 @@ describe("final-select identity and the text output", () => {
 
   test("the text lists each node's columns and SQL", () => {
     const text = formatSqlGraph("m", {
-      nodes: [{ id: "a", name: "a", type: "cte", sql: "select\n  id from t", columns: [{ name: "id" }, { name: "x" }] }],
+      nodes: [
+        { id: "a", name: "a", type: "cte", sql: "select\n  id from t", columns: [{ name: "id" }, { name: "x" }] },
+      ],
       edges: [],
     } as any)
     expect(text).toContain("    columns: id, x")
