@@ -106,6 +106,34 @@ export function aiDryRunEnabled(env: Record<string, string | undefined> = proces
   return env.ALTIMATE_REVIEW_AI_DRYRUN === "1"
 }
 
+/** Opt-in test-gap instruction (`ALTIMATE_REVIEW_AI_TEST_GAP=1`), appended to the core system prompt. */
+export function aiTestGapEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env.ALTIMATE_REVIEW_AI_TEST_GAP === "1"
+}
+
+export const TEST_GAP_INSTRUCTION = `
+
+## Tests for changed macros, materializations and tests
+For each changed macro, materialization or generic test whose runtime behaviour changes (control flow, the SQL statements it issues, defaults, or the relations it creates, renames or drops), check whether this PR also adds or changes a test that runs the new behaviour: a dbt unit test, a singular or generic test, an integration_tests model, or a test file in the PR's file list. When none does, report ONE test_coverage comment on the changed definition that names the behaviour left untested and the case a test should cover. Do not report this for comments, renames, formatting, or a change that only moves code.`
+
+/** Most PR paths listed for the test-gap instruction. */
+const TEST_GAP_FILES_MAX = 40
+
+/** The PR's other changed paths, appended to a batch message for the test-gap instruction. */
+export function testGapFileList(message: string, batch: AiReviewFile[], prFiles: string[] = []): string {
+  const inBatch = new Set(batch.map((f) => f.path))
+  const others = prFiles.filter((p) => !inBatch.has(p))
+  if (!others.length) return message
+  const shown = others.slice(0, TEST_GAP_FILES_MAX)
+  return [
+    message,
+    "",
+    "## OTHER FILES THIS PR CHANGES (paths only, not shown; use them to judge test coverage)",
+    ...shown.map((p) => `- ${p}`),
+    ...(others.length > shown.length ? [`- … and ${others.length - shown.length} more`] : []),
+  ].join("\n")
+}
+
 export interface AiReviewFile {
   path: string
   status: string
@@ -614,6 +642,8 @@ export interface AiReviewInput {
   model?: string
   /** What the verifier may read; it runs only when this is set and `ALTIMATE_REVIEW_AI_VERIFY=1`. */
   evidence?: AiVerifyEvidence
+  /** Every file the PR changes (repo-relative), including files outside the dbt project. */
+  prFiles?: string[]
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -853,8 +883,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   try {
     // Prompt comes from the compiled core, not this file.
     const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
-    const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
-    if (!system) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
+    const corePrompt = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+    if (!corePrompt) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
+    const testGap = aiTestGapEnabled()
+    const system = testGap ? corePrompt + TEST_GAP_INSTRUCTION : corePrompt
 
     let model: Awaited<ReturnType<typeof Provider.getModel>>
     try {
@@ -876,7 +908,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     const results: BatchResult[] = []
     for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
       const slice = batches.slice(i, i + BATCH_CONCURRENCY)
-      results.push(...(await Promise.all(slice.map((b, j) => reviewBatch(plan.messages[i + j], b, system, model)))))
+      results.push(...(await Promise.all(slice.map((b, j) => reviewBatch(testGap ? testGapFileList(plan.messages[i + j], b, input.prFiles) : plan.messages[i + j], b, system, model)))))
     }
     let findings = results.flatMap((r) => r.findings)
     if (plan.focused) findings = dedupAiFindings(findings)

@@ -2679,6 +2679,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         prTitle: input.prTitle,
         prBody: input.prBody,
         model: input.aiModel,
+        prFiles: input.prFiles ?? input.changedFiles.map((f) => f.path),
         ...(evidence ? { evidence } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
