@@ -302,7 +302,8 @@ export async function buildSqlGraph(
       const columns = (d as { columns?: unknown }).columns
       return (
         columns === undefined ||
-        (Array.isArray(columns) && columns.every((c) => isRecord(c) && typeof (c as { name?: unknown }).name === "string"))
+        (Array.isArray(columns) &&
+          columns.every((c) => isRecord(c) && typeof (c as { name?: unknown }).name === "string"))
       )
     }) ||
     !response.tableEdges.every((e) => e.every((x) => Object.hasOwn(response.details, x)))
@@ -327,7 +328,8 @@ export function formatSqlGraph(model: string, graph: SqlGraph): string {
       `- ${n.name} (${n.type}${n.nodeId ? `, ${n.nodeId}` : ""}): ${n.columns.length} columns${from?.length ? `, from ${from.join(", ")}` : ""}`,
     )
     if (n.columns.length) lines.push(`    columns: ${n.columns.map((c) => c.name).join(", ")}`)
-    if (n.sql) lines.push(`    sql: ${n.sql.length > 400 ? `${n.sql.slice(0, 400)}…` : n.sql}`.replace(/\s*\n\s*/g, " "))
+    if (n.sql)
+      lines.push(`    sql: ${n.sql.length > 400 ? `${n.sql.slice(0, 400)}…` : n.sql}`.replace(/\s*\n\s*/g, " "))
   }
   return lines.join("\n")
 }
