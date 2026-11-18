@@ -480,6 +480,20 @@ describe("dbt_health", () => {
     expect(Buffer.byteLength(JSON.stringify(result.metadata.insights), "utf8")).toBeLessThanOrEqual(RESULT_BYTES)
   })
 
+  test("a complete result says it is not truncated, however long its text", async () => {
+    const text = "x".repeat(1_000)
+    const many = Object.fromEntries(
+      Array.from({ length: 100 }, (_, n) => [
+        `model.shop.m${n}`,
+        [{ unique_id: `model.shop.m${n}`, original_file_path: `models/m${n}.sql`, severity: "WARNING", insight: { name: "Big", message: text, recommendation: "" } }],
+      ]),
+    )
+    python.stdout = JSON.stringify({ model_insights: many, nodes: {}, project: "shop" }) + "\n"
+    const result = await run()
+    expect(result.metadata.insights).toHaveLength(100)
+    expect(result.metadata.truncated).toBe(false)
+  })
+
   test("a result over the byte limit is cut, with the total said", async () => {
     const big = "x".repeat(40_000)
     const many = Object.fromEntries(

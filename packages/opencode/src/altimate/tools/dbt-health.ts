@@ -47,7 +47,7 @@ export const dbtHealthInternals = {
     new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
       const child = execFile(
         python,
-        ["-I", "-c", script, ...args],
+        ["-E", "-c", script, ...args],
         { cwd, signal, timeout: dbtHealthInternals.runTimeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
         (error, stdout, stderr) => {
           const code = (error as { code?: unknown } | null)?.code
@@ -165,8 +165,8 @@ async function pythonFor(root: string): Promise<string> {
 // any of its integrations, and its `All` mode would run `dbt docs generate`.
 const SCRIPT = `
 import sys, os
-# The interpreter runs isolated (-I): no PYTHONPATH, no user site, no working folder on the path. The filter
-# is kept for an interpreter wrapper that adds the working folder anyway.
+# The interpreter ignores PYTHONPATH (-E) and the filter below keeps the working folder off the path; the
+# user site stays, so a user-installed (pip --user) DataPilot is found.
 sys.path = [p for p in sys.path if p not in ("", os.getcwd())]
 import json, logging
 try:
@@ -416,7 +416,8 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     const lines = insights.slice(0, LISTED_LINES).map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
     return {
       title: `dbt_health: ${all.length} insight${all.length === 1 ? "" : "s"}`,
-      metadata: { success: true, insights, catalog: !!catalog, ...(truncated ? { truncated: true, total: all.length } : {}), ...(stale ? { stale_manifest: stale } : {}) },
+      // `truncated` is always set: the tool wrapper's own output truncation must not mark a complete insight list as cut.
+      metadata: { success: true, insights, catalog: !!catalog, truncated, ...(truncated ? { total: all.length } : {}), ...(stale ? { stale_manifest: stale } : {}) },
       output: [
         stale?.message,
         truncated ? `The result is cut at ${keep} of ${all.length} insights (size limit); \`insights\` holds those.` : undefined,
