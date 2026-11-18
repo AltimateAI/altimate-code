@@ -124,10 +124,22 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     }
     const name = args.model
     const shown = typeof display === "number" ? `${parsed.bytes} Bytes` : String(display)
+    // A dry run can report 0 for a query that still reads data (BigQuery federated sources), so 0 is a
+    // lower bound and carries no upper bound.
+    const zero = parsed.bytes === 0
     return {
       title: `dbt_cost_estimate: ${shown}`,
-      metadata: { success: true, supported: true, adapter: type, ...parsed, display: shown, ...(name && { model: name }) },
-      output: `${name ? `${name} ` : "The query "}would process ${shown} (at most ${parsed.maxBytes} bytes).`,
+      metadata: {
+        success: true,
+        supported: true,
+        adapter: type,
+        ...(zero ? { bytes: 0, lowerBound: true } : parsed),
+        display: shown,
+        ...(name && { model: name }),
+      },
+      output: `${name ? `${name} ` : "The query "}would process ${shown} ${
+        zero ? "(a dry run can report 0 for a query that still reads data, so this is a lower bound, not a cap)." : `(at most ${parsed.maxBytes} bytes).`
+      }`,
     }
   },
 })

@@ -169,6 +169,22 @@ describe("dbt_cost_estimate", () => {
     expect(result.output).toContain("2048 Bytes")
   })
 
+  test("a zero from the dry run is a lower bound, not an upper bound", async () => {
+    useAdapter(calls, { bytes: 0 })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1" }, ctx)
+    expect(result.metadata).toEqual({
+      success: true,
+      supported: true,
+      adapter: "bigquery",
+      bytes: 0,
+      lowerBound: true,
+      display: "0 Bytes",
+      truncated: false,
+    })
+    expect(result.output).toContain("lower bound")
+    expect(result.output).not.toContain("at most")
+  })
+
   test.each(["snowflake", "databricks", "duckdb"])("answers supported:false on %s and compiles nothing", async (type) => {
     useAdapter(calls, { type })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
