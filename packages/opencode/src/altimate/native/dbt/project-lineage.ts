@@ -98,7 +98,7 @@ const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
  * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
  * name for it. A name the SQL itself writes (`amount as _1`) is a real alias.
  */
-function engineMade(name: string, stripped: string): boolean {
+export function engineMade(name: string, stripped: string): boolean {
   return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
 }
 

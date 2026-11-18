@@ -118,6 +118,234 @@ describe("columnReach", () => {
     expect(reach.truncated).toBe(false)
   })
 
+  test("keeps how each reached column comes from the traced one: a rename is Alias, an aggregate Not sure", () => {
+    const reach = columnReach(manifestFile(), "fct_orders", "revenue")
+    const lens = Object.fromEntries(reach.models.map((m) => [m.name, m.lens_types]))
+    expect(lens).toEqual({
+      fct_daily: { revenue: "Not sure" },
+      mart_ltv: { ltv: "Alias" },
+      // An aggregate, which the engine rates "Not sure", on an alias.
+      rpt_ltv: { top_ltv: "Not sure" },
+    })
+  })
+
+  test("a column read through a schema-qualified relation, as a compiled ref is written, keeps its real rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_qualified"] = model(
+      "stg_qualified",
+      ["model.shop.fct_orders"],
+      'select revenue as net, revenue from "shop"."main"."fct_orders"',
+      ["net", "revenue"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_qualified")
+    expect(found?.lens_types).toEqual({ net: "Alias", revenue: "Original" })
+  })
+
+  test("outputs that differ only by case publish no rating, as the lower-cased key could name either", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_case"] = model(
+      "stg_case",
+      ["model.shop.fct_orders"],
+      'select revenue as "Foo", gross_revenue as "foo" from "shop"."main"."fct_orders"',
+      ["Foo", "foo"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_case")
+    expect(found?.columns).toEqual(["foo"])
+    expect(found?.lens_types).toBeUndefined()
+  })
+
+  test("an unaliased calculation's engine-made output name gets no rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_calc"] = model(
+      "stg_calc",
+      ["model.shop.fct_orders"],
+      'select revenue + 1 from "shop"."main"."fct_orders"',
+      [],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_calc")
+    expect(found?.columns).toEqual(["_0", "_col_0"])
+    expect(found?.lens_types).toBeUndefined()
+  })
+
+  test("an engine-style output name the SQL writes itself keeps its rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_named"] = model(
+      "stg_named",
+      ["model.shop.fct_orders"],
+      'select revenue as _0 from "shop"."main"."fct_orders"',
+      ["_0"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_named")
+    expect(found?.lens_types).toEqual({ _0: "Alias" })
+  })
+
+  test("an engine-style name that only a comment or literal mentions gets no rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_mention"] = model(
+      "stg_mention",
+      ["model.shop.fct_orders"],
+      "select revenue + 1 /* _0 */, '_0' as note from \"shop\".\"main\".\"fct_orders\"",
+      ["_0"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_mention")
+    expect(found?.columns).toContain("_0")
+    expect(found?.lens_types).toBeUndefined()
+  })
+
+  test("a documented engine-style name the SQL never writes gets no rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_doc"] = model(
+      "stg_doc",
+      ["model.shop.fct_orders"],
+      'select revenue + 1 from "shop"."main"."fct_orders"',
+      ["_0"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_doc")
+    expect(found).toBeDefined()
+    expect(found?.lens_types).toBeUndefined()
+  })
+
+  test("a parent that lists no YAML columns is rated by the columns its SQL gives it", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_bare"] = model(
+      "stg_bare",
+      ["model.shop.fct_orders"],
+      'select revenue, gross_revenue from "shop"."main"."fct_orders"',
+      [],
+    )
+    nodes["model.shop.mart_bare"] = model(
+      "mart_bare",
+      ["model.shop.stg_bare"],
+      'select revenue as net from "shop"."main"."stg_bare"',
+      ["net"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "mart_bare")?.lens_types).toEqual({ net: "Alias" })
+  })
+
+  test("two qualified relations sharing a column name are rated each by its own read", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.dim_rates"] = model("dim_rates", [], "select order_id, revenue from raw.rates", [
+      "order_id",
+      "revenue",
+    ])
+    nodes["model.shop.stg_two"] = model(
+      "stg_two",
+      ["model.shop.fct_orders", "model.shop.dim_rates"],
+      'select o.revenue as kept, r.revenue * 2 as scaled from "shop"."main"."fct_orders" o join "shop"."main"."dim_rates" r on o.order_id = r.order_id',
+      ["kept", "scaled"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "stg_two")?.lens_types).toEqual({ kept: "Alias" })
+  })
+
+  test("a column named __proto__ keeps its rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_proto"] = model(
+      "stg_proto",
+      ["model.shop.fct_orders"],
+      'select revenue as "__proto__" from fct_orders',
+      ["__proto__"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_proto")
+    expect(found?.columns).toEqual(["__proto__"])
+    expect(Object.entries(found?.lens_types ?? {})).toEqual([["__proto__", "Alias"]])
+  })
+
+  test("a union of a column and a calculation of it through a qualified relation is a Transformation", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_union"] = model(
+      "stg_union",
+      ["model.shop.fct_orders"],
+      'select revenue from "shop"."main"."fct_orders" union all select revenue * 2 as revenue from "shop"."main"."fct_orders"',
+      ["revenue"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "stg_union")?.lens_types).toEqual({ revenue: "Transformation" })
+  })
+
+  test("a column copied as is is Original, and a copy of a calculation is never Original", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_copy"] = model(
+      "stg_copy",
+      ["model.shop.fct_orders"],
+      "select order_id, revenue from fct_orders",
+      ["order_id", "revenue"],
+    )
+    nodes["model.shop.mart_copy"] = model("mart_copy", ["model.shop.stg_copy"], "select revenue from stg_copy", [
+      "revenue",
+    ])
+    nodes["model.shop.mart_total"] = model(
+      "mart_total",
+      ["model.shop.stg_copy"],
+      "select revenue * 2 as doubled from stg_copy",
+      ["doubled"],
+    )
+    nodes["model.shop.mart_total_copy"] = model(
+      "mart_total_copy",
+      ["model.shop.mart_total"],
+      "select doubled from mart_total",
+      ["doubled"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const lens = Object.fromEntries(reach.models.map((m) => [m.name, m.lens_types]))
+    expect(lens.stg_copy).toEqual({ revenue: "Original" })
+    expect(lens.mart_copy).toEqual({ revenue: "Original" })
+    expect(lens.mart_total).toEqual({ doubled: "Transformation" })
+    expect(lens.mart_total_copy).toEqual({ doubled: "Transformation" })
+  })
+
+  test("an output fed by an Alias and a calculation is as far from unchanged as the calculation", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.mart_mix"] = model(
+      "mart_mix",
+      ["model.shop.fct_orders"],
+      "select coalesce(revenue, gross_revenue * 2) as rev from fct_orders",
+      ["rev"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const mix = reach.models.find((m) => m.name === "mart_mix")
+    expect(mix?.lens_types).toEqual({ rev: "Transformation" })
+  })
+
+  test("edges without a classification leave the column without one", () => {
+    const spy = spyOn(core, "columnLineage").mockImplementation(
+      () =>
+        ({
+          column_lineage: [
+            { source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" },
+          ],
+          errors: [],
+        }) as any,
+    )
+    try {
+      const reach = columnReach(manifestFile(), "fct_orders", "revenue")
+      expect(reach.models.length).toBeGreaterThan(0)
+      for (const m of reach.models) expect(m.lens_types).toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   test("an output alias or a comment naming the column is not a read", () => {
     const value = manifest()
     for (const sql of [
@@ -420,9 +648,12 @@ describe("columnReach where the engine's schema falls short", () => {
   test("stops at 300 traced models and says so", () => {
     const value = manifest()
     for (let i = 0; i < 300; i++) {
-      value.nodes[`model.shop.copy_${i}`] = model(`copy_${i}`, ["model.shop.fct_orders"], "select revenue from fct_orders", [
-        "revenue",
-      ])
+      value.nodes[`model.shop.copy_${i}`] = model(
+        `copy_${i}`,
+        ["model.shop.fct_orders"],
+        "select revenue from fct_orders",
+        ["revenue"],
+      )
     }
     const spy = spyOn(core, "columnLineage").mockImplementation((() => ({
       column_lineage: [{ source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" }],
