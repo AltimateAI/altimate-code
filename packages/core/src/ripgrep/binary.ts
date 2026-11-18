@@ -175,7 +175,7 @@ export namespace RipgrepBinary {
             if (!config) throw new Error(`unsupported platform for ripgrep: ${platformKey}`)
 
             // altimate_change start — assessment mode downloads nothing: a missing ripgrep fails the search
-            if (Flag.ALTIMATE_ASSESSMENT_MODE) throw new Error("ripgrep is not installed and downloads are off in assessment mode")
+            if (Flag.ALTIMATE_ASSESSMENT_MODE) return yield* Effect.fail(new Error("ripgrep is not installed and downloads are off in assessment mode"))
             // altimate_change end
             const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
             const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`

@@ -2512,7 +2512,7 @@ export namespace Telemetry {
     try {
       // altimate_change start — assessment mode sends nothing to Altimate, not even the one-time
       // opt-out event: no sink is resolved and no marker or machine id is touched.
-      if (Flag.truthyEnv("ALTIMATE_ASSESSMENT_MODE")) {
+      if (Flag.assessmentMode()) {
         buffer = []
         return
       }

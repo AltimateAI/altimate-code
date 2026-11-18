@@ -535,6 +535,9 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(auth)) {
+          // altimate_change start — assessment mode fetches no remote config
+          if (value.type === "wellknown" && Flag.ALTIMATE_ASSESSMENT_MODE) continue
+          // altimate_change end
           if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
@@ -744,7 +747,9 @@ export const layer = Layer.effect(
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
-          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+          // altimate_change start — assessment mode installs no plugin dependencies (npm)
+          if (!Flag.ALTIMATE_ASSESSMENT_MODE && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+          // altimate_change end
             const dep = yield* npmSvc
               .install(dir, {
                 add: [

@@ -114,8 +114,12 @@ export namespace Flag {
   export const OPENCODE_ENABLE_EXPERIMENTAL_MODELS = truthy("OPENCODE_ENABLE_EXPERIMENTAL_MODELS")
   export const OPENCODE_DISABLE_AUTOCOMPACT = truthy("OPENCODE_DISABLE_AUTOCOMPACT")
   // altimate_change start — assessment mode: nothing leaves the machine except the customer's own warehouse calls
-  export const ALTIMATE_ASSESSMENT_MODE = truthy("ALTIMATE_ASSESSMENT_MODE")
-  export const OPENCODE_DISABLE_MODELS_FETCH = truthy("OPENCODE_DISABLE_MODELS_FETCH") || ALTIMATE_ASSESSMENT_MODE
+  /** Read live; fails closed (any value but empty, `0` or `false` turns it on). */
+  export function assessmentMode(): boolean {
+    const value = process.env["ALTIMATE_ASSESSMENT_MODE"]?.trim().toLowerCase()
+    return value !== undefined && value !== "" && value !== "0" && value !== "false"
+  }
+  export const OPENCODE_DISABLE_MODELS_FETCH = truthy("OPENCODE_DISABLE_MODELS_FETCH") || assessmentMode()
   // altimate_change end
   export const OPENCODE_DISABLE_CLAUDE_CODE = truthy("OPENCODE_DISABLE_CLAUDE_CODE")
   export const OPENCODE_DISABLE_CLAUDE_CODE_PROMPT =

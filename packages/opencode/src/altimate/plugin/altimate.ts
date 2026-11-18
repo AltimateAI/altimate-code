@@ -86,7 +86,7 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
   //      ("true"/"TRUE"/"1", case-insensitive — see Flag.truthyEnv)
   //   2. config.telemetry.disabled (resolved via the async Config.get())
   let disabled =
-    Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")
+    Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY") || Flag.assessmentMode()
   if (!disabled) {
     try {
       const userConfig = (await Config.get()) as any

@@ -29,7 +29,7 @@ const scratch: string[] = []
 function cleanEnv(): Record<string, string> {
   const base: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !/^(NODE_ENV|BUN_TEST|VITEST|JEST_WORKER_ID|ALTIMATE_TELEMETRY_.*|ALTIMATE_ASSESSMENT_MODE|OPENCODE_.*|APPLICATIONINSIGHTS_.*)$/.test(key)) base[key] = value
+    if (value !== undefined && !/^(NODE_ENV|BUN_TEST|VITEST|JEST_WORKER_ID|ALTIMATE_.*|OPENCODE_.*|APPLICATIONINSIGHTS_.*|XDG_.*|CLOUDSDK_CONFIG)$/.test(key)) base[key] = value
   }
   return base
 }
@@ -97,6 +97,8 @@ async function run(args: string[], env: Record<string, string>, setup?: (home: s
     env: {
       ...base,
       HOME: home,
+      // No ripgrep on the path: without the downloader guards the CLI would fetch it from github.com.
+      PATH: "/usr/bin:/bin",
       XDG_CONFIG_HOME: path.join(home, ".config"),
       XDG_DATA_HOME: path.join(home, ".local/share"),
       XDG_CACHE_HOME: path.join(home, ".cache"),
@@ -134,13 +136,6 @@ describe("assessment mode on the packaged CLI", () => {
     expect(result.hosts).toEqual([])
   }, 120_000)
 
-  posixOnly("opt-out by project config: no host is contacted", async () => {
-    const result = await run(savings, { ALTIMATE_ASSESSMENT_MODE: "true" }, async (_home, project) => {
-      await writeFile(path.join(project, "altimate-code.json"), JSON.stringify({ telemetry: { disabled: true } }))
-    })
-    expect(result.hosts).toEqual([])
-  }, 120_000)
-
   posixOnly("telemetry left on: no host is contacted either", async () => {
     const result = await run(savings, { ALTIMATE_ASSESSMENT_MODE: "true" })
     expect(result.hosts).toEqual([])
@@ -148,14 +143,51 @@ describe("assessment mode on the packaged CLI", () => {
 
   posixOnly("an unreachable warehouse still contacts no other host", async () => {
     const result = await run(savings, assessment, async (_home, project) => {
-      const connections = path.join(project, "connections.json")
+      await mkdir(path.join(project, ".altimate-code"), { recursive: true })
       await writeFile(
-        connections,
+        path.join(project, ".altimate-code", "connections.json"),
         JSON.stringify({ dbx: { type: "databricks", server_hostname: "127.0.0.1", http_path: "/sql/1.0/warehouses/x", access_token: "unused" } }),
       )
     })
     expect(result.hosts.filter((host) => !host.startsWith("127.0.0.1"))).toEqual([])
+    // The failure comes from the connection attempt, not from a missing warehouse.
+    const output = JSON.parse(result.stdout).output as string
+    expect(output).not.toContain("none are set up")
   }, 120_000)
+
+  posixOnly("signed in to Altimate: no host is contacted", async () => {
+    // The ambient PATH: with a bare one the project-binding lookup is never reached, so the case would prove nothing.
+    const result = await run(savings, { ...assessment, PATH: process.env.PATH ?? "" }, async (home) => {
+      await writeFile(
+        path.join(home, ".altimate", "altimate.json"),
+        JSON.stringify({ altimateUrl: `https://${TELEMETRY_SINK}`, altimateInstanceName: "acme", altimateApiKey: "x" }),
+      )
+    })
+    expect(result.hosts).toEqual([])
+  }, 120_000)
+
+  posixOnly("a well-known remote config entry and project plugin sources: no host is contacted", async () => {
+    const result = await run(savings, assessment, async (home, project) => {
+      const data = path.join(home, ".local/share/altimate-code")
+      await mkdir(data, { recursive: true })
+      await writeFile(path.join(data, "auth.json"), JSON.stringify({ "https://org-config.invalid": { type: "wellknown", key: "K", token: "T" } }))
+      await mkdir(path.join(project, ".opencode", "plugin"), { recursive: true })
+      await writeFile(path.join(project, ".opencode", "plugin", "x.ts"), "export default async () => ({})\n")
+    })
+    expect(result.hosts).toEqual([])
+  }, 120_000)
+
+  posixOnly("any non-empty value turns the mode on (`yes` must not fail open)", async () => {
+    const result = await run(savings, { ALTIMATE_ASSESSMENT_MODE: "yes", ALTIMATE_TELEMETRY_DISABLED: "true" })
+    expect(result.hosts).toEqual([])
+  }, 120_000)
+
+  posixOnly("a tool daemon started without the mode does not serve a run that sets it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "assessment-daemon-"))
+    scratch.push(dir)
+    const { connectionEnvKey } = await import("../../src/altimate/tool-cli/daemon")
+    expect(connectionEnvKey({ ALTIMATE_ASSESSMENT_MODE: "true" })).not.toBe(connectionEnvKey({}))
+  })
 
   posixOnly("the opt-out marker and machine id are untouched", async () => {
     const result = await run(savings, assessment)
@@ -163,4 +195,56 @@ describe("assessment mode on the packaged CLI", () => {
     expect(altimate.sort()).toEqual(["machine-id"])
     expect((await readFile(path.join(result.home, ".altimate", "machine-id"), "utf8")).trim()).toBe(MACHINE_ID)
   }, 120_000)
+
+  posixOnly("the core ripgrep downloader refuses, and contacts no host", async () => {
+    const result = await probe("fixtures/assessment-rg-probe.ts", { ALTIMATE_ASSESSMENT_MODE: "true" })
+    expect(result.hosts).toEqual([])
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false })
+  }, 60_000)
+
+  posixOnly("the sign-in context carries no machine id and an explicit catalog refresh contacts no host", async () => {
+    const on = await probe("fixtures/assessment-misc-probe.ts", { ALTIMATE_ASSESSMENT_MODE: "true" })
+    expect(on.hosts).toEqual([])
+    expect(JSON.parse(on.stdout)).toEqual({ hasMachineId: false })
+    // Control: the same probe without the mode does mint a machine id and reach the catalog host.
+    const off = await probe("fixtures/assessment-misc-probe.ts", {})
+    expect(JSON.parse(off.stdout)).toEqual({ hasMachineId: true })
+    expect(off.hosts.some((host) => host.startsWith("models.dev"))).toBe(true)
+  }, 90_000)
+
+  test.each(["true", "1", "yes", "on"])("assessment mode `%s` turns every switch on, and off values leave them off", async (value) => {
+    const on = JSON.parse((await probe("fixtures/assessment-flags-probe.ts", { ALTIMATE_ASSESSMENT_MODE: value })).stdout)
+    expect(on).toEqual({ coreMode: true, coreModelsOff: true, coreWorkspaceOff: true, mode: true, modelsOff: true })
+  }, 60_000)
+
+  test.each(["", "0", "false"])("assessment mode `%s` leaves the switches off", async (value) => {
+    const off = JSON.parse((await probe("fixtures/assessment-flags-probe.ts", { ALTIMATE_ASSESSMENT_MODE: value })).stdout)
+    expect(off).toEqual({ coreMode: false, coreModelsOff: false, coreWorkspaceOff: false, mode: false, modelsOff: false })
+  }, 60_000)
 })
+
+/** Runs a fixture script in a fresh home with the mode's environment, behind the logging proxy. */
+async function probe(fixture: string, env: Record<string, string>) {
+  const home = await mkdtemp(path.join(tmpdir(), "assessment-probe-"))
+  scratch.push(home)
+  seen = []
+  const proc = Bun.spawn([process.execPath, "run", path.join(import.meta.dir, fixture)], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    timeout: 60_000,
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: home,
+      XDG_DATA_HOME: path.join(home, "d"),
+      XDG_CACHE_HOME: path.join(home, "c"),
+      XDG_STATE_HOME: path.join(home, "s"),
+      XDG_CONFIG_HOME: path.join(home, "cf"),
+      HTTPS_PROXY: `http://127.0.0.1:${proxyPort}`,
+      HTTP_PROXY: `http://127.0.0.1:${proxyPort}`,
+      ...env,
+    },
+  })
+  const [stdout] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+  return { stdout: stdout.trim().split("\n").pop() ?? "", hosts: [...new Set(seen)].sort() }
+}

@@ -11,6 +11,7 @@ import {
   readMcpEntryFromDisk,
   removeMcpFromConfig,
 } from "../../mcp/config"
+import { Flag } from "../../flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
@@ -82,6 +83,8 @@ export namespace AltimateApi {
   }
 
   export async function isConfigured(): Promise<boolean> {
+    // Assessment mode talks to no Altimate service: to every caller the user is signed out.
+    if (Flag.assessmentMode()) return false
     if (currentCredentials()) return true
     return Filesystem.exists(credentialsPath())
   }

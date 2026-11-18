@@ -98,8 +98,11 @@ export const Flag = {
   OPENCODE_SHOW_TTFD: truthy("OPENCODE_SHOW_TTFD"),
   OPENCODE_DISABLE_AUTOCOMPACT: truthy("OPENCODE_DISABLE_AUTOCOMPACT"),
   // altimate_change start — assessment mode: nothing leaves the machine except the customer's own warehouse calls
-  ALTIMATE_ASSESSMENT_MODE: truthy("ALTIMATE_ASSESSMENT_MODE"),
-  OPENCODE_DISABLE_MODELS_FETCH: truthy("OPENCODE_DISABLE_MODELS_FETCH") || truthy("ALTIMATE_ASSESSMENT_MODE"),
+  // Fails closed like the other kill switches: `yes` or `on` must not leave the CLI contacting hosts.
+  get ALTIMATE_ASSESSMENT_MODE() {
+    return killSwitchSet(process.env["ALTIMATE_ASSESSMENT_MODE"])
+  },
+  OPENCODE_DISABLE_MODELS_FETCH: truthy("OPENCODE_DISABLE_MODELS_FETCH") || killSwitchSet(process.env["ALTIMATE_ASSESSMENT_MODE"]),
   // altimate_change end
   OPENCODE_DISABLE_MOUSE: truthy("OPENCODE_DISABLE_MOUSE"),
   // altimate_change start — documented ALTIMATE_CLI_ name read first (see `env`)
@@ -134,7 +137,8 @@ export const Flag = {
   // runtime `--` middleware can flip it between plugin activation and command execution.
   // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane).
   get ALTIMATE_DISABLE_WORKSPACE() {
-    return killSwitchSet(env("ALTIMATE_DISABLE_WORKSPACE"))
+    // Assessment mode also turns the SaaS workspace paths off: they send the project path and sign-in to Altimate.
+    return killSwitchSet(env("ALTIMATE_DISABLE_WORKSPACE")) || killSwitchSet(process.env["ALTIMATE_ASSESSMENT_MODE"])
   },
   /**
    * Workspace precedence escape hatch, set by `--integrations=local`. When on, the

@@ -102,7 +102,7 @@ export namespace Ripgrep {
       if (!config) throw new UnsupportedPlatformError({ platform: platformKey })
 
       // altimate_change start — assessment mode downloads nothing: a missing ripgrep fails the search
-      if (Flag.ALTIMATE_ASSESSMENT_MODE) throw new Error("ripgrep is not installed and downloads are off in assessment mode")
+      if (Flag.assessmentMode()) throw new Error("ripgrep is not installed and downloads are off in assessment mode")
       // altimate_change end
       const version = "14.1.1"
       const filename = `ripgrep-${version}-${config.platform}.${config.extension}`
