@@ -97,8 +97,8 @@ async function run(args: string[], env: Record<string, string>, setup?: (home: s
     env: {
       ...base,
       HOME: home,
-      // No ripgrep on the path: without the downloader guards the CLI would fetch it from github.com.
-      PATH: "/usr/bin:/bin",
+      // A PATH with nothing on it, so no ripgrep is found: without the downloader guards the CLI would fetch it from github.com.
+      PATH: path.join(home, "empty-bin"),
       XDG_CONFIG_HOME: path.join(home, ".config"),
       XDG_DATA_HOME: path.join(home, ".local/share"),
       XDG_CACHE_HOME: path.join(home, ".cache"),
@@ -234,7 +234,7 @@ async function probe(fixture: string, env: Record<string, string>) {
     stdin: "ignore",
     timeout: 60_000,
     env: {
-      PATH: "/usr/bin:/bin",
+      PATH: path.join(home, "empty-bin"),
       HOME: home,
       XDG_DATA_HOME: path.join(home, "d"),
       XDG_CACHE_HOME: path.join(home, "c"),

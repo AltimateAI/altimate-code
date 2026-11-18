@@ -660,7 +660,8 @@ export const layer = Layer.effect(
         const activeAccount = Option.getOrUndefined(
           yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
         )
-        if (activeAccount?.active_org_id) {
+        // altimate_change — assessment mode makes no account calls (config fetch, token refresh)
+        if (activeAccount?.active_org_id && !Flag.ALTIMATE_ASSESSMENT_MODE) {
           const accountID = activeAccount.id
           const orgID = activeAccount.active_org_id
           const url = activeAccount.url
