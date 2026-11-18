@@ -7,6 +7,7 @@
  */
 
 import * as core from "@altimateai/altimate-core"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Registry from "../connections/registry"
 import { resolveFinopsWarehouse } from "./warehouse-resolver"
 import type { DatabricksSavingsParams, DatabricksSavingsResult, DatabricksSavingsReport } from "../types"
@@ -282,10 +283,18 @@ ORDER BY jb.job_all_purpose_cost DESC
 /** Core's rules: a `DatabricksSavingsInput` as JSON in, the report out. */
 export type RulesEngine = (input: string) => DatabricksSavingsReport
 
-/** The installed core's rules, or null when its binary predates them. */
-function rulesEngine(): RulesEngine | null {
-  const found = (core as unknown as { databricksSavings?: unknown }).databricksSavings
-  return typeof found === "function" ? (found as RulesEngine) : null
+type CoreModule = { databricksSavings?: unknown; initSdk?: (...args: [string, string, string, boolean, boolean]) => void }
+
+/**
+ * The installed core's rules, or null when its binary predates them. In assessment mode core's own
+ * usage event is switched off first: core reads its telemetry opt-out variables or `initSdk`, not
+ * assessment mode, and a variable set from here does not reach it. `initSdk` only stores the setting.
+ */
+export function rulesEngine(lib: CoreModule = core as unknown as CoreModule): RulesEngine | null {
+  const found = lib.databricksSavings
+  if (typeof found !== "function") return null
+  if (Flag.ALTIMATE_ASSESSMENT_MODE) lib.initSdk?.("", "", "", false, false)
+  return found as RulesEngine
 }
 
 /** The seven-day window the facts cover: it ends at 06:00 UTC on `end`, the latest one that has passed. */

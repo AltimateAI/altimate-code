@@ -7,6 +7,7 @@ import {
   DATABRICKS_JOB_FACTS_SQL,
   DATABRICKS_WAREHOUSE_FACTS_SQL,
   databricksSavings,
+  rulesEngine,
   savingsWindow,
   toClusterFacts,
   toFacts,
@@ -146,6 +147,27 @@ describe("finops_databricks_savings tool", () => {
 
 describe("databricks savings handler", () => {
   afterEach(() => Registry.reset())
+
+  test("in assessment mode the rules come with core's own telemetry switched off; otherwise core is left as it is", () => {
+    const saved = process.env["ALTIMATE_ASSESSMENT_MODE"]
+    const calls: unknown[][] = []
+    const lib = { databricksSavings: () => ({}), initSdk: (...args: unknown[]) => void calls.push(args) }
+    try {
+      process.env["ALTIMATE_ASSESSMENT_MODE"] = "true"
+      expect(rulesEngine(lib)).toBe(lib.databricksSavings as never)
+      // Telemetry off, failure reports off; `initSdk` only stores the setting.
+      expect(calls).toEqual([["", "", "", false, false]])
+      // A core without the rules is not touched: the tool refuses before any rules call.
+      expect(rulesEngine({ initSdk: lib.initSdk })).toBeNull()
+      expect(calls.length).toBe(1)
+      delete process.env["ALTIMATE_ASSESSMENT_MODE"]
+      expect(rulesEngine(lib)).toBe(lib.databricksSavings as never)
+      expect(calls.length).toBe(1)
+    } finally {
+      if (saved === undefined) delete process.env["ALTIMATE_ASSESSMENT_MODE"]
+      else process.env["ALTIMATE_ASSESSMENT_MODE"] = saved
+    }
+  })
 
   test("the window is the seven days to the latest 06:00 UTC that has passed", () => {
     expect(savingsWindow(Date.parse("2026-11-12T10:00:00Z"))).toEqual({ start: "2026-11-05", end: "2026-11-12" })
