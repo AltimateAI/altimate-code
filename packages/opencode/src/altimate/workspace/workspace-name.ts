@@ -68,6 +68,25 @@ export function stripBidiControls(text: string): string {
   return text.replace(BIDI_CONTROLS, "")
 }
 
+/** Strip C0/C1 control bytes (including ESC) from server-controlled text
+ * before it reaches a raw-stdout escape-sequence wrapper. Workspace names
+ * come from ``WorkspaceApi.listDatamates()`` with no charset validation — an
+ * attacker-controlled name containing its own ``\x1b]8;;`` could otherwise
+ * prematurely close our hyperlink and open a spoofed one pointing wherever
+ * they choose, with our trusted URL as the visible (but inert) prefix.
+ * (CodeRabbit + cubic, PR #1274.) */
+export function stripControlChars(text: string): string {
+  // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f) — the previous range only
+  // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
+  // vector) was always covered, but the doc comment claimed C1 coverage it
+  // didn't have. (Kilo, PR #1274.)
+  // Plus the Unicode bidi controls (ALM, LRM/RLM, LRE..RLO, LRI..PDI): they cannot break out of the
+  // hyperlink (the href is always `buildManageUrl`, never the name) but can visually reverse or
+  // reorder the displayed name in the picker. (v0.11.2 release review.)
+  // eslint-disable-next-line no-control-regex
+  return stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""))
+}
+
 /** A workspace name as a dialog shows it: inert, and with no bidi controls. */
 export function displayWorkspaceName(name: string): string {
   return stripBidiControls(inertWorkspaceName(name))

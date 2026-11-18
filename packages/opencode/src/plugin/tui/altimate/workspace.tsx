@@ -622,8 +622,11 @@ async function runBrowserHandoff(
   // ids are tenant-schema-local (same integer, different workspace). Compare
   // the credential fingerprint the handoff was validated against with the
   // credentials we're about to bind under, and refuse if either drifted.
+  // The credential checked here is the one the bind runs as, and the one any error names.
+  let bindAs: ActAs
   try {
     const fresh = await AltimateApi.getCredentials()
+    bindAs = { url: fresh.altimateUrl, instance: fresh.altimateInstanceName, apiKey: fresh.altimateApiKey }
     if (
       fresh.altimateInstanceName !== result.credentials.tenant ||
       fresh.altimateUrl !== result.credentials.apiUrl
@@ -646,7 +649,7 @@ async function runBrowserHandoff(
   // to the returned workspace via the existing bind endpoint. Same code path
   // as PickerDialog's attach mode.
   try {
-    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
+    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier, bindAs)
     await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
@@ -660,7 +663,7 @@ async function runBrowserHandoff(
       api.ui.toast({
         variant: "warning",
         message: isHiddenBindingConflict(err)
-          ? await describeHiddenBinding(err)
+          ? await describeHiddenBinding(err, bindAs)
           : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
       })
     } else if (err instanceof NotFoundError) {
@@ -767,12 +770,14 @@ export async function createAndBindInline(
   // requests resolve credentials independently, and a workspace id means
   // nothing on a different account.
   const account = await WorkspaceApi.accountFingerprint().catch(() => null)
+  // The create-and-bind and any error about it name the same account.
+  const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
   try {
     if (rebindFrom) {
       const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
       res = { via: "unbound", datamate: ws }
     } else {
-      const created = await WorkspaceApi.createAndBind({ name, identifier })
+      const created = await WorkspaceApi.createAndBind({ name, identifier, actAs: createAs })
       res = { via: "bound", datamate: created.datamate, binding: created.binding }
     }
   } catch (err) {
@@ -786,7 +791,7 @@ export async function createAndBindInline(
         // them round a loop with no exit. The three other conflict toasts in this file already
         // branch here; this one did not.
         message: isHiddenBindingConflict(err)
-          ? await describeHiddenBinding(err)
+          ? await describeHiddenBinding(err, createAs)
           : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
         duration: 15_000,
       })
@@ -1096,9 +1101,11 @@ function PickerDialog(props: PickerProps) {
   async function pick(datamateId: number) {
     if (submitting) return
     submitting = true
+    // The bind or re-link and any error about it name the same account.
+    const pickAs = (await WorkspaceApi.captureCredentials()) ?? undefined
     try {
       if (props.mode === "attach") {
-        const res = await WorkspaceApi.bindExisting(datamateId, props.identifier)
+        const res = await WorkspaceApi.bindExisting(datamateId, props.identifier, pickAs)
         await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
@@ -1127,6 +1134,7 @@ function PickerDialog(props: PickerProps) {
           targetDatamateId: datamateId,
           expectedCurrentDatamateId: props.expectedCurrentDatamateId,
           matchedBy: props.matchedBy,
+          actAs: pickAs,
         })
         await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
@@ -1154,7 +1162,7 @@ function PickerDialog(props: PickerProps) {
         // point at OfferDialog's Re-link, which doesn't exist either. Point
         // at the concrete next action instead. (kilo cycle 6.)
         msg = isHiddenBindingConflict(err)
-          ? await describeHiddenBinding(err)
+          ? await describeHiddenBinding(err, pickAs)
           : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
@@ -1372,6 +1380,8 @@ export async function bindOrRebindInline(
     })
     return
   }
+  // The bind and any error about it name the same account: the listed one, else the one signed in now.
+  const bindAs = listedAs ?? (await WorkspaceApi.captureCredentials()) ?? undefined
   try {
     const res = await (async () => {
       if (existing) {
@@ -1380,10 +1390,10 @@ export async function bindOrRebindInline(
           targetDatamateId,
           expectedCurrentDatamateId: existing.datamateId,
           matchedBy: existing.matchedBy,
-          actAs: listedAs ?? undefined,
+          actAs: bindAs,
         })
       }
-      return WorkspaceApi.bindExisting(targetDatamateId, identifier, listedAs ?? undefined)
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier, bindAs)
     })()
     const recorded = await recordApprovedBinding(
       api.state.path.directory,
@@ -1415,7 +1425,7 @@ export async function bindOrRebindInline(
     let msg: string
     if (err instanceof ConflictError) {
       msg = isHiddenBindingConflict(err)
-        ? await describeHiddenBinding(err)
+        ? await describeHiddenBinding(err, bindAs)
         : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."

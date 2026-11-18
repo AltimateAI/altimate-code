@@ -12,9 +12,10 @@
 // for 409/412 and surface it as a typed error rather than a bare status code.
 import { AltimateApi } from "@/altimate/api/client"
 import { Telemetry } from "@/altimate/telemetry"
-import { stripBidiControls } from "./workspace-name"
+import { stripControlChars } from "./workspace-name"
 
 const REQUEST_TIMEOUT_MS = 15_000
+const SIGNED_IN_LOOKUP_TIMEOUT_MS = 3_000
 
 export interface DatamateRef {
   id: number
@@ -113,9 +114,7 @@ export interface SignedInAccount {
   instance: string
 }
 
-const plain = (text: string) =>
-  // eslint-disable-next-line no-control-regex
-  stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, "")).trim()
+const plain = (text: string) => stripControlChars(text).trim()
 
 /** A 409 whose `existing_datamate_name` is withheld: the server hides the name of a workspace
  * the caller cannot see. Reading that as a race ("another workspace claimed this project while
@@ -144,8 +143,9 @@ export function hiddenBindingMessage(detail: ConflictDetail, account?: SignedInA
   )
 }
 
-/** `hiddenBindingMessage` for a conflict, naming the account the request ran as. Never throws:
- * when the account cannot be read, the message says so generically. */
+/** `hiddenBindingMessage` for a conflict, naming the account the request ran as. Pass the
+ * credential the failing request used: read again after the failure, it may already be another
+ * account's. Never throws: when the account cannot be read, the message says so generically. */
 export async function describeHiddenBinding(err: unknown, actAs?: ActAs): Promise<string> {
   const detail = err instanceof ConflictError ? err.detail : { message: "" }
   return hiddenBindingMessage(detail, await WorkspaceApi.signedInAccount(actAs))
@@ -717,6 +717,7 @@ export namespace WorkspaceApi {
     name: string
     identifier: ProjectIdentifier
     description?: string
+    actAs?: ActAs
   }): Promise<CreateAndBindResponse> {
     const res = await linkAttempt("create_and_bind", undefined, () =>
       req<CreateAndBindResponse>("POST", "/", {
@@ -726,6 +727,7 @@ export namespace WorkspaceApi {
           project_path: input.identifier.projectPath ?? null,
           description: input.description ?? null,
         },
+        ...(input.actAs ? { actAs: input.actAs } : {}),
       }),
     )
     const id = res?.binding?.datamate_id ?? res?.datamate?.id
@@ -955,13 +957,7 @@ export namespace WorkspaceApi {
    * client must compare ownership — skill attachment requires the caller to
    * OWN the workspace, and the credentials carry no user id of their own. */
   export async function whoami(actAs?: ActAs): Promise<number> {
-    // Not a workspace call: no workspace_api_error row for it.
-    const me = await req<{ id?: unknown }>("GET", "/me", {
-      base: "/users",
-      reportErrors: false,
-      ...(actAs ? { actAs } : {}),
-    })
-    const id = Number(me?.id)
+    const id = Number((await me(actAs))?.id)
     if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
     return id
   }
@@ -970,15 +966,27 @@ export namespace WorkspaceApi {
    * naming the account in an error. Undefined when either cannot be read; never throws. */
   export async function signedInAccount(actAs?: ActAs): Promise<SignedInAccount | undefined> {
     try {
-      const instance = actAs?.instance ?? (await creds()).instance
-      const me = await req<{ email?: unknown }>("GET", "/me", {
-        base: "/users",
-        reportErrors: false,
-        ...(actAs ? { actAs } : {}),
-      })
-      return typeof me?.email === "string" && me.email ? { email: me.email, instance } : undefined
+      // One credential for both halves, so the email and the instance name the same account.
+      const who = actAs ?? (await captureCredentials())
+      if (!who) return undefined
+      // Runs after a request already failed, only to word its error: a short budget, so a slow
+      // answer does not hold the error back.
+      const answer = await me(who, SIGNED_IN_LOOKUP_TIMEOUT_MS)
+      return typeof answer?.email === "string" && answer.email
+        ? { email: answer.email, instance: who.instance }
+        : undefined
     } catch {
       return undefined
     }
+  }
+
+  /** ``GET /users/me``. Not a workspace call: no workspace_api_error row for it. */
+  function me(actAs?: ActAs, timeoutMs?: number) {
+    return req<{ id?: unknown; email?: unknown }>("GET", "/me", {
+      base: "/users",
+      reportErrors: false,
+      ...(actAs ? { actAs } : {}),
+      ...(timeoutMs ? { timeoutMs } : {}),
+    })
   }
 }

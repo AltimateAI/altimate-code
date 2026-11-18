@@ -23,7 +23,7 @@ test("link reports a completed seed and memory that is off without a retry hint"
   expect(seedMessage(null)).toContain("Sync")
 })
 
-test("a 409 that withholds the workspace name is explained as a teammate's private workspace, not a race", async () => {
+test("a 409 that withholds the workspace name is a hidden binding, not a race", async () => {
   const { ConflictError, isHiddenBindingConflict, hiddenBindingMessage } = await import(
     "../../../src/altimate/workspace/api-client"
   )

@@ -53,8 +53,11 @@ import {
   findNamesakes,
   linkPickerOpensOn,
   namesakeHint,
-  stripBidiControls,
+  stripControlChars,
 } from "@/altimate/workspace/workspace-name"
+
+// Re-exported: other commands and tests import it from here.
+export { stripControlChars }
 
 /** The browser sign-in from a plain shell: the Altimate LLM Gateway method of the `altimate-backend`
  * provider saves the credentials every workspace command reads. `--method` skips the method picker,
@@ -63,25 +66,6 @@ export const SIGN_IN_COMMAND = 'altimate-code auth login -p altimate-backend --m
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
-
-/** Strip C0/C1 control bytes (including ESC) from server-controlled text
- * before it reaches a raw-stdout escape-sequence wrapper. Workspace names
- * come from ``WorkspaceApi.listDatamates()`` with no charset validation — an
- * attacker-controlled name containing its own ``\x1b]8;;`` could otherwise
- * prematurely close our hyperlink and open a spoofed one pointing wherever
- * they choose, with our trusted URL as the visible (but inert) prefix.
- * (CodeRabbit + cubic, PR #1274.) */
-export function stripControlChars(text: string): string {
-  // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f) — the previous range only
-  // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
-  // vector) was always covered, but the doc comment claimed C1 coverage it
-  // didn't have. (Kilo, PR #1274.)
-  // Plus the Unicode bidi controls (ALM, LRM/RLM, LRE..RLO, LRI..PDI): they cannot break out of the
-  // hyperlink (the href is always `buildManageUrl`, never the name) but can visually reverse or
-  // reorder the displayed name in the picker. (v0.11.2 release review.)
-  // eslint-disable-next-line no-control-regex
-  return stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""))
-}
 
 /** What a pick in the link picker does: one of the two create paths, or an existing workspace. */
 export function linkPickKind(pick: string): "create" | "browser" | "workspace" {
@@ -485,8 +469,11 @@ async function runBrowserHandoff(
   // browser window can stay open for up to 15 minutes; an account switch in
   // that window would otherwise bind a callback validated for tenant A
   // under tenant B (workspace ids are tenant-schema-local).
+  // The credential checked here is the one the bind runs as, and the one any error names.
+  let bindAs: ActAs
   try {
     const fresh = await AltimateApi.getCredentials()
+    bindAs = { url: fresh.altimateUrl, instance: fresh.altimateInstanceName, apiKey: fresh.altimateApiKey }
     if (
       fresh.altimateInstanceName !== result.credentials.tenant ||
       fresh.altimateUrl !== result.credentials.apiUrl
@@ -507,7 +494,7 @@ async function runBrowserHandoff(
   const bindSpin = spinner()
   bindSpin.start("Linking workspace...")
   try {
-    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
+    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier, bindAs)
     // Match the two other recordApprovedBinding call sites in this file
     // (lines 377 and 496) which cache under ``identifier.projectPath ??
     // directory``. The raw ``directory`` here caches under a different key
@@ -534,7 +521,7 @@ async function runBrowserHandoff(
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
     if (isHiddenBindingConflict(err)) {
-      prompts.log.error(`${await describeHiddenBinding(err)} Workspace "${projectName}" was created but is not linked.`)
+      prompts.log.error(`${await describeHiddenBinding(err, bindAs)} Workspace "${projectName}" was created but is not linked.`)
     } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(
@@ -633,6 +620,8 @@ export async function createThenBindOrRebind(
   // create the workspace on one tenant and rebind on another using an id that
   // is local to the first. (review, PR #1314)
   const account = await WorkspaceApi.accountFingerprint().catch(() => null)
+  // The create-and-bind and any error about it name the same account.
+  const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
   try {
     // Two different creates, because the server offers two different things.
     //
@@ -649,7 +638,7 @@ export async function createThenBindOrRebind(
       const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
       created = { via: "unbound", datamate: ws }
     } else {
-      const res = await WorkspaceApi.createAndBind({ name, identifier })
+      const res = await WorkspaceApi.createAndBind({ name, identifier, actAs: createAs })
       created = { via: "bound", datamate: res.datamate, binding: res.binding, manage_url: res.manage_url }
     }
   } catch (err) {
@@ -666,7 +655,7 @@ export async function createThenBindOrRebind(
             `project is still linked to "${stripControlChars(existing.datamate.name)}".`,
         )
       } else if (isHiddenBindingConflict(err)) {
-        prompts.log.error(`${await describeHiddenBinding(err)} Nothing was created.`)
+        prompts.log.error(`${await describeHiddenBinding(err, createAs)} Nothing was created.`)
       } else {
         const existingName = conflictExistingName(err.detail)
         prompts.log.error(
