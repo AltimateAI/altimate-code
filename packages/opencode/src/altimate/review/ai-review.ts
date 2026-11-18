@@ -34,6 +34,10 @@ const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
 /** Default per-call size under coverage (~30k tokens): 30 quota files at up to ~22k chars each would
  *  otherwise make one ~660k-char call that overruns common context windows. */
 const COVERAGE_BATCH_CHARS = 120_000
+/** Focused batching defaults under `ALTIMATE_REVIEW_AI_FOCUSED=1`. */
+const FOCUS_DEFAULTS: AiFocusBudget = { minFiles: 7, batchFiles: 5, maxBatches: 4 }
+/** Paths listed per call under "OTHER FILES CHANGED IN THIS PR". */
+const FOCUS_OTHER_FILES = 40
 
 /**
  * How much of the PR the lane sends. Defaults keep one bounded call; the
@@ -49,6 +53,14 @@ export interface AiInputBudget {
   /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
    *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
   coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number> }
+  /** `ALTIMATE_REVIEW_AI_FOCUSED=1`: on PRs with at least `minFiles` selected files, review
+   *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls. */
+  focused?: AiFocusBudget
+}
+export interface AiFocusBudget {
+  minFiles: number
+  batchFiles: number
+  maxBatches: number
 }
 export function aiInputBudget(env: Record<string, string | undefined> = process.env): AiInputBudget {
   const num = (v: string | undefined, d: number) => {
@@ -75,6 +87,14 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
               test: quota(env.ALTIMATE_REVIEW_AI_QUOTA_TEST, COVERAGE_QUOTAS.test),
               yml: quota(env.ALTIMATE_REVIEW_AI_QUOTA_YML, COVERAGE_QUOTAS.yml),
             },
+          }
+        : undefined,
+    focused:
+      env.ALTIMATE_REVIEW_AI_FOCUSED === "1"
+        ? {
+            minFiles: num(env.ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES, FOCUS_DEFAULTS.minFiles),
+            batchFiles: num(env.ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES, FOCUS_DEFAULTS.batchFiles),
+            maxBatches: num(env.ALTIMATE_REVIEW_AI_MAX_BATCHES, FOCUS_DEFAULTS.maxBatches),
           }
         : undefined,
   }
@@ -451,6 +471,126 @@ export function batchAiFiles(files: AiReviewFile[], budget: AiInputBudget): AiRe
   return batches
 }
 
+const MACRO_DEF = /\{%-?\s*macro\s+(\w+)\s*\(/g
+const DISPATCH_CALL = /adapter\.dispatch\(\s*['"](\w+)['"]/g
+const REF_CALL = /\bref\(([^)]*)\)/g
+const STRING_ARG = /['"]([^'"]+)['"]/g
+const YML_NAME = /^[+ ]?\s*-\s*name:\s*['"]?([\w.-]+)['"]?\s*$/gm
+
+function dirOf(p: string): string {
+  const i = p.lastIndexOf("/")
+  return i < 0 ? "" : p.slice(0, i)
+}
+
+/** Macro names a macro file defines: from its content, or from the diff's added lines without it. */
+function definedMacros(f: AiReviewFile): string[] {
+  if (f.kind !== "macro") return []
+  const text =
+    f.sql ??
+    (f.diff ?? "")
+      .split("\n")
+      .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+      .map((l) => l.slice(1))
+      .join("\n")
+  return [...text.matchAll(MACRO_DEF)].map((m) => m[1])
+}
+
+/**
+ * Related changed files, for focused batches: connected components over macro
+ * dispatch families (`default__x`, `snowflake__x`, `adapter.dispatch('x'`), `ref()`
+ * edges, yml `- name:` declarations, then a same-directory fallback for files with
+ * no edge. Components follow the input order of their first member; members keep
+ * input order.
+ */
+export function groupAiFiles(files: AiReviewFile[]): AiReviewFile[][] {
+  const parent = files.map((_, i) => i)
+  const linked = files.map(() => false)
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])))
+  const join = (a: number, b: number) => {
+    if (a === b) return
+    linked[a] = linked[b] = true
+    const [ra, rb] = [find(a), find(b)]
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb)
+  }
+  const byModel = new Map<string, number[]>()
+  files.forEach((f, i) => byModel.set(f.model, [...(byModel.get(f.model) ?? []), i]))
+  const family = new Map<string, number>()
+  const joinFamily = (base: string, i: number) => {
+    const first = family.get(base)
+    if (first === undefined) family.set(base, i)
+    else join(first, i)
+  }
+  files.forEach((f, i) => {
+    const text = `${f.sql ?? ""}\n${f.diff ?? ""}`
+    for (const name of definedMacros(f)) joinFamily(name.replace(/^[A-Za-z0-9]+__(?=\w)/, ""), i)
+    for (const m of text.matchAll(DISPATCH_CALL)) joinFamily(m[1], i)
+    for (const m of text.matchAll(REF_CALL)) {
+      const name = [...m[1].matchAll(STRING_ARG)].at(-1)?.[1]
+      for (const j of (name && byModel.get(name)) || []) join(i, j)
+    }
+    if (f.kind === "schema_yml" || f.kind === "source_yml")
+      for (const m of text.matchAll(YML_NAME)) for (const j of byModel.get(m[1]) ?? []) join(i, j)
+  })
+  const byDir = new Map<string, number>()
+  files.forEach((f, i) => {
+    if (linked[i]) return
+    const first = byDir.get(dirOf(f.path))
+    if (first === undefined) byDir.set(dirOf(f.path), i)
+    else join(first, i)
+  })
+  const groups = new Map<number, AiReviewFile[]>()
+  files.forEach((f, i) => {
+    const root = find(i)
+    groups.set(root, [...(groups.get(root) ?? []), f])
+  })
+  // Roots are each component's lowest index, so sorting by root orders components by first member.
+  return [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([, g]) => g)
+}
+
+/**
+ * Pack related-file groups into calls: groups over `batchFiles` split into
+ * consecutive chunks, chunks fill calls of up to `batchFiles` files without being
+ * split; over `maxBatches` calls, the chunks are balanced by prompt size into
+ * exactly `maxBatches` calls instead.
+ */
+export function packFocusedBatches(groups: AiReviewFile[][], budget: AiInputBudget): AiReviewFile[][] {
+  const { batchFiles, maxBatches } = budget.focused ?? FOCUS_DEFAULTS
+  const chunks = groups.flatMap((g) => {
+    const out: AiReviewFile[][] = []
+    for (let i = 0; i < g.length; i += batchFiles) out.push(g.slice(i, i + batchFiles))
+    return out
+  })
+  const batches: AiReviewFile[][] = []
+  for (const c of chunks) {
+    const cur = batches.at(-1)
+    if (cur && cur.length + c.length <= batchFiles) cur.push(...c)
+    else batches.push([...c])
+  }
+  if (batches.length <= maxBatches) return batches
+  const size = (c: AiReviewFile[]) => c.reduce((n, f) => n + fileSection(f, budget.maxFileChars, budget.coverage).length, 0)
+  const bins = Array.from({ length: maxBatches }, () => ({ chars: 0, chunks: [] as number[] }))
+  chunks
+    .map((c, i) => ({ i, chars: size(c) }))
+    .sort((a, b) => b.chars - a.chars || a.i - b.i)
+    .forEach(({ i, chars }) => {
+      const bin = bins.reduce((best, b) => (b.chars < best.chars ? b : best))
+      bin.chars += chars
+      bin.chunks.push(i)
+    })
+  return bins.filter((b) => b.chunks.length).map((b) => b.chunks.sort((x, y) => x - y).flatMap((i) => chunks[i]))
+}
+
+/** Findings from several calls without repeats: same file, line and title (case and punctuation aside). */
+export function dedupAiFindings(findings: Finding[]): Finding[] {
+  const seen = new Set<string>()
+  return findings.filter((f) => {
+    const key = [f.file ?? "", f.startLine ?? 0, f.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()].join("\u0000")
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 /** An unchanged file the changed ones depend on (dbt DAG parent), sent as read-only context. */
 export interface AiContextFile {
   path: string
@@ -515,6 +655,8 @@ export interface AiInputRecord {
   hunksTotal: number
   /** A manifest context card went with the file. */
   card: boolean
+  /** Index of the call that carried the file; set only under focused batching. */
+  batch?: number
 }
 /** Token counts as `Session.getUsage` reports them: `input` excludes cached
  *  tokens, `inputTotal` includes them. */
@@ -585,16 +727,24 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
 /** The user message for one call and a record of each file it carries. A context
  *  card is added only while the call's cards total at most 6,000 characters; a card
  *  that would pass that is skipped and later, smaller ones may still fit. */
-function buildBatchMessage(input: AiReviewInput, maxFileChars: number, coverage: CoverageArg): { message: string; records: AiInputRecord[] } {
+function buildBatchMessage(
+  input: AiReviewInput,
+  maxFileChars: number,
+  coverage: CoverageArg,
+  focus?: { batch: number; others: AiReviewFile[] },
+): { message: string; records: AiInputRecord[] } {
   const records: AiInputRecord[] = []
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
   if (input.prBody) parts.push(`PR description:\n${truncate(input.prBody, 1500)}`)
 
-  if (input.grounding.length) {
+  // A focused call carries only the grounding for its own files (and file-less findings).
+  const inCall = new Set(input.files.map((f) => f.path))
+  const grounding = focus ? input.grounding.filter((g) => !g.file || inCall.has(g.file)) : input.grounding
+  if (grounding.length) {
     parts.push(
       "\n## GROUNDING — deterministic engine findings (DO NOT repeat these):",
-      ...input.grounding.slice(0, 40).map((f) => `- [${f.severity}] ${f.category} · ${f.file}: ${f.title}`),
+      ...grounding.slice(0, 40).map((f) => `- [${f.severity}] ${f.category} · ${f.file}: ${f.title}`),
     )
   } else {
     parts.push("\n## GROUNDING — the engine produced no findings.")
@@ -615,7 +765,14 @@ function buildBatchMessage(input: AiReviewInput, maxFileChars: number, coverage:
       hunksSent: r.hunksSent,
       hunksTotal: r.hunksTotal,
       card: withCard,
+      ...(focus ? { batch: focus.batch } : {}),
     })
+  }
+  if (focus?.others.length) {
+    parts.push(
+      "\n## OTHER FILES CHANGED IN THIS PR (reviewed in separate calls; do not comment on them):",
+      ...focus.others.slice(0, FOCUS_OTHER_FILES).map((f) => `- ${f.path} (${f.kind ?? "model_sql"})`),
+    )
   }
   const context = relatedContext(input)
   if (context.length) {
@@ -637,6 +794,8 @@ export interface AiInputPlan {
   batches: AiReviewFile[][]
   messages: string[]
   input: AiInputRecord[]
+  /** Focused batching applied (`ALTIMATE_REVIEW_AI_FOCUSED=1` and enough files). */
+  focused: boolean
 }
 
 /**
@@ -654,9 +813,13 @@ export function planAiInput(input: AiReviewInput, env: Record<string, string | u
     const chosen = new Set(files)
     unsent = input.files.filter((f) => sendable(f) && !chosen.has(f))
   }
-  const batches = files.length ? batchAiFiles(files, budget) : []
-  const built = batches.map((b) => buildBatchMessage({ ...input, files: b }, budget.maxFileChars, budget.coverage))
-  return { budget, files, unsent, batches, messages: built.map((b) => b.message), input: built.flatMap((b) => b.records) }
+  const focused = !!budget.focused && files.length >= budget.focused.minFiles
+  const batches = focused ? packFocusedBatches(groupAiFiles(files), budget) : files.length ? batchAiFiles(files, budget) : []
+  const built = batches.map((b, i) => {
+    const focus = focused ? { batch: i, others: files.filter((f) => !b.includes(f)) } : undefined
+    return buildBatchMessage({ ...input, files: b }, budget.maxFileChars, budget.coverage, focus)
+  })
+  return { budget, files, unsent, batches, messages: built.map((b) => b.message), input: built.flatMap((b) => b.records), focused }
 }
 
 /**
@@ -674,7 +837,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const dryRun = aiDryRunEnabled()
   // Recorded only when an opt-in switch changed or inspects the input, so the default envelope is unchanged.
   const recorded: Pick<AiLaneStatus, "input" | "unsent"> = {
-    ...(budget.coverage || dryRun || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
+    ...(budget.coverage || dryRun || plan.focused || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
     ...(budget.coverage && plan.unsent.length ? { unsent: plan.unsent.map((f) => f.path) } : {}),
   }
   const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
@@ -716,6 +879,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       results.push(...(await Promise.all(slice.map((b, j) => reviewBatch(plan.messages[i + j], b, system, model)))))
     }
     let findings = results.flatMap((r) => r.findings)
+    if (plan.focused) findings = dedupAiFindings(findings)
     const failed = results.filter((r) => r.state !== "ok")
     log.info("ai review complete", { findings: findings.length, batches: batches.length, failed: failed.length })
     // The lane is ok when any call answered; a partial failure is reported, not hidden.
