@@ -22,9 +22,9 @@ const UNITS = ["Bytes", "KiB", "MiB", "GiB", "TiB", "PiB"] as const
  */
 /** Whether the SQL is a script (more than one statement, or EXECUTE IMMEDIATE): a dry run only sees its first statements. */
 export function isScript(sql: string): boolean {
+  // One pass over comments and quoted text together: a quote inside a comment, or a comment marker inside a quote, is not either.
   const bare = sql
-    .replace(/--[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\//g, " ")
-    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g, " ")
+    .replace(/--[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g, " ")
     .replace(/;\s*$/, "")
   return bare.includes(";") || /\bexecute\s+immediate\b/i.test(bare)
 }

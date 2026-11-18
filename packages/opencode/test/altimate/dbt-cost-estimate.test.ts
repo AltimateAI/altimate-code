@@ -189,6 +189,8 @@ describe("dbt_cost_estimate", () => {
     "select 1; select * from big",
     "select 1; execute immediate 'select * from big'",
     "execute immediate 'select * from big'",
+    "select * from t where m = '--'; execute immediate 'select * from big'",
+    "select * from t where m = '#sale'; select * from big",
   ])("a script (%s) is a lower bound, not an upper bound", async (sql) => {
     useAdapter(calls, { bytes: "1.0 GiB" })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql }, ctx)
