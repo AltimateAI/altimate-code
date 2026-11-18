@@ -14,6 +14,7 @@ type SavingsMetadata = {
   clusters_checked?: number
   jobs_checked?: number
   skipped?: { check: string; reason: string }[]
+  limited?: string[]
   warehouses?: { id: string; name: string; type: string; size: string | null; window_cost: number }[]
   report?: DatabricksSavingsReport
   error?: string
@@ -79,6 +80,7 @@ export function formatSavings(result: DatabricksSavingsResult): string {
   ].join(", ")
   const lines: string[] = [`Databricks savings: ${counted} checked, the ${report.lookback_days} days to ${result.window.end}, at list price.`]
   for (const one of result.skipped ?? []) lines.push(`Not checked: ${one.check} (${one.reason})`)
+  for (const what of result.limited ?? []) lines.push(`Only the first 10,000 ${what} were read; any beyond them were not checked.`)
   if (report.findings.length === 0) {
     lines.push("No savings found.")
     return lines.join("\n")
@@ -135,6 +137,7 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
           clusters_checked: result.clusters_checked,
           jobs_checked: result.jobs_checked,
           skipped: result.skipped,
+          limited: result.limited,
           warehouses: result.warehouses,
           report: result.report,
         } as SavingsMetadata,

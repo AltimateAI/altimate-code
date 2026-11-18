@@ -18,6 +18,12 @@ const LOOKBACK_DAYS = 7
 
 const DAY_MS = 86_400_000
 
+/** The window ends at 06:00 UTC, once the day before has been billed. */
+const WINDOW_END_MS = 6 * 3_600_000
+
+/** Rows read per query; a query that fills it says so in the result. */
+const ROW_LIMIT = 10_000
+
 /** A SQL warehouse's id in a connection's HTTP path (`/sql/1.0/warehouses/<id>`). */
 const WAREHOUSE_PATH = /\/warehouses\/([0-9a-z]+)\/?$/i
 
@@ -26,7 +32,9 @@ const WAREHOUSE_PATH = /\/warehouses\/([0-9a-z]+)\/?$/i
  * warehouse in the workspace of the warehouse named by the second. System tables hold
  * every workspace of the account, so each input is cut to that workspace's warehouses.
  * Billing that landed after the window's end is left out, so a past window gives the
- * same facts on every run.
+ * same facts on every run. Billing is read as Altimate's opportunity pipeline reads it for
+ * these checks: whole usage days inside the window, ingested before its end day, which is
+ * the six full days before that day.
  */
 export const DATABRICKS_WAREHOUSE_FACTS_SQL = `
 WITH p AS (
@@ -266,7 +274,9 @@ inv AS (
   QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1
 )
 SELECT jb.job_id, COALESCE(inv.name, 'job ' || jb.job_id) AS job_name,
-       COALESCE(inv.trigger_type, runs.run_trigger) AS trigger_type,
+       inv.trigger_type AS trigger_type,
+       inv.job_id IS NOT NULL AS listed_in_job_inventory,
+       runs.run_trigger AS run_trigger_type,
        COALESCE(runs.run_count, 0) AS run_count,
        jb.job_total_cost, jb.job_all_purpose_cost, jb.job_all_purpose_dbus,
        CASE WHEN mc.cluster_id IS NULL OR COALESCE(ct.cost, 0) <= 0 THEN 1.0 ELSE mc.cost / ct.cost END AS job_share_of_cluster,
@@ -280,7 +290,8 @@ WHERE jb.job_all_purpose_cost > 0
 ORDER BY jb.job_all_purpose_cost DESC
 `
 
-type RulesEngine = (input: string) => DatabricksSavingsReport
+/** Core's rules: a `DatabricksSavingsInput` as JSON in, the report out. */
+export type RulesEngine = (input: string) => DatabricksSavingsReport
 
 /** The installed core's rules, or null when its binary predates them. */
 function rulesEngine(): RulesEngine | null {
@@ -288,9 +299,9 @@ function rulesEngine(): RulesEngine | null {
   return typeof found === "function" ? (found as RulesEngine) : null
 }
 
-/** The seven-day window the facts cover: it ends at 06:00 UTC on `end`, today's UTC date. */
+/** The seven-day window the facts cover: it ends at 06:00 UTC on `end`, the latest one that has passed. */
 export function savingsWindow(nowMs: number): { start: string; end: string } {
-  const today = Math.floor(nowMs / DAY_MS) * DAY_MS
+  const today = Math.floor((nowMs - WINDOW_END_MS) / DAY_MS) * DAY_MS
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10)
   return { start: day(today - LOOKBACK_DAYS * DAY_MS), end: day(today) }
 }
@@ -352,6 +363,8 @@ export function toJobFacts(row: Record<string, unknown>) {
     job_id: id,
     job_name: String(row.job_name ?? `job ${id}`),
     trigger_type: row.trigger_type == null ? null : String(row.trigger_type),
+    listed_in_job_inventory: [true, 1, "true"].includes(row.listed_in_job_inventory as never),
+    run_trigger_type: row.run_trigger_type == null ? null : String(row.run_trigger_type),
     run_count: Math.round(num(row.run_count)),
     job_total_cost: num(row.job_total_cost),
     job_all_purpose_cost: num(row.job_all_purpose_cost),
@@ -374,12 +387,16 @@ function preferredConnection(): string | undefined {
   })?.name
 }
 
-export async function databricksSavings(params: DatabricksSavingsParams): Promise<DatabricksSavingsResult> {
+/** `rules` defaults to the installed core's; tests pass their own. */
+export async function databricksSavings(
+  params: DatabricksSavingsParams,
+  rules: RulesEngine | null = rulesEngine(),
+): Promise<DatabricksSavingsResult> {
   const window = savingsWindow(params.now_ms ?? Date.now())
   const failed = (error: string): DatabricksSavingsResult => ({ success: false, window, error })
 
   const resolved = resolveFinopsWarehouse({
-    requested: params.warehouse ?? preferredConnection(),
+    requested: params.warehouse?.trim() || preferredConnection(),
     supportedTypes: SUPPORTED_TYPES,
     operationName: "The Databricks savings check",
   })
@@ -395,7 +412,6 @@ export async function databricksSavings(params: DatabricksSavingsParams): Promis
     )
   }
 
-  const rules = rulesEngine()
   if (!rules) {
     return failed("This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.")
   }
@@ -403,22 +419,29 @@ export async function databricksSavings(params: DatabricksSavingsParams): Promis
   try {
     const connector = await Registry.get(resolved.warehouse)
     const binds = [window.end, runsOn]
-    const warehouses = records(await connector.execute(DATABRICKS_WAREHOUSE_FACTS_SQL, 10_000, binds))
+    // A query that fills the row limit reads only its first rows; the result names it.
+    const limited: string[] = []
+    const read = async (what: string, sql: string) => {
+      const result = await connector.execute(sql, ROW_LIMIT, binds)
+      if (result.truncated) limited.push(what)
+      return records(result)
+    }
+    const warehouses = await read("SQL warehouses", DATABRICKS_WAREHOUSE_FACTS_SQL)
     if (warehouses.length === 0) {
       return failed(`No SQL warehouses were found for warehouse ${runsOn} in system.compute.warehouses.`)
     }
     // A table the connection may not read stops only its own check; the rest still report.
     const skipped: { check: string; reason: string }[] = []
-    const optional = async (check: string, sql: string) => {
+    const optional = async (check: string, what: string, sql: string) => {
       try {
-        return records(await connector.execute(sql, 10_000, binds))
+        return await read(what, sql)
       } catch (e) {
         skipped.push({ check, reason: (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 300) })
         return []
       }
     }
-    const clusters = await optional("Idle Cluster Detection", DATABRICKS_CLUSTER_FACTS_SQL)
-    const jobs = await optional("Job Running on All-Purpose Compute", DATABRICKS_JOB_FACTS_SQL)
+    const clusters = await optional("Idle Cluster Detection", "all-purpose clusters", DATABRICKS_CLUSTER_FACTS_SQL)
+    const jobs = await optional("Job Running on All-Purpose Compute", "jobs", DATABRICKS_JOB_FACTS_SQL)
     const report = rules(
       JSON.stringify({
         lookback_days: LOOKBACK_DAYS,
@@ -436,6 +459,7 @@ export async function databricksSavings(params: DatabricksSavingsParams): Promis
       clusters_checked: clusters.length,
       jobs_checked: jobs.length,
       skipped,
+      limited,
       // What each warehouse is and costs now, so a later run can tell what changed.
       warehouses: warehouses.map((row) => ({
         id: String(row.warehouse_id ?? ""),

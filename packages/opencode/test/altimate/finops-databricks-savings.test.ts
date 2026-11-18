@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import * as Registry from "../../src/altimate/native/connections/registry"
@@ -12,7 +12,7 @@ import {
   toFacts,
   toJobFacts,
 } from "../../src/altimate/native/finops/databricks-savings"
-import { FinopsDatabricksSavingsTool } from "../../src/altimate/tools/finops-databricks-savings"
+import { FinopsDatabricksSavingsTool, formatSavings } from "../../src/altimate/tools/finops-databricks-savings"
 import type { DatabricksSavingsResult } from "../../src/altimate/native/types"
 
 function stubCtx(): any {
@@ -147,8 +147,11 @@ describe("finops_databricks_savings tool", () => {
 describe("databricks savings handler", () => {
   afterEach(() => Registry.reset())
 
-  test("the window is the seven days to 06:00 UTC today", () => {
+  test("the window is the seven days to the latest 06:00 UTC that has passed", () => {
     expect(savingsWindow(Date.parse("2026-11-12T10:00:00Z"))).toEqual({ start: "2026-11-05", end: "2026-11-12" })
+    expect(savingsWindow(Date.parse("2026-11-12T06:00:00Z"))).toEqual({ start: "2026-11-05", end: "2026-11-12" })
+    // Before 06:00 the day before is not billed yet, so the window still ends the day before.
+    expect(savingsWindow(Date.parse("2026-11-12T05:59:00Z"))).toEqual({ start: "2026-11-04", end: "2026-11-11" })
   })
 
   test("the facts query is one read-only statement taking the window end and the warehouse id, in that order", () => {
@@ -253,7 +256,90 @@ describe("cluster and job findings", () => {
     const cluster = toClusterFacts({ cluster_id: "c1", cluster_name: null, auto_termination_minutes: "120", total_node_minutes: 900n, active_util_days: "4", total_worker_minutes: 900, idle_node_minutes: 450, total_cost: "70.5" })
     expect(cluster).toMatchObject({ cluster_id: "c1", cluster_name: "c1", auto_termination_minutes: 120, total_node_minutes: 900, active_util_days: 4, total_cost: 70.5 })
     expect(toClusterFacts({ cluster_id: "c2" }).auto_termination_minutes).toBeNull()
-    const job = toJobFacts({ job_id: "j1", job_name: "nightly", trigger_type: null, run_count: 7n, job_share_of_cluster: 1.2, jobs_rate_per_dbu: null })
-    expect(job).toMatchObject({ job_id: "j1", trigger_type: null, run_count: 7, job_share_of_cluster: 1, jobs_rate_per_dbu: null })
+    const job = toJobFacts({ job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 7n, job_share_of_cluster: 1.2, jobs_rate_per_dbu: null })
+    expect(job).toMatchObject({ job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 7, job_share_of_cluster: 1, jobs_rate_per_dbu: null })
+    // A job the inventory does not list arrives with false, or with nothing at all.
+    expect(toJobFacts({ job_id: "j2", listed_in_job_inventory: false }).listed_in_job_inventory).toBe(false)
+    expect(toJobFacts({ job_id: "j3" })).toMatchObject({ listed_in_job_inventory: false, run_trigger_type: null })
+  })
+
+  test("the job query hands the inventory's trigger and the runs' trigger to core separately", () => {
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("inv.trigger_type AS trigger_type")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("inv.job_id IS NOT NULL AS listed_in_job_inventory")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("runs.run_trigger AS run_trigger_type")
+    expect(DATABRICKS_JOB_FACTS_SQL).not.toContain("COALESCE(inv.trigger_type")
+  })
+})
+
+describe("databricks savings handler over a stubbed connection", () => {
+  const WAREHOUSE_ROW = { warehouse_id: "abc123", warehouse_name: "BI", warehouse_type: "PRO", warehouse_size: "SMALL", total_cost: 27.5 }
+  const JOB_ROW = { job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 9 }
+  const table = (row: Record<string, unknown>, truncated = false) => ({ columns: Object.keys(row), rows: [Object.values(row)], truncated })
+  let calls: { sql: string; limit: number; binds: unknown[] }[]
+  let sent: any
+
+  beforeEach(() => {
+    calls = []
+    sent = undefined
+    Registry.setConfigs({
+      dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" },
+    })
+  })
+  afterEach(() => {
+    Registry.reset()
+  })
+
+  const rules = (input: string) => {
+    sent = JSON.parse(input)
+    return { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  }
+
+  const connect = (answer: (sql: string) => unknown) =>
+    spyOn(Registry, "get").mockResolvedValue({
+      execute: async (sql: string, limit: number, binds: unknown[]) => {
+        calls.push({ sql, limit, binds })
+        return answer(sql)
+      },
+    } as any)
+
+  test("a check whose tables the connection cannot read is named as skipped; the others still reach core", async () => {
+    const spy = connect((sql) => {
+      if (sql === DATABRICKS_CLUSTER_FACTS_SQL) throw new Error("[INSUFFICIENT_PERMISSIONS] system.compute.node_timeline\nstack")
+      return sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : table(JOB_ROW)
+    })
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.skipped).toEqual([{ check: "Idle Cluster Detection", reason: "[INSUFFICIENT_PERMISSIONS] system.compute.node_timeline" }])
+    expect([result.warehouses_checked, result.clusters_checked, result.jobs_checked]).toEqual([1, 0, 1])
+    // Every query takes the window end, then the warehouse the connection runs on.
+    expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL, DATABRICKS_CLUSTER_FACTS_SQL, DATABRICKS_JOB_FACTS_SQL])
+    for (const one of calls) expect(one.binds).toEqual(["2026-11-18", "abc123"])
+    expect(sent.lookback_days).toBe(7)
+    expect(sent.warehouses[0]).toMatchObject({ warehouse_id: "abc123", warehouse_size: "SMALL", total_cost: 27.5 })
+    expect(sent.clusters).toEqual([])
+    expect(sent.jobs[0]).toMatchObject({ job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME" })
+    expect(result.limited).toEqual([])
+  })
+
+  test("a query that fills the row limit is named, and the tool says so", async () => {
+    const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : sql === DATABRICKS_JOB_FACTS_SQL ? table(JOB_ROW, true) : table({ cluster_id: "c1" })))
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(calls.every((one) => one.limit === 10_000)).toBe(true)
+    expect(result.limited).toEqual(["jobs"])
+    expect(formatSavings(result)).toContain("Only the first 10,000 jobs were read; any beyond them were not checked.")
+  })
+
+  test("a blank connection name falls back to the connection that runs through a SQL warehouse", async () => {
+    Registry.setConfigs({
+      cluster: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/protocolv1/o/1/0101-abc", access_token: "x" },
+      dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" },
+    })
+    const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : { columns: [], rows: [], truncated: false }))
+    const result = await databricksSavings({ warehouse: " ", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.warehouse).toBe("dbx")
   })
 })
