@@ -58,7 +58,9 @@ export function suppressSnowflakeLogging(snowflake: any): void {
 
 /**
  * In assessment mode nothing but the warehouse may be contacted. When it loads, snowflake-sdk otherwise probes
- * the AWS, Azure and GCP metadata and identity services to report the platform it runs on.
+ * the AWS, Azure and GCP metadata and identity services to report the platform it runs on. Its certificate
+ * revocation requests need no switch here: they start from an HTTPS agent that Bun, which runs the packaged
+ * CLI, does not use.
  */
 export function keepSdkOffCloudMetadata(env: NodeJS.ProcessEnv = process.env): void {
   const mode = env.ALTIMATE_ASSESSMENT_MODE?.trim().toLowerCase()
@@ -68,8 +70,11 @@ export function keepSdkOffCloudMetadata(env: NodeJS.ProcessEnv = process.env): v
 /** How long to wait for Snowflake to acknowledge a cancel before reporting the statement as possibly still running. */
 const CANCEL_WAIT_MS = 30_000
 
-/** How a caller's `cancelAfterMs` reaches the statement it covers: why it was stopped, and the statement sent. */
-type StatementStop = { stopped?: "deadline" | "aborted"; statement?: any }
+/**
+ * How a caller's `cancelAfterMs` reaches what it covers: why it was stopped, and every statement sent. A read
+ * retried after a closed-session error leaves two, and the first may still be running.
+ */
+type StatementStop = { stopped?: "deadline" | "aborted"; statements: any[] }
 
 /**
  * Errors meaning the session is gone: 407002 is raised client-side for any
@@ -572,7 +577,7 @@ export async function connect(
       }
       if (binds && binds.length > 0) options.binds = binds
       const statement = conn.execute(options)
-      if (stop) stop.statement = statement
+      stop?.statements.push(statement)
     })
   }
 
@@ -602,7 +607,7 @@ export async function connect(
     signal?: AbortSignal,
   ): Promise<{ columns: string[]; rows: any[][] }> {
     signal?.throwIfAborted()
-    const stop: StatementStop = {}
+    const stop: StatementStop = { statements: [] }
     const STOPPED = Symbol("stopped")
     let wake: () => void = () => {}
     const stopping = new Promise<typeof STOPPED>((resolve) => (wake = () => resolve(STOPPED)))
@@ -623,7 +628,7 @@ export async function connect(
     }
     if (outcome !== STOPPED) return outcome
     work.catch(() => {})
-    const cancelled = stop.statement ? await cancelStatement(stop.statement) : true
+    const cancelled = (await Promise.all(stop.statements.map(cancelStatement))).every(Boolean)
     if (stop.stopped === "aborted") throw signal!.reason
     throw new QueryTimeoutError({ engine: "snowflake", timeoutMs: deadlineMs, cancelled })
   }

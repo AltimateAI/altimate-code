@@ -162,7 +162,8 @@ describe("assessment mode on the packaged CLI", () => {
 
   posixOnly("with the Snowflake driver installed, assessment mode keeps it off the cloud metadata services", async () => {
     const account = "egress-test"
-    const args = ["tool", "run", "finops_snowflake_savings", "--args", '{"confirm":true}', "--json", "--no-daemon"]
+    // The connection test reaches the driver whether or not the installed altimate-core has the savings rules.
+    const args = ["tool", "run", "warehouse_test", "--args", '{"name":"sf"}', "--json", "--no-daemon"]
     // The driver the packaged CLI would install, linked in with its dependencies.
     const sdk = createRequire(path.join(root, "../drivers/package.json")).resolve("snowflake-sdk/package.json")
     const dependencies = path.dirname(path.dirname(await realpath(sdk)))

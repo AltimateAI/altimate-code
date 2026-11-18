@@ -184,7 +184,8 @@ describe("Snowflake server-side cancel", () => {
     const error = await db.execute("SELECT 1", 10, [], { cancelAfterMs: 40 }).catch((e) => e)
     expect(isQueryTimeoutError(error)).toBe(true)
     expect(sent).toEqual(["SELECT 1 LIMIT 11", "SELECT 1 LIMIT 11"])
-    expect(cancels).toBe(1)
+    // The first copy may still be running, so both are cancelled.
+    expect(cancels).toBe(2)
   })
 
   test("a statement whose session closed may still be running, so the deadline tries to cancel it", async () => {

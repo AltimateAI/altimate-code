@@ -47,7 +47,7 @@ const tenths = (value: unknown) =>
   Number(value) < 0.05 ? "under 0.1" : Number(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })
 
 /** Free text from the workspace on one line, with control and invisible characters gone. */
-const oneLine = (value: unknown) =>
+export const oneLine = (value: unknown) =>
   String(value ?? "")
     .replace(/\p{Cf}/gu, "")
     .replace(/[\s\p{Cc}]+/gu, " ")

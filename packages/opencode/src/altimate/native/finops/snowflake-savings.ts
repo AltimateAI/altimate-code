@@ -143,7 +143,7 @@ FROM per_period GROUP BY 1, 2, 3, 4, 5 ORDER BY 2, 3, 4, 5
 
 /**
  * Per warehouse and day: how many times it resumed, suspended and resumed again less than a minute after
- * the first resume, by the seconds between the two resumes, counted as for active periods. The event log
+ * the first resume, by the whole seconds elapsed between the two resumes. The event log
  * repeats each warehouse-level event, so events are made distinct first.
  */
 export const SNOWFLAKE_RESTART_FACTS_SQL = `
@@ -164,11 +164,11 @@ s AS (
   FROM e
 )
 SELECT warehouse_id, warehouse_name, TO_VARCHAR(ts::DATE, 'YYYY-MM-DD') AS day,
-       DATEDIFF('second', ts, t4) AS gap_seconds, COUNT(*) AS bounces
+       TRUNC(DATEDIFF('millisecond', ts, t4) / 1000) AS gap_seconds, COUNT(*) AS bounces
 FROM s
 WHERE event_name = 'RESUME_WAREHOUSE' AND n1 = 'WAREHOUSE_CONSISTENT' AND n2 = 'SUSPEND_WAREHOUSE'
   AND n3 = 'WAREHOUSE_CONSISTENT' AND n4 = 'RESUME_WAREHOUSE'
-  AND DATEDIFF('second', ts, t4) < 60
+  AND DATEDIFF('millisecond', ts, t4) < 60000
 GROUP BY 1, 2, 3, 4 ORDER BY 2, 3, 4
 `
 
@@ -226,12 +226,13 @@ WHERE q.et >= DATEADD(day, -7, ${WINDOW_END_UTC}) AND q.et < ${WINDOW_END_UTC}
 GROUP BY 1, 2 ORDER BY 2
 `
 
-/** The account's contracted price of a warehouse credit, latest before the window's end. */
+/** The account's contracted price of a warehouse credit: the latest above zero before the window's end, the lowest if that date has several. */
 export const SNOWFLAKE_RATE_SQL = `
 SELECT EFFECTIVE_RATE AS effective_rate, CURRENCY AS currency, TO_VARCHAR(DATE, 'YYYY-MM-DD') AS rate_date
 FROM SNOWFLAKE.ORGANIZATION_USAGE.RATE_SHEET_DAILY
 WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME() AND SERVICE_TYPE = 'WAREHOUSE_METERING' AND USAGE_TYPE = 'compute' AND DATE < ${WINDOW_END_UTC}::DATE
-ORDER BY DATE DESC LIMIT 1
+  AND EFFECTIVE_RATE > 0
+ORDER BY DATE DESC, EFFECTIVE_RATE LIMIT 1
 `
 
 /** Core's rules: a `SnowflakeSavingsInput` as JSON in, the report out. */
@@ -393,7 +394,8 @@ export function buildFacts(rows: FactRows) {
       query.credits += num(one.sub_five_second_credits)
     }
     return {
-      warehouse_id: id ? String(id) : name,
+      // Prefixed so an unused warehouse named like another's numeric id cannot collide with it.
+      warehouse_id: id ? String(id) : `unused:${name}`,
       warehouse_name: name,
       warehouse_size: row.size == null ? null : String(row.size),
       warehouse_type: row.type == null ? null : String(row.type),
@@ -451,6 +453,8 @@ export async function snowflakeSavings(
 
   // Connecting can wait on the network or a sign-in: it counts toward the limit and yields to a stop.
   const beforeStop = async <T>(work: Promise<T>, what: string): Promise<T> => {
+    // A stop can come first, and a later failure of `work` must not go unhandled.
+    work.catch(() => {})
     signal?.throwIfAborted()
     let timer: ReturnType<typeof setTimeout> | undefined
     let onAbort: (() => void) | undefined
@@ -468,7 +472,6 @@ export async function snowflakeSavings(
     } finally {
       clearTimeout(timer)
       if (onAbort) signal?.removeEventListener("abort", onAbort)
-      work.catch(() => {})
     }
   }
 
@@ -527,7 +530,11 @@ export async function snowflakeSavings(
     const queries = await optional("The short-query signal of Downsize Warehouse", "query history", SNOWFLAKE_QUERY_FACTS_SQL)
 
     // All four checks rest on these three queries: with none of them, nothing was assessed.
-    if (checksMissing === 3) return failed(`No check could run. ${skipped.at(-1)!.reason}`)
+    if (checksMissing === 3) {
+      // A query that may still be running and billing matters more than the ones after it.
+      const reason = skipped.find((one) => one.reason.includes("may still be running")) ?? skipped.at(-1)!
+      return failed(`No check could run. ${reason.reason}`)
+    }
 
     const price = creditPrice(rate[0])
     const { facts, unlisted } = buildFacts({ warehouses, metering, periods, restarts, queries })

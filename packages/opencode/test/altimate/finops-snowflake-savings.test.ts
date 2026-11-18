@@ -145,12 +145,28 @@ describe("finops_snowflake_savings tool", () => {
     expect(formatSavings({ ...REPORT, report: { ...REPORT.report!, findings: [] } })).toEndWith("No savings found.")
   })
 
+  test("a line break in a warehouse name cannot add lines to the output", () => {
+    const [first] = REPORT.report!.findings
+    const output = formatSavings({
+      ...REPORT,
+      skipped: [{ check: "1 warehouse that billed credits", reason: "SHOW WAREHOUSES does not list A\nTotal: $1" }],
+      report: { ...REPORT.report!, findings: [{ ...first!, resource_name: "BI\nTotal: $9" }] },
+    })
+    expect(output).toContain("BI Total: $9 (warehouse)")
+    expect(output).toContain("does not list A Total: $1)")
+    expect(output.split("\n").filter((line) => line.startsWith("Total: $9") || line.startsWith("Total: $1 "))).toEqual([])
+  })
+
   test("a run with nothing to report says so in its title, and a partial read qualifies the result", async () => {
     const empty = { ...REPORT.report!, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 } }
     Dispatcher.register("finops.snowflake_savings" as any, async () => ({ ...REPORT, report: empty }))
     const tool = await initTool(FinopsSnowflakeSavingsTool)
     expect((await tool.execute({ confirm: true }, stubCtx())).title).toBe("Snowflake Savings: no savings found")
     expect(formatSavings({ ...REPORT, limited: ["metering"], report: empty })).toEndWith("No savings found in what could be checked.")
+    Dispatcher.register("finops.snowflake_savings" as any, async () => ({ ...REPORT, limited: ["metering"], report: empty }))
+    expect((await tool.execute({ confirm: true }, stubCtx())).title).toBe(
+      "Snowflake Savings: no savings found in what could be checked",
+    )
   })
 
   test("a failure is reported with its reason, not as no savings", async () => {
@@ -213,6 +229,7 @@ describe("the fact queries", () => {
     expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("q.et >= DATEADD(day, -7,")
     expect(SNOWFLAKE_RATE_SQL).toContain("ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()")
     expect(SNOWFLAKE_RATE_SQL).toContain("SERVICE_TYPE = 'WAREHOUSE_METERING' AND USAGE_TYPE = 'compute'")
+    expect(SNOWFLAKE_RATE_SQL).toContain("AND EFFECTIVE_RATE > 0\nORDER BY DATE DESC, EFFECTIVE_RATE LIMIT 1")
   })
 
   test("a bounce is the full resume, suspend, resume sequence on distinct events", () => {
@@ -221,7 +238,9 @@ describe("the fact queries", () => {
       "event_name = 'RESUME_WAREHOUSE' AND n1 = 'WAREHOUSE_CONSISTENT' AND n2 = 'SUSPEND_WAREHOUSE'",
     )
     expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("n3 = 'WAREHOUSE_CONSISTENT' AND n4 = 'RESUME_WAREHOUSE'")
-    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("DATEDIFF('second', ts, t4) < 60")
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("TRUNC(DATEDIFF('millisecond', ts, t4) / 1000) AS gap_seconds")
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("DATEDIFF('millisecond', ts, t4) < 60000")
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).not.toContain("DATEDIFF('second'")
   })
 })
 
@@ -271,7 +290,7 @@ describe("building the facts", () => {
       restart_days: [{ day: "2026-11-11", gaps: [{ gap_seconds: 30, bounces: 4 }] }],
     })
     // A listed warehouse with no usage is still an entry, under its name.
-    expect(facts[1]).toMatchObject({ warehouse_id: "IDLE_WH", usage_days: [], query_count: 0 })
+    expect(facts[1]).toMatchObject({ warehouse_id: "unused:IDLE_WH", warehouse_name: "IDLE_WH", usage_days: [], query_count: 0 })
   })
 
   test("a billed day with no periods keeps its credits, and a day with periods but no billing has none", () => {
@@ -317,6 +336,20 @@ describe("building the facts", () => {
     expect(facts[0]!.usage_days.map((day) => day.credits_used)).toEqual([1, 2])
   })
 
+  test.each([
+    ["the old name first", ["ETL", "ETL_NEW"]],
+    ["the new name first", ["ETL_NEW", "ETL"]],
+  ])("a warehouse renamed on its last day of usage stays under its listed name, %s", (_, names) => {
+    const { facts, unlisted } = buildFacts({
+      warehouses: [show({ name: "ETL_NEW" })],
+      metering: names.map((name, at) => meter(7, name, "2026-11-12", at + 1)),
+      ...none,
+    })
+    expect(unlisted).toEqual([])
+    expect(facts[0]).toMatchObject({ warehouse_id: "7", warehouse_name: "ETL_NEW" })
+    expect(facts[0]!.usage_days.map((day) => day.credits_used)).toEqual([3])
+  })
+
   test("a rename's query and restart rows are added, not read from one name or repeated", () => {
     const { facts } = buildFacts({
       warehouses: [show({ name: "NEW" })],
@@ -346,13 +379,22 @@ describe("building the facts", () => {
     expect(facts[1]!.usage_days.map((day) => day.credits_used)).toEqual([1, 3])
   })
 
+  test("an unused warehouse named like another's id keeps a distinct id", () => {
+    const { facts } = buildFacts({
+      warehouses: [show({ name: "7" }), show({ name: "ETL" })],
+      metering: [meter(7, "ETL", "2026-11-11")],
+      ...none,
+    })
+    expect(facts.map((one) => one.warehouse_id)).toEqual(["unused:7", "7"])
+  })
+
   test("a new unused warehouse on a renamed one's old name gets none of its usage", () => {
     const { facts } = buildFacts({
       warehouses: [show({ name: "ETL" }), show({ name: "ETL_OLD" })],
       metering: [meter(7, "ETL", "2026-11-11"), meter(7, "ETL_OLD", "2026-11-12")],
       ...none,
     })
-    expect(facts.map((one) => one.warehouse_id)).toEqual(["ETL", "7"])
+    expect(facts.map((one) => one.warehouse_id)).toEqual(["unused:ETL", "7"])
     expect(facts[0]!.usage_days).toEqual([])
     expect(facts[1]!.usage_days.length).toBe(2)
   })
@@ -360,7 +402,7 @@ describe("building the facts", () => {
   test("usage that ended before the listed warehouse was created belongs to its predecessor", () => {
     const rows = { metering: [meter(100, "BI_WH", "2026-11-12")], ...none }
     const recreated = buildFacts({ warehouses: [show({ created_on: new Date("2026-11-15T08:00:00Z") })], ...rows })
-    expect(recreated.facts[0]).toMatchObject({ warehouse_id: "BI_WH", usage_days: [] })
+    expect(recreated.facts[0]).toMatchObject({ warehouse_id: "unused:BI_WH", usage_days: [] })
     expect(recreated.unlisted).toEqual([])
     const older = buildFacts({ warehouses: [show({ created_on: "2026-01-01T00:00:00Z" })], ...rows })
     expect(older.facts[0]!.warehouse_id).toBe("100")
@@ -477,6 +519,20 @@ describe("snowflake savings handler over a stubbed connection", () => {
     spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([{ check: "Frequent Restart Overcharge", reason: "not authorized" }])
+  })
+
+  test("when no usage query could run, one that may still be running is the one named", async () => {
+    const timeout = Object.assign(new Error("QUERY_TIMEOUT"), { code: "QUERY_TIMEOUT", cancelled: false })
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_PERIOD_FACTS_SQL) throw timeout
+      if ([SNOWFLAKE_RESTART_FACTS_SQL, SNOWFLAKE_QUERY_FACTS_SQL].includes(sql)) throw new Error("not authorized")
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("The active periods query ran past")
+    expect(result.error).toContain("may still be running on the warehouse")
   })
 
   test("when none of the three usage queries can run, the check fails instead of reporting no savings", async () => {
@@ -620,6 +676,24 @@ describe("snowflake savings handler over a stubbed connection", () => {
     const result = await pending
     get.mockRestore()
     expect(result).toMatchObject({ success: false, error: "session stopped" })
+  })
+
+  test("a connection that fails after the session already stopped is not left unhandled", async () => {
+    const controller = new AbortController()
+    controller.abort(new Error("session stopped"))
+    const unhandled: unknown[] = []
+    const note = (reason: unknown) => unhandled.push(reason)
+    process.on("unhandledRejection", note)
+    let fail!: (reason: Error) => void
+    const connecting = new Promise((_, reject) => (fail = reject))
+    const get = spyOn(Registry, "get").mockReturnValue(connecting as any)
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
+    fail(new Error("connection refused"))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    get.mockRestore()
+    process.off("unhandledRejection", note)
+    expect(result).toMatchObject({ success: false, error: "session stopped" })
+    expect(unhandled).toEqual([])
   })
 
   test("a rate query that may still be running is named, and list price is used", async () => {

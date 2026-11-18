@@ -3,7 +3,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SnowflakeSavingsFinding, SnowflakeSavingsReport, SnowflakeSavingsResult } from "../native/types"
-import { dollars, range } from "./finops-databricks-savings"
+import { dollars, oneLine, range } from "./finops-databricks-savings"
 
 /** One shape for every outcome, so a reader of the metadata never guesses which fields exist. */
 type SavingsMetadata = {
@@ -73,10 +73,10 @@ function priceLine(result: SnowflakeSavingsResult): string {
     : `$${price.per_credit.toFixed(2)} a credit, list price (no dollar rate could be read from the account's rate sheet)`
 }
 
-function headline(report: SnowflakeSavingsReport): string {
+function headline(report: SnowflakeSavingsReport, partial = false): string {
   const { monthly_min, monthly_max, resources } = report.total
   if (resources > 0) return `${range(monthly_min, monthly_max)} a month on ${resources} warehouse${resources === 1 ? "" : "s"}`
-  if (report.findings.length === 0) return "no savings found"
+  if (report.findings.length === 0) return partial ? "no savings found in what could be checked" : "no savings found"
   return `${report.findings.length} finding${report.findings.length === 1 ? "" : "s"}, no dollar estimate`
 }
 
@@ -87,7 +87,8 @@ export function formatSavings(result: SnowflakeSavingsResult): string {
   const lines: string[] = [
     `Snowflake savings: ${checked} warehouse${checked === 1 ? "" : "s"} checked, the ${report.lookback_days} days to ${result.window.end}, at ${priceLine(result)}.`,
   ]
-  for (const one of result.skipped ?? []) lines.push(`Not checked: ${one.check} (${one.reason})`)
+  // Warehouse names come from the account and can hold line breaks.
+  for (const one of result.skipped ?? []) lines.push(`Not checked: ${oneLine(one.check)} (${oneLine(one.reason)})`)
   for (const what of result.limited ?? []) lines.push(`Only part of the ${what} could be read; the rest was not checked.`)
   if (report.findings.length === 0) {
     lines.push(result.skipped?.length || result.limited?.length ? "No savings found in what could be checked." : "No savings found.")
@@ -97,7 +98,7 @@ export function formatSavings(result: SnowflakeSavingsResult): string {
   lines.push("")
   for (const finding of report.findings) {
     const amount = finding.monthly_max > 0 ? `${range(finding.monthly_min, finding.monthly_max)} a month` : "no dollar estimate"
-    lines.push(`${finding.resource_name} (warehouse) · ${finding.title} · ${amount} (${finding.severity})`)
+    lines.push(`${oneLine(finding.resource_name) || finding.resource_id} (warehouse) · ${finding.title} · ${amount} (${finding.severity})`)
     for (const line of evidenceLines(finding)) lines.push(`  ${line}`)
   }
   return lines.join("\n")
@@ -105,7 +106,7 @@ export function formatSavings(result: SnowflakeSavingsResult): string {
 
 export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings", {
   description:
-    "Check a Snowflake account for savings with Altimate's rules: warehouses that sit idle, could run one size smaller, keep an unneeded extra cluster, or restart so often they are billed twice. Read-only: SHOW WAREHOUSES plus five queries over seven days of SNOWFLAKE.ACCOUNT_USAGE and the rate sheet, on the connection's warehouse, which Snowflake resumes if it is suspended and auto-resume is on. Returns each finding with its monthly dollar range and evidence. Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.",
+    "Check a Snowflake account for savings with Altimate's rules: warehouses that sit idle, could run one size smaller, keep an unneeded extra cluster, or restart so often they are billed twice. Read-only: SHOW WAREHOUSES plus five queries on the connection's warehouse: four read up to eleven days of SNOWFLAKE.ACCOUNT_USAGE, to report on seven, and one reads the rate sheet. Snowflake resumes that warehouse if it is suspended and auto-resume is on. Returns each finding with its monthly dollar range and evidence. Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.",
   parameters: z.object({
     warehouse: z
       .string()
@@ -125,7 +126,7 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
         title: "Snowflake Savings: not run, needs the user's go-ahead",
         metadata: { success: true, needs_confirmation: true } as SavingsMetadata,
         output:
-          "Not run. The Snowflake savings check runs six queries over seven days of account usage; five use the connection's warehouse, " +
+          "Not run. The Snowflake savings check runs six queries that read up to eleven days of account usage, to report on seven; five use the connection's warehouse, " +
           "which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs. It stops after 9 minutes, cancelling any query still running. " +
           "Ask the user whether to run it; if they agree, call this tool again with confirm: true.",
       }
@@ -145,7 +146,7 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
         }
       }
       return {
-        title: `Snowflake Savings: ${headline(result.report)}`,
+        title: `Snowflake Savings: ${headline(result.report, Boolean(result.skipped?.length || result.limited?.length))}`,
         metadata: {
           success: true,
           window: result.window,

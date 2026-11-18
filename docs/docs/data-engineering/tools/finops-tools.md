@@ -211,7 +211,7 @@ Classic (sql warehouse, workspace 525779153077873) · Migrate Classic/Pro to Ser
 
 ## finops_snowflake_savings
 
-Check a Snowflake account for savings with Altimate's rules. It lists warehouses with `SHOW WAREHOUSES` and reads seven days of `SNOWFLAKE.ACCOUNT_USAGE` (`WAREHOUSE_METERING_HISTORY`, `WAREHOUSE_EVENTS_HISTORY`, `QUERY_HISTORY`), read-only, on the connection's warehouse. The role needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database, and sees only the warehouses it has access to; warehouses that billed credits but cannot be listed are named as not checked.
+Check a Snowflake account for savings with Altimate's rules. It lists warehouses with `SHOW WAREHOUSES` and, to report on seven days, reads up to eleven days of `SNOWFLAKE.ACCOUNT_USAGE` (`WAREHOUSE_METERING_HISTORY`, `WAREHOUSE_EVENTS_HISTORY`, `QUERY_HISTORY`), read-only, on the connection's warehouse. The role needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database, and sees only the warehouses it has access to; warehouses that billed credits but cannot be listed are named as not checked.
 
 - **High Idle Time:** on days a warehouse sat idle for more than 40% of its active time, the idle share of that day's cost.
 - **Downsize Warehouse:** nearly all queries finish within 5 seconds, or nearly all active periods last 80 seconds or less, so one size smaller would do.
