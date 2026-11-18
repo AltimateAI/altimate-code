@@ -199,7 +199,6 @@ describe("assessment mode on the packaged CLI", () => {
       (home) => rm(path.join(home, ".altimate", "machine-id")),
     )
     expect(JSON.parse(result.stdout).status).toBe("ok")
-    await new Promise((resolve) => setTimeout(resolve, 2_000))
     expect(await readdir(path.join(result.home, ".altimate"))).toEqual([])
     expect(result.hosts).toEqual([])
   }, 120_000)
