@@ -97,10 +97,16 @@ export function mergeColumns(
   // A Map: a column named `constructor` or `__proto__` is a column, not an inherited property.
   const merged = new Map<string, SqlLineageModelNode["columns"][string]>()
   // A manifest name is documentation spelling: it is case-sensitive only when the column is declared `quote: true`.
-  for (const [k, v] of Object.entries(manifestColumns ?? {}))
-    merged.set((v as { quote?: boolean }).quote === true ? columnKey(k, adapter) : k.toLowerCase(), { ...v })
+  const documented = new Set<string>()
+  for (const [k, v] of Object.entries(manifestColumns ?? {})) {
+    const quoted = (v as { quote?: boolean }).quote === true
+    if (!quoted) documented.add(k.toLowerCase())
+    merged.set(quoted ? columnKey(k, adapter) : k.toLowerCase(), { ...v })
+  }
   for (const c of fromDb ?? []) {
-    const key = columnKey(c.column, adapter)
+    let key = columnKey(c.column, adapter)
+    // The warehouse's own spelling of a column the manifest documents (DuckDB keeps `ID` for a column documented as `id`) is that column.
+    if (!merged.has(key) && documented.has(c.column.toLowerCase())) key = c.column.toLowerCase()
     const existing = merged.get(key)
     if (existing) {
       existing.data_type = (existing.data_type || c.dtype)?.toLowerCase()

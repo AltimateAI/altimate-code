@@ -169,6 +169,12 @@ describe("mergeColumns", () => {
     expect(merged.id.data_type).toBe("bigint")
   })
 
+  test("a column documented in lower case meets the warehouse's upper-case spelling of it on DuckDB", () => {
+    const merged = mergeColumns({ id: col("id") }, [{ column: "ID", dtype: "INTEGER" }], "duckdb")
+    expect(Object.keys(merged)).toEqual(["id"])
+    expect(merged.id.data_type).toBe("integer")
+  })
+
   test("a manifest column and the warehouse's name for it meet under one key in the adapter's case", () => {
     const merged = mergeColumns({ id: col("id") }, [{ column: "id", dtype: "BIGINT" }], "postgres")
     expect(Object.keys(merged)).toEqual(["id"])
