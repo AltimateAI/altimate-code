@@ -102,10 +102,10 @@ The plugin runs `altimate-code run` in your project for each task, with the mode
 
 #### dbt helpers beside the chat
 
-Plugin 1.8.0 or later brings five dbt Power User helpers into the Claude Code session when you work in a dbt project. They are on by default; to turn them off, set the plugin's `dbt_mods` option to false in `/config`. Anthropic's plugin directory serves a reviewed, pinned version of the plugin that does not yet include these helpers, so `claude plugin update altimate-code` will not bring them. Install from Altimate's marketplace instead, remove the directory copy, then start a new session:
+Plugin 1.8.0 or later brings five dbt Power User helpers into the Claude Code session when you work in a dbt project. They are on by default; to turn them off, set the plugin's `dbt_mods` option to false in `/config`. Anthropic's plugin directory serves a reviewed, pinned version of the plugin that does not yet include these helpers, so `claude plugin update altimate-code` will not bring them. Install from Altimate's marketplace instead, remove the other copy, then start a new session. Run `claude plugin list` to see which copy you have: the directory's copy is `altimate-code@anthropic-plugin-directory` (or `altimate-code@claude-plugins-official` when you added Anthropic's catalog from GitHub), and the uninstall below names it.
 
 ```bash
-claude plugin uninstall altimate-code@anthropic-plugin-directory
+claude plugin uninstall altimate-code@anthropic-plugin-directory   # or the ID `claude plugin list` shows
 claude plugin marketplace add AltimateAI/altimate-claude-plugin
 claude plugin install altimate-code@altimate-claude-plugin
 ```
@@ -117,26 +117,28 @@ The helpers run the project's own dbt (from a `.venv` or `venv` in the project f
 - **Compile and validate**
     - *When it runs:* after Claude edits or writes a model's `.sql` file. It checks the model again after Claude's next command when the model's file or its `schema.yml` changed, and after Claude edits another `.yml` or `.sql` file in the project (such as a macro). A macro changed by a command is not noticed. A model whose path has a space is skipped.
     - *What you see:* a line above the prompt: the model compiled and ran (`dbt show`, one row), with the columns `schema.yml` documents but the query did not return, and those it returned undocumented. When the query returns no row or `schema.yml` documents no columns, it says the columns were not compared. A problem opens the **dbt check** pane with every column, or dbt's error details.
-    - *What Claude is told:* with the result of its edit when the check finishes within 30 seconds (otherwise with Claude's next tool result), dbt's own error when the model does not compile or run, or the column differences. It is also told when the model was not checked or its columns were not compared, with the reason, and that the model compiled and ran with N columns. A recheck updates the line, a toast and the pane, but does not tell Claude.
+    - *What Claude is told:* with the result of its edit when the check finishes within 30 seconds (otherwise with Claude's next Bash, Read or edit tool result), dbt's own error when the model does not compile or run, or the column differences. It is also told when the model was not checked or its columns were not compared, with the reason, and that the model compiled and ran with N columns. A recheck updates the line, a toast and the pane, but does not tell Claude.
 - **Explain and Fix**
     - *When it runs:* after a `dbt run`, `test`, `build`, `seed`, `snapshot` or `retry` that Claude ran fails.
     - *What you see:* the failed nodes with **Explain** (asks Claude to explain the failures without changing files) and **Fix with Altimate Code** (runs `/altimate-code:altimate` on the failures).
-    - *What Claude is told:* when you press a button, up to five failures, each cut to six lines and 600 characters, read from the `target/run_results.json` the command wrote together with the errors dbt printed.
+    - *What Claude is told:* when you press a button, up to five failures, each cut to six lines and 600 characters, read from the `run_results.json` the command wrote together with the errors dbt printed.
     - *When it clears:* a newer failing run replaces it. Pressing **Explain** or **Fix with Altimate Code** keeps it. **Dismiss** and `/clear` clear it. A passing run of the same kind (or a build) clears it when it matches the failed one: the same selection or the whole project, the same flags (target, vars, `--full-refresh`, …), the same folder and the same environment variables set in the command. Flags that change only the output or the concurrency, such as `--log-format` or `--threads`, are ignored (a passing `dbt retry` never clears it; a compound command is cleared only by the same command or a whole-project build, and a killed run or output that cannot be split per command, such as output piped through `tail` with its headers cut off, clears nothing). A band that vanished does not mean the run was fixed.
 - **Query results pane**
     - *When it runs:* after Claude runs `dbt show`, or when you run `/dbt-show <model>` or `/dbt-show select …`.
-    - *What you see:* the rows as a table beside the chat, resizable with **Min / Default / Max** (Default is the widest dock beside the chat; Min is a quarter of the terminal width; Max is as wide as Default and taller above the prompt; a size you drag yourself wins), with **Re-run** (Claude's own command with the same query and flags, with JSON output, the same folder and the dbt executable Claude ran when it named a path that still exists (a bare `dbt` runs as the project's own), unless it depended on its shell, such as a variable or `~`; or your query), **Bookmark**, **Clear history**, the history and your bookmarks (kept on this machine across sessions). Several different `dbt show`s in one command save no preview.
+    - *What you see:* the rows as a table beside the chat, resizable with **Min / Default / Max** (Default is the widest dock beside the chat; Min is a quarter of the terminal width; Max is as wide as Default and taller above the prompt; a size you drag yourself wins), with **Re-run** (Claude's own command with the same query and flags, with JSON output, the same folder and the dbt executable Claude ran when it named a path that still exists (a bare `dbt` runs as the project's own), unless it depended on its shell, such as a variable or `~`; or your query), **Bookmark**, **Clear history**, the history and your bookmarks (kept on this machine across sessions: the last 20 queries and at most 50 bookmarks, each with up to 50 rows and cells cut at 200 characters; **Clear history** keeps bookmarks and their rows). Several different `dbt show`s in one command save no preview.
     - *What Claude is told:* nothing beyond the output of Claude's own `dbt show`, which is already in the conversation. Rows from `/dbt-show` stay out of the conversation.
 - **Model context**
     - *When it runs:* when Claude reads a model's `.sql` file.
     - *What you see:* a toast with the counts.
-    - *What Claude is told:* the model's materialization, columns with their types, descriptions and tests, its parents and children, and how deep it sits upstream and downstream, from `target/manifest.json`.
+    - *What Claude is told:* the model's materialization, columns with their types, descriptions and tests, its parents and children, and how deep it sits upstream and downstream, from `target/manifest.json`, for the first 40 columns (a wider model gets a count of the rest).
 - **Environment doctor**
     - *When it runs:* at the start of an interactive session (not under `claude -p` or the SDK), and with `/dbt-doctor`.
     - *What you see:* a toast at session start, also when every check passes. A line above the prompt when something is wrong: dbt, Python, the profile's adapter, `dbt deps`, and a manifest older than the files it was built from, with **Run dbt parse** or **Run dbt deps**. `/dbt-doctor` opens a dbt doctor pane.
     - *What Claude is told:* the checks, with the first prompt after they finish.
 
 Compile and validate runs one query on your warehouse after each model edit (a `dbt ls`, which runs no query, comes first when the manifest does not name the model; a second `dbt show` runs only when the first showed nothing and the manifest names the model differently). Rechecks run it again. That costs money on a warehouse that bills by bytes scanned or wakes a suspended one.
+
+The helpers read `manifest.json` and `run_results.json` from the `target-path` that `dbt_project.yml` names (`target/` by default). A path set by `DBT_TARGET_PATH` or a command's `--target-path` is not followed.
 
 ### The `/altimate` command, without the plugin
 
