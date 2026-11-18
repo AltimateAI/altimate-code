@@ -15,7 +15,7 @@ type SavingsMetadata = {
   jobs_checked?: number
   skipped?: { check: string; reason: string }[]
   limited?: string[]
-  warehouses?: { id: string; name: string; type: string; size: string | null; window_cost: number }[]
+  warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]
   report?: DatabricksSavingsReport
   error?: string
 }
@@ -91,7 +91,7 @@ export function formatSavings(result: DatabricksSavingsResult): string {
   )
   for (const finding of report.findings) {
     lines.push(
-      `${finding.resource_name} (${finding.resource_type.replace("_", " ")}) · ${finding.title} · ${range(finding.monthly_min, finding.monthly_max)} a month (${finding.severity})`,
+      `${finding.resource_name} (${finding.resource_type.replace("_", " ")}${finding.workspace_id ? `, workspace ${finding.workspace_id}` : ""}) · ${finding.title} · ${range(finding.monthly_min, finding.monthly_max)} a month (${finding.severity})`,
     )
     for (const line of evidenceLines(finding)) lines.push(`  ${line}`)
   }
@@ -107,7 +107,7 @@ export function formatSavings(result: DatabricksSavingsResult): string {
 
 export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_savings", {
   description:
-    "Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. Read-only queries over seven days of system tables (billing, compute, query history, jobs) on the connection's SQL warehouse, which Databricks starts if it is stopped. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes.",
+    "Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes.",
   parameters: z.object({
     warehouse: z
       .string()

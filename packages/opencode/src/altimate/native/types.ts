@@ -651,6 +651,8 @@ export interface DatabricksSavingsFinding {
   resource_type: "sql_warehouse" | "cluster" | "job"
   resource_id: string
   resource_name: string
+  /** The workspace the resource is in. */
+  workspace_id?: string | null
   severity: "critical" | "high" | "medium" | "low"
   daily_min: number
   daily_max: number
@@ -692,7 +694,7 @@ export interface DatabricksSavingsResult {
   /** What a query read only the first 10,000 of, e.g. `jobs`. */
   limited?: string[]
   /** Each SQL warehouse as it is now, and its cost over the window. */
-  warehouses?: { id: string; name: string; type: string; size: string | null; window_cost: number }[]
+  warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]
   report?: DatabricksSavingsReport
   error?: string
 }

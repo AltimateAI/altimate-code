@@ -180,7 +180,7 @@ Recommendations:
 
 ## finops_databricks_savings
 
-Check a Databricks workspace for savings with Altimate's rules, on a Databricks connection whose `http_path` is a SQL warehouse (`/sql/1.0/warehouses/<id>`). It reads seven days of system tables (`system.billing`, `system.compute`, `system.query`, `system.lakeflow`) for the workspace that warehouse belongs to, on that warehouse, which Databricks starts if it is stopped. Nothing is written. Four checks:
+Check a Databricks workspace for savings with Altimate's rules, on a Databricks connection whose `http_path` is a SQL warehouse (`/sql/1.0/warehouses/<id>`). It reads seven days of system tables (`system.billing`, `system.compute`, `system.query`, `system.lakeflow`) on that warehouse, which Databricks starts if it is stopped. System tables cover every workspace of the account they can see, so one connection checks all of them; each finding names its workspace. Nothing is written. Four checks:
 
 - **Migrate Classic/Pro to Serverless:** a Classic or Pro warehouse that bills for time it sits idle.
 - **Over-Sized Warehouse:** a warehouse whose queries never use the cores it pays for.

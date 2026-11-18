@@ -154,13 +154,14 @@ describe("databricks savings handler", () => {
     expect(savingsWindow(Date.parse("2026-11-12T05:59:00Z"))).toEqual({ start: "2026-11-04", end: "2026-11-11" })
   })
 
-  test("the facts query is one read-only statement taking the window end and the warehouse id, in that order", () => {
+  test("the facts query is one read-only statement taking only the window end, over every workspace", () => {
     expect(DATABRICKS_WAREHOUSE_FACTS_SQL.trim()).toMatch(/^WITH\b/)
     expect(DATABRICKS_WAREHOUSE_FACTS_SQL).not.toMatch(/;\s*\S/)
     const markers = [...DATABRICKS_WAREHOUSE_FACTS_SQL.matchAll(/\?/g)].map((m) => m.index!)
-    expect(markers.length).toBe(2)
+    expect(markers.length).toBe(1)
     expect(DATABRICKS_WAREHOUSE_FACTS_SQL.slice(0, markers[0]!)).toContain("CAST(")
-    expect(DATABRICKS_WAREHOUSE_FACTS_SQL.slice(markers[0]!, markers[1]!)).toContain("WHERE workspace_id = (SELECT MAX(workspace_id)")
+    expect(DATABRICKS_WAREHOUSE_FACTS_SQL).not.toContain("workspace_id = (SELECT")
+    expect(DATABRICKS_WAREHOUSE_FACTS_SQL).toContain("SELECT inv.workspace_id, inv.warehouse_id")
   })
 
   test("database values are coerced to the numbers core reads; no serverless price stays absent", () => {
@@ -241,15 +242,21 @@ describe("cluster and job findings", () => {
     expect(result.output).toContain("Auto-termination off; $700.00 billed outside job runs over the window")
   })
 
-  test("the cluster and job queries each take the window end and the warehouse id, in that order", () => {
+  test("the cluster and job queries each take only the window end, and key every resource by its workspace", () => {
     for (const sql of [DATABRICKS_CLUSTER_FACTS_SQL, DATABRICKS_JOB_FACTS_SQL]) {
       expect(sql.trim()).toMatch(/^WITH\b/)
       expect(sql).not.toMatch(/;\s*\S/)
       const markers = [...sql.matchAll(/\?/g)].map((m) => m.index!)
-      expect(markers.length).toBe(2)
+      expect(markers.length).toBe(1)
       expect(sql.slice(0, markers[0]!)).toContain("CAST(")
-      expect(sql.slice(markers[0]!, markers[1]!)).toContain("SELECT MAX(workspace_id) FROM system.compute.warehouses WHERE warehouse_id =")
+      expect(sql).not.toContain("workspace_id = (SELECT")
     }
+    expect(DATABRICKS_CLUSTER_FACTS_SQL).toContain("PARTITION BY workspace_id, cluster_id")
+    // Job ids repeat across workspaces: every job key pairs the workspace with the id.
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("PARTITION BY workspace_id, job_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY workspace_id, job_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN inv ON inv.workspace_id = jb.workspace_id AND inv.job_id = jb.job_id")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("LEFT JOIN jobs_rate jr ON jr.workspace_id = jb.workspace_id")
   })
 
   test("cluster and job rows are coerced to the facts core reads", () => {
@@ -272,8 +279,8 @@ describe("cluster and job findings", () => {
 })
 
 describe("databricks savings handler over a stubbed connection", () => {
-  const WAREHOUSE_ROW = { warehouse_id: "abc123", warehouse_name: "BI", warehouse_type: "PRO", warehouse_size: "SMALL", total_cost: 27.5 }
-  const JOB_ROW = { job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 9 }
+  const WAREHOUSE_ROW = { workspace_id: "111", warehouse_id: "abc123", warehouse_name: "BI", warehouse_type: "PRO", warehouse_size: "SMALL", total_cost: 27.5 }
+  const JOB_ROW = { workspace_id: "222", job_id: "j1", job_name: "nightly", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME", run_count: 9 }
   const table = (row: Record<string, unknown>, truncated = false) => ({ columns: Object.keys(row), rows: [Object.values(row)], truncated })
   let calls: { sql: string; limit: number; binds: unknown[] }[]
   let sent: any
@@ -312,13 +319,14 @@ describe("databricks savings handler over a stubbed connection", () => {
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([{ check: "Idle Cluster Detection", reason: "[INSUFFICIENT_PERMISSIONS] system.compute.node_timeline" }])
     expect([result.warehouses_checked, result.clusters_checked, result.jobs_checked]).toEqual([1, 0, 1])
-    // Every query takes the window end, then the warehouse the connection runs on.
+    // Every query takes only the window end: it reads every workspace the system tables show.
     expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL, DATABRICKS_CLUSTER_FACTS_SQL, DATABRICKS_JOB_FACTS_SQL])
-    for (const one of calls) expect(one.binds).toEqual(["2026-11-18", "abc123"])
+    for (const one of calls) expect(one.binds).toEqual(["2026-11-18"])
     expect(sent.lookback_days).toBe(7)
-    expect(sent.warehouses[0]).toMatchObject({ warehouse_id: "abc123", warehouse_size: "SMALL", total_cost: 27.5 })
+    expect(sent.warehouses[0]).toMatchObject({ workspace_id: "111", warehouse_id: "abc123", warehouse_size: "SMALL", total_cost: 27.5 })
+    expect(result.warehouses?.[0]).toMatchObject({ id: "abc123", workspace_id: "111" })
     expect(sent.clusters).toEqual([])
-    expect(sent.jobs[0]).toMatchObject({ job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME" })
+    expect(sent.jobs[0]).toMatchObject({ workspace_id: "222", job_id: "j1", trigger_type: null, listed_in_job_inventory: true, run_trigger_type: "ONE_TIME" })
     expect(result.limited).toEqual([])
   })
 
@@ -360,5 +368,32 @@ describe("databricks savings handler over a stubbed connection", () => {
     spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.warehouse).toBe("dbx")
+  })
+})
+
+describe("every workspace", () => {
+  test("a finding names its workspace in the output", () => {
+    const report = JSON.parse(JSON.stringify(REPORT))
+    report.report.findings[0].workspace_id = "2056943136844690"
+    expect(formatSavings(report)).toContain("(sql warehouse, workspace 2056943136844690) · ")
+  })
+
+  test("a connection through the older /sql/1.0/endpoints/<id> path runs the check", async () => {
+    Registry.setConfigs({
+      dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/endpoints/abc123", access_token: "x" },
+    })
+    const spy = spyOn(Registry, "get").mockResolvedValue({
+      execute: async () => ({ columns: ["warehouse_id"], rows: [["abc123"]], truncated: false }),
+    } as any)
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, () => ({
+      lookback_days: 7,
+      findings: [],
+      total: { monthly_min: 0, monthly_max: 0, resources: 0 },
+      what_if: [],
+    }))
+    spy.mockRestore()
+    Registry.reset()
+    expect(result.success).toBe(true)
+    expect(result.ran_on).toBe("abc123")
   })
 })

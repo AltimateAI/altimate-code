@@ -24,13 +24,13 @@ const WINDOW_END_MS = 6 * 3_600_000
 /** Rows read per query; a query that fills it says so in the result. */
 const ROW_LIMIT = 10_000
 
-/** A SQL warehouse's id in a connection's HTTP path (`/sql/1.0/warehouses/<id>`). */
-const WAREHOUSE_PATH = /\/warehouses\/([0-9a-z]+)\/?$/i
+/** A SQL warehouse's id in a connection's HTTP path (`/sql/1.0/warehouses/<id>`, or the older `/sql/1.0/endpoints/<id>`). */
+const WAREHOUSE_PATH = /\/(?:warehouses|endpoints)\/([0-9a-z]+)\/?$/i
 
 /**
- * Per-warehouse usage over the seven days to 06:00 UTC on the first parameter, for every
- * warehouse in the workspace of the warehouse named by the second. System tables hold
- * every workspace of the account, so each input is cut to that workspace's warehouses.
+ * Per-warehouse usage over the seven days to 06:00 UTC on the parameter, for every warehouse of
+ * every workspace the connection's system tables cover (as Altimate's pipeline reads them), each
+ * row naming its workspace.
  * Billing that landed after the window's end is left out, so a past window gives the
  * same facts on every run. Billing is read as Altimate's opportunity pipeline reads it for
  * these checks: whole usage days inside the window, ingested before its end day, which is
@@ -49,7 +49,6 @@ w AS (
 inv AS (
   SELECT workspace_id, warehouse_id, warehouse_name, warehouse_type, warehouse_size, delete_time
   FROM system.compute.warehouses
-  WHERE workspace_id = (SELECT MAX(workspace_id) FROM system.compute.warehouses WHERE warehouse_id = ?)
   QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, warehouse_id ORDER BY change_time DESC) = 1
 ),
 ev AS (
@@ -124,7 +123,7 @@ type_prices AS (
   SELECT MAX(CASE WHEN sku_name LIKE '%SERVERLESS_SQL_COMPUTE%' THEN price END) AS serverless_price_per_dbu
   FROM bill_rows
 )
-SELECT inv.warehouse_id, inv.warehouse_name, inv.warehouse_type, inv.warehouse_size,
+SELECT inv.workspace_id, inv.warehouse_id, inv.warehouse_name, inv.warehouse_type, inv.warehouse_size,
        COALESCE(up.wall_clock_uptime_sec, 0.0)          AS wall_clock_uptime_sec,
        COALESCE(up.cluster_weighted_uptime_sec, 0.0)    AS cluster_weighted_uptime_sec,
        CASE WHEN COALESCE(up.wall_clock_uptime_sec, 0) <= 0 THEN 0.0
@@ -149,9 +148,6 @@ WHERE inv.delete_time IS NULL
 ORDER BY inv.warehouse_name
 `
 
-/** The workspace of the warehouse the connection runs on: every input is cut to it. */
-const WORKSPACE_OF_WAREHOUSE = "(SELECT MAX(workspace_id) FROM system.compute.warehouses WHERE warehouse_id = ?)"
-
 /** List price of a usage row: the price in force when the usage started. */
 const LIST_PRICE_JOIN = `LEFT JOIN system.billing.list_prices lp
     ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
@@ -159,135 +155,126 @@ const LIST_PRICE_JOIN = `LEFT JOIN system.billing.list_prices lp
    AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)`
 
 /**
- * Per all-purpose cluster (created from the UI or API, not deleted) of the workspace: worker node
- * minutes, active days, idle worker minutes (CPU under 5%, CPU wait under 5%, under 10 MB of network
- * a minute), CPU averages, and the all-purpose cost billed outside job runs. Seven full days before
- * the window end. Parameters: the window end, then the warehouse id.
+ * Per all-purpose cluster (created from the UI or API, not deleted) of every workspace the
+ * connection's system tables cover: worker node minutes, active days, idle worker minutes (CPU
+ * under 5%, CPU wait under 5%, under 10 MB of network a minute), CPU averages, and the
+ * all-purpose cost billed outside job runs. Seven full days before the window end, the parameter.
  */
 export const DATABRICKS_CLUSTER_FACTS_SQL = `
 WITH p AS (
   SELECT CAST(? AS DATE) AS we_date
 ),
-ws AS (
-  SELECT ${WORKSPACE_OF_WAREHOUSE} AS workspace_id
-),
 inv AS (
-  SELECT cluster_id, cluster_name, auto_termination_minutes, cluster_source, delete_time
+  SELECT workspace_id, cluster_id, cluster_name, auto_termination_minutes, cluster_source, delete_time
   FROM system.compute.clusters
-  WHERE workspace_id = (SELECT workspace_id FROM ws)
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY change_time DESC) = 1
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) = 1
 ),
 nodes AS (
-  SELECT n.cluster_id, n.start_time, n.end_time,
+  SELECT n.workspace_id, n.cluster_id, n.start_time, n.end_time,
          COALESCE(n.cpu_user_percent, 0) + COALESCE(n.cpu_system_percent, 0)        AS cpu_active,
          COALESCE(n.cpu_wait_percent, 0)                                              AS cpu_wait,
          COALESCE(n.network_sent_bytes, 0) + COALESCE(n.network_received_bytes, 0)    AS network_bytes
   FROM system.compute.node_timeline n CROSS JOIN p
-  WHERE n.workspace_id = (SELECT workspace_id FROM ws)
-    AND n.start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND n.start_time < CAST(p.we_date AS TIMESTAMP)
+  WHERE n.start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND n.start_time < CAST(p.we_date AS TIMESTAMP)
     AND NOT COALESCE(n.driver, false)
     AND n.cluster_id IN (SELECT cluster_id FROM inv)
 ),
 util AS (
-  SELECT cluster_id,
+  SELECT workspace_id, cluster_id,
          COUNT(DISTINCT CAST(start_time AS DATE))                                       AS active_util_days,
          SUM(timestampdiff(MINUTE, start_time, end_time))                              AS total_node_minutes,
          COUNT(*)                                                                      AS total_worker_minutes,
          COUNT_IF(cpu_active < 5.0 AND cpu_wait < 5.0 AND network_bytes < 10485760)    AS idle_node_minutes,
          AVG(cpu_active)                                                               AS avg_cpu_active_pct,
          MAX(cpu_active)                                                               AS peak_cpu_active_pct
-  FROM nodes GROUP BY cluster_id
+  FROM nodes GROUP BY workspace_id, cluster_id
 ),
 bill AS (
-  SELECT u.usage_metadata.cluster_id AS cluster_id, SUM(u.usage_quantity * lp.pricing.default) AS total_cost
+  SELECT u.workspace_id, u.usage_metadata.cluster_id AS cluster_id, SUM(u.usage_quantity * lp.pricing.default) AS total_cost
   FROM system.billing.usage u CROSS JOIN p
   ${LIST_PRICE_JOIN}
-  WHERE u.workspace_id = (SELECT workspace_id FROM ws)
-    AND u.billing_origin_product = 'ALL_PURPOSE'
+  WHERE u.billing_origin_product = 'ALL_PURPOSE'
     AND u.usage_metadata.cluster_id IS NOT NULL AND u.usage_metadata.job_id IS NULL
     AND u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
-  GROUP BY u.usage_metadata.cluster_id
+  GROUP BY u.workspace_id, u.usage_metadata.cluster_id
 )
-SELECT inv.cluster_id, inv.cluster_name, inv.auto_termination_minutes,
+SELECT inv.workspace_id, inv.cluster_id, inv.cluster_name, inv.auto_termination_minutes,
        util.total_node_minutes, util.active_util_days, util.total_worker_minutes, util.idle_node_minutes,
        util.avg_cpu_active_pct, util.peak_cpu_active_pct,
        COALESCE(bill.total_cost, 0.0) AS total_cost
 FROM inv
-JOIN util ON util.cluster_id = inv.cluster_id
-LEFT JOIN bill ON bill.cluster_id = inv.cluster_id
+JOIN util ON util.workspace_id = inv.workspace_id AND util.cluster_id = inv.cluster_id
+LEFT JOIN bill ON bill.workspace_id = inv.workspace_id AND bill.cluster_id = inv.cluster_id
 WHERE inv.delete_time IS NULL AND inv.cluster_source IN ('UI', 'API')
-ORDER BY total_cost DESC, inv.cluster_name
+ORDER BY COALESCE(bill.total_cost, 0.0) DESC, inv.cluster_name
 `
 
 /**
- * Per job of the workspace that billed in the window: its cost on every product and on all-purpose
- * compute, its share of the all-purpose cluster it used most, its runs and trigger, and the
- * workspace's jobs-compute rate. Seven full days before the window end. Parameters: the window end,
- * then the warehouse id.
+ * Per job of every workspace the connection's system tables cover that billed in the window: its
+ * cost on every product and on all-purpose compute, its share of the all-purpose cluster it used
+ * most, its runs and trigger, and its workspace's jobs-compute rate. Job ids repeat across
+ * workspaces, so every key pairs the workspace with the id. Seven full days before the window end,
+ * the parameter.
  */
 export const DATABRICKS_JOB_FACTS_SQL = `
 WITH p AS (
   SELECT CAST(? AS DATE) AS we_date
 ),
-ws AS (
-  SELECT ${WORKSPACE_OF_WAREHOUSE} AS workspace_id
-),
 bill AS (
-  SELECT u.usage_metadata.job_id AS job_id, u.usage_metadata.cluster_id AS cluster_id, u.billing_origin_product AS product,
-         u.usage_quantity AS dbus, u.usage_quantity * lp.pricing.default AS cost
+  SELECT u.workspace_id, u.usage_metadata.job_id AS job_id, u.usage_metadata.cluster_id AS cluster_id,
+         u.billing_origin_product AS product, u.usage_quantity AS dbus, u.usage_quantity * lp.pricing.default AS cost
   FROM system.billing.usage u CROSS JOIN p
   ${LIST_PRICE_JOIN}
-  WHERE u.workspace_id = (SELECT workspace_id FROM ws)
-    AND u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
+  WHERE u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
 ),
 job_bill AS (
-  SELECT job_id,
+  SELECT workspace_id, job_id,
          SUM(COALESCE(cost, 0))                                                AS job_total_cost,
          SUM(CASE WHEN product = 'ALL_PURPOSE' THEN COALESCE(cost, 0) ELSE 0 END) AS job_all_purpose_cost,
          SUM(CASE WHEN product = 'ALL_PURPOSE' THEN dbus ELSE 0 END)             AS job_all_purpose_dbus
-  FROM bill WHERE job_id IS NOT NULL AND job_id <> '' GROUP BY job_id
+  FROM bill WHERE job_id IS NOT NULL AND job_id <> '' GROUP BY workspace_id, job_id
 ),
 job_cluster AS (
-  SELECT job_id, cluster_id, SUM(COALESCE(cost, 0)) AS cost
+  SELECT workspace_id, job_id, cluster_id, SUM(COALESCE(cost, 0)) AS cost
   FROM bill WHERE product = 'ALL_PURPOSE' AND job_id IS NOT NULL AND job_id <> '' AND cluster_id IS NOT NULL
-  GROUP BY job_id, cluster_id
+  GROUP BY workspace_id, job_id, cluster_id
 ),
 main_cluster AS (
-  SELECT job_id, cluster_id, cost FROM job_cluster
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY cost DESC, cluster_id) = 1
+  SELECT workspace_id, job_id, cluster_id, cost FROM job_cluster
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY cost DESC, cluster_id) = 1
 ),
 cluster_total AS (
-  SELECT cluster_id, SUM(COALESCE(cost, 0)) AS cost
-  FROM bill WHERE product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL GROUP BY cluster_id
+  SELECT workspace_id, cluster_id, SUM(COALESCE(cost, 0)) AS cost
+  FROM bill WHERE product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL GROUP BY workspace_id, cluster_id
 ),
 jobs_rate AS (
-  SELECT CASE WHEN SUM(dbus) > 0 THEN SUM(COALESCE(cost, 0)) / SUM(dbus) END AS rate FROM bill WHERE product = 'JOBS'
+  SELECT workspace_id, CASE WHEN SUM(dbus) > 0 THEN SUM(COALESCE(cost, 0)) / SUM(dbus) END AS rate
+  FROM bill WHERE product = 'JOBS' GROUP BY workspace_id
 ),
 runs AS (
-  SELECT r.job_id, COUNT(DISTINCT r.run_id) AS run_count, MAX(r.trigger_type) AS run_trigger
+  SELECT r.workspace_id, r.job_id, COUNT(DISTINCT r.run_id) AS run_count, MAX(r.trigger_type) AS run_trigger
   FROM system.lakeflow.job_run_timeline r CROSS JOIN p
-  WHERE r.workspace_id = (SELECT workspace_id FROM ws)
-    AND r.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND r.period_start_time < CAST(p.we_date AS TIMESTAMP)
-  GROUP BY r.job_id
+  WHERE r.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND r.period_start_time < CAST(p.we_date AS TIMESTAMP)
+  GROUP BY r.workspace_id, r.job_id
 ),
 inv AS (
-  SELECT job_id, name, trigger_type FROM system.lakeflow.jobs
-  WHERE workspace_id = (SELECT workspace_id FROM ws)
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY change_time DESC) = 1
+  SELECT workspace_id, job_id, name, trigger_type FROM system.lakeflow.jobs
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) = 1
 )
-SELECT jb.job_id, COALESCE(inv.name, 'job ' || jb.job_id) AS job_name,
+SELECT jb.workspace_id, jb.job_id, COALESCE(inv.name, 'job ' || jb.job_id) AS job_name,
        inv.trigger_type AS trigger_type,
        inv.job_id IS NOT NULL AS listed_in_job_inventory,
        runs.run_trigger AS run_trigger_type,
        COALESCE(runs.run_count, 0) AS run_count,
        jb.job_total_cost, jb.job_all_purpose_cost, jb.job_all_purpose_dbus,
        CASE WHEN mc.cluster_id IS NULL OR COALESCE(ct.cost, 0) <= 0 THEN 1.0 ELSE mc.cost / ct.cost END AS job_share_of_cluster,
-       (SELECT rate FROM jobs_rate) AS jobs_rate_per_dbu
+       jr.rate AS jobs_rate_per_dbu
 FROM job_bill jb
-LEFT JOIN runs ON runs.job_id = jb.job_id
-LEFT JOIN inv ON inv.job_id = jb.job_id
-LEFT JOIN main_cluster mc ON mc.job_id = jb.job_id
-LEFT JOIN cluster_total ct ON ct.cluster_id = mc.cluster_id
+LEFT JOIN runs ON runs.workspace_id = jb.workspace_id AND runs.job_id = jb.job_id
+LEFT JOIN inv ON inv.workspace_id = jb.workspace_id AND inv.job_id = jb.job_id
+LEFT JOIN main_cluster mc ON mc.workspace_id = jb.workspace_id AND mc.job_id = jb.job_id
+LEFT JOIN cluster_total ct ON ct.workspace_id = mc.workspace_id AND ct.cluster_id = mc.cluster_id
+LEFT JOIN jobs_rate jr ON jr.workspace_id = jb.workspace_id
 WHERE jb.job_all_purpose_cost > 0
 ORDER BY jb.job_all_purpose_cost DESC
 `
@@ -319,6 +306,7 @@ export function toFacts(row: Record<string, unknown>) {
   const serverless = row.serverless_price_per_dbu
   return {
     warehouse_id: id,
+    workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
     warehouse_name: String(row.warehouse_name ?? id),
     warehouse_type: String(row.warehouse_type ?? ""),
     warehouse_size: row.warehouse_size == null ? null : String(row.warehouse_size),
@@ -345,6 +333,7 @@ export function toClusterFacts(row: Record<string, unknown>) {
   const autoTermination = row.auto_termination_minutes
   return {
     cluster_id: id,
+    workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
     cluster_name: String(row.cluster_name ?? id),
     auto_termination_minutes: autoTermination == null ? null : Math.max(0, Math.round(num(autoTermination))),
     total_node_minutes: num(row.total_node_minutes),
@@ -363,6 +352,7 @@ export function toJobFacts(row: Record<string, unknown>) {
   const rate = row.jobs_rate_per_dbu
   return {
     job_id: id,
+    workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
     job_name: String(row.job_name ?? `job ${id}`),
     trigger_type: row.trigger_type == null ? null : String(row.trigger_type),
     listed_in_job_inventory: [true, 1, "true"].includes(row.listed_in_job_inventory as never),
@@ -420,7 +410,7 @@ export async function databricksSavings(
 
   try {
     const connector = await Registry.get(resolved.warehouse)
-    const binds = [window.end, runsOn]
+    const binds = [window.end]
     // A query that fills the row limit reads only its first rows; the result names it.
     const limited: string[] = []
     const read = async (what: string, sql: string) => {
@@ -477,6 +467,7 @@ export async function databricksSavings(
       // What each warehouse is and costs now, so a later run can tell what changed.
       warehouses: warehouses.map((row) => ({
         id: String(row.warehouse_id ?? ""),
+        workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
         name: String(row.warehouse_name ?? row.warehouse_id ?? ""),
         type: String(row.warehouse_type ?? ""),
         size: row.warehouse_size == null ? null : String(row.warehouse_size),
