@@ -578,6 +578,15 @@ describe("YAML that stops parsing", () => {
   test("a file that already failed at base is not this change", () => {
     expect(yamlParseFindings(f(bad), bad, bad)).toHaveLength(0)
   })
+  test("an unterminated quote fails past the edit: anchors on the added line", () => {
+    const b = "models:\n  - name: orders\n    columns:\n      - name: total\n        description: Total in USD.\n      - name: ordered_at\n"
+    const h = b.replace("description: Total in USD.", 'description: "Total in USD.')
+    const file: ChangedFile = { path: "models/orders.yml", status: "modified", diff: '@@ -5 +5 @@\n-        description: Total in USD.\n+        description: "Total in USD.\n' }
+    const fs = yamlParseFindings(file, b, h)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine).toBe(5)
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe('        description: "Total in USD.')
+  })
   test("runs on a quickstart file the review otherwise doesn't classify, and lists it as reviewed", async () => {
     const env = await prReview([{ path: ".quickstart/quickstart.yml", head: bad, base }])
     expect(ruleIds(env.findings)).toContain("dbt-project-rules:yaml-parse-error")
@@ -641,6 +650,23 @@ describe("doc() reference with no docs block", () => {
   })
   test("no other doc() in the file resolves locally (docs may come from a package): silent", async () => {
     expect(await docRefFindings(yml("audience_id"), base, head("audience_id"), async () => false)).toHaveLength(0)
+  })
+  describe("a file whose only doc() is the new one", () => {
+    const solo = 'models:\n  - name: orders\n    description: "{{ doc(\'orders_grain\') }}"\n'
+    const added: ChangedFile = { path: "models/orders.yml", status: "added", diff: `@@ -0,0 +1,3 @@\n+${solo.trimEnd().split("\n").join("\n+")}\n` }
+    test("fires when the project keeps its own docs blocks", async () => {
+      const fs = await docRefFindings(added, undefined, solo, async () => false, async () => true)
+      expect(fs.map((x) => x.rule)).toEqual(["dbt-project-rules:doc-block-missing"])
+    })
+    test("silent when the project has no docs blocks (they may come from a package)", async () => {
+      expect(await docRefFindings(added, undefined, solo, async () => false, async () => false)).toHaveLength(0)
+      expect(await docRefFindings(added, undefined, solo, async () => false)).toHaveLength(0)
+    })
+    test("other doc() names that don't resolve still keep it silent", async () => {
+      const two = solo + '  - name: items\n    description: "{{ doc(\'items_grain\') }}"\n'
+      const both: ChangedFile = { path: "models/orders.yml", status: "modified", diff: `@@ -3,0 +4,2 @@\n+  - name: items\n+    description: "{{ doc('items_grain') }}"\n` }
+      expect(await docRefFindings(both, solo, two, async () => false, async () => true)).toHaveLength(0)
+    })
   })
   test("end to end: the project's .md files are searched for the block", async () => {
     const searched: string[] = []
@@ -733,6 +759,12 @@ describe("SQL text concatenated in Jinja without a space", () => {
   test("a SQL literal ending in a word right at `~`", () => {
     expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(true)
     expect(seam("{{ 'select id from' ~ relation }}")).toBe(true)
+  })
+  test("double-quoted strings", () => {
+    expect(seam('{% set q = "select " ~ cols ~ "from " ~ rel %}')).toBe(true)
+    expect(seam('{% set q = "select " ~ cols ~ " from " ~ rel %}')).toBe(false)
+    expect(seam('{{ elementary.debug_log("column_snapshot_query - \\n" ~ column_snapshot_query) }}')).toBe(false)
+    expect(seam("{{ log('query: \\n' ~ q) }}")).toBe(false)
   })
   test("twin: the space is inside the string", () => {
     expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id ' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(false)
