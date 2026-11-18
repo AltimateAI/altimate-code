@@ -986,7 +986,9 @@ export function redundantJoinPredicates(sql: string): string[] {
     } else if (rel) i += rel[0].length
     const tail = /^\s+(?:as\s+)?(\w+)\s+on\b/i.exec(s.slice(i)) ?? /^\s+on\b/i.exec(s.slice(i))
     if (!tail) {
-      joins.push({ preds: [], start: m.index!, end: i, inner, outer })
+      // A join with no ON (`cross join params as p`): step over its alias so the chain continues.
+      const bare = /^\s+(?:as\s+)?(?!(?:natural|inner|left|right|full|cross|outer|join|lateral|on|using|where|group|order|qualify|having|union|limit|window|select|from)\b)\w+\b/i.exec(s.slice(i))
+      joins.push({ preds: [], start: m.index!, end: i + (bare?.[0].length ?? 0), inner, outer })
       continue
     }
     const fallback = rel?.[1].split(".").pop()?.toLowerCase()
