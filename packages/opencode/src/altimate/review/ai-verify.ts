@@ -41,6 +41,8 @@ export interface AiVerifyEvidence {
   prBody?: string
   /** Head-side line numbers each changed file adds (see `addedLinesByFile`). */
   addedLines: Map<string, Set<number>>
+  /** Every file the PR changes, repo-relative, including tests and CI outside the dbt project. */
+  prFiles?: string[]
 }
 
 export type Decision = "keep" | "discard" | "summary"
@@ -382,12 +384,27 @@ export function hunkAround(diff: string | undefined, line?: number): string {
     : text || "(the line is outside the diff)"
 }
 
+/** Most PR file paths listed in a verifier message. */
+const PR_FILES_MAX = 40
+
 /** The user message for one batch: the PR title and each candidate with its hunk. Not the whole file, not the grounding. */
 export function buildVerifyMessage(
   prTitle: string | undefined,
   candidates: Array<{ id: string; finding: Finding; diff?: string }>,
+  prFiles: string[] = [],
 ): string {
-  const parts = [`PR: ${(prTitle ?? "(untitled)").slice(0, 200)}`, "", "Candidates:"]
+  const parts = [`PR: ${(prTitle ?? "(untitled)").slice(0, 200)}`]
+  // A test-coverage claim is checked against the PR's own test files, which may sit outside the dbt project.
+  if (prFiles.length && candidates.some((c) => c.finding.category === "test_coverage")) {
+    const shown = prFiles.slice(0, PR_FILES_MAX)
+    parts.push(
+      "",
+      "Files this PR changes (read_file can open any of them):",
+      ...shown.map((p) => `- ${p}`),
+      ...(prFiles.length > shown.length ? [`- … and ${prFiles.length - shown.length} more`] : []),
+    )
+  }
+  parts.push("", "Candidates:")
   for (const { id, finding: f, diff } of candidates) {
     parts.push(
       "",
@@ -784,6 +801,7 @@ export function verifierTools(
       ...ev.addedLines.keys(),
       ...graph.parents.map((p) => p.path),
       ...graph.downstream.map((d) => d.path),
+      ...(ev.prFiles ?? []),
     ]),
   ]
   /** A requested path inside the review scope, as the repo-relative path to read; a project-relative path resolves too. */
@@ -799,11 +817,11 @@ export function verifierTools(
     graph.parents.find((p) => p.name === name && (p.kind === "model" || p.kind === "snapshot"))?.path ??
     graph.downstream.find((d) => d.name === name)?.path
   const side = z.enum(["old", "new"]).optional().describe("old=base, new=head (default)")
-  const scope = NA("outside review scope (changed files, their dbt parents and direct downstream models only)")
+  const scope = NA("outside review scope (files the PR changes, their dbt parents and direct downstream models only)")
 
   return {
     read_file: {
-      description: "Up to 200 numbered lines of a changed file, its dbt parents or direct children.",
+      description: "Up to 200 numbered lines of any file the PR changes (tests and CI included), a dbt parent or direct child.",
       input: z.object({
         path: z.string(),
         side,
@@ -1176,6 +1194,7 @@ export async function runAiVerify(
           finding: input.findings[i],
           diff: fileByPath.get(input.findings[i].file)?.diff,
         })),
+        ev.prFiles,
       )
       return { idx, ids, message }
     })

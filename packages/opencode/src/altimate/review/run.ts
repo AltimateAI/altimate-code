@@ -465,6 +465,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       const specs = projectGrepSpecs(projectRootRel, dirs, glob)
       return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
+    prFiles: collected.map((f) => f.path),
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
