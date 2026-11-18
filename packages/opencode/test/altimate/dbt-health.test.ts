@@ -466,6 +466,33 @@ describe("dbt_health", () => {
     }
   })
 
+  test("a huge parse error is capped in output and in metadata.error", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {
+        throw new Error("boom ".repeat(100_000))
+      },
+      parseManifest: async () => parsed,
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output.length).toBeLessThan(2100)
+    expect(String(result.metadata.error).length).toBeLessThan(2100)
+  })
+
+  test("a listed insight line is capped, so a huge message cannot double the result", async () => {
+    python.stdout =
+      JSON.stringify({
+        model_insights: { "model.shop.m": [{ unique_id: "model.shop.m", original_file_path: "models/m.sql", severity: "WARNING", insight: { name: "Big", message: "x".repeat(100_000), recommendation: "" } }] },
+        nodes: {},
+        project: "shop",
+      }) + "\n"
+    const result = await run()
+    expect(result.metadata.success).toBe(true)
+    expect(result.output.length).toBeLessThan(1000)
+  })
+
   test("the byte limit counts UTF-8 bytes, not characters", async () => {
     const cjk = "漢".repeat(20_000)
     const many = Object.fromEntries(

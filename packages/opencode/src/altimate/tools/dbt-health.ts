@@ -255,6 +255,10 @@ export function flattenInsights(modelInsights: unknown, root = "", nodes: Record
   return out
 }
 
+const FAILURE_CHARS = 2000
+const LINE_CHARS = 500
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}… (${text.length - max} more characters)` : text)
+
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
   return { title: `dbt_health: ${title}`, metadata: { success: false, insights: [], error: output, ...extra }, output }
 }
@@ -296,7 +300,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         if (errors.length > 0)
           return failure(
             "parse failed",
-            `dbt_health can't run: dbt couldn't parse the project: ${errors.map((d: { message?: string }) => d?.message).filter(Boolean).join("; ") || "the manifest rebuild failed"}`,
+            `dbt_health can't run: dbt couldn't parse the project: ${clip(errors.map((d: { message?: string }) => d?.message).filter(Boolean).join("; ") || "the manifest rebuild failed", FAILURE_CHARS)}`,
           )
         const parsed = await adapter.parseManifest()
         if (parsed?.stale) {
@@ -314,8 +318,8 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         const reason = e instanceof Error ? e.message : String(e)
         // The wait's own failures are not parse errors.
         return e instanceof Error && e.name === "RebuildWaitError"
-          ? failure("rebuild unavailable", `dbt_health can't run: ${reason}`)
-          : failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${reason}`)
+          ? failure("rebuild unavailable", `dbt_health can't run: ${clip(reason, FAILURE_CHARS)}`)
+          : failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${clip(reason, FAILURE_CHARS)}`)
       }
     }
     let manifest: string =
@@ -413,7 +417,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     }
     const insights = all.slice(0, keep)
     const truncated = keep < all.length
-    const lines = insights.slice(0, LISTED_LINES).map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
+    const lines = insights.slice(0, LISTED_LINES).map((i) => clip(`- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`, LINE_CHARS))
     return {
       title: `dbt_health: ${all.length} insight${all.length === 1 ? "" : "s"}`,
       // `truncated` is always set: the tool wrapper's own output truncation must not mark a complete insight list as cut.
