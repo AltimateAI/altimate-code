@@ -72,6 +72,8 @@ export interface ReviewPullRequestOptions {
   /** G2 — [EXPERIMENTAL] bypass the tier classifier with the supplied tier.
    *  Envelope carries `tierForced: true` when used. Debug / bench only. */
   forceTier?: "trivial" | "lite" | "full"
+  /** Every file the PR changes, when `changedFiles` is a subset of it (multi-project review). */
+  prFiles?: string[]
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -470,7 +472,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       const specs = projectGrepSpecs(projectRootRel, dirs, glob)
       return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
-    prFiles: collected.map((f) => f.path),
+    prFiles: opts.prFiles ?? collected.map((f) => f.path),
     prRenames,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
