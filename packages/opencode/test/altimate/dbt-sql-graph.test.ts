@@ -508,6 +508,8 @@ describe("buildSqlGraph", () => {
       { ...reply, details: { a: 1 } },
       { ...reply, tableEdges: [["a"]] },
       { ...reply, details: { a: {} } },
+      { ...reply, details: { a: { type: "cte", columns: "id" } } },
+      { ...reply, details: { a: { type: "cte", columns: ["id"] } } },
       { ...reply, details: {}, tableEdges: [["a", "__final_select__"]] },
     ]) {
       await expect(

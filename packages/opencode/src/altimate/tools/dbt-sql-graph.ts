@@ -297,7 +297,14 @@ export async function buildSqlGraph(
     !Array.isArray(response?.tableEdges) ||
     !isRecord(response.details) ||
     !response.tableEdges.every((e) => Array.isArray(e) && e.length === 2 && e.every((x) => typeof x === "string")) ||
-    !Object.values(response.details).every((d) => isRecord(d) && typeof (d as { type?: unknown }).type === "string") ||
+    !Object.values(response.details).every((d) => {
+      if (!isRecord(d) || typeof (d as { type?: unknown }).type !== "string") return false
+      const columns = (d as { columns?: unknown }).columns
+      return (
+        columns === undefined ||
+        (Array.isArray(columns) && columns.every((c) => isRecord(c) && typeof (c as { name?: unknown }).name === "string"))
+      )
+    }) ||
     !response.tableEdges.every((e) => e.every((x) => Object.hasOwn(response.details, x)))
   )
     throw new Error("the backend returned no SQL graph")
@@ -308,7 +315,7 @@ export async function buildSqlGraph(
   )
 }
 
-/** The graph as a list, one line per node: its type, its column count and its inputs. */
+/** The graph as a list: a line per node with its type, column count and inputs, then its column names and SQL beneath it. */
 export function formatSqlGraph(model: string, graph: SqlGraph): string {
   const inputs = new Map<string, string[]>()
   const nameOf = new Map(graph.nodes.map((n) => [n.id, n.name]))
