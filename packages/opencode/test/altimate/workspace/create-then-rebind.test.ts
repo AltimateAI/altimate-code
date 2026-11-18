@@ -405,6 +405,15 @@ describe("TUI: hidden-binding conflict toast", () => {
     })
   }
 
+  test("when the account answer has no email, the message still names the workspace", async () => {
+    routes = [HIDDEN_409, { match: /^\/users\/me$/, method: "GET", status: 200, body: { id: 1 } }]
+    const { api, toasts } = stubApi()
+    await bindOrRebindInline(api, IDENTIFIER, 29, undefined)
+    expect(toasts.find((t) => /already linked/.test(t.message))?.message).toBe(
+      hiddenBindingMessage({ message: "x", existing_datamate_id: 38 }),
+    )
+  })
+
   test("when the account lookup fails, the message still names the workspace", async () => {
     routes = [HIDDEN_409, { match: /^\/users\/me$/, method: "GET", status: 500, body: { detail: "boom" } }]
     const { api, toasts } = stubApi()
