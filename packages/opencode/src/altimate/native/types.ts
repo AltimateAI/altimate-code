@@ -699,6 +699,64 @@ export interface DatabricksSavingsResult {
   error?: string
 }
 
+// --- FinOps: Snowflake warehouse savings ---
+
+export interface SnowflakeSavingsParams {
+  /** Snowflake connection name. If omitted, the first Snowflake connection is used. */
+  warehouse?: string
+  /** Clock override for tests; the window ends on the UTC date six hours before this instant. */
+  now_ms?: number
+}
+
+/** One saving on one warehouse, as altimate-core reports it. Monthly figures are 0 when it has no dollar estimate. */
+export interface SnowflakeSavingsFinding {
+  check_id: "high_idle_time" | "downsize_warehouse" | "underutilized_cluster" | "frequent_restart_overcharge"
+  title: string
+  resource_type: "sql_warehouse"
+  resource_id: string
+  resource_name: string
+  workspace_id?: null
+  severity: "critical" | "high" | "medium" | "low"
+  daily_min: number
+  daily_max: number
+  monthly_min: number
+  monthly_max: number
+  evidence: Record<string, unknown> & {
+    kind: "high_idle_time" | "downsize_warehouse" | "underutilized_cluster" | "frequent_restart"
+  }
+}
+
+export interface SnowflakeSavingsReport {
+  lookback_days: number
+  price_per_credit: number
+  /** Largest monthly saving first; findings with no dollar estimate last. */
+  findings: SnowflakeSavingsFinding[]
+  /** Warehouses with a dollar saving, each counted once at its largest low and high end. */
+  total: { monthly_min: number; monthly_max: number; resources: number }
+  /** Always empty: no Snowflake rule prices alternatives. */
+  what_if: DatabricksWhatIf[]
+}
+
+export interface SnowflakeSavingsResult {
+  success: boolean
+  /** The days the facts cover: `start` inclusive, `end` exclusive (YYYY-MM-DD, UTC). */
+  window: { start: string; end: string }
+  /** The connection that ran the check, and the warehouse its configuration names. */
+  warehouse?: string
+  ran_on?: string
+  warehouses_checked?: number
+  /** The dollars one credit is priced at, and where that came from. */
+  price?: { per_credit: number; source: "rate_sheet" | "list_price"; as_of?: string }
+  /** Checks whose views the connection could not read, and billed warehouses it could not list. */
+  skipped?: { check: string; reason: string }[]
+  /** What a query read only the first rows of, e.g. `active periods`. */
+  limited?: string[]
+  /** Each warehouse as it is now, and its cost over the window. */
+  warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]
+  report?: SnowflakeSavingsReport
+  error?: string
+}
+
 // --- FinOps: Warehouse Advisor ---
 
 export interface WarehouseAdvisorParams {
@@ -1319,6 +1377,7 @@ export const BridgeMethods = {
   "finops.expensive_queries": {} as { params: ExpensiveQueriesParams; result: ExpensiveQueriesResult },
   "finops.warehouse_advice": {} as { params: WarehouseAdvisorParams; result: WarehouseAdvisorResult },
   "finops.databricks_savings": {} as { params: DatabricksSavingsParams; result: DatabricksSavingsResult },
+  "finops.snowflake_savings": {} as { params: SnowflakeSavingsParams; result: SnowflakeSavingsResult },
   "finops.unused_resources": {} as { params: UnusedResourcesParams; result: UnusedResourcesResult },
   "finops.role_grants": {} as { params: RoleGrantsParams; result: RoleGrantsResult },
   "finops.role_hierarchy": {} as { params: RoleHierarchyParams; result: RoleHierarchyResult },

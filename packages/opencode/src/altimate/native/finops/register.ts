@@ -7,6 +7,7 @@ import { getQueryHistory } from "./query-history"
 import { analyzeCredits, getExpensiveQueries } from "./credit-analyzer"
 import { adviseWarehouse } from "./warehouse-advisor"
 import { databricksSavings } from "./databricks-savings"
+import { snowflakeSavings } from "./snowflake-savings"
 import { findUnusedResources } from "./unused-resources"
 import { queryGrants, queryRoleHierarchy, queryUserRoles } from "./role-access"
 import type {
@@ -20,6 +21,8 @@ import type {
   WarehouseAdvisorResult,
   DatabricksSavingsParams,
   DatabricksSavingsResult,
+  SnowflakeSavingsParams,
+  SnowflakeSavingsResult,
   UnusedResourcesParams,
   UnusedResourcesResult,
   RoleGrantsParams,
@@ -51,6 +54,10 @@ register("finops.warehouse_advice", async (params: WarehouseAdvisorParams): Prom
 
 register("finops.databricks_savings", async (params: DatabricksSavingsParams, context): Promise<DatabricksSavingsResult> => {
   return databricksSavings(params, undefined, context)
+})
+
+register("finops.snowflake_savings", async (params: SnowflakeSavingsParams, context): Promise<SnowflakeSavingsResult> => {
+  return snowflakeSavings(params, undefined, context)
 })
 
 register("finops.unused_resources", async (params: UnusedResourcesParams): Promise<UnusedResourcesResult> => {

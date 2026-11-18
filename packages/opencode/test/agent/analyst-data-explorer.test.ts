@@ -424,6 +424,7 @@ const analystConfigEnabled = new Set([
   "finops_query_history",
   "finops_role_grants",
   "finops_role_hierarchy",
+  "finops_snowflake_savings",
   "finops_unused_resources",
   "finops_user_roles",
   "finops_warehouse_advice",

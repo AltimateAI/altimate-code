@@ -22,13 +22,13 @@ type SavingsMetadata = {
   needs_confirmation?: boolean
 }
 
-function dollars(value: number): string {
+export function dollars(value: number): string {
   return value >= 100
     ? `$${Math.round(value).toLocaleString("en-US")}`
     : `$${value.toFixed(2)}`
 }
 
-function range(low: number, high: number): string {
+export function range(low: number, high: number): string {
   return dollars(low) === dollars(high) ? dollars(high) : `${dollars(low)}–${dollars(high)}`
 }
 

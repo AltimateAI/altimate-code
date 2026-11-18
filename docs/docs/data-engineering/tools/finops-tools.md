@@ -206,6 +206,37 @@ Classic (sql warehouse, workspace 525779153077873) · Migrate Classic/Pro to Ser
   $29.29 in DBUs over the window; serverless would bill $4.44 for the busy time alone
 ```
 
+
+---
+
+## finops_snowflake_savings
+
+Check a Snowflake account for savings with Altimate's rules. It lists warehouses with `SHOW WAREHOUSES` and reads seven days of `SNOWFLAKE.ACCOUNT_USAGE` (`WAREHOUSE_METERING_HISTORY`, `WAREHOUSE_EVENTS_HISTORY`, `QUERY_HISTORY`), read-only, on the connection's warehouse. The role needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database, and sees only the warehouses it has access to; warehouses that billed credits but cannot be listed are named as not checked.
+
+- **High Idle Time:** on days a warehouse sat idle for more than 40% of its active time, the idle share of that day's cost.
+- **Downsize Warehouse:** nearly all queries finish within 5 seconds, or nearly all active periods last 80 seconds or less, so one size smaller would do.
+- **Underutilized Cluster:** the highest cluster of a multi-cluster warehouse is barely needed. It is reported without a dollar estimate.
+- **Frequent Restart Overcharge:** a warehouse that suspends and resumes within one billed minute pays the overlap twice.
+
+The tool measures each warehouse's usage; altimate-core decides what qualifies and what it saves. Credits are priced from `ORGANIZATION_USAGE.RATE_SHEET_DAILY` when the role can read it in dollars, otherwise at $3.00 (also for an account billed in another currency), and the output says which. Each warehouse is counted once in the total.
+
+**What it does not assess.** These are four of Altimate's warehouse checks. Storage, serverless features and individual query tuning are not covered. A warehouse that never suspended in the window has no completed active period, so it gets no idle finding. Days are UTC, and the window ends at 00:00 UTC on the latest day at least six hours past, because `ACCOUNT_USAGE` lags by up to that long.
+
+**Asks first, and stops long queries.** The check runs only when called with `confirm: true`; without it, the agent is told to ask you first, since a run can resume a suspended warehouse that then bills. It runs six queries and stops after 9 minutes, connecting included, cancelling any query still running on Snowflake (or sooner, at an `altimate run --time-budget` cutoff); stopping the session cancels the running query too.
+
+**Assessment mode.** `ALTIMATE_ASSESSMENT_MODE=true` works as it does for `finops_databricks_savings`: the run contacts your Snowflake account, and turns off the Snowflake driver's cloud-platform detection. If a result is large enough for Snowflake to deliver it from its own cloud storage, the driver fetches it from there too.
+
+```
+> finops_snowflake_savings --warehouse prod_sf --confirm
+
+Snowflake savings: 12 warehouses checked, the 7 days to 2026-11-18, at $3.00 a credit from the account's rate sheet.
+Total: $54.00–$90.00 a month on 1 warehouse, each counted once at its largest saving.
+
+BI_WH (warehouse) · Downsize Warehouse · $54.00–$90.00 a month (medium)
+  Large could be Medium: 95.0% of its active periods lasted 80 seconds or less
+  The saving is a share of $42.00 over the window
+```
+
 ---
 
 ## finops_role_grants

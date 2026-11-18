@@ -1,0 +1,707 @@
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { initTool } from "./tool-fixture"
+import * as Dispatcher from "../../src/altimate/native/dispatcher"
+import * as Registry from "../../src/altimate/native/connections/registry"
+import {
+  LIST_PRICE_PER_CREDIT,
+  ROW_LIMIT,
+  SAVINGS_RUN_LIMIT_MS,
+  SHOW_ROW_LIMIT,
+  SNOWFLAKE_METERING_FACTS_SQL,
+  SNOWFLAKE_PERIOD_FACTS_SQL,
+  SNOWFLAKE_QUERY_FACTS_SQL,
+  SNOWFLAKE_RATE_SQL,
+  SNOWFLAKE_RESTART_FACTS_SQL,
+  SNOWFLAKE_WAREHOUSES_SQL,
+  buildFacts,
+  creditPrice,
+  rulesEngine,
+  snowflakeSavings,
+} from "../../src/altimate/native/finops/snowflake-savings"
+import { FinopsSnowflakeSavingsTool, formatSavings } from "../../src/altimate/tools/finops-snowflake-savings"
+import type { SnowflakeSavingsResult } from "../../src/altimate/native/types"
+import { RunBudget } from "../../src/altimate/run-budget"
+
+function stubCtx(): any {
+  return { sessionID: "test", messageID: "test", agent: "test", abort: new AbortController().signal, metadata: () => {}, ask: async () => {} }
+}
+
+const finding = (check_id: string, evidence: Record<string, unknown>, monthly_min: number, monthly_max: number) => ({
+  check_id,
+  title: { high_idle_time: "High Idle Time", downsize_warehouse: "Downsize Warehouse", underutilized_cluster: "Underutilized Cluster", frequent_restart_overcharge: "Frequent Restart Overcharge" }[check_id],
+  resource_type: "sql_warehouse",
+  resource_id: "7",
+  resource_name: "BI_WH",
+  workspace_id: null,
+  severity: "medium",
+  daily_min: monthly_min / 30,
+  daily_max: monthly_max / 30,
+  monthly_min,
+  monthly_max,
+  evidence,
+})
+
+const REPORT = {
+  success: true,
+  window: { start: "2026-11-11", end: "2026-11-18" },
+  warehouse: "sf",
+  ran_on: "BI_WH",
+  warehouses_checked: 3,
+  price: { per_credit: 3, source: "rate_sheet", as_of: "2026-11-17" },
+  skipped: [],
+  limited: [],
+  warehouses: [{ id: "7", name: "BI_WH", type: "STANDARD", size: "Large", window_cost: 42 }],
+  report: {
+    lookback_days: 7,
+    price_per_credit: 3,
+    findings: [
+      finding("downsize_warehouse", { kind: "downsize_warehouse", current_size: "Large", recommended_size: "Medium", short_period_percent: 95, sub_five_second_percent: 91.5, query_count: 1200, cost_basis: 42, price_per_credit: 3 }, 54, 90),
+      finding("high_idle_time", { kind: "high_idle_time", idle_ratio: 0.6, idle_seconds: 7200, active_seconds: 12000, flagged_days: ["2026-11-11", "2026-11-12"], credits_used: 10, price_per_credit: 3, wasted_cost: 18 }, 54, 77.14),
+      finding("frequent_restart_overcharge", { kind: "frequent_restart", bounces: 12, double_billed_seconds: 300, credits_per_hour: 4, flagged_days: ["2026-11-11"], price_per_credit: 3 }, 4.29, 6.43),
+      finding("underutilized_cluster", { kind: "underutilized_cluster", cluster_number: 2, max_cluster_count: 2, recommended_max_cluster_count: 1, highest_idle_percent: 70, flagged_days: ["2026-11-13"] }, 0, 0),
+    ],
+    total: { monthly_min: 54, monthly_max: 90, resources: 1 },
+    what_if: [],
+  },
+} as unknown as SnowflakeSavingsResult
+
+describe("finops_snowflake_savings tool", () => {
+  beforeEach(() => Dispatcher.reset())
+
+  test("gives Claude the total, each finding with its evidence, and the whole report as metadata", async () => {
+    Dispatcher.register("finops.snowflake_savings" as any, async () => REPORT)
+    const tool = await initTool(FinopsSnowflakeSavingsTool)
+    const result = await tool.execute({ warehouse: "sf", confirm: true }, stubCtx())
+    expect(result.title).toBe("Snowflake Savings: $54.00–$90.00 a month on 1 warehouse")
+    expect(result.metadata.report).toEqual(REPORT.report)
+    expect(result.metadata.price).toEqual(REPORT.price)
+    expect(result.output).toContain("3 warehouses checked, the 7 days to 2026-11-18, at $3.00 a credit from the account's rate sheet")
+    expect(result.output).toContain("BI_WH (warehouse) · Downsize Warehouse · $54.00–$90.00 a month (medium)")
+    expect(result.output).toContain("Large could be Medium: 95.0% of its active periods lasted 80 seconds or less; 91.5% of 1,200 queries ran in 5 seconds or less")
+    expect(result.output).toContain("60% idle on 2 days above 40%: 2.0 of 3.3 active hours")
+    expect(result.output).toContain("12 suspend-and-resume bounces inside a billed minute on 1 day")
+    expect(result.output).toContain("Underutilized Cluster · no dollar estimate")
+    expect(result.output).toContain("Lowering the maximum to 1 cluster may add some queueing")
+  })
+
+  test("without the user's go-ahead nothing runs: the agent is told to ask first", async () => {
+    let ran = false
+    Dispatcher.register("finops.snowflake_savings" as any, async () => {
+      ran = true
+      return REPORT
+    })
+    const tool = await initTool(FinopsSnowflakeSavingsTool)
+    for (const args of [{}, { confirm: false }, { warehouse: "sf" }]) {
+      const result = await tool.execute(args, stubCtx())
+      expect(result.title).toBe("Snowflake Savings: not run, needs the user's go-ahead")
+      expect(result.metadata).toMatchObject({ success: true, needs_confirmation: true })
+      expect(result.metadata.report).toBeUndefined()
+      expect(result.output).toContain("Snowflake resumes if it is suspended")
+      expect(result.output).toContain("It stops after 9 minutes, cancelling any query still running.")
+      expect(result.output).toContain("Ask the user whether to run it; if they agree, call this tool again with confirm: true.")
+    }
+    expect(ran).toBe(false)
+    expect(tool.description).toEndWith("Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.")
+  })
+
+  test("the session's stop signal reaches the check", async () => {
+    let seen: unknown
+    Dispatcher.register("finops.snowflake_savings" as any, async (_params: unknown, context: unknown) => {
+      seen = context
+      return REPORT
+    })
+    const tool = await initTool(FinopsSnowflakeSavingsTool)
+    const ctx = stubCtx()
+    await tool.execute({ confirm: true }, ctx)
+    expect(seen).toEqual({ signal: ctx.abort, sessionID: "test" })
+  })
+
+  test("findings with no dollar figure are not presented as a saving", async () => {
+    const only = REPORT.report!.findings.slice(3)
+    Dispatcher.register("finops.snowflake_savings" as any, async () => ({
+      ...REPORT,
+      report: { ...REPORT.report, findings: only, total: { monthly_min: 0, monthly_max: 0, resources: 0 } },
+    }))
+    const tool = await initTool(FinopsSnowflakeSavingsTool)
+    const result = await tool.execute({ confirm: true }, stubCtx())
+    expect(result.title).toBe("Snowflake Savings: 1 finding, no dollar estimate")
+    expect(result.output).not.toContain("Total:")
+  })
+
+  test("no findings says so; list price and skipped checks are stated", () => {
+    const output = formatSavings({
+      ...REPORT,
+      price: { per_credit: 3, source: "list_price" },
+      skipped: [{ check: "Frequent Restart Overcharge", reason: "not authorized" }],
+      limited: ["active periods"],
+      report: { ...REPORT.report!, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 } },
+    })
+    expect(output).toContain("$3.00 a credit, list price (no dollar rate could be read from the account's rate sheet)")
+    expect(output).toContain("Not checked: Frequent Restart Overcharge (not authorized)")
+    expect(output).toContain("Only part of the active periods could be read; the rest was not checked.")
+    // Some checks did not run, so this is not a clean bill of health.
+    expect(output).toContain("No savings found in what could be checked.")
+    expect(formatSavings({ ...REPORT, warehouses_checked: 1, report: { ...REPORT.report!, findings: [] } })).toContain("1 warehouse checked")
+    expect(formatSavings({ ...REPORT, report: { ...REPORT.report!, findings: [] } })).toEndWith("No savings found.")
+  })
+
+  test("a run with nothing to report says so in its title, and a partial read qualifies the result", async () => {
+    const empty = { ...REPORT.report!, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 } }
+    Dispatcher.register("finops.snowflake_savings" as any, async () => ({ ...REPORT, report: empty }))
+    const tool = await initTool(FinopsSnowflakeSavingsTool)
+    expect((await tool.execute({ confirm: true }, stubCtx())).title).toBe("Snowflake Savings: no savings found")
+    expect(formatSavings({ ...REPORT, limited: ["metering"], report: empty })).toEndWith("No savings found in what could be checked.")
+  })
+
+  test("a failure is reported with its reason, not as no savings", async () => {
+    Dispatcher.register("finops.snowflake_savings" as any, async () => ({
+      success: false,
+      window: REPORT.window,
+      error: "SQL access control error: Insufficient privileges",
+    }))
+    const tool = await initTool(FinopsSnowflakeSavingsTool)
+    const result = await tool.execute({ confirm: true }, stubCtx())
+    expect(result.title).toBe("Snowflake Savings: FAILED")
+    expect(result.metadata.error).toContain("Insufficient privileges")
+    expect(result.output).not.toContain("No savings found")
+  })
+})
+
+describe("the fact queries", () => {
+  const all = [SNOWFLAKE_METERING_FACTS_SQL, SNOWFLAKE_PERIOD_FACTS_SQL, SNOWFLAKE_RESTART_FACTS_SQL, SNOWFLAKE_QUERY_FACTS_SQL, SNOWFLAKE_RATE_SQL]
+
+  test("each is one read-only statement whose only parameter is the window end", () => {
+    for (const sql of all) {
+      expect(sql.trim()).toMatch(/^(WITH|SELECT)\b/)
+      expect(sql).not.toMatch(/;\s*\S/)
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|CALL|GRANT)\b/)
+      expect(sql).toContain("?")
+    }
+    expect(SNOWFLAKE_WAREHOUSES_SQL).toBe("SHOW WAREHOUSES")
+  })
+
+  test("every timestamp is read as UTC, so a session time zone cannot move a day", () => {
+    for (const sql of all.slice(0, 4)) {
+      expect(sql).toContain("CONVERT_TIMEZONE('UTC'")
+      expect(sql).toContain("+0000")
+    }
+  })
+
+  test("dates are parsed and printed in a fixed format, whatever the session's settings", () => {
+    for (const sql of all) expect(sql).not.toMatch(/TO_TIMESTAMP_NTZ\(\?\)/)
+    for (const sql of all) {
+      for (const call of sql.match(/TO_VARCHAR\([^\n]*/g) ?? []) expect(call).toContain("'YYYY-MM-DD'")
+    }
+  })
+
+  test("the measured thresholds are the hosted rules'", () => {
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("COUNT_IF(active_seconds <= 80)")
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("DATEDIFF('millisecond', valid_from, valid_to) >= 1000")
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("DATEDIFF('second', valid_from, valid_to)")
+    expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("COUNT_IF(q.execution_ms <= 5000)")
+    expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("SUM(compute_credits) * 0.1")
+  })
+
+  test("the windows and filters are the ones the rules are defined on", () => {
+    // Seven days plus the hour the first idle window starts early; system warehouse 0 is left out.
+    expect(SNOWFLAKE_METERING_FACTS_SQL).toContain("DATEADD(hour, -169,")
+    expect(SNOWFLAKE_METERING_FACTS_SQL).toContain("WAREHOUSE_ID > 0")
+    expect(SNOWFLAKE_METERING_FACTS_SQL).toContain("TO_VARCHAR(DATEADD(hour, 1, hour_start)::DATE, 'YYYY-MM-DD'), NULL")
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("TO_VARCHAR(DATEADD(hour, 1, valid_from)::DATE, 'YYYY-MM-DD'), NULL")
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("EVENT_NAME IN ('RESUME_CLUSTER', 'SUSPEND_CLUSTER') AND EVENT_STATE = 'STARTED'")
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("q.cluster_number = p.cluster_number")
+    expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("q.et >= DATEADD(day, -7,")
+    expect(SNOWFLAKE_RATE_SQL).toContain("ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()")
+    expect(SNOWFLAKE_RATE_SQL).toContain("SERVICE_TYPE = 'WAREHOUSE_METERING' AND USAGE_TYPE = 'compute'")
+  })
+
+  test("a bounce is the full resume, suspend, resume sequence on distinct events", () => {
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("SELECT DISTINCT")
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain(
+      "event_name = 'RESUME_WAREHOUSE' AND n1 = 'WAREHOUSE_CONSISTENT' AND n2 = 'SUSPEND_WAREHOUSE'",
+    )
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("n3 = 'WAREHOUSE_CONSISTENT' AND n4 = 'RESUME_WAREHOUSE'")
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("DATEDIFF('second', ts, t4) < 60")
+  })
+})
+
+describe("building the facts", () => {
+  const show = (over: Record<string, unknown> = {}) => ({ name: "BI_WH", size: "Large", type: "STANDARD", min_cluster_count: 1, max_cluster_count: "2", ...over })
+
+  test("rows become one entry per listed warehouse, with database values coerced", () => {
+    const { facts, unlisted } = buildFacts({
+      warehouses: [show(), show({ name: "IDLE_WH", size: "X-Small", max_cluster_count: 1 })],
+      metering: [
+        { warehouse_id: 7, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: "2026-11-11", credits_used: "1.5" },
+        { warehouse_id: 7, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: "2026-11-12", credits_used: 0.5 },
+        { warehouse_id: 7, warehouse_name: "BI_WH", usage_day: null, idle_day: "2026-11-11", credits_used: 2 },
+      ],
+      periods: [
+        { warehouse_id: 7, warehouse_name: "BI_WH", cluster_number: 1, usage_day: "2026-11-11", idle_day: "2026-11-11", periods: 3, short_periods: "2", active_seconds: "100", idle_seconds: 40 },
+        { warehouse_id: 7, warehouse_name: "BI_WH", cluster_number: 2, usage_day: "2026-11-11", idle_day: "2026-11-11", periods: 1, short_periods: 1, active_seconds: 50, idle_seconds: 45 },
+      ],
+      restarts: [{ warehouse_id: 7, warehouse_name: "BI_WH", day: "2026-11-11", gap_seconds: 30, bounces: 4n }],
+      queries: [{ warehouse_id: 7, warehouse_name: "BI_WH", query_count: "10", sub_five_second_queries: 9, sub_five_second_credits: "0.25" }],
+    })
+    expect(unlisted).toEqual([])
+    expect(facts[0]).toEqual({
+      warehouse_id: "7",
+      warehouse_name: "BI_WH",
+      warehouse_size: "Large",
+      warehouse_type: "STANDARD",
+      min_cluster_count: 1,
+      max_cluster_count: 2,
+      query_count: 10,
+      sub_five_second_queries: 9,
+      sub_five_second_credits: 0.25,
+      usage_days: [{ day: "2026-11-11", credits_used: 2, active_periods: 4, short_periods: 3 }],
+      idle_days: [
+        { day: "2026-11-11", active_seconds: 150, idle_seconds: 85, credits_used: 3.5 },
+        { day: "2026-11-12", active_seconds: 0, idle_seconds: 0, credits_used: 0.5 },
+      ],
+      cluster_days: [
+        {
+          day: "2026-11-11",
+          clusters: [
+            { cluster_number: 1, idle_seconds: 40, busy_seconds: 60 },
+            { cluster_number: 2, idle_seconds: 45, busy_seconds: 5 },
+          ],
+        },
+      ],
+      restart_days: [{ day: "2026-11-11", gaps: [{ gap_seconds: 30, bounces: 4 }] }],
+    })
+    // A listed warehouse with no usage is still an entry, under its name.
+    expect(facts[1]).toMatchObject({ warehouse_id: "IDLE_WH", usage_days: [], query_count: 0 })
+  })
+
+  test("a billed day with no periods keeps its credits, and a day with periods but no billing has none", () => {
+    const { facts } = buildFacts({
+      warehouses: [show()],
+      metering: [{ warehouse_id: 7, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: null, credits_used: 1 }],
+      periods: [{ warehouse_id: 7, warehouse_name: "BI_WH", cluster_number: 1, usage_day: "2026-11-12", idle_day: null, periods: 1, short_periods: 0, active_seconds: 9, idle_seconds: 1 }],
+      restarts: [],
+      queries: [],
+    })
+    expect(facts[0]!.usage_days).toEqual([
+      { day: "2026-11-11", credits_used: 1, active_periods: 0, short_periods: 0 },
+      { day: "2026-11-12", credits_used: null, active_periods: 1, short_periods: 0 },
+    ])
+  })
+
+  test("a recreated warehouse keeps only its newest id's usage", () => {
+    const { facts } = buildFacts({
+      warehouses: [show()],
+      metering: [
+        { warehouse_id: 7, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: null, credits_used: 100 },
+        { warehouse_id: 9, warehouse_name: "BI_WH", usage_day: "2026-11-12", idle_day: null, credits_used: 1 },
+      ],
+      periods: [],
+      restarts: [],
+      queries: [],
+    })
+    expect(facts[0]!.warehouse_id).toBe("9")
+    expect(facts[0]!.usage_days).toEqual([{ day: "2026-11-12", credits_used: 1, active_periods: 0, short_periods: 0 }])
+  })
+
+  const meter = (id: number, name: string, day: string, credits = 1) => ({ warehouse_id: id, warehouse_name: name, usage_day: day, idle_day: null, credits_used: credits })
+  const none = { periods: [], restarts: [], queries: [] }
+
+  test("a renamed warehouse keeps its usage under its new name", () => {
+    const { facts, unlisted } = buildFacts({
+      warehouses: [show({ name: "ETL_NEW" })],
+      metering: [meter(7, "ETL", "2026-11-11", 1), meter(7, "ETL_NEW", "2026-11-12", 2)],
+      ...none,
+    })
+    expect(unlisted).toEqual([])
+    expect(facts[0]).toMatchObject({ warehouse_id: "7", warehouse_name: "ETL_NEW" })
+    expect(facts[0]!.usage_days.map((day) => day.credits_used)).toEqual([1, 2])
+  })
+
+  test("a rename's query and restart rows are added, not read from one name or repeated", () => {
+    const { facts } = buildFacts({
+      warehouses: [show({ name: "NEW" })],
+      metering: [meter(7, "AOLD", "2026-11-11"), meter(7, "NEW", "2026-11-12")],
+      periods: [],
+      restarts: [
+        { warehouse_id: 7, warehouse_name: "AOLD", day: "2026-11-12", gap_seconds: 30, bounces: 1 },
+        { warehouse_id: 7, warehouse_name: "NEW", day: "2026-11-12", gap_seconds: 30, bounces: 2 },
+      ],
+      queries: [
+        { warehouse_id: 7, warehouse_name: "AOLD", query_count: 10, sub_five_second_queries: 10, sub_five_second_credits: 1 },
+        { warehouse_id: 7, warehouse_name: "NEW", query_count: 990, sub_five_second_queries: 0, sub_five_second_credits: 0.5 },
+      ],
+    })
+    expect(facts[0]).toMatchObject({ query_count: 1000, sub_five_second_queries: 10, sub_five_second_credits: 1.5 })
+    expect(facts[0]!.restart_days).toEqual([{ day: "2026-11-12", gaps: [{ gap_seconds: 30, bounces: 3 }] }])
+  })
+
+  test("two warehouses that swapped names keep their own usage and distinct ids", () => {
+    const { facts } = buildFacts({
+      warehouses: [show({ name: "BLUE" }), show({ name: "GREEN" })],
+      metering: [meter(7, "BLUE", "2026-11-11", 1), meter(8, "GREEN", "2026-11-11", 2), meter(7, "GREEN", "2026-11-12", 3), meter(8, "BLUE", "2026-11-12", 4)],
+      ...none,
+    })
+    expect(facts.map((one) => one.warehouse_id)).toEqual(["8", "7"])
+    expect(facts[0]!.usage_days.map((day) => day.credits_used)).toEqual([2, 4])
+    expect(facts[1]!.usage_days.map((day) => day.credits_used)).toEqual([1, 3])
+  })
+
+  test("a new unused warehouse on a renamed one's old name gets none of its usage", () => {
+    const { facts } = buildFacts({
+      warehouses: [show({ name: "ETL" }), show({ name: "ETL_OLD" })],
+      metering: [meter(7, "ETL", "2026-11-11"), meter(7, "ETL_OLD", "2026-11-12")],
+      ...none,
+    })
+    expect(facts.map((one) => one.warehouse_id)).toEqual(["ETL", "7"])
+    expect(facts[0]!.usage_days).toEqual([])
+    expect(facts[1]!.usage_days.length).toBe(2)
+  })
+
+  test("usage that ended before the listed warehouse was created belongs to its predecessor", () => {
+    const rows = { metering: [meter(100, "BI_WH", "2026-11-12")], ...none }
+    const recreated = buildFacts({ warehouses: [show({ created_on: new Date("2026-11-15T08:00:00Z") })], ...rows })
+    expect(recreated.facts[0]).toMatchObject({ warehouse_id: "BI_WH", usage_days: [] })
+    expect(recreated.unlisted).toEqual([])
+    const older = buildFacts({ warehouses: [show({ created_on: "2026-01-01T00:00:00Z" })], ...rows })
+    expect(older.facts[0]!.warehouse_id).toBe("100")
+    // A creation time that cannot be read changes nothing.
+    expect(buildFacts({ warehouses: [show({ created_on: "not a time" })], ...rows }).facts[0]!.warehouse_id).toBe("100")
+  })
+
+  test("a warehouse that billed credits but cannot be listed is named", () => {
+    const { facts, unlisted } = buildFacts({
+      warehouses: [show()],
+      metering: [{ warehouse_id: 3, warehouse_name: "SECRET_WH", usage_day: "2026-11-11", idle_day: null, credits_used: 1 }],
+      periods: [],
+      restarts: [],
+      queries: [],
+    })
+    expect(unlisted).toEqual(["SECRET_WH"])
+    expect(facts.map((one) => one.warehouse_name)).toEqual(["BI_WH"])
+  })
+})
+
+describe("the price of a credit", () => {
+  test("is the rate sheet's in dollars, otherwise list price", () => {
+    expect(creditPrice({ effective_rate: "2.40", currency: "USD", rate_date: "2026-11-17" })).toEqual({ per_credit: 2.4, source: "rate_sheet", as_of: "2026-11-17" })
+    for (const rate of [undefined, { effective_rate: 2.4, currency: "EUR" }, { effective_rate: 0, currency: "USD" }]) {
+      expect(creditPrice(rate)).toEqual({ per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" })
+    }
+  })
+})
+
+describe("snowflake savings handler over a stubbed connection", () => {
+  const NOW = Date.parse("2026-11-18T10:00:00Z")
+  const table = (rows: Record<string, unknown>[], truncated = false) => ({
+    columns: Object.keys(rows[0] ?? {}),
+    rows: rows.map((row) => Object.values(row)),
+    truncated,
+  })
+  const SHOW = [{ name: "BI_WH", size: "Large", type: "STANDARD", min_cluster_count: 1, max_cluster_count: 1 }]
+  const METERING = [{ warehouse_id: 7, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: "2026-11-11", credits_used: 14 }]
+  const RATE = [{ effective_rate: 2.5, currency: "USD", rate_date: "2026-11-17" }]
+  const answers = (sql: string) =>
+    sql === SNOWFLAKE_WAREHOUSES_SQL ? table(SHOW) : sql === SNOWFLAKE_METERING_FACTS_SQL ? table(METERING) : sql === SNOWFLAKE_RATE_SQL ? table(RATE) : table([])
+  let calls: { sql: string; limit: number; binds: unknown[]; timeout?: number; clientTimeout?: number; signal?: AbortSignal }[]
+  let sent: any
+
+  beforeEach(() => {
+    calls = []
+    sent = undefined
+    Registry.setConfigs({ sf: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" } } as any)
+  })
+  afterEach(() => Registry.reset())
+
+  const rules = (input: string) => {
+    sent = JSON.parse(input)
+    return { lookback_days: 7, price_per_credit: sent.price_per_credit, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  }
+  const connect = (answer: (sql: string) => unknown) =>
+    spyOn(Registry, "get").mockResolvedValue({
+      execute: async (sql: string, limit: number, binds: unknown[], options?: { cancelAfterMs?: number; queryTimeoutMs?: number; signal?: AbortSignal }) => {
+        calls.push({ sql, limit, binds, timeout: options?.cancelAfterMs, clientTimeout: options?.queryTimeoutMs, signal: options?.signal })
+        return answer(sql)
+      },
+    } as any)
+
+  test("every query is bound to the window end and gets what is left of the 9 minutes; the facts and rate reach core", async () => {
+    const spy = connect(answers)
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.window).toEqual({ start: "2026-11-11", end: "2026-11-18" })
+    expect(calls.map((one) => one.sql)).toEqual([
+      SNOWFLAKE_WAREHOUSES_SQL,
+      SNOWFLAKE_RATE_SQL,
+      SNOWFLAKE_METERING_FACTS_SQL,
+      SNOWFLAKE_PERIOD_FACTS_SQL,
+      SNOWFLAKE_RESTART_FACTS_SQL,
+      SNOWFLAKE_QUERY_FACTS_SQL,
+    ])
+    for (const one of calls) {
+      expect(one.binds).toEqual(Array(one.sql.split("?").length - 1).fill("2026-11-18"))
+      expect(one.timeout).toBeGreaterThan(0)
+      expect(one.timeout).toBeLessThanOrEqual(SAVINGS_RUN_LIMIT_MS)
+      expect(one.clientTimeout).toBeUndefined()
+      // SHOW takes a LIMIT of at most 10,000, and the driver asks for one row more than this.
+      expect(one.limit).toBe(one.sql === SNOWFLAKE_WAREHOUSES_SQL ? SHOW_ROW_LIMIT : ROW_LIMIT)
+    }
+    expect(SHOW_ROW_LIMIT + 1).toBeLessThanOrEqual(10_000)
+    expect(SAVINGS_RUN_LIMIT_MS).toBe(540_000)
+    expect(sent).toMatchObject({ lookback_days: 7, price_per_credit: 2.5 })
+    expect(sent.warehouses[0]).toMatchObject({ warehouse_id: "7", warehouse_name: "BI_WH", warehouse_size: "Large" })
+    expect(result.price).toEqual({ per_credit: 2.5, source: "rate_sheet", as_of: "2026-11-17" })
+    expect(result.ran_on).toBe("BI_WH")
+    expect(result.warehouses).toEqual([{ id: "7", name: "BI_WH", type: "STANDARD", size: "Large", window_cost: 35 }])
+  })
+
+  test("a rate sheet the role cannot read falls back to the stated list price and skips nothing", async () => {
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_RATE_SQL) throw new Error("Object does not exist or not authorized")
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(sent.price_per_credit).toBe(LIST_PRICE_PER_CREDIT)
+    expect(result.price).toEqual({ per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" })
+    expect(result.skipped).toEqual([])
+  })
+
+  test("a view the role cannot read skips only the checks that need it", async () => {
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_RESTART_FACTS_SQL) throw new Error("not authorized\nstack")
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.skipped).toEqual([{ check: "Frequent Restart Overcharge", reason: "not authorized" }])
+  })
+
+  test("when none of the three usage queries can run, the check fails instead of reporting no savings", async () => {
+    const spy = connect((sql) => {
+      if ([SNOWFLAKE_PERIOD_FACTS_SQL, SNOWFLAKE_RESTART_FACTS_SQL, SNOWFLAKE_QUERY_FACTS_SQL].includes(sql)) throw new Error("not authorized")
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "No check could run. not authorized" })
+    expect(sent).toBeUndefined()
+  })
+
+  test("billing that cannot be read fails the check: nothing could be priced", async () => {
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw new Error("Insufficient privileges")
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "Insufficient privileges" })
+    expect(sent).toBeUndefined()
+  })
+
+  test("a role that can list no warehouse gets a plain failure before any usage query", async () => {
+    const spy = connect(() => table([]))
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("SHOW WAREHOUSES lists no warehouse")
+    expect(calls.length).toBe(1)
+  })
+
+  test("billed warehouses the role cannot list are named as not checked", async () => {
+    const spy = connect((sql) =>
+      sql === SNOWFLAKE_METERING_FACTS_SQL
+        ? table([...METERING, { warehouse_id: 3, warehouse_name: "SECRET_WH", usage_day: "2026-11-11", idle_day: null, credits_used: 1 }])
+        : answers(sql),
+    )
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.skipped).toEqual([
+      { check: "1 warehouse that billed credits", reason: "SHOW WAREHOUSES does not list SECRET_WH: dropped, renamed, or not visible to the connection's role" },
+    ])
+  })
+
+  test("a query past its limit fails with a plain reason, or skips an optional check", async () => {
+    const timeout = (cancelled: boolean) => Object.assign(new Error("QUERY_TIMEOUT: snowflake query exceeded"), { code: "QUERY_TIMEOUT", cancelled })
+    let spy = connect((sql) => {
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw timeout(true)
+      return answers(sql)
+    })
+    let result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.error).toBe("The metering query ran past the check's 9-minute limit and was cancelled on the warehouse.")
+
+    spy = connect((sql) => {
+      if (sql === SNOWFLAKE_QUERY_FACTS_SQL) throw timeout(false)
+      return answers(sql)
+    })
+    result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.skipped).toEqual([
+      { check: "The short-query signal of Downsize Warehouse", reason: "The query history query ran past the check's 9-minute limit and may still be running on the warehouse." },
+    ])
+  })
+
+  test("each query gets only what the earlier ones left; with nothing left it is not started", async () => {
+    let now = 1_000_000
+    const clock = spyOn(Date, "now").mockImplementation(() => now)
+    const spy = connect((sql) => {
+      // The metering query uses up two minutes, and the period query all the rest.
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) now += 120_000
+      if (sql === SNOWFLAKE_PERIOD_FACTS_SQL) now += SAVINGS_RUN_LIMIT_MS
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    clock.mockRestore()
+    expect(calls.map((one) => one.timeout)).toEqual([
+      SAVINGS_RUN_LIMIT_MS,
+      SAVINGS_RUN_LIMIT_MS,
+      SAVINGS_RUN_LIMIT_MS,
+      SAVINGS_RUN_LIMIT_MS - 120_000,
+    ])
+    expect(result.success).toBe(true)
+    expect(result.skipped).toEqual([
+      { check: "Frequent Restart Overcharge", reason: "The restart events query was not started: it would run past the check's 9-minute limit." },
+      { check: "The short-query signal of Downsize Warehouse", reason: "The query history query was not started: it would run past the check's 9-minute limit." },
+    ])
+  })
+
+  test("reaching the limit before the required billing query fails the check", async () => {
+    let now = 1_000_000
+    const clock = spyOn(Date, "now").mockImplementation(() => now)
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_RATE_SQL) now += SAVINGS_RUN_LIMIT_MS
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    clock.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "The metering query was not started: it would run past the check's 9-minute limit." })
+  })
+
+  test("stopping the session cancels the running query and starts no other", async () => {
+    const controller = new AbortController()
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_PERIOD_FACTS_SQL) {
+        controller.abort(new Error("session stopped"))
+        throw new Error("session stopped")
+      }
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
+    spy.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "session stopped" })
+    expect(result.skipped).toBeUndefined()
+    expect(calls.at(-1)!.sql).toBe(SNOWFLAKE_PERIOD_FACTS_SQL)
+    expect(sent).toBeUndefined()
+    // Each query got the session's signal, so the driver cancels it on Snowflake.
+    for (const one of calls) expect(one.signal).toBe(controller.signal)
+  })
+
+  test("connecting counts toward the limit: a connection that never comes up ends the check in time", async () => {
+    // A 30 ms session budget stands in for the last moments of the 9 minutes.
+    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 30)
+    const get = spyOn(Registry, "get").mockReturnValue(new Promise(() => {}) as any)
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { sessionID: "s1" })
+    get.mockRestore()
+    budget.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "Connecting to the warehouse took longer than the run's time budget." })
+  })
+
+  test("stopping the session while connecting ends the check at once", async () => {
+    const controller = new AbortController()
+    const get = spyOn(Registry, "get").mockReturnValue(new Promise(() => {}) as any)
+    const pending = snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
+    controller.abort(new Error("session stopped"))
+    const result = await pending
+    get.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "session stopped" })
+  })
+
+  test("a rate query that may still be running is named, and list price is used", async () => {
+    const timeout = Object.assign(new Error("QUERY_TIMEOUT"), { code: "QUERY_TIMEOUT", cancelled: false })
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_RATE_SQL) throw timeout
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.price?.source).toBe("list_price")
+    expect(result.skipped).toEqual([
+      { check: "The account's credit rate", reason: "The credit rate query ran past the check's 9-minute limit and may still be running on the warehouse." },
+    ])
+  })
+
+  test("a session time budget shorter than 9 minutes is the limit, and is named when it stops a query", async () => {
+    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 60_000)
+    const timeout = Object.assign(new Error("QUERY_TIMEOUT"), { code: "QUERY_TIMEOUT", cancelled: true })
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw timeout
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { sessionID: "s1" })
+    spy.mockRestore()
+    budget.mockRestore()
+    for (const one of calls) expect(one.timeout).toBeLessThanOrEqual(60_000)
+    expect(result.error).toBe("The metering query ran past the run's time budget and was cancelled on the warehouse.")
+  })
+
+  test("a stop during the rate lookup is not mistaken for an unreadable rate sheet", async () => {
+    const controller = new AbortController()
+    const spy = connect((sql) => {
+      if (sql === SNOWFLAKE_RATE_SQL) {
+        controller.abort(new Error("session stopped"))
+        throw new Error("session stopped")
+      }
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
+    spy.mockRestore()
+    expect(result).toMatchObject({ success: false, error: "session stopped" })
+    expect(calls.at(-1)!.sql).toBe(SNOWFLAKE_RATE_SQL)
+  })
+
+  test("a query that fills the row limit is named", async () => {
+    const spy = connect((sql) => (sql === SNOWFLAKE_PERIOD_FACTS_SQL ? table([], true) : answers(sql)))
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    spy.mockRestore()
+    expect(result.limited).toEqual(["active periods"])
+  })
+
+  test("with no Snowflake connection it says how to add one", async () => {
+    Registry.setConfigs({})
+    const result = await snowflakeSavings({}, rules)
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("warehouse_add")
+  })
+
+  test("a core without the rules is refused before any query", async () => {
+    const spy = connect(answers)
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, null)
+    spy.mockRestore()
+    expect(result.error).toContain("no Snowflake savings rules")
+    expect(calls).toEqual([])
+  })
+
+  test("in assessment mode the rules come with core's own telemetry switched off", () => {
+    const saved = process.env["ALTIMATE_ASSESSMENT_MODE"]
+    const calls: unknown[][] = []
+    const lib = { snowflakeSavings: () => ({}), initSdk: (...args: unknown[]) => void calls.push(args) }
+    try {
+      process.env["ALTIMATE_ASSESSMENT_MODE"] = "true"
+      expect(rulesEngine(lib)).toBe(lib.snowflakeSavings as never)
+      expect(calls).toEqual([["", "", "", false, false]])
+      expect(rulesEngine({ initSdk: lib.initSdk })).toBeNull()
+      delete process.env["ALTIMATE_ASSESSMENT_MODE"]
+      rulesEngine(lib)
+      expect(calls.length).toBe(1)
+    } finally {
+      if (saved === undefined) delete process.env["ALTIMATE_ASSESSMENT_MODE"]
+      else process.env["ALTIMATE_ASSESSMENT_MODE"] = saved
+    }
+  })
+})

@@ -4,7 +4,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import http from "node:http"
 import type { AddressInfo } from "node:net"
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { createRequire } from "node:module"
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -136,6 +137,56 @@ describe("assessment mode on the packaged CLI", () => {
     expect(result.hosts).toEqual([])
     expect(JSON.parse(result.stdout).output).toContain("call this tool again with confirm: true")
   }, 120_000)
+
+  posixOnly("the Snowflake check: unconfirmed, with no warehouse, and with an unreachable one, no other host is contacted", async () => {
+    const snowflake = (args: string) => ["tool", "run", "finops_snowflake_savings", "--args", args, "--json", "--no-daemon"]
+    const unconfirmed = await run(snowflake("{}"), assessment)
+    expect(unconfirmed.hosts).toEqual([])
+    expect(JSON.parse(unconfirmed.stdout).output).toContain("call this tool again with confirm: true")
+
+    const noWarehouse = await run(snowflake('{"confirm":true}'), assessment)
+    expect(noWarehouse.hosts).toEqual([])
+    expect(JSON.parse(noWarehouse.stdout).status).toBe("error")
+
+    const account = "egress-test.invalid"
+    const unreachable = await run(snowflake('{"confirm":true}'), assessment, async (_home, project) => {
+      await mkdir(path.join(project, ".altimate-code"), { recursive: true })
+      await writeFile(
+        path.join(project, ".altimate-code", "connections.json"),
+        JSON.stringify({ sf: { type: "snowflake", account, user: "u", password: "unused", warehouse: "W" } }),
+      )
+    })
+    expect(unreachable.hosts.filter((host) => !host.includes(account))).toEqual([])
+    expect(JSON.parse(unreachable.stdout).output).not.toContain("none are set up")
+  }, 360_000)
+
+  posixOnly("with the Snowflake driver installed, assessment mode keeps it off the cloud metadata services", async () => {
+    const account = "egress-test"
+    const args = ["tool", "run", "finops_snowflake_savings", "--args", '{"confirm":true}', "--json", "--no-daemon"]
+    // The driver the packaged CLI would install, linked in with its dependencies.
+    const sdk = createRequire(path.join(root, "../drivers/package.json")).resolve("snowflake-sdk/package.json")
+    const dependencies = path.dirname(path.dirname(await realpath(sdk)))
+    const setup = async (home: string, project: string) => {
+      const drivers = path.join(home, ".local/share/altimate-code/drivers")
+      await mkdir(drivers, { recursive: true })
+      await writeFile(path.join(drivers, "package.json"), JSON.stringify({ name: "drivers", private: true, dependencies: { "snowflake-sdk": "*" } }))
+      await symlink(dependencies, path.join(drivers, "node_modules"))
+      await mkdir(path.join(project, ".altimate-code"), { recursive: true })
+      await writeFile(
+        path.join(project, ".altimate-code", "connections.json"),
+        JSON.stringify({ sf: { type: "snowflake", account, user: "u", password: "unused", warehouse: "W" } }),
+      )
+    }
+    const metadata = (hosts: string[]) => hosts.filter((host) => /169\.254\.169\.254|metadata\.google\.internal|sts\.|login\.microsoftonline/.test(host))
+
+    // Control: without the mode the SDK does probe, so the proxy would see it.
+    const control = await run(args, { ALTIMATE_TELEMETRY_DISABLED: "true" }, setup)
+    expect(metadata(control.hosts).length).toBeGreaterThan(0)
+
+    const result = await run(args, assessment, setup)
+    expect(result.hosts.some((host) => host.includes(account))).toBe(true)
+    expect(result.hosts.filter((host) => !host.includes(account))).toEqual([])
+  }, 360_000)
 
   posixOnly("startup path (`tool list`): no host is contacted", async () => {
     const result = await run(["tool", "list"], assessment)
