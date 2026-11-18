@@ -46,7 +46,7 @@ export interface ExecuteOptions {
   queryTimeoutMs?: number
   /** Cancel the statement on the server once this many milliseconds pass, or when
    *  `signal` aborts. Opt-in: `executeQuery` fills in `queryTimeoutMs` for every
-   *  call, so only callers that set this get the server-side cancel. Databricks only. */
+   *  call, so only callers that set this get the server-side cancel. Databricks and Snowflake. */
   cancelAfterMs?: number
   /** DuckDB only: called once after handing this query to its helper; callback errors do not affect execution. */
   onDispatch?: () => void
