@@ -419,6 +419,32 @@ describe("dbt_map_relations tool", () => {
     writeFileSync(p, JSON.stringify(manifest))
     return p
   }
+  /** Runs `fn` with a temp dir as the working directory and HOME and no DBT_TARGET_PATH, all restored after; a dbt project with a manifest is written there when `manifest` is given. */
+  async function inTempProject<T>(manifest: unknown | null, fn: (dir: string) => Promise<T>): Promise<T> {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-project-")))
+    dirs.push(dir)
+    if (manifest) {
+      writeFileSync(join(dir, "dbt_project.yml"), "name: jaffle\n")
+      mkdirSync(join(dir, "target"))
+      writeFileSync(join(dir, "target", "manifest.json"), JSON.stringify(manifest))
+    }
+    const cwd = process.cwd()
+    const home = process.env.HOME
+    const target = process.env.DBT_TARGET_PATH
+    delete process.env.DBT_TARGET_PATH
+    process.env.HOME = dir
+    process.chdir(dir)
+    try {
+      return await fn(dir)
+    } finally {
+      process.chdir(cwd)
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
+      if (target === undefined) delete process.env.DBT_TARGET_PATH
+      else process.env.DBT_TARGET_PATH = target
+    }
+  }
+
   async function run(args: Record<string, unknown>) {
     const tool = await initTool(DbtMapRelationsTool)
     return tool.execute(args, ctx)
@@ -449,24 +475,11 @@ describe("dbt_map_relations tool", () => {
   })
 
   test("without manifest_path the dbt project around the working directory supplies target/manifest.json", async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-project-")))
-    dirs.push(dir)
-    writeFileSync(join(dir, "dbt_project.yml"), "name: jaffle\n")
-    mkdirSync(join(dir, "target"))
-    writeFileSync(join(dir, "target", "manifest.json"), JSON.stringify(MANIFEST))
-    const cwd = process.cwd()
-    const home = process.env.HOME
-    process.env.HOME = dir
-    process.chdir(dir)
-    try {
+    await inTempProject(MANIFEST, async (dir) => {
       const result = await run({ sql: "select * from legacy.thing" })
       expect(result.metadata.success).toBe(true)
       expect(result.metadata.manifest_path).toBe(join(dir, "target", "manifest.json"))
-    } finally {
-      process.chdir(cwd)
-      if (home === undefined) delete process.env.HOME
-      else process.env.HOME = home
-    }
+    })
   })
 
   test("project_dir names the project, and its manifest is found as dbt finds it: DBT_TARGET_PATH first, then a templated target-path at its env_var default", async () => {
@@ -495,44 +508,21 @@ describe("dbt_map_relations tool", () => {
   })
 
   test("an empty or blank project_dir is absent: the project around the working directory is found", async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-blank-")))
-    dirs.push(dir)
-    writeFileSync(join(dir, "dbt_project.yml"), "name: jaffle\n")
-    mkdirSync(join(dir, "target"))
-    writeFileSync(join(dir, "target", "manifest.json"), JSON.stringify(MANIFEST))
-    const cwd = process.cwd()
-    const home = process.env.HOME
-    process.env.HOME = dir
-    process.chdir(dir)
-    try {
+    await inTempProject(MANIFEST, async (dir) => {
       for (const blank of ["", "  "]) {
         const result = await run({ sql: "select * from legacy.thing", project_dir: blank })
         expect(result.metadata.success).toBe(true)
         expect(result.metadata.manifest_path).toBe(join(dir, "target", "manifest.json"))
       }
-    } finally {
-      process.chdir(cwd)
-      if (home === undefined) delete process.env.HOME
-      else process.env.HOME = home
-    }
+    })
   })
 
   test("outside a dbt project, without manifest_path, the error says so", async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-bare-")))
-    dirs.push(dir)
-    const cwd = process.cwd()
-    const home = process.env.HOME
-    process.env.HOME = dir
-    process.chdir(dir)
-    try {
+    await inTempProject(null, async () => {
       const result = await run({ sql: "select * from t" })
       expect(result.metadata.success).toBe(false)
       expect(result.output).toBe("No dbt project found here. Run from a dbt project or pass manifest_path.")
-    } finally {
-      process.chdir(cwd)
-      if (home === undefined) delete process.env.HOME
-      else process.env.HOME = home
-    }
+    })
   })
 
   test("with the real parser, a table a CTE shares its name with and a dot spaced out are both mapped", async () => {
@@ -790,15 +780,16 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(matchParts(["db", "", "orders"], ["other", "dbo", "orders"])).toBeNull()
   })
 
-  test("an unquoted manifest relation that folds to the written name outranks a quoted one that does not", () => {
-    const rel = (relationName: string, parts: string[], id: string, match: string) => ({ parts, call: `{{ ref('${id}') }}`, kind: "model" as const, name: id, uniqueId: id, relationName, root: true, match })
+  test("an unquoted manifest relation outranks a quoted one of another case when the match is otherwise the same", () => {
+    const rel = (relationName: string, parts: string[], id: string) => ({ parts, call: `{{ ref('${id}') }}`, kind: "model" as const, name: id, uniqueId: id, relationName, root: true })
+    // Both are a case-insensitive match for `db.s.orders`; Snowflake reads that as ORDERS, which only the unquoted relation is.
     const rows = mapRelations(
       ["orders"],
-      "select * from DB.S.orders",
-      [rel('"DB"."S"."ORDERS"', ["DB", "S", "ORDERS"], "quoted_upper", ""), rel("DB.S.orders", ["DB", "S", "orders"], "plain", "")],
+      "select * from db.s.orders",
+      [rel('"DB"."S"."orders"', ["DB", "S", "orders"], "a_quoted_lower"), rel("DB.S.orders", ["DB", "S", "orders"], "b_unquoted")],
       "snowflake",
     )
-    expect(rows[0].replaceWith).toBe("{{ ref('plain') }}")
+    expect(rows[0].replaceWith).toBe("{{ ref('b_unquoted') }}")
   })
 
   test("T-SQL table hints and PIVOT do not end the list", () => {
