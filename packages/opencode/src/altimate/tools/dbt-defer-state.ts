@@ -1,16 +1,306 @@
 import z from "zod"
+import fs from "fs"
+import os from "os"
+import path from "path"
+import { createScanner, parse as parseJsonc, stripComments, type ParseError } from "jsonc-parser"
 import { Tool } from "../../tool/tool"
 
+/** Resolve Jinja `{{ env_var('NAME') }}` and `{{ env_var('NAME', 'default') }}`, in single or double quotes. */
+export function resolveEnvVars(value: unknown): unknown {
+  if (typeof value !== "string") return value
+  return value.replace(
+    /\{\{\s*env_var\s*\(\s*(['"])((?:(?!\1)[\s\S])+)\1\s*(?:,\s*(['"])((?:(?!\3)[\s\S])*)\3\s*)?\)\s*\}\}/g,
+    (_match, _q1: string, envName: string, _q2?: string, defaultValue?: string) => process.env[envName] ?? defaultValue ?? "",
+  )
+}
+
+/** dbt's profiles.yml lookup: DBT_PROFILES_DIR, then the project folder, then ~/.dbt. */
+function resolveProfilesPath(projectDir?: string): string {
+  const envDir = process.env.DBT_PROFILES_DIR
+  if (envDir) {
+    const envPath = path.join(envDir, "profiles.yml")
+    if (fs.existsSync(envPath)) return envPath
+  }
+  if (projectDir) {
+    const projectPath = path.join(projectDir, "profiles.yml")
+    if (fs.existsSync(projectPath)) return projectPath
+  }
+  return path.join(os.homedir(), ".dbt", "profiles.yml")
+}
+
+// The Power User setting this tool reads: `dbt.deferConfigPerProject`, keyed by the dbt project's path
+// relative to its workspace folder.
+const SETTING = "dbt.deferConfigPerProject"
+
+export interface DeferSetting {
+  deferToProduction?: boolean
+  favorState?: boolean
+  manifestPathForDeferral?: string
+  manifestPathType?: string
+  dbtCoreIntegrationId?: string | number
+}
+
+export interface DeferStateResult {
+  enabled: boolean
+  favorState: boolean
+  /** "local" | "remote" | "none" (no entry for this project, or a manifest type this tool does not know) */
+  mode: "local" | "remote" | "none"
+  /** Directory holding the manifest to defer to; set whenever the configured local one can be used, also while defer is off. */
+  stateDir?: string
+  /** Why the configured defer cannot be used: no usable state directory, remote mode, an unknown manifest type, a settings file that cannot be read. */
+  reason?: string
+  /** The settings key that matched, relative to the workspace folder. */
+  settingsKey?: string
+  settingsFile?: string
+  profile?: string
+  defaultTarget?: string
+  targets: string[]
+}
+
+/** Expand `${env:NAME}` and `${workspaceFolder}`; an unset variable is left as written. */
+function expandVariables(value: string, workspaceFolder: string): string {
+  return value
+    .replace(/\$\{env:(.*?)\}/g, (match, name: string) => process.env[name] ?? match)
+    .replace(/\$\{workspaceFolder\}/g, () => workspaceFolder)
+}
+
+/** A `/* ...` block comment that never closes: stripComments drops it silently, but VS Code cannot read the file. */
+function hasUnterminatedComment(text: string): boolean {
+  const scanner = createScanner(text, false)
+  while (scanner.scan() !== 17 /* SyntaxKind.EOF */) {
+    if (scanner.getTokenError() === 1 /* ScanError.UnexpectedEndOfComment */) return true
+  }
+  return false
+}
+
+const UNREADABLE = Symbol("unreadable settings")
+
+/** The parsed settings; undefined when there is no file, UNREADABLE when there is one that cannot be trusted. */
+function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE | undefined {
+  let text: string
+  try {
+    text = fs.readFileSync(file, "utf-8")
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ENOTDIR" ? undefined : UNREADABLE
+  }
+  // VS Code reads a file with a leading byte order mark as it reads one without.
+  text = text.replace(/^\uFEFF/, "")
+  // An empty or whitespace-only file is a settings file with nothing in it.
+  if (text.trim() === "") return {}
+  const errors: ParseError[] = []
+  // .vscode/settings.json allows comments and trailing commas.
+  const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
+  // A file that does not parse cannot be trusted to say defer is on.
+  // A file holding only comments has no value to parse, which VS Code reads as empty settings; a stray token is not that.
+  if (parsed === undefined && stripComments(text).trim() === "" && !hasUnterminatedComment(text)) return {}
+  if (errors.length > 0) return UNREADABLE
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return UNREADABLE
+  return parsed as Record<string, unknown>
+}
+
+/**
+ * Find the entry for the project. The workspace folder is the nearest ancestor of the project (or the
+ * project itself) whose `.vscode/settings.json` has an entry under the project's relative path. A settings
+ * file that cannot be read or parsed ends the search.
+ */
+function lookupDeferSetting(projectDir: string, workspaceDir?: string) {
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(path.resolve(p))
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  const search = (start: string, workspace?: string) => {
+    const candidates: string[] = []
+    if (workspace) candidates.push(workspace)
+    else {
+      for (let dir = start; ; dir = path.dirname(dir)) {
+        candidates.push(dir)
+        if (path.dirname(dir) === dir) break
+      }
+    }
+    for (const folder of candidates) {
+      const file = path.join(folder, ".vscode", "settings.json")
+      const settings = readSettings(file)
+      // The nearest settings file that cannot be read ends the search: an outer folder's entry must not stand in for it.
+      if (settings === UNREADABLE) return { unreadable: file }
+      const perProject = settings?.[SETTING]
+      if (!perProject || typeof perProject !== "object") continue
+      const key = path.relative(folder, start)
+      const entry = (perProject as Record<string, unknown>)[key]
+      if (entry && typeof entry === "object") {
+        return { entry: entry as DeferSetting, key, file, folder }
+      }
+      // A key naming the project through a symlink: compare the real paths.
+      const target = real(start)
+      for (const [k, v] of Object.entries(perProject as Record<string, unknown>)) {
+        if (!v || typeof v !== "object") continue
+        if (real(path.resolve(folder, k)) === target) return { entry: v as DeferSetting, key: k, file, folder }
+      }
+    }
+    return undefined
+  }
+  // The paths as given first, as VS Code builds the key; then with symlinks followed, for a workspace reached through a link.
+  const lexical = [path.resolve(projectDir), workspaceDir ? path.resolve(workspaceDir) : undefined] as const
+  const resolved = [real(projectDir), workspaceDir ? real(workspaceDir) : undefined] as const
+  const passes = lexical[0] === resolved[0] && lexical[1] === resolved[1] ? [lexical] : [lexical, resolved]
+  let unreadable: { unreadable: string } | undefined
+  for (const [start, workspace] of passes) {
+    const found = search(start, workspace)
+    // An unreadable file ends the search of its own pass; the pass over the real paths may still reach a readable one.
+    if (found && typeof found.unreadable === "string") {
+      unreadable ??= { unreadable: found.unreadable }
+      continue
+    }
+    if (found) return found
+  }
+  return unreadable
+}
+
+function profilesFile(projectDir: string): string | undefined {
+  const file = resolveProfilesPath(projectDir)
+  return fs.existsSync(file) ? file : undefined
+}
+
+async function parseYaml(text: string): Promise<any> {
+  const mod = await import("yaml")
+  // dbt reads YAML with PyYAML, which merges `<<` keys.
+  return (mod.default ?? mod).parse(text, { merge: true })
+}
+
+/** The project's profile name, that profile's default `target` and its output names. */
+export async function readProfileTargets(projectDir: string) {
+  const out: { profile?: string; defaultTarget?: string; targets: string[] } = { targets: [] }
+  try {
+    const project = await parseYaml(fs.readFileSync(path.join(projectDir, "dbt_project.yml"), "utf-8"))
+    const profile = resolveEnvVars(project?.profile)
+    // A profile dbt would render from an expression this does not evaluate is unknown, not that text.
+    if (typeof profile === "string" && profile !== "" && !/\{[{%#]/.test(profile)) out.profile = profile
+  } catch {
+    return out
+  }
+  if (!out.profile) return out
+  const file = profilesFile(projectDir)
+  if (!file) return out
+  try {
+    const profiles = await parseYaml(fs.readFileSync(file, "utf-8"))
+    const profile = profiles?.[out.profile]
+    if (profile && typeof profile === "object") {
+      const target = resolveEnvVars(profile.target)
+      if (profile.outputs && typeof profile.outputs === "object") out.targets = Object.keys(profile.outputs)
+      // A target dbt would render from an expression this does not evaluate is unknown, not that text.
+      if (typeof target === "string" && target !== "" && !/\{[{%#]/.test(target)) out.defaultTarget = target
+      // With no `target`, dbt runs the output named "default".
+      else if (profile.target === undefined && out.targets.includes("default")) out.defaultTarget = "default"
+    }
+  } catch {
+    // An unreadable profiles.yml leaves the target unknown.
+  }
+  return out
+}
+
+function isFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile()
+  } catch {
+    return false
+  }
+}
+
+function isDirectory(dir: string): boolean {
+  try {
+    return fs.statSync(dir).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** The entry for the project; undefined when there is none or the settings file cannot be trusted. */
+export function findDeferSetting(projectDir: string, workspaceDir?: string) {
+  const found = lookupDeferSetting(projectDir, workspaceDir)
+  return found && "unreadable" in found ? undefined : found
+}
+
+export async function resolveDeferState(projectDir: string, workspaceDir?: string): Promise<DeferStateResult> {
+  const root = path.resolve(projectDir)
+  const targets = await readProfileTargets(root)
+  const base: DeferStateResult = { enabled: false, favorState: false, mode: "none", ...targets }
+  const found = lookupDeferSetting(root, workspaceDir)
+  if (!found) return base
+  // Said outright: the same silence as "no setting" would send the caller on without --defer and no one the wiser.
+  if ("unreadable" in found) return { ...base, settingsFile: found.unreadable, reason: `The settings file could not be read or parsed, so defer is left off: ${found.unreadable}` }
+
+  const { entry } = found
+  const result: DeferStateResult = {
+    ...base,
+    settingsKey: found.key,
+    settingsFile: found.file,
+    favorState: entry.favorState === true,
+  }
+  const wanted = entry.deferToProduction === true
+
+  // Power User writes "local" or "remote"; an entry without a type is local. Anything else is not understood.
+  const type = entry.manifestPathType
+  if (type !== undefined && type !== "" && type !== "local" && type !== "remote") {
+    return { ...result, reason: `Unknown manifestPathType "${String(type)}": expected "local" or "remote".` }
+  }
+  if (type === "remote") {
+    // The request that downloads the manifest is not implemented, so remote mode cannot supply a state dir.
+    return { ...result, mode: "remote", reason: "Remote defer mode is not supported yet: download the manifest and use a local path." }
+  }
+  result.mode = "local"
+
+  // The directory is resolved whether or not defer is on, so a session can still switch it on.
+  const raw = entry.manifestPathForDeferral
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { ...result, reason: "manifestPathForDeferral is not set." }
+  }
+  // Power User expands ${workspaceFolder} to the dbt project's own folder.
+  const expanded = expandVariables(raw, root)
+  const stateDir = path.isAbsolute(expanded) ? expanded : path.resolve(root, expanded)
+  if (!isDirectory(stateDir)) {
+    return { ...result, reason: `manifestPathForDeferral is not a directory: ${raw}` }
+  }
+  if (!isFile(path.join(stateDir, "manifest.json"))) {
+    return { ...result, reason: `No manifest.json in manifestPathForDeferral: ${raw}` }
+  }
+  return { ...result, enabled: wanted, stateDir }
+}
+
 export const DbtDeferStateTool = Tool.define("dbt_defer_state", {
-  description: "dbt Power User's defer-to-production setting for a dbt project, and the profile's default target.",
+  description:
+    "Read the dbt Power User defer setting for a dbt project (`dbt.deferConfigPerProject` in .vscode/settings.json) and the project's profile target. Returns whether defer is on, whether to favor state, the state directory to pass as `dbt --defer --state <dir>` (use it only when `enabled` is true), and the profile's default target and target names. Read-only.",
   parameters: z.object({
-    project_dir: z.string().describe("dbt project folder"),
+    project_dir: z.string().describe("The dbt project directory (the folder holding dbt_project.yml)"),
+    workspace_dir: z
+      .string()
+      .optional()
+      .describe("The workspace folder that holds .vscode/settings.json (default: the nearest ancestor of project_dir whose settings have an entry for the project)"),
   }),
-  async execute() {
-    return {
-      title: "dbt_defer_state: not implemented",
-      metadata: { success: false, error: "not implemented" },
-      output: "dbt_defer_state is not implemented in this build of altimate-code yet.",
+  async execute(args) {
+    try {
+      const result = await resolveDeferState(args.project_dir, args.workspace_dir)
+      const lines = [
+        `defer: ${result.enabled ? "on" : "off"}${result.favorState ? " (favor state)" : ""}`,
+        `mode: ${result.mode}`,
+      ]
+      if (result.stateDir) lines.push(`state dir${result.enabled ? "" : " (not used: defer is off)"}: ${result.stateDir}`)
+      if (result.reason) lines.push(`note: ${result.reason}`)
+      if (result.defaultTarget) lines.push(`default target: ${result.defaultTarget}`)
+      if (result.targets.length) lines.push(`targets: ${result.targets.join(", ")}`)
+      return {
+        title: `dbt Defer: ${result.enabled ? "on" : "off"}`,
+        metadata: { success: true, error: undefined as string | undefined, ...result },
+        output: lines.join("\n"),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "dbt Defer: ERROR",
+        metadata: { success: false, error: msg as string | undefined, enabled: false },
+        output: `Failed: ${msg}`,
+      }
     }
   },
 })
