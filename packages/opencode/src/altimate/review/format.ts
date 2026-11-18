@@ -72,6 +72,8 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     return ""
 
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
+  const projects = env.scope?.projects ?? []
+  if (projects.length > 1) lines.push(`Reviewed ${projects.length} dbt projects: ${projects.map((p) => p.root || ".").join(", ")}`, "")
 
   if (env.summary.degraded) {
     lines.push(
