@@ -331,6 +331,25 @@ describe("databricks savings handler over a stubbed connection", () => {
     expect(formatSavings(result)).toContain("Only the first 10,000 jobs were read; any beyond them were not checked.")
   })
 
+  test("when core refuses the cluster or job facts, the warehouse findings still report and those checks are named", async () => {
+    const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : sql === DATABRICKS_JOB_FACTS_SQL ? table(JOB_ROW) : table({ cluster_id: "c1" })))
+    const calls: any[] = []
+    const picky = (input: string) => {
+      const parsed = JSON.parse(input)
+      calls.push(parsed)
+      if (parsed.clusters.length > 0 || parsed.jobs.length > 0) throw new Error("invalid input: jobs[0].job_total_cost must not be negative")
+      return rules(input)
+    }
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, picky)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(calls.length).toBe(2)
+    expect(sent.warehouses[0].warehouse_id).toBe("abc123")
+    expect(result.skipped?.map((one) => one.check)).toEqual(["Idle Cluster Detection", "Job Running on All-Purpose Compute"])
+    expect(result.skipped?.[0]?.reason).toContain("core refused their facts: invalid input: jobs[0].job_total_cost")
+    expect([result.clusters_checked, result.jobs_checked]).toEqual([0, 0])
+  })
+
   test("a blank connection name falls back to the connection that runs through a SQL warehouse", async () => {
     Registry.setConfigs({
       cluster: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/protocolv1/o/1/0101-abc", access_token: "x" },

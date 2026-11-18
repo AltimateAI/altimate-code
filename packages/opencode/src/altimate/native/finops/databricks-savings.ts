@@ -57,6 +57,8 @@ ev AS (
          unix_timestamp(LEAD(e.event_time) OVER (PARTITION BY e.workspace_id, e.warehouse_id ORDER BY e.event_time))
            - unix_timestamp(e.event_time) AS dur_sec
   FROM system.compute.warehouse_events e CROSS JOIN w
+  -- As in Altimate's pipeline, uptime counts only the time between two events inside the window:
+  -- a warehouse that runs all week without a scale or stop event reads no uptime.
   WHERE e.event_time >= w.rs AND e.event_time < w.r
     AND e.workspace_id IN (SELECT workspace_id FROM inv) AND e.warehouse_id IN (SELECT warehouse_id FROM inv)
 ),
@@ -214,7 +216,7 @@ FROM inv
 JOIN util ON util.cluster_id = inv.cluster_id
 LEFT JOIN bill ON bill.cluster_id = inv.cluster_id
 WHERE inv.delete_time IS NULL AND inv.cluster_source IN ('UI', 'API')
-ORDER BY inv.cluster_name
+ORDER BY total_cost DESC, inv.cluster_name
 `
 
 /**
@@ -442,14 +444,26 @@ export async function databricksSavings(
     }
     const clusters = await optional("Idle Cluster Detection", "all-purpose clusters", DATABRICKS_CLUSTER_FACTS_SQL)
     const jobs = await optional("Job Running on All-Purpose Compute", "jobs", DATABRICKS_JOB_FACTS_SQL)
-    const report = rules(
-      JSON.stringify({
-        lookback_days: LOOKBACK_DAYS,
-        warehouses: warehouses.map(toFacts),
-        clusters: clusters.map(toClusterFacts),
-        jobs: jobs.map(toJobFacts),
-      }),
-    )
+    const input = {
+      lookback_days: LOOKBACK_DAYS,
+      warehouses: warehouses.map(toFacts),
+      clusters: clusters.map(toClusterFacts),
+      jobs: jobs.map(toJobFacts),
+    }
+    let report: DatabricksSavingsReport
+    try {
+      report = rules(JSON.stringify(input))
+    } catch (e) {
+      // Core refuses the whole input over one bad value. If the warehouses alone pass, the
+      // cluster and job checks are named as skipped instead of losing every finding.
+      if (input.clusters.length === 0 && input.jobs.length === 0) throw e
+      report = rules(JSON.stringify({ ...input, clusters: [], jobs: [] }))
+      const reason = `core refused their facts: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 240)}`
+      if (input.clusters.length > 0) skipped.push({ check: "Idle Cluster Detection", reason })
+      if (input.jobs.length > 0) skipped.push({ check: "Job Running on All-Purpose Compute", reason })
+      clusters.length = 0
+      jobs.length = 0
+    }
     return {
       success: true,
       window,
