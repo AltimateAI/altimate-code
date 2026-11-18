@@ -116,6 +116,25 @@ describe("dbt_run_results", () => {
     expect(result.title).toBe("dbt compile: 1/1 ok")
   })
 
+  test("a run written with --target-path is read from that folder, relative to the project or absolute; the project's own target is not", async () => {
+    const dir = await project("elsewhere", COMPILE)
+    await mkdir(path.join(dir, "ci-out"), { recursive: true })
+    await writeFile(path.join(dir, "ci-out", "run_results.json"), JSON.stringify(BUILD))
+    const other = path.join(root, "absolute-out")
+    await mkdir(other, { recursive: true })
+    await writeFile(path.join(other, "run_results.json"), JSON.stringify(BUILD))
+
+    expect((await run(dir)).metadata.command).toBe("compile")
+    const relative = await run(dir, "ci-out")
+    expect(relative.metadata.command).toBe("build")
+    expect(relative.metadata.invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
+    expect(relative.metadata.results[0]).toEqual({ uniqueId: "model.shop.stg_orders", name: "stg_orders", status: "error", executionTimeSec: 1.25, message: "Database Error: relation missing" })
+    expect((await run(dir, other)).metadata.command).toBe("build")
+    const missing = await run(dir, "nowhere")
+    expect(missing.metadata.found).toBe(false)
+    expect(missing.output).toContain("(in nowhere)")
+  })
+
   test("no run_results.json: found is false and the answer is empty, not an error", async () => {
     const dir = await project("empty")
 

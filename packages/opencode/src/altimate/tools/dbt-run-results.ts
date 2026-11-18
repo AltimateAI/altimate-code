@@ -3,7 +3,7 @@ import path from "node:path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { projectRoot } from "../native/connections/registry"
-import { isFailedRunStatus, readRunResults } from "../validators/validator-utils"
+import { isFailedRunStatus, readRunResults, type RunResultsArtifact } from "../validators/validator-utils"
 
 /** A message longer than this is cut: a build of thousands of nodes must stay readable and small. */
 const MAX_MESSAGE = 2000
@@ -96,11 +96,48 @@ async function extraFields(
 }
 
 /**
+ * The artifact of a run that wrote to a folder of its own (`--target-path`): `readRunResults` only knows the project's configured
+ * folder, so a folder the caller names is read here, with the same fields and the same rule that a file without `results` is no artifact.
+ */
+async function readRunResultsIn(file: string): Promise<RunResultsArtifact | null> {
+  try {
+    const stat = await fs.stat(file)
+    if (!stat.isFile()) return null
+    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as { results?: unknown; args?: unknown }
+    if (!Array.isArray(parsed.results)) return null
+    const which = typeof parsed.args === "object" && parsed.args !== null ? (parsed.args as Record<string, unknown>)["which"] : undefined
+    const results: RunResultsArtifact["results"] = []
+    for (const row of parsed.results as unknown[]) {
+      if (typeof row !== "object" || row === null) continue
+      const r = row as Record<string, unknown>
+      const uniqueId = typeof r["unique_id"] === "string" ? r["unique_id"] : ""
+      if (!uniqueId) continue
+      const parts = uniqueId.split(".")
+      const last = (parts[parts.length - 1] ?? "").toLowerCase()
+      const versioned = parts.length > 3 && /^v\d+$/.test(last)
+      results.push({
+        uniqueId,
+        name: versioned ? (parts[parts.length - 2] ?? "").toLowerCase() : last,
+        version: versioned ? last : null,
+        status: typeof r["status"] === "string" ? r["status"].toLowerCase() : "",
+        message: typeof r["message"] === "string" ? r["message"] : null,
+      })
+    }
+    return { path: file, mtimeMs: stat.mtimeMs, results, command: (typeof which === "string" ? which.trim().toLowerCase() : "") || null }
+  } catch {
+    return null
+  }
+}
+
+/**
  * The last dbt run of a project: `readRunResults` gives the path, the command and each row's status and
  * message; the invocation id, elapsed time and execution times are read from the same file version.
  */
-export async function readRunView(dbtRoot: string): Promise<DbtRunResultsView> {
-  const artifact = await readRunResults(dbtRoot)
+export async function readRunView(dbtRoot: string, targetPath?: string): Promise<DbtRunResultsView> {
+  const named = targetPath?.trim()
+  const artifact = named
+    ? await readRunResultsIn(path.join(path.isAbsolute(named) ? named : path.join(dbtRoot, named), "run_results.json"))
+    : await readRunResults(dbtRoot)
   if (!artifact) return NONE
   const extra = await extraFields(artifact.path, artifact.mtimeMs)
   if (!extra) return NONE
@@ -135,21 +172,25 @@ export async function readRunView(dbtRoot: string): Promise<DbtRunResultsView> {
 
 export const DbtRunResultsTool = Tool.define("dbt_run_results", {
   description:
-    "Read the last dbt run of a project from its target/run_results.json: the invocation id, the dbt command, the elapsed seconds, when it finished, the counts, and one row per node (the failures first, at most 200) with its status, execution seconds and message. Read-only; runs nothing. A compile or parse writes success rows without building anything, so look at `command`.",
+    "Read the last dbt run of a project from its target/run_results.json (or the folder `target_path` names): the invocation id, the dbt command, the elapsed seconds, when it finished, the counts, and one row per node (the failures first, at most 200) with its status, execution seconds and message. Read-only; runs nothing. A compile or parse writes success rows without building anything, so look at `command`.",
   parameters: z.object({
     project_dir: z
       .string()
       .optional()
       .describe("A folder in the dbt project (its dbt_project.yml is looked for there and above; default: the project the session's directory is in, else the one the dbt adapter is configured for)"),
+    target_path: z
+      .string()
+      .optional()
+      .describe("The folder the dbt run wrote its artifacts to when it was not the project's own target folder (a relative one is from the project)"),
   }),
   async execute(args) {
     const root = args.project_dir ? await projectAbove(path.resolve(projectRoot(), args.project_dir)) : await defaultRoot()
-    const view = await readRunView(root)
+    const view = await readRunView(root, args.target_path)
     if (!view.found) {
       return {
         title: "dbt run results: none",
         metadata: { ...view },
-        output: `No readable run_results.json for the dbt project at ${root}: no dbt command has written one there yet, or the file is not a run artifact.`,
+        output: `No readable run_results.json for the dbt project at ${root}${args.target_path ? ` (in ${args.target_path})` : ""}: no dbt command has written one there yet, or the file is not a run artifact.`,
       }
     }
     const command = view.command ? `dbt ${view.command}` : "dbt (unknown command)"
