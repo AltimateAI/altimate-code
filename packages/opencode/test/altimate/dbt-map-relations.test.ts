@@ -494,6 +494,29 @@ describe("dbt_map_relations tool", () => {
     }
   })
 
+  test("an empty or blank project_dir is absent: the project around the working directory is found", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-blank-")))
+    dirs.push(dir)
+    writeFileSync(join(dir, "dbt_project.yml"), "name: jaffle\n")
+    mkdirSync(join(dir, "target"))
+    writeFileSync(join(dir, "target", "manifest.json"), JSON.stringify(MANIFEST))
+    const cwd = process.cwd()
+    const home = process.env.HOME
+    process.env.HOME = dir
+    process.chdir(dir)
+    try {
+      for (const blank of ["", "  "]) {
+        const result = await run({ sql: "select * from legacy.thing", project_dir: blank })
+        expect(result.metadata.success).toBe(true)
+        expect(result.metadata.manifest_path).toBe(join(dir, "target", "manifest.json"))
+      }
+    } finally {
+      process.chdir(cwd)
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
+    }
+  })
+
   test("outside a dbt project, without manifest_path, the error says so", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-bare-")))
     dirs.push(dir)

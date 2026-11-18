@@ -750,7 +750,7 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
 
 async function defaultManifestPath(projectDir?: string): Promise<string | null> {
   const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
-  const found = projectDir ?? findProjectRoot(projectRoot())
+  const found = projectDir?.trim() || findProjectRoot(projectRoot())
   const root = found ?? (await (await import("../native/connections/register")).getDbtProjectRoot())
   if (!root) return null
   let real = root
