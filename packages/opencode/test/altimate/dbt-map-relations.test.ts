@@ -703,6 +703,56 @@ describe("table lists after a join condition, a sample clause or ONLY", () => {
     expect(raws("create table if not exists main.live.orders as select * from main.raw.input", "postgres")).toEqual(["main.live.orders", "main.raw.input"])
   })
 
+  test("INSERT OVERWRITE skips DIRECTORY, LOCAL DIRECTORY and INTO, and only follows INSERT", () => {
+    expect(raws("insert overwrite directory '/tmp/x' using parquet select * from main.raw.input", "databricks")).toEqual(["main.raw.input"])
+    expect(raws("insert overwrite local directory '/tmp/x' select * from main.raw.input", "databricks")).toEqual(["main.raw.input"])
+    expect(raws("insert overwrite into main.live.orders select * from main.raw.input", "snowflake")).toEqual(["main.live.orders", "main.raw.input"])
+    expect(raws("select * from main.raw.input order by overwrite desc", "databricks")).toEqual(["main.raw.input"])
+  })
+
+  test("SELECT STRAIGHT_JOIN is an option and a bare STRAIGHT_JOIN joins a table", () => {
+    expect(raws("select straight_join orders, count(*) from db.orders", "mysql")).toEqual(["db.orders"])
+    expect(raws("select distinct straight_join orders from db.orders", "mysql")).toEqual(["db.orders"])
+    expect(raws("select * from db.one.orders o straight_join db.two.payments p on o.id = p.id", "mysql")).toEqual(["db.one.orders", "db.two.payments"])
+  })
+
+  test("BigQuery hyphenated project ids survive in a CREATE TABLE target", () => {
+    expect(raws("create table my-proj.ds.orders as select * from my-proj.ds.input", "bigquery")).toEqual(["my-proj.ds.orders", "my-proj.ds.input"])
+    expect(raws("create table if not exists my-proj.ds.orders as select 1", "bigquery")).toEqual(["my-proj.ds.orders"])
+  })
+
+  test("a name with a combining mark stays one name", () => {
+    expect(raws("select * from raw.cafe\u0301", "snowflake")).toEqual(["raw.cafe\u0301"])
+  })
+
+  test("E strings with an escaped quote hide nothing in DuckDB; block comments nest as sql-tokenize says", () => {
+    expect(raws("select E'it\\'s' as p from db.right.orders", "duckdb")).toEqual(["db.right.orders"])
+    expect(raws("select * from db.a.orders /* outer /* nested */ from db.wrong.orders */", "spark")).toEqual(["db.a.orders"])
+    expect(raws("select * from db.a.orders /* outer /* nested */ from db.wrong.orders */", "clickhouse")).toEqual(["db.a.orders"])
+  })
+
+  test("Trino folds an unquoted name to lower case, so a quoted CTE of another case hides nothing", () => {
+    expect(mapRelations(["orders"], 'with "Orders" as (select 1) select * from orders', [], "trino").map((r) => r.raw)).toEqual(["orders"])
+  })
+
+  test("T-SQL db..table matches the relation of any schema as a partial match", () => {
+    const rel = { parts: ["db", "dbo", "orders"], call: "{{ ref('orders') }}", kind: "model" as const, name: "orders", uniqueId: "model.p.orders", relationName: "db.dbo.orders", root: true }
+    const rows = mapRelations(["orders"], "select * from db..orders", [rel], "mssql")
+    expect(rows.map((r) => [r.raw, r.match])).toEqual([["db..orders", "partial"]])
+    expect(matchParts(["db", "", "orders"], ["other", "dbo", "orders"])).toBeNull()
+  })
+
+  test("an unquoted manifest relation that folds to the written name outranks a quoted one that does not", () => {
+    const rel = (relationName: string, parts: string[], id: string, match: string) => ({ parts, call: `{{ ref('${id}') }}`, kind: "model" as const, name: id, uniqueId: id, relationName, root: true, match })
+    const rows = mapRelations(
+      ["orders"],
+      "select * from DB.S.orders",
+      [rel('"DB"."S"."ORDERS"', ["DB", "S", "ORDERS"], "quoted_upper", ""), rel("DB.S.orders", ["DB", "S", "orders"], "plain", "")],
+      "snowflake",
+    )
+    expect(rows[0].replaceWith).toBe("{{ ref('plain') }}")
+  })
+
   test("T-SQL table hints and PIVOT do not end the list", () => {
     expect(raws("select * from db.a.orders with (nolock), db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])
     expect(raws("select * from db.a.orders pivot (sum(x) for y in ([a])) p, db.z.orders", "mssql")).toEqual(["db.a.orders", "db.z.orders"])

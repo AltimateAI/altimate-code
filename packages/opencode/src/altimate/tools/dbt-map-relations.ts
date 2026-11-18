@@ -98,8 +98,8 @@ type Reference = { raw: string; parts: string[]; start?: number; /** The last pa
 /** What the scan of a query found: its table references in text order, and the names its CTEs define. */
 export type Scan = {
   refs: Reference[]
-  /** By identity (see `identityOf`): whether the WITH is recursive, the text offsets of each body that defines the name, and the text range each definition is visible in (its statement or enclosing parentheses). */
-  ctes: Map<string, { recursive: boolean; bodies: [number, number][]; scopes: [number, number][] }>
+  /** By identity (see `identityOf`): the text range each definition of the name is visible in (its statement or enclosing parentheses). */
+  ctes: Map<string, { scopes: [number, number][] }>
 }
 
 // Dialects whose double quotes (and, for some, backslashes) belong to string literals.
@@ -108,11 +108,11 @@ const BACKSLASH_ESCAPE = new Set(["bigquery", "databricks", "spark", "mysql", "h
 const DOLLAR_QUOTE = new Set(["snowflake", "postgres", "redshift", "duckdb"])
 const IMPLICIT_RECURSION = new Set(["snowflake", "tsql", "sqlserver", "mssql", "fabric", "synapse", "oracle"])
 // Dialects whose block comments nest: an inner comment does not end the outer one.
-const NESTED_COMMENTS = new Set(["postgres", "postgresql", "redshift", "cockroachdb", "duckdb", "tsql", "sqlserver", "mssql", "fabric", "synapse"])
-const ESCAPE_STRING = new Set(["postgres", "postgresql", "redshift", "cockroachdb"])
+const NESTED_COMMENTS = new Set(["postgres", "postgresql", "cockroachdb", "duckdb", "tsql", "sqlserver", "mssql", "fabric", "synapse", "clickhouse", "spark", "databricks"])
+const ESCAPE_STRING = new Set(["postgres", "postgresql", "redshift", "cockroachdb", "duckdb"])
 const HASH_COMMENT = new Set(["bigquery", "mysql", "mariadb", "clickhouse"])
 // Dialects where a double-quoted name keeps its case while an unquoted one is folded, so `"orders"` and `ORDERS` differ.
-const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower", redshift: "lower" }
+const FOLDS_UNQUOTED: Record<string, "upper" | "lower"> = { snowflake: "upper", oracle: "upper", postgres: "lower", postgresql: "lower", redshift: "lower", trino: "lower" }
 const BRACKET_QUOTE = new Set(["tsql", "sqlserver", "mssql", "fabric", "synapse"])
 
 const RESERVED = new Set([
@@ -171,6 +171,13 @@ const JOIN_CONDITION_END = new Set([
   "union", "intersect", "except", "minus", "limit", "offset", "fetch", "window", "qualify", "for", "returning",
   "when", "set", "do", "select", "lateral", "distribute", "cluster", "sort", "settings",
 ])
+// Words that can stand between `SELECT` and a `STRAIGHT_JOIN` select option; there it names no table.
+const SELECT_OPTIONS = new Set(["select", "all", "distinct", "distinctrow", "high_priority", "sql_small_result", "sql_big_result", "sql_buffer_result", "sql_no_cache", "sql_calc_found_rows"])
+// Words that stand before `TABLE` and name a statement that creates or overwrites one.
+const DDL_TABLE_PREFIX = new Set(["overwrite", "create", "replace", "temporary", "temp", "transient", "external", "volatile", "unlogged", "global", "local"])
+const CREATE_TABLE_MODIFIERS = new Set(["if", "not", "exists"])
+// After these a BigQuery project id may carry hyphens.
+const HYPHEN_AFTER = new Set([...TABLE_KEYWORDS, "table", "exists"])
 const SUBQUERY_START = new Set(["select", "with", "values", "table", "from"])
 const FROM_INSIDE_CALL = new Set(["extract", "trim", "substring", "overlay", "position"])
 
@@ -253,9 +260,9 @@ function tokenize(sql: string, dialect: string): Token[] {
       i = end
     } else if (/[\p{L}_]/u.test(ch)) {
       let j = i + 1
-      while (j < n && /[\p{L}\p{N}_$]/u.test(sql[j])) j++
+      while (j < n && /[\p{L}\p{M}\p{N}_$]/u.test(sql[j])) j++
       // BigQuery project ids may contain hyphens (`my-proj.ds.tbl` unquoted), but only where a table is named.
-      if (dialect === "bigquery" && (TABLE_KEYWORDS.has(lastWord()) || out[out.length - 1]?.text === ",")) {
+      if (dialect === "bigquery" && (HYPHEN_AFTER.has(lastWord()) || out[out.length - 1]?.text === ",")) {
         while (sql[j] === "-" && /[A-Za-z0-9_]/.test(sql[j + 1] ?? "")) {
           j++
           while (j < n && /[\p{L}\p{N}_$]/u.test(sql[j])) j++
@@ -345,10 +352,8 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       if (tokens[j]?.text.toLowerCase() === "not") j++
       if (tokens[j]?.text.toLowerCase() === "materialized") j++
       if (!isPunct(tokens[j], "(")) return
-      const open = tokens[j].start
       j = afterParens(tokens, j)
-      const known = ctes.get(name) ?? { recursive, bodies: [], scopes: [] }
-      known.bodies.push([open, tokens[j - 1].end])
+      const known = ctes.get(name) ?? { scopes: [] }
       // Visible after its own definition, so an earlier CTE or its own body names the real table; a recursive one sees every CTE of its WITH, later ones included.
       known.scopes.push([recursive ? tokens[start - 1].start : tokens[j - 1].end, scopeEnd])
       ctes.set(name, known)
@@ -356,6 +361,9 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       i = j + 1
     }
   }
+
+  const isIndexHint = (at: number) =>
+    tokens[at]?.kind === "word" && ["use", "force", "ignore"].includes(tokens[at].text.toLowerCase()) && ["index", "key"].includes(tokens[at + 1]?.text.toLowerCase() ?? "")
 
   const readList = (start: number, strict: boolean) => {
     let i = start
@@ -366,7 +374,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
     const isGroup = (at: number) =>
       !using || tokens.slice(at, afterParens(tokens, at)).some((t) => t.kind === "word" && t.text.toLowerCase() === "join")
     let groupEnd = -1
-    for (let item = 0; ; item++) {
+    for (;;) {
       // LATERAL prefixes a table expression in the list; the list goes on after it.
       if (tokens[i]?.kind === "word" && tokens[i].text.toLowerCase() === "lateral") i++
       // `(a join b on ...)` groups tables, at any position in the list: its first table is read like any other, and the list goes on after the
@@ -423,7 +431,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       // An alias with or without AS, then its column list, then a comma continues a FROM list.
       if (tokens[i]?.text.toLowerCase() === "as") i++
       const alias = tokens[i]
-      const startsHint = alias?.kind === "word" && ["use", "force", "ignore"].includes(alias.text.toLowerCase()) && ["index", "key"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")
+      const startsHint = isIndexHint(i)
       const startsSample = startsHint || alias?.kind === "word" && ["sample", "tablesample", "pivot", "unpivot"].includes(alias.text.toLowerCase()) && (isPunct(tokens[i + 1], "(") || ["bernoulli", "system", "block", "row"].includes(tokens[i + 1]?.text.toLowerCase() ?? ""))
       if (alias && !startsSample && (alias.kind === "quoted" || (alias.kind === "word" && !RESERVED.has(alias.text.toLowerCase())))) {
         i++
@@ -441,7 +449,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
     let i = start
     const word = () => (tokens[i]?.kind === "word" ? tokens[i].text.toLowerCase() : "")
     // MySQL's `USE|FORCE|IGNORE INDEX|KEY [FOR ...] (...)` also sits there.
-    const indexHint = () => ["use", "force", "ignore"].includes(word()) && ["index", "key"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")
+    const indexHint = () => isIndexHint(i)
     while (
       indexHint() ||
       ["tablesample", "sample", "repeatable", "seed", "bernoulli", "system", "block", "row"].includes(word()) ||
@@ -453,7 +461,7 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
       i++
       if (hint) {
         i++
-        while (tokens[i] && !isPunct(tokens[i], "(") && tokens[i].kind === "word" && ["for", "join", "order", "group", "by"].includes(tokens[i].text.toLowerCase())) i++
+        while (tokens[i] && ["for", "join", "order", "group", "by"].includes(word())) i++
       }
       if (isPunct(tokens[i], "(")) i = afterParens(tokens, i)
       if (pivot) {
@@ -484,12 +492,12 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
     else if (token.kind === "word") {
       const word = token.text.toLowerCase()
       if (word === "with") readCtes(i + 1)
-      else if (word === "table" && ["overwrite", "create", "replace", "temporary", "temp", "transient", "external", "volatile", "unlogged", "global", "local"].includes(tokens[i - 1]?.text.toLowerCase() ?? "")) {
+      else if (word === "table" && DDL_TABLE_PREFIX.has(tokens[i - 1]?.text.toLowerCase() ?? "")) {
         // `INSERT OVERWRITE TABLE t` and `CREATE [OR REPLACE] TABLE t`: the target is read with the qualifiers written.
         let at = i + 1
-        while (["if", "not", "exists"].includes(tokens[at]?.text.toLowerCase() ?? "")) at++
+        while (CREATE_TABLE_MODIFIERS.has(tokens[at]?.text.toLowerCase() ?? "")) at++
         readList(at, false)
-      } else if (word === "overwrite" && !["table", "directory", "local"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")) {
+      } else if (word === "overwrite" && tokens[i - 1]?.text.toLowerCase() === "insert" && !["table", "into", "directory", "local"].includes(tokens[i + 1]?.text.toLowerCase() ?? "")) {
         // Databricks' `INSERT OVERWRITE name`, without the optional TABLE.
         readList(i + 1, false)
       } else if (TABLE_KEYWORDS.has(word)) {
@@ -500,6 +508,10 @@ export function scanTableReferences(sql: string, dialect: string): Scan {
           continue
         // `FOR JOIN` inside a MySQL index hint names no table.
         if (word === "join" && tokens[i - 1]?.text.toLowerCase() === "for") continue
+        // `INSERT OVERWRITE DIRECTORY 'path' USING format` names a file format.
+        if (word === "using" && tokens[i - 1]?.text.toLowerCase() === "directory") continue
+        // `SELECT STRAIGHT_JOIN <columns>` is a select option, not a join.
+        if (word === "straight_join" && SELECT_OPTIONS.has(tokens[i - 1]?.text.toLowerCase() ?? "")) continue
         // A name followed by "(" after FROM, JOIN or USING is a table function; after INTO or UPDATE it is a table.
         readList(
           word === "into" && tokens[i + 1]?.text.toLowerCase() === "table" ? i + 2 : i + 1,
@@ -586,9 +598,11 @@ export function manifestRelations(manifest: any, dialect?: string): Relation[] {
 export function matchParts(parts: string[], relation: string[]): Exclude<RelationMatch, "none"> | null {
   if (parts.length === 0 || parts.length > relation.length) return null
   const tail = relation.slice(relation.length - parts.length)
+  // T-SQL's `db..table` leaves the schema out: the empty part stands for whatever schema the relation has, so it is only a partial match.
+  const gap = parts.includes("")
   const same = parts.every((p, i) => p === tail[i])
-  const fold = parts.every((p, i) => p.toLowerCase() === tail[i].toLowerCase())
-  if (parts.length < relation.length) return fold ? "partial" : null
+  const fold = parts.every((p, i) => p === "" || p.toLowerCase() === tail[i].toLowerCase())
+  if (parts.length < relation.length || gap) return fold ? "partial" : null
   if (same) return "exact"
   if (fold) return "case_insensitive"
   return null
@@ -643,7 +657,8 @@ export function mapRelations(tables: string[], sql: string, relations: Relation[
         relationName: rel.relationName,
         match: how,
         root: rel.root,
-        folds: folded === null || rel.parts[rel.parts.length - 1] === folded,
+        // A relation written without quotes in the manifest is folded by the warehouse like the name in the query, so it is the one named.
+        folds: folded === null || rel.parts[rel.parts.length - 1] === folded || !/["`\]]$/.test(rel.relationName),
       })
     }
     hits.sort(
