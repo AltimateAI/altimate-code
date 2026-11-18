@@ -187,6 +187,21 @@ describe("columnReach", () => {
     expect(found?.lens_types).toEqual({ _0: "Alias" })
   })
 
+  test("an engine-style name that only a comment or literal mentions gets no rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_mention"] = model(
+      "stg_mention",
+      ["model.shop.fct_orders"],
+      "select revenue + 1 /* _0 */, '_0' as note from \"shop\".\"main\".\"fct_orders\"",
+      ["_0"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_mention")
+    expect(found).toBeDefined()
+    expect(found?.lens_types).toBeUndefined()
+  })
+
   test("a documented engine-style name the SQL never writes gets no rating", () => {
     const value = manifest()
     const nodes = value.nodes as Record<string, any>
