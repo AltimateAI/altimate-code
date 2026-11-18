@@ -691,7 +691,7 @@ export interface DatabricksSavingsResult {
   jobs_checked?: number
   /** Checks whose system tables the connection could not read. */
   skipped?: { check: string; reason: string }[]
-  /** What a query read only the first 10,000 of, e.g. `jobs`. */
+  /** What a query read only the first 10,000 of, e.g. `job task rows`. */
   limited?: string[]
   /** Each SQL warehouse as it is now, and its cost over the window. */
   warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]

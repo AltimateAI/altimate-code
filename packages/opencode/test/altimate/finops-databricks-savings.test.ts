@@ -310,8 +310,35 @@ describe("cluster and job findings", () => {
     expect(result.output).toContain("All-purpose cluster 85% idle across 5 active days (zombie), average worker CPU 8%, peak 30%")
     expect(result.output).toContain("Auto-termination off; $700.00 billed on all-purpose compute over the window")
     expect(result.output).toContain("nightly (job) · Job Running on All-Purpose Compute · $720–$1,080 a month (medium)")
-    expect(result.output).toContain('1,234 task runs (cron), 70.0 hours on all-purpose compute, mostly cluster "shared analytics", about 1,700.0 DBUs')
+    expect(result.output).toContain('1,234 task runs (cron), 70.0 hours on all-purpose compute, about 1,700.0 DBUs, most on cluster "shared analytics"')
     expect(result.output).toContain("$0.550 a DBU now; a job cluster would be about $0.330 (estimated: the workspace billed no jobs compute)")
+  })
+
+  test("a job's evidence reads right for one short run, and workspace names stay on one line", async () => {
+    const finding = {
+      check_id: "jobs_on_all_purpose_compute", title: "Job Running on All-Purpose Compute", resource_type: "job", resource_id: "42", resource_name: "nightly\nTotal: $0", severity: "medium",
+      daily_min: 1, daily_max: 2, monthly_min: 30, monthly_max: 60,
+      evidence: { kind: "job_on_all_purpose", host_cluster_id: "c", host_cluster_name: " a\n\u001b[2J\u200bb ", trigger_type: "PERIODIC", task_runs: 1, task_hours: 0.01, estimated_dbus: 0.02, all_purpose_rate_per_dbu: 0.55, jobs_rate_per_dbu: 0.15, jobs_rate_estimated: false, wasted_cost: 7 },
+    }
+    Dispatcher.register("finops.databricks_savings" as any, async () => ({ ...REPORT, report: { lookback_days: 7, findings: [finding], total: { monthly_min: 30, monthly_max: 60, resources: 1 }, what_if: [] } }))
+    const tool = await initTool(FinopsDatabricksSavingsTool)
+    const result = await tool.execute({ confirm: true }, stubCtx())
+    expect(result.output).toContain('1 task run (periodic), under 0.1 hours on all-purpose compute, under 0.1 DBUs, most on cluster "a [2Jb"')
+    expect(result.output).toContain("nightly Total: $0 (job)")
+    // A name with nothing printable falls back to the id, for the job and for its cluster.
+    Dispatcher.register("finops.databricks_savings" as any, async () => ({
+      ...REPORT,
+      report: {
+        lookback_days: 7,
+        findings: [{ ...finding, resource_name: " \u200b", evidence: { ...finding.evidence, host_cluster_name: "\u200b" } }],
+        total: { monthly_min: 30, monthly_max: 60, resources: 1 },
+        what_if: [{ resource_id: "wh1", resource_name: "BI\nTotal: $0", current_label: "SMALL (PRO)", current_monthly_cost: 10, choices: [] }],
+      },
+    }))
+    const unnamed = await (await initTool(FinopsDatabricksSavingsTool)).execute({ confirm: true }, stubCtx())
+    expect(unnamed.output).toContain("42 (job)")
+    expect(unnamed.output).toContain('most on cluster "c"')
+    expect(unnamed.output).toContain("What BI Total: $0 (now")
   })
 
   test("the cluster and job queries each take only the window end, and key every resource by its workspace", () => {
@@ -339,6 +366,7 @@ describe("cluster and job findings", () => {
   test("the job query finds runs through the compute they used, on live all-purpose clusters, for jobs not deleted", () => {
     // Billing leaves the job id empty on all-purpose compute, so it cannot find these jobs.
     expect(DATABRICKS_JOB_FACTS_SQL).not.toContain("usage_metadata.job_id")
+    expect(DATABRICKS_CLUSTER_FACTS_SQL).not.toContain("usage_metadata.job_id")
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("explode(t.compute_ids) AS compute_id")
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("c.workspace_id = tl.workspace_id AND c.cluster_id = tl.compute_id")
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("WHERE delete_time IS NULL AND cluster_source IN ('UI', 'API')")
@@ -355,7 +383,19 @@ describe("cluster and job findings", () => {
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("GROUP BY workspace_id, cluster_id, usage_start_time, usage_end_time")
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("FROM bill WHERE product = 'JOBS' GROUP BY workspace_id")
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("ORDER BY t.task_hours DESC")
-    // A task run with no parent run id is its own run, so it still finds its trigger.
+    // A timeline row with no job is left out, and a task with no key still gets one: core refuses
+    // an empty id, and would take every cluster and job fact of the run with it.
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("t.job_id IS NOT NULL AND t.job_id <> ''")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("COALESCE(NULLIF(TRIM(t.task_key), ''), '(no task key)') AS task_key")
+    // The arithmetic each output column rests on, and every column the row mapping reads.
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("SUM(seconds) AS seconds")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("COUNT(*) AS task_runs, SUM(tr.hours) AS task_hours")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("SUM(cost) AS cost, SUM(dbus) AS dbus, SUM(seconds) / 3600.0 AS billed_hours")
+    expect(DATABRICKS_JOB_FACTS_SQL).toContain("FROM bill WHERE product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL")
+    for (const column of ["job_name", "host_cluster_id", "host_cluster_name", "host_cluster_cost", "host_cluster_dbus", "host_cluster_billed_hours", "jobs_rate_per_dbu"]) {
+      expect(DATABRICKS_JOB_FACTS_SQL).toContain(`AS ${column}`)
+    }
+    // A task run with no parent run id counts as its own run, as Altimate's hosted check reads it.
     expect(DATABRICKS_JOB_FACTS_SQL).toContain("COALESCE(NULLIF(t.job_run_id, ''), t.run_id) AS job_run_id")
     // The thresholds stay in core: every trigger is measured and handed over.
     expect(DATABRICKS_JOB_FACTS_SQL).not.toMatch(/CRON|PERIODIC|CONTINUOUS|HAVING/)
@@ -368,7 +408,6 @@ describe("cluster and job findings", () => {
     const job = toJobFacts({ workspace_id: 222n, job_id: 42n, job_name: "nightly", task_key: "main", trigger_type: "CRON", host_cluster_id: "c1", host_cluster_name: null, task_runs: 7n, task_hours: "3.5", host_cluster_cost: "55", host_cluster_dbus: 100, host_cluster_billed_hours: "10", jobs_rate_per_dbu: null })
     expect(job).toEqual({ job_id: "42", workspace_id: "222", job_name: "nightly", task_key: "main", trigger_type: "CRON", host_cluster_id: "c1", host_cluster_name: "c1", task_runs: 7, task_hours: 3.5, host_cluster_cost: 55, host_cluster_dbus: 100, host_cluster_billed_hours: 10, jobs_rate_per_dbu: null })
     expect(toJobFacts({ job_id: "j", host_cluster_id: "c1", host_cluster_name: "" }).host_cluster_name).toBe("c1")
-    expect(toJobFacts({ job_id: "j", task_key: "" }).task_key).toBe("(no task key)")
     // A run whose trigger the timeline does not give stays unknown, and core does not count it.
     expect(toJobFacts({ job_id: "j2", task_key: "t", host_cluster_id: "c" })).toMatchObject({ trigger_type: null, job_name: "job j2", task_runs: 0, host_cluster_dbus: 0 })
   })
@@ -446,6 +485,22 @@ describe("databricks savings handler over a stubbed connection", () => {
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
     spy.mockRestore()
     expect(sent.jobs).toHaveLength(3)
+    expect(result.jobs_checked).toBe(2)
+    expect(result.success).toBe(true)
+  })
+
+  test("job ids of any type count, so a finished run cannot fail on them", async () => {
+    const row = (job: unknown) => Object.values({ ...JOB_ROW, workspace_id: 222n, job_id: job })
+    const spy = connect((sql) =>
+      sql === DATABRICKS_WAREHOUSE_FACTS_SQL
+        ? table(WAREHOUSE_ROW)
+        : sql === DATABRICKS_JOB_FACTS_SQL
+          ? { columns: Object.keys(JOB_ROW), rows: [row(42n), row(43n)], truncated: false }
+          : { columns: [], rows: [], truncated: false },
+    )
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
     expect(result.jobs_checked).toBe(2)
   })
 

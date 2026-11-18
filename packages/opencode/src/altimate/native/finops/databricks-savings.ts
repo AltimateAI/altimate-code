@@ -203,7 +203,7 @@ bill AS (
   FROM system.billing.usage u CROSS JOIN p
   ${LIST_PRICE_JOIN}
   WHERE u.billing_origin_product = 'ALL_PURPOSE'
-    AND u.usage_metadata.cluster_id IS NOT NULL AND u.usage_metadata.job_id IS NULL
+    AND u.usage_metadata.cluster_id IS NOT NULL
     AND u.usage_date >= DATE_SUB(p.we_date, 7) AND u.usage_date < p.we_date
   GROUP BY u.workspace_id, u.usage_metadata.cluster_id
 )
@@ -241,10 +241,12 @@ clusters AS (
   WHERE delete_time IS NULL AND cluster_source IN ('UI', 'API')
 ),
 timeline AS (
-  SELECT t.workspace_id, t.job_id, t.task_key, COALESCE(NULLIF(t.job_run_id, ''), t.run_id) AS job_run_id,
+  SELECT t.workspace_id, t.job_id, COALESCE(NULLIF(TRIM(t.task_key), ''), '(no task key)') AS task_key,
+         COALESCE(NULLIF(t.job_run_id, ''), t.run_id) AS job_run_id,
          t.run_id, t.period_start_time, t.period_end_time, explode(t.compute_ids) AS compute_id
   FROM system.lakeflow.job_task_run_timeline t CROSS JOIN p
   WHERE t.period_start_time >= CAST(DATE_SUB(p.we_date, 7) AS TIMESTAMP) AND t.period_start_time < CAST(p.we_date AS TIMESTAMP)
+    AND t.job_id IS NOT NULL AND t.job_id <> ''
 ),
 timeline_row AS (
   SELECT tl.workspace_id, tl.job_id, tl.task_key, tl.job_run_id, tl.run_id, tl.period_start_time,
@@ -306,7 +308,7 @@ inv AS (
   SELECT workspace_id, job_id, name, delete_time FROM system.lakeflow.jobs
   QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) = 1
 )
-SELECT t.workspace_id, t.job_id, COALESCE(NULLIF(inv.name, ''), 'job ' || t.job_id) AS job_name,
+SELECT t.workspace_id, t.job_id, COALESCE(NULLIF(TRIM(inv.name), ''), 'job ' || t.job_id) AS job_name,
        t.task_key, t.trigger_type, t.cluster_id AS host_cluster_id,
        COALESCE(NULLIF(TRIM(c.cluster_name), ''), t.cluster_id) AS host_cluster_name,
        t.task_runs, t.task_hours,
@@ -407,8 +409,7 @@ export function toJobFacts(row: Record<string, unknown>) {
     job_id: id,
     workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
     job_name: String(row.job_name ?? `job ${id}`),
-    // Core refuses an empty key, and with it every cluster and job fact of the run.
-    task_key: String(row.task_key || "(no task key)"),
+    task_key: String(row.task_key ?? ""),
     trigger_type: row.trigger_type == null ? null : String(row.trigger_type),
     host_cluster_id: cluster,
     host_cluster_name: String(row.host_cluster_name || cluster),
@@ -561,7 +562,7 @@ export async function databricksSavings(
       warehouses_checked: warehouses.length,
       clusters_checked: clusters.length,
       // The query gives a row per task, cluster and trigger: each job is counted once.
-      jobs_checked: new Set(jobs.map((row) => JSON.stringify([row.workspace_id ?? null, row.job_id]))).size,
+      jobs_checked: new Set(jobs.map((row) => `${row.workspace_id ?? ""}/${row.job_id}`)).size,
       skipped,
       limited,
       // What each warehouse is and costs now, so a later run can tell what changed.

@@ -47,7 +47,11 @@ const tenths = (value: unknown) =>
   Number(value) < 0.05 ? "under 0.1" : Number(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })
 
 /** Free text from the workspace on one line, with control and invisible characters gone. */
-const oneLine = (value: unknown) => String(value ?? "").replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim()
+const oneLine = (value: unknown) =>
+  String(value ?? "")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/[\s\p{Cc}]+/gu, " ")
+    .trim()
 
 /** What a finding rests on, one short line each. */
 export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
@@ -71,7 +75,7 @@ export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
       ]
     case "job_on_all_purpose":
       return [
-        `${Number(e.task_runs).toLocaleString("en-US")} task ${Number(e.task_runs) === 1 ? "run" : "runs"} (${String(e.trigger_type).toLowerCase()}), ${tenths(e.task_hours)} hours on all-purpose compute, mostly cluster ${JSON.stringify(oneLine(e.host_cluster_name))}, about ${tenths(e.estimated_dbus)} DBUs`,
+        `${Number(e.task_runs).toLocaleString("en-US")} task ${Number(e.task_runs) === 1 ? "run" : "runs"} (${String(e.trigger_type).toLowerCase()}), ${tenths(e.task_hours)} hours on all-purpose compute, ${Number(e.estimated_dbus) < 0.05 ? "under 0.1" : `about ${tenths(e.estimated_dbus)}`} DBUs, most on cluster ${JSON.stringify(oneLine(e.host_cluster_name) || oneLine(e.host_cluster_id))}`,
         `$${Number(e.all_purpose_rate_per_dbu).toFixed(3)} a DBU now; a job cluster would be about $${Number(e.jobs_rate_per_dbu).toFixed(3)}${e.jobs_rate_estimated ? " (estimated: the workspace billed no jobs compute)" : ""}`,
       ]
     default:
@@ -100,12 +104,12 @@ export function formatSavings(result: DatabricksSavingsResult): string {
   )
   for (const finding of report.findings) {
     lines.push(
-      `${finding.resource_name} (${finding.resource_type.replace("_", " ")}${finding.workspace_id ? `, workspace ${finding.workspace_id}` : ""}) · ${finding.title} · ${range(finding.monthly_min, finding.monthly_max)} a month (${finding.severity})`,
+      `${oneLine(finding.resource_name) || finding.resource_id} (${finding.resource_type.replace("_", " ")}${finding.workspace_id ? `, workspace ${finding.workspace_id}` : ""}) · ${finding.title} · ${range(finding.monthly_min, finding.monthly_max)} a month (${finding.severity})`,
     )
     for (const line of evidenceLines(finding)) lines.push(`  ${line}`)
   }
   for (const option of report.what_if) {
-    lines.push("", `What ${option.resource_name} (now ${option.current_label}, ${dollars(option.current_monthly_cost)} a month) would cost instead:`)
+    lines.push("", `What ${oneLine(option.resource_name) || option.resource_id} (now ${option.current_label}, ${dollars(option.current_monthly_cost)} a month) would cost instead:`)
     for (const choice of option.choices) {
       const fit = choice.fits ? "" : ` (too small: ${choice.cores} cores, its queries need ${choice.cores_needed.toFixed(0)})`
       lines.push(`  ${size(choice.label)}: ${dollars(choice.monthly_cost)} a month, saving ${dollars(choice.monthly_saving)}${fit}`)
