@@ -289,6 +289,8 @@ export interface OrchestrateInput {
   aiVerify?: boolean
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
+  /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
+  prFiles?: string[]
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -2618,6 +2620,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           prTitle: input.prTitle,
           prBody: input.prBody,
           grepProject: input.grepProject,
+          prFiles: input.prFiles ?? input.changedFiles.map((f) => f.path),
           readFile: async (p, side, start, end) => numberedSlice(await getContent?.(p, side), start, end),
           compiledSql: async (p, side) => {
             const ctx = ctxByPath.get(p)
