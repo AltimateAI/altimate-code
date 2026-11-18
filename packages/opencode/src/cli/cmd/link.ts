@@ -18,7 +18,7 @@ import { AltimateApi } from "@/altimate/api/client"
 import {
   WorkspaceApi,
   ConflictError,
-  HIDDEN_BINDING_MESSAGE,
+  describeHiddenBinding,
   isHiddenBindingConflict,
   QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
@@ -534,7 +534,7 @@ async function runBrowserHandoff(
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
     if (isHiddenBindingConflict(err)) {
-      prompts.log.error(`${HIDDEN_BINDING_MESSAGE} Workspace "${projectName}" was created but is not linked.`)
+      prompts.log.error(`${await describeHiddenBinding(err)} Workspace "${projectName}" was created but is not linked.`)
     } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(
@@ -666,7 +666,7 @@ export async function createThenBindOrRebind(
             `project is still linked to "${stripControlChars(existing.datamate.name)}".`,
         )
       } else if (isHiddenBindingConflict(err)) {
-        prompts.log.error(`${HIDDEN_BINDING_MESSAGE} Nothing was created.`)
+        prompts.log.error(`${await describeHiddenBinding(err)} Nothing was created.`)
       } else {
         const existingName = conflictExistingName(err.detail)
         prompts.log.error(
@@ -906,7 +906,7 @@ async function bindOrRebind(
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (isHiddenBindingConflict(err)) {
-      prompts.log.error(HIDDEN_BINDING_MESSAGE)
+      prompts.log.error(await describeHiddenBinding(err, actAs))
     } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(`Already linked to "${existingName}". Re-run \`altimate-code link\` to switch.`)

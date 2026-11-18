@@ -24,7 +24,7 @@ test("link reports a completed seed and memory that is off without a retry hint"
 })
 
 test("a 409 that withholds the workspace name is explained as a teammate's private workspace, not a race", async () => {
-  const { ConflictError, isHiddenBindingConflict, HIDDEN_BINDING_MESSAGE } = await import(
+  const { ConflictError, isHiddenBindingConflict, hiddenBindingMessage } = await import(
     "../../../src/altimate/workspace/api-client"
   )
   expect(isHiddenBindingConflict(new ConflictError({ existing_datamate_id: 7, existing_datamate_name: null } as any))).toBe(true)
@@ -33,5 +33,20 @@ test("a 409 that withholds the workspace name is explained as a teammate's priva
   // A 409 that is not a binding conflict (no workspace id) keeps its own message.
   expect(isHiddenBindingConflict(new ConflictError({ message: "conflict" } as any))).toBe(false)
   expect(isHiddenBindingConflict(new Error("x"))).toBe(false)
-  expect(HIDDEN_BINDING_MESSAGE).toContain("share it with you")
+  expect(hiddenBindingMessage({ message: "x", existing_datamate_id: 7 })).toContain("share it with you")
+})
+
+test("the hidden-binding message names the workspace id and the account that cannot see it", async () => {
+  const { hiddenBindingMessage } = await import("../../../src/altimate/workspace/api-client")
+  const detail = { message: "This project is already linked to a different workspace", existing_datamate_id: 38, existing_datamate_name: null }
+  expect(hiddenBindingMessage(detail, { email: "support@example.com", instance: "acme" })).toBe(
+    'This project is already linked to a workspace (workspace id 38) that support@example.com on instance "acme" can\'t see. ' +
+      "It is private to another account: a teammate's, or yours under a different sign-in. " +
+      "Sign in as that account, or ask its owner to share it with you in the Altimate web app or to unlink the project, " +
+      "then run `altimate-code link` again.",
+  )
+  // Account unknown (lookup failed): still names the workspace, and says which account in general terms.
+  expect(hiddenBindingMessage(detail)).toContain("(workspace id 38) that the account you are signed in with can't see")
+  // Server-sourced text cannot inject terminal control sequences.
+  expect(hiddenBindingMessage(detail, { email: "a\x1b]8;;evil\x07@x.com", instance: "acme" })).toContain("a]8;;evil@x.com")
 })

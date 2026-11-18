@@ -49,7 +49,7 @@ const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await im
 )
 const { recordApprovedBinding } = await import("@/altimate/workspace/state")
 const { flushPendingSyncs } = await import("@/altimate/workspace/skill-sync")
-const { HIDDEN_BINDING_MESSAGE, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
+const { hiddenBindingMessage, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
   "@/altimate/workspace/api-client"
 )
 
@@ -298,7 +298,7 @@ describe("TUI: hidden-binding conflict toast", () => {
     const { api, toasts } = stubApi()
     // existing=undefined → bindExisting → 409 (name withheld) → hidden-binding toast.
     await bindOrRebindInline(api, IDENTIFIER, 5, undefined)
-    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
+    expect(toasts.some((t) => t.message === hiddenBindingMessage({ message: "already linked", existing_datamate_id: 7 }))).toBe(true)
     expect(toasts.some((t) => /claimed this project while you were choosing/i.test(t.message))).toBe(false)
   })
 
@@ -315,10 +315,42 @@ describe("TUI: hidden-binding conflict toast", () => {
     // No `rebindFrom`: the project looks unlinked to this user, because the binding that
     // owns it belongs to a workspace they cannot see. This is Bob, a minute after cloning.
     await createAndBindInline(api, IDENTIFIER, "proj")
-    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
+    expect(toasts.some((t) => t.message === hiddenBindingMessage({ message: "already linked", existing_datamate_id: 7 }))).toBe(true)
     // The advice that sent him round the loop: a picker scoped to workspaces he can see
     // lists none of them, so "use the palette to change" had nothing to offer.
     expect(toasts.some((t) => /Link this project to a workspace/.test(t.message))).toBe(false)
+  })
+
+  test("names the hidden workspace and the account signed in now, so a second sign-in is diagnosable", async () => {
+    // The exact body the service returns when the remote is bound to a private workspace the
+    // caller does not own: the id is sent, the name and path are withheld.
+    routes = [
+      {
+        match: /datamate-project-bindings/,
+        method: "POST",
+        status: 409,
+        body: {
+          detail: {
+            message: "This project is already linked to a different workspace",
+            existing_datamate_id: 38,
+            existing_datamate_name: null,
+            repo_remote: "https://github.com/acme/proj",
+            project_path: null,
+          },
+        },
+      },
+      { match: /^\/users\/me$/, method: "GET", status: 200, body: { id: 1, email: "serviceuser@example.com" } },
+    ]
+    const { api, toasts } = stubApi()
+    await bindOrRebindInline(api, IDENTIFIER, 29, undefined)
+    const toast = toasts.find((t) => /already linked/.test(t.message))
+    expect(toast?.message).toBe(
+      hiddenBindingMessage(
+        { message: "x", existing_datamate_id: 38 },
+        { email: "serviceuser@example.com", instance: "acme" },
+      ),
+    )
+    expect(toast?.message).toContain('(workspace id 38) that serviceuser@example.com on instance "acme" can\'t see')
   })
 
   test("a NAMED 409 is still a real race, and still names the workspace", async () => {
@@ -333,7 +365,7 @@ describe("TUI: hidden-binding conflict toast", () => {
     const { api, toasts } = stubApi()
     await createAndBindInline(api, IDENTIFIER, "proj")
     expect(toasts.some((t) => /already linked to "team-ws"/.test(t.message))).toBe(true)
-    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(false)
+    expect(toasts.some((t) => t.message === hiddenBindingMessage({ message: "already linked", existing_datamate_id: 7 }))).toBe(false)
   })
 })
 
