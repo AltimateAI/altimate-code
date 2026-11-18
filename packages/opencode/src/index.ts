@@ -55,6 +55,9 @@ import { CheckCommand } from "./cli/cmd/check"
 // altimate_change start — tool: model-free data tool access
 import { ToolCommand } from "./cli/cmd/tool"
 // altimate_change end
+// altimate_change start — integrations: one-click local integrations command
+import { IntegrationsCommand } from "./cli/cmd/integrations"
+// altimate_change end
 // altimate_change start — learn: playbook learning loop command
 import { LearnCommand } from "./cli/cmd/learn"
 // altimate_change end
@@ -104,6 +107,7 @@ const CLI_COMMAND_NAMES = new Set([
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion", "tool",
   // altimate_change start — attribute learning commands to their CLI entry point
   "learn",
+  "integrations",
   // altimate_change end
   // registered conditionally below (workspace / local-install builds)
   "link", "workspace", "workspace-serve", "workspace-client",
@@ -261,6 +265,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — tool: model-free data tool access
   .command(ToolCommand)
+  // altimate_change end
+  // altimate_change start — integrations: one-click local integrations
+  .command(IntegrationsCommand)
   // altimate_change end
   // altimate_change start — learn: register playbook learning command
   .command(LearnCommand)
