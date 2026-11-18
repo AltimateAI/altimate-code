@@ -1035,6 +1035,22 @@ describe("structuredError", () => {
         .report,
     ).toBe("Model: x")
   })
+  test("dbt_sql_graph's model, nodes and edges reach the structured fields, with only the report's header", () => {
+    const nodes = [{ id: "a", name: "a" }]
+    const report = "SQL graph for orders: 1 nodes, 0 edges\n- a (cte): 1 columns\n    columns: id\n    sql: select id from x"
+    expect(structuredResult("dbt_sql_graph", { model: "orders", nodes, edges: [], success: true }, report)).toEqual({
+      model: "orders",
+      nodes,
+      edges: [],
+      report: "SQL graph for orders: 1 nodes, 0 edges",
+    })
+  })
+  test("a dbt_sql_graph failure keeps its whole report", () => {
+    expect(structuredResult("dbt_sql_graph", { success: false, error: "no key" }, "Failed: no key\nsee the docs")).toEqual({
+      error: "no key",
+      report: "Failed: no key\nsee the docs",
+    })
+  })
   test("exposures_error reaches the structured fields", () => {
     expect(structuredResult("impact_analysis", { exposures_error: "bad json" }, "R")).toEqual({
       exposures_error: "bad json",

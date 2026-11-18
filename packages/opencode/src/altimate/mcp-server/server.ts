@@ -51,6 +51,7 @@ export async function serverInstructions(): Promise<string> {
 // fields are passed, and the whole is capped.
 const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
   dbt_lineage: ["model_name", "model_unique_id", "confidence", "confidence_factors", "upstream", "columns", "edges", "error"],
+  dbt_sql_graph: ["model", "nodes", "edges", "error"],
   impact_analysis: [
     "model",
     "column",
@@ -96,8 +97,14 @@ export function structuredResult(tool: string, metadata: Record<string, unknown>
     return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
   }
   const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))
-  // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`: keep its header.
-  const head = tool === "dbt_lineage" && "columns" in fields ? report.split(/\n(?:Column Mappings|Lineage Edges):/)[0]!.trim() : report
+  // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`, and dbt_sql_graph's
+  // text lists the same nodes as `nodes`: keep only the header.
+  let head = report
+  if (tool === "dbt_lineage" && "columns" in fields) {
+    head = report.split(/\n(?:Column Mappings|Lineage Edges):/)[0]!.trim()
+  } else if (tool === "dbt_sql_graph" && "nodes" in fields) {
+    head = report.split("\n")[0]!.trim()
+  }
   const full = { ...fields, report: head }
   if (Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES) return full
   // The column answer is the largest field: past the cap it goes first, so the model-level fields
