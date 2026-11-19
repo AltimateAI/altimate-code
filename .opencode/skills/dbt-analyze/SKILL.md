@@ -5,6 +5,8 @@ description: Analyze downstream impact of dbt model changes using column-level l
 
 # dbt Impact Analysis
 
+The first time you name `altimate-dbt` to the user, say what it is: the dbt command-line tool installed with altimate-code.
+
 ## Requirements
 **Agent:** any (read-only analysis)
 **Tools used:** bash (runs `altimate-dbt` commands), read, glob, dbt_manifest, lineage_check, dbt_lineage, sql_analyze, altimate_core_extract_metadata

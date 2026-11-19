@@ -11,7 +11,9 @@ import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import {
   DbtCostEstimateTool,
+  dbtCostEstimateInternals,
   explainJinja,
+  firstStatement,
   mayBeScript,
   parseBytesProcessed,
   readsFiles,
@@ -481,7 +483,7 @@ describe("parseDatabricksExplainCost", () => {
   })
 
   test("a leaf with no statistics at all is no estimate", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true, relation: "main.t", unread: true })
   })
 
   test.each([
@@ -680,7 +682,7 @@ describe("parseDatabricksExplainCost reads only the statistics Spark appends", (
   })
 
   test("nor stands in for missing statistics, or for Spark's default size", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true, relation: "main.t", unread: true })
     expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation [Statistics(sizeInBytes=0 B)#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({ noStats: true })
   })
 })
@@ -993,5 +995,105 @@ describe("review follow-ups, round twelve", () => {
       expect(local.queries).toEqual([])
       expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
     }
+  })
+})
+
+describe("follow-ups to the planner estimate", () => {
+  const rendered = (row: unknown) => async () => JSON.stringify([row])
+  const originalTimeout = dbtCostEstimateInternals.explainTimeoutMs
+  afterEach(() => {
+    dbtCostEstimateInternals.explainTimeoutMs = originalTimeout
+  })
+
+  test("an EXPLAIN that outlasts its deadline is no estimate, and the call stops waiting", async () => {
+    dbtCostEstimateInternals.explainTimeoutMs = 50
+    useAdapter(calls, { type: "databricks", explain: () => new Promise<string>(() => {}) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.title).toBe("dbt_cost_estimate: explain failed")
+    expect(result.output).toContain("did not answer within 0.05 s")
+    expect(result.metadata.bytes).toBeUndefined()
+  })
+
+  test("an EXPLAIN that answers within its deadline is read as before", async () => {
+    dbtCostEstimateInternals.explainTimeoutMs = 5_000
+    useAdapter(calls, { type: "snowflake", explain: rendered(SNOWFLAKE_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.bytes).toBe(2_147_483_648)
+  })
+
+  test.each([
+    ["a multi-line block comment", "select 1; /* a\nb */", "select 1"],
+    ["a second semicolon and a comment", "select 1;; -- c", "select 1"],
+    ["a comment on the next line", "select 1;\n-- done\n", "select 1"],
+  ])("Snowflake sends %s after the final semicolon to nobody", async (_, compiled, sent) => {
+    expect(mayBeScript(compiled, "snowflake")).toBe(false)
+    useAdapter(calls, { type: "snowflake", compile: async () => compiled, explain: rendered(SNOWFLAKE_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries).toEqual([[explainJinja("EXPLAIN USING JSON", sent), undefined]])
+    expect(result.metadata.success).toBe(true)
+  })
+
+  test.each([
+    ["select 'a;b' from t; -- c", "snowflake", "select 'a;b' from t"],
+    ["select \"a;b\" /* ; */ from t", "snowflake", 'select "a;b" /* ; */ from t'],
+    ["select `a;b` from t; /* x */", "databricks", "select `a;b` from t"],
+    ["select 1 -- not; a split", "snowflake", "select 1 -- not; a split"],
+    ["select 1", "snowflake", "select 1"],
+  ])("firstStatement(%p, %s) keeps what the driver sends as the statement", (sql, type, expected) => {
+    expect(firstStatement(sql, type)).toBe(expected)
+  })
+
+  test("a section heading inside a multi-line literal does not end the plan", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Project [concat(w#1, ",
+      "== Physical Plan ==",
+      ") AS z#2], Statistics(sizeInBytes=1.0 KiB)",
+      "+- Relation spark_catalog.default.b[w#1] parquet, Statistics(sizeInBytes=2.0 GiB)",
+      "",
+      "== Physical Plan ==",
+      "*(1) Project",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 2 * 1024 ** 3 })
+  })
+
+  test("a section heading after a finished node still ends the plan", () => {
+    const plan = "== Optimized Logical Plan ==\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\n== Physical Plan ==\nRelation main.u[a#0] parquet, Statistics(sizeInBytes=9.0 GiB)"
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 4096 })
+  })
+
+  test("a leaf that holds an inner plan keeps its own size", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Relation main.s.t[a#0] parquet, Statistics(sizeInBytes=2.0 GiB)",
+      ":  +- Relation main.s.u[a#1] parquet, Statistics(sizeInBytes=3.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 5 * 1024 ** 3 })
+  })
+
+  test("a node with a child and an inner plan is still not a leaf", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Filter (a#0 IN (list#5 [])), Statistics(sizeInBytes=1.0 GiB)",
+      ":  +- Relation main.s.u[a#1] parquet, Statistics(sizeInBytes=3.0 GiB)",
+      "+- Relation main.s.t[a#0] parquet, Statistics(sizeInBytes=2.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 5 * 1024 ** 3 })
+  })
+
+  test("Snowflake's 0 bytes is not called an upper bound: it also reports 0 for a source it cannot size", async () => {
+    useAdapter(calls, { type: "snowflake", explain: rendered('{"GlobalStats":{"partitionsTotal":0,"partitionsAssigned":0,"bytesAssigned":0}}') })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select $1 from @stage" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, bound: "unknown", bytes: 0 })
+    expect(result.output).toContain("not a cap")
+    expect(result.output).not.toContain("an upper bound")
+  })
+
+  test("a leaf with no readable size gets no ANALYZE advice: it is not known to lack statistics", async () => {
+    useAdapter(calls, { type: "databricks", explain: rendered("== Optimized Logical Plan ==\nRelation main.t[a#0] parquet") })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("printed no size this tool can read for main.t")
+    expect(result.output).not.toContain("ANALYZE")
   })
 })

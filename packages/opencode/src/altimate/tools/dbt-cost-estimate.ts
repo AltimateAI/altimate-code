@@ -65,6 +65,12 @@ export function formatBytes(bytes: number): string {
   return `${n.toFixed(1)} ${UNITS[i]}`
 }
 
+/**
+ * A plan with no size for a leaf: `relation` names it when the plan does, and `unread` marks a leaf that printed no
+ * size this parser could read (as opposed to Spark's default size for a table without statistics).
+ */
+export type NoStats = { noStats: true; relation?: string; unread?: true }
+
 /** A scan estimate from the warehouse's query planner: what EXPLAIN says the query reads, without running it. */
 export type PlanEstimate = { bytes: number; partitionsAssigned?: number; partitionsTotal?: number }
 
@@ -108,6 +114,13 @@ const SPARK_NO_SIZE = 2 ** 62
 /** The headers Spark writes between the sections of an EXPLAIN. */
 const SPARK_SECTION = /^== (Parsed Logical Plan|Analyzed Logical Plan|Optimized Logical Plan|Physical Plan) ==\s*$/
 
+/** Whether a node's text has more opening brackets than closing ones: its line continues on the next. */
+function opensBracket(text: string): boolean {
+  let open = 0
+  for (const c of text) open += c === "(" || c === "[" ? 1 : c === ")" || c === "]" ? -1 : 0
+  return open > 0
+}
+
 /** A `sizeInBytes=` figure read back into bytes: "12.3 MiB", "16.0 B", or past a long "1.23E+21 B". */
 function sparkBytes(figure: string): number | undefined {
   const match = /^(\d+(?:\.\d+)?(?:E[+-]?\d+)?)\s*([A-Za-z]+)$/i.exec(figure.trim())
@@ -125,15 +138,16 @@ function sparkBytes(figure: string): number | undefined {
  * size or Spark's default for a relation without statistics (with the relation's name when the leaf gives one);
  * undefined when there is no plan to read.
  */
-export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noStats: true; relation?: string } | undefined {
+export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | NoStats | undefined {
   if (typeof plan !== "string") return undefined
   const lines = plan.replace(/\r\n?/g, "\n").split("\n")
   const start = lines.findIndex((line) => /^\s*==\s*Optimized Logical Plan\s*==\s*$/i.test(line))
   if (start < 0) return undefined
   const nodes: { depth: number; text: string }[] = []
   for (const line of lines.slice(start + 1)) {
-    // Only Spark's own section headers end the plan: a line of a multi-line node could look like one.
-    if (SPARK_SECTION.test(line)) break
+    // Only Spark's own section headers end the plan: a line of a multi-line node could look like one. A header
+    // while the node above still has an open bracket is the rest of that node (a literal holding a line break).
+    if (SPARK_SECTION.test(line) && !(nodes.length > 0 && opensBracket(nodes[nodes.length - 1].text))) break
     if (!line.trim()) continue
     // Each level of the tree is three characters: ":  " or "   " for an ancestor, ":- " or "+- " for the node itself.
     const prefix = /^(?::  |   )*(?:[:+]- )?/.exec(line)![0]
@@ -145,10 +159,18 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
     nodes.push({ depth: prefix.length / 3, text: line.slice(prefix.length) })
   }
   if (nodes.length === 0) return undefined
+  // A node has a child when a later node sits one level below it before the tree comes back up to its level. An inner
+  // plan (a subquery) is printed two levels below, so a node holding one and no child is still a leaf.
+  const hasChild = nodes.map(() => false)
+  const open: number[] = []
+  nodes.forEach((node, i) => {
+    while (open.length > 0 && nodes[open[open.length - 1]].depth >= node.depth) open.pop()
+    if (open.length > 0 && nodes[open[open.length - 1]].depth === node.depth - 1) hasChild[open[open.length - 1]] = true
+    open.push(i)
+  })
   let bytes = 0
   for (let i = 0; i < nodes.length; i++) {
-    // A leaf is a node the next line does not go below.
-    if (i + 1 < nodes.length && nodes[i + 1].depth > nodes[i].depth) continue
+    if (hasChild[i]) continue
     // Only the suffix Spark appends to the node: a column can be named anything, "Statistics(sizeInBytes=…)" too.
     const figure = /, Statistics\(sizeInBytes=([^,()]+)(?:, [^()]*)?\)\s*$/.exec(nodes[i].text)?.[1]
     const size = figure === undefined ? undefined : sparkBytes(figure)
@@ -156,7 +178,8 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
       // "Relation main.sales.orders[…] parquet": Spark prints the name unquoted, so only a plain one (letters, digits,
       // underscores, dots) right before the column list is surely the whole name; any other gives none.
       const relation = /^Relation ([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\[/.exec(nodes[i].text)?.[1]
-      return relation ? { noStats: true, relation } : { noStats: true }
+      const unread = size === undefined ? { unread: true as const } : {}
+      return { noStats: true, ...(relation && { relation }), ...unread }
     }
     bytes += size
   }
@@ -190,7 +213,7 @@ export function readsFiles(sql: string): boolean {
  * The warehouses with no dry run whose planner still says what a query reads, the EXPLAIN that asks it, and the
  * reader of its one row.
  */
-const PLANNERS: Record<string, { owner: string; explain: string; read: (row: unknown) => PlanEstimate | { noStats: true; relation?: string } | undefined }> = {
+const PLANNERS: Record<string, { owner: string; explain: string; read: (row: unknown) => PlanEstimate | NoStats | undefined }> = {
   snowflake: { owner: "Snowflake's", explain: "EXPLAIN USING JSON", read: parseSnowflakeExplain },
   databricks: { owner: "Databricks'", explain: "EXPLAIN COST", read: parseDatabricksExplainCost },
 }
@@ -206,6 +229,37 @@ export function explainJinja(explain: string, sql: string): string {
   const statement = `${explain}\n${sql.replace(/[\s;]+$/, "")}`
   const literal = `'${statement.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
   return `{%- if execute -%}{%- set altimate_plan = run_query(${literal}) -%}{{ tojson(altimate_plan.columns[0].values() | list) }}{%- else -%}[]{%- endif -%}`
+}
+
+/**
+ * The SQL up to its first semicolon outside quotes and comments. Past one `mayBeScript` allows only whitespace,
+ * semicolons and comments, which the driver would still split off and send as a statement of their own
+ * (`select 1; /* a\nb *\/`, `select 1;; -- c`): none of it is sent. Read for SQL `mayBeScript` accepted, so the
+ * quotes and comments it models are the only ones there are.
+ */
+export function firstStatement(sql: string, type: string): string {
+  const databricks = type === "databricks"
+  let i = 0
+  while (i < sql.length) {
+    const c = sql[i]
+    const two = sql.slice(i, i + 2)
+    if (two === "--") {
+      const end = sql.indexOf("\n", i)
+      if (end < 0) break
+      i = end + 1
+    } else if (two === "/*") {
+      const end = sql.indexOf("*/", i + 2)
+      if (end < 0) break
+      i = end + 2
+    } else if (c === "'" || c === '"' || (databricks && c === "`")) {
+      let j = i + 1
+      while (j < sql.length && sql[j] !== c) j += c !== "`" && sql[j] === "\\" ? 2 : 1
+      i = j + 1
+    } else if (c === ";") {
+      return sql.slice(0, i)
+    } else i++
+  }
+  return sql
 }
 
 /**
@@ -280,6 +334,12 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
   return { script: /\bexecute\s+immediate\b/i.test(code), code }
 }
 
+/** Test seams. */
+export const dbtCostEstimateInternals = {
+  /** How long a call waits for a planner's EXPLAIN before it gives up; the plugin's own wait is 120 s. */
+  explainTimeoutMs: 90_000,
+}
+
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
 export function untilAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
@@ -325,18 +385,38 @@ async function explainEstimate(
     )
   }
   let row: unknown
+  // The EXPLAIN is bounded like the dbt adapter's start: a call that outlasts the deadline stops waiting for it (the
+  // adapter takes no signal, so the statement itself runs on) and a cancelled call stops at once.
+  const deadline = new AbortController()
+  const timer = setTimeout(
+    () => deadline.abort(new Error(`${planner.explain} did not answer within ${dbtCostEstimateInternals.explainTimeoutMs / 1000} s`)),
+    dbtCostEstimateInternals.explainTimeoutMs,
+  )
   try {
-    const rendered = await untilAbort(() => adapter.unsafeCompileQuery(explainJinja(planner.explain, sql), undefined), signal)
+    const rendered = await untilAbort(
+      () => adapter.unsafeCompileQuery(explainJinja(planner.explain, firstStatement(sql, type)), undefined),
+      AbortSignal.any([signal, deadline.signal]),
+    )
     const rows = typeof rendered === "string" ? JSON.parse(rendered.trim()) : undefined
     if (!Array.isArray(rows) || rows.length === 0) throw new Error(`${planner.explain} returned no plan`)
     row = rows[0]
   } catch (e) {
     if (signal.aborted) throw e
     return failure("explain failed", `${planner.owner} ${planner.explain} failed: ${e instanceof Error ? e.message : String(e)}`, extra)
+  } finally {
+    clearTimeout(timer)
   }
   const parsed = planner.read(row)
   if (parsed && "noStats" in parsed) {
     const table = parsed.relation ?? "<table>"
+    // A leaf that printed no readable size (rather than Spark's default) is not known to lack statistics: no advice.
+    if (parsed.unread) {
+      return failure(
+        "no estimate",
+        `${planner.owner} ${planner.explain} printed no size this tool can read for ${parsed.relation ?? "a table this query reads"}, so it is not estimated.`,
+        extra,
+      )
+    }
     return failure(
       "no estimate",
       `${planner.owner} planner has no size for ${parsed.relation ?? "a table this query reads"} (it shows Spark's default for a table without statistics). ANALYZE TABLE ${table} COMPUTE STATISTICS NOSCAN records its size from file metadata without reading the data; without NOSCAN, ANALYZE scans the whole table.`,
@@ -351,8 +431,11 @@ async function explainEstimate(
     parsed.partitionsAssigned !== undefined && parsed.partitionsTotal !== undefined
       ? `${parsed.partitionsAssigned} of ${parsed.partitionsTotal} partitions after pruning; `
       : ""
-  const accuracy =
-    type === "snowflake"
+  // Snowflake may give 0 for a source it cannot size when it compiles (an external table, a stage): not a cap.
+  const unsized = type === "snowflake" && parsed.bytes === 0
+  const accuracy = unsized
+    ? "Snowflake also reports 0 for a source it cannot size at compile time, such as an external table or a stage, so this is not a cap"
+    : type === "snowflake"
       ? `${partitions}an upper bound: runtime pruning can scan less, and a cached result none`
       : "table sizes before column pruning and file skipping, which usually read less; not a bound either way"
   return {
@@ -363,7 +446,7 @@ async function explainEstimate(
       adapter: type,
       source: "explain",
       // Snowflake documents bytesAssigned as an upper bound; Spark's sizes are the planner's guess, either way.
-      bound: type === "snowflake" ? "upper" : "estimate",
+      bound: unsized ? "unknown" : type === "snowflake" ? "upper" : "estimate",
       bytes: parsed.bytes,
       display: shown,
       ...(parsed.partitionsAssigned !== undefined && { partitionsAssigned: parsed.partitionsAssigned }),
@@ -376,7 +459,7 @@ async function explainEstimate(
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake, \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when it reports 0, which it also does for a source it cannot size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),

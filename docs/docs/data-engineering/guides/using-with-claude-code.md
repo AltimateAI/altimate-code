@@ -24,6 +24,10 @@ This gives Claude Code access to:
 - dbt manifest parsing and model scaffolding
 - Cross-dialect SQL translation
 
+### What `altimate-dbt` is
+
+When altimate works on a dbt project, it often runs `altimate-dbt`. It is a small command-line tool for dbt tasks: it finds your dbt project, Python environment and adapter, then compiles models, runs and tests them, and inspects columns and schemas. It is installed together with altimate-code, so there is nothing separate to set up, and altimate runs it for you as part of a task. You can also run it yourself in a terminal. See [dbt Tools](../tools/dbt-tools.md#altimate-dbt-cli) for its commands.
+
 ## Example workflows
 
 ### Code review with cost analysis

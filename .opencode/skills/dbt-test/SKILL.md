@@ -5,6 +5,8 @@ description: Add schema tests, unit tests, and data quality checks to dbt models
 
 # dbt Testing
 
+The first time you name `altimate-dbt` to the user, say what it is: the dbt command-line tool installed with altimate-code.
+
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
 **Tools used:** bash (runs `altimate-dbt` commands), read, glob, write, edit, altimate_core_testgen, altimate_core_validate
