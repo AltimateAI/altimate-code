@@ -2418,6 +2418,11 @@ export namespace Telemetry {
   // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
   // the module's current state (the opt-out marker runs while telemetry is disabled and must not
   // touch the state an enabled init may be using concurrently).
+  // altimate_change start — events sent without the signed-in account (`user_id`, `tenant`): keyed to the
+  // anonymous machine id only, as the plugin's privacy notice promises.
+  const ANONYMOUS_EVENTS: ReadonlySet<string> = new Set(["plugin_session_start", "plugin_feature_used"])
+  // altimate_change end
+
   function toAppInsightsEnvelopes(
     events: Event[],
     cfg: AppInsightsConfig,
@@ -2436,6 +2441,8 @@ export namespace Telemetry {
     return events.map((event) => {
       const { type, timestamp, ...fields } = event as any
       const sid: string = fields.session_id ?? sessionId
+      // altimate_change — the Claude Code plugin's usage events are anonymous: never the signed-in account.
+      const account = ANONYMOUS_EVENTS.has(type) ? undefined : who
 
       const properties: Record<string, string> = {
         cli_version: InstallationVersion,
@@ -2447,7 +2454,7 @@ export namespace Telemetry {
         ...(mid && { machine_id: mid }),
         // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
         // row joins the PostHog person and the backend record for the same account.
-        ...(who && { user_id: who.user_id, tenant: who.tenant }),
+        ...(account && { user_id: account.user_id, tenant: account.tenant }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
         // spans the TUI main thread and the server worker, and most of it runs before any chat
         // session exists, so `session_id` is empty for the first half and real for the second —
@@ -2477,7 +2484,7 @@ export namespace Telemetry {
           // altimate_change start — the backend user uuid when signed in, else the machine id.
           // Anonymous machines each keep a distinct identity (the random machine UUID, already a
           // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
-          "ai.user.id": who?.user_id || mid || "",
+          "ai.user.id": account?.user_id || mid || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,

@@ -213,6 +213,40 @@ describe("telemetry identity", () => {
     expect(last.headers["authorization"]).toBe("Bearer key-F")
   })
 
+  test("signed in, the Claude Code plugin's usage events still carry no account: no user_id or tenant, and the machine id as ai.user.id", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    writeCreds("key-A")
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await Telemetry.refreshIdentity()
+    expect(Telemetry.identityForTest()).toEqual({ user_id: UUID, tenant: "acme" })
+    const common = {
+      timestamp: Date.now(),
+      session_id: "claude:abc",
+      plugin_version: "1.8.2",
+      install_id: UUID_B,
+    }
+    Telemetry.track({ type: "plugin_session_start", ...common, altimate_code_version: "0.13.0", os: "macos" })
+    Telemetry.track({ type: "plugin_feature_used", ...common, feature: "lineage", outcome: "opened" })
+    Telemetry.track({ type: "startup_ready", session_id: "", command: "a", surface: "a", duration_ms: 1, fresh_install: false, timestamp: Date.now() })
+    await Telemetry.flush()
+    const sent = trackCalls().flatMap((c) => JSON.parse(c.body) as any[])
+    const named = (name: string) => sent.find((e) => e.data?.baseData?.name === name)
+    for (const name of ["plugin_session_start", "plugin_feature_used"]) {
+      const event = named(name)
+      expect(event).toBeDefined()
+      expect(event.data.baseData.properties).not.toHaveProperty("user_id")
+      expect(event.data.baseData.properties).not.toHaveProperty("tenant")
+      expect(event.tags["ai.user.id"]).toBe(event.data.baseData.properties.machine_id)
+      expect(JSON.stringify(event)).not.toContain(UUID)
+      expect(JSON.stringify(event)).not.toContain("acme")
+    }
+    // Every other event keeps the account, as before.
+    expect(named("startup_ready").data.baseData.properties.user_id).toBe(UUID)
+    expect(named("startup_ready").tags["ai.user.id"]).toBe(UUID)
+  })
+
   test("a credential change on disk is noticed at the next flush, and a buffered batch keeps the identity it was tracked under", async () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
       "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
