@@ -36,13 +36,9 @@ describe("tool report-event", () => {
       expect(reportEvent("built", session)).toHaveProperty("error")
   })
 
-  test("a lineage report step keeps only its action and session, whatever else is passed", () => {
-    expect(reportEvent("built", SESSION, 7, { pluginVersion: "1.8.2", installId: INSTALL, os: "macos", feature: "lineage", outcome: "opened" })).toEqual({
-      type: "lineage_report",
-      timestamp: 7,
-      session_id: SESSION,
-      action: "built",
-    })
+  test("a lineage report step takes only its action and session: a plugin field with it is refused", () => {
+    expect(reportEvent("built", SESSION, 7, {})).toEqual({ type: "lineage_report", timestamp: 7, session_id: SESSION, action: "built" })
+    expect(reportEvent("built", SESSION, 7, { pluginVersion: "1.8.2", installId: INSTALL })).toEqual({ error: "built does not take --plugin-version, --install-id" })
   })
 })
 
@@ -78,7 +74,7 @@ describe("tool report-event: the plugin's usage", () => {
     expect(PLUGIN_OUTCOMES).toEqual(["opened", "failed", "held", "allowed"])
     for (const feature of PLUGIN_FEATURES)
       for (const outcome of PLUGIN_OUTCOMES)
-        expect(reportEvent("plugin_feature_used", SESSION, 1000, { pluginVersion: "1.8.2-beta.1", installId: INSTALL, feature, outcome, os: "linux" })).toEqual({
+        expect(reportEvent("plugin_feature_used", SESSION, 1000, { pluginVersion: "1.8.2-beta.1", installId: INSTALL, feature, outcome })).toEqual({
           type: "plugin_feature_used",
           timestamp: 1000,
           session_id: SESSION,
@@ -90,13 +86,43 @@ describe("tool report-event: the plugin's usage", () => {
   })
 
   test("a plugin version that is not a semver is refused, so no name or path rides in it", () => {
-    for (const pluginVersion of ["", "1.8", "1.8.2 /Users/me/project", "/opt/plugin", "v1.8.2", "1.8.2-" + "x".repeat(33), undefined, 182])
-      expect(reportEvent("plugin_session_start", SESSION, 1, { pluginVersion, installId: INSTALL, os: "macos" })).toHaveProperty("error")
-    expect(reportEvent("plugin_session_start", SESSION, 1, { pluginVersion: "unknown", installId: INSTALL, os: "macos" })).not.toHaveProperty("error")
+    for (const pluginVersion of [
+      "",
+      "1.8",
+      "1.8.2 /Users/me/project",
+      "/opt/plugin",
+      "v1.8.2",
+      "01.8.2",
+      "1.8.2-",
+      "1.8.2-..",
+      "1.8.2-foo..bar",
+      "1.8.2-01",
+      "1.8.2+",
+      "1.8.2+a..b",
+      "1.8.2-" + "x".repeat(60),
+      undefined,
+      182,
+    ])
+      expect({ pluginVersion, event: reportEvent("plugin_session_start", SESSION, 1, { pluginVersion, installId: INSTALL, os: "macos" }) }).toMatchObject({
+        pluginVersion,
+        event: { error: expect.any(String) },
+      })
+    for (const pluginVersion of ["unknown", "0.0.0", "1.8.2", "1.8.2-beta.1", "1.8.2-0.3.7", "1.8.2-x-y.7z", "1.8.2+build.7", "1.8.2-rc.1+sha.5114f85"])
+      expect(reportEvent("plugin_session_start", SESSION, 1, { pluginVersion, installId: INSTALL, os: "macos" })).not.toHaveProperty("error")
+  })
+
+  test("each plugin action refuses a field it does not take", () => {
+    expect(reportEvent("plugin_session_start", SESSION, 1, { pluginVersion: "1.8.2", installId: INSTALL, os: "macos", feature: "lineage" })).toEqual({
+      error: "plugin_session_start does not take --feature",
+    })
+    expect(reportEvent("plugin_feature_used", SESSION, 1, { pluginVersion: "1.8.2", installId: INSTALL, os: "macos", feature: "lineage", outcome: "opened" })).toEqual({
+      error: "plugin_feature_used does not take --os",
+    })
   })
 
   test("an install id that is not a lowercase UUID is refused", () => {
-    for (const installId of ["", "machine", "orders_model", INSTALL.toUpperCase(), `${INSTALL}x`, "../../etc/passwd", undefined])
+    // Version 0 and a non-RFC variant are not what crypto.randomUUID makes.
+    for (const installId of ["", "machine", "orders_model", INSTALL.toUpperCase(), `${INSTALL}x`, "../../etc/passwd", "0f3c2a1e-6b7d-0c8e-9f10-1a2b3c4d5e6f", "0f3c2a1e-6b7d-4c8e-7f10-1a2b3c4d5e6f", undefined])
       expect(reportEvent("plugin_feature_used", SESSION, 1, { pluginVersion: "1.8.2", installId, feature: "health", outcome: "opened" })).toHaveProperty("error")
   })
 

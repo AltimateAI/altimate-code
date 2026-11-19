@@ -335,12 +335,21 @@ const ToolReportEventCommand = cmd({
   describe: "record the Claude Code plugin's usage: its lineage report, a session start, a feature used (usage telemetry; nothing is sent when telemetry is off)",
   builder: (yargs: Argv) =>
     yargs
-      .positional("action", { type: "string", describe: "a lineage report step, plugin_session_start or plugin_feature_used", demandOption: true })
+      .positional("action", {
+        type: "string",
+        describe:
+          "a lineage report step (summary_shown, open_pressed, command_run, built, build_failed, no_browser), plugin_session_start or plugin_feature_used",
+        demandOption: true,
+      })
       .option("session", { type: "string", describe: "the Claude Code session: claude:<id>", demandOption: true })
       .option("plugin-version", { type: "string", describe: "the plugin's version (plugin_* actions)" })
       .option("install-id", { type: "string", describe: "the plugin's random install id, a UUID (plugin_* actions)" })
       .option("os", { type: "string", describe: "macos, linux, windows, wsl or unknown (plugin_session_start)" })
-      .option("feature", { type: "string", describe: "the panel, command or gate (plugin_feature_used)" })
+      .option("feature", {
+        type: "string",
+        describe:
+          "lineage, dbt_show, profile_ctes, scan_cost, comments, sql_graph, health, runs, to_model, cost_gate or health_push_gate (plugin_feature_used)",
+      })
       .option("outcome", { type: "string", describe: "opened, failed, held or allowed (plugin_feature_used)" }),
   handler: async (args) => {
     const { reportEvent } = await import("../../altimate/tool-cli/report-event")
