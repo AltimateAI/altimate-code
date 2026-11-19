@@ -26,7 +26,7 @@ This gives Claude Code access to:
 
 ### What `altimate-dbt` is
 
-When altimate works on a dbt project, it often runs `altimate-dbt`. It is a small command-line tool for dbt tasks: it finds your dbt project, Python environment and adapter, then compiles models, runs and tests them, and inspects columns and schemas. It is installed together with altimate-code, so there is nothing separate to set up, and altimate runs it for you as part of a task. It is on the path of the commands altimate runs, which is not necessarily your own terminal's. See [dbt Tools](../tools/dbt-tools.md#altimate-dbt-cli) for its commands.
+When altimate works on a dbt project, it often runs `altimate-dbt`. It is a small command-line tool for dbt tasks: it finds your dbt project, Python environment and adapter, then compiles models, runs and tests them, and inspects columns and schemas. It is installed together with altimate-code, so there is nothing separate to set up, and altimate runs it for you as part of a task. altimate adds it to the `PATH` of the commands it runs, which is not necessarily your terminal's `PATH`. See [dbt Tools](../tools/dbt-tools.md#altimate-dbt-cli) for its commands.
 
 ## Example workflows
 

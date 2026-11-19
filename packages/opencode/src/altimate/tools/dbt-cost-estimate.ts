@@ -153,8 +153,9 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | NoStat
   const start = lines.findIndex((line) => /^\s*==\s*Optimized Logical Plan\s*==\s*$/i.test(line))
   if (start < 0) return undefined
   const nodes: { depth: number; text: string }[] = []
-  for (const [at, line] of lines.slice(start + 1).entries()) {
-    const previous = at > 0 ? lines[start + at] : undefined
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]
+    const previous = i > start + 1 ? lines[i - 1] : undefined
     // Only Spark's own section headers end the plan: a line of a multi-line node could look like one. Spark sets
     // each section off with an empty line, which the line of a literal holding a line break does not have before it.
     // A literal built to hold an empty line, a heading and a statistics suffix would still end the plan early; the

@@ -744,6 +744,8 @@ describe("follow-ups to the planner estimate", () => {
     reject(new Error("late"))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("did not answer within 0.03 s")
+    expect(result.output).not.toContain("late")
   })
 
   test("a node with a child and an inner plan is still not a leaf", () => {
