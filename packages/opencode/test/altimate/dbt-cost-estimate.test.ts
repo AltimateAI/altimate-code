@@ -885,7 +885,7 @@ describe("review follow-ups, round eight", () => {
   })
 
   test("both checks read the SQL the same way: one scan", () => {
-    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  ", literals: [] })
+    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  ", literals: [], calls: 0 })
     expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
   })
 })
@@ -1030,6 +1030,11 @@ describe("IDENTIFIER() on Databricks", () => {
     "SELECT * FROM IDENTIFIER('identifier(''x'')')('/x')",
     "SELECT * FROM IDENTIFIER('read_' /*a*/ || 'files' /*b*/)('/Volumes/c/s/v/raw', format => 'json')",
     "SELECT * FROM IDENTIFIER('`j\u017fon`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('${hiveconf:source}')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('json.raw')",
+    "SELECT * FROM IDENTIFIER(' CSV . raw')",
+    "SELECT \u017fIDENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+    "SELECT \u0131DENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
     "SELECT * FROM IDENTIFIER('js' /*a*/ || 'on.`/Volumes/c/s/v/raw`' /*b*/)",
     "SELECT 1 AS `\u00df\u00df\u00df`, XIDENTIFIER('safe') AS n FROM IDENTIFIER(concat('read_', 'files'))('/x')",
   ])("%p may read files", (sql) => {
@@ -1083,5 +1088,6 @@ describe("IDENTIFIER() on Databricks", () => {
 
   test("leaves Snowflake and BigQuery alone", async () => {
     expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").literals).toEqual([])
+    expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").calls).toBe(0)
   })
 })

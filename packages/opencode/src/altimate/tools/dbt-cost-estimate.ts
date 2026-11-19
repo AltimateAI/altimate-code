@@ -163,6 +163,9 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
   return { bytes: Math.round(bytes) }
 }
 
+/** The data source formats Spark reads a path with (`json.`/path``). */
+const FILE_FORMATS = "json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image"
+
 /**
  * Whether a Databricks query reads files rather than tables (read_files, cloud_files, a path such as json.`…`):
  * planning one can read the files to infer their schema. Read on the code `scanSql` leaves (comments and quoted text
@@ -170,15 +173,13 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
  * does not read counts.
  */
 export function readsFiles(sql: string): boolean {
-  const { script, code, literals } = scanSql(sql, "databricks")
+  const { script, code, literals, calls } = scanSql(sql, "databricks")
   if (script) return true
   if (fileSource(code)) return true
   // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: read a lone string literal as
   // code, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
-  // Counted outside backtick-quoted names, and with no boundary consumed, so IDENTIFIER(IDENTIFIER('f')('x')) is two.
-  // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
+    // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
   const bare = code.replace(/`[^`]*`/g, " ").toUpperCase()
-  const calls = bare.match(/(?<![A-Z0-9_$])IDENTIFIER\s*\(/g)?.length ?? 0
   // A qualified clause (system.builtin.IDENTIFIER('read_files')) or one a name continues past (IDENTIFIER('json').`p`)
   // is assembled from parts this does not read.
   if (/\.\s*IDENTIFIER\s*\(/.test(bare) || /IDENTIFIER\s*\(\s*\u0000\s*\)\s*\./.test(bare)) return true
@@ -186,8 +187,9 @@ export function readsFiles(sql: string): boolean {
   for (const lit of literals) {
     plain++
     // Spark reads the string as a name, ignoring comments and unescaping backslashes: not read here.
-    // A double quote, a nested IDENTIFIER or a non-ASCII letter (Spark folds ſ to s, so jſon is json) is not read.
-    if (/[\\"]|\/\*|--/.test(lit.text) || /IDENTIFIER\s*\(/.test(lit.text.toUpperCase()) || /[^\x00-\x7f]/.test(lit.text)) return true
+    // A double quote, a `${…}` substitution, a nested IDENTIFIER, a non-ASCII letter (Spark folds ſ to s, so jſon is json) or
+    // a format before the path (json.raw) is not read.
+    if (/[\\"$]|\/\*|--/.test(lit.text) || new RegExp(`^\\s*\`?(${FILE_FORMATS})\`?\\s*\\.`, "i").test(lit.text) || /IDENTIFIER\s*\(/.test(lit.text.toUpperCase()) || /[^\x00-\x7f]/.test(lit.text)) return true
     if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*$/i.test(lit.text) || fileSource(lit.text)) return true
   }
   return calls > plain
@@ -200,8 +202,7 @@ function fileSource(code: string): boolean {
   // A known format over any backtick-quoted name, unless the format word is the middle of a dotted name (main.json.`t`).
   // Where a relation goes cannot be told from a column without parsing (FROM (json.`x`), FROM`json`.`x`), so a
   // column qualified by an alias named like a format (json.`order-id`) is refused too: no estimate, never a missed read.
-  const formats = "json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image"
-  if (new RegExp(`(?:(^|[^a-z0-9_.\`])(${formats})|(^|[^.\`])\`(${formats})\`)\\s*\\.\\s*\``, "i").test(code)) return true
+  if (new RegExp(`(?:(^|[^a-z0-9_.\`])(${FILE_FORMATS})|(^|[^.\`])\`(${FILE_FORMATS})\`)\\s*\\.\\s*\``, "i").test(code)) return true
   // Any backtick-quoted name that looks like a path ("/" or ":", as in s3://…, dbfs:/…, /Volumes/…), whatever the source
   // before it (a format, a provider class) or a doubled backtick inside it, unless it directly follows Delta's own
   // provider: a source over files can infer its schema from them.
@@ -248,8 +249,8 @@ export function mayBeScript(input: string, type: string): boolean {
  * comments and quoted text as spaces and Databricks' backtick-quoted names kept as written, and (Databricks) the lone
  * string literals an IDENTIFIER( call holds.
  */
-export function scanSql(input: string, type: string): { script: boolean; code: string; literals: { text: string }[] } {
-  const script = { script: true, code: "", literals: [] }
+export function scanSql(input: string, type: string): { script: boolean; code: string; literals: { text: string }[]; calls: number } {
+  const script = { script: true, code: "", literals: [], calls: 0 }
   // Read with the line breaks Jinja renders: every \r\n and lone \r is \n.
   const sql = input.replace(/\r\n?/g, "\n")
   const databricks = type === "databricks"
@@ -264,6 +265,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
   }
   // Databricks: the text of each string literal that opens an IDENTIFIER( call, and where it sits in `code`.
   const literals: { text: string }[] = []
+  let calls = 0
   // Past a semicolon only whitespace and comments may follow: anything else, quoted or not, is a second statement.
   let ended = false
   let i = 0
@@ -315,9 +317,10 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       continue
     }
     emit(c)
+    if (databricks && c === "(" && opensIdentifier(tail)) calls++
     i++
   }
-  return { script: /\bexecute\s+immediate\b/i.test(code), code, literals }
+  return { script: /\bexecute\s+immediate\b/i.test(code), code, literals, calls }
 }
 
 /** Whether `tail` (the last of `scanSql`'s code, whitespace collapsed to one space) ends in `IDENTIFIER(`. */
