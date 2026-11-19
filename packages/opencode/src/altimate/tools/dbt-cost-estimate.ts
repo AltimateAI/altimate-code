@@ -175,11 +175,17 @@ export function readsFiles(sql: string): boolean {
   if (fileSource(code)) return true
   // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: read a lone string literal as
   // code, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
-  const calls = code.match(/(^|[^a-z0-9_.$`])identifier\s*\(/gi)?.length ?? 0
+  // Counted outside backtick-quoted names, and with no boundary consumed, so IDENTIFIER(IDENTIFIER('f')('x')) is two.
+  const bare = code.replace(/`[^`]*`/g, " ")
+  const calls = bare.match(/(?<![a-z0-9_$])identifier\s*\(/gi)?.length ?? 0
+  // A qualified clause (system.builtin.IDENTIFIER('read_files')) or one a name continues past (IDENTIFIER('json').`p`)
+  // is assembled from parts this does not read.
+  if (/\.\s*identifier\s*\(/i.test(bare) || /identifier\s*\(\s*\u0000\s*\)\s*\./i.test(bare)) return true
   let plain = 0
   for (const lit of literals) {
     plain++
-    if (lit.text.includes("\\")) return true
+    // Spark reads the string as a name, ignoring comments and unescaping backslashes: not read here.
+    if (/[\\]|\/\*|--/.test(lit.text)) return true
     if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*$/i.test(lit.text) || fileSource(lit.text)) return true
   }
   return calls > plain
@@ -288,7 +294,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       while (j < sql.length && sql[j] !== close) j += escapes && sql[j] === "\\" ? 2 : 1
       if (j >= sql.length) return script
       let blank = " "
-      if (databricks && c !== "`" && /(^|[^a-z0-9_.$`])identifier\s*\(\s*$/i.test(code)) {
+      if (databricks && c !== "`" && /(?<![a-z0-9_$])identifier\s*\(\s*$/i.test(code)) {
         // Marked, so a second literal after it does not read as the call's first.
         blank = "\u0000"
         // Only a literal the call's parenthesis closes is plain: a following literal, operator or name is not.

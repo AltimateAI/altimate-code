@@ -1013,6 +1013,16 @@ describe("IDENTIFIER() on Databricks", () => {
     "select * from IDENTIFIER(tbl_var)",
     "select * from IDENTIFIER('cat.sch.tbl') a join IDENTIFIER(:other) b on a.id = b.id",
     "select * from IDENTIFIER('read\\_files')('/x')",
+    "SELECT * FROM IDENTIFIER(IDENTIFIER('lower')('READ_FILES'))('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER( IDENTIFIER('concat')('read_', 'files'))('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('read_files /* c */')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('read_files/**/')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('json/**/.`/Volumes/c/s/v/raw`')",
+    "SELECT * FROM IDENTIFIER('read_files -- c\n')('/x')",
+    "SELECT * FROM system.builtin.IDENTIFIER('read_files')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM json.IDENTIFIER('`/Volumes/c/s/v/raw`')",
+    "SELECT * FROM IDENTIFIER('json').`data.json`",
+    "SELECT * FROM IDENTIFIER('json') . `data`",
   ])("%p may read files", (sql) => {
     expect(readsFiles(sql)).toBe(true)
   })
@@ -1023,6 +1033,7 @@ describe("IDENTIFIER() on Databricks", () => {
     "select IDENTIFIER('col') from main.sales.orders",
     "select * from IDENTIFIER('main.json.t')",
     "select * from `identifier`('x')",
+    "SELECT `note identifier(:x)` FROM main.sales.orders",
   ])("%p reads tables", (sql) => {
     expect(readsFiles(sql)).toBe(false)
   })
