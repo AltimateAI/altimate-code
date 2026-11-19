@@ -709,3 +709,33 @@ describe("review follow-ups", () => {
     expect((parseDatabricksExplainCost(plan) as { bytes: number }).bytes).toBeGreaterThanOrEqual(2 * 1024 ** 3)
   })
 })
+
+describe("review follow-ups, round four", () => {
+  test.each([
+    ["snowflake", "select 1\n!foo"],
+    ["snowflake", "!set x=1\nselect 1"],
+    ["snowflake", "select 1 /* outer /* inner */ */"],
+    ["databricks", "select 1 /* outer /* inner */ */"],
+  ])("on %s, %p is not read: no estimate", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(true)
+  })
+
+  for (const [type, compiled] of [
+    ["snowflake", "select 1\n!foo"],
+    ["snowflake", "select 1\r!foo"],
+    ["snowflake", "select 1\r\n!foo"],
+    ["snowflake", "select 1 /* outer /* inner */ */"],
+  ] as const) {
+    test(`on ${type}, ${JSON.stringify(compiled)} never reaches the EXPLAIN`, async () => {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type, compile: async () => compiled, explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, source: "explain" })
+    })
+  }
+
+  test("a ! inside a line is an operator, not a command", () => {
+    expect(mayBeScript("select a from t where a != 1", "snowflake")).toBe(false)
+  })
+})

@@ -183,12 +183,14 @@ export function explainJinja(explain: string, sql: string): string {
  * Whether the SQL may be more than one statement, as the warehouse's driver splits it: dbt-snowflake runs each
  * statement it splits off, so a second one after the EXPLAIN would run for real. One pass, left to right, that
  * reads only what it models exactly: single- and double-quoted text (a backslash escapes, as the Snowflake
- * connector's splitter reads it), backticks on Databricks, `--` and block comments. Anything else that could hide or fake a separator (Snowflake's `$$` text and `//` comments,
- * Databricks' raw strings and nested comments, an unclosed quote or comment, EXECUTE IMMEDIATE) counts as a
- * script, as does a semicolon with anything but whitespace after it: a doubt is no estimate, never a run.
+ * connector's splitter reads it), backticks on Databricks, `--` and block comments. Anything else that could hide or
+ * fake a separator (Snowflake's `$$` text, `//` comments and `!` commands at a line's start, raw strings, nested
+ * comments, an unclosed quote or comment, EXECUTE IMMEDIATE) counts as a script, as does a semicolon with anything but whitespace after it: a doubt is no estimate, never a run.
  */
 export function mayBeScript(sql: string, type: string): boolean {
   const databricks = type === "databricks"
+  // The Snowflake splitter yields a line starting with "!" as a command of its own, wherever it sits: never read.
+  if (!databricks && /(^|\n)!/.test(sql)) return true
   let code = ""
   let i = 0
   while (i < sql.length) {
@@ -203,8 +205,8 @@ export function mayBeScript(sql: string, type: string): boolean {
     }
     if (two === "/*") {
       const end = sql.indexOf("*/", i + 2)
-      // Databricks nests block comments, and an unclosed one hides the rest: neither is read.
-      if (end < 0 || (databricks && sql.slice(i + 2, end).includes("/*"))) return true
+      // Databricks nests block comments, and an unclosed one hides the rest: neither is read, on either warehouse.
+      if (end < 0 || sql.slice(i + 2, end).includes("/*")) return true
       i = end + 2
       code += " "
       continue
