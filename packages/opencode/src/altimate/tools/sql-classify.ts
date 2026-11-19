@@ -32,6 +32,11 @@ const READ_CATEGORIES = new Set(["query"])
  * Only code tokens change; quoted content and the original statement boundaries
  * remain authoritative when checking the parser's result. */
 function parserSql(sql: string, dialect?: string): string {
+  if (/\bEXPLAIN\b/i.test(sql) && tokenizeSql(sql, dialect).complete) {
+    const statements = statementsOf(sql, dialect)
+    const adapted = statements.map((statement) => withoutExplainOptions(statement, dialect))
+    if (adapted.some((statement, index) => statement !== statements[index])) sql = adapted.join("; ")
+  }
   const duckdb = dialect?.toLowerCase() === "duckdb"
   if (!duckdb && dialect?.toLowerCase() !== "sqlite") return sql
   const compatible = tokenizeSql(sql, dialect).tokens
@@ -141,11 +146,33 @@ function isReadOnlyMetadata(statement: string): boolean {
 }
 // EXPLAIN is a read only when the explained statement is one: `EXPLAIN ANALYZE`
 // executes the statement, so `EXPLAIN ANALYZE DELETE …` must stay a write.
-const EXPLAIN_PREFIX = /^\s*EXPLAIN\b(\s+(ANALYZE|VERBOSE|QUERY\s+PLAN|FORMAT\s+\w+|\([^)]*\)))*\s+/i
+// Options are accepted only where the dialect defines them: Snowflake USING JSON|TEXT|TABULAR,
+// Databricks/Spark EXTENDED|CODEGEN|COST|FORMATTED, and a parenthesized option list.
+const EXPLAIN_OPTION_LIST = "\\((?!\\s*\\(*\\s*(?:SELECT|WITH|VALUES|TABLE|FROM)\\b)[^)]*\\)"
+
+function explainPrefix(dialect?: string): RegExp {
+  const d = dialect?.toLowerCase() ?? ""
+  const options = ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+", EXPLAIN_OPTION_LIST]
+  if (d === "snowflake") options.push("USING\\s+(?:JSON|TEXT|TABULAR)")
+  if (/^(databricks|spark|hive)$/.test(d)) options.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
+  return new RegExp(`^\\s*EXPLAIN\\b(\\s+(${options.join("|")}))*\\s+`, "i")
+}
+
+/** The parser lacks the dialect's EXPLAIN options; give it plain EXPLAIN <statement>. Never used for execution. */
+function withoutExplainOptions(statement: string, dialect?: string): string {
+  const explained = statement.replace(explainPrefix(dialect), "")
+  return explained === statement || !explained.trim() ? statement : `EXPLAIN ${explained}`
+}
+
+/** EXPLAIN with options is read-only only as the sole statement of its text. */
+function hasExplainOptions(statement: string, dialect?: string): boolean {
+  const prefix = explainPrefix(dialect).exec(statement)
+  return !!prefix && prefix[0].length > (/^\s*EXPLAIN\s+/i.exec(statement)?.[0].length ?? 0)
+}
 
 function isReadOnlyOther(statement: string, dialect?: string): boolean {
   if (isReadOnlyMetadata(statement)) return true
-  const explained = statement.replace(EXPLAIN_PREFIX, "")
+  const explained = statement.replace(explainPrefix(dialect), "")
   if (explained === statement) return false
   return (
     (/^\s*(SELECT|WITH)\b/i.test(explained) && !hasQueryWriteClause(explained, dialect)) ||
@@ -161,6 +188,7 @@ function otherIsReadOnly(sql: string, parsed: Array<{ category: string }>, diale
   if (!tokenizeSql(sql, dialect).complete) return false
   const statements = statementsOf(sql, dialect)
   if (statements.length !== parsed.length) return false
+  if (statements.length > 1 && statements.some((statement) => hasExplainOptions(statement, dialect))) return false
   return parsed.every(
     (statement, i) =>
       (READ_CATEGORIES.has(statement.category) && !hasQueryWriteClause(statements[i], dialect)) ||
