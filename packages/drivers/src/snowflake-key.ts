@@ -38,7 +38,7 @@ export function normalizePrivateKeyPem(raw: string): NormalizedKey | undefined {
 
   // A pasted file may hold other blocks (certificates, public key) before the
   // private key; use the first block that is a private key.
-  const match = [...text.matchAll(PEM_BLOCK)].find((m) => /PRIVATE KEY$/.test(m[1])) ?? text.match(new RegExp(PEM_BLOCK.source))
+  const match = [...text.matchAll(PEM_BLOCK)].find((m) => /PRIVATE KEY$/.test(m[1]))
   if (!match) return undefined
   const label = match[1]
   let inner = match[2]
