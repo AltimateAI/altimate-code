@@ -130,6 +130,15 @@ describe("EXPLAIN with options", () => {
     }
   })
 
+  test("EXPLAIN of a query with a COPY in a CTE is a write", () => {
+    const copy = "WITH copied AS (COPY (SELECT 1 AS x) TO '/tmp/out.csv') SELECT * FROM copied"
+    for (const sql of [`EXPLAIN (ANALYZE) ${copy}`, `EXPLAIN (FORMAT JSON) ${copy}`, `EXPLAIN ANALYZE ${copy}`, `EXPLAIN ${copy}`]) {
+      expect(type(sql, "duckdb")).toBe("write")
+      expect(type(sql, "postgres")).toBe("write")
+    }
+    expect(type("EXPLAIN (ANALYZE) SELECT 'copy' AS \"copy\"", "duckdb")).toBe("read")
+  })
+
   test("an optioned EXPLAIN batch of reads is still a write", () => {
     for (const sql of ["EXPLAIN ANALYZE SELECT 1; SELECT 2", "EXPLAIN (FORMAT JSON) SELECT 1; SELECT 2", "SELECT 1; EXPLAIN (ANALYZE) SELECT 2"]) {
       expect(type(sql, "postgres")).toBe("write")

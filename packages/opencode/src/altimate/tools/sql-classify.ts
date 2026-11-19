@@ -210,7 +210,10 @@ function isReadOnlyOther(statement: string, dialect?: string): boolean {
   const explained = statement.replace(explainPrefix(dialect), "")
   if (explained === statement) return false
   return (
-    (/^\s*(SELECT|WITH)\b/i.test(explained) && !hasQueryWriteClause(explained, dialect)) ||
+    (/^\s*(SELECT|WITH)\b/i.test(explained) &&
+      !hasQueryWriteClause(explained, dialect) &&
+      // DuckDB runs COPY inside a CTE, and an adapted EXPLAIN reaches the parser without its options.
+      !/\bCOPY\b/i.test(maskSql(tokenizeSql(explained, dialect).tokens))) ||
     isReadOnlyMetadata(explained)
   )
 }
