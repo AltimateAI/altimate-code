@@ -153,9 +153,9 @@ export function parseDatabricksExplainCost(plan: unknown): (PlanEstimate & { lea
  * The warehouses with no dry run whose planner still says what a query reads, the EXPLAIN that asks it, and the
  * reader of its one row.
  */
-const PLANNERS: Record<string, { name: string; explain: string; read: (row: unknown) => PlanEstimate | { noStats: true } | undefined }> = {
-  snowflake: { name: "Snowflake", explain: "EXPLAIN USING JSON", read: parseSnowflakeExplain },
-  databricks: { name: "Databricks", explain: "EXPLAIN COST", read: parseDatabricksExplainCost },
+const PLANNERS: Record<string, { owner: string; explain: string; read: (row: unknown) => PlanEstimate | { noStats: true } | undefined }> = {
+  snowflake: { owner: "Snowflake's", explain: "EXPLAIN USING JSON", read: parseSnowflakeExplain },
+  databricks: { owner: "Databricks'", explain: "EXPLAIN COST", read: parseDatabricksExplainCost },
 }
 
 /**
@@ -204,18 +204,18 @@ async function explainEstimate(
     row = rows[0]
   } catch (e) {
     if (signal.aborted) throw e
-    return failure("explain failed", `No estimate: ${planner.name}'s ${planner.explain} failed: ${e instanceof Error ? e.message : String(e)}`, extra)
+    return failure("explain failed", `${planner.owner} ${planner.explain} failed: ${e instanceof Error ? e.message : String(e)}`, extra)
   }
   const parsed = planner.read(row)
   if (parsed && "noStats" in parsed) {
     return failure(
       "no estimate",
-      `No estimate: ${planner.name}'s planner has no size for a table this query reads (it shows Spark's default for a table without statistics). ANALYZE TABLE <table> COMPUTE STATISTICS gives it one.`,
+      `${planner.owner} planner has no size for a table this query reads (it shows Spark's default for a table without statistics). ANALYZE TABLE <table> COMPUTE STATISTICS gives it one.`,
       extra,
     )
   }
   if (!parsed) {
-    return failure("unreadable estimate", `No estimate: ${planner.name}'s ${planner.explain} answered a plan this tool can't read.`, extra)
+    return failure("unreadable estimate", `${planner.owner} ${planner.explain} answered a plan this tool can't read.`, extra)
   }
   const shown = formatBytes(parsed.bytes)
   const partitions =
@@ -241,7 +241,7 @@ async function explainEstimate(
       ...(parsed.partitionsTotal !== undefined && { partitionsTotal: parsed.partitionsTotal }),
       ...(model && { model }),
     },
-    output: `${model ? `${model} ` : "The query "}would scan about ${shown}, by ${planner.name}'s plan estimate (${accuracy}).`,
+    output: `${model ? `${model} ` : "The query "}would scan about ${shown}, by ${planner.owner} plan estimate (${accuracy}).`,
   }
 }
 
