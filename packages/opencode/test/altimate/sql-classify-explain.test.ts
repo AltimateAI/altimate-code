@@ -106,7 +106,7 @@ describe("EXPLAIN with options", () => {
   })
 
   test("a parenthesized option list is not an option outside Postgres", () => {
-    for (const dialect of ["snowflake", "mysql", "bigquery", "sqlserver", "databricks", "redshift", "duckdb"]) {
+    for (const dialect of ["snowflake", "mysql", "bigquery", "sqlserver", "databricks", "redshift"]) {
       for (const options of ["(FORMAT JSON)", "(BOGUS TRUE)", "(ANALYZE)"]) {
         expect(type(`EXPLAIN ${options} SELECT 1`, dialect)).toBe("write")
       }
@@ -114,7 +114,30 @@ describe("EXPLAIN with options", () => {
     expect(type("EXPLAIN (FORMAT JSON) SELECT 1", undefined as unknown as string)).toBe("write")
   })
 
-  test("the postgresql alias takes no option list, so hidden statements cannot slip through", () => {
+  test("DuckDB and the postgresql alias share the Postgres option list", () => {
+    for (const dialect of ["duckdb", "postgresql", "postgres"]) {
+      expect(type("EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1", dialect)).toBe("read")
+      expect(type("EXPLAIN (FORMAT HTML) SELECT 1", dialect)).toBe("read")
+      expect(type("EXPLAIN (ANALYZE, FORMAT JSON) DELETE FROM t", dialect)).toBe("write")
+      expect(type("EXPLAIN (BOGUS TRUE) SELECT 1", dialect)).toBe("write")
+    }
+  })
+
+  test("Postgres boolean spellings and the IO option are accepted", () => {
+    for (const options of ["(IO TRUE)", "(ANALYZE yes)", "(BUFFERS t, COSTS n)", "(ANALYZE 1, TIMING off)"]) {
+      expect(type(`EXPLAIN ${options} SELECT 1`, "postgres")).toBe("read")
+      expect(type(`EXPLAIN ${options} DELETE FROM t`, "postgres")).toBe("write")
+    }
+  })
+
+  test("an optioned EXPLAIN batch of reads is still a write", () => {
+    for (const sql of ["EXPLAIN ANALYZE SELECT 1; SELECT 2", "EXPLAIN (FORMAT JSON) SELECT 1; SELECT 2", "SELECT 1; EXPLAIN (ANALYZE) SELECT 2"]) {
+      expect(type(sql, "postgres")).toBe("write")
+    }
+    expect(type("EXPLAIN COST SELECT 1; SELECT 2", "databricks")).toBe("write")
+  })
+
+  test("the postgresql alias reads dollar quotes, so hidden statements cannot slip through", () => {
     for (const sql of [
       "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; CLUSTER t",
       "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; CHECKPOINT",
@@ -123,11 +146,12 @@ describe("EXPLAIN with options", () => {
       "EXPLAIN ANALYZE SELECT $$--$$ AS a; CHECKPOINT",
       "EXPLAIN VERBOSE SELECT $t$--$t$ AS a; NOTIFY channel",
       "EXPLAIN SELECT $$--$$ AS a; CHECKPOINT",
+      "EXPLAIN (ANALYZE) SELECT $t1$--$t1$ AS a; CLUSTER t",
     ]) {
       expect(type(sql, "postgresql")).toBe("write")
       expect(type(sql, "postgres")).toBe("write")
     }
-    expect(type("EXPLAIN (FORMAT JSON) SELECT 1", "postgresql")).toBe("write")
+    expect(type("EXPLAIN (FORMAT JSON) SELECT 1", "postgresql")).toBe("read")
   })
 
   test("nested optioned EXPLAIN is a write", () => {
@@ -141,6 +165,7 @@ describe("EXPLAIN with options", () => {
       for (const quote of ["$$", "$t$"]) {
         const literal = `${quote}--${quote}`
         expect(type(`EXPLAIN COST SELECT ${literal} AS a; DELETE FROM t`, dialect)).toBe("write")
+        expect(type(`EXPLAIN COST SELECT $t1$--$t1$ AS a; CHECKPOINT`, dialect)).toBe("write")
         expect(type(`EXPLAIN SELECT ${literal} AS a; DELETE FROM t`, dialect)).toBe("write")
       }
     }
@@ -148,24 +173,37 @@ describe("EXPLAIN with options", () => {
   })
 
   test("a long option list is classified in linear time", () => {
-    for (const filler of [" ", "\n", "((("]) {
-      const sql = "EXPLAIN (" + filler.repeat(64_000) + "FORMAT JSON) SELECT 1"
+    // Quadratic matching took seconds here; the budget leaves room for a loaded runner.
+    const budget = 500
+    const timed = (sql: string, dialect: string, expected: "read" | "write") => {
       const start = performance.now()
-      type(sql, "postgres")
-      expect(performance.now() - start).toBeLessThan(200)
+      expect(type(sql, dialect)).toBe(expected)
+      expect(performance.now() - start).toBeLessThan(budget)
     }
-    for (const [sql, dialect] of [
-      ["EXPLAIN USING JSON SELECT 1;".repeat(64_000), "snowflake"],
-      ["EXPLAIN (FORMAT JSON) SELECT 1;".repeat(64_000), "postgres"],
+    timed("EXPLAIN (" + " ".repeat(64_000) + "FORMAT JSON) SELECT 1", "postgres", "read")
+    timed("EXPLAIN (" + "\n".repeat(64_000) + "FORMAT JSON) SELECT 1", "postgres", "read")
+    timed("EXPLAIN (" + "(((".repeat(64_000) + "FORMAT JSON) SELECT 1", "postgres", "write")
+    timed("EXPLAIN (" + "ANALYZE, ".repeat(8_000) + "FORMAT JSON) SELECT 1", "postgres", "read")
+  })
+
+  test("a long batch of optioned statements scales linearly", () => {
+    // Four times the statements costs about four times as much; rebuilding the text per statement costs sixteen.
+    const best = (statement: string, dialect: string, count: number) => {
+      const sql = statement.repeat(count)
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const start = performance.now()
+          expect(type(sql, dialect)).toBe("write")
+          return performance.now() - start
+        }),
+      )
+    }
+    for (const [statement, dialect] of [
+      ["EXPLAIN USING JSON SELECT 1;", "snowflake"],
+      ["EXPLAIN (FORMAT JSON) SELECT 1;", "postgres"],
     ]) {
-      const begin = performance.now()
-      expect(type(sql, dialect)).toBe("write")
-      expect(performance.now() - begin).toBeLessThan(1_000)
+      expect(best(statement, dialect, 64_000) / best(statement, dialect, 16_000)).toBeLessThan(9)
     }
-    const items = "EXPLAIN (" + "ANALYZE, ".repeat(8_000) + "FORMAT JSON) SELECT 1"
-    const start = performance.now()
-    expect(type(items, "postgres")).toBe("read")
-    expect(performance.now() - start).toBeLessThan(200)
   })
 
   test("plain EXPLAIN is unchanged", () => {

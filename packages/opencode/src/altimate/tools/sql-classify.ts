@@ -5,7 +5,7 @@
 // Parser failures are never reads; lexical checks retain hard-deny protection.
 
 import { hasMongoWriteStage, normalizeMqlCommand } from "@altimateai/drivers"
-import { isModeledDialect, maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
+import { DOLLAR_TAG_ANYWHERE, isModeledDialect, lexesDollarQuotes, maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls, sqlLiteral } from "./sql-functions"
 import { hasSideEffectFunction, isReadOnlyNestedFunction } from "./sql-function-policy"
 
@@ -143,12 +143,12 @@ function isReadOnlyMetadata(statement: string): boolean {
 // EXPLAIN is a read only when the explained statement is one: `EXPLAIN ANALYZE`
 // executes the statement, so `EXPLAIN ANALYZE DELETE …` must stay a write.
 // Options are accepted only where the dialect defines them: Snowflake USING JSON|TEXT|TABULAR,
-// Databricks/Spark/Hive EXTENDED|CODEGEN|COST|FORMATTED, and PostgreSQL's parenthesized list of
-// its documented options. Any other option, or a list in another dialect, leaves a write.
-const POSTGRES_BOOLEAN = "(?:\\s+(?:TRUE|FALSE|ON|OFF|0|1))?"
+// Databricks/Spark/Hive EXTENDED|CODEGEN|COST|FORMATTED, and the parenthesized list of
+// documented options that PostgreSQL and DuckDB share. Any other option, or a list in another dialect, leaves a write.
+const POSTGRES_BOOLEAN = "(?:\\s+(?:TRUE|FALSE|ON|OFF|YES|NO|T|F|Y|N|0|1))?"
 const POSTGRES_OPTION =
-  "(?:FORMAT\\s+(?:TEXT|XML|JSON|YAML)|SERIALIZE(?:\\s+(?:NONE|TEXT|BINARY))?|" +
-  `(?:ANALYZE|ANALYSE|VERBOSE|COSTS|SETTINGS|GENERIC_PLAN|BUFFERS|WAL|TIMING|SUMMARY|MEMORY)${POSTGRES_BOOLEAN})`
+  "(?:FORMAT\\s+(?:TEXT|XML|JSON|YAML|HTML|GRAPHVIZ)|SERIALIZE(?:\\s+(?:NONE|TEXT|BINARY))?|" +
+  `(?:ANALYZE|ANALYSE|VERBOSE|COSTS|IO|SETTINGS|GENERIC_PLAN|BUFFERS|WAL|TIMING|SUMMARY|MEMORY)${POSTGRES_BOOLEAN})`
 // Linear: the items are separated by a comma, so no whitespace run can be split two ways.
 const POSTGRES_OPTION_LIST = `\\(\\s*${POSTGRES_OPTION}(?:\\s*,\\s*${POSTGRES_OPTION})*\\s*\\)`
 
@@ -157,8 +157,8 @@ function explainPrefix(dialect?: string): RegExp {
   const words = ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+"]
   if (d === "snowflake") words.push("USING\\s+(?:JSON|TEXT|TABULAR)")
   if (/^(databricks|spark|hive)$/.test(d)) words.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
-  // Only the canonical `postgres` dialect, whose lexer reads dollar quotes. PostgreSQL takes either the parenthesized list or the legacy words, never both.
-  const list = d === "postgres" ? `\\s*${POSTGRES_OPTION_LIST}\\s*|` : ""
+  // PostgreSQL and DuckDB (same grammar); other dialects have no such list. PostgreSQL takes either the parenthesized list or the legacy words, never both.
+  const list = /^(postgres|postgresql|duckdb)$/.test(d) ? `\\s*${POSTGRES_OPTION_LIST}\\s*|` : ""
   return new RegExp(`^\\s*EXPLAIN\\b(?:${list}(?:\\s+(?:${words.join("|")}))*\\s+)`, "i")
 }
 
@@ -173,7 +173,7 @@ function blankExplainOptions(sql: string, dialect?: string): string {
   // A lexer without dollar quotes can read `$$--$$` as a comment that hides statements the parser
   // skips too, so the two statement counts would agree on a wrong answer. Leave such text unadapted:
   // the parser rejects the options and the statement is a write.
-  if (/\$[A-Za-z_\u0080-\uffff]*\$/.test(sql) && !/^(postgres|postgresql|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")) return sql
+  if (DOLLAR_TAG_ANYWHERE.test(sql) && !lexesDollarQuotes(dialect)) return sql
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) return sql
   // Same length as the text: comments are blanks, quoted text a filler no option can match.
