@@ -72,7 +72,13 @@ export function formatBytes(bytes: number): string {
 export type NoStats = { noStats: true; relation?: string; unread?: true }
 
 /** A scan estimate from the warehouse's query planner: what EXPLAIN says the query reads, without running it. */
-export type PlanEstimate = { bytes: number; partitionsAssigned?: number; partitionsTotal?: number }
+export type PlanEstimate = {
+  bytes: number
+  partitionsAssigned?: number
+  partitionsTotal?: number
+  /** Snowflake: the total may leave out a source it cannot size (an external table, a stage), so it is not a cap. */
+  unsized?: true
+}
 
 const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined)
 
@@ -96,8 +102,18 @@ export function parseSnowflakeExplain(content: unknown): PlanEstimate | undefine
   if (bytes === undefined) return undefined
   const partitionsAssigned = count(stats.partitionsAssigned)
   const partitionsTotal = count(stats.partitionsTotal)
+  // A total of 0 beside a scan (or with no operations to read), or a scan of an external table or stage, or one with no
+  // size of its own, may leave data out of it. A 0 with no scan at all is a query that reads nothing.
+  const operations = (plan as { Operations?: unknown }).Operations
+  const scans = (Array.isArray(operations) ? operations.flat(2) : []).filter(
+    (op): op is { operation: string; bytesAssigned?: unknown } => typeof (op as { operation?: unknown } | null)?.operation === "string",
+  )
+  const unsized =
+    (bytes === 0 && (!Array.isArray(operations) || scans.some((op) => /scan/i.test(op.operation)))) ||
+    scans.some((op) => /external|stage/i.test(op.operation) || (/scan/i.test(op.operation) && count(op.bytesAssigned) === undefined))
   return {
     bytes: Math.round(bytes),
+    ...(unsized && { unsized: true as const }),
     ...(partitionsAssigned !== undefined && { partitionsAssigned }),
     ...(partitionsTotal !== undefined && { partitionsTotal }),
   }
@@ -113,13 +129,6 @@ const SPARK_NO_SIZE = 2 ** 62
 
 /** The headers Spark writes between the sections of an EXPLAIN. */
 const SPARK_SECTION = /^== (Parsed Logical Plan|Analyzed Logical Plan|Optimized Logical Plan|Physical Plan) ==\s*$/
-
-/** Whether a node's text has more opening brackets than closing ones: its line continues on the next. */
-function opensBracket(text: string): boolean {
-  let open = 0
-  for (const c of text) open += c === "(" || c === "[" ? 1 : c === ")" || c === "]" ? -1 : 0
-  return open > 0
-}
 
 /** A `sizeInBytes=` figure read back into bytes: "12.3 MiB", "16.0 B", or past a long "1.23E+21 B". */
 function sparkBytes(figure: string): number | undefined {
@@ -144,10 +153,13 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | NoStat
   const start = lines.findIndex((line) => /^\s*==\s*Optimized Logical Plan\s*==\s*$/i.test(line))
   if (start < 0) return undefined
   const nodes: { depth: number; text: string }[] = []
-  for (const line of lines.slice(start + 1)) {
-    // Only Spark's own section headers end the plan: a line of a multi-line node could look like one. A header
-    // while the node above still has an open bracket is the rest of that node (a literal holding a line break).
-    if (SPARK_SECTION.test(line) && !(nodes.length > 0 && opensBracket(nodes[nodes.length - 1].text))) break
+  for (const [at, line] of lines.slice(start + 1).entries()) {
+    const previous = at > 0 ? lines[start + at] : undefined
+    // Only Spark's own section headers end the plan: a line of a multi-line node could look like one. Spark sets
+    // each section off with an empty line, which the line of a literal holding a line break does not have before it.
+    // A literal built to hold an empty line, a heading and a statistics suffix would still end the plan early; the
+    // SQL is the agent's own, so that is not defended against.
+    if (SPARK_SECTION.test(line) && (previous === undefined || !previous.trim())) break
     if (!line.trim()) continue
     // Each level of the tree is three characters: ":  " or "   " for an ancestor, ":- " or "+- " for the node itself.
     const prefix = /^(?::  |   )*(?:[:+]- )?/.exec(line)![0]
@@ -432,9 +444,9 @@ async function explainEstimate(
       ? `${parsed.partitionsAssigned} of ${parsed.partitionsTotal} partitions after pruning; `
       : ""
   // Snowflake may give 0 for a source it cannot size when it compiles (an external table, a stage): not a cap.
-  const unsized = type === "snowflake" && parsed.bytes === 0
+  const unsized = type === "snowflake" && parsed.unsized === true
   const accuracy = unsized
-    ? "Snowflake also reports 0 for a source it cannot size at compile time, such as an external table or a stage, so this is not a cap"
+    ? "Snowflake can leave a source it cannot size at compile time (an external table, a stage) out of this figure, or report 0, so it is not a cap"
     : type === "snowflake"
       ? `${partitions}an upper bound: runtime pruning can scan less, and a cached result none`
       : "table sizes before column pruning and file skipping, which usually read less; not a bound either way"

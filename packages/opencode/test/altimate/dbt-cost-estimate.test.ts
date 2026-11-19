@@ -679,8 +679,37 @@ describe("follow-ups to the planner estimate", () => {
   })
 
   test("a section heading after a finished node still ends the plan", () => {
-    const plan = "== Optimized Logical Plan ==\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\n== Physical Plan ==\nRelation main.u[a#0] parquet, Statistics(sizeInBytes=9.0 GiB)"
+    const plan = "== Optimized Logical Plan ==\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\n\n== Physical Plan ==\nRelation main.u[a#0] parquet, Statistics(sizeInBytes=9.0 GiB)"
     expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 4096 })
+  })
+
+  test("brackets inside a printed name do not stretch a node over the plan's real end", () => {
+    const plan = "== Optimized Logical Plan ==\nRelation main.t[a(b#0] parquet, Statistics(sizeInBytes=2.0 GiB)\n\n== Physical Plan ==\nFileScan parquet main.t[a(b#0]"
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 2 * 1024 ** 3 })
+  })
+
+  test("Snowflake: a scan of an external table or stage, or a scan with no size, keeps the total from being a cap", () => {
+    const mixed = (extra: object) =>
+      JSON.stringify({
+        GlobalStats: { bytesAssigned: 1024 },
+        Operations: [[{ id: 1, operation: "TableScan", objects: ["T"], bytesAssigned: 1024 }, { id: 2, ...extra }]],
+      })
+    expect(parseSnowflakeExplain(mixed({ operation: "ExternalScan", bytesAssigned: 0 }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "StageScan" }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "TableScan", objects: ["U"] }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "Filter" }))).toEqual({ bytes: 1024 })
+    expect(parseSnowflakeExplain(SNOWFLAKE_PLAN)).toEqual({ bytes: 2_147_483_648, partitionsAssigned: 37, partitionsTotal: 1240 })
+  })
+
+  test("Snowflake: a positive total beside an external scan is not called an upper bound", async () => {
+    const plan = JSON.stringify({
+      GlobalStats: { partitionsTotal: 2, partitionsAssigned: 2, bytesAssigned: 1024 },
+      Operations: [[{ id: 1, operation: "TableScan", objects: ["T"], bytesAssigned: 1024 }, { id: 2, operation: "ExternalScan", objects: ["E"] }]],
+    })
+    useAdapter(calls, { type: "snowflake", explain: rendered(plan) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select * from t join e" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, bound: "unknown", bytes: 1024 })
+    expect(result.output).not.toContain("an upper bound")
   })
 
   test("a leaf that holds an inner plan keeps its own size", () => {
