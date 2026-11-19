@@ -132,15 +132,16 @@ const IDENT = String.raw`(?:"(?:[^"]|"")+"|\`(?:[^\`]|\`\`)+\`|\[[^\]]+\]|[A-Za-
 // A join's own relation, right after its JOIN keyword: `JOIN "db"."schema"."table" AS alias`.
 const JOINED_RELATION = new RegExp(String.raw`^((?:[A-Za-z]+\s+)*JOIN\s+)(${IDENT}(?:\s*\.\s*${IDENT})*)(?:\s+AS)?\s+(?!ON\b|USING\b)(${IDENT})(?=\s|$)`, "i")
 
-/** SQL on one line: runs of whitespace become one space, except inside quoted strings and identifiers. */
+/** SQL on one line: runs of whitespace become one space, except inside quoted strings and identifiers (`[…]` included). */
 function oneLine(sql: string): string {
   let out = ""
   for (let i = 0; i < sql.length; ) {
     const ch = sql[i]
-    if (ch === "'" || ch === '"' || ch === "`") {
-      // To the closing quote; a doubled quote is an escaped one.
+    if (ch === "'" || ch === '"' || ch === "`" || ch === "[") {
+      // To the closing quote (`]` for a bracketed name); a doubled one is an escaped one.
+      const close = ch === "[" ? "]" : ch
       let j = i + 1
-      while (j < sql.length && !(sql[j] === ch && sql[j + 1] !== ch)) j += sql[j] === ch ? 2 : 1
+      while (j < sql.length && !(sql[j] === close && sql[j + 1] !== close)) j += sql[j] === close ? 2 : 1
       out += sql.slice(i, j + 1)
       i = j + 1
     } else if (/\s/.test(ch)) {
