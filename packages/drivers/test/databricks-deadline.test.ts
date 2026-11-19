@@ -12,6 +12,7 @@ await restoreModuleMocksAfterTests("@databricks/sql")
 let fetch: () => Promise<any[]>
 let startDelayMs = 0
 let cancelResult: () => Promise<unknown>
+let closeResult: () => Promise<unknown>
 let cancels = 0
 let closes = 0
 
@@ -19,6 +20,7 @@ beforeEach(() => {
   fetch = async () => [{ n: 1 }]
   startDelayMs = 0
   cancelResult = async () => ({})
+  closeResult = async () => ({})
   cancels = 0
   closes = 0
 })
@@ -39,6 +41,7 @@ class FakeClient {
           },
           close: async () => {
             closes++
+            return closeResult()
           },
         }
       },
@@ -140,5 +143,43 @@ describe("Databricks server-side cancel", () => {
     expect(isQueryTimeoutError(error)).toBe(false)
     expect(error.message).toContain("TABLE_OR_VIEW_NOT_FOUND")
     expect(cancels).toBe(0)
+  })
+})
+
+describe("Databricks statement cleanup when the fetch fails", () => {
+  const failingFetch = async (): Promise<any[]> => {
+    throw new Error("[TABLE_OR_VIEW_NOT_FOUND] system.x")
+  }
+
+  for (const [label, options] of [
+    ["with a deadline", { cancelAfterMs: 5_000 }],
+    ["without a deadline", { queryTimeoutMs: 5_000 }],
+  ] as const) {
+    test(`${label}, the statement is closed and the fetch's error is reported`, async () => {
+      fetch = failingFetch
+      const db = await connector()
+      const error = await db.execute("SELECT 1", 10, [], options).catch((e) => e)
+      expect(error.message).toContain("TABLE_OR_VIEW_NOT_FOUND")
+      expect(isQueryTimeoutError(error)).toBe(false)
+      expect([cancels, closes]).toEqual([0, 1])
+    })
+
+    test(`${label}, a close that also fails does not replace the fetch's error`, async () => {
+      fetch = failingFetch
+      closeResult = async () => {
+        throw new Error("close failed")
+      }
+      const db = await connector()
+      const error = await db.execute("SELECT 1", 10, [], options).catch((e) => e)
+      expect(error.message).toContain("TABLE_OR_VIEW_NOT_FOUND")
+      expect(closes).toBe(1)
+    })
+  }
+
+  test("a statement that returns rows without a deadline is closed once", async () => {
+    const db = await connector()
+    const result = await db.execute("SELECT 1", 10, [])
+    expect(result.rows).toEqual([[1]])
+    expect([cancels, closes]).toEqual([0, 1])
   })
 })

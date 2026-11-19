@@ -257,6 +257,22 @@ describe("databricks savings handler", () => {
     expect(result.success).toBe(false)
     expect(result.error).toContain("/sql/1.0/warehouses/<id>")
   })
+
+  test("a core without the savings rules is refused before connecting to the warehouse", async () => {
+    Registry.setConfigs({
+      dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" },
+    })
+    const get = spyOn(Registry, "get").mockRejectedValue(new Error("opened a connection"))
+    // A published core that predates the rules exports `initSdk` but not `databricksSavings`.
+    const result = await databricksSavings({ warehouse: "dbx" }, rulesEngine({ initSdk: () => {} }))
+    const connections = get.mock.calls.length
+    get.mockRestore()
+    expect(result.success).toBe(false)
+    expect(result.error).toBe(
+      "This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.",
+    )
+    expect(connections).toBe(0)
+  })
 })
 
 describe("cluster and job findings", () => {

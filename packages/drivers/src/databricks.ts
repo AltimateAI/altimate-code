@@ -49,7 +49,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     const deadlineMs = options?.cancelAfterMs
     if (!deadlineMs || deadlineMs <= 0) {
       const operation = await session.executeStatement(query, stmtOptions)
-      const rows = await operation.fetchAll()
+      let rows: any[]
+      try {
+        rows = await operation.fetchAll()
+      } catch (error) {
+        // A statement that failed while fetching is still open on the session: free it, and
+        // report the fetch's own error rather than any from the close.
+        operation.close().catch(() => {})
+        throw error
+      }
       await operation.close()
       return rows
     }
@@ -84,6 +92,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     let outcome: any[] | typeof STOPPED
     try {
       outcome = await Promise.race([work, stopping])
+    } catch (error) {
+      // The fetch failed before any stop: the statement is still open on the session.
+      operation?.close().catch(() => {})
+      throw error
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener("abort", onAbort)
