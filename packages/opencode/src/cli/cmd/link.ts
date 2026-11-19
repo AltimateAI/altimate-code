@@ -590,10 +590,9 @@ export async function createThenBindOrRebind(
   /** False for a headless run: print the manage URL, but there is nobody at a browser to look at it. */
   opts: { openBrowser?: boolean } = {},
 ): Promise<void> {
-  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
-  const linkAccount = await accountDigest()
-  if (linkAccount === null) {
+  // Unreadable credentials cannot create anyway: stop before the create. The create and its
+  // local record use the credential captured just before the request.
+  if ((await accountDigest()) === null) {
     prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
     process.exitCode = 1
     return
@@ -722,7 +721,7 @@ export async function createThenBindOrRebind(
     repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
     projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
-  }, { awaitBackfill: true, account: digestOf(createAs) ?? linkAccount })
+  }, { awaitBackfill: true, account: digestOf(createAs) })
   prompts.log.info(seedMessage(seed))
   // The quick create is private, and the server hides a private workspace's link from
   // everyone else: a teammate who clones this repo is told it is unlinked.

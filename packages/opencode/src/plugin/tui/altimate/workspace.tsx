@@ -483,8 +483,12 @@ async function confirmLink(
   label: LinkedProps["verb"],
   datamateId: number,
   datamateName: string,
+  /** The link was started from a dialog that is still open (the picker). The confirmation
+   * would replace it; without one, close it, or choosing again from it links a second time. */
+  openDialog = false,
 ): Promise<void> {
   if (recorded?.status === "account-changed") {
+    if (openDialog) api.ui.dialog.clear()
     api.ui.toast({
       variant: "warning",
       message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
@@ -1136,6 +1140,7 @@ function PickerDialog(props: PickerProps) {
           "Linked",
           res.binding.datamate_id,
           res.binding.datamate_name,
+          true,
         )
         return
       } else {
@@ -1167,6 +1172,7 @@ function PickerDialog(props: PickerProps) {
           "Re-linked",
           res.binding.datamate_id,
           res.binding.datamate_name,
+          true,
         )
         return
       }
