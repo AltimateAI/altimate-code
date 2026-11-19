@@ -885,7 +885,7 @@ describe("review follow-ups, round eight", () => {
   })
 
   test("both checks read the SQL the same way: one scan", () => {
-    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  " })
+    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  ", literals: [] })
     expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
   })
 })
@@ -993,5 +993,51 @@ describe("review follow-ups, round twelve", () => {
       expect(local.queries).toEqual([])
       expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
     }
+  })
+})
+
+describe("IDENTIFIER() on Databricks", () => {
+  test.each([
+    "SELECT * FROM IDENTIFIER('read_files')('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('system.builtin.read_files')('s3://b/x')",
+    "SELECT * FROM IDENTIFIER('json.`/Volumes/c/s/v/raw`')",
+    "select * from identifier ( 'READ_FILES' ) ('/x')",
+    "select * from IDENTIFIER(\"Cloud_Files\")('/x')",
+    "select * from IDENTIFIER('system . builtin . `read_files`')('/x')",
+    "select * from IDENTIFIER /* c */ ( /* d */ 'CSV.`/x`')",
+    "select * from IDENTIFIER('`parquet`.`s3://b/x`')",
+    "select * from IDENTIFIER('read' || '_files')('/x')",
+    "select * from IDENTIFIER('read_' '' 'files')('/x')",
+    "select * from IDENTIFIER(:tbl)",
+    "select * from IDENTIFIER(concat('json.`', :p, '`'))",
+    "select * from IDENTIFIER(tbl_var)",
+    "select * from IDENTIFIER('cat.sch.tbl') a join IDENTIFIER(:other) b on a.id = b.id",
+    "select * from IDENTIFIER('read\\_files')('/x')",
+  ])("%p may read files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "select * from IDENTIFIER('cat.sch.tbl')",
+    "select * from identifier ( \"cat.sch.tbl\" ) t where t.x = 'read_files'",
+    "select IDENTIFIER('col') from main.sales.orders",
+    "select * from IDENTIFIER('main.json.t')",
+    "select * from `identifier`('x')",
+  ])("%p reads tables", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test.each([
+    ["SELECT * FROM IDENTIFIER('system.builtin.read_files')('s3://b/x')", false],
+    ["SELECT * FROM IDENTIFIER(:tbl)", false],
+    ["SELECT * FROM IDENTIFIER('cat.sch.tbl')", true],
+  ])("%p: EXPLAIN sent is %p", async (compiled, explained) => {
+    useAdapter(calls, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries.length > 0).toBe(explained)
+  })
+
+  test("leaves Snowflake and BigQuery alone", async () => {
+    expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").literals).toEqual([])
   })
 })

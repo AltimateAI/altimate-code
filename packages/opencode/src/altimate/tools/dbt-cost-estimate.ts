@@ -170,8 +170,23 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
  * does not read counts.
  */
 export function readsFiles(sql: string): boolean {
-  const { script, code } = scanSql(sql, "databricks")
+  const { script, code, literals } = scanSql(sql, "databricks")
   if (script) return true
+  if (fileSource(code)) return true
+  // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: read a lone string literal as
+  // code, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
+  const calls = code.match(/(^|[^a-z0-9_.$`])identifier\s*\(/gi)?.length ?? 0
+  let plain = 0
+  for (const lit of literals) {
+    plain++
+    if (lit.text.includes("\\")) return true
+    if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*$/i.test(lit.text) || fileSource(lit.text)) return true
+  }
+  return calls > plain
+}
+
+/** Whether code (as `scanSql` leaves it) names a file source: a read_files or cloud_files call, a format or path over backticks. */
+function fileSource(code: string): boolean {
   // A function call, qualified or not (system.builtin.read_files).
   if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(/i.test(code)) return true
   // A known format over any backtick-quoted name, unless the format word is the middle of a dotted name (main.json.`t`).
@@ -222,16 +237,19 @@ export function mayBeScript(input: string, type: string): boolean {
 
 /**
  * The one reading of the SQL both checks share: whether it may be a script (see `mayBeScript`), and its code with
- * comments and quoted text as spaces and Databricks' backtick-quoted names kept as written.
+ * comments and quoted text as spaces and Databricks' backtick-quoted names kept as written, and (Databricks) the lone
+ * string literals an IDENTIFIER( call holds.
  */
-export function scanSql(input: string, type: string): { script: boolean; code: string } {
-  const script = { script: true, code: "" }
+export function scanSql(input: string, type: string): { script: boolean; code: string; literals: { text: string }[] } {
+  const script = { script: true, code: "", literals: [] }
   // Read with the line breaks Jinja renders: every \r\n and lone \r is \n.
   const sql = input.replace(/\r\n?/g, "\n")
   const databricks = type === "databricks"
   // The Snowflake splitter yields a line starting with "!" as a command of its own, wherever it sits: never read.
   if (!databricks && /(^|\n)!/.test(sql)) return script
   let code = ""
+  // Databricks: the text of each string literal that opens an IDENTIFIER( call, and where it sits in `code`.
+  const literals: { text: string }[] = []
   // Past a semicolon only whitespace and comments may follow: anything else, quoted or not, is a second statement.
   let ended = false
   let i = 0
@@ -269,15 +287,22 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       let j = i + 1
       while (j < sql.length && sql[j] !== close) j += escapes && sql[j] === "\\" ? 2 : 1
       if (j >= sql.length) return script
+      let blank = " "
+      if (databricks && c !== "`" && /(^|[^a-z0-9_.$`])identifier\s*\(\s*$/i.test(code)) {
+        // Marked, so a second literal after it does not read as the call's first.
+        blank = "\u0000"
+        // Only a literal the call's parenthesis closes is plain: a following literal, operator or name is not.
+        if (/^(?:\s|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*\)/.test(sql.slice(j + 1))) literals.push({ text: sql.slice(i + 1, j) })
+      }
       // A backtick-quoted name is code; quoted text is not.
-      code += c === "`" ? sql.slice(i, j + 1) : " "
+      code += c === "`" ? sql.slice(i, j + 1) : blank
       i = j + 1
       continue
     }
     code += c
     i++
   }
-  return { script: /\bexecute\s+immediate\b/i.test(code), code }
+  return { script: /\bexecute\s+immediate\b/i.test(code), code, literals }
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
