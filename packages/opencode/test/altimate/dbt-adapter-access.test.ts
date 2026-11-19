@@ -135,13 +135,21 @@ describe("feature tools in the allow-list", () => {
 
 describe("dbtAdapterFor", () => {
   let created: number
+  // The default target folder is the project's own `target`: an inherited DBT_TARGET_PATH would move it.
+  let inheritedTargetPath: string | undefined
   beforeEach(() => {
+    inheritedTargetPath = process.env.DBT_TARGET_PATH
+    delete process.env.DBT_TARGET_PATH
     created = 0
     useConfig()
     dbtAdapterInternals.create = async () => {
       created += 1
       return { isInitialized: () => true, dispose: async () => {} }
     }
+  })
+  afterEach(() => {
+    if (inheritedTargetPath === undefined) delete process.env.DBT_TARGET_PATH
+    else process.env.DBT_TARGET_PATH = inheritedTargetPath
   })
 
   test("refuses a read-only call and never creates the adapter", async () => {

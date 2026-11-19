@@ -47,7 +47,8 @@ describe.skipIf(process.platform === "win32")("create's target folder", () => {
       expect(process.env.DBT_TARGET_PATH).toBeUndefined()
       return seen()
     } finally {
-      if (saved !== undefined) process.env.DBT_TARGET_PATH = saved
+      if (saved === undefined) delete process.env.DBT_TARGET_PATH
+      else process.env.DBT_TARGET_PATH = saved
       rmSync(root, { recursive: true, force: true })
     }
   }

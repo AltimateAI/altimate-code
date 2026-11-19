@@ -8,6 +8,7 @@ import { projectRoot } from "../native/connections/registry"
 import { isQueryTimeoutError } from "@altimateai/drivers/types"
 import { executeQuery } from "../native/query-execution"
 import { dbtAdapterFor } from "./dbt-adapter-access"
+import { untilAbort } from "./dbt-cost-estimate"
 import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, unclosedJinjaBlock, unreadCteAfter, type CteInfo } from "./cte-detect"
 
 /** Folders a model search never enters. */
@@ -151,6 +152,8 @@ function nameMatches(list: CteInfo[], typed: string): CteInfo[] {
 export const dbtCteProfileInternals = {
   /** The trivial query whose time through dbt stands for dbt's own start-up, when dbt reports no timing. */
   baselineQuery: "select 1 as _profile_baseline",
+  /** How long a finished count waits for that measurement before it answers with its own time as is. */
+  baselineWaitMs: 30_000,
 }
 
 /** Per adapter: how long a trivial query takes through it, dbt's start-up with next to no warehouse work. */
@@ -194,14 +197,11 @@ export function profileTag(): string {
   return `altimate-code cte profile ${crypto.randomUUID()}`
 }
 
-/** `work`, or the signal's reason as soon as it aborts. */
-function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted()
-  return new Promise<T>((resolve, reject) => {
-    const stop = () => reject(signal.reason)
-    signal.addEventListener("abort", stop, { once: true })
-    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop))
-  })
+/** `work`'s value, or undefined once `ms` have passed first; `work` goes on either way. */
+function within<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<undefined>((resolve) => (timer = setTimeout(() => resolve(undefined), ms)))
+  return Promise.race([work, late]).finally(() => clearTimeout(timer))
 }
 
 type QueryTime = { source: "dbt" | "baseline" | "wall"; queryMs: number; startupMs?: number }
@@ -238,7 +238,9 @@ async function queryTime(adapter: any, call: { startedAt: number; totalMs: numbe
     baseline = measured
     baselines.set(adapter, baseline)
   }
-  const startupMs = await untilAbort(baseline, ctx.abort)
+  // A measurement that stalls doesn't hold a count that has finished: past the wait, the count's own time is given.
+  const pending = baseline
+  const startupMs = await untilAbort(() => within(pending, dbtCteProfileInternals.baselineWaitMs), ctx.abort)
   if (startupMs === undefined) return { source: "wall", queryMs: call.totalMs }
   const startup = Math.min(startupMs, call.totalMs)
   return { source: "baseline", queryMs: call.totalMs - startup, startupMs: startup }
@@ -250,7 +252,7 @@ function failure(title: string, output: string, extra: Record<string, unknown> =
 
 export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
   description:
-    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the row count and the query's milliseconds on the warehouse (`queryMs`): dbt's own timing of the query's execute step where dbt reports one (run_results.json), else the call's time less that of a trivial query through dbt, so a command-line dbt's start-up of a second or more per query is not counted; `totalMs` is the whole call, start-up included, and `timing` says which measure `queryMs` is (dbt, baseline, or wall when neither was available); that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE whose count query reads is_incremental() or this, in its own SQL, an earlier CTE or the model header, is not run, because the count runs outside the model. Macros the query calls are not opened: one that reads is_incremental() inside is not caught, so treat the count of such a model as a full-history count.",
+    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the row count and the query's milliseconds on the warehouse (`queryMs`): dbt's own timing of the query's execute step where dbt reports one (run_results.json), else the call's time less that of a trivial query through dbt, so a command-line dbt's start-up of a second or more per query is not counted; `totalMs` is the count query's whole call through dbt, start-up included, and `timing` says which measure `queryMs` is (dbt, baseline, or wall when neither was available); that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE whose count query reads is_incremental() or this, in its own SQL, an earlier CTE or the model header, is not run, because the count runs outside the model. Macros the query calls are not opened: one that reads is_incremental() inside is not caught, so treat the count of such a model as a full-history count.",
   parameters: z.object({
     model: z
       .string()

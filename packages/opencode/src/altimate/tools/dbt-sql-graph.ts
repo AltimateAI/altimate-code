@@ -165,9 +165,11 @@ export function clauseName(details: Pick<SqlLineageNodeDetails, "type" | "expres
   // A joined relation keeps its last name part; its alias goes when it only repeats that name. Nothing else in
   // the clause is rewritten: an `AS` in a condition (a CAST) is not a relation.
   text = text.replace(JOINED_RELATION, (_all, join: string, relation: string, alias: string) => {
-    const last = unquote(relation.match(new RegExp(IDENT, "g"))!.at(-1)!)
+    // A name that needs its quotes (a space, a keyword-like spelling) keeps them; a plain one is shown bare.
+    const shown = (part: string) => (/^[A-Za-z_][\w$]*$/.test(unquote(part)) ? unquote(part) : part)
+    const last = relation.match(new RegExp(IDENT, "g"))!.at(-1)!
     // Exactly the same spelling: a quoted alias that differs in case can name another relation.
-    return `${join}${last === unquote(alias) ? last : `${last} AS ${unquote(alias)}`}`
+    return `${join}${unquote(last) === unquote(alias) ? shown(last) : `${shown(last)} AS ${shown(alias)}`}`
   })
   // The backend writes an inner join as a bare JOIN; its type says which join it is.
   const kind = /^([A-Z]+)_JOIN$/i.exec(details.type ?? "")?.[1]

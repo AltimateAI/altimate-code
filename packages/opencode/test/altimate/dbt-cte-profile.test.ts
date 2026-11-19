@@ -638,9 +638,10 @@ describe("dbt_cte_profile timing", () => {
       tool.execute({ model: "customers", cte: "orders" }, ctx),
       tool.execute({ model: "customers", cte: "orders" }, ctx),
     ])
-    expect(b.metadata).toMatchObject({ timing: "dbt", queryMs: 3 })
-    // B's file is not A's: A falls back to the start-up baseline rather than report B's 3 ms.
-    expect(a.metadata.timing).toBe("baseline")
+    // Whichever call ran first wrote 500 ms and saw it overwritten: it falls back to the start-up baseline
+    // rather than report the other run's 3 ms, and only the run that wrote 3 ms reports it.
+    const timings = [a.metadata, b.metadata].map((m) => `${m.timing}:${m.timing === "dbt" ? m.queryMs : "-"}`).sort()
+    expect(timings).toEqual(["baseline:-", "dbt:3"])
     // The same CTE, but each run's SQL is its own.
     expect(queries[0].sql).not.toBe(queries[1].sql)
     expect(queries[0].sql.replace(/^\/\* .*? \*\/\n/, "")).toBe(queries[1].sql.replace(/^\/\* .*? \*\/\n/, ""))
@@ -658,12 +659,32 @@ describe("dbt_cte_profile timing", () => {
     while (baselines.length === 0) await sleep(1)
     const controller = new AbortController()
     const second = tool.execute({ model: "customers", cte: "final" }, { ...ctx, abort: controller.signal })
-    await sleep(10)
+    // The second call's count has answered: it is now waiting on the first call's measurement.
+    while (queries.length < 2) await sleep(1)
+    await sleep(5)
+    expect(baselines).toHaveLength(1)
     controller.abort(new Error("stopped"))
     await expect(second).rejects.toThrow("stopped")
     finish()
     expect((await first).metadata.timing).toBe("baseline")
     expect(baselines).toHaveLength(1)
+  })
+
+  test("a finished count waits only so long for a stalled start-up measurement", async () => {
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery) return new Promise(() => {})
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 1 }] }
+    }
+    const saved = dbtCteProfileInternals.baselineWaitMs
+    dbtCteProfileInternals.baselineWaitMs = 20
+    try {
+      const tool = await initTool(DbtCteProfileTool)
+      const result = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+      expect(result.metadata.timing).toBe("wall")
+      expect(result.metadata.queryMs).toBe(result.metadata.totalMs)
+    } finally {
+      dbtCteProfileInternals.baselineWaitMs = saved
+    }
   })
 
   test("when the trivial query fails too, the call's own time is given as including start-up, and the next call measures again", async () => {
