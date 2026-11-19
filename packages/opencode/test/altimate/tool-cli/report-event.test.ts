@@ -166,8 +166,13 @@ describe("tool report-event through the CLI's telemetry", () => {
     await fs.rm(root, { recursive: true, force: true })
   })
 
-  async function run(args: string[], extra: Record<string, string> = {}) {
+  async function run(args: string[], extra: Record<string, string> = {}, installed = false) {
     const home = await fs.mkdtemp(path.join(root, "home-"))
+    // Just installed: the postinstall marker makes this process send first_launch, with the machine id.
+    if (installed) {
+      await fs.mkdir(path.join(home, ".local/share/altimate-code"), { recursive: true })
+      await fs.writeFile(path.join(home, ".local/share/altimate-code/.installed-version"), "0.13.0")
+    }
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       OPENCODE_TEST_HOME: home,
@@ -195,21 +200,27 @@ describe("tool report-event through the CLI's telemetry", () => {
     "a session start and a feature used each send one event, with the allowed fields only",
     async () => {
       received = []
-      const start = await run(["plugin_session_start", "--plugin-version", "1.8.2", "--install-id", INSTALL, "--os", "macos"])
+      const start = await run(["plugin_session_start", "--plugin-version", "1.8.2", "--install-id", INSTALL, "--os", "macos"], {}, true)
       expect(start.exitCode).toBe(0)
       const used = await run(["plugin_feature_used", "--plugin-version", "1.8.2", "--install-id", INSTALL, "--feature", "cost_gate", "--outcome", "held"])
       expect(used.exitCode).toBe(0)
       const events = plugin()
       expect(events.map((one) => one.data.baseData.name)).toEqual(["plugin_session_start", "plugin_feature_used"])
-      // The envelope's own keys, and the event's allow-listed fields: nothing else. No machine id, project or session.
-      const ENVELOPE = ["cli_version", "client", "source", "launch_id"]
+      // The envelope's own keys, and the event's allow-listed fields: nothing else. No machine id, project, session or launch id.
+      const ENVELOPE = ["cli_version", "client", "source"]
       const [startEvent, usedEvent] = events.map((one) => one.data.baseData.properties as Record<string, string>)
       expect(Object.keys(startEvent!).sort()).toEqual([...ENVELOPE, "plugin_version", "altimate_code_version", "host_os", "install_id"].sort())
       expect(Object.keys(usedEvent!).sort()).toEqual([...ENVELOPE, "plugin_version", "install_id", "feature", "outcome"].sort())
       expect(startEvent).toMatchObject({ plugin_version: "1.8.2", host_os: "macos", install_id: INSTALL })
       expect(startEvent!.altimate_code_version).toBe(startEvent!.cli_version)
       expect(usedEvent).toMatchObject({ feature: "cost_gate", outcome: "held", install_id: INSTALL })
+      // A fresh home: the same processes sent first_launch rows with the machine id. Nothing joins the plugin's rows to them.
+      const others = received.filter((one) => !String(one?.data?.baseData?.name ?? "").startsWith("plugin_"))
+      expect(others.some((one) => one.data.baseData.name === "first_launch")).toBe(true)
+      const joinable = others.flatMap((one) => [one.data.baseData.properties.machine_id, one.data.baseData.properties.launch_id, one.tags["ai.user.id"], one.tags["ai.session.id"]])
       for (const one of events) {
+        const text = JSON.stringify(one)
+        for (const value of joinable) if (value && value !== "startup") expect(text).not.toContain(value)
         expect(one.tags["ai.session.id"]).toBe("")
         expect(one.tags["ai.user.id"]).toBe(INSTALL)
         expect(one.tags).not.toHaveProperty("ai.operation.id")

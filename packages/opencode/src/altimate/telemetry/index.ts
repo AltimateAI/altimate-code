@@ -2419,8 +2419,8 @@ export namespace Telemetry {
   // the module's current state (the opt-out marker runs while telemetry is disabled and must not
   // touch the state an enabled init may be using concurrently).
   // altimate_change start — the Claude Code plugin's usage events are anonymous and unlinkable: they carry
-  // none of the identifiers the CLI's other events share (account, machine id, project, session), so they
-  // cannot be joined to a signed-in row. They are keyed to the plugin's own random install id only.
+  // none of the identifiers the CLI's other events share (account, machine id, project, session, launch id),
+  // so they cannot be joined to a signed-in row. They are keyed to the plugin's own random install id only.
   const ANONYMOUS_EVENTS: ReadonlySet<string> = new Set(PLUGIN_ACTIONS)
   // altimate_change end
 
@@ -2441,7 +2441,7 @@ export namespace Telemetry {
     const clientSource = Flag.ALTIMATE_CLI_CLIENT
     return events.map((event) => {
       const { type, timestamp, ...fields } = event as any
-      // altimate_change start — the plugin's anonymous events: no account, machine id, project or session.
+      // altimate_change start — the plugin's anonymous events: no account, machine id, project, session or launch id.
       const anonymous = ANONYMOUS_EVENTS.has(type)
       const account = anonymous ? undefined : who
       const sid: string = anonymous ? "" : (fields.session_id ?? sessionId)
@@ -2463,7 +2463,9 @@ export namespace Telemetry {
         // session exists, so `session_id` is empty for the first half and real for the second —
         // leaving no key to join a single run on. This is not persisted, not derived from the
         // machine or the user, and not reused across launches; it only says "same run".
-        launch_id: launchId(),
+        // altimate_change — not on the plugin's anonymous events: shared with the same process's other rows
+        // (a first_launch carries the machine id), it would join them.
+        ...(!anonymous && { launch_id: launchId() }),
       }
       const measurements: Record<string, number> = {}
 

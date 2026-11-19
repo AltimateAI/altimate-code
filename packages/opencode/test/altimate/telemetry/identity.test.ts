@@ -237,11 +237,14 @@ describe("telemetry identity", () => {
     for (const name of ["plugin_session_start", "plugin_feature_used"]) {
       const event = named(name)
       expect(event).toBeDefined()
-      for (const key of ["user_id", "tenant", "machine_id", "project_id", "session_id"]) expect(event.data.baseData.properties).not.toHaveProperty(key)
+      for (const key of ["user_id", "tenant", "machine_id", "project_id", "session_id", "launch_id"]) expect(event.data.baseData.properties).not.toHaveProperty(key)
       expect(event.tags["ai.user.id"]).toBe(UUID_B)
       expect(event.tags["ai.session.id"]).toBe("")
       const text = JSON.stringify(event)
-      for (const shared of [UUID, "acme", machine, "claude:abc"]) expect(text).not.toContain(shared)
+      // Nothing the account's row carries to join on, the process's launch id included.
+      const launch = account.data.baseData.properties.launch_id
+      expect(launch).toBeTruthy()
+      for (const shared of [UUID, "acme", machine, "claude:abc", launch]) expect(text).not.toContain(shared)
     }
   })
 
