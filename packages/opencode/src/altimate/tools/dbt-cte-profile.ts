@@ -185,8 +185,8 @@ export function dbtQueryMs(targetDir: string, startedAt: number, tag: string): n
   if (typeof node?.compiled_code !== "string" || !node.compiled_code.includes(tag)) return undefined
   const execute = Array.isArray(node?.timing) ? node.timing.find((t: any) => t?.name === "execute") : undefined
   const span = utc(execute?.completed_at) - utc(execute?.started_at)
-  if (Number.isFinite(span) && span >= 0) return Math.round(span)
-  return typeof node?.execution_time === "number" && node.execution_time >= 0 ? Math.round(node.execution_time * 1000) : undefined
+  // Only the execute step: the node's execution_time also counts compiling it.
+  return Number.isFinite(span) && span >= 0 ? Math.round(span) : undefined
 }
 
 /** The comment a count query starts with, unique to the call, by which its run_results.json is known. */

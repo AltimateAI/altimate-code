@@ -2,7 +2,7 @@
 // one gate the new dbt-adapter-backed tools go through, and the API helper for new endpoint files. The
 // dbt adapter is replaced through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { existsSync, readFileSync, realpathSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -191,6 +191,25 @@ describe("dbtAdapterFor", () => {
     expect(access.reason).toContain("(python3)")
     expect(access.reason).toContain("Activate the project's virtualenv")
     expect(access.reason).toContain("altimate-code tool daemon stop")
+  })
+
+  test("with a saved dbt config, the refusal says to change its pythonPath, which wins over any virtualenv", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-access-home-"))
+    const saved = process.env.HOME
+    try {
+      await mkdir(path.join(home, ".altimate-code"), { recursive: true })
+      await writeFile(path.join(home, ".altimate-code", "dbt.json"), "{}")
+      process.env.HOME = home
+      dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
+      const access = await dbtAdapterFor(ctx)
+      expect(access.reason).toContain("Python that ~/.altimate-code/dbt.json names (python3)")
+      expect(access.reason).toContain("Set pythonPath there")
+      expect(access.reason).not.toContain("Activate the project's virtualenv")
+    } finally {
+      if (saved === undefined) delete process.env.HOME
+      else process.env.HOME = saved
+      await rm(home, { recursive: true, force: true })
+    }
   })
 
   test("the tools' adapter is created with a dbt target folder of its own, inside the project's target", async () => {

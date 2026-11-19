@@ -71,7 +71,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
       const root = await bounded(getDbtProjectRoot())
       const found = !!root && fs.existsSync(path.join(root, "dbt_project.yml"))
       return found
-        ? { refusal: "not_started", reason: `the dbt adapter didn't start${pythonHint(getDbtPythonPath())}` }
+        ? { refusal: "not_started", reason: `the dbt adapter didn't start${pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))}` }
         : { refusal: "no_project", reason: "no dbt project here" }
     }
     if (project?.root) {
@@ -84,7 +84,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
         }
     }
     if (adapter.isInitialized?.() === false)
-      return { refusal: "not_loaded", reason: `the dbt adapter didn't load the project${pythonHint(getDbtPythonPath())}` }
+      return { refusal: "not_loaded", reason: `the dbt adapter didn't load the project${pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))}` }
     return { adapter }
   } catch (e) {
     if (signal.aborted) throw e
@@ -97,11 +97,25 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
 
 /**
  * How to fix an adapter that didn't start or load, which is most often dbt missing from the Python it was
- * started with. The adapter is kept for the life of the process, so the fix takes effect in a new one.
+ * started with. A pythonPath saved in ~/.altimate-code/dbt.json wins over any virtualenv, so that is what
+ * to change then. The adapter is kept for the life of the process, so the fix takes effect in a new one.
  */
-function pythonHint(python: string | undefined): string {
+function pythonHint(python: string | undefined, saved: boolean): string {
   const which = python ? ` (${python})` : ""
-  return `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json) and start a new session, or run \`altimate-code tool daemon stop\` for the \`tool run\` daemon`
+  const restart = "then start a new session, or run `altimate-code tool daemon stop` for the `tool run` daemon"
+  return saved
+    ? `: dbt runs with the Python that ~/.altimate-code/dbt.json names${which}, which may not be the project's. Set pythonPath there to a Python that has dbt installed, ${restart}`
+    : `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json), ${restart}`
+}
+
+/** Whether ~/.altimate-code/dbt.json exists: its pythonPath, when set, is the Python dbt runs with. */
+async function savedDbtConfig(): Promise<boolean> {
+  try {
+    const { path: configPath } = await import("../../../../dbt-tools/src/config")
+    return fs.existsSync(configPath())
+  } catch {
+    return false
+  }
 }
 
 /** `p` with its links resolved, or as given when it can't be. */

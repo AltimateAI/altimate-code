@@ -132,19 +132,42 @@ const IDENT = String.raw`(?:"(?:[^"]|"")+"|\`(?:[^\`]|\`\`)+\`|\[[^\]]+\]|[A-Za-
 // A join's own relation, right after its JOIN keyword: `JOIN "db"."schema"."table" AS alias`.
 const JOINED_RELATION = new RegExp(String.raw`^((?:[A-Za-z]+\s+)*JOIN\s+)(${IDENT}(?:\s*\.\s*${IDENT})*)(?:\s+AS)?\s+(?!ON\b|USING\b)(${IDENT})(?=\s|$)`, "i")
 
+/** SQL on one line: runs of whitespace become one space, except inside quoted strings and identifiers. */
+function oneLine(sql: string): string {
+  let out = ""
+  for (let i = 0; i < sql.length; ) {
+    const ch = sql[i]
+    if (ch === "'" || ch === '"' || ch === "`") {
+      // To the closing quote; a doubled quote is an escaped one.
+      let j = i + 1
+      while (j < sql.length && !(sql[j] === ch && sql[j + 1] !== ch)) j += sql[j] === ch ? 2 : 1
+      out += sql.slice(i, j + 1)
+      i = j + 1
+    } else if (/\s/.test(ch)) {
+      while (i < sql.length && /\s/.test(sql[i])) i++
+      out += " "
+    } else {
+      out += ch
+      i++
+    }
+  }
+  return out.trim()
+}
+
 /**
  * A name for a node the backend leaves unnamed (a join, filter, group or sort): its clause on one line, a relation
  * written as its own name (`LEFT JOIN payments ON …`, `WHERE status <> 'returned'`), cut at CLAUSE_NAME_CHARS.
  * Undefined when the node has no clause to show.
  */
 export function clauseName(details: Pick<SqlLineageNodeDetails, "type" | "expression" | "sql">): string | undefined {
-  let text = (details.expression ?? details.sql ?? "").replace(/\s+/g, " ").trim()
+  let text = oneLine(details.expression ?? details.sql ?? "")
   if (!text) return undefined
   // A joined relation keeps its last name part; its alias goes when it only repeats that name. Nothing else in
   // the clause is rewritten: an `AS` in a condition (a CAST) is not a relation.
   text = text.replace(JOINED_RELATION, (_all, join: string, relation: string, alias: string) => {
     const last = unquote(relation.match(new RegExp(IDENT, "g"))!.at(-1)!)
-    return `${join}${last.toLowerCase() === unquote(alias).toLowerCase() ? last : `${last} AS ${unquote(alias)}`}`
+    // Exactly the same spelling: a quoted alias that differs in case can name another relation.
+    return `${join}${last === unquote(alias) ? last : `${last} AS ${unquote(alias)}`}`
   })
   // The backend writes an inner join as a bare JOIN; its type says which join it is.
   const kind = /^([A-Z]+)_JOIN$/i.exec(details.type ?? "")?.[1]

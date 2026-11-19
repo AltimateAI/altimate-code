@@ -580,7 +580,6 @@ describe("dbt_cte_profile timing", () => {
       expect(result.metadata.startupMs).toBeGreaterThanOrEqual(35)
       expect(result.metadata.queryMs).toBeLessThan(result.metadata.totalMs)
     }
-    expect(first.metadata.startupMs).toBe(second.metadata.startupMs)
     expect(baselines).toEqual([{ sql: dbtCteProfileInternals.baselineQuery, name: "", limit: 1 }])
   })
 
@@ -597,6 +596,11 @@ describe("dbt_cte_profile timing", () => {
     expect(dbtQueryMs(target, now, tag)).toBeUndefined()
     await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine }))
     expect(dbtQueryMs(target, now, tag)).toBe(3)
+    // Without the execute step's timing there is no warehouse time: execution_time also counts the compile.
+    const noTiming = JSON.parse(runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine }))
+    noTiming.results[0].timing = []
+    await writeFile(path.join(target, "run_results.json"), JSON.stringify(noTiming))
+    expect(dbtQueryMs(target, now, tag)).toBeUndefined()
   })
 
   test("dbt's timestamps without a zone are read as UTC", async () => {

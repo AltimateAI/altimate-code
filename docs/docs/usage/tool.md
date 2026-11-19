@@ -68,7 +68,7 @@ altimate-code tool daemon status
 altimate-code tool daemon stop
 ```
 
-`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS`, `ALTIMATE_DISABLE_WORKSPACE`, `VIRTUAL_ENV` and `CONDA_PREFIX` environment variables. The last two pick the Python the daemon's dbt adapter runs dbt with, so activating the project's virtualenv gets a daemon that uses it rather than one started without it. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
+`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS`, `ALTIMATE_DISABLE_WORKSPACE`, `VIRTUAL_ENV` and `CONDA_PREFIX` environment variables. The last two are part of the daemon's identity because, when `~/.altimate-code/dbt.json` sets no `pythonPath` and the project has no `.venv`, `venv` or `env` folder of its own, they pick the Python the daemon's dbt adapter runs dbt with: activating the project's virtualenv then gets a daemon that uses it rather than one started without it. A `pythonPath` in `dbt.json` always wins; change it there. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
 
 | Setting | Description |
 |---|---|

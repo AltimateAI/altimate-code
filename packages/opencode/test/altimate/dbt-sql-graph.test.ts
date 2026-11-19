@@ -871,6 +871,11 @@ describe("clauseName", () => {
     expect(clauseName(details)).toBe(name)
   })
 
+  test("whitespace inside a quoted string or identifier is kept, and an alias differing only in case stays", () => {
+    expect(clauseName({ type: "FILTER", expression: "WHERE   code = 'a,  b''s'\n  AND \"x  y\" = 1" })).toBe("WHERE code = 'a,  b''s' AND \"x  y\" = 1")
+    expect(clauseName({ type: "LEFT_JOIN", expression: 'LEFT JOIN "db"."s"."Orders" AS "orders" ON 1 = 1' })).toBe("LEFT JOIN Orders AS orders ON 1 = 1")
+  })
+
   test("an AS inside a condition is left as written", () => {
     expect(clauseName({ type: "FILTER", expression: "WHERE CAST(a.b AS INT) > 0" })).toBe("WHERE CAST(a.b AS INT) > 0")
   })
