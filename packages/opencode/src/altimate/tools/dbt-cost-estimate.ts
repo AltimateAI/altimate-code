@@ -54,6 +54,121 @@ export function parseBytesProcessed(display: unknown): { bytes: number; maxBytes
   return { bytes, maxBytes: Math.max(bytes, maxBytes) }
 }
 
+/** Bytes in the units the BigQuery dry run writes them in: "4.2 TiB". */
+export function formatBytes(bytes: number): string {
+  let n = bytes
+  let i = 0
+  while (n >= 1024 && i < UNITS.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n.toFixed(1)} ${UNITS[i]}`
+}
+
+/** A scan estimate from the warehouse's query planner: what EXPLAIN says the query reads, without running it. */
+export type PlanEstimate = { bytes: number; partitionsAssigned?: number; partitionsTotal?: number }
+
+const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined)
+
+/**
+ * The bytes Snowflake's `EXPLAIN USING JSON` says the query will scan: `GlobalStats.bytesAssigned`, the
+ * micro-partitions left after compile-time pruning. Takes the `content` column as text or parsed JSON.
+ * Undefined for anything without a readable `bytesAssigned`, so a changed format is reported, never read as a count.
+ */
+export function parseSnowflakeExplain(content: unknown): PlanEstimate | undefined {
+  let plan = content
+  if (typeof plan === "string") {
+    try {
+      plan = JSON.parse(plan)
+    } catch {
+      return undefined
+    }
+  }
+  const stats = (plan as { GlobalStats?: Record<string, unknown> } | null)?.GlobalStats
+  if (!stats || typeof stats !== "object") return undefined
+  const bytes = count(stats.bytesAssigned)
+  if (bytes === undefined) return undefined
+  const partitionsAssigned = count(stats.partitionsAssigned)
+  const partitionsTotal = count(stats.partitionsTotal)
+  return {
+    bytes: Math.round(bytes),
+    ...(partitionsAssigned !== undefined && { partitionsAssigned }),
+    ...(partitionsTotal !== undefined && { partitionsTotal }),
+  }
+}
+
+/** Spark's `Utils.bytesToString` units, each 1024 times the one before; Spark 2 wrote "KB" for "KiB". */
+const SPARK_UNITS: Record<string, number> = { B: 0, KIB: 1, MIB: 2, GIB: 3, TIB: 4, PIB: 5, EIB: 6, KB: 1, MB: 2, GB: 3, TB: 4, PB: 5, EB: 6 }
+/**
+ * A relation Spark has no size for is given `spark.sql.defaultSizeInBytes`, Long.MaxValue unless set ("8.0 EiB"):
+ * a leaf at or past this is no size at all.
+ */
+const SPARK_NO_SIZE = 2 ** 62
+
+/** A `sizeInBytes=` figure read back into bytes: "12.3 MiB", "16.0 B", or past a long "1.23E+21 B". */
+function sparkBytes(figure: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?(?:E[+-]?\d+)?)\s*([A-Za-z]+)$/i.exec(figure.trim())
+  if (!match) return undefined
+  const unit = SPARK_UNITS[match[2].toUpperCase()]
+  if (unit === undefined) return undefined
+  const value = Number(match[1]) * 1024 ** unit
+  return Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * The bytes Databricks' `EXPLAIN COST` says the query reads: the sum of `Statistics(sizeInBytes=…)` over the
+ * leaves of the Optimized Logical Plan, the relations it scans. Their sizes are table (or file) sizes from the
+ * catalog and the Delta log, before column pruning and runtime file skipping. `noStats` when a leaf carries no
+ * size or Spark's default for a relation without statistics; undefined when there is no plan to read.
+ */
+export function parseDatabricksExplainCost(plan: unknown): (PlanEstimate & { leaves: number }) | { noStats: true } | undefined {
+  if (typeof plan !== "string") return undefined
+  const lines = plan.replace(/\r\n?/g, "\n").split("\n")
+  const start = lines.findIndex((line) => /^\s*==\s*Optimized Logical Plan\s*==\s*$/i.test(line))
+  if (start < 0) return undefined
+  const nodes: { depth: number; text: string }[] = []
+  for (const line of lines.slice(start + 1)) {
+    if (/^\s*==.*==\s*$/.test(line)) break
+    if (!line.trim()) continue
+    // Each level of the tree is three characters: ":  " or "   " for an ancestor, ":- " or "+- " for the node itself.
+    const prefix = /^(?::  |   )*(?:[:+]- )?/.exec(line)![0]
+    nodes.push({ depth: prefix.length / 3, text: line.slice(prefix.length) })
+  }
+  if (nodes.length === 0) return undefined
+  let bytes = 0
+  let leaves = 0
+  for (let i = 0; i < nodes.length; i++) {
+    // A leaf is a node the next line does not go below.
+    if (i + 1 < nodes.length && nodes[i + 1].depth > nodes[i].depth) continue
+    leaves++
+    const figure = /Statistics\(sizeInBytes=([^,)]+)/.exec(nodes[i].text)?.[1]
+    const size = figure === undefined ? undefined : sparkBytes(figure)
+    if (size === undefined || size >= SPARK_NO_SIZE) return { noStats: true }
+    bytes += size
+  }
+  return { bytes: Math.round(bytes), leaves }
+}
+
+/**
+ * The warehouses with no dry run whose planner still says what a query reads, the EXPLAIN that asks it, and the
+ * reader of its one row.
+ */
+const PLANNERS: Record<string, { name: string; explain: string; read: (row: unknown) => PlanEstimate | { noStats: true } | undefined }> = {
+  snowflake: { name: "Snowflake", explain: "EXPLAIN USING JSON", read: parseSnowflakeExplain },
+  databricks: { name: "Databricks", explain: "EXPLAIN COST", read: parseDatabricksExplainCost },
+}
+
+/**
+ * Inline Jinja that runs the EXPLAIN through dbt's own connection (`run_query`) while dbt compiles it, and
+ * renders the first column of its answer as JSON. Compiling, not `dbt show`, since show wraps the query in a
+ * limit, which an EXPLAIN can't take. The SQL is written into a Jinja string, so its quotes and backslashes are escaped.
+ */
+export function explainJinja(explain: string, sql: string): string {
+  const statement = `${explain}\n${sql.replace(/[\s;]+$/, "")}`
+  const literal = `'${statement.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
+  return `{%- set altimate_plan = run_query(${literal}) -%}{{ tojson(altimate_plan.columns[0].values() | list) }}`
+}
+
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
 export function untilAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
@@ -71,9 +186,68 @@ function failure(title: string, message: string, extra: Record<string, unknown> 
   return { title: `dbt_cost_estimate: ${title}`, metadata: { success: false, error: message, ...extra }, output: message }
 }
 
+/** The planner's estimate of a compiled query on a warehouse with no dry run: an EXPLAIN, which compiles the query and runs none of it. */
+async function explainEstimate(
+  adapter: any,
+  type: string,
+  planner: (typeof PLANNERS)[string],
+  compiled: string,
+  model: string | undefined,
+  signal: AbortSignal,
+) {
+  const extra = { adapter: type, source: "explain" }
+  let row: unknown
+  try {
+    const rendered = await untilAbort(() => adapter.unsafeCompileQuery(explainJinja(planner.explain, compiled), undefined), signal)
+    const rows = typeof rendered === "string" ? JSON.parse(rendered.trim()) : undefined
+    if (!Array.isArray(rows) || rows.length === 0) throw new Error(`${planner.explain} returned no plan`)
+    row = rows[0]
+  } catch (e) {
+    if (signal.aborted) throw e
+    return failure("explain failed", `No estimate: ${planner.name}'s ${planner.explain} failed: ${e instanceof Error ? e.message : String(e)}`, extra)
+  }
+  const parsed = planner.read(row)
+  if (parsed && "noStats" in parsed) {
+    return failure(
+      "no estimate",
+      `No estimate: ${planner.name}'s planner has no size for a table this query reads (it shows Spark's default for a table without statistics). ANALYZE TABLE <table> COMPUTE STATISTICS gives it one.`,
+      extra,
+    )
+  }
+  if (!parsed) {
+    return failure("unreadable estimate", `No estimate: ${planner.name}'s ${planner.explain} answered a plan this tool can't read.`, extra)
+  }
+  const shown = formatBytes(parsed.bytes)
+  const partitions =
+    parsed.partitionsAssigned !== undefined && parsed.partitionsTotal !== undefined
+      ? `${parsed.partitionsAssigned} of ${parsed.partitionsTotal} partitions after pruning; `
+      : ""
+  const accuracy =
+    type === "snowflake"
+      ? `${partitions}an upper bound: runtime pruning can scan less, and a cached result none`
+      : "table sizes before column pruning and file skipping, which usually read less; not a bound either way"
+  return {
+    title: `dbt_cost_estimate: ${shown}`,
+    metadata: {
+      success: true,
+      supported: true,
+      adapter: type,
+      source: "explain",
+      // Snowflake documents bytesAssigned as an upper bound; Spark's sizes are the planner's guess, either way.
+      bound: type === "snowflake" ? "upper" : "estimate",
+      bytes: parsed.bytes,
+      display: shown,
+      ...(parsed.partitionsAssigned !== undefined && { partitionsAssigned: parsed.partitionsAssigned }),
+      ...(parsed.partitionsTotal !== undefined && { partitionsTotal: parsed.partitionsTotal }),
+      ...(model && { model }),
+    },
+    output: `${model ? `${model} ` : "The query "}would scan about ${shown}, by ${planner.name}'s plan estimate (${accuracy}).`,
+  }
+}
+
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run. Only BigQuery has a dry run: any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake, \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
@@ -85,13 +259,14 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     if (!access.adapter) return failure("not available", `No estimate: ${access.reason}.`, { refusal: access.refusal })
     const adapter = access.adapter
     const type: string | undefined = adapter.getAdapterType?.()
-    // Every dbt-integration refuses the dry run off BigQuery, so nothing is compiled there.
-    if (type !== "bigquery") {
+    // Every dbt-integration refuses the dry run off BigQuery; elsewhere only a planner EXPLAIN tells the scan. Nothing is compiled for any other warehouse.
+    const planner = type ? PLANNERS[type] : undefined
+    if (type !== "bigquery" && !planner) {
       const adapterName = type ?? "unknown"
       return {
         title: "dbt_cost_estimate: no estimate",
         metadata: { success: true, supported: false, adapter: adapterName },
-        output: `No cost estimate: dry runs are only available on BigQuery (this project uses ${adapterName}).`,
+        output: `No cost estimate: scan estimates are only available on BigQuery, Snowflake and Databricks (this project uses ${adapterName}).`,
       }
     }
     const signal = ctx.abort
@@ -109,6 +284,7 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     if (typeof compiled !== "string" || !compiled.trim()) {
       return failure("compile failed", "The query compiled to nothing.", { adapter: type })
     }
+    if (planner) return explainEstimate(adapter, type!, planner, compiled, args.model, signal)
     let display: unknown
     try {
       const integration = await untilAbort(async () => {
