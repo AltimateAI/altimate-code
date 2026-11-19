@@ -3062,9 +3062,11 @@ export namespace Telemetry {
       (batch) => batch.length > 0,
     )
     const sent = new Set<Event>()
+    const attempted = new Set<Event>()
     // altimate_change end
     try {
       for (const batch of batches) {
+        for (const e of batch) attempted.add(e)
         const response = await fetch(appInsights.endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3083,8 +3085,9 @@ export namespace Telemetry {
       if (shuttingDown) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
+      // altimate_change — a batch never attempted (an earlier one failed) keeps its retry.
       for (const e of retriable) {
-        ;(e as any)._retried = true
+        if (attempted.has(e)) (e as any)._retried = true
       }
       const space = Math.max(0, MAX_BUFFER_SIZE - buffer.length)
       buffer.unshift(...retriable.slice(0, space))

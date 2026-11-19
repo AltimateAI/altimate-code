@@ -47,6 +47,8 @@ describe("telemetry identity", () => {
   let gates: Record<string, Promise<void> | undefined> = {}
   /** Resolved when a /users/me request for that key has reached its gate. */
   let entered: Record<string, () => void> = {}
+  /** The next this-many /v2/track posts fail with a network error. */
+  let failTrackPosts = 0
 
   function writeCreds(apiKey = "key-1") {
     mkdirSync(path.join(home, ".altimate"), { recursive: true })
@@ -77,11 +79,16 @@ describe("telemetry identity", () => {
     meBody = undefined
     gates = {}
     entered = {}
+    failTrackPosts = 0
     // The auth store lives in the real data directory; never let a test read it.
     authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
       calls.push({ url, method: init?.method ?? "GET", headers: headersOf(init), body: String(init?.body ?? "") })
+      if (url.includes("/v2/track") && failTrackPosts > 0) {
+        failTrackPosts--
+        throw new Error("network down")
+      }
       if (url === `${API}/users/me` || url === `${DEFAULT_API}/users/me`) {
         const key = headersOf(init)["authorization"]?.replace("Bearer ", "") ?? ""
         const gate = gates[key]
@@ -251,6 +258,32 @@ describe("telemetry identity", () => {
       expect(launch).toBeTruthy()
       for (const shared of [UUID, "acme", machine, "claude:abc", launch]) expect(text).not.toContain(shared)
     }
+  })
+
+  test("a plugin batch never attempted because the batch before it failed keeps its retry", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    Telemetry.track({ type: "plugin_feature_used", timestamp: Date.now(), plugin_version: "1.8.2", install_id: UUID_B, feature: "runs", outcome: "opened" })
+    // Not an anchor event: nothing is sent until the flushes below.
+    Telemetry.track({ type: "rules_command", timestamp: Date.now(), session_id: "claude:abc", command: "view" })
+    // Twice the account's batch fails first, so the plugin's is not tried; the third flush sends it.
+    failTrackPosts = 1
+    await Telemetry.flush()
+    failTrackPosts = 1
+    await Telemetry.flush()
+    await Telemetry.flush()
+    expect(trackCalls().map((c) => (JSON.parse(c.body) as any[]).map((e) => e.data?.baseData?.name))).toEqual([
+      ["rules_command"],
+      ["rules_command"],
+      ["plugin_feature_used"],
+    ])
+    const delivered = trackCalls()
+      .slice(-1)
+      .flatMap((c) => JSON.parse(c.body) as any[])
+      .map((e) => e.data?.baseData?.name)
+    expect(delivered).toEqual(["plugin_feature_used"])
   })
 
   test("a credential change on disk is noticed at the next flush, and a buffered batch keeps the identity it was tracked under", async () => {
