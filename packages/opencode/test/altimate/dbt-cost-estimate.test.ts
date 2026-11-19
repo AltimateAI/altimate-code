@@ -1029,6 +1029,7 @@ describe("IDENTIFIER() on Databricks", () => {
     "SELECT * FROM IDENTIFIER(\"IDENTIFIER('read_files')\")('/Volumes/c/s/v/raw')",
     "SELECT * FROM IDENTIFIER('identifier(''x'')')('/x')",
     "SELECT * FROM IDENTIFIER('read_' /*a*/ || 'files' /*b*/)('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('`j\u017fon`.`data.json`')",
     "SELECT * FROM IDENTIFIER('js' /*a*/ || 'on.`/Volumes/c/s/v/raw`' /*b*/)",
     "SELECT 1 AS `\u00df\u00df\u00df`, XIDENTIFIER('safe') AS n FROM IDENTIFIER(concat('read_', 'files'))('/x')",
   ])("%p may read files", (sql) => {
@@ -1043,6 +1044,7 @@ describe("IDENTIFIER() on Databricks", () => {
     "select * from `identifier`('x')",
     "SELECT `note identifier(x)` FROM main.sales.orders",
     `select * from IDENTIFIER${" ".repeat(120)}( 'cat.sch.tbl' )`,
+    "select * from IDENTIFIER('main.analytics.identifier_map')",
     "SELECT 1 AS `\u00df\u00df`, XIDENTIFIER('safe') AS n FROM main.sales.orders",
   ])("%p reads tables", (sql) => {
     expect(readsFiles(sql)).toBe(false)
@@ -1063,6 +1065,13 @@ describe("IDENTIFIER() on Databricks", () => {
     const started = performance.now()
     expect(readsFiles(sql)).toBe(true)
     expect(performance.now() - started).toBeLessThan(200)
+  })
+
+  test("adjacent ordinary literals scan in linear time", () => {
+    const sql = "SELECT " + "'a' ".repeat(64000) + "FROM main.s.t"
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   test("many ordinary literals scan in linear time", () => {

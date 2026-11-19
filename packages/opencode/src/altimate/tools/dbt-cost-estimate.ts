@@ -186,8 +186,8 @@ export function readsFiles(sql: string): boolean {
   for (const lit of literals) {
     plain++
     // Spark reads the string as a name, ignoring comments and unescaping backslashes: not read here.
-    // A double quote or a nested IDENTIFIER names a quoting mode or clause of its own.
-    if (/[\\"]|\/\*|--/.test(lit.text) || /IDENTIFIER/.test(lit.text.toUpperCase())) return true
+    // A double quote, a nested IDENTIFIER or a non-ASCII letter (Spark folds ſ to s, so jſon is json) is not read.
+    if (/[\\"]|\/\*|--/.test(lit.text) || /IDENTIFIER\s*\(/.test(lit.text.toUpperCase()) || /[^\x00-\x7f]/.test(lit.text)) return true
     if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*$/i.test(lit.text) || fileSource(lit.text)) return true
   }
   return calls > plain
@@ -256,6 +256,12 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
   // The Snowflake splitter yields a line starting with "!" as a command of its own, wherever it sits: never read.
   if (!databricks && /(^|\n)!/.test(sql)) return script
   let code = ""
+  // The last of `code` with its whitespace collapsed to one space: what an IDENTIFIER( call is read from.
+  let tail = ""
+  const emit = (text: string) => {
+    code += text
+    tail = (tail + text.slice(-40)).replace(/\s+/g, " ").slice(-40)
+  }
   // Databricks: the text of each string literal that opens an IDENTIFIER( call, and where it sits in `code`.
   const literals: { text: string }[] = []
   // Past a semicolon only whitespace and comments may follow: anything else, quoted or not, is a second statement.
@@ -270,7 +276,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       if (databricks && end >= 0 && sql[end - 1] === "\\") return script
       if (end < 0) break
       i = end + 1
-      code += " "
+      emit(" ")
       continue
     }
     if (two === "/*") {
@@ -279,7 +285,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       // The closer's star counts too: in "/*/*/" an opener overlaps it.
       if (end < 0 || sql.slice(i + 2, end + 1).includes("/*")) return script
       i = end + 2
-      code += " "
+      emit(" ")
       continue
     }
     if (two === "$$" || (!databricks && two === "//")) return script
@@ -297,33 +303,31 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       if (j >= sql.length) return script
       let blank = " "
       // Only a single-quoted string is a literal name: "…" may be a quoted identifier or a variable.
-      if (databricks && c !== "`" && opensIdentifier(code)) {
+      if (databricks && c !== "`" && opensIdentifier(tail)) {
         // Marked, so a second literal after it does not read as the call's first.
         blank = "\u0000"
         // Only a literal the call's parenthesis closes is plain: a following literal, operator or name is not.
         if (c === "'" && closesCall(sql, j + 1)) literals.push({ text: sql.slice(i + 1, j) })
       }
       // A backtick-quoted name is code; quoted text is not.
-      code += c === "`" ? sql.slice(i, j + 1) : blank
+      emit(c === "`" ? sql.slice(i, j + 1) : blank)
       i = j + 1
       continue
     }
-    code += c
+    emit(c)
     i++
   }
   return { script: /\bexecute\s+immediate\b/i.test(code), code, literals }
 }
 
-/** Whether `code` (as `scanSql` builds it) ends in `IDENTIFIER(`, spacing aside. */
-function opensIdentifier(code: string): boolean {
-  let end = code.length
-  while (end > 0 && /\s/.test(code[end - 1])) end--
-  if (code[end - 1] !== "(") return false
-  end--
-  while (end > 0 && /\s/.test(code[end - 1])) end--
+/** Whether `tail` (the last of `scanSql`'s code, whitespace collapsed to one space) ends in `IDENTIFIER(`. */
+function opensIdentifier(tail: string): boolean {
+  let t = tail.replace(/ $/, "")
+  if (!t.endsWith("(")) return false
+  t = t.slice(0, -1).replace(/ $/, "")
   // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
-  if (end < 10 || code.slice(end - 10, end).toUpperCase() !== "IDENTIFIER") return false
-  return end === 10 || !/[A-Za-z0-9_$]/.test(code[end - 11])
+  if (t.length < 10 || t.slice(-10).toUpperCase() !== "IDENTIFIER") return false
+  return t.length === 10 || !/[A-Za-z0-9_$]/.test(t[t.length - 11])
 }
 
 /** Whether, past whitespace and comments, the next character of `sql` from `at` is `)`. One pass, no backtracking. */
