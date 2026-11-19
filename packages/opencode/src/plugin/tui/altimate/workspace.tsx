@@ -87,6 +87,7 @@ import { sameIdentifier } from "@/altimate/workspace/remote-identity"
 import {
   accountDigest,
   credentialDigest,
+  digestOf,
   readLocalBinding,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
@@ -473,6 +474,27 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
   )
 }
 
+/** The confirmation after a link, unless the account was switched while it ran: the server
+ * link stands, but the local record and memory seed were refused, so the usual confirmation
+ * (which promises memory sync) would not hold. */
+async function confirmLink(
+  api: TuiPluginApi,
+  recorded: Awaited<ReturnType<typeof recordApprovedBinding>>,
+  label: LinkedProps["verb"],
+  datamateId: number,
+  datamateName: string,
+): Promise<void> {
+  if (recorded?.status === "account-changed") {
+    api.ui.toast({
+      variant: "warning",
+      message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
+      duration: 8_000,
+    })
+    return
+  }
+  await showLinkedConfirmation(api, label, datamateId, datamateName)
+}
+
 /** Show the persistent linked-confirmation dialog. Builds the manage URL
  * best-effort; degrades gracefully on BYOK/unresolvable. */
 async function showLinkedConfirmation(
@@ -622,26 +644,21 @@ async function runBrowserHandoff(
   // ids are tenant-schema-local (same integer, different workspace). Compare
   // the credential fingerprint the handoff was validated against with the
   // credentials we're about to bind under, and refuse if either drifted.
-  // The credential checked here is the one the bind runs as, and the one any error names.
-  let bindAs: ActAs
-  try {
-    const fresh = await AltimateApi.getCredentials()
-    bindAs = { url: fresh.altimateUrl, instance: fresh.altimateInstanceName, apiKey: fresh.altimateApiKey }
-    if (
-      fresh.altimateInstanceName !== result.credentials.tenant ||
-      fresh.altimateUrl !== result.credentials.apiUrl
-    ) {
-      api.ui.toast({
-        variant: "error",
-        message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
-        duration: 15_000,
-      })
-      return
-    }
-  } catch {
+  // The credential checked here is the one the bind runs as, the one its record is pinned to,
+  // and the one any error names.
+  const bindAs = await WorkspaceApi.captureCredentials()
+  if (!bindAs) {
     api.ui.toast({
       variant: "error",
       message: "Lost Altimate credentials while the browser was open — sign in and re-run.",
+    })
+    return
+  }
+  if (bindAs.instance !== result.credentials.tenant || bindAs.url !== result.credentials.apiUrl) {
+    api.ui.toast({
+      variant: "error",
+      message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${bindAs.instance}). Re-run to link this project.`,
+      duration: 15_000,
     })
     return
   }
@@ -650,14 +667,14 @@ async function runBrowserHandoff(
   // as PickerDialog's attach mode.
   try {
     const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier, bindAs)
-    await recordApprovedBinding(api.state.path.directory, {
+    const recorded = await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    })
-    await showLinkedConfirmation(api, "Linked", res.binding.datamate_id, res.binding.datamate_name)
+    }, { account: digestOf(bindAs) })
+    await confirmLink(api, recorded, "Linked", res.binding.datamate_id, res.binding.datamate_name)
   } catch (err) {
     if (err instanceof ConflictError) {
       api.ui.toast({
@@ -848,14 +865,14 @@ export async function createAndBindInline(
   // toast fallback keeps the user informed without taking the process down.
   // (Kilo cycle 5.)
   try {
-    await recordApprovedBinding(api.state.path.directory, {
+    const recorded = await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.datamate.id,
       datamateName: res.datamate.name,
       repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
       projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
       linkedAt: Date.now(),
-    })
-    await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
+    }, { account: digestOf(createAs) })
+    await confirmLink(api, recorded, "Created", res.datamate.id, res.datamate.name)
   } catch (err) {
     // Log the failure so a regression in ``showLinkedConfirmation`` doesn't
     // vanish silently, then fall back to a plain toast. Previously ``void err``
@@ -1106,15 +1123,16 @@ function PickerDialog(props: PickerProps) {
     try {
       if (props.mode === "attach") {
         const res = await WorkspaceApi.bindExisting(datamateId, props.identifier, pickAs)
-        await recordApprovedBinding(props.api.state.path.directory, {
+        const recorded = await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
           repoRemote: res.binding.repo_remote,
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
-        })
-        await showLinkedConfirmation(
+        }, { account: digestOf(pickAs) })
+        await confirmLink(
           props.api,
+          recorded,
           "Linked",
           res.binding.datamate_id,
           res.binding.datamate_name,
@@ -1136,15 +1154,16 @@ function PickerDialog(props: PickerProps) {
           matchedBy: props.matchedBy,
           actAs: pickAs,
         })
-        await recordApprovedBinding(props.api.state.path.directory, {
+        const recorded = await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
           repoRemote: res.binding.repo_remote,
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
-        })
-        await showLinkedConfirmation(
+        }, { account: digestOf(pickAs) })
+        await confirmLink(
           props.api,
+          recorded,
           "Re-linked",
           res.binding.datamate_id,
           res.binding.datamate_name,
@@ -1406,19 +1425,11 @@ export async function bindOrRebindInline(
         projectPath: res.binding.project_path,
         linkedAt: Date.now(),
       },
-      listedAccount ? { account: listedAccount } : undefined,
+      { account: digestOf(bindAs) },
     )
-    if (recorded?.status === "account-changed") {
-      // The bind ran as the listed account; only the local record and seed were refused.
-      api.ui.toast({
-        variant: "warning",
-        message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
-        duration: 8_000,
-      })
-      return
-    }
-    await showLinkedConfirmation(
+    await confirmLink(
       api,
+      recorded,
       isRebind ? "Re-linked" : "Linked",
       res.binding.datamate_id,
       res.binding.datamate_name,

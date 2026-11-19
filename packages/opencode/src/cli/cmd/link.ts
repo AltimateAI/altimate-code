@@ -45,7 +45,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { accountDigest, credentialDigest, isApprovedRow, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, digestOf, isApprovedRow, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 import {
   confirmsNamesake,
@@ -449,10 +449,9 @@ async function runBrowserHandoff(
   projectName: string,
   directory: string,
 ): Promise<void> {
-  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
-  const linkAccount = await accountDigest()
-  if (linkAccount === null) {
+  // Unreadable credentials cannot link anyway: stop before opening the browser. The bind
+  // and its local record use the credential captured after the browser returns.
+  if ((await accountDigest()) === null) {
     prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
     process.exitCode = 1
     return
@@ -469,24 +468,19 @@ async function runBrowserHandoff(
   // browser window can stay open for up to 15 minutes; an account switch in
   // that window would otherwise bind a callback validated for tenant A
   // under tenant B (workspace ids are tenant-schema-local).
-  // The credential checked here is the one the bind runs as, and the one any error names.
-  let bindAs: ActAs
-  try {
-    const fresh = await AltimateApi.getCredentials()
-    bindAs = { url: fresh.altimateUrl, instance: fresh.altimateInstanceName, apiKey: fresh.altimateApiKey }
-    if (
-      fresh.altimateInstanceName !== result.credentials.tenant ||
-      fresh.altimateUrl !== result.credentials.apiUrl
-    ) {
-      spin.stop(
-        `Credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
-        1,
-      )
-      process.exitCode = 1
-      return
-    }
-  } catch {
+  // The credential checked here is the one the bind runs as, the one its record is pinned to,
+  // and the one any error names.
+  const bindAs = await WorkspaceApi.captureCredentials()
+  if (!bindAs) {
     spin.stop("Lost Altimate credentials while the browser was open — sign in and re-run.", 1)
+    process.exitCode = 1
+    return
+  }
+  if (bindAs.instance !== result.credentials.tenant || bindAs.url !== result.credentials.apiUrl) {
+    spin.stop(
+      `Credentials changed while the browser was open (was ${result.credentials.tenant}, now ${bindAs.instance}). Re-run to link this project.`,
+      1,
+    )
     process.exitCode = 1
     return
   }
@@ -507,7 +501,7 @@ async function runBrowserHandoff(
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    }, { awaitBackfill: true, account: linkAccount })
+    }, { awaitBackfill: true, account: digestOf(bindAs) })
     bindSpin.stop(`Linked to "${stripControlChars(res.binding.datamate_name)}".`)
     prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
@@ -728,7 +722,7 @@ export async function createThenBindOrRebind(
     repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
     projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
-  }, { awaitBackfill: true, account: linkAccount })
+  }, { awaitBackfill: true, account: digestOf(createAs) ?? linkAccount })
   prompts.log.info(seedMessage(seed))
   // The quick create is private, and the server hides a private workspace's link from
   // everyone else: a teammate who clones this repo is told it is unlinked.

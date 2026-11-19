@@ -47,7 +47,7 @@ const { createThenBindOrRebind } = await import("@/cli/cmd/link")
 const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await import(
   "@/plugin/tui/altimate/workspace"
 )
-const { recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { recordApprovedBinding, readLocalBinding } = await import("@/altimate/workspace/state")
 const { flushPendingSyncs } = await import("@/altimate/workspace/skill-sync")
 const { hiddenBindingMessage, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
   "@/altimate/workspace/api-client"
@@ -257,6 +257,33 @@ describe("TUI: createAndBindInline", () => {
     await createAndBindInline(api, IDENTIFIER, "proj")
 
     expect(sequence()).toEqual(["POST /datamate-project-bindings/"])
+  })
+
+  test("a create whose account is switched mid-request is not recorded under the next account", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings\/$/,
+        method: "POST",
+        status: 200,
+        body: { datamate: { id: 7, name: "proj" }, binding: BINDING, manage_url: "https://x.test/w/7" },
+      },
+    ]
+    const credentials = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const acme = { altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }
+    onRequest = (call) => {
+      if (call.method === "POST" && call.path === "/datamate-project-bindings/")
+        writeFileSync(credentials, JSON.stringify({ ...acme, altimateInstanceName: "other", altimateApiKey: "other-key" }))
+    }
+    const { api, toasts } = stubApi()
+    try {
+      await createAndBindInline(api, IDENTIFIER, "proj")
+      // Workspace 7 belongs to "acme": the account signed in now must not find it as its link.
+      expect(await readLocalBinding("/tmp/proj")).toBeNull()
+      // And the confirmation says the link stands but nothing was synced, instead of the usual one.
+      expect(toasts.some((t) => t.variant === "warning" && /account changed during the link/.test(t.message))).toBe(true)
+    } finally {
+      writeFileSync(credentials, JSON.stringify(acme))
+    }
   })
 
   test("a failed rebind toasts the orphan instead of reporting success", async () => {
