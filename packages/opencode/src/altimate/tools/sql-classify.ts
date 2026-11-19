@@ -157,8 +157,8 @@ function explainPrefix(dialect?: string): RegExp {
   const words = ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+"]
   if (d === "snowflake") words.push("USING\\s+(?:JSON|TEXT|TABULAR)")
   if (/^(databricks|spark|hive)$/.test(d)) words.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
-  // PostgreSQL takes either the parenthesized list or the legacy words, never both.
-  const list = /^(postgres|postgresql)$/.test(d) ? `\\s*${POSTGRES_OPTION_LIST}\\s*|` : ""
+  // Only the canonical `postgres` dialect, whose lexer reads dollar quotes. PostgreSQL takes either the parenthesized list or the legacy words, never both.
+  const list = d === "postgres" ? `\\s*${POSTGRES_OPTION_LIST}\\s*|` : ""
   return new RegExp(`^\\s*EXPLAIN\\b(?:${list}(?:\\s+(?:${words.join("|")}))*\\s+)`, "i")
 }
 

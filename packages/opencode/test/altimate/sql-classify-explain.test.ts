@@ -114,6 +114,18 @@ describe("EXPLAIN with options", () => {
     expect(type("EXPLAIN (FORMAT JSON) SELECT 1", undefined as unknown as string)).toBe("write")
   })
 
+  test("the postgresql alias takes no option list, so hidden statements cannot slip through", () => {
+    for (const sql of [
+      "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; CLUSTER t",
+      "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; CHECKPOINT",
+      "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; NOTIFY channel",
+    ]) {
+      expect(type(sql, "postgresql")).toBe("write")
+      expect(type(sql, "postgres")).toBe("write")
+    }
+    expect(type("EXPLAIN (FORMAT JSON) SELECT 1", "postgresql")).toBe("write")
+  })
+
   test("nested optioned EXPLAIN is a write", () => {
     expect(type("EXPLAIN USING JSON EXPLAIN USING JSON SELECT 1", "snowflake")).toBe("write")
     expect(type("EXPLAIN COST EXPLAIN COST SELECT 1", "databricks")).toBe("write")
