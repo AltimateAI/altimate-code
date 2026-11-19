@@ -787,12 +787,13 @@ export async function createAndBindInline(
     | { via: "bound"; datamate: DatamateRef; binding: Binding }
     | { via: "unbound"; datamate: DatamateRef }
   let res: Created
-  // Captured before the create and re-checked before the rebind: the two
-  // requests resolve credentials independently, and a workspace id means
-  // nothing on a different account.
-  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
-  // Every write in this flow, its local record and any error about it use this one account.
+  // The create, the rebind that may follow, the local record and any error about them all use
+  // this one credential. The memory seed and skill sync that follow the record use the current
+  // one, and the record refuses if the account changed.
   const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
+  // Re-checked before the rebind: the rebind is refused if the signed-in account changed since,
+  // since the user would not find the link on the account they are on now.
+  const account = createAs ? { apiUrl: createAs.url, tenant: createAs.instance } : null
   try {
     if (rebindFrom) {
       const ws = await WorkspaceApi.createWorkspaceUnbound({ name, actAs: createAs })

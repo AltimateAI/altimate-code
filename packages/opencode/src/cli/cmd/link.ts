@@ -609,13 +609,13 @@ export async function createThenBindOrRebind(
     | { via: "bound"; datamate: DatamateRef; binding: Binding; manage_url: string }
     | { via: "unbound"; datamate: DatamateRef }
   let created: Created
-  // Captured BEFORE the create and re-checked before the rebind. Each request
-  // resolves credentials on its own, so an account switch in between would
-  // create the workspace on one tenant and rebind on another using an id that
-  // is local to the first. (review, PR #1314)
-  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
-  // Every write in this flow, its local record and any error about it use this one account.
+  // The create, the rebind that may follow, the local record and any error about them all use
+  // this one credential. The memory seed and skill sync that follow the record use the current
+  // one, and the record refuses if the account changed.
   const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
+  // Re-checked before the rebind: the rebind is refused if the signed-in account changed since,
+  // since the user would not find the link on the account they are on now.
+  const account = createAs ? { apiUrl: createAs.url, tenant: createAs.instance } : null
   try {
     // Two different creates, because the server offers two different things.
     //
