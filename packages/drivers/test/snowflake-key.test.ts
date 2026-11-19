@@ -65,9 +65,9 @@ describe("toPkcs8Pem", () => {
       }
       expect(msg).toMatch(/passphrase .* incorrect/)
       expect(msg).not.toMatch(/DECODER|bad decrypt|wrong/)
-      for (const line of pem.split("\n").filter((l) => /^[A-Za-z0-9+/=]{40,}$/.test(l))) {
-        expect(msg).not.toContain(line)
-      }
+      const bodyLines = pem.split("\n").filter((l) => /^[A-Za-z0-9+/=]{40,}$/.test(l))
+      expect(bodyLines.length).toBeGreaterThan(0)
+      for (const line of bodyLines) expect(msg).not.toContain(line)
     })
   }
 
