@@ -9,7 +9,17 @@ import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
-import { DbtCostEstimateTool, parseBytesProcessed, untilAbort } from "@/altimate/tools/dbt-cost-estimate"
+import {
+  DbtCostEstimateTool,
+  explainJinja,
+  mayBeScript,
+  parseBytesProcessed,
+  readsFiles,
+  scanSql,
+  parseDatabricksExplainCost,
+  parseSnowflakeExplain,
+  untilAbort,
+} from "@/altimate/tools/dbt-cost-estimate"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -28,7 +38,15 @@ type Calls = { nodes: string[]; queries: [string, string | undefined][]; dryRuns
 
 function fakeAdapter(
   calls: Calls,
-  opts: { type?: string; bytes?: unknown; compileFails?: boolean; dryRunFails?: boolean; compile?: () => Promise<string> } = {},
+  opts: {
+    type?: string
+    bytes?: unknown
+    compileFails?: boolean
+    dryRunFails?: boolean
+    compile?: () => Promise<string>
+    /** What compiling the EXPLAIN Jinja renders (the plan's first column as JSON), or a failure to throw. */
+    explain?: () => Promise<string>
+  } = {},
 ) {
   return {
     isInitialized: () => true,
@@ -42,6 +60,7 @@ function fakeAdapter(
     },
     unsafeCompileQuery: async (query: string, name?: string) => {
       calls.queries.push([query, name])
+      if (opts.explain && query.startsWith("{%- if execute -%}{%- set altimate_plan")) return opts.explain()
       if (opts.compileFails) throw new Error("compilation failed")
       return `compiled(${query})`
     },
@@ -208,12 +227,12 @@ describe("dbt_cost_estimate", () => {
     }
   })
 
-  test.each(["snowflake", "databricks", "duckdb"])("answers supported:false on %s and compiles nothing", async (type) => {
+  test.each(["duckdb", "redshift", "postgres"])("answers supported:false on %s and compiles nothing", async (type) => {
     useAdapter(calls, { type })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, supported: false, adapter: type })
     expect(result.metadata.bytes).toBeUndefined()
-    expect(result.output).toContain("only available on BigQuery")
+    expect(result.output).toBe(`No cost estimate: scan estimates are only available on BigQuery, Snowflake and Databricks (this project uses ${type}).`)
     expect(calls).toEqual({ nodes: [], queries: [], dryRuns: [] })
   })
 
@@ -338,5 +357,641 @@ describe("dbt_cost_estimate", () => {
     dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "python3", queryLimit: 500 })
     await (await initTool(DbtCostEstimateTool)).execute({ sql: "where s = 'a'" }, ctx)
     expect(calls.dryRuns).toEqual(["compiled(where s = 'a')"])
+  })
+})
+
+// Snowflake's EXPLAIN USING JSON answers one row, column `content`: the shape documented for the command, with a
+// table scan per object read. Databricks' EXPLAIN COST answers one row, column `plan`: Spark's tree string, each node
+// suffixed with `Statistics(sizeInBytes=…[, rowCount=…])` as Statistics.simpleString and Utils.bytesToString write it.
+const SNOWFLAKE_PLAN = JSON.stringify({
+  GlobalStats: { partitionsTotal: 1240, partitionsAssigned: 37, bytesAssigned: 2_147_483_648 },
+  Operations: [
+    [
+      { id: 0, operation: "Result", expressions: ["ORDERS.O_ORDERKEY", "CUSTOMER.C_NAME"] },
+      { id: 1, parentOperators: [0], operation: "InnerJoin", expressions: ["joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"] },
+      {
+        id: 2,
+        parentOperators: [1],
+        operation: "TableScan",
+        objects: ["ANALYTICS.PUBLIC.ORDERS"],
+        expressions: ["O_ORDERKEY", "O_CUSTKEY", "O_ORDERDATE"],
+        partitionsAssigned: 30,
+        partitionsTotal: 1200,
+        bytesAssigned: 2_000_000_000,
+      },
+      { id: 3, parentOperators: [1], operation: "JoinFilter", expressions: ["joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"] },
+      {
+        id: 4,
+        parentOperators: [3],
+        operation: "TableScan",
+        objects: ["ANALYTICS.PUBLIC.CUSTOMER"],
+        expressions: ["C_CUSTKEY", "C_NAME"],
+        partitionsAssigned: 7,
+        partitionsTotal: 40,
+        bytesAssigned: 147_483_648,
+      },
+    ],
+  ],
+})
+
+const DATABRICKS_PLAN = [
+  "== Optimized Logical Plan ==",
+  "Aggregate [o_custkey#12L], [o_custkey#12L, sum(o_totalprice#15) AS revenue#40], Statistics(sizeInBytes=1.2 MiB, rowCount=5.00E+4)",
+  "+- Project [o_custkey#12L, o_totalprice#15], Statistics(sizeInBytes=1.6 GiB)",
+  "   +- Join Inner, (o_custkey#12L = c_custkey#30L), Statistics(sizeInBytes=3.0 GiB)",
+  "      :- Filter (isnotnull(o_orderdate#16) AND (o_orderdate#16 >= 2024-01-01)), Statistics(sizeInBytes=2.5 GiB)",
+  "      :  +- Relation main.sales.orders[o_orderkey#11L,o_custkey#12L,o_totalprice#15,o_orderdate#16] parquet, Statistics(sizeInBytes=2.5 GiB, rowCount=1.50E+7)",
+  "      +- Relation main.sales.customer[c_custkey#30L,c_name#31] parquet, Statistics(sizeInBytes=512.0 MiB)",
+  "",
+  "== Physical Plan ==",
+  "AdaptiveSparkPlan isFinalPlan=false",
+  "+- HashAggregate(keys=[o_custkey#12L], functions=[sum(o_totalprice#15)])",
+  "   +- FileScan parquet main.sales.orders[o_custkey#12L] Batched: true, Statistics(sizeInBytes=99.0 EiB)",
+].join("\n")
+
+describe("parseSnowflakeExplain", () => {
+  test("reads GlobalStats: the bytes and partitions left after pruning", () => {
+    expect(parseSnowflakeExplain(SNOWFLAKE_PLAN)).toEqual({ bytes: 2_147_483_648, partitionsAssigned: 37, partitionsTotal: 1240 })
+  })
+
+  test("takes the content already parsed", () => {
+    expect(parseSnowflakeExplain(JSON.parse(SNOWFLAKE_PLAN))).toEqual({ bytes: 2_147_483_648, partitionsAssigned: 37, partitionsTotal: 1240 })
+  })
+
+  test("a query that reads no table is zero bytes", () => {
+    expect(parseSnowflakeExplain('{"GlobalStats":{"partitionsTotal":0,"partitionsAssigned":0,"bytesAssigned":0},"Operations":[[{"id":0,"operation":"Result"}]]}')).toEqual({
+      bytes: 0,
+      partitionsAssigned: 0,
+      partitionsTotal: 0,
+    })
+  })
+
+  test("bytes without partition counts are still an estimate", () => {
+    expect(parseSnowflakeExplain({ GlobalStats: { bytesAssigned: 1024 } })).toEqual({ bytes: 1024 })
+  })
+
+  test.each([
+    ["not JSON", "GlobalStats: 1024"],
+    ["no GlobalStats", '{"Operations":[]}'],
+    ["no bytesAssigned", '{"GlobalStats":{"partitionsTotal":3}}'],
+    ["text bytes", '{"GlobalStats":{"bytesAssigned":"1024"}}'],
+    ["negative bytes", '{"GlobalStats":{"bytesAssigned":-1}}'],
+    ["the tabular format", "step\tid\tparent\toperation"],
+    ["null", null],
+    ["a number", 1024],
+  ])("does not read %s", (_, content) => {
+    expect(parseSnowflakeExplain(content)).toBeUndefined()
+  })
+})
+
+describe("parseDatabricksExplainCost", () => {
+  test("sums the leaves of the optimized plan: the relations it scans, not the operators above them", () => {
+    expect(parseDatabricksExplainCost(DATABRICKS_PLAN)).toEqual({ bytes: Math.round(2.5 * 1024 ** 3 + 512 * 1024 ** 2) })
+  })
+
+  test("a single relation and Spark's B unit", () => {
+    const plan = "== Optimized Logical Plan ==\nProject [id#0L], Statistics(sizeInBytes=12.0 B)\n+- Relation main.t[id#0L] parquet, Statistics(sizeInBytes=16.0 B, rowCount=2)\n\n== Physical Plan ==\n*(1) ColumnarToRow"
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 16 })
+  })
+
+  test("a scalar subquery's plan is printed inside the tree, and its relation counts too", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Project [id#1L, scalar-subquery#5 [] AS m#6L], Statistics(sizeInBytes=2.0 MiB)",
+      ":  +- Aggregate [max(v#3L) AS max(v)#8L], Statistics(sizeInBytes=16.0 B, rowCount=1)",
+      ":     +- Relation main.s.dim[v#3L] parquet, Statistics(sizeInBytes=3.0 MiB)",
+      "+- Relation main.s.fact[id#1L] parquet, Statistics(sizeInBytes=1.5 GiB)",
+      "",
+      "== Physical Plan ==",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: Math.round(1.5 * 1024 ** 3 + 3 * 1024 ** 2) })
+  })
+
+  test("reads Spark 2's KB/MB units and the scientific form past a long", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation[a#0] parquet, Statistics(sizeInBytes=2.0 MB, hints=none)")).toEqual({
+      bytes: 2 * 1024 ** 2 ,
+    })
+    // A size past 2^62 is Spark's "no statistics" default or larger: not a size.
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation[a#0] parquet, Statistics(sizeInBytes=1.23E+21 B)")).toEqual({ noStats: true })
+  })
+
+  test("a relation without statistics shows Spark's default size, Long.MaxValue: no estimate, not 8 EiB", () => {
+    const plan = "== Optimized Logical Plan ==\nJoin Inner, Statistics(sizeInBytes=8.0 EiB)\n:- Relation main.a[x#1] parquet, Statistics(sizeInBytes=1.0 GiB)\n+- Relation jdbc.b[x#2] JDBCRelation, Statistics(sizeInBytes=8.0 EiB)"
+    expect(parseDatabricksExplainCost(plan)).toEqual({ noStats: true, relation: "jdbc.b" })
+  })
+
+  test("a leaf with no statistics at all is no estimate", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
+  })
+
+  test.each([
+    ["no optimized plan section", "== Physical Plan ==\n*(1) Scan"],
+    ["an empty section", "== Optimized Logical Plan ==\n\n== Physical Plan ==\nScan"],
+    ["not text", { plan: "x" }],
+    ["null", null],
+  ])("does not read %s", (_, plan) => {
+    expect(parseDatabricksExplainCost(plan)).toBeUndefined()
+  })
+
+  test("reads Windows line endings", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\r\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\r\n")).toEqual({ bytes: 4096 })
+  })
+})
+
+describe("explainJinja", () => {
+  test("runs the EXPLAIN through dbt's run_query and renders its first column as JSON", () => {
+    expect(explainJinja("EXPLAIN COST", "select 1")).toBe(
+      "{%- if execute -%}{%- set altimate_plan = run_query('EXPLAIN COST\nselect 1') -%}{{ tojson(altimate_plan.columns[0].values() | list) }}{%- else -%}[]{%- endif -%}",
+    )
+  })
+
+  test("at dbt's parse pass (execute false) it runs nothing and renders an empty list, not an error", () => {
+    // dbt compile --inline renders the query at parse first, where run_query returns None: reading its columns there failed.
+    const template = explainJinja("EXPLAIN USING JSON", "select 1")
+    const parsePass = /^\{%- if execute -%\}[\s\S]*\{%- else -%\}([\s\S]*)\{%- endif -%\}$/.exec(template)
+    expect(parsePass?.[1]).toBe("[]")
+    expect(template.indexOf("run_query")).toBeLessThan(template.indexOf("{%- else -%}"))
+  })
+
+  test("escapes quotes and backslashes for the Jinja string, and drops a trailing semicolon", () => {
+    expect(explainJinja("EXPLAIN USING JSON", "select * from t where s = 'a\\b';\n")).toContain("run_query('EXPLAIN USING JSON\nselect * from t where s = \\'a\\\\b\\'')")
+  })
+})
+
+describe("dbt_cost_estimate on a warehouse with a planner", () => {
+  const rendered = (row: unknown) => async () => JSON.stringify([row])
+
+  test("Snowflake: compiles the model, then EXPLAINs it, and answers the bytes assigned as an upper bound", async () => {
+    useAdapter(calls, { type: "snowflake", explain: rendered(SNOWFLAKE_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.nodes).toEqual(["orders"])
+    expect(calls.queries).toEqual([[explainJinja("EXPLAIN USING JSON", "compiled(orders)"), undefined]])
+    expect(calls.dryRuns).toEqual([])
+    expect(result.metadata).toEqual({
+      success: true,
+      supported: true,
+      adapter: "snowflake",
+      source: "explain",
+      bound: "upper",
+      bytes: 2_147_483_648,
+      display: "2.0 GiB",
+      partitionsAssigned: 37,
+      partitionsTotal: 1240,
+      model: "orders",
+      truncated: false,
+    })
+    expect(result.output).toContain("orders would scan about 2.0 GiB, by Snowflake's plan estimate (37 of 1240 partitions after pruning; an upper bound")
+  })
+
+  test("Databricks: estimates inline SQL from EXPLAIN COST, as an estimate, not a bound", async () => {
+    useAdapter(calls, { type: "databricks", explain: rendered(DATABRICKS_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select * from {{ ref('orders') }}" }, ctx)
+    expect(calls.queries).toEqual([
+      ["select * from {{ ref('orders') }}", undefined],
+      [explainJinja("EXPLAIN COST", "compiled(select * from {{ ref('orders') }})"), undefined],
+    ])
+    expect(result.metadata).toEqual({
+      success: true,
+      supported: true,
+      adapter: "databricks",
+      source: "explain",
+      bound: "estimate",
+      bytes: Math.round(2.5 * 1024 ** 3 + 512 * 1024 ** 2),
+      display: "3.0 GiB",
+      truncated: false,
+    })
+    expect(result.output).toContain("not a bound either way")
+  })
+
+  test("Databricks without table statistics: no estimate, and says why", async () => {
+    useAdapter(calls, { type: "databricks", explain: rendered("== Optimized Logical Plan ==\nRelation x.y[a#1] parquet, Statistics(sizeInBytes=8.0 EiB)") })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata).toEqual({ success: false, adapter: "databricks", source: "explain", error: expect.stringContaining("no size for x.y"), truncated: false })
+    expect(result.metadata.bytes).toBeUndefined()
+    expect(result.output).toContain("ANALYZE TABLE x.y COMPUTE STATISTICS NOSCAN")
+    expect(result.output).toContain("no size for x.y")
+  })
+
+  test("an EXPLAIN the warehouse refuses is no estimate, with the warehouse's error", async () => {
+    useAdapter(calls, { type: "snowflake", explain: async () => Promise.reject(new Error("SQL compilation error: Object 'ORDERS' does not exist")) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.title).toBe("dbt_cost_estimate: explain failed")
+    expect(result.metadata).toMatchObject({ success: false, adapter: "snowflake", source: "explain" })
+    expect(result.output).toContain("does not exist")
+  })
+
+  test.each([
+    ["a plan it can't read", JSON.stringify(['{"Operations":[]}'])],
+    ["no rows", "[]"],
+    ["text that is not JSON", "EXPLAIN output"],
+  ])("%s is no estimate, never a count", async (_, out) => {
+    useAdapter(calls, { type: "snowflake", explain: async () => out })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.bytes).toBeUndefined()
+  })
+
+  test("a model that doesn't compile is not EXPLAINed", async () => {
+    useAdapter(calls, { type: "snowflake", compileFails: true, explain: rendered(SNOWFLAKE_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "nope" }, ctx)
+    expect(result.title).toBe("dbt_cost_estimate: compile failed")
+    expect(calls.queries).toEqual([])
+  })
+
+  test("a cancelled call stops waiting for the EXPLAIN", async () => {
+    const abort = new AbortController()
+    let started!: () => void
+    const explaining = new Promise<void>((resolve) => (started = resolve))
+    useAdapter(calls, {
+      type: "databricks",
+      explain: () => {
+        started()
+        return new Promise<string>(() => {})
+      },
+    })
+    const run = (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, { ...ctx, abort: abort.signal })
+    // Cancelled once the EXPLAIN is under way, not before it starts.
+    await explaining
+    abort.abort(new Error("cancelled"))
+    await expect(run).rejects.toThrow("cancelled")
+  })
+})
+
+describe("mayBeScript", () => {
+  test.each([
+    ["snowflake", "select 1; delete from orders"],
+    ["snowflake", "select 1;\ndelete from orders;"],
+    ["snowflake", "select * from t where s = 'a'; drop table t"],
+    ["snowflake", "select $$a$$; delete from t"],
+    // Snowflake's own comment and dollar-quoted text are not set aside: a doubt counts as a script.
+    ["snowflake", "select 1 // note; delete from t"],
+    ["snowflake", "select $$a;b$$"],
+    ["snowflake", "execute immediate 'select 1'"],
+    ["snowflake", "select `a; b` from t"],
+    ["snowflake", "select 'unclosed; delete from t"],
+    ["databricks", "select 1; delete from orders"],
+    ["databricks", "select 1 # c; delete from t"],
+    // Found in review: text the scan does not model must not hide a separator the driver sees.
+    ["snowflake", "select $$--$$; delete from orders"],
+    ["snowflake", "select $$'$$; delete from orders -- '"],
+    ["snowflake", "select 1 // '\n; delete from orders -- '"],
+    ["snowflake", 'select "a\\" x" ; delete from orders; "'],
+    ["snowflake", "select 1 /* unclosed ; delete from orders"],
+    ["databricks", "select r'\\'; delete from orders -- '"],
+    ["databricks", "select 1 /* a /* b */ ; delete from orders */"],
+    ["snowflake", "select 1; -- one\ndelete from orders"],
+  ])("on %s, %p may be more than one statement", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(true)
+  })
+
+  test.each([
+    ["snowflake", "select 1"],
+    ["snowflake", "select 1;\n  "],
+    ["snowflake", "select 'a;b', \"x;y\" from t -- one; two\n/* three; */"],
+    ["snowflake", "select 'it''s; fine', 'a\\'; b' from t"],
+    ["databricks", "select `p;q`.c from t where s = 'a;b'"],
+    ["databricks", "with x as (select 1) select * from x;"],
+    ["snowflake", "select 1; -- done"],
+    ["snowflake", "select 'a\\'; b', \"c\\\"; d\" from t"],
+    ["databricks", "select array_join(arr, ';') from t -- x; y"],
+  ])("on %s, %p is one statement", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(false)
+  })
+})
+
+describe("dbt_cost_estimate refuses to EXPLAIN a script", () => {
+  for (const type of ["snowflake", "databricks"]) {
+    test(`on ${type}, a second statement is never sent: no estimate, and only the compile ran`, async () => {
+      useAdapter(calls, { type, explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1; delete from orders" }, ctx)
+      expect(calls.queries).toEqual([["select 1; delete from orders", undefined]])
+      expect(result.metadata).toMatchObject({ success: false, adapter: type, source: "explain" })
+      expect(result.metadata.bytes).toBeUndefined()
+      expect(result.output).toContain("more than one statement")
+    })
+  }
+})
+
+describe("parseDatabricksExplainCost reads only the statistics Spark appends", () => {
+  test("a column named like statistics is not a size", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet, Statistics(sizeInBytes=1.0 GiB)")).toEqual({
+      bytes: 1024 ** 3 ,
+    })
+  })
+
+  test("nor stands in for missing statistics, or for Spark's default size", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation [Statistics(sizeInBytes=0 B)#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({ noStats: true })
+  })
+})
+
+describe("review follow-ups", () => {
+  test("a lone carriage return, which Jinja turns into a line break, cannot end a comment the check reads as running on", async () => {
+    for (const type of ["snowflake", "databricks"]) {
+      expect(mayBeScript("select 1 -- c\n; delete from orders", type)).toBe(true)
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type, compile: async () => "select 1 -- comment\r; delete from orders", explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, source: "explain" })
+      expect(result.output).toContain("more than one statement")
+    }
+  })
+
+  test("the SQL sent is the one checked: line endings are already line breaks", async () => {
+    useAdapter(calls, { type: "snowflake", compile: async () => "select 1\r\nfrom t\rwhere x", explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+    await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries).toEqual([[explainJinja("EXPLAIN USING JSON", "select 1\nfrom t\nwhere x"), undefined]])
+  })
+
+  test("only Spark's own section headers end the optimized plan", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Union, Statistics(sizeInBytes=2.0 GiB)",
+      ":- Project [concat(a#1, ==, note ==) AS x#3], Statistics(sizeInBytes=1.0 GiB)",
+      "== note ==",
+      ":  +- Relation main.s.a[a#1] parquet, Statistics(sizeInBytes=1.0 GiB)",
+      "+- Relation main.s.b[b#2] parquet, Statistics(sizeInBytes=1.0 GiB)",
+      "",
+      "== Physical Plan ==",
+      "Union",
+    ].join("\n")
+    // The stray line is the rest of the Project above it, not the end of the plan and not a node: the two relations, exactly.
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 2 * 1024 ** 3 })
+  })
+})
+
+describe("review follow-ups, round four", () => {
+  test.each([
+    ["snowflake", "select 1\n!foo"],
+    ["snowflake", "!set x=1\nselect 1"],
+    ["snowflake", "select 1 /* outer /* inner */ */"],
+    ["databricks", "select 1 /* outer /* inner */ */"],
+  ])("on %s, %p is not read: no estimate", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(true)
+  })
+
+  for (const [type, compiled] of [
+    ["snowflake", "select 1\n!foo"],
+    ["snowflake", "select 1\r!foo"],
+    ["snowflake", "select 1\r\n!foo"],
+    ["snowflake", "select 1 /* outer /* inner */ */"],
+  ] as const) {
+    test(`on ${type}, ${JSON.stringify(compiled)} never reaches the EXPLAIN`, async () => {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type, compile: async () => compiled, explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, source: "explain" })
+    })
+  }
+
+  test("a ! inside a line is an operator, not a command", () => {
+    expect(mayBeScript("select a from t where a != 1", "snowflake")).toBe(false)
+  })
+})
+
+describe("review follow-ups, round five", () => {
+  test.each([
+    ["snowflake", "select 1; 'second\nstatement'"],
+    ["snowflake", 'select 1; "x"'],
+    ["databricks", "select 1; `x`"],
+    ["snowflake", "select 1 /*/*/"],
+    ["databricks", "select 1 /*/*/ ' */ */ ; delete from t -- '"],
+    ["snowflake", "select 1 -- c\r; delete from orders"],
+  ])("on %s, %p is not read: no estimate", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(true)
+  })
+
+  test.each([
+    ["snowflake", "select 1;;\n"],
+    ["snowflake", "select 1; /* done */ -- really"],
+  ])("on %s, %p is one statement", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(false)
+  })
+
+  test("quoted text after a semicolon never reaches the EXPLAIN", async () => {
+    useAdapter(calls, { type: "snowflake", compile: async () => "select 1; 'second\nstatement'", explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries).toEqual([])
+    expect(result.metadata).toMatchObject({ success: false, source: "explain" })
+  })
+
+  test.each([
+    ["a comma", "Relation main.sales.orders,archive[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)"],
+    ["a hyphen", "Relation main.sales.my-table[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)"],
+    ["a space", "Relation main.sales.my table[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)"],
+    ["a Hive relation", "HiveTableRelation [`spark_catalog`.`default`.`t`, org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe], Statistics(sizeInBytes=8.0 EiB)"],
+  ])("a relation whose printed name has %s is not named: Spark prints it unquoted, so it may not be the whole name", (_, leaf) => {
+    expect(parseDatabricksExplainCost(`== Optimized Logical Plan ==\n${leaf}`)).toEqual({ noStats: true })
+  })
+
+  test("a plain relation name is named in the advice", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.sales.orders[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({
+      noStats: true,
+      relation: "main.sales.orders",
+    })
+  })
+})
+
+describe("review follow-ups, round six", () => {
+  test("a node continued on a line of its own is one node: its size is not added as a leaf", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Project [concat(a#1, line one",
+      "line two) AS x#3], Statistics(sizeInBytes=5.0 GiB)",
+      "+- Relation main.s.a[a#1] parquet, Statistics(sizeInBytes=1.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 1024 ** 3 })
+  })
+
+  test.each([
+    "select * from read_files('/Volumes/c/s/v/raw', format => 'json')",
+    "select * from READ_FILES ('/Volumes/c/s/v/raw')",
+    "select * from cloud_files('/mnt/raw', 'json')",
+    "select * from json.`/Volumes/c/s/v/raw`",
+    "select * from parquet . `s3://bucket/path`",
+  ])("on Databricks, %p reads files to plan: no EXPLAIN is sent", async (compiled) => {
+    const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+    useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(local.queries).toEqual([])
+    expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    expect(result.output).toContain("reads files directly")
+  })
+
+  test("a Delta path and a table are still estimated", async () => {
+    for (const compiled of ["select * from delta.`/Volumes/c/s/v/t`", "select * from main.sales.orders"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(result.metadata).toMatchObject({ success: true, source: "explain" })
+    }
+  })
+})
+
+describe("review follow-ups, round seven", () => {
+  test.each([
+    "select * from read_files/**/('/Volumes/c/s/v/raw', format => 'json')",
+    "select * from `read_files`('/x')",
+    "select * from read_files -- why\n ('/x')",
+    "select * from `json`.`/Volumes/c/s/v/raw`",
+    "select * from json/**/.`/x`",
+    "select '--', * from read_files('/x')",
+    "select * from system.builtin.read_files('/x')",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "select * from main.sales.orders",
+    "select t.json.field, text.col from t",
+    "select * from delta.`/Volumes/c/s/v/t`",
+    "select 'read_files' as note from t",
+  ])("%p reads tables", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test("on Databricks, a comment-split or quoted file read never reaches the EXPLAIN", async () => {
+    for (const compiled of ["select * from read_files/**/('/x')", "select * from `json`.`/x`"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
+  })
+})
+
+describe("review follow-ups, round eight", () => {
+  const escapedNewline = [
+    "WITH unused AS (SELECT 'a\\\n-- x' AS s) SELECT * FROM read_files('/x')",
+    "SELECT length('a\\\n--') AS n, * FROM read_files('/x', format => 'json')",
+  ]
+
+  test.each(escapedNewline)("a backslash before a line break stays inside the text: %p reads files", (sql) => {
+    expect(mayBeScript(sql, "databricks")).toBe(false)
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("so it never reaches the EXPLAIN", async () => {
+    for (const compiled of escapedNewline) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
+  })
+
+  test("both checks read the SQL the same way: one scan", () => {
+    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  " })
+    expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
+  })
+})
+
+describe("review follow-ups, round nine", () => {
+  test("a Databricks line comment continued past a backslash is not read", () => {
+    const sql = "SELECT 1 -- \\\n'ignored\n, * FROM read_files('/Volumes/c/s/v/raw', format => 'json') -- '"
+    expect(mayBeScript(sql, "databricks")).toBe(true)
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "SELECT * FROM libsvm.`s3://bucket/train`",
+    "SELECT * FROM somefmt.`dbfs:/mnt/raw`",
+    "SELECT * FROM `binaryFile`.`/Volumes/c/s/v/raw`",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "SELECT * FROM delta.`/Volumes/c/s/v/t`",
+    "SELECT * FROM sales.`order items`",
+    "SELECT * FROM main.sales.`orders`",
+  ])("%p reads a table", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test("a continued comment or a LIBSVM path never reaches the EXPLAIN", async () => {
+    for (const compiled of ["SELECT 1 -- \\\n'ignored\n, * FROM read_files('/x') -- '", "SELECT * FROM libsvm.`s3://bucket/train`"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
+  })
+})
+
+describe("review follow-ups, round ten", () => {
+  test.each([
+    "SELECT * FROM `org.apache.spark.sql.json.DefaultSource`.`/Volumes/c/s/v/raw`",
+    "SELECT * FROM `org.apache.spark.sql.execution.datasources.json.JsonFileFormat`.`/Volumes/c/s/v/raw`",
+    "SELECT * FROM somefmt.`prefix``/raw`",
+    "SELECT * FROM delta.`a``/b`",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("Delta's own provider over a path is still a table", () => {
+    expect(readsFiles("SELECT * FROM `delta`.`/Volumes/c/s/v/t`")).toBe(false)
+    expect(readsFiles("SELECT * FROM delta . `s3://bucket/t`")).toBe(false)
+  })
+
+  test("a provider class name over a path never reaches the EXPLAIN", async () => {
+    const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+    useAdapter(local, { type: "databricks", compile: async () => "SELECT * FROM `org.apache.spark.sql.json.DefaultSource`.`/Volumes/c/s/v/raw`", explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(local.queries).toEqual([])
+    expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+  })
+})
+
+describe("bot review follow-ups", () => {
+  test.each([
+    "select * from query_audit where sql_text like '%read_files(%'",
+    "SELECT * FROM main.json.`orders`",
+    "SELECT * FROM main.image.`thumbnails`",
+  ])("%p reads a table", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test.each([
+    "SELECT * FROM json.`data.json`",
+    "SELECT * FROM t JOIN csv.`rel` ON true",
+    "SELECT * FROM a, parquet.`p`",
+    "SELECT * FROM system.builtin.read_files('/x')",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("many backtick-quoted names are read in one pass", () => {
+    const sql = `select ${Array.from({ length: 5000 }, (_, i) => `\`c${i}\``).join(", ")} from delta.\`/Volumes/c/s/v/t\``
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+})
+
+describe("review follow-ups, round twelve", () => {
+  test.each([
+    "SELECT * FROM (json.`data.json`)",
+    "SELECT * FROM`json`.`data.json`",
+    "SELECT * FROM json . `data.json`",
+    // A column qualified by an alias named like a format cannot be told from a path query without parsing: refused.
+    "SELECT json.`order-id` FROM main.sales.orders AS json",
+  ])("%p reads files (or may)", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("a parenthesised or unspaced file read never reaches the EXPLAIN", async () => {
+    for (const compiled of ["SELECT * FROM (json.`data.json`)", "SELECT * FROM`json`.`data.json`"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
   })
 })
