@@ -172,7 +172,12 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
 export function readsFiles(sql: string): boolean {
   const { script, code } = scanSql(sql, "databricks")
   if (script) return true
-  return /(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml)`?\s*\.\s*`/i.test(code)
+  if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image)`?\s*\.\s*`/i.test(code)) return true
+  // Any other source over a path (`provider`.`/a/path`, s3://…, dbfs:/…), Delta's log aside: its schema can come from the files too.
+  for (const match of code.matchAll(/(^|[^a-z0-9_.`])`?([a-z_][a-z0-9_]*)`?\s*\.\s*`([^`]*)`/gi)) {
+    if (match[2].toLowerCase() !== "delta" && /[/:]/.test(match[3])) return true
+  }
+  return false
 }
 
 /**
@@ -229,6 +234,8 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
     const two = sql.slice(i, i + 2)
     if (two === "--") {
       const end = sql.indexOf("\n", i)
+      // Spark continues a line comment past a backslash at its end: not read.
+      if (databricks && end >= 0 && sql[end - 1] === "\\") return script
       if (end < 0) break
       i = end + 1
       code += " "

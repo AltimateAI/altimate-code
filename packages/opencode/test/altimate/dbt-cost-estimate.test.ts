@@ -889,3 +889,37 @@ describe("review follow-ups, round eight", () => {
     expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
   })
 })
+
+describe("review follow-ups, round nine", () => {
+  test("a Databricks line comment continued past a backslash is not read", () => {
+    const sql = "SELECT 1 -- \\\n'ignored\n, * FROM read_files('/Volumes/c/s/v/raw', format => 'json') -- '"
+    expect(mayBeScript(sql, "databricks")).toBe(true)
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "SELECT * FROM libsvm.`s3://bucket/train`",
+    "SELECT * FROM somefmt.`dbfs:/mnt/raw`",
+    "SELECT * FROM `binaryFile`.`/Volumes/c/s/v/raw`",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "SELECT * FROM delta.`/Volumes/c/s/v/t`",
+    "SELECT * FROM sales.`order items`",
+    "SELECT * FROM main.sales.`orders`",
+  ])("%p reads a table", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test("a continued comment or a LIBSVM path never reaches the EXPLAIN", async () => {
+    for (const compiled of ["SELECT 1 -- \\\n'ignored\n, * FROM read_files('/x') -- '", "SELECT * FROM libsvm.`s3://bucket/train`"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
+  })
+})
