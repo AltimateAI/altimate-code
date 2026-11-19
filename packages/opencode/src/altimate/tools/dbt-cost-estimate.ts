@@ -174,8 +174,11 @@ export function readsFiles(sql: string): boolean {
   if (script) return true
   // A function call, qualified or not (system.builtin.read_files).
   if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(/i.test(code)) return true
-  // A known format over any name, where a relation goes (after FROM, JOIN or a comma), so json.`order-id` as a column is not one.
-  if (/(\b(from|join)\s+|,\s*)`?(json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image)`?\s*\.\s*`/i.test(code)) return true
+  // A known format over any backtick-quoted name, unless the format word is the middle of a dotted name (main.json.`t`).
+  // Where a relation goes cannot be told from a column without parsing (FROM (json.`x`), FROM`json`.`x`), so a
+  // column qualified by an alias named like a format (json.`order-id`) is refused too: no estimate, never a missed read.
+  const formats = "json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image"
+  if (new RegExp(`(?:(^|[^a-z0-9_.\`])(${formats})|(^|[^.\`])\`(${formats})\`)\\s*\\.\\s*\``, "i").test(code)) return true
   // Any backtick-quoted name that looks like a path ("/" or ":", as in s3://…, dbfs:/…, /Volumes/…), whatever the source
   // before it (a format, a provider class) or a doubled backtick inside it, unless it directly follows Delta's own
   // provider: a source over files can infer its schema from them.

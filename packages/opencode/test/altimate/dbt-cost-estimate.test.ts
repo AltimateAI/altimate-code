@@ -951,7 +951,6 @@ describe("review follow-ups, round ten", () => {
 describe("bot review follow-ups", () => {
   test.each([
     "select * from query_audit where sql_text like '%read_files(%'",
-    "SELECT json.`order-id` FROM main.sales.orders AS json",
     "SELECT * FROM main.json.`orders`",
     "SELECT * FROM main.image.`thumbnails`",
   ])("%p reads a table", (sql) => {
@@ -972,5 +971,27 @@ describe("bot review follow-ups", () => {
     const started = performance.now()
     expect(readsFiles(sql)).toBe(false)
     expect(performance.now() - started).toBeLessThan(500)
+  })
+})
+
+describe("review follow-ups, round twelve", () => {
+  test.each([
+    "SELECT * FROM (json.`data.json`)",
+    "SELECT * FROM`json`.`data.json`",
+    "SELECT * FROM json . `data.json`",
+    // A column qualified by an alias named like a format cannot be told from a path query without parsing: refused.
+    "SELECT json.`order-id` FROM main.sales.orders AS json",
+  ])("%p reads files (or may)", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("a parenthesised or unspaced file read never reaches the EXPLAIN", async () => {
+    for (const compiled of ["SELECT * FROM (json.`data.json`)", "SELECT * FROM`json`.`data.json`"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
   })
 })
