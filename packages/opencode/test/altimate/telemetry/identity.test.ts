@@ -213,7 +213,7 @@ describe("telemetry identity", () => {
     expect(last.headers["authorization"]).toBe("Bearer key-F")
   })
 
-  test("signed in, the Claude Code plugin's usage events still carry no account: no user_id or tenant, and the machine id as ai.user.id", async () => {
+  test("signed in, the Claude Code plugin's usage events share no identifier with the account's events: no user_id, tenant, machine id, project or session", async () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
       "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
     writeCreds("key-A")
@@ -221,30 +221,28 @@ describe("telemetry identity", () => {
     await Telemetry.init()
     await Telemetry.refreshIdentity()
     expect(Telemetry.identityForTest()).toEqual({ user_id: UUID, tenant: "acme" })
-    const common = {
-      timestamp: Date.now(),
-      session_id: "claude:abc",
-      plugin_version: "1.8.2",
-      install_id: UUID_B,
-    }
+    const common = { timestamp: Date.now(), plugin_version: "1.8.2", install_id: UUID_B }
     Telemetry.track({ type: "plugin_session_start", ...common, altimate_code_version: "0.13.0", os: "macos" })
     Telemetry.track({ type: "plugin_feature_used", ...common, feature: "lineage", outcome: "opened" })
-    Telemetry.track({ type: "startup_ready", session_id: "", command: "a", surface: "a", duration_ms: 1, fresh_install: false, timestamp: Date.now() })
+    Telemetry.track({ type: "startup_ready", session_id: "claude:abc", command: "a", surface: "a", duration_ms: 1, fresh_install: false, timestamp: Date.now() })
     await Telemetry.flush()
     const sent = trackCalls().flatMap((c) => JSON.parse(c.body) as any[])
     const named = (name: string) => sent.find((e) => e.data?.baseData?.name === name)
+    const account = named("startup_ready")
+    // The account's own row, as before: user, tenant and machine id.
+    expect(account.data.baseData.properties.user_id).toBe(UUID)
+    expect(account.tags["ai.user.id"]).toBe(UUID)
+    const machine = account.data.baseData.properties.machine_id
+    expect(machine).toMatch(/^[0-9a-f-]{36}$/)
     for (const name of ["plugin_session_start", "plugin_feature_used"]) {
       const event = named(name)
       expect(event).toBeDefined()
-      expect(event.data.baseData.properties).not.toHaveProperty("user_id")
-      expect(event.data.baseData.properties).not.toHaveProperty("tenant")
-      expect(event.tags["ai.user.id"]).toBe(event.data.baseData.properties.machine_id)
-      expect(JSON.stringify(event)).not.toContain(UUID)
-      expect(JSON.stringify(event)).not.toContain("acme")
+      for (const key of ["user_id", "tenant", "machine_id", "project_id", "session_id"]) expect(event.data.baseData.properties).not.toHaveProperty(key)
+      expect(event.tags["ai.user.id"]).toBe(UUID_B)
+      expect(event.tags["ai.session.id"]).toBe("")
+      const text = JSON.stringify(event)
+      for (const shared of [UUID, "acme", machine, "claude:abc"]) expect(text).not.toContain(shared)
     }
-    // Every other event keeps the account, as before.
-    expect(named("startup_ready").data.baseData.properties.user_id).toBe(UUID)
-    expect(named("startup_ready").tags["ai.user.id"]).toBe(UUID)
   })
 
   test("a credential change on disk is noticed at the next flush, and a buffered batch keeps the identity it was tracked under", async () => {

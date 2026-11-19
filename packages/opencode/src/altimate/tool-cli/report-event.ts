@@ -56,7 +56,6 @@ export type ReportEvent = { type: "lineage_report"; timestamp: number; session_i
 export type PluginSessionStartEvent = {
   type: "plugin_session_start"
   timestamp: number
-  session_id: string
   plugin_version: string
   altimate_code_version: string
   os: PluginOs
@@ -65,7 +64,6 @@ export type PluginSessionStartEvent = {
 export type PluginFeatureUsedEvent = {
   type: "plugin_feature_used"
   timestamp: number
-  session_id: string
   plugin_version: string
   install_id: string
   feature: PluginFeature
@@ -92,7 +90,10 @@ const FLAG: Record<keyof PluginFields, string> = {
 }
 const oneOf = <T extends string>(list: readonly T[], value: unknown): value is T => list.includes(value as T)
 
-/** The event for an action and a host session (and, for the plugin's actions, its fields), or why there is none. */
+/**
+ * The event for an action, or why there is none. A lineage report step takes the host session; the plugin's
+ * own actions take their fields and no session, so they cannot be joined to anything else the CLI sends.
+ */
 export function reportEvent(
   action: unknown,
   session: unknown,
@@ -101,16 +102,18 @@ export function reportEvent(
   cliVersion: string = InstallationVersion,
 ): UsageEvent | { error: string } {
   if (!oneOf(ACTIONS, action)) return { error: `the action must be one of ${ACTIONS.join(", ")}` }
-  if (typeof session !== "string" || !HOST_SESSION.test(session)) return { error: "--session takes a Claude Code session id: claude:<id>" }
-  const takes = TAKES[oneOf(PLUGIN_ACTIONS, action) ? action : "lineage"]
+  const plugin = oneOf(PLUGIN_ACTIONS, action)
+  if (plugin && session !== undefined) return { error: `${action} does not take --session` }
+  if (!plugin && (typeof session !== "string" || !HOST_SESSION.test(session))) return { error: "--session takes a Claude Code session id: claude:<id>" }
+  const takes = TAKES[plugin ? action : "lineage"]
   const extra = (Object.keys(FLAG) as (keyof PluginFields)[]).filter((key) => fields[key] !== undefined && !takes.includes(key))
   if (extra.length > 0) return { error: `${action} does not take ${extra.map((key) => FLAG[key]).join(", ")}` }
-  if (oneOf(REPORT_ACTIONS, action)) return { type: "lineage_report", timestamp: now, session_id: session, action }
+  if (oneOf(REPORT_ACTIONS, action)) return { type: "lineage_report", timestamp: now, session_id: session as string, action }
 
   if (typeof fields.pluginVersion !== "string" || fields.pluginVersion.length > MAX_VERSION || !PLUGIN_VERSION.test(fields.pluginVersion))
     return { error: "--plugin-version takes the plugin's version: a semver, or unknown" }
   if (typeof fields.installId !== "string" || !INSTALL_ID.test(fields.installId)) return { error: "--install-id takes a lowercase random (version 4) UUID" }
-  const common = { timestamp: now, session_id: session, plugin_version: fields.pluginVersion, install_id: fields.installId }
+  const common = { timestamp: now, plugin_version: fields.pluginVersion, install_id: fields.installId }
   if (action === "plugin_session_start") {
     if (!oneOf(PLUGIN_OS, fields.os)) return { error: `--os must be one of ${PLUGIN_OS.join(", ")}` }
     return { type: "plugin_session_start", ...common, altimate_code_version: cliVersion, os: fields.os }

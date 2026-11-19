@@ -341,7 +341,7 @@ const ToolReportEventCommand = cmd({
           "a lineage report step (summary_shown, open_pressed, command_run, built, build_failed, no_browser), plugin_session_start or plugin_feature_used",
         demandOption: true,
       })
-      .option("session", { type: "string", describe: "the Claude Code session: claude:<id>", demandOption: true })
+      .option("session", { type: "string", describe: "the Claude Code session: claude:<id> (lineage report steps only)" })
       .option("plugin-version", { type: "string", describe: "the plugin's version (plugin_* actions)" })
       .option("install-id", { type: "string", describe: "the plugin's random install id, a UUID (plugin_* actions)" })
       .option("os", { type: "string", describe: "macos, linux, windows, wsl or unknown (plugin_session_start)" })

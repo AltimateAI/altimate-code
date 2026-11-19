@@ -930,11 +930,9 @@ export namespace Telemetry {
     // altimate_change end
     // altimate_change start — the Claude Code plugin's own usage, sent through `tool report-event`
     | {
-        /** A Claude Code session started with the plugin. Versions, OS and the plugin's random install id only. */
+        /** A Claude Code session started with the plugin. Versions, OS and the plugin's random install id only: no session id. */
         type: "plugin_session_start"
         timestamp: number
-        /** The host agent's session: `claude:<id>`. */
-        session_id: string
         plugin_version: string
         altimate_code_version: string
         os: "macos" | "linux" | "windows" | "wsl" | "unknown"
@@ -945,7 +943,6 @@ export namespace Telemetry {
         /** A plugin panel or command was opened, or one of its gates held or allowed a command. */
         type: "plugin_feature_used"
         timestamp: number
-        session_id: string
         plugin_version: string
         install_id: string
         feature:
@@ -2418,8 +2415,9 @@ export namespace Telemetry {
   // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
   // the module's current state (the opt-out marker runs while telemetry is disabled and must not
   // touch the state an enabled init may be using concurrently).
-  // altimate_change start — events sent without the signed-in account (`user_id`, `tenant`): keyed to the
-  // anonymous machine id only, as the plugin's privacy notice promises.
+  // altimate_change start — the Claude Code plugin's usage events are anonymous and unlinkable: they carry
+  // none of the identifiers the CLI's other events share (account, machine id, project, session), so they
+  // cannot be joined to a signed-in row. They are keyed to the plugin's own random install id only.
   const ANONYMOUS_EVENTS: ReadonlySet<string> = new Set(["plugin_session_start", "plugin_feature_used"])
   // altimate_change end
 
@@ -2440,9 +2438,11 @@ export namespace Telemetry {
     const clientSource = Flag.ALTIMATE_CLI_CLIENT
     return events.map((event) => {
       const { type, timestamp, ...fields } = event as any
-      const sid: string = fields.session_id ?? sessionId
-      // altimate_change — the Claude Code plugin's usage events are anonymous: never the signed-in account.
-      const account = ANONYMOUS_EVENTS.has(type) ? undefined : who
+      // altimate_change start — the plugin's anonymous events: no account, machine id, project or session.
+      const anonymous = ANONYMOUS_EVENTS.has(type)
+      const account = anonymous ? undefined : who
+      const sid: string = anonymous ? "" : (fields.session_id ?? sessionId)
+      // altimate_change end
 
       const properties: Record<string, string> = {
         cli_version: InstallationVersion,
@@ -2450,8 +2450,8 @@ export namespace Telemetry {
         // still says how this CLI was launched (cli, tui, serve, datamates).
         client: "altimate-code",
         source: clientSource,
-        project_id: fields.project_id ?? projectId,
-        ...(mid && { machine_id: mid }),
+        ...(!anonymous && { project_id: fields.project_id ?? projectId }),
+        ...(mid && !anonymous && { machine_id: mid }),
         // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
         // row joins the PostHog person and the backend record for the same account.
         ...(account && { user_id: account.user_id, tenant: account.tenant }),
@@ -2480,15 +2480,15 @@ export namespace Telemetry {
         time: new Date(timestamp).toISOString(),
         iKey: cfg.iKey,
         tags: {
-          "ai.session.id": sid || "startup",
+          "ai.session.id": sid || (anonymous ? "" : "startup"),
           // altimate_change start — the backend user uuid when signed in, else the machine id.
           // Anonymous machines each keep a distinct identity (the random machine UUID, already a
           // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
-          "ai.user.id": account?.user_id || mid || "",
+          "ai.user.id": anonymous ? String(fields.install_id ?? "") : account?.user_id || mid || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
-          ...(fields._operation_id && { "ai.operation.id": fields._operation_id }),
+          ...(fields._operation_id && !anonymous && { "ai.operation.id": fields._operation_id }),
         },
         data: {
           baseType: "EventData",
