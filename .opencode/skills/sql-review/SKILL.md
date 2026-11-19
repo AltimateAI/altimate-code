@@ -5,7 +5,7 @@ description: Pre-merge SQL quality gate — lint 26 anti-patterns, grade readabi
 
 # SQL Review
 
-The first time you name `altimate-dbt` to the user, say what it is: the dbt command-line tool installed with altimate-code.
+The first time you name `altimate-dbt` to the user, say what it is: a command-line tool for dbt tasks, installed with altimate-code.
 
 ## Requirements
 **Agent:** any (read-only analysis)

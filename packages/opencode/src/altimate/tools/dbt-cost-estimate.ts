@@ -76,7 +76,7 @@ export type PlanEstimate = {
   bytes: number
   partitionsAssigned?: number
   partitionsTotal?: number
-  /** Snowflake: the total may leave out a source it cannot size (an external table, a stage), so it is not a cap. */
+  /** Snowflake: the total may leave out a source it cannot size (an external table, a stage, a secure view), so it is not a cap. */
   unsized?: true
 }
 
@@ -102,7 +102,7 @@ export function parseSnowflakeExplain(content: unknown): PlanEstimate | undefine
   if (bytes === undefined) return undefined
   const partitionsAssigned = count(stats.partitionsAssigned)
   const partitionsTotal = count(stats.partitionsTotal)
-  // A total of 0 beside a scan (or with no operations to read), or a scan of an external table or stage, a secure view (its scanned size is hidden), or one with no
+  // A total of 0 beside a scan (or with no operations to read), or a scan of an external table or stage, a secure view (its scanned size is hidden), or one with no or a zero
   // size of its own, may leave data out of it. A 0 with no scan at all is a query that reads nothing.
   const operations = (plan as { Operations?: unknown }).Operations
   const scans = (Array.isArray(operations) ? operations.flat(2) : []).filter(
@@ -110,7 +110,7 @@ export function parseSnowflakeExplain(content: unknown): PlanEstimate | undefine
   )
   const unsized =
     (bytes === 0 && (!Array.isArray(operations) || scans.some((op) => /scan/i.test(op.operation)))) ||
-    scans.some((op) => /external|stage|secure/i.test(op.operation) || (/scan/i.test(op.operation) && count(op.bytesAssigned) === undefined))
+    scans.some((op) => /external|stage|secure/i.test(op.operation) || (/scan/i.test(op.operation) && !count(op.bytesAssigned)))
   return {
     bytes: Math.round(bytes),
     ...(unsized && { unsized: true as const }),
@@ -443,10 +443,10 @@ async function explainEstimate(
     parsed.partitionsAssigned !== undefined && parsed.partitionsTotal !== undefined
       ? `${parsed.partitionsAssigned} of ${parsed.partitionsTotal} partitions after pruning; `
       : ""
-  // Snowflake may give 0 for a source it cannot size when it compiles (an external table, a stage): not a cap.
+  // Snowflake may give 0 for a source it cannot size when it compiles (an external table, a stage, a secure view): not a cap.
   const unsized = type === "snowflake" && parsed.unsized === true
   const accuracy = unsized
-    ? "Snowflake can leave a source it cannot size at compile time (an external table, a stage) out of this figure, or report 0, so it is not a cap"
+    ? "Snowflake can leave a source it cannot size at compile time (an external table, a stage, a secure view) out of this figure, or report 0, so it is not a cap"
     : type === "snowflake"
       ? `${partitions}an upper bound: runtime pruning can scan less, and a cached result none`
       : "table sizes before column pruning and file skipping, which usually read less; not a bound either way"
@@ -471,7 +471,7 @@ async function explainEstimate(
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when it reports 0, which it also does for a source it cannot size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),

@@ -696,6 +696,7 @@ describe("follow-ups to the planner estimate", () => {
       })
     expect(parseSnowflakeExplain(mixed({ operation: "ExternalScan", bytesAssigned: 0 }))).toEqual({ bytes: 1024, unsized: true })
     expect(parseSnowflakeExplain(mixed({ operation: "StageScan" }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "TableScan", objects: ["U"], bytesAssigned: 0 }))).toEqual({ bytes: 1024, unsized: true })
     expect(parseSnowflakeExplain(mixed({ operation: "SecureView", objects: ["V"] }))).toEqual({ bytes: 1024, unsized: true })
     expect(parseSnowflakeExplain(mixed({ operation: "DynamicSecureView" }))).toEqual({ bytes: 1024, unsized: true })
     // A secure view hides what it scans, so a total of 0 beside one is not a cap either.

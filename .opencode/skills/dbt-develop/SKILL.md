@@ -29,7 +29,7 @@ description: |
 
 # dbt Model Development
 
-The first time you name `altimate-dbt` to the user, say what it is: the dbt command-line tool installed with altimate-code.
+The first time you name `altimate-dbt` to the user, say what it is: a command-line tool for dbt tasks, installed with altimate-code.
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
