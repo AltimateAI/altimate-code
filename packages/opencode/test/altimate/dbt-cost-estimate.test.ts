@@ -1035,6 +1035,9 @@ describe("IDENTIFIER() on Databricks", () => {
     "SELECT * FROM IDENTIFIER(' CSV . raw')",
     "SELECT \u017fIDENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
     "SELECT \u0131DENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+    "SELECT * FROM IDENTIFIER('`org.apache.spark.sql.json.DefaultSource`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('`org.apache.spark.sql.json.DefaultSource`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('a.b.c.d')",
     "SELECT * FROM IDENTIFIER('js' /*a*/ || 'on.`/Volumes/c/s/v/raw`' /*b*/)",
     "SELECT 1 AS `\u00df\u00df\u00df`, XIDENTIFIER('safe') AS n FROM IDENTIFIER(concat('read_', 'files'))('/x')",
   ])("%p may read files", (sql) => {
@@ -1076,6 +1079,12 @@ describe("IDENTIFIER() on Databricks", () => {
     const sql = "SELECT " + "'a' ".repeat(64000) + "FROM main.s.t"
     const started = performance.now()
     expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("an unbalanced backtick over many slashes scans in linear time", () => {
+    const started = performance.now()
+    expect(readsFiles("SELECT * FROM IDENTIFIER('`" + "/".repeat(128000) + "')")).toBe(true)
     expect(performance.now() - started).toBeLessThan(1000)
   })
 

@@ -176,21 +176,23 @@ export function readsFiles(sql: string): boolean {
   const { script, code, literals, calls } = scanSql(sql, "databricks")
   if (script) return true
   if (fileSource(code)) return true
-  // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: read a lone string literal as
-  // code, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
-    // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
+  // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: allow a lone string literal
+  // that is a plain table name, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
+  // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
   const bare = code.replace(/`[^`]*`/g, " ").toUpperCase()
   // A qualified clause (system.builtin.IDENTIFIER('read_files')) or one a name continues past (IDENTIFIER('json').`p`)
   // is assembled from parts this does not read.
   if (/\.\s*IDENTIFIER\s*\(/.test(bare) || /IDENTIFIER\s*\(\s*\u0000\s*\)\s*\./.test(bare)) return true
   let plain = 0
+  const format = new RegExp(`^(${FILE_FORMATS})$`, "i")
   for (const lit of literals) {
     plain++
-    // Spark reads the string as a name, ignoring comments and unescaping backslashes: not read here.
-    // A double quote, a `${…}` substitution, a nested IDENTIFIER, a non-ASCII letter (Spark folds ſ to s, so jſon is json) or
-    // a format before the path (json.raw) is not read.
-    if (/[\\"$]|\/\*|--/.test(lit.text) || new RegExp(`^\\s*\`?(${FILE_FORMATS})\`?\\s*\\.`, "i").test(lit.text) || /IDENTIFIER\s*\(/.test(lit.text.toUpperCase()) || /[^\x00-\x7f]/.test(lit.text)) return true
-    if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*$/i.test(lit.text) || fileSource(lit.text)) return true
+    // Only a plain dotted name of up to three parts is a table: anything quoted, escaped, commented, substituted,
+    // non-ASCII or longer is not read (Spark resolves it by rules this does not model), nor is a read_files or
+    // cloud_files part, or a format before the path (json.raw).
+    const parts = lit.text.split(".")
+    if (parts.length > 3 || !parts.every((part) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) return true
+    if (parts.some((part) => /^(read_files|cloud_files)$/i.test(part)) || format.test(parts[0])) return true
   }
   return calls > plain
 }
