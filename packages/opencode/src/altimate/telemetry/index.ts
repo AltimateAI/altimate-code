@@ -3056,15 +3056,25 @@ export namespace Telemetry {
     const controller = new AbortController()
     activeFlushAbort = controller
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    // altimate_change start — the plugin's anonymous events go in a request of their own, never in one
+    // body beside rows that carry the machine id or the account. Only an unsent batch is retried.
+    const batches = [events.filter((e) => !ANONYMOUS_EVENTS.has(e.type)), events.filter((e) => ANONYMOUS_EVENTS.has(e.type))].filter(
+      (batch) => batch.length > 0,
+    )
+    const sent = new Set<Event>()
+    // altimate_change end
     try {
-      const response = await fetch(appInsights.endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights, { machineId: mid, identity: who })),
-        signal: controller.signal,
-      })
-      if (!response.ok) {
-        log.debug("telemetry flush failed", { status: response.status })
+      for (const batch of batches) {
+        const response = await fetch(appInsights.endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(toAppInsightsEnvelopes(batch, appInsights, { machineId: mid, identity: who })),
+          signal: controller.signal,
+        })
+        for (const e of batch) sent.add(e)
+        if (!response.ok) {
+          log.debug("telemetry flush failed", { status: response.status })
+        }
       }
     } catch {
       // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
@@ -3072,7 +3082,7 @@ export namespace Telemetry {
       // shipped by whatever lifecycle comes next, under a different launch id.
       if (shuttingDown) return
       // Re-add events that haven't been retried yet to avoid data loss
-      const retriable = events.filter((e) => !(e as any)._retried)
+      const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
       for (const e of retriable) {
         ;(e as any)._retried = true
       }

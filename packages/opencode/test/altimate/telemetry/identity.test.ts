@@ -226,7 +226,12 @@ describe("telemetry identity", () => {
     Telemetry.track({ type: "plugin_feature_used", ...common, feature: "lineage", outcome: "opened" })
     Telemetry.track({ type: "startup_ready", session_id: "claude:abc", command: "a", surface: "a", duration_ms: 1, fresh_install: false, timestamp: Date.now() })
     await Telemetry.flush()
-    const sent = trackCalls().flatMap((c) => JSON.parse(c.body) as any[])
+    // Tracked together, sent apart: no request body holds a plugin row beside the account's.
+    const bodies = trackCalls().map((c) => JSON.parse(c.body) as any[])
+    const isPlugin = (e: any) => String(e.data?.baseData?.name).startsWith("plugin_")
+    expect(bodies.filter((body) => body.some(isPlugin))).toHaveLength(1)
+    for (const body of bodies) expect(body.every(isPlugin) || !body.some(isPlugin)).toBe(true)
+    const sent = bodies.flat()
     const named = (name: string) => sent.find((e) => e.data?.baseData?.name === name)
     const account = named("startup_ready")
     // The account's own row, as before: user, tenant and machine id.

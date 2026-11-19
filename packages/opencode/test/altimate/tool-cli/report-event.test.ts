@@ -146,6 +146,8 @@ describe("tool report-event through the CLI's telemetry", () => {
   let root: string
   let server: ReturnType<typeof Bun.serve>
   let received: any[] = []
+  /** Each request's body, as the sink got it. */
+  let requests: any[][] = []
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "report-event-"))
@@ -154,7 +156,9 @@ describe("tool report-event through the CLI's telemetry", () => {
       async fetch(req) {
         if (new URL(req.url).pathname === "/v2/track") {
           const body = await req.json().catch(() => [])
-          received.push(...(Array.isArray(body) ? body : [body]))
+          const rows = Array.isArray(body) ? body : [body]
+          requests.push(rows)
+          received.push(...rows)
         }
         return Response.json({ itemsReceived: 1, itemsAccepted: 1, errors: [] })
       },
@@ -200,6 +204,7 @@ describe("tool report-event through the CLI's telemetry", () => {
     "a session start and a feature used each send one event, with the allowed fields only",
     async () => {
       received = []
+      requests = []
       const start = await run(["plugin_session_start", "--plugin-version", "1.8.2", "--install-id", INSTALL, "--os", "macos"], {}, true)
       expect(start.exitCode).toBe(0)
       const used = await run(["plugin_feature_used", "--plugin-version", "1.8.2", "--install-id", INSTALL, "--feature", "cost_gate", "--outcome", "held"])
@@ -217,6 +222,9 @@ describe("tool report-event through the CLI's telemetry", () => {
       // A fresh home: the same processes sent first_launch rows with the machine id. Nothing joins the plugin's rows to them.
       const others = received.filter((one) => !String(one?.data?.baseData?.name ?? "").startsWith("plugin_"))
       expect(others.some((one) => one.data.baseData.name === "first_launch")).toBe(true)
+      // Nor does any request carry a plugin row beside another.
+      const isPlugin = (one: any) => String(one?.data?.baseData?.name ?? "").startsWith("plugin_")
+      for (const rows of requests) expect(rows.every(isPlugin) || !rows.some(isPlugin)).toBe(true)
       const joinable = others.flatMap((one) => [one.data.baseData.properties.machine_id, one.data.baseData.properties.launch_id, one.tags["ai.user.id"], one.tags["ai.session.id"]])
       for (const one of events) {
         const text = JSON.stringify(one)
