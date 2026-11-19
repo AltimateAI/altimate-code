@@ -1033,7 +1033,7 @@ describe("IDENTIFIER() on Databricks", () => {
     "select IDENTIFIER('col') from main.sales.orders",
     "select * from IDENTIFIER('main.json.t')",
     "select * from `identifier`('x')",
-    "SELECT `note identifier(:x)` FROM main.sales.orders",
+    "SELECT `note identifier(x)` FROM main.sales.orders",
   ])("%p reads tables", (sql) => {
     expect(readsFiles(sql)).toBe(false)
   })
