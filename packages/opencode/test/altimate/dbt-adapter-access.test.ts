@@ -206,13 +206,23 @@ describe("dbtAdapterFor", () => {
     const saved = process.env.HOME
     try {
       await mkdir(path.join(home, ".altimate-code"), { recursive: true })
-      await writeFile(path.join(home, ".altimate-code", "dbt.json"), "{}")
+      const config = path.join(home, ".altimate-code", "dbt.json")
       process.env.HOME = home
       dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
+      await writeFile(config, JSON.stringify({ projectRoot: project, pythonPath: "python3" }))
       const access = await dbtAdapterFor(ctx)
       expect(access.reason).toContain("Python that ~/.altimate-code/dbt.json names (python3)")
       expect(access.reason).toContain("Set pythonPath there")
       expect(access.reason).not.toContain("Activate the project's virtualenv")
+      // A config without a pythonPath, or one that doesn't parse, leaves the choice to discovery.
+      for (const text of ["{}", "{not json"]) {
+        await writeFile(config, text)
+        resetDbtAdapter()
+        useConfig()
+        const other = await dbtAdapterFor(ctx)
+        expect(other.reason).toContain("Activate the project's virtualenv")
+        expect(other.reason).not.toContain("Set pythonPath there")
+      }
     } finally {
       if (saved === undefined) delete process.env.HOME
       else process.env.HOME = saved

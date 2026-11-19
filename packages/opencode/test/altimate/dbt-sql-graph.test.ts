@@ -875,6 +875,7 @@ describe("clauseName", () => {
     expect(clauseName({ type: "FILTER", expression: "WHERE   code = 'a,  b''s'\n  AND \"x  y\" = 1" })).toBe("WHERE code = 'a,  b''s' AND \"x  y\" = 1")
     expect(clauseName({ type: "LEFT_JOIN", expression: 'LEFT JOIN "db"."s"."Orders" AS "orders" ON 1 = 1' })).toBe("LEFT JOIN Orders AS orders ON 1 = 1")
     expect(clauseName({ type: "FILTER", expression: "WHERE  [order  status]]x] = 1" })).toBe("WHERE [order  status]]x] = 1")
+    expect(clauseName({ type: "FILTER", expression: "WHERE msg <> 'a\nb'" })).toBe("WHERE msg <> 'a b'")
     // A name that needs its quotes keeps them.
     expect(clauseName({ type: "LEFT_JOIN", expression: 'LEFT JOIN "db"."s"."my table" AS "x y" ON 1 = 1' })).toBe('LEFT JOIN "my table" AS "x y" ON 1 = 1')
   })

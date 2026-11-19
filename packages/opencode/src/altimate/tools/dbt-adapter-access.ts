@@ -108,11 +108,15 @@ function pythonHint(python: string | undefined, saved: boolean): string {
     : `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json), ${restart}`
 }
 
-/** Whether ~/.altimate-code/dbt.json exists: its pythonPath, when set, is the Python dbt runs with. */
+/**
+ * Whether ~/.altimate-code/dbt.json picks the Python: it parses and names a pythonPath. A file without one,
+ * or one that doesn't parse, leaves the choice to discovery (project venv, VIRTUAL_ENV, CONDA_PREFIX, PATH).
+ */
 async function savedDbtConfig(): Promise<boolean> {
   try {
     const { path: configPath } = await import("../../../../dbt-tools/src/config")
-    return fs.existsSync(configPath())
+    const saved = JSON.parse(await fs.promises.readFile(configPath(), "utf8")) as { pythonPath?: unknown } | null
+    return typeof saved?.pythonPath === "string" && saved.pythonPath.trim() !== ""
   } catch {
     return false
   }

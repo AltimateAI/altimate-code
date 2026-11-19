@@ -132,7 +132,7 @@ const IDENT = String.raw`(?:"(?:[^"]|"")+"|\`(?:[^\`]|\`\`)+\`|\[[^\]]+\]|[A-Za-
 // A join's own relation, right after its JOIN keyword: `JOIN "db"."schema"."table" AS alias`.
 const JOINED_RELATION = new RegExp(String.raw`^((?:[A-Za-z]+\s+)*JOIN\s+)(${IDENT}(?:\s*\.\s*${IDENT})*)(?:\s+AS)?\s+(?!ON\b|USING\b)(${IDENT})(?=\s|$)`, "i")
 
-/** SQL on one line: runs of whitespace become one space, except inside quoted strings and identifiers (`[…]` included). */
+/** SQL on one line: runs of whitespace become one space, except inside quoted strings and identifiers (`[…]` included), where only a line break does. */
 function oneLine(sql: string): string {
   let out = ""
   for (let i = 0; i < sql.length; ) {
@@ -142,7 +142,8 @@ function oneLine(sql: string): string {
       const close = ch === "[" ? "]" : ch
       let j = i + 1
       while (j < sql.length && !(sql[j] === close && sql[j + 1] !== close)) j += sql[j] === close ? 2 : 1
-      out += sql.slice(i, j + 1)
+      // Its spacing is kept, but not a line break: the name stays on one line.
+      out += sql.slice(i, j + 1).replace(/\r?\n/g, " ")
       i = j + 1
     } else if (/\s/.test(ch)) {
       while (i < sql.length && /\s/.test(sql[i])) i++
