@@ -230,7 +230,7 @@ describe("dbt_cost_estimate", () => {
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, supported: false, adapter: type })
     expect(result.metadata.bytes).toBeUndefined()
-    expect(result.output).toContain("only available on BigQuery")
+    expect(result.output).toBe(`No cost estimate: scan estimates are only available on BigQuery, Snowflake and Databricks (this project uses ${type}).`)
     expect(calls).toEqual({ nodes: [], queries: [], dryRuns: [] })
   })
 
@@ -444,12 +444,12 @@ describe("parseSnowflakeExplain", () => {
 
 describe("parseDatabricksExplainCost", () => {
   test("sums the leaves of the optimized plan: the relations it scans, not the operators above them", () => {
-    expect(parseDatabricksExplainCost(DATABRICKS_PLAN)).toEqual({ bytes: Math.round(2.5 * 1024 ** 3 + 512 * 1024 ** 2), leaves: 2 })
+    expect(parseDatabricksExplainCost(DATABRICKS_PLAN)).toEqual({ bytes: Math.round(2.5 * 1024 ** 3 + 512 * 1024 ** 2) })
   })
 
   test("a single relation and Spark's B unit", () => {
     const plan = "== Optimized Logical Plan ==\nProject [id#0L], Statistics(sizeInBytes=12.0 B)\n+- Relation main.t[id#0L] parquet, Statistics(sizeInBytes=16.0 B, rowCount=2)\n\n== Physical Plan ==\n*(1) ColumnarToRow"
-    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 16, leaves: 1 })
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 16 })
   })
 
   test("a scalar subquery's plan is printed inside the tree, and its relation counts too", () => {
@@ -462,13 +462,12 @@ describe("parseDatabricksExplainCost", () => {
       "",
       "== Physical Plan ==",
     ].join("\n")
-    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: Math.round(1.5 * 1024 ** 3 + 3 * 1024 ** 2), leaves: 2 })
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: Math.round(1.5 * 1024 ** 3 + 3 * 1024 ** 2) })
   })
 
   test("reads Spark 2's KB/MB units and the scientific form past a long", () => {
     expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation[a#0] parquet, Statistics(sizeInBytes=2.0 MB, hints=none)")).toEqual({
-      bytes: 2 * 1024 ** 2,
-      leaves: 1,
+      bytes: 2 * 1024 ** 2 ,
     })
     // A size past 2^62 is Spark's "no statistics" default or larger: not a size.
     expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation[a#0] parquet, Statistics(sizeInBytes=1.23E+21 B)")).toEqual({ noStats: true })
@@ -476,11 +475,11 @@ describe("parseDatabricksExplainCost", () => {
 
   test("a relation without statistics shows Spark's default size, Long.MaxValue: no estimate, not 8 EiB", () => {
     const plan = "== Optimized Logical Plan ==\nJoin Inner, Statistics(sizeInBytes=8.0 EiB)\n:- Relation main.a[x#1] parquet, Statistics(sizeInBytes=1.0 GiB)\n+- Relation jdbc.b[x#2] JDBCRelation, Statistics(sizeInBytes=8.0 EiB)"
-    expect(parseDatabricksExplainCost(plan)).toEqual({ noStats: true })
+    expect(parseDatabricksExplainCost(plan)).toEqual({ noStats: true, relation: "jdbc.b" })
   })
 
   test("a leaf with no statistics at all is no estimate", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
   })
 
   test.each([
@@ -493,7 +492,7 @@ describe("parseDatabricksExplainCost", () => {
   })
 
   test("reads Windows line endings", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\r\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\r\n")).toEqual({ bytes: 4096, leaves: 1 })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\r\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\r\n")).toEqual({ bytes: 4096 })
   })
 })
 
@@ -565,9 +564,10 @@ describe("dbt_cost_estimate on a warehouse with a planner", () => {
   test("Databricks without table statistics: no estimate, and says why", async () => {
     useAdapter(calls, { type: "databricks", explain: rendered("== Optimized Logical Plan ==\nRelation x.y[a#1] parquet, Statistics(sizeInBytes=8.0 EiB)") })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    expect(result.metadata).toEqual({ success: false, adapter: "databricks", source: "explain", error: expect.stringContaining("no size for a table"), truncated: false })
+    expect(result.metadata).toEqual({ success: false, adapter: "databricks", source: "explain", error: expect.stringContaining("no size for x.y"), truncated: false })
     expect(result.metadata.bytes).toBeUndefined()
-    expect(result.output).toContain("ANALYZE TABLE")
+    expect(result.output).toContain("ANALYZE TABLE x.y COMPUTE STATISTICS NOSCAN")
+    expect(result.output).toContain("no size for x.y")
   })
 
   test("an EXPLAIN the warehouse refuses is no estimate, with the warehouse's error", async () => {
@@ -664,13 +664,48 @@ describe("dbt_cost_estimate refuses to EXPLAIN a script", () => {
 describe("parseDatabricksExplainCost reads only the statistics Spark appends", () => {
   test("a column named like statistics is not a size", () => {
     expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet, Statistics(sizeInBytes=1.0 GiB)")).toEqual({
-      bytes: 1024 ** 3,
-      leaves: 1,
+      bytes: 1024 ** 3 ,
     })
   })
 
   test("nor stands in for missing statistics, or for Spark's default size", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
     expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation [Statistics(sizeInBytes=0 B)#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({ noStats: true })
+  })
+})
+
+describe("review follow-ups", () => {
+  test("a lone carriage return, which Jinja turns into a line break, cannot end a comment the check reads as running on", async () => {
+    for (const type of ["snowflake", "databricks"]) {
+      expect(mayBeScript("select 1 -- c\n; delete from orders", type)).toBe(true)
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type, compile: async () => "select 1 -- comment\r; delete from orders", explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, source: "explain" })
+      expect(result.output).toContain("more than one statement")
+    }
+  })
+
+  test("the SQL sent is the one checked: line endings are already line breaks", async () => {
+    useAdapter(calls, { type: "snowflake", compile: async () => "select 1\r\nfrom t\rwhere x", explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+    await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries).toEqual([[explainJinja("EXPLAIN USING JSON", "select 1\nfrom t\nwhere x"), undefined]])
+  })
+
+  test("only Spark's own section headers end the optimized plan", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Union, Statistics(sizeInBytes=2.0 GiB)",
+      ":- Project [concat(a#1, ==, note ==) AS x#3], Statistics(sizeInBytes=1.0 GiB)",
+      "== note ==",
+      ":  +- Relation main.s.a[a#1] parquet, Statistics(sizeInBytes=1.0 GiB)",
+      "+- Relation main.s.b[b#2] parquet, Statistics(sizeInBytes=1.0 GiB)",
+      "",
+      "== Physical Plan ==",
+      "Union",
+    ].join("\n")
+    // The stray line is read as a node, not as the end: both relations count, never fewer.
+    expect((parseDatabricksExplainCost(plan) as { bytes: number }).bytes).toBeGreaterThanOrEqual(2 * 1024 ** 3)
   })
 })
