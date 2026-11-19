@@ -148,9 +148,10 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
     const figure = /, Statistics\(sizeInBytes=([^,()]+)(?:, [^()]*)?\)\s*$/.exec(nodes[i].text)?.[1]
     const size = figure === undefined ? undefined : sparkBytes(figure)
     if (size === undefined || size >= SPARK_NO_SIZE) {
-      // "Relation main.sales.orders[…] parquet": the table's name, when the leaf is one.
-      const relation = /^(?:Relation|HiveTableRelation|LogicalRelation)\s+\[?`?([A-Za-z0-9_.`]+?)`?[\[,\s]/.exec(nodes[i].text)?.[1]
-      return relation ? { noStats: true, relation: relation.replace(/`/g, "") } : { noStats: true }
+      // "Relation main.sales.orders[…] parquet": Spark prints the name unquoted, so only a plain one (letters, digits,
+      // underscores, dots) right before the column list is surely the whole name; any other gives none.
+      const relation = /^Relation ([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\[/.exec(nodes[i].text)?.[1]
+      return relation ? { noStats: true, relation } : { noStats: true }
     }
     bytes += size
   }
@@ -187,11 +188,15 @@ export function explainJinja(explain: string, sql: string): string {
  * fake a separator (Snowflake's `$$` text, `//` comments and `!` commands at a line's start, raw strings, nested
  * comments, an unclosed quote or comment, EXECUTE IMMEDIATE) counts as a script, as does a semicolon with anything but whitespace after it: a doubt is no estimate, never a run.
  */
-export function mayBeScript(sql: string, type: string): boolean {
+export function mayBeScript(input: string, type: string): boolean {
+  // Read with the line breaks Jinja renders: every \r\n and lone \r is \n.
+  const sql = input.replace(/\r\n?/g, "\n")
   const databricks = type === "databricks"
   // The Snowflake splitter yields a line starting with "!" as a command of its own, wherever it sits: never read.
   if (!databricks && /(^|\n)!/.test(sql)) return true
   let code = ""
+  // Past a semicolon only whitespace and comments may follow: anything else, quoted or not, is a second statement.
+  let ended = false
   let i = 0
   while (i < sql.length) {
     const c = sql[i]
@@ -206,7 +211,8 @@ export function mayBeScript(sql: string, type: string): boolean {
     if (two === "/*") {
       const end = sql.indexOf("*/", i + 2)
       // Databricks nests block comments, and an unclosed one hides the rest: neither is read, on either warehouse.
-      if (end < 0 || sql.slice(i + 2, end).includes("/*")) return true
+      // The closer's star counts too: in "/*/*/" an opener overlaps it.
+      if (end < 0 || sql.slice(i + 2, end + 1).includes("/*")) return true
       i = end + 2
       code += " "
       continue
@@ -214,6 +220,8 @@ export function mayBeScript(sql: string, type: string): boolean {
     if (two === "$$" || (!databricks && two === "//")) return true
     // Databricks raw strings (r'…', R"…") do not escape with a backslash: not read.
     if (databricks && /[rR]/.test(c) && /['"]/.test(sql[i + 1] ?? "") && !/[A-Za-z0-9_]/.test(sql[i - 1] ?? "")) return true
+    if (ended && !/[\s;]/.test(c)) return true
+    if (c === ";") ended = true
     const close = c === "'" || c === '"' || (databricks && c === "`") ? c : null
     if (close) {
       // A backslash escapes in quotes, as the splitter has it (only before a quote or a backslash, which skipping the
@@ -229,8 +237,6 @@ export function mayBeScript(sql: string, type: string): boolean {
     code += c
     i++
   }
-  const semicolon = code.indexOf(";")
-  if (semicolon >= 0 && /[^\s;]/.test(code.slice(semicolon))) return true
   return /\bexecute\s+immediate\b/i.test(code)
 }
 

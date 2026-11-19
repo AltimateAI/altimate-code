@@ -598,9 +598,18 @@ describe("dbt_cost_estimate on a warehouse with a planner", () => {
 
   test("a cancelled call stops waiting for the EXPLAIN", async () => {
     const abort = new AbortController()
-    useAdapter(calls, { type: "databricks", explain: () => new Promise<string>(() => {}) })
+    let started!: () => void
+    const explaining = new Promise<void>((resolve) => (started = resolve))
+    useAdapter(calls, {
+      type: "databricks",
+      explain: () => {
+        started()
+        return new Promise<string>(() => {})
+      },
+    })
     const run = (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, { ...ctx, abort: abort.signal })
-    await Bun.sleep(20)
+    // Cancelled once the EXPLAIN is under way, not before it starts.
+    await explaining
     abort.abort(new Error("cancelled"))
     await expect(run).rejects.toThrow("cancelled")
   })
@@ -737,5 +746,48 @@ describe("review follow-ups, round four", () => {
 
   test("a ! inside a line is an operator, not a command", () => {
     expect(mayBeScript("select a from t where a != 1", "snowflake")).toBe(false)
+  })
+})
+
+describe("review follow-ups, round five", () => {
+  test.each([
+    ["snowflake", "select 1; 'second\nstatement'"],
+    ["snowflake", 'select 1; "x"'],
+    ["databricks", "select 1; `x`"],
+    ["snowflake", "select 1 /*/*/"],
+    ["databricks", "select 1 /*/*/ ' */ */ ; delete from t -- '"],
+    ["snowflake", "select 1 -- c\r; delete from orders"],
+  ])("on %s, %p is not read: no estimate", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(true)
+  })
+
+  test.each([
+    ["snowflake", "select 1;;\n"],
+    ["snowflake", "select 1; /* done */ -- really"],
+  ])("on %s, %p is one statement", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(false)
+  })
+
+  test("quoted text after a semicolon never reaches the EXPLAIN", async () => {
+    useAdapter(calls, { type: "snowflake", compile: async () => "select 1; 'second\nstatement'", explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries).toEqual([])
+    expect(result.metadata).toMatchObject({ success: false, source: "explain" })
+  })
+
+  test.each([
+    ["a comma", "Relation main.sales.orders,archive[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)"],
+    ["a hyphen", "Relation main.sales.my-table[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)"],
+    ["a space", "Relation main.sales.my table[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)"],
+    ["a Hive relation", "HiveTableRelation [`spark_catalog`.`default`.`t`, org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe], Statistics(sizeInBytes=8.0 EiB)"],
+  ])("a relation whose printed name has %s is not named: Spark prints it unquoted, so it may not be the whole name", (_, leaf) => {
+    expect(parseDatabricksExplainCost(`== Optimized Logical Plan ==\n${leaf}`)).toEqual({ noStats: true })
+  })
+
+  test("a plain relation name is named in the advice", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.sales.orders[id#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({
+      noStats: true,
+      relation: "main.sales.orders",
+    })
   })
 })
