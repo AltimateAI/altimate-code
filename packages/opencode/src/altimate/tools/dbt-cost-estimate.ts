@@ -161,12 +161,27 @@ const PLANNERS: Record<string, { owner: string; explain: string; read: (row: unk
 /**
  * Inline Jinja that runs the EXPLAIN through dbt's own connection (`run_query`) while dbt compiles it, and
  * renders the first column of its answer as JSON. Compiling, not `dbt show`, since show wraps the query in a
- * limit, which an EXPLAIN can't take. The SQL is written into a Jinja string, so its quotes and backslashes are escaped.
+ * limit, which an EXPLAIN can't take. dbt renders an inline query twice: at parse, where `execute` is false and
+ * `run_query` returns nothing, the template renders `[]` and runs nothing. The SQL is written into a Jinja
+ * string, so its quotes and backslashes are escaped.
  */
 export function explainJinja(explain: string, sql: string): string {
   const statement = `${explain}\n${sql.replace(/[\s;]+$/, "")}`
   const literal = `'${statement.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
-  return `{%- set altimate_plan = run_query(${literal}) -%}{{ tojson(altimate_plan.columns[0].values() | list) }}`
+  return `{%- if execute -%}{%- set altimate_plan = run_query(${literal}) -%}{{ tojson(altimate_plan.columns[0].values() | list) }}{%- else -%}[]{%- endif -%}`
+}
+
+/**
+ * Whether the SQL may be more than one statement, as the warehouse's driver splits it: dbt-snowflake runs each
+ * statement it splits off, so a second one after the EXPLAIN would run for real. Only what certainly hides a
+ * semicolon is set aside (quoted text and identifiers, `--` and block comments, backticks on Databricks); anything
+ * else, dollar-quoted text and `//` comments included, counts, so a doubt is no estimate, never a run.
+ */
+export function mayBeScript(sql: string, type: string): boolean {
+  const quoted = type === "databricks" ? /--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g : /--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"[^"]*"/g
+  const bare = sql.replace(quoted, " ").replace(/[\s;]+$/, "")
+  // An unclosed quote or comment is left in place, and so is any semicolon after it.
+  return bare.includes(";") || /\bexecute\s+immediate\b/i.test(bare)
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
@@ -196,6 +211,13 @@ async function explainEstimate(
   signal: AbortSignal,
 ) {
   const extra = { adapter: type, source: "explain" }
+  if (mayBeScript(compiled, type)) {
+    return failure(
+      "no estimate",
+      `The query is more than one statement (or may be): ${planner.explain} takes one, and a second would run for real, so it is not estimated.`,
+      extra,
+    )
+  }
   let row: unknown
   try {
     const rendered = await untilAbort(() => adapter.unsafeCompileQuery(explainJinja(planner.explain, compiled), undefined), signal)

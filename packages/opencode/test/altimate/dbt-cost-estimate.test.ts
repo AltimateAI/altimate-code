@@ -12,6 +12,7 @@ import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connecti
 import {
   DbtCostEstimateTool,
   explainJinja,
+  mayBeScript,
   parseBytesProcessed,
   parseDatabricksExplainCost,
   parseSnowflakeExplain,
@@ -57,7 +58,7 @@ function fakeAdapter(
     },
     unsafeCompileQuery: async (query: string, name?: string) => {
       calls.queries.push([query, name])
-      if (opts.explain && query.startsWith("{%- set altimate_plan")) return opts.explain()
+      if (opts.explain && query.startsWith("{%- if execute -%}{%- set altimate_plan")) return opts.explain()
       if (opts.compileFails) throw new Error("compilation failed")
       return `compiled(${query})`
     },
@@ -499,8 +500,16 @@ describe("parseDatabricksExplainCost", () => {
 describe("explainJinja", () => {
   test("runs the EXPLAIN through dbt's run_query and renders its first column as JSON", () => {
     expect(explainJinja("EXPLAIN COST", "select 1")).toBe(
-      "{%- set altimate_plan = run_query('EXPLAIN COST\nselect 1') -%}{{ tojson(altimate_plan.columns[0].values() | list) }}",
+      "{%- if execute -%}{%- set altimate_plan = run_query('EXPLAIN COST\nselect 1') -%}{{ tojson(altimate_plan.columns[0].values() | list) }}{%- else -%}[]{%- endif -%}",
     )
+  })
+
+  test("at dbt's parse pass (execute false) it runs nothing and renders an empty list, not an error", () => {
+    // dbt compile --inline renders the query at parse first, where run_query returns None: reading its columns there failed.
+    const template = explainJinja("EXPLAIN USING JSON", "select 1")
+    const parsePass = /^\{%- if execute -%\}[\s\S]*\{%- else -%\}([\s\S]*)\{%- endif -%\}$/.exec(template)
+    expect(parsePass?.[1]).toBe("[]")
+    expect(template.indexOf("run_query")).toBeLessThan(template.indexOf("{%- else -%}"))
   })
 
   test("escapes quotes and backslashes for the Jinja string, and drops a trailing semicolon", () => {
@@ -595,4 +604,47 @@ describe("dbt_cost_estimate on a warehouse with a planner", () => {
     abort.abort(new Error("cancelled"))
     await expect(run).rejects.toThrow("cancelled")
   })
+})
+
+describe("mayBeScript", () => {
+  test.each([
+    ["snowflake", "select 1; delete from orders"],
+    ["snowflake", "select 1;\ndelete from orders;"],
+    ["snowflake", "select * from t where s = 'a'; drop table t"],
+    ["snowflake", "select $$a$$; delete from t"],
+    // Snowflake's own comment and dollar-quoted text are not set aside: a doubt counts as a script.
+    ["snowflake", "select 1 // note; delete from t"],
+    ["snowflake", "select $$a;b$$"],
+    ["snowflake", "execute immediate 'select 1'"],
+    ["snowflake", "select `a; b` from t"],
+    ["snowflake", "select 'unclosed; delete from t"],
+    ["databricks", "select 1; delete from orders"],
+    ["databricks", "select 1 # c; delete from t"],
+  ])("on %s, %p may be more than one statement", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(true)
+  })
+
+  test.each([
+    ["snowflake", "select 1"],
+    ["snowflake", "select 1;\n  "],
+    ["snowflake", "select 'a;b', \"x;y\" from t -- one; two\n/* three; */"],
+    ["snowflake", "select 'it''s; fine', 'a\\'; b' from t"],
+    ["databricks", "select `p;q`.c from t where s = 'a;b'"],
+    ["databricks", "with x as (select 1) select * from x;"],
+  ])("on %s, %p is one statement", (type, sql) => {
+    expect(mayBeScript(sql, type)).toBe(false)
+  })
+})
+
+describe("dbt_cost_estimate refuses to EXPLAIN a script", () => {
+  for (const type of ["snowflake", "databricks"]) {
+    test(`on ${type}, a second statement is never sent: no estimate, and only the compile ran`, async () => {
+      useAdapter(calls, { type, explain: async () => JSON.stringify([SNOWFLAKE_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1; delete from orders" }, ctx)
+      expect(calls.queries).toEqual([["select 1; delete from orders", undefined]])
+      expect(result.metadata).toMatchObject({ success: false, adapter: type, source: "explain" })
+      expect(result.metadata.bytes).toBeUndefined()
+      expect(result.output).toContain("more than one statement")
+    })
+  }
 })
