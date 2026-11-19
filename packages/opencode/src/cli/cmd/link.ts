@@ -590,11 +590,12 @@ export async function createThenBindOrRebind(
   /** False for a headless run: print the manage URL, but there is nobody at a browser to look at it. */
   opts: { openBrowser?: boolean } = {},
 ): Promise<void> {
-  // Unreadable credentials cannot create anyway: stop before the create. Every write below
-  // (the create, and the rebind that may follow) and the local record use the one credential
-  // captured just before the create.
-  if ((await accountDigest()) === null) {
-    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+  // The create, the rebind that may follow, the local record and any error about them all use
+  // this one credential, captured before anything starts. The memory seed and skill sync that
+  // follow the record use the current one, and the record refuses if the account changed.
+  const createAs = await WorkspaceApi.captureCredentials()
+  if (!createAs) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was created. Check /connect and try again.")
     process.exitCode = 1
     return
   }
@@ -609,15 +610,6 @@ export async function createThenBindOrRebind(
     | { via: "bound"; datamate: DatamateRef; binding: Binding; manage_url: string }
     | { via: "unbound"; datamate: DatamateRef }
   let created: Created
-  // The create, the rebind that may follow, the local record and any error about them all use
-  // this one credential. The memory seed and skill sync that follow the record use the current
-  // one, and the record refuses if the account changed.
-  const createAs = await WorkspaceApi.captureCredentials()
-  if (!createAs) {
-    prompts.log.error("Could not read your Altimate credentials, so nothing was created. Check /connect and try again.")
-    process.exitCode = 1
-    return
-  }
   // Re-checked before the rebind: the rebind is refused if the signed-in account changed since,
   // since the user would not find the link on the account they are on now.
   const account = { apiUrl: createAs.url, tenant: createAs.instance }

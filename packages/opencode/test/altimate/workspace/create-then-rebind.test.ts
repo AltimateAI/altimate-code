@@ -195,13 +195,25 @@ describe("CLI: createThenBindOrRebind", () => {
     const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
     const original = ws.captureCredentials
     ws.captureCredentials = async () => null
+    const written: string[] = []
+    const streams = [process.stdout, process.stderr]
+    const writes = streams.map((s) => s.write)
+    for (const s of streams)
+      s.write = ((chunk: string | Uint8Array) => {
+        written.push(String(chunk))
+        return true
+      }) as typeof s.write
     try {
       await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", EXISTING)
     } finally {
+      streams.forEach((s, i) => (s.write = writes[i]!))
       ws.captureCredentials = original
     }
     expect(sequence()).toEqual([])
     expect(process.exitCode).toBe(1)
+    // Stopped before the spinner started, so nothing is left spinning over the error.
+    expect(written.join("")).not.toContain("Creating workspace")
+    expect(written.join("")).toContain("nothing was created")
   })
 
   test("the unbound create and its rebind both run as the credential the flow captured", async () => {
