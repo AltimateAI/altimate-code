@@ -1155,7 +1155,10 @@ function PickerDialog(props: PickerProps) {
       // Surface as a toast so the user sees the specific failure. Dialog
       // closes either way — the palette command ``altimate.workspace.link``
       // (or re-running ``altimate-code link``) re-enters the flow, so the
-      // user always has a way to try again from a clean slate.
+      // user always has a way to try again from a clean slate. Closed before
+      // the account lookup below, which can take a moment: closing after it
+      // would dismiss whatever dialog the user opened in the meantime.
+      props.api.ui.dialog.clear()
       let msg: string
       if (err instanceof ConflictError) {
         // The picker doesn't have a "Re-link" option; the referral used to
@@ -1174,7 +1177,6 @@ function PickerDialog(props: PickerProps) {
         msg = err instanceof Error ? err.message : "Failed to link workspace"
       }
       props.api.ui.toast({ variant: "error", message: msg })
-      props.api.ui.dialog.clear()
     } finally {
       submitting = false
     }
@@ -2797,7 +2799,7 @@ export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boole
 }
 
 /** Test seam: the link dialogs, rendered against a stand-in `api.ui.DialogSelect`. */
-export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog }
+export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog, PickerDialog }
 
 /** Test seam for the raise path's process-wide state. */
 export const engineOfferInternals = {

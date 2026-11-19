@@ -47,6 +47,18 @@ test("the hidden-binding message names the workspace id and the account that can
   )
   // Account unknown (lookup failed): still names the workspace, and says which account in general terms.
   expect(hiddenBindingMessage(detail)).toContain("(workspace id 38) that the account you are signed in with can't see")
-  // Server-sourced text cannot inject terminal control sequences.
-  expect(hiddenBindingMessage(detail, { email: "a\x1b]8;;evil\x07@x.com", instance: "acme" })).toContain("a]8;;evil@x.com")
+  // Server-sourced text cannot inject terminal control sequences, bidi overrides or line breaks.
+  const injected = hiddenBindingMessage(detail, {
+    email: "a\x1b]8;;evil\x07@x.com\u202e",
+    instance: "ac\u2028me\u0085",
+  })
+  expect(injected).toContain('a ]8;;evil @x.com on instance "ac me" can\'t see')
+  expect(injected).not.toMatch(/[\x00-\x1f\x7f-\x9f\u2028\u2029\u202e]/)
+  // A value that cannot be a workspace id is left out rather than printed.
+  for (const bad of [0, -3, 1.5])
+    expect(hiddenBindingMessage({ ...detail, existing_datamate_id: bad })).toContain("linked to a workspace that the account")
+  // An over-long server value is clipped.
+  const long = hiddenBindingMessage(detail, { email: "x".repeat(5000) + "@x.com", instance: "acme" })
+  expect(long).toContain("x".repeat(253) + "… on instance")
+  expect(long.length).toBeLessThan(700)
 })

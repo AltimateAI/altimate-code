@@ -69,13 +69,25 @@ export function stripBidiControls(text: string): string {
 }
 
 /** Strip C0/C1 control bytes (including ESC) and bidi controls from server-controlled text
- * before it reaches the terminal. Workspace names, emails and instance names come from the
- * service with no charset validation: an embedded ``\x1b]8;;`` could close a hyperlink and open
+ * before it reaches the terminal. Workspace names come from the service with no charset
+ * validation: an embedded ``\x1b]8;;`` could close a hyperlink and open
  * a spoofed one, and bidi controls can visually reverse or reorder the displayed text. */
 export function stripControlChars(text: string): string {
   // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f), then the Unicode bidi controls.
   // eslint-disable-next-line no-control-regex
   return stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""))
+}
+
+/** Longest server-sourced value (an email, an instance name) rendered inside a message. */
+export const MAX_MESSAGE_VALUE_CHARS = 254
+
+/** Server-sourced text placed inside a message: on one line, no control or bidi characters,
+ * and clipped so a bad value cannot flood a toast or a terminal line. */
+export function inertMessageValue(text: string): string {
+  const points = Array.from(oneLine(stripBidiControls(text)))
+  return points.length > MAX_MESSAGE_VALUE_CHARS
+    ? points.slice(0, MAX_MESSAGE_VALUE_CHARS - 1).join("") + "…"
+    : points.join("")
 }
 
 /** A workspace name as a dialog shows it: inert, and with no bidi controls. */

@@ -12,7 +12,7 @@
 // for 409/412 and surface it as a typed error rather than a bare status code.
 import { AltimateApi } from "@/altimate/api/client"
 import { Telemetry } from "@/altimate/telemetry"
-import { stripControlChars } from "./workspace-name"
+import { inertMessageValue } from "./workspace-name"
 
 const REQUEST_TIMEOUT_MS = 15_000
 const SIGNED_IN_LOOKUP_TIMEOUT_MS = 3_000
@@ -114,8 +114,6 @@ export interface SignedInAccount {
   instance: string
 }
 
-const plain = (text: string) => stripControlChars(text).trim()
-
 /** A 409 whose `existing_datamate_name` is withheld: the server hides the name of a workspace
  * the caller cannot see. Reading that as a race ("another workspace claimed this project while
  * you were choosing") sent users round a retry loop with no way out.
@@ -127,14 +125,13 @@ const plain = (text: string) => stripControlChars(text).trim()
  * nothing says which account they are looking through. So the message carries the workspace id
  * (the server always returns it) and the account the request ran as, when known. */
 export function hiddenBindingMessage(detail: ConflictDetail, account?: SignedInAccount): string {
-  const id = typeof detail.existing_datamate_id === "number" ? ` (workspace id ${detail.existing_datamate_id})` : ""
-  const email = account ? plain(account.email) : ""
-  const instance = account ? plain(account.instance) : ""
-  const who = email
-    ? instance
-      ? `${email} on instance "${instance}"`
-      : email
-    : "the account you are signed in with"
+  const workspaceId = detail.existing_datamate_id
+  const validId = typeof workspaceId === "number" && Number.isSafeInteger(workspaceId) && workspaceId > 0
+  const id = validId ? ` (workspace id ${workspaceId})` : ""
+  const email = account ? inertMessageValue(account.email) : ""
+  const instance = account ? inertMessageValue(account.instance) : ""
+  let who = "the account you are signed in with"
+  if (email) who = instance ? `${email} on instance "${instance}"` : email
   return (
     `This project is already linked to a workspace${id} that ${who} can't see. ` +
     "It is private to another account: a teammate's, or yours under a different sign-in. " +
