@@ -57,6 +57,12 @@ export function credentialDigest(apiUrl: string, tenant: string, apiKey: string)
   return createHash("sha256").update(`${apiUrl}|${tenant}|${apiKey}`).digest("hex")
 }
 
+/** `credentialDigest` of a captured credential, or undefined when there is none. Pins a
+ * local record to the account its server write ran as. */
+export function digestOf(credential?: { url: string; instance: string; apiKey: string } | null): string | undefined {
+  return credential ? credentialDigest(credential.url, credential.instance, credential.apiKey) : undefined
+}
+
 const log = Log.create({ service: "altimate-workspace-state" })
 
 export interface CachedBinding {

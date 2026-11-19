@@ -56,7 +56,7 @@ import {
 import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
-  HIDDEN_BINDING_MESSAGE,
+  describeHiddenBinding,
   isHiddenBindingConflict,
   QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
@@ -87,6 +87,7 @@ import { sameIdentifier } from "@/altimate/workspace/remote-identity"
 import {
   accountDigest,
   credentialDigest,
+  digestOf,
   readLocalBinding,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
@@ -473,6 +474,31 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
   )
 }
 
+/** The confirmation after a link, unless the account was switched while it ran: the server
+ * link stands, but the local record and memory seed were refused, so the usual confirmation
+ * (which promises memory sync) would not hold. */
+async function confirmLink(
+  api: TuiPluginApi,
+  recorded: Awaited<ReturnType<typeof recordApprovedBinding>>,
+  label: LinkedProps["verb"],
+  datamateId: number,
+  datamateName: string,
+  /** The link was started from a dialog that is still open (the picker). The confirmation
+   * would replace it; without one, close it, or choosing again from it links a second time. */
+  openDialog = false,
+): Promise<void> {
+  if (recorded?.status === "account-changed") {
+    if (openDialog) api.ui.dialog.clear()
+    api.ui.toast({
+      variant: "warning",
+      message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
+      duration: 8_000,
+    })
+    return
+  }
+  await showLinkedConfirmation(api, label, datamateId, datamateName)
+}
+
 /** Show the persistent linked-confirmation dialog. Builds the manage URL
  * best-effort; degrades gracefully on BYOK/unresolvable. */
 async function showLinkedConfirmation(
@@ -622,23 +648,21 @@ async function runBrowserHandoff(
   // ids are tenant-schema-local (same integer, different workspace). Compare
   // the credential fingerprint the handoff was validated against with the
   // credentials we're about to bind under, and refuse if either drifted.
-  try {
-    const fresh = await AltimateApi.getCredentials()
-    if (
-      fresh.altimateInstanceName !== result.credentials.tenant ||
-      fresh.altimateUrl !== result.credentials.apiUrl
-    ) {
-      api.ui.toast({
-        variant: "error",
-        message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
-        duration: 15_000,
-      })
-      return
-    }
-  } catch {
+  // The credential checked here is the one the bind runs as, the one its record is pinned to,
+  // and the one any error names.
+  const bindAs = await WorkspaceApi.captureCredentials()
+  if (!bindAs) {
     api.ui.toast({
       variant: "error",
       message: "Lost Altimate credentials while the browser was open — sign in and re-run.",
+    })
+    return
+  }
+  if (bindAs.instance !== result.credentials.tenant || bindAs.url !== result.credentials.apiUrl) {
+    api.ui.toast({
+      variant: "error",
+      message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${bindAs.instance}). Re-run to link this project.`,
+      duration: 15_000,
     })
     return
   }
@@ -646,21 +670,21 @@ async function runBrowserHandoff(
   // to the returned workspace via the existing bind endpoint. Same code path
   // as PickerDialog's attach mode.
   try {
-    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
-    await recordApprovedBinding(api.state.path.directory, {
+    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier, bindAs)
+    const recorded = await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    })
-    await showLinkedConfirmation(api, "Linked", res.binding.datamate_id, res.binding.datamate_name)
+    }, { account: digestOf(bindAs) })
+    await confirmLink(api, recorded, "Linked", res.binding.datamate_id, res.binding.datamate_name)
   } catch (err) {
     if (err instanceof ConflictError) {
       api.ui.toast({
         variant: "warning",
         message: isHiddenBindingConflict(err)
-          ? HIDDEN_BINDING_MESSAGE
+          ? await describeHiddenBinding(err, bindAs)
           : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
       })
     } else if (err instanceof NotFoundError) {
@@ -763,16 +787,26 @@ export async function createAndBindInline(
     | { via: "bound"; datamate: DatamateRef; binding: Binding }
     | { via: "unbound"; datamate: DatamateRef }
   let res: Created
-  // Captured before the create and re-checked before the rebind: the two
-  // requests resolve credentials independently, and a workspace id means
-  // nothing on a different account.
-  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
+  // The create, the rebind that may follow, the local record and any error about them all use
+  // this one credential. The memory seed and skill sync that follow the record use the current
+  // one, and the record refuses if the account changed.
+  const createAs = await WorkspaceApi.captureCredentials()
+  if (!createAs) {
+    api.ui.toast({
+      variant: "error",
+      message: "Could not read your Altimate credentials, so nothing was created. Check /connect and try again.",
+    })
+    return
+  }
+  // Re-checked before the rebind: the rebind is refused if the signed-in account changed since,
+  // since the user would not find the link on the account they are on now.
+  const account = { apiUrl: createAs.url, tenant: createAs.instance }
   try {
     if (rebindFrom) {
-      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name, actAs: createAs })
       res = { via: "unbound", datamate: ws }
     } else {
-      const created = await WorkspaceApi.createAndBind({ name, identifier })
+      const created = await WorkspaceApi.createAndBind({ name, identifier, actAs: createAs })
       res = { via: "bound", datamate: created.datamate, binding: created.binding }
     }
   } catch (err) {
@@ -786,7 +820,7 @@ export async function createAndBindInline(
         // them round a loop with no exit. The three other conflict toasts in this file already
         // branch here; this one did not.
         message: isHiddenBindingConflict(err)
-          ? HIDDEN_BINDING_MESSAGE
+          ? await describeHiddenBinding(err, createAs)
           : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
         duration: 15_000,
       })
@@ -818,6 +852,7 @@ export async function createAndBindInline(
         targetDatamateId: res.datamate.id,
         expectedCurrentDatamateId: rebindFrom.expectedCurrentDatamateId,
         matchedBy: rebindFrom.matchedBy,
+        actAs: createAs,
       })
       reboundBinding = rebound.binding
     } catch (err) {
@@ -843,14 +878,14 @@ export async function createAndBindInline(
   // toast fallback keeps the user informed without taking the process down.
   // (Kilo cycle 5.)
   try {
-    await recordApprovedBinding(api.state.path.directory, {
+    const recorded = await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.datamate.id,
       datamateName: res.datamate.name,
       repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
       projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
       linkedAt: Date.now(),
-    })
-    await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
+    }, { account: digestOf(createAs) })
+    await confirmLink(api, recorded, "Created", res.datamate.id, res.datamate.name)
   } catch (err) {
     // Log the failure so a regression in ``showLinkedConfirmation`` doesn't
     // vanish silently, then fall back to a plain toast. Previously ``void err``
@@ -1096,21 +1131,25 @@ function PickerDialog(props: PickerProps) {
   async function pick(datamateId: number) {
     if (submitting) return
     submitting = true
+    // The bind or re-link and any error about it name the same account.
+    const pickAs = (await WorkspaceApi.captureCredentials()) ?? undefined
     try {
       if (props.mode === "attach") {
-        const res = await WorkspaceApi.bindExisting(datamateId, props.identifier)
-        await recordApprovedBinding(props.api.state.path.directory, {
+        const res = await WorkspaceApi.bindExisting(datamateId, props.identifier, pickAs)
+        const recorded = await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
           repoRemote: res.binding.repo_remote,
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
-        })
-        await showLinkedConfirmation(
+        }, { account: digestOf(pickAs) })
+        await confirmLink(
           props.api,
+          recorded,
           "Linked",
           res.binding.datamate_id,
           res.binding.datamate_name,
+          true,
         )
         return
       } else {
@@ -1127,19 +1166,22 @@ function PickerDialog(props: PickerProps) {
           targetDatamateId: datamateId,
           expectedCurrentDatamateId: props.expectedCurrentDatamateId,
           matchedBy: props.matchedBy,
+          actAs: pickAs,
         })
-        await recordApprovedBinding(props.api.state.path.directory, {
+        const recorded = await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
           repoRemote: res.binding.repo_remote,
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
-        })
-        await showLinkedConfirmation(
+        }, { account: digestOf(pickAs) })
+        await confirmLink(
           props.api,
+          recorded,
           "Re-linked",
           res.binding.datamate_id,
           res.binding.datamate_name,
+          true,
         )
         return
       }
@@ -1147,14 +1189,17 @@ function PickerDialog(props: PickerProps) {
       // Surface as a toast so the user sees the specific failure. Dialog
       // closes either way — the palette command ``altimate.workspace.link``
       // (or re-running ``altimate-code link``) re-enters the flow, so the
-      // user always has a way to try again from a clean slate.
+      // user always has a way to try again from a clean slate. Closed before
+      // the account lookup below, which can take a moment: closing after it
+      // would dismiss whatever dialog the user opened in the meantime.
+      props.api.ui.dialog.clear()
       let msg: string
       if (err instanceof ConflictError) {
         // The picker doesn't have a "Re-link" option; the referral used to
         // point at OfferDialog's Re-link, which doesn't exist either. Point
         // at the concrete next action instead. (kilo cycle 6.)
         msg = isHiddenBindingConflict(err)
-          ? HIDDEN_BINDING_MESSAGE
+          ? await describeHiddenBinding(err, pickAs)
           : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
@@ -1166,7 +1211,6 @@ function PickerDialog(props: PickerProps) {
         msg = err instanceof Error ? err.message : "Failed to link workspace"
       }
       props.api.ui.toast({ variant: "error", message: msg })
-      props.api.ui.dialog.clear()
     } finally {
       submitting = false
     }
@@ -1372,6 +1416,8 @@ export async function bindOrRebindInline(
     })
     return
   }
+  // The bind and any error about it name the same account: the listed one, else the one signed in now.
+  const bindAs = listedAs ?? (await WorkspaceApi.captureCredentials()) ?? undefined
   try {
     const res = await (async () => {
       if (existing) {
@@ -1380,10 +1426,10 @@ export async function bindOrRebindInline(
           targetDatamateId,
           expectedCurrentDatamateId: existing.datamateId,
           matchedBy: existing.matchedBy,
-          actAs: listedAs ?? undefined,
+          actAs: bindAs,
         })
       }
-      return WorkspaceApi.bindExisting(targetDatamateId, identifier, listedAs ?? undefined)
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier, bindAs)
     })()
     const recorded = await recordApprovedBinding(
       api.state.path.directory,
@@ -1394,19 +1440,11 @@ export async function bindOrRebindInline(
         projectPath: res.binding.project_path,
         linkedAt: Date.now(),
       },
-      listedAccount ? { account: listedAccount } : undefined,
+      { account: digestOf(bindAs) },
     )
-    if (recorded?.status === "account-changed") {
-      // The bind ran as the listed account; only the local record and seed were refused.
-      api.ui.toast({
-        variant: "warning",
-        message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
-        duration: 8_000,
-      })
-      return
-    }
-    await showLinkedConfirmation(
+    await confirmLink(
       api,
+      recorded,
       isRebind ? "Re-linked" : "Linked",
       res.binding.datamate_id,
       res.binding.datamate_name,
@@ -1415,7 +1453,7 @@ export async function bindOrRebindInline(
     let msg: string
     if (err instanceof ConflictError) {
       msg = isHiddenBindingConflict(err)
-        ? HIDDEN_BINDING_MESSAGE
+        ? await describeHiddenBinding(err, bindAs)
         : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
@@ -2787,7 +2825,7 @@ export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boole
 }
 
 /** Test seam: the link dialogs, rendered against a stand-in `api.ui.DialogSelect`. */
-export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog }
+export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog, PickerDialog }
 
 /** Test seam for the raise path's process-wide state. */
 export const engineOfferInternals = {

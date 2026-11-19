@@ -18,7 +18,7 @@ import { AltimateApi } from "@/altimate/api/client"
 import {
   WorkspaceApi,
   ConflictError,
-  HIDDEN_BINDING_MESSAGE,
+  describeHiddenBinding,
   isHiddenBindingConflict,
   QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
@@ -45,7 +45,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { accountDigest, credentialDigest, isApprovedRow, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, digestOf, isApprovedRow, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 import {
   confirmsNamesake,
@@ -53,8 +53,11 @@ import {
   findNamesakes,
   linkPickerOpensOn,
   namesakeHint,
-  stripBidiControls,
+  stripControlChars,
 } from "@/altimate/workspace/workspace-name"
+
+// Re-exported: other commands and tests import it from here.
+export { stripControlChars }
 
 /** The browser sign-in from a plain shell: the Altimate LLM Gateway method of the `altimate-backend`
  * provider saves the credentials every workspace command reads. `--method` skips the method picker,
@@ -63,25 +66,6 @@ export const SIGN_IN_COMMAND = 'altimate-code auth login -p altimate-backend --m
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
-
-/** Strip C0/C1 control bytes (including ESC) from server-controlled text
- * before it reaches a raw-stdout escape-sequence wrapper. Workspace names
- * come from ``WorkspaceApi.listDatamates()`` with no charset validation — an
- * attacker-controlled name containing its own ``\x1b]8;;`` could otherwise
- * prematurely close our hyperlink and open a spoofed one pointing wherever
- * they choose, with our trusted URL as the visible (but inert) prefix.
- * (CodeRabbit + cubic, PR #1274.) */
-export function stripControlChars(text: string): string {
-  // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f) — the previous range only
-  // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
-  // vector) was always covered, but the doc comment claimed C1 coverage it
-  // didn't have. (Kilo, PR #1274.)
-  // Plus the Unicode bidi controls (ALM, LRM/RLM, LRE..RLO, LRI..PDI): they cannot break out of the
-  // hyperlink (the href is always `buildManageUrl`, never the name) but can visually reverse or
-  // reorder the displayed name in the picker. (v0.11.2 release review.)
-  // eslint-disable-next-line no-control-regex
-  return stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""))
-}
 
 /** What a pick in the link picker does: one of the two create paths, or an existing workspace. */
 export function linkPickKind(pick: string): "create" | "browser" | "workspace" {
@@ -465,10 +449,9 @@ async function runBrowserHandoff(
   projectName: string,
   directory: string,
 ): Promise<void> {
-  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
-  const linkAccount = await accountDigest()
-  if (linkAccount === null) {
+  // Unreadable credentials cannot link anyway: stop before opening the browser. The bind
+  // and its local record use the credential captured after the browser returns.
+  if ((await accountDigest()) === null) {
     prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
     process.exitCode = 1
     return
@@ -485,21 +468,19 @@ async function runBrowserHandoff(
   // browser window can stay open for up to 15 minutes; an account switch in
   // that window would otherwise bind a callback validated for tenant A
   // under tenant B (workspace ids are tenant-schema-local).
-  try {
-    const fresh = await AltimateApi.getCredentials()
-    if (
-      fresh.altimateInstanceName !== result.credentials.tenant ||
-      fresh.altimateUrl !== result.credentials.apiUrl
-    ) {
-      spin.stop(
-        `Credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
-        1,
-      )
-      process.exitCode = 1
-      return
-    }
-  } catch {
+  // The credential checked here is the one the bind runs as, the one its record is pinned to,
+  // and the one any error names.
+  const bindAs = await WorkspaceApi.captureCredentials()
+  if (!bindAs) {
     spin.stop("Lost Altimate credentials while the browser was open — sign in and re-run.", 1)
+    process.exitCode = 1
+    return
+  }
+  if (bindAs.instance !== result.credentials.tenant || bindAs.url !== result.credentials.apiUrl) {
+    spin.stop(
+      `Credentials changed while the browser was open (was ${result.credentials.tenant}, now ${bindAs.instance}). Re-run to link this project.`,
+      1,
+    )
     process.exitCode = 1
     return
   }
@@ -507,7 +488,7 @@ async function runBrowserHandoff(
   const bindSpin = spinner()
   bindSpin.start("Linking workspace...")
   try {
-    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
+    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier, bindAs)
     // Match the two other recordApprovedBinding call sites in this file
     // (lines 377 and 496) which cache under ``identifier.projectPath ??
     // directory``. The raw ``directory`` here caches under a different key
@@ -520,7 +501,7 @@ async function runBrowserHandoff(
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    }, { awaitBackfill: true, account: linkAccount })
+    }, { awaitBackfill: true, account: digestOf(bindAs) })
     bindSpin.stop(`Linked to "${stripControlChars(res.binding.datamate_name)}".`)
     prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
@@ -534,7 +515,7 @@ async function runBrowserHandoff(
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
     if (isHiddenBindingConflict(err)) {
-      prompts.log.error(`${HIDDEN_BINDING_MESSAGE} Workspace "${projectName}" was created but is not linked.`)
+      prompts.log.error(`${await describeHiddenBinding(err, bindAs)} Workspace "${projectName}" was created but is not linked.`)
     } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(
@@ -609,11 +590,12 @@ export async function createThenBindOrRebind(
   /** False for a headless run: print the manage URL, but there is nobody at a browser to look at it. */
   opts: { openBrowser?: boolean } = {},
 ): Promise<void> {
-  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
-  const linkAccount = await accountDigest()
-  if (linkAccount === null) {
-    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+  // The create, the rebind that may follow, the local record and any error about them all use
+  // this one credential, captured before anything starts. The memory seed and skill sync that
+  // follow the record use the current one, and the record refuses if the account changed.
+  const createAs = await WorkspaceApi.captureCredentials()
+  if (!createAs) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was created. Check /connect and try again.")
     process.exitCode = 1
     return
   }
@@ -628,11 +610,9 @@ export async function createThenBindOrRebind(
     | { via: "bound"; datamate: DatamateRef; binding: Binding; manage_url: string }
     | { via: "unbound"; datamate: DatamateRef }
   let created: Created
-  // Captured BEFORE the create and re-checked before the rebind. Each request
-  // resolves credentials on its own, so an account switch in between would
-  // create the workspace on one tenant and rebind on another using an id that
-  // is local to the first. (review, PR #1314)
-  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
+  // Re-checked before the rebind: the rebind is refused if the signed-in account changed since,
+  // since the user would not find the link on the account they are on now.
+  const account = { apiUrl: createAs.url, tenant: createAs.instance }
   try {
     // Two different creates, because the server offers two different things.
     //
@@ -646,10 +626,10 @@ export async function createThenBindOrRebind(
     // Create unbound first, then repoint, which is what the row's own hint
     // promises.
     if (existing) {
-      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name, actAs: createAs })
       created = { via: "unbound", datamate: ws }
     } else {
-      const res = await WorkspaceApi.createAndBind({ name, identifier })
+      const res = await WorkspaceApi.createAndBind({ name, identifier, actAs: createAs })
       created = { via: "bound", datamate: res.datamate, binding: res.binding, manage_url: res.manage_url }
     }
   } catch (err) {
@@ -666,7 +646,7 @@ export async function createThenBindOrRebind(
             `project is still linked to "${stripControlChars(existing.datamate.name)}".`,
         )
       } else if (isHiddenBindingConflict(err)) {
-        prompts.log.error(`${HIDDEN_BINDING_MESSAGE} Nothing was created.`)
+        prompts.log.error(`${await describeHiddenBinding(err, createAs)} Nothing was created.`)
       } else {
         const existingName = conflictExistingName(err.detail)
         prompts.log.error(
@@ -712,6 +692,7 @@ export async function createThenBindOrRebind(
         targetDatamateId: created.datamate.id,
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
+        actAs: createAs,
       })
       reboundBinding = res.binding
       rebindSpin.stop(`Project is now linked to "${safeCreatedName}".`)
@@ -739,7 +720,7 @@ export async function createThenBindOrRebind(
     repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
     projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
-  }, { awaitBackfill: true, account: linkAccount })
+  }, { awaitBackfill: true, account: digestOf(createAs) })
   prompts.log.info(seedMessage(seed))
   // The quick create is private, and the server hides a private workspace's link from
   // everyone else: a teammate who clones this repo is told it is unlinked.
@@ -906,7 +887,7 @@ async function bindOrRebind(
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (isHiddenBindingConflict(err)) {
-      prompts.log.error(HIDDEN_BINDING_MESSAGE)
+      prompts.log.error(await describeHiddenBinding(err, actAs))
     } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(`Already linked to "${existingName}". Re-run \`altimate-code link\` to switch.`)
