@@ -590,8 +590,9 @@ export async function createThenBindOrRebind(
   /** False for a headless run: print the manage URL, but there is nobody at a browser to look at it. */
   opts: { openBrowser?: boolean } = {},
 ): Promise<void> {
-  // Unreadable credentials cannot create anyway: stop before the create. The create and its
-  // local record use the credential captured just before the request.
+  // Unreadable credentials cannot create anyway: stop before the create. Every write below
+  // (the create, and the rebind that may follow) and the local record use the one credential
+  // captured just before the create.
   if ((await accountDigest()) === null) {
     prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
     process.exitCode = 1
@@ -613,7 +614,7 @@ export async function createThenBindOrRebind(
   // create the workspace on one tenant and rebind on another using an id that
   // is local to the first. (review, PR #1314)
   const account = await WorkspaceApi.accountFingerprint().catch(() => null)
-  // The create-and-bind and any error about it name the same account.
+  // Every write in this flow, its local record and any error about it use this one account.
   const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
   try {
     // Two different creates, because the server offers two different things.
@@ -628,7 +629,7 @@ export async function createThenBindOrRebind(
     // Create unbound first, then repoint, which is what the row's own hint
     // promises.
     if (existing) {
-      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name, actAs: createAs })
       created = { via: "unbound", datamate: ws }
     } else {
       const res = await WorkspaceApi.createAndBind({ name, identifier, actAs: createAs })
@@ -694,6 +695,7 @@ export async function createThenBindOrRebind(
         targetDatamateId: created.datamate.id,
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
+        actAs: createAs,
       })
       reboundBinding = res.binding
       rebindSpin.stop(`Project is now linked to "${safeCreatedName}".`)

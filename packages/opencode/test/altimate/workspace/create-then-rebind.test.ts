@@ -49,7 +49,7 @@ const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await im
 )
 const { recordApprovedBinding, readLocalBinding } = await import("@/altimate/workspace/state")
 const { flushPendingSyncs } = await import("@/altimate/workspace/skill-sync")
-const { hiddenBindingMessage, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
+const { hiddenBindingMessage, QUICK_WORKSPACE_PRIVATE_NOTE, WorkspaceApi } = await import(
   "@/altimate/workspace/api-client"
 )
 
@@ -191,6 +191,31 @@ describe("CLI: createThenBindOrRebind", () => {
     expect(process.exitCode ?? 0).toBe(0)
   })
 
+  test("the unbound create and its rebind both run as the credential the flow captured", async () => {
+    routes = [
+      { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
+      { match: /by-remote/, method: "PUT", status: 200, body: { binding: BINDING } },
+    ]
+    const api = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = { create: api.createWorkspaceUnbound, rebind: api.rebindByRemote }
+    const ranAs: string[] = []
+    api.createWorkspaceUnbound = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`create:${input.actAs?.instance}`)
+      return original.create(input)
+    }
+    api.rebindByRemote = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`rebind:${input.actAs?.instance}`)
+      return original.rebind(input)
+    }
+    try {
+      await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", EXISTING)
+    } finally {
+      api.createWorkspaceUnbound = original.create
+      api.rebindByRemote = original.rebind
+    }
+    expect(ranAs).toEqual(["create:acme", "rebind:acme"])
+  })
+
   test("a failed rebind reports the orphan rather than claiming success", async () => {
     routes = [
       { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
@@ -257,6 +282,32 @@ describe("TUI: createAndBindInline", () => {
     await createAndBindInline(api, IDENTIFIER, "proj")
 
     expect(sequence()).toEqual(["POST /datamate-project-bindings/"])
+  })
+
+  test("the unbound create and its rebind both run as the credential the flow captured", async () => {
+    routes = [
+      { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
+      { match: /by-remote/, method: "PUT", status: 200, body: { binding: BINDING } },
+    ]
+    const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = { create: ws.createWorkspaceUnbound, rebind: ws.rebindByRemote }
+    const ranAs: string[] = []
+    ws.createWorkspaceUnbound = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`create:${input.actAs?.instance}`)
+      return original.create(input)
+    }
+    ws.rebindByRemote = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`rebind:${input.actAs?.instance}`)
+      return original.rebind(input)
+    }
+    const { api } = stubApi()
+    try {
+      await createAndBindInline(api, IDENTIFIER, "proj", { expectedCurrentDatamateId: 3, matchedBy: "remote" })
+    } finally {
+      ws.createWorkspaceUnbound = original.create
+      ws.rebindByRemote = original.rebind
+    }
+    expect(ranAs).toEqual(["create:acme", "rebind:acme"])
   })
 
   test("a create whose account is switched mid-request is not recorded under the next account", async () => {

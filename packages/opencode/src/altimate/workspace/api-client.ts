@@ -784,6 +784,7 @@ export namespace WorkspaceApi {
   export async function createWorkspaceUnbound(input: {
     name: string
     description?: string
+    actAs?: ActAs
   }): Promise<{ id: number; name: string }> {
     // The id check sits inside the reported attempt: a create whose answer is unusable is a
     // failed link step, not a created workspace.
@@ -798,6 +799,7 @@ export namespace WorkspaceApi {
           knowledge_engine_enabled: true,
           privacy: "private",
         },
+        ...(input.actAs ? { actAs: input.actAs } : {}),
       })
       // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
       // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,

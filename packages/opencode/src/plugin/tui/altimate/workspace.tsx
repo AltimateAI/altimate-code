@@ -791,11 +791,11 @@ export async function createAndBindInline(
   // requests resolve credentials independently, and a workspace id means
   // nothing on a different account.
   const account = await WorkspaceApi.accountFingerprint().catch(() => null)
-  // The create-and-bind and any error about it name the same account.
+  // Every write in this flow, its local record and any error about it use this one account.
   const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
   try {
     if (rebindFrom) {
-      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name, actAs: createAs })
       res = { via: "unbound", datamate: ws }
     } else {
       const created = await WorkspaceApi.createAndBind({ name, identifier, actAs: createAs })
@@ -844,6 +844,7 @@ export async function createAndBindInline(
         targetDatamateId: res.datamate.id,
         expectedCurrentDatamateId: rebindFrom.expectedCurrentDatamateId,
         matchedBy: rebindFrom.matchedBy,
+        actAs: createAs,
       })
       reboundBinding = rebound.binding
     } catch (err) {
