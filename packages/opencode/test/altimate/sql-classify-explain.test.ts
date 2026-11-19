@@ -138,6 +138,14 @@ describe("EXPLAIN with options", () => {
       type(sql, "postgres")
       expect(performance.now() - start).toBeLessThan(200)
     }
+    for (const [sql, dialect] of [
+      ["EXPLAIN USING JSON SELECT 1;".repeat(64_000), "snowflake"],
+      ["EXPLAIN (FORMAT JSON) SELECT 1;".repeat(64_000), "postgres"],
+    ]) {
+      const begin = performance.now()
+      expect(type(sql, dialect)).toBe("write")
+      expect(performance.now() - begin).toBeLessThan(1_000)
+    }
     const items = "EXPLAIN (" + "ANALYZE, ".repeat(8_000) + "FORMAT JSON) SELECT 1"
     const start = performance.now()
     expect(type(items, "postgres")).toBe("read")

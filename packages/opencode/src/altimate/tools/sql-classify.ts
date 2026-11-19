@@ -179,18 +179,20 @@ function blankExplainOptions(sql: string, dialect?: string): string {
     )
     .join("")
   const prefix = explainPrefix(dialect)
-  let out = sql
+  const parts: string[] = []
+  let copied = 0
   let start = 0
   for (const statement of scan.split(";")) {
     const match = prefix.exec(statement)
     if (match && optionsLength(statement, match) > 0 && statement.slice(match[0].length).trim()) {
       const from = start + /^\s*/.exec(match[0])![0].length + "EXPLAIN".length
       const to = start + match[0].length
-      out = out.slice(0, from) + " ".repeat(to - from) + out.slice(to)
+      parts.push(sql.slice(copied, from), " ".repeat(to - from))
+      copied = to
     }
     start += statement.length + 1
   }
-  return out
+  return parts.length ? parts.join("") + sql.slice(copied) : sql
 }
 
 /** EXPLAIN with options is read-only only as the sole statement of its text. */
