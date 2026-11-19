@@ -4,6 +4,7 @@
 
 import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { toPkcs8Pem } from "./snowflake-key"
 import { loadOptionalDriver } from "./resolve"
 import { emitBrowserSignIn, openInBrowser } from "./sign-in"
 import { emitReconnect, type ReconnectEvent } from "./reconnect-events"
@@ -614,35 +615,11 @@ export async function connect(
           keyContent = fs.readFileSync(resolvedKeyPath, "utf-8")
         } else {
           keyContent = resolvedInlineKey!
-          // Normalize escaped newlines from env vars / JSON configs
-          if (keyContent.includes("\\n")) {
-            keyContent = keyContent.replace(/\\n/g, "\n")
-          }
         }
 
-        // If key is encrypted, decrypt using Node crypto —
-        // snowflake-sdk expects unencrypted PKCS#8 PEM.
-        let privateKey: string
-        if (keyPassphrase || keyContent.includes("ENCRYPTED")) {
-          const crypto = await import("crypto")
-          try {
-            const keyObject = crypto.createPrivateKey({
-              key: keyContent,
-              format: "pem",
-              passphrase: keyPassphrase || undefined,
-            })
-            privateKey = keyObject
-              .export({ type: "pkcs8", format: "pem" })
-              .toString()
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e)
-            throw new Error(
-              `Snowflake: Failed to decrypt private key. Verify the passphrase and key format (must be PEM/PKCS#8). ${msg}`,
-            )
-          }
-        } else {
-          privateKey = keyContent
-        }
+        // Normalize pasted formats and convert to the unencrypted PKCS#8 PEM
+        // snowflake-sdk expects.
+        const privateKey = toPkcs8Pem(keyContent, keyPassphrase)
 
         options.authenticator = "SNOWFLAKE_JWT"
         options.privateKey = privateKey
