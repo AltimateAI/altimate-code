@@ -163,8 +163,18 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
   return { bytes: Math.round(bytes) }
 }
 
-/** Databricks queries over files rather than tables: planning one can read the files to infer their schema. */
-const READS_FILES = /\b(read_files|cloud_files)\s*\(|\b(json|csv|parquet|avro|orc|text|binaryFile|xml)\s*\.\s*`/i
+/**
+ * Whether a Databricks query reads files rather than tables (read_files, cloud_files, a path such as json.`…`):
+ * planning one can read the files to infer their schema. Read on the text with its comments as spaces (quoted text
+ * kept, so a comment marker inside it stays) and any spacing between the name and what follows; the names may be
+ * backtick-quoted. Called once `mayBeScript` has passed: every quote and comment is closed and none nests.
+ */
+export function readsFiles(sql: string): boolean {
+  const bare = sql
+    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`|--[^\n]*|\/\*[\s\S]*?\*\//g, (token) => (token.startsWith("--") || token.startsWith("/*") ? " " : token))
+    .toLowerCase()
+  return /(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml)`?\s*\.\s*`/.test(bare)
+}
 
 /**
  * The warehouses with no dry run whose planner still says what a query reads, the EXPLAIN that asks it, and the
@@ -277,18 +287,18 @@ async function explainEstimate(
   const extra = { adapter: type, source: "explain" }
   // Jinja turns every \r\n and lone \r in a string into \n: the check reads the SQL exactly as the driver will get it.
   const sql = compiled.replace(/\r\n?/g, "\n")
-  // Databricks infers the schema of files a query reads directly by reading them, while it plans: an EXPLAIN would.
-  if (type === "databricks" && READS_FILES.test(sql)) {
-    return failure(
-      "no estimate",
-      "The query reads files directly (read_files, cloud_files or a path such as json.`…`): Databricks infers their schema by reading them while it plans, so an EXPLAIN is not run for it.",
-      extra,
-    )
-  }
   if (mayBeScript(sql, type)) {
     return failure(
       "no estimate",
       `The query is more than one statement (or may be): ${planner.explain} takes one, and a second would run for real, so it is not estimated.`,
+      extra,
+    )
+  }
+  // Databricks infers the schema of files a query reads directly by reading them, while it plans: an EXPLAIN would.
+  if (type === "databricks" && readsFiles(sql)) {
+    return failure(
+      "no estimate",
+      "The query reads files directly (read_files, cloud_files or a path such as json.`…`): Databricks infers their schema by reading them while it plans, so an EXPLAIN is not run for it.",
       extra,
     )
   }

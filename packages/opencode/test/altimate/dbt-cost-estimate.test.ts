@@ -14,6 +14,7 @@ import {
   explainJinja,
   mayBeScript,
   parseBytesProcessed,
+  readsFiles,
   parseDatabricksExplainCost,
   parseSnowflakeExplain,
   untilAbort,
@@ -824,6 +825,39 @@ describe("review follow-ups, round six", () => {
       useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
       const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
       expect(result.metadata).toMatchObject({ success: true, source: "explain" })
+    }
+  })
+})
+
+describe("review follow-ups, round seven", () => {
+  test.each([
+    "select * from read_files/**/('/Volumes/c/s/v/raw', format => 'json')",
+    "select * from `read_files`('/x')",
+    "select * from read_files -- why\n ('/x')",
+    "select * from `json`.`/Volumes/c/s/v/raw`",
+    "select * from json/**/.`/x`",
+    "select '--', * from read_files('/x')",
+    "select * from system.builtin.read_files('/x')",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "select * from main.sales.orders",
+    "select t.json.field, text.col from t",
+    "select * from delta.`/Volumes/c/s/v/t`",
+    "select 'read_files' as note from t",
+  ])("%p reads tables", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test("on Databricks, a comment-split or quoted file read never reaches the EXPLAIN", async () => {
+    for (const compiled of ["select * from read_files/**/('/x')", "select * from `json`.`/x`"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
     }
   })
 })
