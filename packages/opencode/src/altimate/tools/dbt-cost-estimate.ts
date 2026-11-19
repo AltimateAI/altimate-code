@@ -137,6 +137,11 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
     if (!line.trim()) continue
     // Each level of the tree is three characters: ":  " or "   " for an ancestor, ":- " or "+- " for the node itself.
     const prefix = /^(?::  |   )*(?:[:+]- )?/.exec(line)![0]
+    // A tree has one root: a later line with no prefix is the rest of the node above it (a literal with a line break).
+    if (!prefix && nodes.length > 0) {
+      nodes[nodes.length - 1].text += `\n${line}`
+      continue
+    }
     nodes.push({ depth: prefix.length / 3, text: line.slice(prefix.length) })
   }
   if (nodes.length === 0) return undefined
@@ -157,6 +162,9 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
   }
   return { bytes: Math.round(bytes) }
 }
+
+/** Databricks queries over files rather than tables: planning one can read the files to infer their schema. */
+const READS_FILES = /\b(read_files|cloud_files)\s*\(|\b(json|csv|parquet|avro|orc|text|binaryFile|xml)\s*\.\s*`/i
 
 /**
  * The warehouses with no dry run whose planner still says what a query reads, the EXPLAIN that asks it, and the
@@ -269,6 +277,14 @@ async function explainEstimate(
   const extra = { adapter: type, source: "explain" }
   // Jinja turns every \r\n and lone \r in a string into \n: the check reads the SQL exactly as the driver will get it.
   const sql = compiled.replace(/\r\n?/g, "\n")
+  // Databricks infers the schema of files a query reads directly by reading them, while it plans: an EXPLAIN would.
+  if (type === "databricks" && READS_FILES.test(sql)) {
+    return failure(
+      "no estimate",
+      "The query reads files directly (read_files, cloud_files or a path such as json.`…`): Databricks infers their schema by reading them while it plans, so an EXPLAIN is not run for it.",
+      extra,
+    )
+  }
   if (mayBeScript(sql, type)) {
     return failure(
       "no estimate",
@@ -328,7 +344,7 @@ async function explainEstimate(
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake, \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake, \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),

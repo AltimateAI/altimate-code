@@ -714,8 +714,8 @@ describe("review follow-ups", () => {
       "== Physical Plan ==",
       "Union",
     ].join("\n")
-    // The stray line is read as a node, not as the end: both relations count, never fewer.
-    expect((parseDatabricksExplainCost(plan) as { bytes: number }).bytes).toBeGreaterThanOrEqual(2 * 1024 ** 3)
+    // The stray line is the rest of the Project above it, not the end of the plan and not a node: the two relations, exactly.
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 2 * 1024 ** 3 })
   })
 })
 
@@ -789,5 +789,41 @@ describe("review follow-ups, round five", () => {
       noStats: true,
       relation: "main.sales.orders",
     })
+  })
+})
+
+describe("review follow-ups, round six", () => {
+  test("a node continued on a line of its own is one node: its size is not added as a leaf", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Project [concat(a#1, line one",
+      "line two) AS x#3], Statistics(sizeInBytes=5.0 GiB)",
+      "+- Relation main.s.a[a#1] parquet, Statistics(sizeInBytes=1.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 1024 ** 3 })
+  })
+
+  test.each([
+    "select * from read_files('/Volumes/c/s/v/raw', format => 'json')",
+    "select * from READ_FILES ('/Volumes/c/s/v/raw')",
+    "select * from cloud_files('/mnt/raw', 'json')",
+    "select * from json.`/Volumes/c/s/v/raw`",
+    "select * from parquet . `s3://bucket/path`",
+  ])("on Databricks, %p reads files to plan: no EXPLAIN is sent", async (compiled) => {
+    const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+    useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(local.queries).toEqual([])
+    expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    expect(result.output).toContain("reads files directly")
+  })
+
+  test("a Delta path and a table are still estimated", async () => {
+    for (const compiled of ["select * from delta.`/Volumes/c/s/v/t`", "select * from main.sales.orders"]) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(result.metadata).toMatchObject({ success: true, source: "explain" })
+    }
   })
 })
