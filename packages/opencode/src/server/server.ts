@@ -10,6 +10,9 @@ import { basicAuth } from "hono/basic-auth"
 import z from "zod"
 import { Provider } from "../provider/provider"
 import { NamedError } from "@opencode-ai/core/util/error"
+// altimate_change start — client-safe error responses
+import { unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
+// altimate_change end
 import { LSP } from "../lsp"
 import { Format } from "../format"
 import { TuiRoutes } from "./routes/tui"
@@ -275,6 +278,9 @@ export namespace Server {
           // server fault; without this it surfaced from /find as a 500.
           else if (err.name === "RipgrepInvalidPatternError") status = 400
           // altimate_change end
+          // altimate_change start — a remote the server depends on failed: 502, not a server fault.
+          else if (upstreamStatus(err.name)) status = 502
+          // altimate_change end
           else status = 500
           return c.json(err.toObject(), { status })
         }
@@ -286,15 +292,17 @@ export namespace Server {
           // altimate_change start — see above: an invalid search pattern is a client error.
           else if (err.name === "RipgrepInvalidPatternError") status = 400
           // altimate_change end
+          else if (upstreamStatus(err.name)) status = 502
           else status = 500
           return c.json(err.toObject(), { status })
         }
         // altimate_change end
         if (err instanceof HTTPException) return err.getResponse()
-        const message = err instanceof Error && err.stack ? err.stack : err.toString()
-        return c.json(new NamedError.Unknown({ message }).toObject(), {
+        // altimate_change start — never send an error's text or stack to the client: a fixed message and a ref, logged in full.
+        return c.json(unknownErrorBody(log, err), {
           status: 500,
         })
+        // altimate_change end
       })
       .use((c, next) => {
         // Allow CORS preflight requests to succeed without auth.

@@ -37,3 +37,12 @@ export const RemoteAuthError = NamedError.create("ConfigRemoteAuthError", {
   url: Schema.String,
   remote: Schema.String,
 })
+
+// altimate_change start — remote config that can't be fetched is the remote's failure: name it and its status, so the
+// server answers 502 with a short message instead of a 500 carrying a stack trace.
+export const RemoteUnavailableError = NamedError.create("ConfigRemoteUnavailableError", {
+  remote: Schema.String,
+  status: Schema.optional(Schema.Number),
+  reason: Schema.String,
+})
+// altimate_change end

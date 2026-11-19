@@ -30,7 +30,9 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
+// altimate_change start — typed remote-config failures
+import { RemoteAuthError, RemoteUnavailableError } from "@opencode-ai/core/v1/config/error"
+// altimate_change end
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
@@ -338,10 +340,25 @@ export const layer = Layer.effect(
           HttpClientRequest.get(url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers ?? {})),
         )
         .pipe(
-          Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
+          // altimate_change start — an unreachable or failing remote is reported by name and status (HTTP 502), not as
+          // an untyped defect whose stack the server used to send back in a 500.
+          Effect.catch((error) =>
+            Effect.die(
+              new RemoteUnavailableError({
+                remote: url,
+                status: error.reason._tag === "StatusCodeError" ? error.reason.response.status : undefined,
+                reason: error.reason._tag === "StatusCodeError" ? `HTTP ${error.reason.response.status}` : error.reason._tag,
+              }),
+            ),
+          ),
+          // altimate_change end
         )
       const body = yield* response.text.pipe(
-        Effect.catch((error) => Effect.die(new Error(`failed to read remote config from ${url}: ${String(error)}`))),
+        // altimate_change start — see above
+        Effect.catch((error) =>
+          Effect.die(new RemoteUnavailableError({ remote: url, status: response.status, reason: error.reason._tag })),
+        ),
+        // altimate_change end
       )
       // An auth proxy can answer with an HTML login page at HTTP 200 (passes filterStatusOk); treat it as a re-auth error, not a decode failure.
       const contentType = (response.headers["content-type"] ?? "").toLowerCase()
