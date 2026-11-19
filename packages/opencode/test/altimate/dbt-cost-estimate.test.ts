@@ -725,6 +725,26 @@ describe("follow-ups to the planner estimate", () => {
     expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 5 * 1024 ** 3 })
   })
 
+  test("a leaf with an inner plan but no size of its own is no estimate, not the inner plan's size", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Relation main.s.t[a#0] parquet",
+      ":  +- Relation main.s.u[a#1] parquet, Statistics(sizeInBytes=3.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ noStats: true, relation: "main.s.t", unread: true })
+  })
+
+  test("an EXPLAIN that rejects after its deadline changes nothing", async () => {
+    dbtCostEstimateInternals.explainTimeoutMs = 30
+    let reject!: (e: Error) => void
+    useAdapter(calls, { type: "snowflake", explain: () => new Promise<string>((_, r) => (reject = r)) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.title).toBe("dbt_cost_estimate: explain failed")
+    reject(new Error("late"))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(result.metadata.success).toBe(false)
+  })
+
   test("a node with a child and an inner plan is still not a leaf", () => {
     const plan = [
       "== Optimized Logical Plan ==",
