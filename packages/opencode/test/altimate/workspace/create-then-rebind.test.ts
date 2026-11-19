@@ -191,6 +191,19 @@ describe("CLI: createThenBindOrRebind", () => {
     expect(process.exitCode ?? 0).toBe(0)
   })
 
+  test("with no readable credential it creates nothing", async () => {
+    const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = ws.captureCredentials
+    ws.captureCredentials = async () => null
+    try {
+      await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", EXISTING)
+    } finally {
+      ws.captureCredentials = original
+    }
+    expect(sequence()).toEqual([])
+    expect(process.exitCode).toBe(1)
+  })
+
   test("the unbound create and its rebind both run as the credential the flow captured", async () => {
     routes = [
       { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
@@ -308,6 +321,20 @@ describe("TUI: createAndBindInline", () => {
       ws.rebindByRemote = original.rebind
     }
     expect(ranAs).toEqual(["create:acme", "rebind:acme"])
+  })
+
+  test("with no readable credential it creates nothing", async () => {
+    const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = ws.captureCredentials
+    ws.captureCredentials = async () => null
+    const { api, toasts } = stubApi()
+    try {
+      await createAndBindInline(api, IDENTIFIER, "proj", { expectedCurrentDatamateId: 3, matchedBy: "remote" })
+    } finally {
+      ws.captureCredentials = original
+    }
+    expect(sequence()).toEqual([])
+    expect(toasts.some((t) => t.variant === "error" && /nothing was created/.test(t.message))).toBe(true)
   })
 
   test("a create whose account is switched mid-request is not recorded under the next account", async () => {

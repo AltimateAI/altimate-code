@@ -612,10 +612,15 @@ export async function createThenBindOrRebind(
   // The create, the rebind that may follow, the local record and any error about them all use
   // this one credential. The memory seed and skill sync that follow the record use the current
   // one, and the record refuses if the account changed.
-  const createAs = (await WorkspaceApi.captureCredentials()) ?? undefined
+  const createAs = await WorkspaceApi.captureCredentials()
+  if (!createAs) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was created. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   // Re-checked before the rebind: the rebind is refused if the signed-in account changed since,
   // since the user would not find the link on the account they are on now.
-  const account = createAs ? { apiUrl: createAs.url, tenant: createAs.instance } : null
+  const account = { apiUrl: createAs.url, tenant: createAs.instance }
   try {
     // Two different creates, because the server offers two different things.
     //
