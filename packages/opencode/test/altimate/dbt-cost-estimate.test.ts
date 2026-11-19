@@ -885,7 +885,7 @@ describe("review follow-ups, round eight", () => {
   })
 
   test("both checks read the SQL the same way: one scan", () => {
-    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  " })
+    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  ", literals: [], calls: 0 })
     expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
   })
 })
@@ -993,5 +993,110 @@ describe("review follow-ups, round twelve", () => {
       expect(local.queries).toEqual([])
       expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
     }
+  })
+})
+
+describe("IDENTIFIER() on Databricks", () => {
+  test.each([
+    "SELECT * FROM IDENTIFIER('read_files')('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('system.builtin.read_files')('s3://b/x')",
+    "SELECT * FROM IDENTIFIER('json.`/Volumes/c/s/v/raw`')",
+    "select * from identifier ( 'READ_FILES' ) ('/x')",
+    "select * from IDENTIFIER(\"Cloud_Files\")('/x')",
+    "select * from IDENTIFIER('system . builtin . `read_files`')('/x')",
+    "select * from IDENTIFIER /* c */ ( /* d */ 'CSV.`/x`')",
+    "select * from IDENTIFIER('`parquet`.`s3://b/x`')",
+    "select * from IDENTIFIER('read' || '_files')('/x')",
+    "select * from IDENTIFIER('read_' '' 'files')('/x')",
+    "select * from IDENTIFIER(:tbl)",
+    "select * from IDENTIFIER(concat('json.`', :p, '`'))",
+    "select * from IDENTIFIER(tbl_var)",
+    "select * from IDENTIFIER('cat.sch.tbl') a join IDENTIFIER(:other) b on a.id = b.id",
+    "select * from IDENTIFIER('read\\_files')('/x')",
+    "SELECT * FROM IDENTIFIER(IDENTIFIER('lower')('READ_FILES'))('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER( IDENTIFIER('concat')('read_', 'files'))('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('read_files /* c */')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('read_files/**/')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('json/**/.`/Volumes/c/s/v/raw`')",
+    "SELECT * FROM IDENTIFIER('read_files -- c\n')('/x')",
+    "SELECT * FROM system.builtin.IDENTIFIER('read_files')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM json.IDENTIFIER('`/Volumes/c/s/v/raw`')",
+    "SELECT * FROM IDENTIFIER('json').`data.json`",
+    "SELECT * FROM IDENTIFIER('json') . `data`",
+    "SELECT * FROM IDENTIFIER('\"read_files\"')('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER(\"fn\")('/Volumes/c/s/v/raw')",
+    "SELECT * FROM \u0131DENTIFIER('read_files')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER(\"IDENTIFIER('read_files')\")('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('identifier(''x'')')('/x')",
+    "SELECT * FROM IDENTIFIER('read_' /*a*/ || 'files' /*b*/)('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('`j\u017fon`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('${hiveconf:source}')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('json.raw')",
+    "SELECT * FROM IDENTIFIER(' CSV . raw')",
+    "SELECT \u017fIDENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+    "SELECT \u0131DENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+    "SELECT * FROM IDENTIFIER('`org.apache.spark.sql.json.DefaultSource`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('`org.apache.spark.sql.json.DefaultSource`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('a.b.c.d')",
+    "SELECT * FROM IDENTIFIER('js' /*a*/ || 'on.`/Volumes/c/s/v/raw`' /*b*/)",
+    "SELECT 1 AS `\u00df\u00df\u00df`, XIDENTIFIER('safe') AS n FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+  ])("%p may read files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "select * from IDENTIFIER('cat.sch.tbl')",
+    "select * from identifier ( 'cat.sch.tbl' ) t where t.x = 'read_files'",
+    "select IDENTIFIER('col') from main.sales.orders",
+    "select * from IDENTIFIER('main.json.t')",
+    "select * from `identifier`('x')",
+    "SELECT `note identifier(x)` FROM main.sales.orders",
+    `select * from IDENTIFIER${" ".repeat(120)}( 'cat.sch.tbl' )`,
+    "select * from IDENTIFIER('main.analytics.identifier_map')",
+    "SELECT 1 AS `\u00df\u00df`, XIDENTIFIER('safe') AS n FROM main.sales.orders",
+  ])("%p reads tables", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test.each([
+    ["SELECT * FROM IDENTIFIER('system.builtin.read_files')('s3://b/x')", false],
+    ["SELECT * FROM IDENTIFIER(:tbl)", false],
+    ["SELECT * FROM IDENTIFIER('cat.sch.tbl')", true],
+  ])("%p: EXPLAIN sent is %p", async (compiled, explained) => {
+    useAdapter(calls, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries.length > 0).toBe(explained)
+  })
+
+  test("repeated comments before a concatenation scan in linear time", () => {
+    const sql = "SELECT * FROM IDENTIFIER('read_' " + "/**/".repeat(30) + " || 'files')('/Volumes/c/s/v/raw')"
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(true)
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+
+  test("adjacent ordinary literals scan in linear time", () => {
+    const sql = "SELECT " + "'a' ".repeat(64000) + "FROM main.s.t"
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("an unbalanced backtick over many slashes scans in linear time", () => {
+    const started = performance.now()
+    expect(readsFiles("SELECT * FROM IDENTIFIER('`" + "/".repeat(128000) + "')")).toBe(true)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("many ordinary literals scan in linear time", () => {
+    const sql = `select ${Array.from({ length: 20000 }, (_, n) => `'v${n}'`).join(", ")} from main.s.t`
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("leaves Snowflake and BigQuery alone", async () => {
+    expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").literals).toEqual([])
+    expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").calls).toBe(0)
   })
 })

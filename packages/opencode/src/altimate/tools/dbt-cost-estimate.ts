@@ -163,6 +163,9 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
   return { bytes: Math.round(bytes) }
 }
 
+/** The data source formats Spark reads a path with (`json.`/path``). */
+const FILE_FORMATS = "json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image"
+
 /**
  * Whether a Databricks query reads files rather than tables (read_files, cloud_files, a path such as json.`…`):
  * planning one can read the files to infer their schema. Read on the code `scanSql` leaves (comments and quoted text
@@ -170,15 +173,38 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
  * does not read counts.
  */
 export function readsFiles(sql: string): boolean {
-  const { script, code } = scanSql(sql, "databricks")
+  const { script, code, literals, calls } = scanSql(sql, "databricks")
   if (script) return true
+  if (fileSource(code)) return true
+  // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: allow a lone string literal
+  // that is a plain table name, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
+  // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
+  const bare = code.replace(/`[^`]*`/g, " ").toUpperCase()
+  // A qualified clause (system.builtin.IDENTIFIER('read_files')) or one a name continues past (IDENTIFIER('json').`p`)
+  // is assembled from parts this does not read.
+  if (/\.\s*IDENTIFIER\s*\(/.test(bare) || /IDENTIFIER\s*\(\s*\u0000\s*\)\s*\./.test(bare)) return true
+  let plain = 0
+  const format = new RegExp(`^(${FILE_FORMATS})$`, "i")
+  for (const lit of literals) {
+    plain++
+    // Only a plain dotted name of up to three parts is a table: anything quoted, escaped, commented, substituted,
+    // non-ASCII or longer is not read (Spark resolves it by rules this does not model), nor is a read_files or
+    // cloud_files part, or a format before the path (json.raw).
+    const parts = lit.text.split(".")
+    if (parts.length > 3 || !parts.every((part) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) return true
+    if (parts.some((part) => /^(read_files|cloud_files)$/i.test(part)) || format.test(parts[0])) return true
+  }
+  return calls > plain
+}
+
+/** Whether code (as `scanSql` leaves it) names a file source: a read_files or cloud_files call, a format or path over backticks. */
+function fileSource(code: string): boolean {
   // A function call, qualified or not (system.builtin.read_files).
   if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(/i.test(code)) return true
   // A known format over any backtick-quoted name, unless the format word is the middle of a dotted name (main.json.`t`).
   // Where a relation goes cannot be told from a column without parsing (FROM (json.`x`), FROM`json`.`x`), so a
   // column qualified by an alias named like a format (json.`order-id`) is refused too: no estimate, never a missed read.
-  const formats = "json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image"
-  if (new RegExp(`(?:(^|[^a-z0-9_.\`])(${formats})|(^|[^.\`])\`(${formats})\`)\\s*\\.\\s*\``, "i").test(code)) return true
+  if (new RegExp(`(?:(^|[^a-z0-9_.\`])(${FILE_FORMATS})|(^|[^.\`])\`(${FILE_FORMATS})\`)\\s*\\.\\s*\``, "i").test(code)) return true
   // Any backtick-quoted name that looks like a path ("/" or ":", as in s3://…, dbfs:/…, /Volumes/…), whatever the source
   // before it (a format, a provider class) or a doubled backtick inside it, unless it directly follows Delta's own
   // provider: a source over files can infer its schema from them.
@@ -222,16 +248,26 @@ export function mayBeScript(input: string, type: string): boolean {
 
 /**
  * The one reading of the SQL both checks share: whether it may be a script (see `mayBeScript`), and its code with
- * comments and quoted text as spaces and Databricks' backtick-quoted names kept as written.
+ * comments and quoted text as spaces and Databricks' backtick-quoted names kept as written, and (Databricks) the lone
+ * string literals an IDENTIFIER( call holds.
  */
-export function scanSql(input: string, type: string): { script: boolean; code: string } {
-  const script = { script: true, code: "" }
+export function scanSql(input: string, type: string): { script: boolean; code: string; literals: { text: string }[]; calls: number } {
+  const script = { script: true, code: "", literals: [], calls: 0 }
   // Read with the line breaks Jinja renders: every \r\n and lone \r is \n.
   const sql = input.replace(/\r\n?/g, "\n")
   const databricks = type === "databricks"
   // The Snowflake splitter yields a line starting with "!" as a command of its own, wherever it sits: never read.
   if (!databricks && /(^|\n)!/.test(sql)) return script
   let code = ""
+  // The last of `code` with its whitespace collapsed to one space: what an IDENTIFIER( call is read from.
+  let tail = ""
+  const emit = (text: string) => {
+    code += text
+    tail = (tail + text.slice(-40)).replace(/\s+/g, " ").slice(-40)
+  }
+  // Databricks: the text of each string literal that opens an IDENTIFIER( call, and where it sits in `code`.
+  const literals: { text: string }[] = []
+  let calls = 0
   // Past a semicolon only whitespace and comments may follow: anything else, quoted or not, is a second statement.
   let ended = false
   let i = 0
@@ -244,7 +280,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       if (databricks && end >= 0 && sql[end - 1] === "\\") return script
       if (end < 0) break
       i = end + 1
-      code += " "
+      emit(" ")
       continue
     }
     if (two === "/*") {
@@ -253,7 +289,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       // The closer's star counts too: in "/*/*/" an opener overlaps it.
       if (end < 0 || sql.slice(i + 2, end + 1).includes("/*")) return script
       i = end + 2
-      code += " "
+      emit(" ")
       continue
     }
     if (two === "$$" || (!databricks && two === "//")) return script
@@ -269,15 +305,52 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       let j = i + 1
       while (j < sql.length && sql[j] !== close) j += escapes && sql[j] === "\\" ? 2 : 1
       if (j >= sql.length) return script
+      let blank = " "
+      // Only a single-quoted string is a literal name: "…" may be a quoted identifier or a variable.
+      if (databricks && c !== "`" && opensIdentifier(tail)) {
+        // Marked, so a second literal after it does not read as the call's first.
+        blank = "\u0000"
+        // Only a literal the call's parenthesis closes is plain: a following literal, operator or name is not.
+        if (c === "'" && closesCall(sql, j + 1)) literals.push({ text: sql.slice(i + 1, j) })
+      }
       // A backtick-quoted name is code; quoted text is not.
-      code += c === "`" ? sql.slice(i, j + 1) : " "
+      emit(c === "`" ? sql.slice(i, j + 1) : blank)
       i = j + 1
       continue
     }
-    code += c
+    emit(c)
+    if (databricks && c === "(" && opensIdentifier(tail)) calls++
     i++
   }
-  return { script: /\bexecute\s+immediate\b/i.test(code), code }
+  return { script: /\bexecute\s+immediate\b/i.test(code), code, literals, calls }
+}
+
+/** Whether `tail` (the last of `scanSql`'s code, whitespace collapsed to one space) ends in `IDENTIFIER(`. */
+function opensIdentifier(tail: string): boolean {
+  let t = tail.replace(/ $/, "")
+  if (!t.endsWith("(")) return false
+  t = t.slice(0, -1).replace(/ $/, "")
+  // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
+  if (t.length < 10 || t.slice(-10).toUpperCase() !== "IDENTIFIER") return false
+  return t.length === 10 || !/[A-Za-z0-9_$]/.test(t[t.length - 11])
+}
+
+/** Whether, past whitespace and comments, the next character of `sql` from `at` is `)`. One pass, no backtracking. */
+function closesCall(sql: string, at: number): boolean {
+  let i = at
+  while (i < sql.length) {
+    if (/\s/.test(sql[i])) i++
+    else if (sql.startsWith("--", i)) {
+      const end = sql.indexOf("\n", i)
+      if (end < 0) return false
+      i = end + 1
+    } else if (sql.startsWith("/*", i)) {
+      const end = sql.indexOf("*/", i + 2)
+      if (end < 0) return false
+      i = end + 2
+    } else return sql[i] === ")"
+  }
+  return false
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
