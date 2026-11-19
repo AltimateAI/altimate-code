@@ -15,9 +15,13 @@
  * what the model reads. */
 export const MAX_WORKSPACE_NAME_CHARS = 80
 export function inertWorkspaceName(name: string): string {
-  const cleaned = oneLine(name)
-  const points = Array.from(cleaned)
-  return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
+  return clipCodePoints(oneLine(name), MAX_WORKSPACE_NAME_CHARS)
+}
+
+/** `text` cut to at most `max` code points, ending in "…" when cut. Never splits a surrogate pair. */
+function clipCodePoints(text: string, max: number): string {
+  const points = Array.from(text)
+  return points.length > max ? points.slice(0, max - 1).join("") + "…" : text
 }
 
 /** The rendered label — quoted name plus id — after JSON escaping, budgeted on that
@@ -84,10 +88,7 @@ export const MAX_MESSAGE_VALUE_CHARS = 254
 /** Server-sourced text placed inside a message: on one line, no control or bidi characters,
  * and clipped so a bad value cannot flood a toast or a terminal line. */
 export function inertMessageValue(text: string): string {
-  const points = Array.from(oneLine(stripBidiControls(text)))
-  return points.length > MAX_MESSAGE_VALUE_CHARS
-    ? points.slice(0, MAX_MESSAGE_VALUE_CHARS - 1).join("") + "…"
-    : points.join("")
+  return clipCodePoints(oneLine(stripBidiControls(text)), MAX_MESSAGE_VALUE_CHARS)
 }
 
 /** A workspace name as a dialog shows it: inert, and with no bidi controls. */
