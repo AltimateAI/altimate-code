@@ -102,7 +102,7 @@ export function parseSnowflakeExplain(content: unknown): PlanEstimate | undefine
   if (bytes === undefined) return undefined
   const partitionsAssigned = count(stats.partitionsAssigned)
   const partitionsTotal = count(stats.partitionsTotal)
-  // A total of 0 beside a scan (or with no operations to read), or a scan of an external table or stage, or one with no
+  // A total of 0 beside a scan (or with no operations to read), or a scan of an external table or stage, a secure view (its scanned size is hidden), or one with no
   // size of its own, may leave data out of it. A 0 with no scan at all is a query that reads nothing.
   const operations = (plan as { Operations?: unknown }).Operations
   const scans = (Array.isArray(operations) ? operations.flat(2) : []).filter(
@@ -110,7 +110,7 @@ export function parseSnowflakeExplain(content: unknown): PlanEstimate | undefine
   )
   const unsized =
     (bytes === 0 && (!Array.isArray(operations) || scans.some((op) => /scan/i.test(op.operation)))) ||
-    scans.some((op) => /external|stage/i.test(op.operation) || (/scan/i.test(op.operation) && count(op.bytesAssigned) === undefined))
+    scans.some((op) => /external|stage|secure/i.test(op.operation) || (/scan/i.test(op.operation) && count(op.bytesAssigned) === undefined))
   return {
     bytes: Math.round(bytes),
     ...(unsized && { unsized: true as const }),
