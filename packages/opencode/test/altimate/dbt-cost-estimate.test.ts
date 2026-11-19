@@ -923,3 +923,27 @@ describe("review follow-ups, round nine", () => {
     }
   })
 })
+
+describe("review follow-ups, round ten", () => {
+  test.each([
+    "SELECT * FROM `org.apache.spark.sql.json.DefaultSource`.`/Volumes/c/s/v/raw`",
+    "SELECT * FROM `org.apache.spark.sql.execution.datasources.json.JsonFileFormat`.`/Volumes/c/s/v/raw`",
+    "SELECT * FROM somefmt.`prefix``/raw`",
+    "SELECT * FROM delta.`a``/b`",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("Delta's own provider over a path is still a table", () => {
+    expect(readsFiles("SELECT * FROM `delta`.`/Volumes/c/s/v/t`")).toBe(false)
+    expect(readsFiles("SELECT * FROM delta . `s3://bucket/t`")).toBe(false)
+  })
+
+  test("a provider class name over a path never reaches the EXPLAIN", async () => {
+    const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+    useAdapter(local, { type: "databricks", compile: async () => "SELECT * FROM `org.apache.spark.sql.json.DefaultSource`.`/Volumes/c/s/v/raw`", explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(local.queries).toEqual([])
+    expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+  })
+})

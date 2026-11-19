@@ -173,9 +173,11 @@ export function readsFiles(sql: string): boolean {
   const { script, code } = scanSql(sql, "databricks")
   if (script) return true
   if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image)`?\s*\.\s*`/i.test(code)) return true
-  // Any other source over a path (`provider`.`/a/path`, s3://…, dbfs:/…), Delta's log aside: its schema can come from the files too.
-  for (const match of code.matchAll(/(^|[^a-z0-9_.`])`?([a-z_][a-z0-9_]*)`?\s*\.\s*`([^`]*)`/gi)) {
-    if (match[2].toLowerCase() !== "delta" && /[/:]/.test(match[3])) return true
+  // Any backtick-quoted name that looks like a path ("/" or ":", as in s3://…, dbfs:/…, /Volumes/…), whatever the source
+  // before it (a format, a provider class) or a doubled backtick inside it, unless it follows Delta's own provider:
+  // a source over files can infer its schema from them.
+  for (const match of code.matchAll(/`[^`]*`/g)) {
+    if (/[/:]/.test(match[0]) && !/(^|[^a-z0-9_.`])`?delta`?\s*\.\s*$/i.test(code.slice(0, match.index))) return true
   }
   return false
 }
