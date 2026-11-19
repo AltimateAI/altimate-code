@@ -146,13 +146,90 @@ function nameMatches(list: CteInfo[], typed: string): CteInfo[] {
   return exact.length > 0 ? exact : list.filter((c) => bareName(c.name).toLowerCase() === typed.toLowerCase())
 }
 
+/** Test seams. */
+export const dbtCteProfileInternals = {
+  /** The trivial query whose time through dbt stands for dbt's own start-up, when dbt reports no timing. */
+  baselineQuery: "select 1 as _profile_baseline",
+}
+
+/** Per adapter: how long a trivial query takes through it, dbt's start-up with next to no warehouse work. */
+const baselines = new WeakMap<object, Promise<number | undefined>>()
+
+/** A dbt timestamp in ms; dbt writes UTC, with or without the zone. */
+function utc(value: unknown): number {
+  if (typeof value !== "string" || !value) return NaN
+  return Date.parse(/(Z|[+-]\d\d:?\d\d)$/i.test(value) ? value : `${value}Z`)
+}
+
+/** The run_results.json dbt wrote for the count query, as the warehouse time of its execute step, in ms. */
+export function dbtQueryMs(targetDir: string, startedAt: number, compiledSql?: unknown): number | undefined {
+  let raw: any
+  try {
+    raw = JSON.parse(fs.readFileSync(path.join(targetDir, "run_results.json"), "utf-8"))
+  } catch {
+    return undefined
+  }
+  // Only the file this call's command wrote: a later start than the call, a `show`, one inline node,
+  // and its compiled SQL inside what the adapter ran, when it says (another command may have run meanwhile).
+  const invoked = utc(raw?.metadata?.invocation_started_at ?? raw?.metadata?.generated_at)
+  if (!Number.isFinite(invoked) || invoked < startedAt) return undefined
+  if (raw?.args?.which !== undefined && raw.args.which !== "show") return undefined
+  const results = Array.isArray(raw?.results) ? raw.results : []
+  if (results.length !== 1) return undefined
+  const node = results[0]
+  // The adapter's SQL is what ran: the node's compiled code inside dbt's query comment and limit.
+  if (typeof compiledSql === "string" && typeof node?.compiled_code === "string" && !compiledSql.includes(node.compiled_code.trim())) return undefined
+  const execute = Array.isArray(node?.timing) ? node.timing.find((t: any) => t?.name === "execute") : undefined
+  const span = utc(execute?.completed_at) - utc(execute?.started_at)
+  if (Number.isFinite(span) && span >= 0) return Math.round(span)
+  return typeof node?.execution_time === "number" && node.execution_time >= 0 ? Math.round(node.execution_time * 1000) : undefined
+}
+
+type QueryTime = { source: "dbt" | "baseline" | "wall"; queryMs: number; startupMs?: number }
+
+/**
+ * The count query's time on the warehouse, without dbt's start-up, which a command-line dbt pays on every
+ * query (seconds, against milliseconds for a small CTE). First dbt's own timing of the query, from the
+ * run_results.json it wrote; else the call's time less a trivial query's time through the same adapter,
+ * measured once per adapter; else the call's time as is.
+ */
+async function queryTime(adapter: any, call: { startedAt: number; totalMs: number; compiledSql?: unknown }, ctx: Pick<Tool.Context, "abort" | "sessionID">): Promise<QueryTime> {
+  const dir = typeof adapter.getTargetPath === "function" ? adapter.getTargetPath() : undefined
+  const fromDbt = typeof dir === "string" && dir ? dbtQueryMs(dir, call.startedAt, call.compiledSql) : undefined
+  if (fromDbt !== undefined) return { source: "dbt", queryMs: Math.min(fromDbt, call.totalMs) }
+  let baseline = baselines.get(adapter)
+  if (!baseline) {
+    baseline = (async () => {
+      const started = performance.now()
+      try {
+        await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
+          adapter.immediatelyExecuteSQLWithLimit(dbtCteProfileInternals.baselineQuery, "", 1),
+        )
+        return Math.round(performance.now() - started)
+      } catch {
+        return undefined
+      }
+    })()
+    baselines.set(adapter, baseline)
+  }
+  const startupMs = await baseline
+  // A failed or cancelled measurement is not kept: the next call measures again.
+  if (startupMs === undefined) {
+    baselines.delete(adapter)
+    ctx.abort.throwIfAborted()
+    return { source: "wall", queryMs: call.totalMs }
+  }
+  const startup = Math.min(startupMs, call.totalMs)
+  return { source: "baseline", queryMs: call.totalMs - startup, startupMs: startup }
+}
+
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
   return { title: `dbt_cte_profile: ${title}`, metadata: { success: false, error: output, ...extra }, output }
 }
 
 export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
   description:
-    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the elapsed milliseconds and the row count; that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE whose count query reads is_incremental() or this, in its own SQL, an earlier CTE or the model header, is not run, because the count runs outside the model. Macros the query calls are not opened: one that reads is_incremental() inside is not caught, so treat the count of such a model as a full-history count.",
+    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the row count and the query's milliseconds on the warehouse (`queryMs`): dbt's own timing of the query's execute step where dbt reports one (run_results.json), else the call's time less that of a trivial query through dbt, so a command-line dbt's start-up of a second or more per query is not counted; `totalMs` is the whole call, start-up included, and `timing` says which measure `queryMs` is (dbt, baseline, or wall when neither was available); that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE whose count query reads is_incremental() or this, in its own SQL, an earlier CTE or the model header, is not run, because the count runs outside the model. Macros the query calls are not opened: one that reads is_incremental() inside is not caught, so treat the count of such a model as a full-history count.",
   parameters: z.object({
     model: z
       .string()
@@ -249,18 +326,38 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     if (!access.adapter) return failure("not run", access.reason ?? "the dbt adapter is not available", { model: args.model, cte: name, refusal: access.refusal })
     const adapter = access.adapter
     ctx.abort.throwIfAborted()
+    const startedAt = Date.now()
     const started = performance.now()
     try {
       // The adapter has no cancel of its own: the run's timeout, budget and abort end the wait, not the query.
-      const result: { data?: Record<string, unknown>[] } = await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
+      const result: { data?: Record<string, unknown>[]; compiledSql?: unknown } = await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
         adapter.immediatelyExecuteSQLWithLimit(query, path.basename(modelPath, ".sql"), 1),
       )
-      const queryMs = Math.round(performance.now() - started)
+      const totalMs = Math.round(performance.now() - started)
       const rows = extractRowCount(result?.data)
+      const timing = await queryTime(adapter, { startedAt, totalMs, compiledSql: result?.compiledSql }, ctx)
+      const rowText = `${rows} row${rows === 1 ? "" : "s"}`
+      const output =
+        timing.source === "dbt"
+          ? `${name}: ${timing.queryMs} ms on the warehouse (dbt's own timing of the query), ${rowText}; ${totalMs} ms in all with dbt's start-up`
+          : timing.source === "baseline"
+            ? `${name}: ${timing.queryMs} ms on the warehouse (${totalMs} ms in all, less ${timing.startupMs} ms that a trivial query takes through dbt), ${rowText}`
+            : `${name}: ${totalMs} ms, ${rowText} (dbt's start-up included: no query timing of its own was available)`
       return {
-        title: `dbt_cte_profile: ${name} ${queryMs} ms`,
-        metadata: { success: true, model: args.model, cte: name, index: target.index, position: ctes.indexOf(target), queryMs, rows },
-        output: `${name}: ${queryMs} ms, ${rows} row${rows === 1 ? "" : "s"}`,
+        title: `dbt_cte_profile: ${name} ${timing.queryMs} ms`,
+        metadata: {
+          success: true,
+          model: args.model,
+          cte: name,
+          index: target.index,
+          position: ctes.indexOf(target),
+          queryMs: timing.queryMs,
+          totalMs,
+          timing: timing.source,
+          ...(timing.startupMs !== undefined && { startupMs: timing.startupMs }),
+          rows,
+        },
+        output,
       }
     } catch (e) {
       if (ctx.abort.aborted) throw e

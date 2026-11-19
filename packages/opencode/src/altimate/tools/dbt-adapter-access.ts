@@ -55,7 +55,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
     return value
   }
   try {
-    const { getDbtAdapter, getDbtProjectRoot } = await bounded(import("../native/connections/register"))
+    const { getDbtAdapter, getDbtProjectRoot, getDbtPythonPath } = await bounded(import("../native/connections/register"))
     const project = await bounded(sessionProject())
     if (project?.other) {
       return {
@@ -71,7 +71,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
       const root = await bounded(getDbtProjectRoot())
       const found = !!root && fs.existsSync(path.join(root, "dbt_project.yml"))
       return found
-        ? { refusal: "not_started", reason: "the dbt adapter didn't start" }
+        ? { refusal: "not_started", reason: `the dbt adapter didn't start${pythonHint(getDbtPythonPath())}` }
         : { refusal: "no_project", reason: "no dbt project here" }
     }
     if (project?.root) {
@@ -84,7 +84,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
         }
     }
     if (adapter.isInitialized?.() === false)
-      return { refusal: "not_loaded", reason: "the dbt adapter didn't load the project" }
+      return { refusal: "not_loaded", reason: `the dbt adapter didn't load the project${pythonHint(getDbtPythonPath())}` }
     return { adapter }
   } catch (e) {
     if (signal.aborted) throw e
@@ -93,6 +93,15 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
     signal.removeEventListener("abort", stop)
     clearTimeout(timer)
   }
+}
+
+/**
+ * How to fix an adapter that didn't start or load, which is most often dbt missing from the Python it was
+ * started with. The adapter is kept for the life of the process, so the fix takes effect in a new one.
+ */
+function pythonHint(python: string | undefined): string {
+  const which = python ? ` (${python})` : ""
+  return `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json) and start a new session, or run \`altimate-code tool daemon stop\` for the \`tool run\` daemon`
 }
 
 /** `p` with its links resolved, or as given when it can't be. */
