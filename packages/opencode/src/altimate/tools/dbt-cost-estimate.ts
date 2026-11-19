@@ -165,15 +165,14 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
 
 /**
  * Whether a Databricks query reads files rather than tables (read_files, cloud_files, a path such as json.`…`):
- * planning one can read the files to infer their schema. Read on the text with its comments as spaces (quoted text
- * kept, so a comment marker inside it stays) and any spacing between the name and what follows; the names may be
- * backtick-quoted. Called once `mayBeScript` has passed: every quote and comment is closed and none nests.
+ * planning one can read the files to infer their schema. Read on the code `scanSql` leaves (comments and quoted text
+ * as spaces, backtick-quoted names kept), with any spacing between a name and what follows. Anything the scanner
+ * does not read counts.
  */
 export function readsFiles(sql: string): boolean {
-  const bare = sql
-    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`|--[^\n]*|\/\*[\s\S]*?\*\//g, (token) => (token.startsWith("--") || token.startsWith("/*") ? " " : token))
-    .toLowerCase()
-  return /(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml)`?\s*\.\s*`/.test(bare)
+  const { script, code } = scanSql(sql, "databricks")
+  if (script) return true
+  return /(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml)`?\s*\.\s*`/i.test(code)
 }
 
 /**
@@ -207,11 +206,20 @@ export function explainJinja(explain: string, sql: string): string {
  * comments, an unclosed quote or comment, EXECUTE IMMEDIATE) counts as a script, as does a semicolon with anything but whitespace after it: a doubt is no estimate, never a run.
  */
 export function mayBeScript(input: string, type: string): boolean {
+  return scanSql(input, type).script
+}
+
+/**
+ * The one reading of the SQL both checks share: whether it may be a script (see `mayBeScript`), and its code with
+ * comments and quoted text as spaces and Databricks' backtick-quoted names kept as written.
+ */
+export function scanSql(input: string, type: string): { script: boolean; code: string } {
+  const script = { script: true, code: "" }
   // Read with the line breaks Jinja renders: every \r\n and lone \r is \n.
   const sql = input.replace(/\r\n?/g, "\n")
   const databricks = type === "databricks"
   // The Snowflake splitter yields a line starting with "!" as a command of its own, wherever it sits: never read.
-  if (!databricks && /(^|\n)!/.test(sql)) return true
+  if (!databricks && /(^|\n)!/.test(sql)) return script
   let code = ""
   // Past a semicolon only whitespace and comments may follow: anything else, quoted or not, is a second statement.
   let ended = false
@@ -230,15 +238,15 @@ export function mayBeScript(input: string, type: string): boolean {
       const end = sql.indexOf("*/", i + 2)
       // Databricks nests block comments, and an unclosed one hides the rest: neither is read, on either warehouse.
       // The closer's star counts too: in "/*/*/" an opener overlaps it.
-      if (end < 0 || sql.slice(i + 2, end + 1).includes("/*")) return true
+      if (end < 0 || sql.slice(i + 2, end + 1).includes("/*")) return script
       i = end + 2
       code += " "
       continue
     }
-    if (two === "$$" || (!databricks && two === "//")) return true
+    if (two === "$$" || (!databricks && two === "//")) return script
     // Databricks raw strings (r'…', R"…") do not escape with a backslash: not read.
-    if (databricks && /[rR]/.test(c) && /['"]/.test(sql[i + 1] ?? "") && !/[A-Za-z0-9_]/.test(sql[i - 1] ?? "")) return true
-    if (ended && !/[\s;]/.test(c)) return true
+    if (databricks && /[rR]/.test(c) && /['"]/.test(sql[i + 1] ?? "") && !/[A-Za-z0-9_]/.test(sql[i - 1] ?? "")) return script
+    if (ended && !/[\s;]/.test(c)) return script
     if (c === ";") ended = true
     const close = c === "'" || c === '"' || (databricks && c === "`") ? c : null
     if (close) {
@@ -247,15 +255,16 @@ export function mayBeScript(input: string, type: string): boolean {
       const escapes = c !== "`"
       let j = i + 1
       while (j < sql.length && sql[j] !== close) j += escapes && sql[j] === "\\" ? 2 : 1
-      if (j >= sql.length) return true
+      if (j >= sql.length) return script
+      // A backtick-quoted name is code; quoted text is not.
+      code += c === "`" ? sql.slice(i, j + 1) : " "
       i = j + 1
-      code += " "
       continue
     }
     code += c
     i++
   }
-  return /\bexecute\s+immediate\b/i.test(code)
+  return { script: /\bexecute\s+immediate\b/i.test(code), code }
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */

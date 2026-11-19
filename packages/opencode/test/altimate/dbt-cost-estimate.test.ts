@@ -15,6 +15,7 @@ import {
   mayBeScript,
   parseBytesProcessed,
   readsFiles,
+  scanSql,
   parseDatabricksExplainCost,
   parseSnowflakeExplain,
   untilAbort,
@@ -859,5 +860,32 @@ describe("review follow-ups, round seven", () => {
       expect(local.queries).toEqual([])
       expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
     }
+  })
+})
+
+describe("review follow-ups, round eight", () => {
+  const escapedNewline = [
+    "WITH unused AS (SELECT 'a\\\n-- x' AS s) SELECT * FROM read_files('/x')",
+    "SELECT length('a\\\n--') AS n, * FROM read_files('/x', format => 'json')",
+  ]
+
+  test.each(escapedNewline)("a backslash before a line break stays inside the text: %p reads files", (sql) => {
+    expect(mayBeScript(sql, "databricks")).toBe(false)
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("so it never reaches the EXPLAIN", async () => {
+    for (const compiled of escapedNewline) {
+      const local: Calls = { nodes: [], queries: [], dryRuns: [] }
+      useAdapter(local, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(local.queries).toEqual([])
+      expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
+    }
+  })
+
+  test("both checks read the SQL the same way: one scan", () => {
+    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  " })
+    expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
   })
 })
