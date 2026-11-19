@@ -81,6 +81,69 @@ describe("EXPLAIN with options", () => {
     }
   })
 
+  test("Postgres option lists accept only documented options", () => {
+    for (const options of ["(BOGUS TRUE)", "(ANALYZE, (FORMAT JSON)", "(FORMAT XML2)", "(ANALYZE,)", "()", "(ANALYZE) (VERBOSE)"]) {
+      expect(type(`EXPLAIN ${options} SELECT 1`, "postgres")).toBe("write")
+    }
+    for (const options of ["(ANALYZE TRUE, BUFFERS off, SERIALIZE BINARY, FORMAT YAML)", "( analyze , format json )"]) {
+      expect(type(`EXPLAIN ${options} SELECT 1`, "postgres")).toBe("read")
+    }
+    expect(type("EXPLAIN(FORMAT JSON)SELECT 1", "postgres")).toBe("read")
+    expect(type("EXPLAIN(FORMAT JSON)DELETE FROM t", "postgres")).toBe("write")
+  })
+
+  test("EXPLAIN (ANALYZE) of a write stays a write", () => {
+    for (const sql of [
+      "EXPLAIN (ANALYZE) DELETE FROM t",
+      "EXPLAIN (ANALYZE TRUE, FORMAT JSON) UPDATE t SET a = 1",
+      "EXPLAIN (ANALYZE) INSERT INTO t SELECT 1",
+      "EXPLAIN (ANALYZE) SELECT 1 INTO t2",
+      "EXPLAIN (ANALYZE) WITH a AS (DELETE FROM t RETURNING *) SELECT * FROM a",
+      "EXPLAIN(ANALYZE)DELETE FROM t",
+    ]) {
+      expect(type(sql, "postgres")).toBe("write")
+    }
+  })
+
+  test("a parenthesized option list is not an option outside Postgres", () => {
+    for (const dialect of ["snowflake", "mysql", "bigquery", "sqlserver", "databricks", "redshift", "duckdb"]) {
+      for (const options of ["(FORMAT JSON)", "(BOGUS TRUE)", "(ANALYZE)"]) {
+        expect(type(`EXPLAIN ${options} SELECT 1`, dialect)).toBe("write")
+      }
+    }
+    expect(type("EXPLAIN (FORMAT JSON) SELECT 1", undefined as unknown as string)).toBe("write")
+  })
+
+  test("nested optioned EXPLAIN is a write", () => {
+    expect(type("EXPLAIN USING JSON EXPLAIN USING JSON SELECT 1", "snowflake")).toBe("write")
+    expect(type("EXPLAIN COST EXPLAIN COST SELECT 1", "databricks")).toBe("write")
+    expect(type("EXPLAIN (FORMAT JSON) EXPLAIN (FORMAT JSON) SELECT 1", "postgres")).toBe("write")
+  })
+
+  test("statements after text the lexer reads as a comment are not hidden from the parser", () => {
+    for (const dialect of ["databricks", "spark", "hive"]) {
+      for (const quote of ["$$", "$t$"]) {
+        const literal = `${quote}--${quote}`
+        expect(type(`EXPLAIN COST SELECT ${literal} AS a; DELETE FROM t`, dialect)).toBe("write")
+        expect(type(`EXPLAIN SELECT ${literal} AS a; DELETE FROM t`, dialect)).toBe("write")
+      }
+    }
+    expect(type("EXPLAIN COST SELECT 1 -- note; not a statement", "databricks")).toBe("read")
+  })
+
+  test("a long option list is classified in linear time", () => {
+    for (const filler of [" ", "\n", "((("]) {
+      const sql = "EXPLAIN (" + filler.repeat(64_000) + "FORMAT JSON) SELECT 1"
+      const start = performance.now()
+      type(sql, "postgres")
+      expect(performance.now() - start).toBeLessThan(200)
+    }
+    const items = "EXPLAIN (" + "ANALYZE, ".repeat(8_000) + "FORMAT JSON) SELECT 1"
+    const start = performance.now()
+    expect(type(items, "postgres")).toBe("read")
+    expect(performance.now() - start).toBeLessThan(200)
+  })
+
   test("plain EXPLAIN is unchanged", () => {
     for (const dialect of ["snowflake", "postgres", "bigquery", "redshift", "mysql"]) {
       expect(type("EXPLAIN SELECT 1", dialect)).toBe("read")

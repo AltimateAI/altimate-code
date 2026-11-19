@@ -32,11 +32,7 @@ const READ_CATEGORIES = new Set(["query"])
  * Only code tokens change; quoted content and the original statement boundaries
  * remain authoritative when checking the parser's result. */
 function parserSql(sql: string, dialect?: string): string {
-  if (/\bEXPLAIN\b/i.test(sql) && tokenizeSql(sql, dialect).complete) {
-    const statements = statementsOf(sql, dialect)
-    const adapted = statements.map((statement) => withoutExplainOptions(statement, dialect))
-    if (adapted.some((statement, index) => statement !== statements[index])) sql = adapted.join("; ")
-  }
+  if (/\bEXPLAIN\b/i.test(sql)) sql = blankExplainOptions(sql, dialect)
   const duckdb = dialect?.toLowerCase() === "duckdb"
   if (!duckdb && dialect?.toLowerCase() !== "sqlite") return sql
   const compatible = tokenizeSql(sql, dialect).tokens
@@ -147,27 +143,60 @@ function isReadOnlyMetadata(statement: string): boolean {
 // EXPLAIN is a read only when the explained statement is one: `EXPLAIN ANALYZE`
 // executes the statement, so `EXPLAIN ANALYZE DELETE …` must stay a write.
 // Options are accepted only where the dialect defines them: Snowflake USING JSON|TEXT|TABULAR,
-// Databricks/Spark EXTENDED|CODEGEN|COST|FORMATTED, and a parenthesized option list.
-const EXPLAIN_OPTION_LIST = "\\((?!\\s*\\(*\\s*(?:SELECT|WITH|VALUES|TABLE|FROM)\\b)[^)]*\\)"
+// Databricks/Spark/Hive EXTENDED|CODEGEN|COST|FORMATTED, and PostgreSQL's parenthesized list of
+// its documented options. Any other option, or a list in another dialect, leaves a write.
+const POSTGRES_BOOLEAN = "(?:\\s+(?:TRUE|FALSE|ON|OFF|0|1))?"
+const POSTGRES_OPTION =
+  "(?:FORMAT\\s+(?:TEXT|XML|JSON|YAML)|SERIALIZE(?:\\s+(?:NONE|TEXT|BINARY))?|" +
+  `(?:ANALYZE|ANALYSE|VERBOSE|COSTS|SETTINGS|GENERIC_PLAN|BUFFERS|WAL|TIMING|SUMMARY|MEMORY)${POSTGRES_BOOLEAN})`
+// Linear: the items are separated by a comma, so no whitespace run can be split two ways.
+const POSTGRES_OPTION_LIST = `\\(\\s*${POSTGRES_OPTION}(?:\\s*,\\s*${POSTGRES_OPTION})*\\s*\\)`
 
 function explainPrefix(dialect?: string): RegExp {
   const d = dialect?.toLowerCase() ?? ""
-  const options = ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+", EXPLAIN_OPTION_LIST]
-  if (d === "snowflake") options.push("USING\\s+(?:JSON|TEXT|TABULAR)")
-  if (/^(databricks|spark|hive)$/.test(d)) options.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
-  return new RegExp(`^\\s*EXPLAIN\\b(\\s+(${options.join("|")}))*\\s+`, "i")
+  const words = ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+"]
+  if (d === "snowflake") words.push("USING\\s+(?:JSON|TEXT|TABULAR)")
+  if (/^(databricks|spark|hive)$/.test(d)) words.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
+  // PostgreSQL takes either the parenthesized list or the legacy words, never both.
+  const list = /^(postgres|postgresql)$/.test(d) ? `\\s*${POSTGRES_OPTION_LIST}\\s*|` : ""
+  return new RegExp(`^\\s*EXPLAIN\\b(?:${list}(?:\\s+(?:${words.join("|")}))*\\s+)`, "i")
 }
 
-/** The parser lacks the dialect's EXPLAIN options; give it plain EXPLAIN <statement>. Never used for execution. */
-function withoutExplainOptions(statement: string, dialect?: string): string {
-  const explained = statement.replace(explainPrefix(dialect), "")
-  return explained === statement || !explained.trim() ? statement : `EXPLAIN ${explained}`
+/** Length of the EXPLAIN keyword and its options, beyond a bare `EXPLAIN `. */
+function optionsLength(statement: string, prefix: RegExpExecArray): number {
+  return prefix[0].length - (/^\s*EXPLAIN\s+/i.exec(statement)?.[0].length ?? 0)
+}
+
+/** The parser lacks the dialect's EXPLAIN options. Blank them in place, so the parser reads plain
+ * EXPLAIN <statement> over the original text, comments and statement boundaries unchanged. Never used for execution. */
+function blankExplainOptions(sql: string, dialect?: string): string {
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) return sql
+  // Same length as the text: comments are blanks, quoted text a filler no option can match.
+  const scan = lexical.tokens
+    .map(({ kind, text }) =>
+      kind === "code" ? text : kind === "comment" ? " ".repeat(text.length) : "\u0001".repeat(text.length),
+    )
+    .join("")
+  const prefix = explainPrefix(dialect)
+  let out = sql
+  let start = 0
+  for (const statement of scan.split(";")) {
+    const match = prefix.exec(statement)
+    if (match && optionsLength(statement, match) > 0 && statement.slice(match[0].length).trim()) {
+      const from = start + /^\s*/.exec(match[0])![0].length + "EXPLAIN".length
+      const to = start + match[0].length
+      out = out.slice(0, from) + " ".repeat(to - from) + out.slice(to)
+    }
+    start += statement.length + 1
+  }
+  return out
 }
 
 /** EXPLAIN with options is read-only only as the sole statement of its text. */
 function hasExplainOptions(statement: string, dialect?: string): boolean {
   const prefix = explainPrefix(dialect).exec(statement)
-  return !!prefix && prefix[0].length > (/^\s*EXPLAIN\s+/i.exec(statement)?.[0].length ?? 0)
+  return !!prefix && optionsLength(statement, prefix) > 0
 }
 
 function isReadOnlyOther(statement: string, dialect?: string): boolean {
