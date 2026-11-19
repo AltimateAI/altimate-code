@@ -1,6 +1,6 @@
 ---
 title: "dbt Tools — Altimate Code"
-description: "Run dbt commands from Altimate Code using the dbt_run tool with full output capture and error reporting."
+description: "dbt tools in Altimate Code: dbt_run, dbt_manifest, dbt_unit_test_gen, and the dbt Power User tools for cost estimates, run results, docs coverage, project health, CTE timing, SQL graphs, relation mapping, defer state and shared-docs comments."
 ---
 
 # dbt Tools
@@ -139,6 +139,43 @@ unit_tests:
 **Important:** The tool generates scaffold tests with type-correct placeholder values. The LLM skill layer refines expected outputs by running SQL against mock data — always review and verify before committing.
 
 ---
+
+## dbt Power User tools
+
+These tools bring dbt Power User features to the command line. Call them with `altimate-code tool run <id> --args '<json>'` (see [Tool CLI](../../usage/tool.md)) or from another coding agent through `altimate-code mcp serve`. The agent in the TUI does not offer them.
+
+Some of them start the project's dbt integration (the dbt adapter), which runs `dbt deps` and renders the project's Jinja. Jinja `run_query` calls can run billed queries. A read-only call (`altimate-code tool run` without `--allow-write`, or plan mode) does not start the adapter, so these tools refuse it.
+
+### Tools that start the dbt adapter and so need `--allow-write`
+
+| Tool | What it returns | Parameters | What it runs on the warehouse |
+| --- | --- | --- | --- |
+| `dbt_cost_estimate` | The bytes a model or a query would scan, without running it. | `model` or `sql` (may use Jinja), not both | BigQuery: a dry run. Snowflake: `EXPLAIN USING JSON`, bytes left after pruning, an upper bound. Databricks: `EXPLAIN COST`, the sizes of the tables it reads, which can start a stopped SQL warehouse (billed while it runs). A query that may hold a second statement, or that reads files on Databricks, is refused rather than planned. |
+| `dbt_health` | DataPilot project health insights per model, such as hard-coded references, missing tests or documentation, and naming and structure issues. | `config_path` (optional DataPilot config) | Nothing. It needs the `altimate-datapilot-cli` Python package in the project's Python. |
+| `dbt_cte_profile` | Without `cte` or `position`: the model's CTEs in source order. With one: the elapsed milliseconds and row count of that CTE. | `model` (name, unique_id or `.sql` path), `cte`, `position` | Listing runs nothing and works read-only. Timing runs `SELECT COUNT(*)` over that CTE and the CTEs before it, so a model of N CTEs costs N queries. |
+| `dbt_sql_graph` | A model's CTEs, joins and filters as a graph, each relation tied to the dbt node it stands for. | `model` | Nothing. |
+
+### Read-only tools
+
+| Tool | What it returns | Parameters |
+| --- | --- | --- |
+| `dbt_run_results` | The last dbt run from `target/run_results.json`: invocation id, command, elapsed seconds, finish time, counts, and one row per node with failures first (at most 200). A compile or parse writes success rows without building anything. | `project_dir`, `target_path` |
+| `dbt_docs_coverage` | For one model: the output columns without a description in the project's YAML, the percent documented, and whether the model has a description. Needs a compiled manifest (`dbt compile`). | `model`, `manifest_path` |
+| `dbt_map_relations` | For each table in a raw SQL query, the `ref()` or `source()` call that replaces it, how it matched (`exact`, `case_insensitive`, `partial`, `none`) and the candidates. | `sql`, `dialect`, `manifest_path`, `project_dir` |
+| `dbt_defer_state` | The dbt Power User defer setting (`dbt.deferConfigPerProject`) and the profile's default target and target names. It reads only the workspace's `.vscode/settings.json`, not user settings or a `.code-workspace` file. | `project_dir`, `workspace_dir` |
+
+### Shared-docs comments
+
+`docs_share_comments` works on comment threads on dbt docs shared through Altimate. It needs you to be signed in.
+
+- `action: "list"` returns the open threads for a dbt project: the shares you own and the threads you are tagged in. It can lag up to five minutes behind a new post.
+- `action: "reply"` (with `share_id`, `group_id` and `text`) and `action: "resolve"` (with `share_id` and `group_id`) post under your name. They need write permission.
+
+```bash
+altimate-code tool run dbt_run_results
+altimate-code tool run dbt_cost_estimate --allow-write --args '{"model":"fct_revenue"}'
+altimate-code tool run docs_share_comments --args '{"action":"list"}'
+```
 
 ## altimate-dbt CLI
 

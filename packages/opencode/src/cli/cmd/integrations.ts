@@ -237,7 +237,11 @@ async function runCredentials(args: any, update: boolean) {
     if (r.status === "connected") {
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${update ? "updated" : "connected"}${r.account ? ` as ${S.TEXT_NORMAL_BOLD}${clean(r.account)}${S.TEXT_NORMAL}` : ""}`)
       out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${clean(os.hostname())}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
-    } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
+    } else {
+      out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
+      if (r.status === "missing_fields")
+        out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}\`, fill them with \`set ${id} <field> <value>\` or \`set-secret ${id} <field>\`, then run \`connect ${id}\` again.${S.TEXT_NORMAL}`)
+    }
   } catch (e) {
     fail(e, args.json)
   }

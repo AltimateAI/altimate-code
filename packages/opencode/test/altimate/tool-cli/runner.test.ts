@@ -65,6 +65,15 @@ describe("tool list", () => {
       "finops_query_history",
       "project_scan",
       "answer_commit",
+      "dbt_cost_estimate",
+      "dbt_cte_profile",
+      "dbt_defer_state",
+      "dbt_docs_coverage",
+      "dbt_health",
+      "dbt_map_relations",
+      "dbt_run_results",
+      "dbt_sql_graph",
+      "docs_share_comments",
     ])
       expect(ids).toContain(id)
     for (const tool of tools) {

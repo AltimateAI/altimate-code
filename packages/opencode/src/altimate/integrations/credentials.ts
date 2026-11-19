@@ -604,9 +604,14 @@ export interface Validation {
   message: string | null
 }
 
-const githubApi = () => (process.env.ALTIMATE_INTEGRATIONS_GITHUB_API || "https://api.github.com").replace(/\/+$/, "")
-const linearApi = () => process.env.ALTIMATE_INTEGRATIONS_LINEAR_API || "https://api.linear.app/graphql"
-const jiraCloudBase = (site: string) => (process.env.ALTIMATE_INTEGRATIONS_JIRA_API || `https://${site}.atlassian.net`).replace(/\/+$/, "")
+// An override receives the real token, so it must be https or a local http address, as a Jira server URL must; any other value is ignored.
+const apiOverride = (name: string) => {
+  const v = process.env[name]
+  return v && (/^https:\/\//i.test(v) || /^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(v)) ? v : undefined
+}
+const githubApi = () => (apiOverride("ALTIMATE_INTEGRATIONS_GITHUB_API") || "https://api.github.com").replace(/\/+$/, "")
+const linearApi = () => apiOverride("ALTIMATE_INTEGRATIONS_LINEAR_API") || "https://api.linear.app/graphql"
+const jiraCloudBase = (site: string) => (apiOverride("ALTIMATE_INTEGRATIONS_JIRA_API") || `https://${site}.atlassian.net`).replace(/\/+$/, "")
 
 /** GitHub sends the expiry as `2026-11-01 00:00:00 UTC`. */
 export function parseGithubExpiry(header: string | null): string | null {

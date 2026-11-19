@@ -511,9 +511,9 @@ function resolveJinjaPathValue(value: string): string | null {
   return m[2] !== undefined && m[2].length > 0 ? m[2] : null
 }
 
-/** Absolute-path test that also accepts Windows drive-letter roots. */
+/** Absolute-path test that also accepts Windows drive-letter roots and UNC paths (\\server\share). */
 function isAbsolutePath(p: string): boolean {
-  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p)
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p)
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,12 +1359,15 @@ export function isFailedRunStatus(status: string): boolean {
  * Read and parse `<target>/run_results.json`. Returns null when the artifact
  * is absent or unparseable — callers decide what that means for their gate.
  */
+/** A run_results.json larger than this is not read into memory; it is far above what a large project writes. */
+const MAX_RUN_RESULTS_BYTES = 256 * 1024 * 1024
+
 export async function readRunResults(dbtRoot: string, targetPathOverride?: string): Promise<RunResultsArtifact | null> {
   const targetPath = await resolveDbtTargetPath(dbtRoot, targetPathOverride)
   const path = join(targetPath, "run_results.json")
   try {
     const stat = await fs.stat(path, { bigint: true })
-    if (!stat.isFile()) return null
+    if (!stat.isFile() || stat.size > MAX_RUN_RESULTS_BYTES) return null
     const raw = await fs.readFile(path, "utf8")
     // The time keeps the plain stat's own rounding: every other caller compares it with mtimes read the same way, and a different rounding of equal timestamps would order them apart. It is taken between the two bigint stats, so the comparison below proves it describes the same file version as the rows.
     const plain = await fs.stat(path)
