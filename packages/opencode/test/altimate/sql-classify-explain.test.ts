@@ -119,6 +119,10 @@ describe("EXPLAIN with options", () => {
       "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; CLUSTER t",
       "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; CHECKPOINT",
       "EXPLAIN (ANALYZE) SELECT $$--$$ AS a; NOTIFY channel",
+      "EXPLAIN VERBOSE SELECT $$--$$ AS a; CLUSTER t",
+      "EXPLAIN ANALYZE SELECT $$--$$ AS a; CHECKPOINT",
+      "EXPLAIN VERBOSE SELECT $t$--$t$ AS a; NOTIFY channel",
+      "EXPLAIN SELECT $$--$$ AS a; CHECKPOINT",
     ]) {
       expect(type(sql, "postgresql")).toBe("write")
       expect(type(sql, "postgres")).toBe("write")

@@ -36,7 +36,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   // Where nesting is not known either way, a /* inside a comment makes its end uncertain.
   const nestingKnown = nestedComments || /^(mysql|mariadb|sqlite|oracle|trino)$/i.test(dialect ?? "")
   // ClickHouse heredocs ($tag$...$tag$) read like PostgreSQL dollar quotes.
-  const dollarQuotes = /^(postgres|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")
+  const dollarQuotes = /^(postgres|postgresql|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")
   // Quoting is dialect-specific: brackets can contain executable array expressions,
   // and PostgreSQL backticks can be operators. Unknown dialects keep both visible.
   const backtickIdentifiers = /^(mysql|mariadb|sqlite|bigquery|clickhouse|spark|databricks|hive)$/i.test(dialect ?? "")

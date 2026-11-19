@@ -170,6 +170,10 @@ function optionsLength(statement: string, prefix: RegExpExecArray): number {
 /** The parser lacks the dialect's EXPLAIN options. Blank them in place, so the parser reads plain
  * EXPLAIN <statement> over the original text, comments and statement boundaries unchanged. Never used for execution. */
 function blankExplainOptions(sql: string, dialect?: string): string {
+  // A lexer without dollar quotes can read `$$--$$` as a comment that hides statements the parser
+  // skips too, so the two statement counts would agree on a wrong answer. Leave such text unadapted:
+  // the parser rejects the options and the statement is a write.
+  if (/\$[A-Za-z_\u0080-\uffff]*\$/.test(sql) && !/^(postgres|postgresql|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")) return sql
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) return sql
   // Same length as the text: comments are blanks, quoted text a filler no option can match.
