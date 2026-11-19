@@ -222,7 +222,7 @@ describe("telemetry identity", () => {
     await Telemetry.refreshIdentity()
     expect(Telemetry.identityForTest()).toEqual({ user_id: UUID, tenant: "acme" })
     const common = { timestamp: Date.now(), plugin_version: "1.8.2", install_id: UUID_B }
-    Telemetry.track({ type: "plugin_session_start", ...common, altimate_code_version: "0.13.0", os: "macos" })
+    Telemetry.track({ type: "plugin_session_start", ...common, altimate_code_version: "0.13.0", host_os: "macos" })
     Telemetry.track({ type: "plugin_feature_used", ...common, feature: "lineage", outcome: "opened" })
     Telemetry.track({ type: "startup_ready", session_id: "claude:abc", command: "a", surface: "a", duration_ms: 1, fresh_install: false, timestamp: Date.now() })
     await Telemetry.flush()

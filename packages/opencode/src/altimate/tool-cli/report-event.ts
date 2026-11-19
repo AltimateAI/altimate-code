@@ -43,7 +43,7 @@ export type PluginOs = (typeof PLUGIN_OS)[number]
 /** A Claude Code session id as the plugin passes it: `claude:` and the host's own id. */
 const HOST_SESSION = /^claude:[A-Za-z0-9_-]{1,128}$/
 /** A SemVer 2.0 version (prerelease and build metadata included), up to 64 characters, or `unknown` when the plugin could not read its own. */
-const NUMBER = "(?:0|[1-9]\\d{0,5})"
+const NUMBER = "(?:0|[1-9]\\d*)"
 const PRERELEASE_PART = "(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)"
 const PLUGIN_VERSION = new RegExp(
   `^(?:${NUMBER}\\.${NUMBER}\\.${NUMBER}(?:-${PRERELEASE_PART}(?:\\.${PRERELEASE_PART})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?|unknown)$`,
@@ -58,7 +58,8 @@ export type PluginSessionStartEvent = {
   timestamp: number
   plugin_version: string
   altimate_code_version: string
-  os: PluginOs
+  /** Claude Code's name for the OS; not `os`, which other events carry as `process.platform`. */
+  host_os: PluginOs
   install_id: string
 }
 export type PluginFeatureUsedEvent = {
@@ -116,7 +117,7 @@ export function reportEvent(
   const common = { timestamp: now, plugin_version: fields.pluginVersion, install_id: fields.installId }
   if (action === "plugin_session_start") {
     if (!oneOf(PLUGIN_OS, fields.os)) return { error: `--os must be one of ${PLUGIN_OS.join(", ")}` }
-    return { type: "plugin_session_start", ...common, altimate_code_version: cliVersion, os: fields.os }
+    return { type: "plugin_session_start", ...common, altimate_code_version: cliVersion, host_os: fields.os }
   }
   if (!oneOf(PLUGIN_FEATURES, fields.feature)) return { error: `--feature must be one of ${PLUGIN_FEATURES.join(", ")}` }
   if (!oneOf(PLUGIN_OUTCOMES, fields.outcome)) return { error: `--outcome must be one of ${PLUGIN_OUTCOMES.join(", ")}` }

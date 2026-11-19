@@ -50,7 +50,7 @@ describe("tool report-event: the plugin's usage", () => {
         timestamp: 1000,
         plugin_version: "1.8.2",
         altimate_code_version: "0.13.4",
-        os,
+        host_os: os,
         install_id: INSTALL,
       })
     }
@@ -105,7 +105,7 @@ describe("tool report-event: the plugin's usage", () => {
         pluginVersion,
         event: { error: expect.any(String) },
       })
-    for (const pluginVersion of ["unknown", "0.0.0", "1.8.2", "1.8.2-beta.1", "1.8.2-0.3.7", "1.8.2-x-y.7z", "1.8.2+build.7", "1.8.2-rc.1+sha.5114f85"])
+    for (const pluginVersion of ["unknown", "0.0.0", "1.8.2", "20240101.0.0", "1.0.1000000", "1.8.2-beta.1", "1.8.2-0.3.7", "1.8.2-x-y.7z", "1.8.2+build.7", "1.8.2-rc.1+sha.5114f85"])
       expect(reportEvent("plugin_session_start", undefined, 1, { pluginVersion, installId: INSTALL, os: "macos" })).not.toHaveProperty("error")
   })
 
@@ -204,9 +204,9 @@ describe("tool report-event through the CLI's telemetry", () => {
       // The envelope's own keys, and the event's allow-listed fields: nothing else. No machine id, project or session.
       const ENVELOPE = ["cli_version", "client", "source", "launch_id"]
       const [startEvent, usedEvent] = events.map((one) => one.data.baseData.properties as Record<string, string>)
-      expect(Object.keys(startEvent!).sort()).toEqual([...ENVELOPE, "plugin_version", "altimate_code_version", "os", "install_id"].sort())
+      expect(Object.keys(startEvent!).sort()).toEqual([...ENVELOPE, "plugin_version", "altimate_code_version", "host_os", "install_id"].sort())
       expect(Object.keys(usedEvent!).sort()).toEqual([...ENVELOPE, "plugin_version", "install_id", "feature", "outcome"].sort())
-      expect(startEvent).toMatchObject({ plugin_version: "1.8.2", os: "macos", install_id: INSTALL })
+      expect(startEvent).toMatchObject({ plugin_version: "1.8.2", host_os: "macos", install_id: INSTALL })
       expect(startEvent!.altimate_code_version).toBe(startEvent!.cli_version)
       expect(usedEvent).toMatchObject({ feature: "cost_gate", outcome: "held", install_id: INSTALL })
       for (const one of events) {

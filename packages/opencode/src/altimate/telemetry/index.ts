@@ -5,6 +5,8 @@ import { Log } from "@/altimate/util/log"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
+// altimate_change — the Claude Code plugin's actions, whose events are sent anonymous (see ANONYMOUS_EVENTS)
+import { PLUGIN_ACTIONS } from "@/altimate/tool-cli/report-event"
 import { TelemetryIdentity } from "./identity"
 import { OptOutMarker } from "./opt-out"
 import { TelemetryConfig } from "./config-state"
@@ -935,7 +937,8 @@ export namespace Telemetry {
         timestamp: number
         plugin_version: string
         altimate_code_version: string
-        os: "macos" | "linux" | "windows" | "wsl" | "unknown"
+        /** Claude Code's name for the OS; not `os`, which other events carry as `process.platform`. */
+        host_os: "macos" | "linux" | "windows" | "wsl" | "unknown"
         /** A random UUID the plugin made on first run and keeps in its Claude Code plugin store. */
         install_id: string
       }
@@ -2418,7 +2421,7 @@ export namespace Telemetry {
   // altimate_change start — the Claude Code plugin's usage events are anonymous and unlinkable: they carry
   // none of the identifiers the CLI's other events share (account, machine id, project, session), so they
   // cannot be joined to a signed-in row. They are keyed to the plugin's own random install id only.
-  const ANONYMOUS_EVENTS: ReadonlySet<string> = new Set(["plugin_session_start", "plugin_feature_used"])
+  const ANONYMOUS_EVENTS: ReadonlySet<string> = new Set(PLUGIN_ACTIONS)
   // altimate_change end
 
   function toAppInsightsEnvelopes(
