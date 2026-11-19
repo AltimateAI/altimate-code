@@ -620,6 +620,15 @@ describe("mayBeScript", () => {
     ["snowflake", "select 'unclosed; delete from t"],
     ["databricks", "select 1; delete from orders"],
     ["databricks", "select 1 # c; delete from t"],
+    // Found in review: text the scan does not model must not hide a separator the driver sees.
+    ["snowflake", "select $$--$$; delete from orders"],
+    ["snowflake", "select $$'$$; delete from orders -- '"],
+    ["snowflake", "select 1 // '\n; delete from orders -- '"],
+    ["snowflake", 'select "a\\" x" ; delete from orders; "'],
+    ["snowflake", "select 1 /* unclosed ; delete from orders"],
+    ["databricks", "select r'\\'; delete from orders -- '"],
+    ["databricks", "select 1 /* a /* b */ ; delete from orders */"],
+    ["snowflake", "select 1; -- one\ndelete from orders"],
   ])("on %s, %p may be more than one statement", (type, sql) => {
     expect(mayBeScript(sql, type)).toBe(true)
   })
@@ -631,6 +640,9 @@ describe("mayBeScript", () => {
     ["snowflake", "select 'it''s; fine', 'a\\'; b' from t"],
     ["databricks", "select `p;q`.c from t where s = 'a;b'"],
     ["databricks", "with x as (select 1) select * from x;"],
+    ["snowflake", "select 1; -- done"],
+    ["snowflake", "select 'a\\'; b', \"c\\\"; d\" from t"],
+    ["databricks", "select array_join(arr, ';') from t -- x; y"],
   ])("on %s, %p is one statement", (type, sql) => {
     expect(mayBeScript(sql, type)).toBe(false)
   })
@@ -647,4 +659,18 @@ describe("dbt_cost_estimate refuses to EXPLAIN a script", () => {
       expect(result.output).toContain("more than one statement")
     })
   }
+})
+
+describe("parseDatabricksExplainCost reads only the statistics Spark appends", () => {
+  test("a column named like statistics is not a size", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet, Statistics(sizeInBytes=1.0 GiB)")).toEqual({
+      bytes: 1024 ** 3,
+      leaves: 1,
+    })
+  })
+
+  test("nor stands in for missing statistics, or for Spark's default size", () => {
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation [Statistics(sizeInBytes=0 B)#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({ noStats: true })
+  })
 })

@@ -141,7 +141,8 @@ export function parseDatabricksExplainCost(plan: unknown): (PlanEstimate & { lea
     // A leaf is a node the next line does not go below.
     if (i + 1 < nodes.length && nodes[i + 1].depth > nodes[i].depth) continue
     leaves++
-    const figure = /Statistics\(sizeInBytes=([^,)]+)/.exec(nodes[i].text)?.[1]
+    // Only the suffix Spark appends to the node: a column can be named anything, "Statistics(sizeInBytes=…)" too.
+    const figure = /, Statistics\(sizeInBytes=([^,()]+)(?:, [^()]*)?\)\s*$/.exec(nodes[i].text)?.[1]
     const size = figure === undefined ? undefined : sparkBytes(figure)
     if (size === undefined || size >= SPARK_NO_SIZE) return { noStats: true }
     bytes += size
@@ -173,15 +174,55 @@ export function explainJinja(explain: string, sql: string): string {
 
 /**
  * Whether the SQL may be more than one statement, as the warehouse's driver splits it: dbt-snowflake runs each
- * statement it splits off, so a second one after the EXPLAIN would run for real. Only what certainly hides a
- * semicolon is set aside (quoted text and identifiers, `--` and block comments, backticks on Databricks); anything
- * else, dollar-quoted text and `//` comments included, counts, so a doubt is no estimate, never a run.
+ * statement it splits off, so a second one after the EXPLAIN would run for real. One pass, left to right, that
+ * reads only what it models exactly: single- and double-quoted text (a backslash escapes, as the Snowflake
+ * connector's splitter reads it), backticks on Databricks, `--` and block comments. Anything else that could hide or fake a separator (Snowflake's `$$` text and `//` comments,
+ * Databricks' raw strings and nested comments, an unclosed quote or comment, EXECUTE IMMEDIATE) counts as a
+ * script, as does a semicolon with anything but whitespace after it: a doubt is no estimate, never a run.
  */
 export function mayBeScript(sql: string, type: string): boolean {
-  const quoted = type === "databricks" ? /--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g : /--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"[^"]*"/g
-  const bare = sql.replace(quoted, " ").replace(/[\s;]+$/, "")
-  // An unclosed quote or comment is left in place, and so is any semicolon after it.
-  return bare.includes(";") || /\bexecute\s+immediate\b/i.test(bare)
+  const databricks = type === "databricks"
+  let code = ""
+  let i = 0
+  while (i < sql.length) {
+    const c = sql[i]
+    const two = sql.slice(i, i + 2)
+    if (two === "--") {
+      const end = sql.indexOf("\n", i)
+      if (end < 0) break
+      i = end + 1
+      code += " "
+      continue
+    }
+    if (two === "/*") {
+      const end = sql.indexOf("*/", i + 2)
+      // Databricks nests block comments, and an unclosed one hides the rest: neither is read.
+      if (end < 0 || (databricks && sql.slice(i + 2, end).includes("/*"))) return true
+      i = end + 2
+      code += " "
+      continue
+    }
+    if (two === "$$" || (!databricks && two === "//")) return true
+    // Databricks raw strings (r'…', R"…") do not escape with a backslash: not read.
+    if (databricks && /[rR]/.test(c) && /['"]/.test(sql[i + 1] ?? "") && !/[A-Za-z0-9_]/.test(sql[i - 1] ?? "")) return true
+    const close = c === "'" || c === '"' || (databricks && c === "`") ? c : null
+    if (close) {
+      // A backslash escapes in quotes, as the splitter has it (only before a quote or a backslash, which skipping the
+      // next character always matches); Databricks' backticks take none.
+      const escapes = c !== "`"
+      let j = i + 1
+      while (j < sql.length && sql[j] !== close) j += escapes && sql[j] === "\\" ? 2 : 1
+      if (j >= sql.length) return true
+      i = j + 1
+      code += " "
+      continue
+    }
+    code += c
+    i++
+  }
+  const semicolon = code.indexOf(";")
+  if (semicolon >= 0 && /[^\s;]/.test(code.slice(semicolon))) return true
+  return /\bexecute\s+immediate\b/i.test(code)
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
