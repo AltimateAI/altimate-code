@@ -947,3 +947,30 @@ describe("review follow-ups, round ten", () => {
     expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
   })
 })
+
+describe("bot review follow-ups", () => {
+  test.each([
+    "select * from query_audit where sql_text like '%read_files(%'",
+    "SELECT json.`order-id` FROM main.sales.orders AS json",
+    "SELECT * FROM main.json.`orders`",
+    "SELECT * FROM main.image.`thumbnails`",
+  ])("%p reads a table", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test.each([
+    "SELECT * FROM json.`data.json`",
+    "SELECT * FROM t JOIN csv.`rel` ON true",
+    "SELECT * FROM a, parquet.`p`",
+    "SELECT * FROM system.builtin.read_files('/x')",
+  ])("%p reads files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test("many backtick-quoted names are read in one pass", () => {
+    const sql = `select ${Array.from({ length: 5000 }, (_, i) => `\`c${i}\``).join(", ")} from delta.\`/Volumes/c/s/v/t\``
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+})

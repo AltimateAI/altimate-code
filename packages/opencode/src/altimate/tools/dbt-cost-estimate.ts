@@ -172,14 +172,15 @@ export function parseDatabricksExplainCost(plan: unknown): PlanEstimate | { noSt
 export function readsFiles(sql: string): boolean {
   const { script, code } = scanSql(sql, "databricks")
   if (script) return true
-  if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(|(^|[^a-z0-9_])`?(json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image)`?\s*\.\s*`/i.test(code)) return true
+  // A function call, qualified or not (system.builtin.read_files).
+  if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*\(/i.test(code)) return true
+  // A known format over any name, where a relation goes (after FROM, JOIN or a comma), so json.`order-id` as a column is not one.
+  if (/(\b(from|join)\s+|,\s*)`?(json|csv|parquet|avro|orc|text|binaryfile|xml|libsvm|image)`?\s*\.\s*`/i.test(code)) return true
   // Any backtick-quoted name that looks like a path ("/" or ":", as in s3://…, dbfs:/…, /Volumes/…), whatever the source
-  // before it (a format, a provider class) or a doubled backtick inside it, unless it follows Delta's own provider:
-  // a source over files can infer its schema from them.
-  for (const match of code.matchAll(/`[^`]*`/g)) {
-    if (/[/:]/.test(match[0]) && !/(^|[^a-z0-9_.`])`?delta`?\s*\.\s*$/i.test(code.slice(0, match.index))) return true
-  }
-  return false
+  // before it (a format, a provider class) or a doubled backtick inside it, unless it directly follows Delta's own
+  // provider: a source over files can infer its schema from them.
+  const rest = code.replace(/(^|[^a-z0-9_.`])`?delta`?\s*\.\s*`[^`]*`/gi, "$1 ")
+  return /`[^`]*[/:][^`]*`/.test(rest)
 }
 
 /**
@@ -295,7 +296,7 @@ function failure(title: string, message: string, extra: Record<string, unknown> 
 
 /** The planner's estimate of a compiled query on a warehouse with no dry run: an EXPLAIN, which compiles the query and runs none of it. */
 async function explainEstimate(
-  adapter: any,
+  adapter: { unsafeCompileQuery(sql: string, model?: string): Promise<unknown> },
   type: string,
   planner: (typeof PLANNERS)[string],
   compiled: string,
