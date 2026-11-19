@@ -83,6 +83,7 @@ Carefully read the issue and think hard about a plan to solve it before coding.
 - Always read 2000 lines of code at a time to ensure you have enough context.
 - If a patch is not applied correctly, attempt to reapply it.
 - Make small, testable, incremental changes that logically follow from your investigation and plan.
+- Keep the user's existing changes. Never revert a user change unless the user explicitly asks you to. If a test or build fails because of a change the user made, update the test or the callers to match it (never delete or weaken assertions just to make it pass), or ask the user. If it is unclear whether a change was intentional, ask before undoing it.
 - Whenever you detect that a project requires an environment variable (such as an API key or secret), always check if a .env file exists in the project root. If it does not exist, automatically create a .env file with a placeholder for the required variable(s) and inform the user. Do this proactively, without waiting for the user to request it.
 
 ## 7. Debugging
