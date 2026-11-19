@@ -553,7 +553,7 @@ describe("dbt_cte_profile timing", () => {
       // A command-line dbt spends most of the call starting up.
       await sleep(60)
       await writeFile(path.join(target, "run_results.json"), runResults({ started, executeMs: 7, compiled: compiledOf(sql) }))
-      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }], compiledSql: `/* {"app": "dbt"} */\n${compiledOf(sql)}\n limit 1` }
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }] }
     }
     const tool = await initTool(DbtCteProfileTool)
     const result = await tool.execute({ model: "customers", cte: "orders" }, ctx)
@@ -562,6 +562,7 @@ describe("dbt_cte_profile timing", () => {
     expect(result.output).toContain("orders: 7 ms on the warehouse")
     expect(result.output).toContain(`${result.metadata.totalMs} ms in all`)
     expect(queries).toHaveLength(1)
+    expect(queries[0].sql).toMatch(/^\/\* altimate-code cte profile [0-9a-f-]{36} \*\/\n/)
     expect(baselines).toEqual([])
   })
 
@@ -583,23 +584,82 @@ describe("dbt_cte_profile timing", () => {
     expect(baselines).toEqual([{ sql: dbtCteProfileInternals.baselineQuery, name: "", limit: 1 }])
   })
 
-  test("a run_results.json from before the call or from another command is not this query's timing", async () => {
+  test("a run_results.json from before the call, of another command, or without the call's tag is not this query's timing", async () => {
+    const tag = "altimate-code cte profile t-1"
+    const mine = `/* ${tag} */ select 1`
     const before = new Date(Date.now() - 60_000)
-    await writeFile(path.join(target, "run_results.json"), runResults({ started: before, executeMs: 3, compiled: "select 1" }))
-    expect(dbtQueryMs(target, Date.now())).toBeUndefined()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: before, executeMs: 3, compiled: mine }))
+    expect(dbtQueryMs(target, Date.now(), tag)).toBeUndefined()
     const now = Date.now()
-    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: "select 1" }))
-    expect(dbtQueryMs(target, now, "select 2 limit 1")).toBeUndefined()
-    expect(dbtQueryMs(target, now, "/* c */ select 1 limit 1")).toBe(3)
-    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: "select 1", which: "build" }))
-    expect(dbtQueryMs(target, now)).toBeUndefined()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: "/* altimate-code cte profile t-2 */ select 1" }))
+    expect(dbtQueryMs(target, now, tag)).toBeUndefined()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine, which: "build" }))
+    expect(dbtQueryMs(target, now, tag)).toBeUndefined()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine }))
+    expect(dbtQueryMs(target, now, tag)).toBe(3)
   })
 
   test("dbt's timestamps without a zone are read as UTC", async () => {
     const now = Date.now()
-    const naive = runResults({ started: new Date(now + 5), executeMs: 9, compiled: "select 1" }).replaceAll(/(\d{3})123Z/g, "$1123")
+    const naive = runResults({ started: new Date(now + 5), executeMs: 9, compiled: "/* t */ select 1" }).replaceAll(/(\d{3})123Z/g, "$1123")
     await writeFile(path.join(target, "run_results.json"), naive)
-    expect(dbtQueryMs(target, now)).toBe(9)
+    expect(dbtQueryMs(target, now, "t")).toBe(9)
+  })
+
+  test("two calls counting the same CTE at once each take only their own run's timing", async () => {
+    // A's dbt writes its run_results.json, then B's overwrites it before A's call returns.
+    let releaseA = () => {}
+    const aWritten = new Promise<void>((resolve) => (releaseA = resolve))
+    let bDone = () => {}
+    const bWritten = new Promise<void>((resolve) => (bDone = resolve))
+    let calls = 0
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery) return { columnNames: ["N"], data: [{ N: 1 }] }
+      const which = calls++ === 0 ? "A" : "B"
+      const started = new Date()
+      await sleep(5)
+      if (which === "A") {
+        await writeFile(path.join(target, "run_results.json"), runResults({ started, executeMs: 500, compiled: compiledOf(sql) }))
+        releaseA()
+        await bWritten
+      } else {
+        await aWritten
+        await writeFile(path.join(target, "run_results.json"), runResults({ started, executeMs: 3, compiled: compiledOf(sql) }))
+        bDone()
+      }
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const [a, b] = await Promise.all([
+      tool.execute({ model: "customers", cte: "orders" }, ctx),
+      tool.execute({ model: "customers", cte: "orders" }, ctx),
+    ])
+    expect(b.metadata).toMatchObject({ timing: "dbt", queryMs: 3 })
+    // B's file is not A's: A falls back to the start-up baseline rather than report B's 3 ms.
+    expect(a.metadata.timing).toBe("baseline")
+    // The same CTE, but each run's SQL is its own.
+    expect(queries[0].sql).not.toBe(queries[1].sql)
+    expect(queries[0].sql.replace(/^\/\* .*? \*\/\n/, "")).toBe(queries[1].sql.replace(/^\/\* .*? \*\/\n/, ""))
+  })
+
+  test("a call waiting on another call's start-up measurement stops at its own abort", async () => {
+    let finish = () => {}
+    const held = new Promise<void>((resolve) => (finish = resolve))
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery) await held
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 1 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const first = tool.execute({ model: "customers", cte: "orders" }, ctx)
+    while (baselines.length === 0) await sleep(1)
+    const controller = new AbortController()
+    const second = tool.execute({ model: "customers", cte: "final" }, { ...ctx, abort: controller.signal })
+    await sleep(10)
+    controller.abort(new Error("stopped"))
+    await expect(second).rejects.toThrow("stopped")
+    finish()
+    expect((await first).metadata.timing).toBe("baseline")
+    expect(baselines).toHaveLength(1)
   })
 
   test("when the trivial query fails too, the call's own time is given as including start-up, and the next call measures again", async () => {

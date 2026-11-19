@@ -75,7 +75,7 @@ altimate-code tool daemon stop
 | `ALTIMATE_TOOL_DAEMON=0` | Always run in-process. |
 | `ALTIMATE_TOOL_DAEMON_IDLE_MS` | Idle time before the daemon exits (default `600000`). |
 
-The tools that start the dbt adapter (`dbt_lineage`, `dbt_cte_profile`, `dbt_sql_graph`, `dbt_health`, `dbt_cost_estimate`, and `sql_execute` routed through dbt) have dbt write its artifacts to `<target-path>/.altimate-code/` rather than the project's own `target/`: a dbt command rewrites `manifest.json` with compiled SQL for only what it compiled, so the project's `target/manifest.json` is left as your own `dbt compile` wrote it.
+The tools that start the dbt adapter (`dbt_lineage`, `dbt_cte_profile`, `dbt_sql_graph`, `dbt_health`, `dbt_cost_estimate`, and `sql_execute` routed through dbt) have dbt write its artifacts to `<target-path>/.altimate-code/` rather than the project's own `target/` in the `core` and `corecommand` integration modes: a dbt command rewrites `manifest.json` with compiled SQL for only what it compiled, so the project's `target/manifest.json` is left as your own `dbt compile` wrote it. The `fusion` and `cloud` modes read `<project>/target` whatever dbt is told, so there dbt still writes to it.
 
 The daemon listens on a local socket (a named pipe on Windows) under the Altimate Code state directory and removes it on exit.
 

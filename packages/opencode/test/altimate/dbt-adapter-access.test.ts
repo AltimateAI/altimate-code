@@ -203,6 +203,22 @@ describe("dbtAdapterFor", () => {
     expect(options).toEqual({ targetPath: path.join(project, "target", DBT_TOOL_TARGET_DIR) })
   })
 
+  test("Fusion and dbt Cloud, which read <project>/target whatever dbt is told, keep dbt writing there", async () => {
+    const seen: ({ targetPath?: string } | undefined)[] = []
+    dbtAdapterInternals.create = async (_config, given) => {
+      seen.push(given)
+      return { isInitialized: () => true, dispose: async () => {} }
+    }
+    for (const dbtIntegration of ["fusion", "cloud", "core", ""]) {
+      resetDbtAdapter()
+      dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "python3", dbtIntegration, queryLimit: 500 })
+      await dbtAdapterFor(ctx)
+    }
+    const own = { targetPath: path.join(project, "target", DBT_TOOL_TARGET_DIR) }
+    // An unset mode is dbt-integration's default, core.
+    expect(seen).toEqual([{}, {}, own, own])
+  })
+
   test("the tools' target folder follows the project's own target-path and DBT_TARGET_PATH", async () => {
     const yml = path.join(project, "dbt_project.yml")
     const saved = readFileSync(yml, "utf8")

@@ -1,3 +1,4 @@
+import crypto from "crypto"
 import fs from "fs"
 import path from "path"
 import z from "zod"
@@ -161,28 +162,46 @@ function utc(value: unknown): number {
   return Date.parse(/(Z|[+-]\d\d:?\d\d)$/i.test(value) ? value : `${value}Z`)
 }
 
-/** The run_results.json dbt wrote for the count query, as the warehouse time of its execute step, in ms. */
-export function dbtQueryMs(targetDir: string, startedAt: number, compiledSql?: unknown): number | undefined {
+/**
+ * The warehouse time, in ms, of the execute step of the count query that carries `tag`, from the
+ * run_results.json dbt wrote for it; undefined when that file is not this query's.
+ */
+export function dbtQueryMs(targetDir: string, startedAt: number, tag: string): number | undefined {
   let raw: any
   try {
     raw = JSON.parse(fs.readFileSync(path.join(targetDir, "run_results.json"), "utf-8"))
   } catch {
     return undefined
   }
-  // Only the file this call's command wrote: a later start than the call, a `show`, one inline node,
-  // and its compiled SQL inside what the adapter ran, when it says (another command may have run meanwhile).
+  // Only the file this call's command wrote: a start after the call's, a `show` of one inline node, and
+  // this call's tag in its compiled SQL. Other commands (another call's count of the same CTE, another
+  // daemon on the project) write the same file, and only the tag tells two runs of one query apart.
   const invoked = utc(raw?.metadata?.invocation_started_at ?? raw?.metadata?.generated_at)
   if (!Number.isFinite(invoked) || invoked < startedAt) return undefined
   if (raw?.args?.which !== undefined && raw.args.which !== "show") return undefined
   const results = Array.isArray(raw?.results) ? raw.results : []
   if (results.length !== 1) return undefined
   const node = results[0]
-  // The adapter's SQL is what ran: the node's compiled code inside dbt's query comment and limit.
-  if (typeof compiledSql === "string" && typeof node?.compiled_code === "string" && !compiledSql.includes(node.compiled_code.trim())) return undefined
+  if (typeof node?.compiled_code !== "string" || !node.compiled_code.includes(tag)) return undefined
   const execute = Array.isArray(node?.timing) ? node.timing.find((t: any) => t?.name === "execute") : undefined
   const span = utc(execute?.completed_at) - utc(execute?.started_at)
   if (Number.isFinite(span) && span >= 0) return Math.round(span)
   return typeof node?.execution_time === "number" && node.execution_time >= 0 ? Math.round(node.execution_time * 1000) : undefined
+}
+
+/** The comment a count query starts with, unique to the call, by which its run_results.json is known. */
+export function profileTag(): string {
+  return `altimate-code cte profile ${crypto.randomUUID()}`
+}
+
+/** `work`, or the signal's reason as soon as it aborts. */
+function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason)
+    signal.addEventListener("abort", stop, { once: true })
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop))
+  })
 }
 
 type QueryTime = { source: "dbt" | "baseline" | "wall"; queryMs: number; startupMs?: number }
@@ -193,16 +212,18 @@ type QueryTime = { source: "dbt" | "baseline" | "wall"; queryMs: number; startup
  * run_results.json it wrote; else the call's time less a trivial query's time through the same adapter,
  * measured once per adapter; else the call's time as is.
  */
-async function queryTime(adapter: any, call: { startedAt: number; totalMs: number; compiledSql?: unknown }, ctx: Pick<Tool.Context, "abort" | "sessionID">): Promise<QueryTime> {
+async function queryTime(adapter: any, call: { startedAt: number; totalMs: number; tag: string }, ctx: Pick<Tool.Context, "abort" | "sessionID">): Promise<QueryTime> {
   const dir = typeof adapter.getTargetPath === "function" ? adapter.getTargetPath() : undefined
-  const fromDbt = typeof dir === "string" && dir ? dbtQueryMs(dir, call.startedAt, call.compiledSql) : undefined
+  const fromDbt = typeof dir === "string" && dir ? dbtQueryMs(dir, call.startedAt, call.tag) : undefined
   if (fromDbt !== undefined) return { source: "dbt", queryMs: Math.min(fromDbt, call.totalMs) }
   let baseline = baselines.get(adapter)
   if (!baseline) {
-    baseline = (async () => {
+    // Shared by the calls that wait for it, so no one call's abort cancels it: each call stops waiting at its
+    // own abort, and the measurement is bounded by the query timeout.
+    const measured: Promise<number | undefined> = (async () => {
       const started = performance.now()
       try {
-        await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
+        await executeQuery({ type: "dbt" }, {}, { sessionID: ctx.sessionID }, () =>
           adapter.immediatelyExecuteSQLWithLimit(dbtCteProfileInternals.baselineQuery, "", 1),
         )
         return Math.round(performance.now() - started)
@@ -210,15 +231,15 @@ async function queryTime(adapter: any, call: { startedAt: number; totalMs: numbe
         return undefined
       }
     })()
+    // A failed measurement is not kept: the next call measures again.
+    void measured.then((ms) => {
+      if (ms === undefined && baselines.get(adapter) === measured) baselines.delete(adapter)
+    })
+    baseline = measured
     baselines.set(adapter, baseline)
   }
-  const startupMs = await baseline
-  // A failed or cancelled measurement is not kept: the next call measures again.
-  if (startupMs === undefined) {
-    baselines.delete(adapter)
-    ctx.abort.throwIfAborted()
-    return { source: "wall", queryMs: call.totalMs }
-  }
+  const startupMs = await untilAbort(baseline, ctx.abort)
+  if (startupMs === undefined) return { source: "wall", queryMs: call.totalMs }
   const startup = Math.min(startupMs, call.totalMs)
   return { source: "baseline", queryMs: call.totalMs - startup, startupMs: startup }
 }
@@ -330,12 +351,14 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     const started = performance.now()
     try {
       // The adapter has no cancel of its own: the run's timeout, budget and abort end the wait, not the query.
-      const result: { data?: Record<string, unknown>[]; compiledSql?: unknown } = await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
-        adapter.immediatelyExecuteSQLWithLimit(query, path.basename(modelPath, ".sql"), 1),
+      // The tag makes this run's compiled SQL its own, so its run_results.json can't be taken for another's.
+      const tag = profileTag()
+      const result: { data?: Record<string, unknown>[] } = await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
+        adapter.immediatelyExecuteSQLWithLimit(`/* ${tag} */\n${query}`, path.basename(modelPath, ".sql"), 1),
       )
       const totalMs = Math.round(performance.now() - started)
       const rows = extractRowCount(result?.data)
-      const timing = await queryTime(adapter, { startedAt, totalMs, compiledSql: result?.compiledSql }, ctx)
+      const timing = await queryTime(adapter, { startedAt, totalMs, tag }, ctx)
       const rowText = `${rows} row${rows === 1 ? "" : "s"}`
       const output =
         timing.source === "dbt"

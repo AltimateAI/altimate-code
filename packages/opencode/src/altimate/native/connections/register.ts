@@ -127,9 +127,12 @@ async function ensureDbtAdapter(): Promise<any | null> {
       // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's
       // target/manifest.json is the user's (and other tools'), and a tool's compile or show would rewrite
       // it with compiled SQL for only the nodes that command compiled.
+      // Only in the modes whose dbt-integration reads the artifacts back from where dbt wrote them.
       const create = dbtAdapterInternals.create ?? (await import("../../../../../dbt-tools/src/adapter")).create
-      const targetPath = await dbtToolTargetPath(dbtConfig.projectRoot)
-      return publish(await create(dbtConfig, { targetPath }), dbtConfig.projectRoot)
+      const options = SEPARATE_TARGET_MODES.has(dbtConfig.dbtIntegration || "core")
+        ? { targetPath: await dbtToolTargetPath(dbtConfig.projectRoot) }
+        : {}
+      return publish(await create(dbtConfig, options), dbtConfig.projectRoot)
     } catch {
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
@@ -140,6 +143,13 @@ async function ensureDbtAdapter(): Promise<any | null> {
   dbtAdapterInflight = mine
   return mine
 }
+
+/**
+ * The dbt-integration modes (dbt.json's `dbtIntegration`, `core` when unset) that read the manifest back from the
+ * target path dbt itself reports, DBT_TARGET_PATH included. Fusion and dbt Cloud read `<project>/target` whatever
+ * dbt was told, so they keep writing there: a separate folder would leave them reading a manifest nothing updates.
+ */
+export const SEPARATE_TARGET_MODES: ReadonlySet<string> = new Set(["core", "corecommand"])
 
 /** The folder, inside the project's target folder, where the tools' dbt adapter writes its dbt artifacts. */
 export const DBT_TOOL_TARGET_DIR = ".altimate-code"
