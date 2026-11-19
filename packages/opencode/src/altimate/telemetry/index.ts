@@ -928,6 +928,41 @@ export namespace Telemetry {
         action: "summary_shown" | "open_pressed" | "command_run" | "built" | "build_failed" | "no_browser"
       }
     // altimate_change end
+    // altimate_change start — the Claude Code plugin's own usage, sent through `tool report-event`
+    | {
+        /** A Claude Code session started with the plugin. Versions, OS and the plugin's random install id only. */
+        type: "plugin_session_start"
+        timestamp: number
+        /** The host agent's session: `claude:<id>`. */
+        session_id: string
+        plugin_version: string
+        altimate_code_version: string
+        os: "macos" | "linux" | "windows" | "wsl" | "unknown"
+        /** A random UUID the plugin made on first run and keeps in its Claude Code plugin store. */
+        install_id: string
+      }
+    | {
+        /** A plugin panel or command was opened, or one of its gates held or allowed a command. */
+        type: "plugin_feature_used"
+        timestamp: number
+        session_id: string
+        plugin_version: string
+        install_id: string
+        feature:
+          | "lineage"
+          | "dbt_show"
+          | "profile_ctes"
+          | "scan_cost"
+          | "comments"
+          | "sql_graph"
+          | "health"
+          | "runs"
+          | "to_model"
+          | "cost_gate"
+          | "health_push_gate"
+        outcome: "opened" | "failed" | "held" | "allowed"
+      }
+    // altimate_change end
     | {
         // Sent before connecting, so an attempt that hangs or ends the process is still counted.
         type: "warehouse_connect_started"
