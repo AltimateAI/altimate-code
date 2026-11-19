@@ -98,7 +98,7 @@ const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
  * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
  * name for it. A name the SQL itself writes (`amount as _1`) is a real alias.
  */
-function engineMade(name: string, stripped: string): boolean {
+export function engineMade(name: string, stripped: string): boolean {
   return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
 }
 
@@ -136,9 +136,7 @@ export function selectItems(stripped: string): string[] {
     if (start < 0) {
       if (boundary && word === "select") {
         start = i + 6
-        // A whole word only: `allocation` and `distinct_users` are column names, not modifiers.
-        const lead = /^\s+(?:distinct\s+on\s*\([^)]*\)|distinct|all|top\s+\d+)(?![\w$])/i.exec(text.slice(start))
-        if (lead) start += lead[0].length
+        start += modifierLength(text, start)
         from = start
         i = start - 1
       }
@@ -179,20 +177,140 @@ export function itemName(item: string): string | null {
   return ENDS_EXPRESSION.test(plain[2]!) ? null : unquoteName(plain[2]!)
 }
 
-/** The column a SELECT item casts, unaliased (`amount::numeric`, `cast(t.amount as numeric)`); null otherwise. */
-function castColumn(item: string): string | null {
-  const ref = `(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)`
-  // A type name: words (`double precision`, `pg_catalog.int4`), a size (`numeric(10, 2)`), array marks (`int[]`,
-  // `int[3]`), a quoted name, a further `::` cast.
-  const type = `((?:[\\w\\s(),:.]|\\[\\d*\\]|"(?:[^"]|"")*")+)`
-  const m = new RegExp(`^${ref}\\s*::\\s*${type}$`, "i").exec(item) ?? new RegExp(`^cast\\s*\\(\\s*${ref}\\s+as\\s+${type}\\)$`, "i").exec(item)
-  if (!m || NOT_TYPE.test(m[2]!.replace(new RegExp(QUOTED, "g"), " "))) return null
-  return unquoteName(m[1]!)
+/**
+ * The length of the modifier a SELECT list starts with at `at` in quote-blanked text: `distinct on (…)` up to its
+ * matching `)`, `top N`, or the whole word `distinct` or `all` (`allocation` and `distinct_users` are names); 0 when
+ * there is none.
+ */
+function modifierLength(text: string, at: number): number {
+  const rest = text.slice(at)
+  const on = /^\s+distinct\s+on\s*\(/i.exec(rest)
+  if (on) {
+    const end = closingParen(rest, on[0].length - 1)
+    return end < 0 ? 0 : end + 1
+  }
+  // The same name characters as the cast reader's, so `allé` is a name too.
+  return /^\s+(?:top\s+\d+|(?:distinct|all)(?![\p{L}\p{N}_$]))/iu.exec(rest)?.[0].length ?? 0
 }
 
-/** Words that make the rest of an item more than a type (`amount::numeric is not null`, `amount::int as x`). */
+/** The index of the `)` that closes the `(` at `open` in quote-blanked text, -1 when it isn't closed. */
+function closingParen(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "(") depth++
+    else if (text[i] === ")" && --depth === 0) return i
+  }
+  return -1
+}
+
+/** A token of a SELECT item for the cast reader. `other` is any character the reader never accepts (`+`, `-`, `|`, …). */
+type CastToken = { kind: "name" | "quoted" | "number" | "string" | "punct" | "other"; text: string }
+
+const CAST_TOKEN =
+  /\s+|("(?:[^"]|"")*"|`(?:[^`]|``)*`)|('(?:[^']|'')*')|(\d+(?:\.\d*)?(?:e[+-]?\d+)?|\.\d+(?:e[+-]?\d+)?)|([\p{L}_$][\p{L}\p{N}_$]*)|(::|[().,[\]])|([^])/iuy
+
+/** The tokens of a literal- and comment-stripped SELECT item, whitespace dropped. */
+function castTokens(item: string): CastToken[] {
+  const out: CastToken[] = []
+  CAST_TOKEN.lastIndex = 0
+  for (let m = CAST_TOKEN.exec(item); m; m = CAST_TOKEN.exec(item)) {
+    const kind = m[1] ? "quoted" : m[2] ? "string" : m[3] ? "number" : m[4] ? "name" : m[5] ? "punct" : m[6] ? "other" : undefined
+    if (kind) out.push({ kind, text: m[0] })
+  }
+  return out
+}
+
+/** Words a type name never holds: an item with one after `::` is more than a cast (`amount::numeric is not null`). */
 const NOT_TYPE =
-  /(?<![\w$])(?:as|is|not|isnull|notnull|null|true|false|between|in|like|ilike|similar|and|or|div|mod|xor|collate|at|over|filter|case|when|then|else|end|escape)(?![\w$])/i
+  /^(?:as|is|not|isnull|notnull|null|true|false|between|in|like|ilike|similar|and|or|div|mod|xor|collate|at|over|filter|case|when|then|else|end|escape)$/i
+
+/**
+ * The column a SELECT item casts, unaliased; null otherwise. It reads the item as tokens, in this grammar, and the
+ * whole item must match:
+ *
+ *   item    = operand { "::" type }          (at least one cast or one pair of parentheses)
+ *   operand = column | "(" item ")" | "cast" "(" item "as" type ")"
+ *   column  = name { "." name }              (a bare `null`, `true`, `false` or `end` is a literal)
+ *   type    = word { word | "." | "(" mod { "," mod } ")" | "[" [ number ] "]" }   (mod = number | name)
+ *
+ * So `amount::numeric`, `(amount)::numeric`, `cast((amount)as numeric)`, `cast(amount as numeric)::int` and `q.end::int`
+ * name a column; `amount::numeric + 1`, `coalesce(amount)::numeric`, `(1.5)::numeric` and `(null)::int` don't.
+ */
+export function castColumn(item: string): string | null {
+  const t = castTokens(item)
+  let at = 0
+  let shaped = false
+  const punct = (k: number, text: string) => t[k]?.kind === "punct" && t[k]!.text === text
+  const word = (k: number, text: string) => t[k]?.kind === "name" && t[k]!.text.toLowerCase() === text
+  const named = (k: number) => t[k]?.kind === "quoted" || t[k]?.kind === "name"
+  // A type modifier: a number (`numeric(10, 2)`) or a name (`varchar(max)`, `geometry(Point, 4326)`).
+  const modifier = (k: number) => t[k]?.kind === "number" || named(k)
+
+  const type = (): boolean => {
+    let words = 0
+    for (;;) {
+      const k = t[at]
+      if (k && (k.kind === "quoted" || (k.kind === "name" && !NOT_TYPE.test(k.text)))) at++, words++
+      else if (words && punct(at, ".")) at++
+      else if (words && punct(at, "(") && modifier(at + 1)) {
+        at += 2
+        while (punct(at, ",") && modifier(at + 1)) at += 2
+        if (!punct(at, ")")) return false
+        at++
+      } else if (words && punct(at, "[")) {
+        at += t[at + 1]?.kind === "number" ? 2 : 1
+        if (!punct(at, "]")) return false
+        at++
+      } else return words > 0
+    }
+  }
+  const column = (): string | null => {
+    if (!named(at)) return null
+    const start = at++
+    while (punct(at, ".") && named(at + 1)) at += 2
+    const last = t[at - 1]!
+    // Only the token's own quote is escaped by doubling: `"a``b"` is a``b.
+    if (last.kind === "quoted") {
+      const q = last.text[0]!
+      return last.text.slice(1, -1).replaceAll(q + q, q).toLowerCase()
+    }
+    return at - start === 1 && ENDS_EXPRESSION.test(last.text) ? null : last.text.toLowerCase()
+  }
+  const operand = (): string | null => {
+    if (punct(at, "(")) {
+      at++
+      const name = chain()
+      if (name === null || !punct(at, ")")) return null
+      at++
+      shaped = true
+      return name
+    }
+    if (word(at, "cast") && punct(at + 1, "(")) {
+      at += 2
+      const name = chain()
+      if (name === null || !word(at, "as")) return null
+      at++
+      if (!type() || !punct(at, ")")) return null
+      at++
+      shaped = true
+      return name
+    }
+    return column()
+  }
+  const chain = (): string | null => {
+    const name = operand()
+    if (name === null) return null
+    while (punct(at, "::")) {
+      at++
+      if (!type()) return null
+      shaped = true
+    }
+    return name
+  }
+
+  const name = chain()
+  return name !== null && shaped && at === t.length ? name : null
+}
 
 /**
  * The alias templates `COLUMNS(...) AS "…"` items give (DuckDB's `"col_\0"`, which hold a `\N` marker), lower-cased.

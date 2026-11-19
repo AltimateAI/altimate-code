@@ -13,8 +13,10 @@
 import { AltimateApi } from "@/altimate/api/client"
 import { Telemetry } from "@/altimate/telemetry"
 import { Flag } from "@/flag/flag"
+import { inertMessageValue } from "./workspace-name"
 
 const REQUEST_TIMEOUT_MS = 15_000
+const SIGNED_IN_LOOKUP_TIMEOUT_MS = 3_000
 
 export interface DatamateRef {
   id: number
@@ -107,19 +109,51 @@ export class NotConfiguredError extends Error {
   }
 }
 
+/** The account a request ran as, named in a hidden-binding conflict. */
+export interface SignedInAccount {
+  email: string
+  instance: string
+}
+
 /** A 409 whose `existing_datamate_name` is withheld: the server hides the name of a workspace
- * the caller cannot see, which is almost always a teammate's private one. Reading that as a race
- * ("another workspace claimed this project while you were choosing") sent users round a retry
- * loop with no way out. */
-export const HIDDEN_BINDING_MESSAGE =
-  "This project is already linked to a workspace you can't see, most likely a teammate's private one. " +
-  "Ask its owner to share it with you in the Altimate web app, or to unlink the project, then run `altimate-code link` again."
+ * the caller cannot see. Reading that as a race ("another workspace claimed this project while
+ * you were choosing") sent users round a retry loop with no way out.
+ *
+ * The workspace is private to another account. That is a teammate's, or the same person's
+ * under another sign-in on the same instance (a second login, or a support account). A message
+ * that names neither the workspace nor the signed-in account leaves the second case
+ * undiagnosable: the person sees "not linked" in the menu and "already linked" on link, and
+ * nothing says which account they are looking through. So the message carries the workspace id
+ * (the server always returns it) and the account the request ran as, when known. */
+export function hiddenBindingMessage(detail: ConflictDetail, account?: SignedInAccount): string {
+  const workspaceId = detail.existing_datamate_id
+  const validId = typeof workspaceId === "number" && Number.isSafeInteger(workspaceId) && workspaceId > 0
+  const id = validId ? ` (workspace id ${workspaceId})` : ""
+  const email = account ? inertMessageValue(account.email) : ""
+  const instance = account ? inertMessageValue(account.instance) : ""
+  let who = "the account you are signed in with"
+  if (email) who = instance ? `${email} on instance "${instance}"` : email
+  return (
+    `This project is already linked to a workspace${id} that ${who} can't see. ` +
+    "It is private to another account: a teammate's, or yours under a different sign-in. " +
+    "Sign in as that account, or ask its owner to share it with you in the Altimate web app or to unlink the project, " +
+    "then run `altimate-code link` again."
+  )
+}
+
+/** `hiddenBindingMessage` for a conflict, naming the account the request ran as. Pass the
+ * credential the failing request used: read again after the failure, it may already be another
+ * account's. Never throws: when the account cannot be read, the message says so generically. */
+export async function describeHiddenBinding(err: unknown, actAs?: ActAs): Promise<string> {
+  const detail = err instanceof ConflictError ? err.detail : { message: "" }
+  return hiddenBindingMessage(detail, await WorkspaceApi.signedInAccount(actAs))
+}
 
 /** The other half of the same story, told to the person who creates the workspace.
  * A create from the CLI or the TUI is always `privacy: "private"`, and the server hides a
  * private workspace's binding from everyone else — so without this note the creator has no
  * way to know that the teammate who clones the repo next will be told it is unlinked, and
- * will hit `HIDDEN_BINDING_MESSAGE` with no idea who to ask. Lives here, beside that
+ * will hit `hiddenBindingMessage` with no idea who to ask. Lives here, beside that
  * message, because both the CLI command and the TUI plugin have to say it and neither can
  * import the other. */
 export const QUICK_WORKSPACE_PRIVATE_NOTE =
@@ -684,6 +718,7 @@ export namespace WorkspaceApi {
     name: string
     identifier: ProjectIdentifier
     description?: string
+    actAs?: ActAs
   }): Promise<CreateAndBindResponse> {
     const res = await linkAttempt("create_and_bind", undefined, () =>
       req<CreateAndBindResponse>("POST", "/", {
@@ -693,6 +728,7 @@ export namespace WorkspaceApi {
           project_path: input.identifier.projectPath ?? null,
           description: input.description ?? null,
         },
+        ...(input.actAs ? { actAs: input.actAs } : {}),
       }),
     )
     const id = res?.binding?.datamate_id ?? res?.datamate?.id
@@ -752,6 +788,7 @@ export namespace WorkspaceApi {
   export async function createWorkspaceUnbound(input: {
     name: string
     description?: string
+    actAs?: ActAs
   }): Promise<{ id: number; name: string }> {
     // The id check sits inside the reported attempt: a create whose answer is unusable is a
     // failed link step, not a created workspace.
@@ -766,6 +803,7 @@ export namespace WorkspaceApi {
           knowledge_engine_enabled: true,
           privacy: "private",
         },
+        ...(input.actAs ? { actAs: input.actAs } : {}),
       })
       // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
       // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
@@ -922,14 +960,36 @@ export namespace WorkspaceApi {
    * client must compare ownership — skill attachment requires the caller to
    * OWN the workspace, and the credentials carry no user id of their own. */
   export async function whoami(actAs?: ActAs): Promise<number> {
-    // Not a workspace call: no workspace_api_error row for it.
-    const me = await req<{ id?: unknown }>("GET", "/me", {
+    const id = Number((await me(actAs))?.id)
+    if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
+    return id
+  }
+
+  /** The email and instance a request runs as (`actAs`, else the configured credential), for
+   * naming the account in an error. Undefined when either cannot be read; never throws. */
+  export async function signedInAccount(actAs?: ActAs): Promise<SignedInAccount | undefined> {
+    try {
+      // One credential for both halves, so the email and the instance name the same account.
+      const who = actAs ?? (await captureCredentials())
+      if (!who) return undefined
+      // Runs after a request already failed, only to word its error: a short budget, so a slow
+      // answer does not hold the error back.
+      const answer = await me(who, SIGNED_IN_LOOKUP_TIMEOUT_MS)
+      return typeof answer?.email === "string" && answer.email
+        ? { email: answer.email, instance: who.instance }
+        : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** ``GET /users/me``. Not a workspace call: no workspace_api_error row for it. */
+  function me(actAs?: ActAs, timeoutMs?: number) {
+    return req<{ id?: unknown; email?: unknown }>("GET", "/me", {
       base: "/users",
       reportErrors: false,
       ...(actAs ? { actAs } : {}),
+      ...(timeoutMs ? { timeoutMs } : {}),
     })
-    const id = Number(me?.id)
-    if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
-    return id
   }
 }
