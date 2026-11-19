@@ -11,7 +11,7 @@
 
 import * as crypto from "crypto"
 
-const PEM_BLOCK = /-----BEGIN ([A-Z0-9 ]+?)-----([\s\S]*?)-----END \1-----/
+const PEM_BLOCK = /-----BEGIN ([A-Z0-9 ]+?)-----([\s\S]*?)-----END \1-----/g
 
 export interface NormalizedKey {
   pem: string
@@ -36,7 +36,9 @@ export function normalizePrivateKeyPem(raw: string): NormalizedKey | undefined {
   }
   text = text.replace(/\\r\\n|\\n|\\r/g, "\n").replace(/\r\n?/g, "\n")
 
-  const match = PEM_BLOCK.exec(text)
+  // A pasted file may hold other blocks (certificates, public key) before the
+  // private key; use the first block that is a private key.
+  const match = [...text.matchAll(PEM_BLOCK)].find((m) => /PRIVATE KEY$/.test(m[1])) ?? text.match(new RegExp(PEM_BLOCK.source))
   if (!match) return undefined
   const label = match[1]
   let inner = match[2]

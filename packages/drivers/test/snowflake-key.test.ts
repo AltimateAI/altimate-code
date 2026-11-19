@@ -87,6 +87,13 @@ describe("toPkcs8Pem", () => {
     expect(() => toPkcs8Pem(bad)).toThrow(/could not be parsed/)
   })
 
+  test("a private key after other PEM blocks is found", () => {
+    const pub = rsa.publicKey.export({ type: "spki", format: "pem" }) as string
+    expect(fingerprint(toPkcs8Pem(`${pub}\n${pkcs8}`))).toBe(expected)
+    expect(fingerprint(toPkcs8Pem(spaced(`${pub}\n${pkcs8}`)))).toBe(expected)
+    expect(fingerprint(toPkcs8Pem(`${pub}\n${pkcs8Enc}`, PASS))).toBe(expected)
+  })
+
   test("public key PEM is not accepted as a private key", () => {
     const pub = rsa.publicKey.export({ type: "spki", format: "pem" }) as string
     expect(() => toPkcs8Pem(pub)).toThrow(/not recognized/)
