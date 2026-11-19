@@ -1028,6 +1028,9 @@ describe("IDENTIFIER() on Databricks", () => {
     "SELECT * FROM \u0131DENTIFIER('read_files')('/Volumes/c/s/v/raw')",
     "SELECT * FROM IDENTIFIER(\"IDENTIFIER('read_files')\")('/Volumes/c/s/v/raw')",
     "SELECT * FROM IDENTIFIER('identifier(''x'')')('/x')",
+    "SELECT * FROM IDENTIFIER('read_' /*a*/ || 'files' /*b*/)('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('js' /*a*/ || 'on.`/Volumes/c/s/v/raw`' /*b*/)",
+    "SELECT 1 AS `\u00df\u00df\u00df`, XIDENTIFIER('safe') AS n FROM IDENTIFIER(concat('read_', 'files'))('/x')",
   ])("%p may read files", (sql) => {
     expect(readsFiles(sql)).toBe(true)
   })
@@ -1039,6 +1042,8 @@ describe("IDENTIFIER() on Databricks", () => {
     "select * from IDENTIFIER('main.json.t')",
     "select * from `identifier`('x')",
     "SELECT `note identifier(x)` FROM main.sales.orders",
+    `select * from IDENTIFIER${" ".repeat(120)}( 'cat.sch.tbl' )`,
+    "SELECT 1 AS `\u00df\u00df`, XIDENTIFIER('safe') AS n FROM main.sales.orders",
   ])("%p reads tables", (sql) => {
     expect(readsFiles(sql)).toBe(false)
   })
@@ -1051,6 +1056,13 @@ describe("IDENTIFIER() on Databricks", () => {
     useAdapter(calls, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
     await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(calls.queries.length > 0).toBe(explained)
+  })
+
+  test("repeated comments before a concatenation scan in linear time", () => {
+    const sql = "SELECT * FROM IDENTIFIER('read_' " + "/**/".repeat(30) + " || 'files')('/Volumes/c/s/v/raw')"
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(true)
+    expect(performance.now() - started).toBeLessThan(200)
   })
 
   test("many ordinary literals scan in linear time", () => {

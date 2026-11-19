@@ -301,7 +301,7 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
         // Marked, so a second literal after it does not read as the call's first.
         blank = "\u0000"
         // Only a literal the call's parenthesis closes is plain: a following literal, operator or name is not.
-        if (c === "'" && /^(?:\s|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*\)/.test(sql.slice(j + 1))) literals.push({ text: sql.slice(i + 1, j) })
+        if (c === "'" && closesCall(sql, j + 1)) literals.push({ text: sql.slice(i + 1, j) })
       }
       // A backtick-quoted name is code; quoted text is not.
       code += c === "`" ? sql.slice(i, j + 1) : blank
@@ -318,9 +318,30 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
 function opensIdentifier(code: string): boolean {
   let end = code.length
   while (end > 0 && /\s/.test(code[end - 1])) end--
-  const start = Math.max(0, end - 80)
-  const at = code.slice(start, end).toUpperCase().search(/IDENTIFIER\s*\($/)
-  return at >= 0 && (start + at === 0 || !/[A-Za-z0-9_$]/.test(code[start + at - 1]))
+  if (code[end - 1] !== "(") return false
+  end--
+  while (end > 0 && /\s/.test(code[end - 1])) end--
+  // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
+  if (end < 10 || code.slice(end - 10, end).toUpperCase() !== "IDENTIFIER") return false
+  return end === 10 || !/[A-Za-z0-9_$]/.test(code[end - 11])
+}
+
+/** Whether, past whitespace and comments, the next character of `sql` from `at` is `)`. One pass, no backtracking. */
+function closesCall(sql: string, at: number): boolean {
+  let i = at
+  while (i < sql.length) {
+    if (/\s/.test(sql[i])) i++
+    else if (sql.startsWith("--", i)) {
+      const end = sql.indexOf("\n", i)
+      if (end < 0) return false
+      i = end + 1
+    } else if (sql.startsWith("/*", i)) {
+      const end = sql.indexOf("*/", i + 2)
+      if (end < 0) return false
+      i = end + 2
+    } else return sql[i] === ")"
+  }
+  return false
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
