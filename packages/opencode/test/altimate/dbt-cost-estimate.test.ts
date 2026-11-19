@@ -1023,13 +1023,18 @@ describe("IDENTIFIER() on Databricks", () => {
     "SELECT * FROM json.IDENTIFIER('`/Volumes/c/s/v/raw`')",
     "SELECT * FROM IDENTIFIER('json').`data.json`",
     "SELECT * FROM IDENTIFIER('json') . `data`",
+    "SELECT * FROM IDENTIFIER('\"read_files\"')('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER(\"fn\")('/Volumes/c/s/v/raw')",
+    "SELECT * FROM \u0131DENTIFIER('read_files')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER(\"IDENTIFIER('read_files')\")('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('identifier(''x'')')('/x')",
   ])("%p may read files", (sql) => {
     expect(readsFiles(sql)).toBe(true)
   })
 
   test.each([
     "select * from IDENTIFIER('cat.sch.tbl')",
-    "select * from identifier ( \"cat.sch.tbl\" ) t where t.x = 'read_files'",
+    "select * from identifier ( 'cat.sch.tbl' ) t where t.x = 'read_files'",
     "select IDENTIFIER('col') from main.sales.orders",
     "select * from IDENTIFIER('main.json.t')",
     "select * from `identifier`('x')",
@@ -1046,6 +1051,13 @@ describe("IDENTIFIER() on Databricks", () => {
     useAdapter(calls, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
     await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(calls.queries.length > 0).toBe(explained)
+  })
+
+  test("many ordinary literals scan in linear time", () => {
+    const sql = `select ${Array.from({ length: 20000 }, (_, n) => `'v${n}'`).join(", ")} from main.s.t`
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   test("leaves Snowflake and BigQuery alone", async () => {

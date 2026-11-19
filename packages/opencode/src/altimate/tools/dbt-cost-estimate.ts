@@ -176,16 +176,18 @@ export function readsFiles(sql: string): boolean {
   // IDENTIFIER(expr) names a function or relation from a string, which the scan blanked: read a lone string literal as
   // code, and count any other argument (a variable, :param, concatenation, adjacent literals, escapes) as a read.
   // Counted outside backtick-quoted names, and with no boundary consumed, so IDENTIFIER(IDENTIFIER('f')('x')) is two.
-  const bare = code.replace(/`[^`]*`/g, " ")
-  const calls = bare.match(/(?<![a-z0-9_$])identifier\s*\(/gi)?.length ?? 0
+  // Upper-cased as Spark's lexer folds keywords (a dotless ı spells IDENTIFIER too).
+  const bare = code.replace(/`[^`]*`/g, " ").toUpperCase()
+  const calls = bare.match(/(?<![A-Z0-9_$])IDENTIFIER\s*\(/g)?.length ?? 0
   // A qualified clause (system.builtin.IDENTIFIER('read_files')) or one a name continues past (IDENTIFIER('json').`p`)
   // is assembled from parts this does not read.
-  if (/\.\s*identifier\s*\(/i.test(bare) || /identifier\s*\(\s*\u0000\s*\)\s*\./i.test(bare)) return true
+  if (/\.\s*IDENTIFIER\s*\(/.test(bare) || /IDENTIFIER\s*\(\s*\u0000\s*\)\s*\./.test(bare)) return true
   let plain = 0
   for (const lit of literals) {
     plain++
     // Spark reads the string as a name, ignoring comments and unescaping backslashes: not read here.
-    if (/[\\]|\/\*|--/.test(lit.text)) return true
+    // A double quote or a nested IDENTIFIER names a quoting mode or clause of its own.
+    if (/[\\"]|\/\*|--/.test(lit.text) || /IDENTIFIER/.test(lit.text.toUpperCase())) return true
     if (/(^|[^a-z0-9_])`?(read_files|cloud_files)`?\s*$/i.test(lit.text) || fileSource(lit.text)) return true
   }
   return calls > plain
@@ -294,11 +296,12 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
       while (j < sql.length && sql[j] !== close) j += escapes && sql[j] === "\\" ? 2 : 1
       if (j >= sql.length) return script
       let blank = " "
-      if (databricks && c !== "`" && /(?<![a-z0-9_$])identifier\s*\(\s*$/i.test(code)) {
+      // Only a single-quoted string is a literal name: "…" may be a quoted identifier or a variable.
+      if (databricks && c !== "`" && opensIdentifier(code)) {
         // Marked, so a second literal after it does not read as the call's first.
         blank = "\u0000"
         // Only a literal the call's parenthesis closes is plain: a following literal, operator or name is not.
-        if (/^(?:\s|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*\)/.test(sql.slice(j + 1))) literals.push({ text: sql.slice(i + 1, j) })
+        if (c === "'" && /^(?:\s|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*\)/.test(sql.slice(j + 1))) literals.push({ text: sql.slice(i + 1, j) })
       }
       // A backtick-quoted name is code; quoted text is not.
       code += c === "`" ? sql.slice(i, j + 1) : blank
@@ -309,6 +312,15 @@ export function scanSql(input: string, type: string): { script: boolean; code: s
     i++
   }
   return { script: /\bexecute\s+immediate\b/i.test(code), code, literals }
+}
+
+/** Whether `code` (as `scanSql` builds it) ends in `IDENTIFIER(`, spacing aside. */
+function opensIdentifier(code: string): boolean {
+  let end = code.length
+  while (end > 0 && /\s/.test(code[end - 1])) end--
+  const start = Math.max(0, end - 80)
+  const at = code.slice(start, end).toUpperCase().search(/IDENTIFIER\s*\($/)
+  return at >= 0 && (start + at === 0 || !/[A-Za-z0-9_$]/.test(code[start + at - 1]))
 }
 
 /** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
