@@ -30,18 +30,26 @@ export interface ConsumerColumnList {
 const exec = promisify(execFile)
 const IDENT = /^[A-Za-z_][A-Za-z0-9_$]*$/
 
-/** Column names from every match of `pattern` in `content` (lowercased, de-duplicated). */
-export function extractColumnList(content: string, pattern: RegExp): string[] {
+/** One column list per match of `pattern` in `content` (each lowercased and
+ *  de-duplicated), so two lists in one file are checked separately. */
+export function extractColumnLists(content: string, pattern: RegExp): string[][] {
   const flags = pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g"
   const re = new RegExp(pattern.source, flags)
-  const out = new Set<string>()
+  const lists: string[][] = []
   for (const m of content.matchAll(re)) {
+    const out = new Set<string>()
     for (const token of (m[1] ?? "").split(/[,\s]+/)) {
       const name = token.replace(/^["'`]+|["'`]+$/g, "")
       if (IDENT.test(name)) out.add(name.toLowerCase())
     }
+    if (out.size) lists.push([...out])
   }
-  return [...out]
+  return lists
+}
+
+/** Column names from every match of `pattern` in `content` (lowercased, de-duplicated). */
+export function extractColumnList(content: string, pattern: RegExp): string[] {
+  return [...new Set(extractColumnLists(content, pattern).flat())]
 }
 
 /** True when a list belongs to `model`: named explicitly, or the file mentions the model. */
@@ -69,6 +77,10 @@ export async function loadConsumerLists(opts: {
       process.stderr.write(`⚠️  consumerColumnLists: invalid pattern ${JSON.stringify(cfg.pattern)} (${String(e)}); skipped.\n`)
       continue
     }
+    if (!/\((?!\?)/.test(cfg.pattern.replace(/\\./g, "")))
+      process.stderr.write(
+        `⚠️  consumerColumnLists: pattern ${JSON.stringify(cfg.pattern)} has no capture group; it matches no list.\n`,
+      )
     // `git ls-tree` rejects `:(glob)` pathspec magic, so list every file and
     // match the glob here, the same way for the head ref and the working tree.
     const args = opts.head ? ["ls-tree", "-r", "-z", "--name-only", opts.head] : ["ls-files", "-z"]
@@ -78,14 +90,16 @@ export async function loadConsumerLists(opts: {
       files = (await exec("git", args, { cwd: opts.gitRoot, maxBuffer: 64 * 1024 * 1024 })).stdout
         .split("\0")
         .filter((f) => f && glob.match(f))
-    } catch {
+    } catch (e) {
+      process.stderr.write(
+        `⚠️  consumerColumnLists: could not list files for ${JSON.stringify(cfg.files)} (${String(e).split("\n")[0]}); skipped.\n`,
+      )
       files = []
     }
     for (const file of files) {
       const content = await opts.read(file)
       if (!content) continue
-      const columns = extractColumnList(content, re)
-      if (columns.length) out.push({ path: file, model: cfg.model, columns, content })
+      for (const columns of extractColumnLists(content, re)) out.push({ path: file, model: cfg.model, columns, content })
     }
   }
   return out

@@ -1975,7 +1975,10 @@ const MISC: Rule[] = [
     "`7 / 2` returns 3, not 3.5, on Postgres, Redshift, Trino/Athena and SQL Server (`count(…) / count(…)` too): " +
       "integer division drops the fraction. Cast one side to numeric for a real ratio.",
     {
-      added: /(?<![\w.])\d[\d_]*\s*\/\s*\d[\d_]*(?![\d.])|\bcount\s*\([^()]*\)\s*\/\s*(nullif\s*\(\s*)?count\s*\(/i,
+      // A count ratio already made numeric (`100.0 * count(…) / …`, a trailing
+      // `::float` cast on the divisor) does not truncate.
+      added:
+        /(?<![\w.])\d[\d_]*\s*\/\s*\d[\d_]*(?![\d.])|(?<!\d*\.\d*\s*\*\s*)\bcount\s*\([^()]*\)\s*\/\s*(?:nullif\s*\(\s*count\s*\([^()]*\)\s*,[^()]*\)|count\s*\([^()]*\))(?!\s*::)/i,
       dialectGate: "integerDivisionTruncates",
       ignoreStrings: true,
       portabilityBody:

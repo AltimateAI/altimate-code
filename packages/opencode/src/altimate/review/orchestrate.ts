@@ -1,4 +1,5 @@
 import path from "node:path"
+import YAML from "yaml"
 import {
   type Finding,
   type ReviewCategory,
@@ -623,11 +624,48 @@ async function columnDelta(
 
 const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
 
+/** Column names (lowercased) the given schema yml texts declare for `model`:
+ *  the `models:` entry with that name (all its versions), or a versioned
+ *  model's file name (`orders_v2` → `orders`, version 2). Unparsable files
+ *  declare nothing. */
+export function ymlModelColumns(texts: string[], model: string): Set<string> {
+  const out = new Set<string>()
+  const target = model.toLowerCase()
+  const names = (cols: unknown) => {
+    if (Array.isArray(cols))
+      for (const c of cols) if (c && typeof c === "object" && "name" in c) out.add(String((c as any).name).toLowerCase())
+  }
+  for (const text of texts) {
+    let doc: any
+    try {
+      doc = YAML.parse(text)
+    } catch {
+      continue
+    }
+    for (const m of Array.isArray(doc?.models) ? doc.models : []) {
+      const name = String(m?.name ?? "").toLowerCase()
+      if (!name) continue
+      const versions: any[] = Array.isArray(m.versions) ? m.versions : []
+      if (name === target) {
+        names(m.columns)
+        for (const v of versions) names(v?.columns)
+        continue
+      }
+      const v = versions.find((v) => `${name}_v${String(v?.v ?? "").toLowerCase()}` === target)
+      if (v) {
+        names(m.columns)
+        names(v.columns)
+      }
+    }
+  }
+  return out
+}
+
 /**
  * Consumers dbt refs don't show. A column removed or renamed on a model that
  * feeds exposures (dashboards, apps, ML) or has an enforced contract breaks
  * readers outside the DAG; the finding names them. And a new column missing
- * from an enforced contract fails `dbt build` — reported unless the project
+ * from an enforced contract fails `dbt build` — reported only when the project
  * opts in (`checkContractColumns`); `dbt build` already enforces it.
  */
 async function consumerContractLane(
@@ -670,11 +708,10 @@ async function consumerContractLane(
 
   if (consumers.contractEnforced && opts.checkContractColumns && consumers.contractColumns.length && added.length) {
     const declared = new Set(consumers.contractColumns)
-    const yml = await opts.changedYmlText()
-    // A column the PR adds to a changed yml is declared even when the manifest predates the PR.
-    const inChangedYml = (c: string) =>
-      yml.some((t) => new RegExp(`name:\\s*["']?${c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']?\\s*$`, "im").test(t))
-    const missing = added.filter((c) => !declared.has(c) && !inChangedYml(c))
+    // A column the PR declares for THIS model in a changed yml is declared even
+    // when the manifest predates the PR; another model's columns never count.
+    const inChangedYml = ymlModelColumns(await opts.changedYmlText(), model)
+    const missing = added.filter((c) => !declared.has(c) && !inChangedYml.has(c))
     if (missing.length)
       out.push(
         makeFinding({
