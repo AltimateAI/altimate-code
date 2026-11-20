@@ -63,8 +63,10 @@ const unquote = (s: string) => s.replace(/^["`\[]|["`\]]$/g, "")
 const SET_OP = /\b(union|intersect|except|minus)\b(\s+(all|distinct))?\s*(\bselect\b|\()/i
 
 /** Output names of the final top-level SELECT, or null when unknown (`*`, unparseable).
- *  A set operation (`UNION` …) takes its names from its first branch. */
-export function selectListNames(sql: string): string[] | null {
+ *  A set operation (`UNION` …) takes its names from its first branch. Items it
+ *  cannot name contribute nothing, unless `complete` is set: then any unnamed
+ *  item makes the whole list unknown (null). */
+export function selectListNames(sql: string, opts: { complete?: boolean } = {}): string[] | null {
   const flat = flatten(sql)
   const selects = [...flat.matchAll(/\bselect\b/gi)]
   if (!selects.length) return null
@@ -93,6 +95,7 @@ export function selectListNames(sql: string): string[] | null {
       if (m && before && (m[1] || /([A-Za-z0-9_$"`\]')]|\bend)$/i.test(before))) name = unquote(m[2])
     }
     if (name && (IDENT.test(name) || /^[^"`]+$/.test(name)) && !/^(end|null|true|false)$/i.test(name)) names.push(name.toLowerCase())
+    else if (opts.complete) return null
   }
   return names
 }

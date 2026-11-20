@@ -639,8 +639,9 @@ async function columnDelta(
     const before = withOld ? await outputColumns(runner, engineOldSql!, dialect) : undefined
     return delta(current, before)
   }
-  // No compiled SQL (CI that only runs `dbt parse`): the raw model's own SELECT
-  // list, when it names its columns. Columns produced inside a macro stay unknown.
+  // Compiled SQL missing on either side (`dbt parse`-only CI, or a base that did
+  // not compile): the raw model's own SELECT list, when it names every column.
+  // Columns produced inside a macro stay unknown.
   if (!newSql) return none
   const current = rawSelectList(newSql)
   const before = withOld && oldSql ? rawSelectList(oldSql) : undefined
@@ -648,7 +649,8 @@ async function columnDelta(
 }
 
 /** Output names of a raw (Jinja) model's final SELECT; empty when a Jinja
- *  expression or tag is in the list. */
+ *  expression or tag is in the list, or when any item has no name of its own
+ *  (e.g. `amount::numeric(18,2)`): this list is the whole answer, not a supplement. */
 function rawSelectList(sql: string): Set<string> {
   const plain = sql
     .replace(/\{#[\s\S]*?#\}/g, " ")
@@ -656,9 +658,10 @@ function rawSelectList(sql: string): Set<string> {
     // it becomes its own `__jinja__` item, which marks the list unknown.
     .replace(/\{%[\s\S]*?%\}/g, " , __jinja__ , ")
     .replace(/\{\{[\s\S]*?\}\}/g, " __jinja__ ")
-  const names = selectListNames(plain)
+  const names = selectListNames(plain, { complete: true })
+  // A Jinja expression inside an item (e.g. `{{ col }} as x`) leaves its alias
+  // intact; only a Jinja item standing alone is unknown.
   if (!names || names.includes("__jinja__")) return new Set()
-  // A Jinja expression inside an item (e.g. `{{ col }} as x`) leaves its alias intact.
   return new Set(names)
 }
 

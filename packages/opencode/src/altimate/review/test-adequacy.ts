@@ -131,13 +131,13 @@ export function inheritedThresholds(projectYml: any, segments: string[]): { seve
   return { ...eff, path }
 }
 
-/** Folders of a yml below its model path (e.g. `models/marts/x.yml` → `["marts"]`). */
+/** Folders of a yml below its resource path (e.g. `models/marts/x.yml` → `["marts"]`, `seeds/x.yml` → `[]`). */
 function segmentsOf(file: string, layout?: DbtProjectLayout): string[] {
   const root = layout?.root ? layout.root.replace(/\/$/, "") + "/" : ""
   const rel = root && file.startsWith(root) ? file.slice(root.length) : file
   const parts = rel.split("/").slice(0, -1)
-  const modelDirs = layout?.dirs.model ?? ["models"]
-  return modelDirs.includes(parts[0]) ? parts.slice(1) : parts
+  const resourceDirs = layout ? Object.values(layout.dirs).flat() : ["models", "seeds", "snapshots", "tests"]
+  return resourceDirs.includes(parts[0]) ? parts.slice(1) : parts
 }
 
 export function detectTestAdequacy(input: {
@@ -163,8 +163,12 @@ export function detectTestAdequacy(input: {
       name !== "expect_table_aggregation_to_equal_other_table" ||
       String(arg(t, "compare_expression") ?? arg(t, "expression") ?? "").replace(/\s+/g, "").toLowerCase() ===
         String(arg(t, "expression") ?? "").replace(/\s+/g, "").toLowerCase()
+    // `cardinality_equality` compares this column with `field` on the other
+    // model; against itself it is circular only when the field is the same column.
+    const sameField =
+      name !== "cardinality_equality" || String(arg(t, "field") ?? "").toLowerCase() === (t.column ?? "").toLowerCase()
     const self =
-      (SELF_COMPARE.has(name) && sameExpression && ["compare_model", "to", "compare_to"].some((a) => refsEntity(arg(t, a), t.entity))) ||
+      (SELF_COMPARE.has(name) && sameExpression && sameField && ["compare_model", "to", "compare_to"].some((a) => refsEntity(arg(t, a), t.entity))) ||
       (name === "relationships" && refsEntity(arg(t, "to"), t.entity) && String(arg(t, "field") ?? "").toLowerCase() === (t.column ?? "").toLowerCase())
     if (self)
       out.push(
@@ -177,21 +181,23 @@ export function detectTestAdequacy(input: {
   const project = parse(input.projectYml)
   if (project && added.length) {
     const inherited = inheritedThresholds(project, segmentsOf(file.path, input.layout))
-    const own = (t: TestRef) => {
-      const c = t.args?.config ?? {}
-      return [c.severity, c.error_if, c.warn_if, t.args?.severity, t.args?.error_if].some((v) => v !== undefined)
-    }
-    const loose = added.filter((t) => !own(t))
+    // dbt resolves `severity` and `error_if` separately: a local `warn_if` or
+    // `error_if` still leaves `severity` inherited, and vice versa.
+    const local = (t: TestRef, k: "severity" | "error_if") => t.args?.config?.[k] ?? t.args?.[k]
+    const inheritingWarn = added.filter((t) => local(t, "severity") === undefined)
+    const inheritingThreshold = added.filter(
+      (t) => local(t, "error_if") === undefined && String(local(t, "severity") ?? inherited.severity ?? "error").toLowerCase() !== "warn",
+    )
     const where = inherited.path.length ? ` (\`data_tests:\` → ${inherited.path.map((p) => `\`${p}\``).join(" → ")})` : ""
-    if (loose.length && inherited.severity === "warn")
+    if (inheritingWarn.length && inherited.severity === "warn")
       out.push(
-        finding(file, undefined, "test-inherits-warn", "suggestion", `${loose.length} new test(s) in ${file.path} inherit \`severity: warn\``,
+        finding(file, undefined, "test-inherits-warn", "suggestion", `${inheritingWarn.length} new test(s) in ${file.path} inherit \`severity: warn\``,
           `They inherit \`severity: warn\` from \`dbt_project.yml\`${where}, so failures are reported but never fail \`dbt build\`. ` +
             "If a test should gate the build, set `config: {severity: error}` on it."),
       )
-    else if (loose.length && inherited.error_if && allowedFailures(inherited.error_if) !== 0)
+    else if (inheritingThreshold.length && inherited.error_if && allowedFailures(inherited.error_if) !== 0)
       out.push(
-        finding(file, undefined, "test-inherits-threshold", "suggestion", `${loose.length} new test(s) in ${file.path} inherit \`error_if: ${inherited.error_if}\``,
+        finding(file, undefined, "test-inherits-threshold", "suggestion", `${inheritingThreshold.length} new test(s) in ${file.path} inherit \`error_if: ${inherited.error_if}\``,
           `They fail only when \`${inherited.error_if}\` rows fail, a threshold inherited from \`dbt_project.yml\`${where}. ` +
             "Set `config: {error_if: '!= 0'}` on tests that must catch any bad row."),
       )
@@ -204,34 +210,53 @@ export function detectThresholdLoosening(file: ChangedFile, oldContent?: string,
   const oldDoc = parse(oldContent)
   const newDoc = parse(newContent)
   if (!oldDoc || !newDoc) return []
-  const flat = (doc: any) => {
-    const out = new Map<string, ReturnType<typeof thresholds>>()
-    const visit = (node: any, path: string[]) => {
-      if (!node || typeof node !== "object") return
-      out.set(path.join(" → ") || "(all tests)", thresholds(node))
-      for (const [k, v] of Object.entries(node)) if (!k.startsWith("+") && v && typeof v === "object") visit(v, [...path, k])
-    }
-    visit(doc?.data_tests ?? doc?.tests, [])
-    return out
+  // Every config path in either version: a deleted override loosens its subtree too.
+  const paths = new Map<string, string[]>()
+  const visit = (node: any, path: string[]) => {
+    if (!node || typeof node !== "object") return
+    paths.set(path.join("\u0000"), path)
+    for (const [k, v] of Object.entries(node)) if (!k.startsWith("+") && v && typeof v === "object") visit(v, [...path, k])
   }
-  const before = flat(oldDoc)
-  const out: Finding[] = []
-  for (const [path, t] of flat(newDoc)) {
-    const prev = before.get(path) ?? {}
-    const toWarn = t.severity === "warn" && prev.severity !== "warn"
-    // Only a threshold that tolerates more failing rows than before loosens;
-    // a changed condition that is not a simple bound is still reported.
-    const allowed = allowedFailures(t.error_if)
-    const newThreshold =
-      !!t.error_if &&
-      t.error_if !== prev.error_if &&
+  visit(oldDoc?.data_tests ?? oldDoc?.tests, [])
+  visit(newDoc?.data_tests ?? newDoc?.tests, [])
+  // Effective values at a path, walking the tree from the top (no project-name prepend:
+  // the path already names it when the config does).
+  const effective = (doc: any, path: string[]) => {
+    const eff: { severity: string; error_if?: string } = { severity: "error" }
+    let node = doc?.data_tests ?? doc?.tests
+    for (let i = 0; i <= path.length && node && typeof node === "object"; i++) {
+      const t = thresholds(node)
+      if (t.severity) eff.severity = t.severity
+      if (t.error_if) eff.error_if = t.error_if
+      node = node[path[i]]
+    }
+    return eff
+  }
+  const loosened = (path: string[]) => {
+    const prev = effective(oldDoc, path)
+    const next = effective(newDoc, path)
+    const toWarn = next.severity === "warn" && prev.severity !== "warn"
+    // Only a bound that tolerates more failing rows loosens; a changed condition
+    // that isn't a simple bound is still reported.
+    const allowed = allowedFailures(next.error_if)
+    const looserThreshold =
+      next.severity !== "warn" &&
+      prev.severity !== "warn" &&
+      next.error_if !== prev.error_if &&
+      !!next.error_if &&
       (allowed === undefined || allowed > (allowedFailures(prev.error_if) ?? 0))
-    if (!toWarn && !newThreshold) continue
+    return toWarn ? { why: "`severity: warn` now applies" } : looserThreshold ? { why: `\`error_if: ${next.error_if}\` now applies` } : undefined
+  }
+  const out: Finding[] = []
+  for (const path of paths.values()) {
+    const hit = loosened(path)
+    // Report only the topmost loosened path, not each folder below it.
+    if (!hit || (path.length && loosened(path.slice(0, -1)))) continue
+    const label = path.join(" → ") || "(all tests)"
     out.push(
-      finding(file, undefined, "test-thresholds-loosened", "warning", `test thresholds loosened for \`${path}\``,
-        (toWarn ? "`severity: warn` now applies" : `\`error_if: ${t.error_if}\` now applies`) +
-          ` to every data test under \`${path}\` in \`dbt_project.yml\`, so those tests stop failing the build. ` +
-          "Prefer setting it on the specific tests that need it.", `:${path}`),
+      finding(file, undefined, "test-thresholds-loosened", "warning", `test thresholds loosened for \`${label}\``,
+        `${hit.why} to every data test under \`${label}\` in \`dbt_project.yml\`, so those tests stop failing the build. ` +
+          "Prefer setting it on the specific tests that need it.", `:${label}`),
     )
   }
   return out

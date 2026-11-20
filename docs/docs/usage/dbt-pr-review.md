@@ -221,10 +221,13 @@ The action can build these for you with `dbt_prepare` (off by default):
 
 - **`compile`:** runs `dbt compile` on the head, then compiles the PR's merge-base
   into `target-base/` in a temporary worktree. This enables equivalence and
-  column-breakage proofs. It usually works offline.
+  column-breakage proofs. dbt needs a profile it can load, and many adapters
+  connect to the warehouse while compiling. The head is compiled into the
+  directory of `manifest_path`. When `head` is set to a commit other than the
+  checkout, preparation is skipped.
 - **`full`:** also runs `dbt docs generate` for `catalog.json` (complete column
   types). That needs warehouse credentials in the profile.
-- A base compile that fails is a warning: the review still runs, and the
+- A head or base compile that fails is a warning: the review still runs, and the
   affected models are listed as not verified.
 
 To build them yourself, compile the **merge-base**, not the base branch's tip:

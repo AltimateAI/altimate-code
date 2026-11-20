@@ -327,6 +327,16 @@ describe("dedup windows split across lines", () => {
       "dedup_no_tiebreaker",
     )
   })
+  test("without hunk headers, a bare identifier that also appears in the window doesn't touch it", () => {
+    const window = "select customer_id, row_number() over (partition by customer_id) as rn\nfrom t\ngroup by\n  customer_id"
+    const rules = (diff: string) =>
+      detectModelPatterns({ path: "models/m.sql", status: "modified", diff }, window, DEFAULT_RUBRIC).map(
+        (f) => (f.evidence?.result as { rule?: string })?.rule,
+      )
+    expect(rules("+  customer_id\n")).not.toContain("dedup_no_tiebreaker")
+    // An added line that is the window itself (whitespace differing) still counts.
+    expect(rules("+select customer_id, row_number()  over (partition by   customer_id) as rn\n")).toContain("dedup_no_tiebreaker")
+  })
 })
 
 describe("column changes without compiled SQL (dbt parse-only CI)", () => {
@@ -399,5 +409,12 @@ describe("column changes without compiled SQL (dbt parse-only CI)", () => {
       `${cfg}select id, amount {% if var('with_region', false) %}, region {% endif %} from {{ ref('src') }}`,
     )
     expect(conditional.findings.some((f) => f.title.includes("on_schema_change"))).toBe(false)
+    // An item with no name of its own (a cast) makes the list unknown, so a
+    // column turned into a cast is neither removed nor are others added.
+    const cast = await review(
+      `${cfg}select id, amount from {{ ref('src') }}`,
+      `${cfg}select id, amount::numeric(18,2), region from {{ ref('src') }}`,
+    )
+    expect(cast.findings.some((f) => f.title.includes("on_schema_change"))).toBe(false)
   })
 })
