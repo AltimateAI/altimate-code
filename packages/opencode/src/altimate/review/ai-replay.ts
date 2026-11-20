@@ -6,6 +6,8 @@
 // verifier discarded (`ai.verifier.dropped`). The verifier then runs on them as
 // usual, so verifier settings can be compared without paying for generation
 // again. Ids are the stored ones; benchmark labels are keyed by them.
+// Fidelity is approximate: discarded findings come back with bodies clamped to
+// 600 characters, and kept ones after the orchestrator's anchoring/cleaning.
 import { readFile } from "node:fs/promises"
 import z from "zod"
 import { Provider } from "@/provider/provider"
@@ -143,9 +145,10 @@ export function replayFindings(raw: unknown): ReplayedLane {
   return { findings: out, status: warnings.length ? { ...status, replayIncomplete: true } : status, warnings }
 }
 
-/** A kept finding as the generator returned it: no verification record, body suffix, tier or origin. */
+/** A kept finding close to how the generator returned it: no verification record, body suffix,
+ *  tier, origin, or the orchestrator's `preExisting` / `evidenceLine` (re-derived on the next run). */
 function unverify(f: Finding): Finding {
-  const { tier: _tier, origin: _origin, ...rest } = f
+  const { tier: _tier, origin: _origin, preExisting: _pre, evidenceLine: _line, ...rest } = f
   const prior = f.evidence?.result
   if (!prior || typeof prior !== "object") return rest
   const { verification, ...result } = prior as Record<string, unknown> & {
@@ -192,8 +195,22 @@ export async function runAiReplay(input: AiReviewInput, path: string): Promise<A
       const chosen = input.model ? Provider.parseModel(input.model) : await Provider.defaultModel()
       model = await Provider.getModel(chosen.providerID, chosen.modelID)
     } catch (err) {
+      // Fail open: the replayed generator findings stand, unverified.
       const reason = `no usable model: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200)
-      return done([], { ...lane.status, state: "skipped", reason })
+      const n = findings.length
+      const skipped: VerifierStatus = {
+        state: "skipped",
+        reason,
+        durationMs: 0,
+        turns: 0,
+        toolCalls: 0,
+        reviewed: 0,
+        kept: n,
+        discarded: 0,
+        summary: 0,
+        unreviewed: n,
+      }
+      return done(findings, { ...lane.status, verifier: skipped })
     }
     const v = await runAiVerify({ findings, grounding: input.grounding, evidence: input.evidence, model })
     findings = v.findings

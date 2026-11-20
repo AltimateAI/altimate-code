@@ -396,6 +396,8 @@ const CONFIDENCE_ORDER: Record<Confidence, number> = { high: 3, medium: 2, low: 
  *  (AI findings default to inline in `ruleTier`) that the verifier did not move
  *  to the summary, on a line the PR added, at or above the severity floor. */
 export function inlineEligible(f: Finding, posting: PostingPolicy): boolean {
+  // The verifier's demotion wins over any tier, including a config rule that
+  // re-tiers AI findings to `inline` after the AI lane ran.
   if (verifierDemoted(f) || f.tier !== "inline") return false
   if (f.preExisting || typeof f.startLine !== "number") return false
   return SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[posting.inlineSeverityFloor]
