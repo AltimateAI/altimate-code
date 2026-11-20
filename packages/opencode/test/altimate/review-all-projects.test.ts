@@ -15,6 +15,7 @@ import {
 import { buildEnvelope, signEnvelope, verifyEnvelope, type VerdictEnvelope } from "../../src/altimate/review/verdict"
 import { makeFinding } from "../../src/altimate/review/finding"
 import { renderSummary } from "../../src/altimate/review/format"
+import { postGitHubReview, type GitHubClient } from "../../src/altimate/review/post-github"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
 
 /**
@@ -57,7 +58,12 @@ async function fixture(opts: { nested?: boolean } = {}): Promise<{ root: string;
   return { root, base: await commitAll(root, "base") }
 }
 
-const strip = (e: VerdictEnvelope) => ({ ...e, signature: undefined, generatedAt: undefined })
+const strip = (e: VerdictEnvelope) => ({
+  ...e,
+  signature: undefined,
+  generatedAt: undefined,
+  scope: e.scope ? { ...e.scope, coveredProjects: undefined } : undefined,
+})
 
 describe("reviewAllProjects: one envelope for every dbt project a PR touches", () => {
   test("merges findings from both projects, scopes the ledger, and signs the result", async () => {
@@ -96,6 +102,41 @@ describe("reviewAllProjects: one envelope for every dbt project a PR touches", (
     expect(renderSummary(env, { maxChars: Infinity, inline: false, allowSilent: false })).toContain(
       "Reviewed 2 dbt projects: proj_a, proj_b",
     )
+    // Both projects were reviewed at one head; the poster's stale-run guard needs it.
+    expect(env.scope?.headSha).toBe(await g(root, "rev-parse", "HEAD"))
+    expect(env.scope?.coveredProjects).toEqual(["proj_a", "proj_b"])
+  }, 60_000)
+
+  test("a repo-root policy applies to every project without its own; a project policy wins; --mode only tightens", async () => {
+    const { root } = await fixture()
+    await write(root, ".altimate/review.yml", "mode: gate\n")
+    await write(root, "proj_b/.altimate/review.yml", "mode: comment\n")
+    const base = await commitAll(root, "policies")
+    await write(root, "proj_a/models/orders.sql", STAR_MODEL)
+    await write(root, "proj_b/models/orders.sql", STAR_MODEL)
+    await commitAll(root, "head")
+
+    const modes = (env: VerdictEnvelope) => env.scope?.projects?.map((p) => [p.root, p.mode])
+    const env = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true })
+    expect(modes(env)).toEqual([["proj_a", "gate"], ["proj_b", "comment"]])
+    expect(env.mode).toBe("gate")
+    // The PR-editable `--mode comment` cannot loosen proj_a's base `gate`, and the merge never re-applies it.
+    const loosened = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true, mode: "comment" })
+    expect(modes(loosened)).toEqual([["proj_a", "gate"], ["proj_b", "comment"]])
+    expect(loosened.mode).toBe("gate")
+    // One touched project from the repo root: the root policy still applies.
+    await write(root, "proj_b/models/orders.sql", "select id, amount from {{ ref('stg') }}\n")
+    await commitAll(root, "only a")
+    const single = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true })
+    expect([single.mode, single.policy?.source]).toEqual(["gate", "base"])
+  }, 60_000)
+
+  test("discovery skips virtualenvs and finds dbt_project.yaml", async () => {
+    const { root } = await fixture()
+    await write(root, ".venv/lib/site-packages/dbt/include/starter_project/dbt_project.yml", "name: starter\n")
+    await write(root, "venv/x/dbt_project.yml", "name: v\n")
+    await write(root, "proj_c/dbt_project.yaml", "name: proj_c\nversion: '1.0'\nprofile: x\n")
+    expect(await discoverDbtProjects(root)).toEqual(["proj_a", "proj_b", "proj_c"])
   }, 60_000)
 
   test("a PR touching one project returns the single-project envelope", async () => {
@@ -109,6 +150,9 @@ describe("reviewAllProjects: one envelope for every dbt project a PR touches", (
     const all = await reviewAllProjects({ cwd, base, head: "HEAD", noAi: true })
     expect(strip(all)).toEqual(strip(single))
     expect(all.scope?.projects).toBeUndefined()
+    // It still covers every discovered project, so it can reconcile an earlier all-projects review.
+    expect(all.scope?.coveredProjects).toEqual(["proj_a", "proj_b"])
+    expect(verifyEnvelope(all)).toBe(true)
     // From the repo root the one touched project is reviewed as if invoked from it.
     const fromRoot = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true })
     expect(strip(fromRoot)).toEqual(strip(single))
@@ -231,9 +275,113 @@ describe("mergeProjectEnvelopes", () => {
       { root: "b", state: "ok", calls: 2 },
     ])
     expect(verifyEnvelope(merged)).toBe(true)
+  })
 
-    // A comment-mode override softens the merged ideal verdict.
-    expect(mergeProjectEnvelopes([{ root: "a", paths: [], env: a }, { root: "b", paths: [], env: b }], "comment").verdict).toBe("COMMENT")
+  test("a gate project's block survives the merge: modes come from the projects, never re-applied", () => {
+    const blocking = finding("a/models/x.sql", "critical", "altimate_core.equivalence")
+    const gateA = signEnvelope(buildEnvelope({ findings: [blocking], tier: "full", mode: "gate" }))
+    const commentB = signEnvelope(buildEnvelope({ findings: [], tier: "lite", mode: "comment" }))
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: ["a/models/x.sql"], env: gateA },
+      { root: "b", paths: [], env: commentB },
+    ])
+    expect([merged.mode, merged.verdict]).toEqual(["gate", "REQUEST_CHANGES"])
+    const allComment = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: signEnvelope(buildEnvelope({ findings: [blocking], tier: "full", mode: "comment" })) },
+      { root: "b", paths: [], env: commentB },
+    ])
+    expect([allComment.mode, allComment.verdict]).toEqual(["comment", "COMMENT"])
+  })
+
+  test("the merged scope carries the shared head; projects reviewed at different heads fail", () => {
+    const at = (headSha: string, headParents?: string[]) =>
+      signEnvelope(buildEnvelope({ findings: [], tier: "lite", mode: "gate", scope: { headSha, headParents, notReviewed: [] } }))
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: at("h", ["p1", "h"]) },
+      { root: "b", paths: [], env: at("h", ["p1", "h"]) },
+    ])
+    expect([merged.scope?.headSha, merged.scope?.headParents]).toEqual(["h", ["p1", "h"]])
+    expect(merged.scope?.coveredProjects).toEqual(["a", "b"])
+    expect(() =>
+      mergeProjectEnvelopes([
+        { root: "a", paths: [], env: at("h1") },
+        { root: "b", paths: [], env: at("h2") },
+      ]),
+    ).toThrow("different head commits")
+  })
+
+  test("AI input records, unsent files and verifier usage are merged across projects", () => {
+    const rec = (p: string) => ({ path: p, kind: "model_sql", chars: 10, truncated: false, hunksSent: 1, hunksTotal: 1, card: false })
+    const verifier = (cost: number, reason?: string, state: "ok" | "error" = "ok") => ({
+      state,
+      reason,
+      cost,
+      turns: 1,
+      toolCalls: 2,
+      reviewed: 1,
+      kept: 1,
+      discarded: 0,
+      tokens: { input: 1, inputTotal: 1, output: 1, reasoning: 0, cacheRead: 0 },
+    })
+    const env = (root: string, v: ReturnType<typeof verifier>) =>
+      signEnvelope(
+        buildEnvelope({
+          findings: [],
+          tier: "full",
+          mode: "comment",
+          ai: { state: "ok", calls: 1, input: [rec(`${root}/m.sql`)], unsent: [`${root}/n.sql`], verifier: v },
+        }),
+      )
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: env("a", verifier(2)) },
+      { root: "b", paths: [], env: env("b", verifier(2, "timed out", "error")) },
+    ])
+    expect(merged.ai?.input?.map((r) => r.path)).toEqual(["a/m.sql", "b/m.sql"])
+    expect(merged.ai?.unsent).toEqual(["a/n.sql", "b/n.sql"])
+    expect(merged.ai?.verifier).toMatchObject({ state: "error", reason: "b: timed out", cost: 4, turns: 2, toolCalls: 4, reviewed: 2, kept: 2 })
+    expect(merged.ai?.verifier?.tokens).toEqual({ input: 2, inputTotal: 2, output: 2, reasoning: 0, cacheRead: 0 })
+    expect(verifyEnvelope(merged)).toBe(true)
+  })
+
+  test("a merged envelope reconciles earlier per-project blocks it covers, and only those", async () => {
+    const calls: Record<string, any[]> = { createReview: [], dismissReview: [] }
+    const bot = { type: "Bot" }
+    const block = (id: number, marker: string) => ({
+      id,
+      body: `🛑 Changes requested — 1 critical (full tier)\n\n<!-- altimate-code-review:verdict${marker} -->`,
+      state: "CHANGES_REQUESTED",
+      user: bot,
+    })
+    const reviews = [block(1, " project=a"), block(2, " project=b"), block(3, " project=c"), block(4, " projects=a,b"), block(5, " projects=a,c")]
+    const client = {
+      async paginate(fn: any) {
+        return fn === client.rest.pulls.listReviews ? reviews : []
+      },
+      rest: {
+        issues: { listComments: () => {}, createComment: async () => ({ data: { id: 1 } }), updateComment: async () => ({ data: { id: 1 } }) },
+        pulls: {
+          listReviewComments: () => {},
+          listReviews: () => {},
+          get: async () => ({ data: { head: { sha: "h" } } }),
+          createReview: async (a: any) => (calls.createReview.push(a), { data: { id: 9 } }),
+          dismissReview: async (a: any) => (calls.dismissReview.push(a), { data: {} }),
+        },
+      },
+    } as unknown as GitHubClient
+    // Comment mode: the run has something to say but does not block, so it may clear earlier blocks.
+    const clean = (root: string) =>
+      signEnvelope(buildEnvelope({ findings: [finding(`${root}/models/y.sql`, "critical", "rule-catalog")], tier: "lite", mode: "comment", scope: { projectRoot: root, headSha: "h", notReviewed: [] } }))
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: clean("a") },
+      { root: "b", paths: [], env: clean("b") },
+    ])
+    const target = { token: "t", owner: "o", repo: "r", prNumber: 1 }
+    await postGitHubReview(merged, target, client)
+    expect(calls.dismissReview.map((c) => c.review_id)).toEqual([1, 2, 4])
+    // With no earlier review to reuse, it posts under a marker naming every project it covers.
+    reviews.length = 0
+    await postGitHubReview(merged, target, client)
+    expect(calls.createReview[0].body).toContain("<!-- altimate-code-review:verdict projects=a,b -->")
   })
 
   test("a comment-mode project's REQUEST_CHANGES does not block a gate-mode merge", () => {
