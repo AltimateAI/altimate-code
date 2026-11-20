@@ -493,10 +493,11 @@ export function packageLockFindings(file: ChangedFile, isPackage: boolean): Find
 
 const DOC_REF = /\bdoc\s*\(\s*['"](\w+)['"]\s*\)/g
 
-/** `doc('x')` names this change adds to a yml file that no docs block in the project defines:
- *  dbt fails to parse the project. Only when another `doc()` in the file resolves in the project,
- *  or, when the file has no other `doc()`, the project keeps its own docs blocks; so docs kept in
- *  an installed package aren't mistaken for missing ones. */
+/** `doc('x')` names this change adds to a yml file that no docs block in the project or its
+ *  installed packages defines: dbt fails to parse the project. Only when another `doc()` in the
+ *  file resolves, or, when the file has no other `doc()`, the project keeps its own docs blocks
+ *  (`projectHasDocs` also requires the packages' blocks to be known); so docs kept in an
+ *  uninstalled package aren't mistaken for missing ones. */
 export async function docRefFindings(
   file: ChangedFile,
   oldContent: string | undefined,
@@ -524,7 +525,7 @@ export async function docRefFindings(
       "warning",
       "sql_correctness",
       `\`doc('${name}')\` has no docs block`,
-      `No \`{% docs ${name} %}\` block exists in the project's \`.md\` files, while the other \`doc()\` references in this file resolve there. dbt fails to parse the project on a \`doc()\` it can't resolve. Add the docs block, or fix the name.`,
+      `No \`{% docs ${name} %}\` block exists in the project's \`.md\` files or its installed packages, while ${others.length ? "the other \`doc()\` references in this file resolve" : "the project defines its own docs blocks"}. dbt fails to parse the project on a \`doc()\` it can't resolve. Add the docs block, or fix the name.`,
       lines.get(name),
     ),
   )
