@@ -444,8 +444,12 @@ describe("triage (first match wins)", () => {
     })
   }
 
-  test("refuted without evidence falls through; unchanged code is kept when confirmed, a test gap, or intent", () => {
-    expect(triage(f, TS, { ...M, verdict: "refuted", evidence: " " }, K).rule).toBe("verified")
+  test("refuted without evidence counts as unverifiable; unchanged code is kept when confirmed, a test gap, or intent", () => {
+    const bare = { ...M, verdict: "refuted" as const, evidence: " " }
+    // Never labelled verified: it is judged like an unverifiable claim.
+    expect(triage(f, TS, bare, K).rule).toBe("plausible_local")
+    expect(triage(f, { ...TS, evidenceLineValid: false }, bare, K)).toEqual({ decision: "discard", rule: "unverifiable" })
+    expect(triage(f, TS, { ...bare, claimType: "cross_file" }, K).decision).toBe("summary")
     const unchanged = { ...TS, targetsUnchangedCode: true }
     expect(triage(f, unchanged, M, K).rule).toBe("verified")
     expect(
@@ -533,8 +537,11 @@ describe("triage (first match wins)", () => {
       [M, { ...M, value: "informational" }],
       K,
     ).findings
-    expect(inlineEligible(kept, DEFAULT_POSTING_POLICY)).toBe(true)
+    // The orchestrator stamps AI findings `inline` by default (`ruleTier`).
+    expect(inlineEligible({ ...kept, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(true)
     expect(inlineEligible({ ...summary, tier: "summary" }, DEFAULT_POSTING_POLICY)).toBe(false)
+    // A config rule that re-tiers AI findings to inline does not undo the demotion.
+    expect(inlineEligible({ ...summary, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(false)
   })
 
   test("dropped is capped at 20", () => {
@@ -715,7 +722,7 @@ describe("runAiVerify: the bounded tool loop", () => {
     const long = "x".repeat(10_000)
     const step = () =>
       scripted((req) =>
-        req.toolChoice === "none" ? { text: "[]" } : toolStep([["read_file", { path: "models/fct.sql" }]]),
+        req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["read_file", { path: "models/fct.sql" }]]),
       )
     const env = { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "1000000" }
     const wide = step()
@@ -731,6 +738,18 @@ describe("runAiVerify: the bounded tool loop", () => {
     // One read (about 2,500 characters) spends the 2,000-character budget: the next call must answer.
     expect(narrow.calls.map((c) => c.toolChoice)).toEqual(["auto", "none"])
     expect(res.status.state).toBe("budget")
+  })
+
+  test("a round is planned at its typical tool output, not the worst case, so a batch of 8 can use tools", async () => {
+    const eight = Array.from({ length: 8 }, (_, i) => aiFinding({ ruleKey: `k${i}` }))
+    const { llm, calls } = scripted((req) =>
+      req.toolChoice === "none"
+        ? { text: JSON.stringify(eight.map((_, i) => verdict(`c${i + 1}`))) }
+        : toolStep([["pr_description", {}]]),
+    )
+    // 8,000 tokens fit one round at two full tool outputs, not at six (the worst case).
+    await verify(eight, llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "8000" } })
+    expect(calls[0].toolChoice).toBe("auto")
   })
 
   test("a spent token budget forces the answer early and reports budget", async () => {
@@ -751,7 +770,7 @@ describe("runAiVerify: the bounded tool loop", () => {
   test("the env budget override and the tool-output budget both force the answer", async () => {
     const small = { tokens: { input: 600, inputTotal: 600, output: 10, reasoning: 0, cacheRead: 0 }, cost: 0 }
     const a = scripted((req) =>
-      req.toolChoice === "none" ? { text: "[]" } : toolStep([["pr_description", {}]], small),
+      req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["pr_description", {}]], small),
     )
     // A budget too small for a tool round and an answer: answer straight away, without tools.
     const res = await verify([aiFinding()], a.llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "500" } })
@@ -759,6 +778,13 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(a.calls[0].messages).toHaveLength(1)
     expect(String(a.calls[0].messages[0].content).endsWith(ANSWER_DIRECT)).toBe(true)
     expect(res.status.state).toBe("budget")
+
+    // An unparsable forced answer is an error, not budget: every finding went unreviewed.
+    const empty = scripted(() => ({ text: "[]" }))
+    const failed = await verify([aiFinding()], empty.llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_MAX_TOKENS: "500" } })
+    expect(empty.calls.map((c) => c.toolChoice)).toEqual(["none"])
+    expect(failed.status.state).toBe("error")
+    expect(failed.status.reason).toContain("no parsable verdicts")
 
     const long = "x".repeat(10_000)
     const b = scripted((req) =>
@@ -957,6 +983,26 @@ describe("runAiVerify: the bounded tool loop", () => {
     const { findings, status } = await verify([f], llm, {}, { timeoutMs: 20 })
     expect(findings).toEqual([f])
     expect(status.state).toBe("timeout")
+  })
+
+  test("the timeout also interrupts a pending evidence tool", async () => {
+    const f = aiFinding()
+    const { llm } = scripted(() => toolStep([["read_file", { path: "models/fct.sql" }]]))
+    // The read never settles; the deadline must still end the run.
+    const { findings, status } = await verify([f], llm, { readFile: () => new Promise<string>(() => {}) }, { timeoutMs: 20 })
+    expect(findings).toEqual([f])
+    expect(status.state).toBe("timeout")
+  })
+
+  test("an unexpected failure honours ALTIMATE_REVIEW_AI_VERIFY_FAIL=closed", async () => {
+    const f = aiFinding()
+    const { llm } = scripted(() => ({ text: "[]" }))
+    const broken = { addedLines: undefined as any }
+    const open = await verify([f], llm, broken)
+    expect(open.findings).toEqual([f])
+    const closed = await verify([f], llm, broken, { env: { ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" } })
+    expect(closed.findings).toEqual([])
+    expect(closed.status).toMatchObject({ state: "error", kept: 0, discarded: 1 })
   })
 
   test("never throws, even on broken evidence", async () => {

@@ -1,6 +1,6 @@
 // altimate_change - new file: dbt-grounded verifier for the advisory AI lane
 //
-// One extra, bounded model call per PR that tries to REFUTE each AI finding
+// One extra model conversation per batch of AI findings (soft token budget) that tries to REFUTE each AI finding
 // with dbt evidence (compiled SQL, the manifest DAG, column lineage, project
 // grep). The verifier sees only the candidate comments and their diff hunks,
 // never the reviewer's prompt or context, and a deterministic triage table —
@@ -86,7 +86,7 @@ export interface VerifierStatus {
   decisions?: VerifierDecision[]
 }
 
-/** Whether the verifier runs: opt-in until the decision run says otherwise. */
+/** Whether the verifier runs (opt-in). */
 export function aiVerifyEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env.ALTIMATE_REVIEW_AI_VERIFY === "1"
 }
@@ -174,7 +174,7 @@ const SUBSTANCE = /null|dup|fan.?out|grain|join|filter|timezone|currency|unit|in
  * Deterministic features of one AI finding (pure). `added` holds the head-side
  * lines the PR added in the finding's file; `names` the dbt parents and
  * downstream models of the changed files. Findings reach the verifier before
- * `anchorToDiff` tags `preExisting`, so a line on the diff that the PR did not
+ * `markPreExisting` tags `preExisting`, so a line on the diff that the PR did not
  * add counts as unchanged code here.
  */
 export function extractFeatures(
@@ -364,10 +364,13 @@ export function hunkAround(diff: string | undefined, line?: number): string {
     if (row.startsWith("-")) rows.push({ text: row })
     else if (row.startsWith("+") || row.startsWith(" ")) rows.push({ head: right++, text: row })
   }
+  // The head line at or after each row, in one backward pass.
+  const nextHead: number[] = new Array(rows.length)
+  for (let i = rows.length - 1, next = right; i >= 0; i--) nextHead[i] = next = rows[i].head ?? next
   const near = (r: { head?: number }, i: number) => {
     if (typeof line !== "number") return i < 2 * HUNK_RADIUS
     // A removed row or hunk header sits beside the head row that follows it.
-    const at = r.head ?? rows.slice(i).find((x) => x.head !== undefined)?.head ?? right
+    const at = r.head ?? nextHead[i]
     return Math.abs(at - line) <= HUNK_RADIUS
   }
   const picked = rows
@@ -444,10 +447,14 @@ export function triage(
       ? { decision: "keep", rule: "unreviewed" }
       : { decision: "discard", rule: "unreviewed" }
   if (ts.restatesGrounding) return { decision: "discard", rule: "duplicate_of_engine" }
-  if (m.verdict === "refuted" && m.evidence.trim()) return { decision: "discard", rule: "refuted" }
+  if (m.verdict === "refuted") {
+    if (m.evidence.trim()) return { decision: "discard", rule: "refuted" }
+    // A refutation without evidence is no verification: treat it as unverifiable,
+    // so it is never labelled `verified` and never outlives an unverifiable claim.
+    m = { ...m, verdict: "unverifiable" }
+  }
   // Unverified cross-file and speculative claims go to the summary, not away:
-  // in the decision run about half of these discards were judged valuable and
-  // they held real catches, so they are kept for the reader but never posted inline.
+  // these often hold real catches, so they are kept for the reader but never posted inline.
   if (m.claimType === "cross_file" && (m.verdict === "unverifiable" || m.toolsUsed.length === 0))
     return { decision: "summary", rule: "unverifiable_cross_file" }
   if (m.claimType === "speculation" || (m.requiresAssumedInput && m.verdict !== "confirmed"))
@@ -635,7 +642,8 @@ export function applyTriage(
 // Tool loop
 // ---------------------------------------------------------------------------
 
-/** Tokens (input incl. cached + output) one PR's verifier may spend before it must answer. */
+/** Tokens (input incl. cached + output) one PR's verifier plans to spend. A soft cap: each
+ *  batch always sends its forced answer, so a PR with many batches can exceed it. */
 export const VERIFY_MAX_TOKENS = 12_000
 /** Output tokens reserved for each model call when planning the budget. */
 export const VERIFY_OUTPUT_RESERVE = 1_000
@@ -646,6 +654,8 @@ export const VERIFY_MAX_CALLS_PER_ROUND = 6
 /** Candidates per model conversation. */
 export const VERIFY_BATCH_SIZE = 8
 const TOOL_OUTPUT_MAX = 2_500
+/** Tool-output characters one round is planned to add (typical, not worst case). */
+const ROUND_OUTPUT_PLAN = 2 * TOOL_OUTPUT_MAX
 const PR_TEXT_MAX = 1_500
 const BATCH_CONCURRENCY = 2
 export const ANSWER_NOW = "Answer now with the evidence you have."
@@ -719,6 +729,16 @@ interface Graph {
 }
 
 const MODEL_KINDS = new Set([undefined, "model_sql", "python_model"])
+
+/** Settle with `work`, or reject as soon as `signal` aborts (the work itself is not cancelled). */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("aborted"))
+    signal.addEventListener("abort", onAbort, { once: true })
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort))
+  })
+}
 
 async function gatherGraph(ev: AiVerifyEvidence): Promise<Graph> {
   const parents = (await ev.runner.graphParents?.(ev.files.map((f) => f.path)).catch(() => undefined)) ?? []
@@ -966,7 +986,7 @@ interface BatchOutcome {
  * One batch's conversation: up to 3 tool rounds, then a forced answer. The
  * answer is forced early (toolChoice "none") when another tool round plus the
  * answer after it would not fit the batch's token share, or the tool-output
- * budget is spent; the forced answer is thereby budgeted for.
+ * budget is spent. The forced answer is always sent, so the token budget is soft.
  */
 async function verifyBatch(
   message: string,
@@ -999,7 +1019,9 @@ async function verifyBatch(
       const nextCall = (extra = 0) =>
         Math.ceil((requestChars(ctx.fixedChars, messages) + ANSWER_NOW.length + extra) / charsPerToken) +
         VERIFY_OUTPUT_RESERVE
-      const roundOutput = Math.min(VERIFY_MAX_CALLS_PER_ROUND * TOOL_OUTPUT_MAX, ctx.maxToolChars - toolChars)
+      // A typical round returns about two full tool outputs; planning for the
+      // worst case (every call at the cap) kept the tool loop from ever running.
+      const roundOutput = Math.min(ROUND_OUTPUT_PLAN, ctx.maxToolChars - toolChars)
       const roomForRound = tokens + nextCall() + nextCall(roundOutput) <= ctx.maxTokens
       const overBudget = !roomForRound || toolChars > ctx.maxToolChars
       const force = rounds >= ctx.maxRounds || overBudget
@@ -1026,7 +1048,7 @@ async function verifyBatch(
       if (ctx.abort.aborted) throw ctx.abort.reason ?? new Error("aborted")
       if (force || step.finishReason !== "tool-calls" || !step.toolCalls.length) {
         out.verdicts = parseVerifierOutput(step.text, ids)
-        if (!out.verdicts.size && out.state === "ok") {
+        if (!out.verdicts.size) {
           out.state = "error"
           out.reason = "the verifier returned no parsable verdicts"
         }
@@ -1039,7 +1061,7 @@ async function verifyBatch(
       for (const [i, call] of pending.entries()) {
         const result =
           i < VERIFY_MAX_CALLS_PER_ROUND
-            ? await runToolCall(ctx.defs, call)
+            ? await untilAborted(runToolCall(ctx.defs, call), ctx.abort)
             : NA(`at most ${VERIFY_MAX_CALLS_PER_ROUND} tool calls per round`)
         if (i < VERIFY_MAX_CALLS_PER_ROUND) out.toolCalls++
         toolChars += result.length
@@ -1139,16 +1161,12 @@ export async function runAiVerify(
   if (!input.findings.length)
     return { findings: input.findings, status: status({ state: "skipped", reason: "no AI findings to verify" }) }
   let timer: ReturnType<typeof setTimeout> | undefined
+  const controller = new AbortController()
   try {
     const env = deps.env ?? process.env
     const ev = input.evidence
     const llm = deps.llm ?? harnessVerifierLlm(input.model)
-    const graph = await gatherGraph(ev)
-    const names = { parents: graph.parents.map((p) => p.name), downstream: graph.downstream.map((d) => d.name) }
     const fileByPath = new Map(ev.files.map((f) => [f.path, f]))
-    const ts = input.findings.map((f) =>
-      extractFeatures(f, fileByPath.get(f.file), input.grounding, names, ev.addedLines.get(f.file) ?? new Set()),
-    )
     const batches = batchFindings(input.findings).map((idx) => {
       const ids = idx.map((_, j) => `c${j + 1}`)
       const message = buildVerifyMessage(
@@ -1162,8 +1180,13 @@ export async function runAiVerify(
       return { idx, ids, message }
     })
     const promptChars = batches.reduce((n, b) => n + b.message.length, 0)
-    const controller = new AbortController()
+    // One deadline covers graph gathering, tool calls and model calls.
     timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? aiTimeoutMs(promptChars))
+    const graph = await untilAborted(gatherGraph(ev), controller.signal)
+    const names = { parents: graph.parents.map((p) => p.name), downstream: graph.downstream.map((d) => d.name) }
+    const ts = input.findings.map((f) =>
+      extractFeatures(f, fileByPath.get(f.file), input.grounding, names, ev.addedLines.get(f.file) ?? new Set()),
+    )
     const defs = verifierTools(ev, graph)
     const tools = Object.fromEntries(
       Object.entries(defs).map(([name, d]) => [name, tool({ description: d.description, inputSchema: d.input })]),
@@ -1225,7 +1248,18 @@ export async function runAiVerify(
     }
   } catch (err) {
     log.error("ai verify failed", { error: err })
-    return { findings: input.findings, status: status({ state: "error", reason: safeReason(err) }) }
+    // No finding got a verdict: the fail mode decides, as for an unreviewed finding.
+    const closed = triageKnobs(deps.env ?? process.env).failMode === "closed"
+    const n = input.findings.length
+    return {
+      findings: closed ? [] : input.findings,
+      status: status({
+        ...(controller.signal.aborted
+          ? { state: "timeout" as const, reason: "no answer before the verifier timeout" }
+          : { state: "error" as const, reason: safeReason(err) }),
+        ...(closed ? { kept: 0, discarded: n } : {}),
+      }),
+    }
   } finally {
     clearTimeout(timer)
   }

@@ -126,7 +126,8 @@ describe("replayFindings (envelope → the generator's findings)", () => {
   })
 
   test("an envelope from a run without the verifier replays its AI findings unchanged", () => {
-    const f = { ...GENERATED[0], origin: "ai", tier: "inline" }
+    // Orchestrator post-processing (origin, tier, preExisting, evidenceLine) is undone too.
+    const f = { ...GENERATED[0], origin: "ai", tier: "inline", preExisting: true, evidenceLine: "select 1" }
     const lane = replayFindings({ findings: [f], ai: { state: "ok", calls: 1 } })
     expect(lane.findings).toEqual([GENERATED[0]])
     expect(lane.status).toEqual({ state: "ok", calls: 1, replayed: true })
@@ -195,6 +196,21 @@ describe("runAiReview with ALTIMATE_REVIEW_AI_REPLAY", () => {
     expect(res.status).toMatchObject({ state: "ok", replayed: true, tokens: TOKENS, calls: 1 })
     expect(res.status.verifier).toMatchObject({ reviewed: 4, kept: 2, summary: 1, discarded: 2, unreviewed: 1 })
     expect(res.status.verifier?.tokens?.inputTotal).toBe(1_000)
+  })
+
+  test("verifier on but no usable model: the replayed findings stand, verifier skipped", async () => {
+    const { envelope } = await storedEnvelope()
+    process.env.ALTIMATE_REVIEW_AI_REPLAY = write(JSON.stringify(envelope))
+    process.env.ALTIMATE_REVIEW_AI_VERIFY = "1"
+    spyOn(Provider, "defaultModel").mockResolvedValue({ providerID: "fake", modelID: "missing" } as any)
+    spyOn(Provider, "getModel").mockRejectedValue(new Error("model not found"))
+    const stream = spyOn(LLM, "stream")
+    const res = await runAiReview({ files: [FILE], grounding: [], evidence: evidence() })
+    expect(stream).not.toHaveBeenCalled()
+    expect(res.findings.map((f) => f.id)).toEqual(GENERATED.map((f) => f.id))
+    expect(res.status).toMatchObject({ state: "ok", replayed: true })
+    expect(res.status.verifier).toMatchObject({ state: "skipped", reviewed: 0, kept: GENERATED.length })
+    expect(res.status.verifier?.reason).toContain("no usable model")
   })
 
   test("a missing or unparsable file is an error on stderr, never a generator call", async () => {

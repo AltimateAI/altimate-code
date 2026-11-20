@@ -440,6 +440,8 @@ const CONFIDENCE_ORDER: Record<Confidence, number> = { high: 3, medium: 2, low: 
  *  no entry has unknown hunks (GitHub omits the patch for large diffs): its
  *  lines are attempted, and the 422 fallback covers a miss. */
 export function inlineEligible(f: Finding, posting: PostingPolicy, commentable?: Map<string, Set<number>>): boolean {
+  // The verifier's demotion wins over any tier, including a config rule that
+  // re-tiers AI findings to `inline` after the AI lane ran.
   if (verifierDemoted(f) || f.tier !== "inline") return false
   if (f.preExisting || typeof f.startLine !== "number") return false
   if (commentable?.has(f.file) && !commentable.get(f.file)!.has(f.startLine)) return false
