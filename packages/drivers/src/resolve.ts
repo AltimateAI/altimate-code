@@ -859,13 +859,14 @@ function isRegularFile(file: string): boolean {
 
 /** An environment variable by name, ignoring case as Windows does (`Path` and `PATH` are one variable). */
 function windowsEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const key = Object.keys(env).find((k) => k.toUpperCase() === name)
+  const key = Object.keys(env).find((k) => k.toUpperCase() === name.toUpperCase())
   return key === undefined ? undefined : env[key]
 }
 
 /**
- * Where cmd.exe would find `command`: the current directory, then each PATH
- * entry, trying each PATHEXT extension in turn. Undefined when it would not.
+ * Where cmd.exe would find `command`: the current directory (unless
+ * NoDefaultCurrentDirectoryInExePath is set), then each PATH entry, trying each
+ * PATHEXT extension in turn. Undefined when it would not.
  */
 export function findOnWindowsPath(
   command: string,
@@ -878,7 +879,8 @@ export function findOnWindowsPath(
     .split(";")
     .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
     .filter(Boolean)
-  for (const dir of [cwd, ...dirs]) {
+  const searchDirs = windowsEnv(env, "NoDefaultCurrentDirectoryInExePath") === undefined ? [cwd, ...dirs] : dirs
+  for (const dir of searchDirs) {
     for (const ext of extensions) {
       const file = path.win32.resolve(cwd, dir, command + ext)
       if (isFile(file)) return file

@@ -1114,16 +1114,32 @@ describe("findOnWindowsPath", () => {
   })
 
   test("the current directory is searched first, and a relative entry is read from it", () => {
-    expect(findOnWindowsPath("npm", cwd, { PATH: "" }, files(`${cwd}\\npm.cmd`))).toBe(`${cwd}\\npm.CMD`)
+    const both = files(`${cwd}\\npm.cmd`, "C:\\Program Files\\nodejs\\npm.cmd")
+    expect(findOnWindowsPath("npm", cwd, { PATH: "C:\\Program Files\\nodejs" }, both)).toBe(`${cwd}\\npm.CMD`)
     expect(findOnWindowsPath("npm", cwd, { PATH: "tools" }, files(`${cwd}\\tools\\npm.exe`))).toBe(
       `${cwd}\\tools\\npm.EXE`,
     )
+  })
+
+  test("NoDefaultCurrentDirectoryInExePath, in any case and with any value, skips the current directory", () => {
+    const isFile = files(`${cwd}\\npm.cmd`)
+    expect(findOnWindowsPath("npm", cwd, { PATH: "", NODEFAULTCURRENTDIRECTORYINEXEPATH: "" }, isFile)).toBeUndefined()
+    expect(findOnWindowsPath("npm", cwd, { PATH: "", NoDefaultCurrentDirectoryInExePath: "1" }, isFile)).toBeUndefined()
+    expect(
+      findOnWindowsPath(
+        "npm",
+        cwd,
+        { PATH: "C:\\Program Files\\nodejs", NoDefaultCurrentDirectoryInExePath: "1" },
+        files(`${cwd}\\npm.cmd`, "C:\\Program Files\\nodejs\\npm.cmd"),
+      ),
+    ).toBe("C:\\Program Files\\nodejs\\npm.CMD")
   })
 })
 
 describe("runNpm when npm is missing on Windows", () => {
   // What cmd.exe prints, and its exit code, when npm is not on PATH (Windows 11, English).
-  const NOT_RECOGNIZED = "'npm' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n"
+  const NOT_RECOGNIZED =
+    "'npm' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n"
 
   async function run(options: { platform: NodeJS.Platform; npmOnPath: boolean; stderr: string; code: number }) {
     const child = fakeChild()
