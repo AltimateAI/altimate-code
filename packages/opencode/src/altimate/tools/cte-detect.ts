@@ -472,7 +472,12 @@ function skipQuoted(text: string, pos: number): number {
 function shadowsIn(sql: string, start: number, end: number): { written: Written; at: number; from: number; to: number }[] {
   const out: { written: Written; at: number; from: number; to: number }[] = []
   const add = (from: number, to: number) => {
-    for (const one of detectCtes(sql.substring(from, to))) out.push({ written: written(stripColumnList(one.name)), at: from + one.nameStart, from: from + one.queryEnd, to })
+    const text = sql.substring(from, to)
+    for (const one of detectCtes(text)) {
+      // In a WITH RECURSIVE clause a CTE's name means that CTE across the whole clause, its own body included.
+      const recursive = /^with\s+recursive\b/i.test(text.substring(one.withClauseStart, one.withClauseStart + 40))
+      out.push({ written: written(stripColumnList(one.name)), at: from + one.nameStart, from: from + (recursive ? one.withClauseStart : one.queryEnd), to })
+    }
   }
   if (!/\bwith\b/i.test(sql.substring(start, end))) return out
   add(start, end)
@@ -522,7 +527,8 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
     const reads = new Set<number>()
     // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
     // once its definition has ended, to the end of the query that holds it.
-    const inner = earlier.size > 0 ? shadowsIn(sql, cte.queryStart, cte.queryEnd) : []
+    const inner = new Map<string, { written: Written; at: number; from: number; to: number }[]>()
+    for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, cte.queryEnd) : []) inner.set(bucket(one.written.name), [...(inner.get(bucket(one.written.name)) ?? []), one])
     let pos = cte.queryStart
     // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
     let previous = ""
@@ -560,9 +566,10 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
       }
       if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ")) {
         const ref = written(sql.substring(pos, end))
-        // An inner CTE's own name where it is defined is no reference at all.
-        const shadowed = inner.some((one) => one.at === pos || (one.from < pos && pos < one.to && sameName(one.written, ref)))
-        if (!shadowed) for (const one of earlier.get(bucket(ref.name)) ?? []) if (sameName(one.written, ref)) reads.add(one.position)
+        const named = (earlier.get(bucket(ref.name)) ?? []).filter((one) => sameName(one.written, ref))
+        // An inner CTE's own name where it is defined is no reference at all, and one in scope shadows the outer.
+        const shadowed = (inner.get(bucket(ref.name)) ?? []).some((one) => one.at === pos || (one.from < pos && pos < one.to && sameName(one.written, ref)))
+        if (!shadowed) for (const one of named) reads.add(one.position)
       }
       previous = sql[end - 1]
       pos = end

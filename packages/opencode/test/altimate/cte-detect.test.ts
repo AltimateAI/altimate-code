@@ -1744,11 +1744,22 @@ select * from c`
     // Inside its own definition, or in an inner CTE before it, the name is still the outer CTE.
     expect(readsOf("with orders as (select 1), b as (with x as (select * from orders), orders as (select 2) select * from x) select * from b").b).toEqual(["orders"])
     expect(readsOf("with orders as (select 1), b as (with orders as (select * from orders) select * from orders) select * from b").b).toEqual(["orders"])
+    // In WITH RECURSIVE the inner CTE's own body already means it.
+    expect(readsOf("with dates as (select 999 as n), result as (with recursive dates(n) as (select 1 union all select n + 1 from dates where n < 3) select * from dates) select * from result").result).toEqual([])
+    expect(readsOf("with dates as (select 999 as n), result as (with dates2(n) as (select n from dates) select * from dates2) select * from result").result).toEqual(["dates"])
     // A subquery's WITH shadows too, only inside that subquery.
     expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s) select * from b").b).toEqual([])
     expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s join orders on 1 = 1) select * from b").b).toEqual(["orders"])
     const sql = "with orders as (select 1), b as (with orders as (select 2) select * from orders), c as (with x as (select 3) select * from x join orders on 1 = 1) select * from c"
     expect(readsOf(sql)).toEqual({ orders: [], b: [], c: ["orders"] })
+  })
+
+  it("a body with thousands of inner CTEs is read in near-linear time", () => {
+    const inner = Array.from({ length: 10000 }, (_, i) => `i${i} as (select ${i} as x)`).join(",\n")
+    const sql = `with orders as (select 1), b as (with ${inner} select * from i9999 join orders on 1 = 1) select * from b`
+    const started = performance.now()
+    expect(readsOf(sql).b).toEqual(["orders"])
+    expect(performance.now() - started).toBeLessThan(3000)
   })
 
   it("lists the reads of a model with thousands of CTEs in linear time", () => {
