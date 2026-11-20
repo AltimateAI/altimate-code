@@ -843,6 +843,48 @@ interface KillTreeOptions {
 interface RunNpmOptions {
   spawnProcess?: SpawnProcess
   killTree?: (child: ReturnType<typeof spawn>) => Promise<KillTreeResult>
+  platform?: NodeJS.Platform
+  /** Whether cmd.exe can find npm from `cwd`. Consulted only after a failed run on Windows. */
+  npmOnPath?: (cwd: string) => boolean
+}
+
+/** False for anything unreadable as well as absent: a PATH entry can name a file, or a directory we may not stat. */
+function isRegularFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** An environment variable by name, ignoring case as Windows does (`Path` and `PATH` are one variable). */
+function windowsEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === name)
+  return key === undefined ? undefined : env[key]
+}
+
+/**
+ * Where cmd.exe would find `command`: the current directory, then each PATH
+ * entry, trying each PATHEXT extension in turn. Undefined when it would not.
+ */
+export function findOnWindowsPath(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+  isFile: (file: string) => boolean = isRegularFile,
+): string | undefined {
+  const extensions = (windowsEnv(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+  const dirs = (windowsEnv(env, "PATH") ?? "")
+    .split(";")
+    .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter(Boolean)
+  for (const dir of [cwd, ...dirs]) {
+    for (const ext of extensions) {
+      const file = path.win32.resolve(cwd, dir, command + ext)
+      if (isFile(file)) return file
+    }
+  }
+  return undefined
 }
 
 const KILL_TERM_GRACE_MS = 2_000
@@ -1049,6 +1091,15 @@ function runNpm(
     })
     child.on("close", (code) => {
       if (state !== "running") return
+      // POSIX shells exit 127 when npm is missing. cmd.exe exits 1, the same as
+      // a failed install, and words its "is not recognized" line in the system's
+      // language, so on Windows look npm up the way cmd.exe does instead.
+      const platform = options.platform ?? process.platform
+      const npmOnPath = options.npmOnPath ?? ((dir: string) => findOnWindowsPath("npm", dir) !== undefined)
+      if (code !== 0 && platform === "win32" && !npmOnPath(cwd)) {
+        finish(127)
+        return
+      }
       finish(code ?? 1)
     })
   })

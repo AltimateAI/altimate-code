@@ -28,6 +28,7 @@ import {
   driverInstallDir,
   driverLabel,
   driverSearchRoots,
+  findOnWindowsPath,
   isDriverInstalled,
   loadOptionalDriver,
   packageNameOf,
@@ -1078,5 +1079,114 @@ describe("runNpm timeout", () => {
     expect(result.code).toBe(124)
     expect(result.output).toContain("could not be verified")
     expect(result.output).toContain("cleanup exploded")
+  })
+})
+
+describe("findOnWindowsPath", () => {
+  // Windows paths compare case-insensitively, as NTFS does.
+  const files = (...paths: string[]) => {
+    const set = new Set(paths.map((p) => p.toLowerCase()))
+    return (file: string) => set.has(file.toLowerCase())
+  }
+  const cwd = "C:\\Users\\x\\AppData\\Local\\altimate-code\\drivers"
+
+  test("finds npm.cmd in a PATH entry, reading Path and PATHEXT in any case", () => {
+    const env = { Path: "C:\\Windows\\System32;C:\\Program Files\\nodejs\\", PathExt: ".COM;.EXE;.BAT;.CMD" }
+    expect(findOnWindowsPath("npm", cwd, env, files("C:\\Program Files\\nodejs\\npm.cmd"))).toBe(
+      "C:\\Program Files\\nodejs\\npm.CMD",
+    )
+  })
+
+  test("a quoted PATH entry is read without its quotes", () => {
+    const env = { PATH: '"C:\\Program Files\\nodejs";C:\\Windows' }
+    expect(findOnWindowsPath("npm", cwd, env, files("C:\\Program Files\\nodejs\\npm.cmd"))).toBeDefined()
+  })
+
+  test("an extensionless npm (the POSIX script) does not count: cmd.exe only runs PATHEXT files", () => {
+    const env = { PATH: "C:\\Program Files\\nodejs" }
+    expect(findOnWindowsPath("npm", cwd, env, files("C:\\Program Files\\nodejs\\npm"))).toBeUndefined()
+  })
+
+  test("undefined when no PATH entry holds npm, or there is no PATH at all", () => {
+    const isFile = files("D:\\elsewhere\\npm.cmd")
+    expect(findOnWindowsPath("npm", cwd, { PATH: "C:\\Windows\\System32;C:\\Windows" }, isFile)).toBeUndefined()
+    expect(findOnWindowsPath("npm", cwd, {}, isFile)).toBeUndefined()
+  })
+
+  test("the current directory is searched first, and a relative entry is read from it", () => {
+    expect(findOnWindowsPath("npm", cwd, { PATH: "" }, files(`${cwd}\\npm.cmd`))).toBe(`${cwd}\\npm.CMD`)
+    expect(findOnWindowsPath("npm", cwd, { PATH: "tools" }, files(`${cwd}\\tools\\npm.exe`))).toBe(
+      `${cwd}\\tools\\npm.EXE`,
+    )
+  })
+})
+
+describe("runNpm when npm is missing on Windows", () => {
+  // What cmd.exe prints, and its exit code, when npm is not on PATH (Windows 11, English).
+  const NOT_RECOGNIZED = "'npm' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n"
+
+  async function run(options: { platform: NodeJS.Platform; npmOnPath: boolean; stderr: string; code: number }) {
+    const child = fakeChild()
+    const lookups: string[] = []
+    const result = _testing.runNpm(["install", "@databricks/sql"], tmpRoot, 60_000, {
+      spawnProcess: (() => child as any) as typeof spawn,
+      platform: options.platform,
+      npmOnPath: (dir) => {
+        lookups.push(dir)
+        return options.npmOnPath
+      },
+    })
+    child.stderr.write(options.stderr)
+    await new Promise((resolve) => setImmediate(resolve))
+    child.emit("close", options.code)
+    return { ...(await result), lookups }
+  }
+
+  test("cmd.exe's exit 1 with npm not on PATH is reported as a missing npm (127)", async () => {
+    const result = await run({ platform: "win32", npmOnPath: false, stderr: NOT_RECOGNIZED, code: 1 })
+    expect(result.code).toBe(127)
+    expect(result.lookups).toEqual([tmpRoot])
+  })
+
+  test("a failed install with npm on PATH keeps its exit code and output", async () => {
+    const result = await run({ platform: "win32", npmOnPath: true, stderr: "npm error code ENOTFOUND", code: 1 })
+    expect(result.code).toBe(1)
+    expect(result.output).toContain("ENOTFOUND")
+  })
+
+  test("a successful run never looks npm up", async () => {
+    const result = await run({ platform: "win32", npmOnPath: false, stderr: "", code: 0 })
+    expect(result.code).toBe(0)
+    expect(result.lookups).toEqual([])
+  })
+
+  test("outside Windows the exit code stands and npm is not looked up", async () => {
+    const result = await run({ platform: "linux", npmOnPath: false, stderr: "boom", code: 1 })
+    expect(result.code).toBe(1)
+    expect(result.lookups).toEqual([])
+  })
+
+  test("the install answers with the npm-missing message and the manual command", async () => {
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "My Drivers")
+    const child = fakeChild()
+    const runNpm = (args: string[], cwd: string, timeoutMs: number) => {
+      const result = _testing.runNpm(args, cwd, timeoutMs, {
+        spawnProcess: (() => child as any) as typeof spawn,
+        platform: "win32",
+        npmOnPath: () => false,
+      })
+      child.stderr.write(NOT_RECOGNIZED)
+      setImmediate(() => child.emit("close", 1))
+      return result
+    }
+
+    const result = await installOptionalDriver("databricks", { force: true, runNpm })
+
+    expect(result.installed).toBe(false)
+    expect(result.error).toBe(
+      "npm is not available on PATH, so Databricks cannot be installed automatically. " +
+        `Install Node.js, then run: npm install --prefix ${shellQuote(path.join(tmpRoot, "My Drivers"))} @databricks/sql`,
+    )
+    expect(result.error).not.toContain("is not recognized")
   })
 })
