@@ -510,6 +510,16 @@ describe("input coverage (opt-in ALTIMATE_REVIEW_AI_COVERAGE=1)", () => {
     expect(aiInputBudget({}).coverage).toBeUndefined()
   })
 
+  test("coverage bounds the per-call size by default; the env still overrides it", () => {
+    expect(aiInputBudget(COVERAGE).batchChars).toBe(120_000)
+    expect(aiInputBudget({ ...COVERAGE, ALTIMATE_REVIEW_AI_BATCH_CHARS: "50000" }).batchChars).toBe(50_000)
+    expect(aiInputBudget({}).batchChars).toBe(Infinity)
+    // 30 files with ~16k-char diffs no longer land in one call.
+    const diff = "@@ -1,200 +1,200 @@\n" + ("+" + "x".repeat(79) + "\n").repeat(200)
+    const big = Array.from({ length: 30 }, (_, i) => ({ ...f(`m${i}.sql`, "model_sql"), diff }))
+    expect(batchAiFiles(big, aiInputBudget(COVERAGE)).length).toBeGreaterThan(1)
+  })
+
   test("a 20k-char file with one hunk near char 15k: the hunk and its ±20-line window are sent", () => {
     const lines = Array.from({ length: 400 }, (_, i) => `  , col_${String(i + 1).padStart(3, "0")} as alias_${String(i + 1).padStart(3, "0")} -- padding text, more padding`)
     lines[299] = "  , amount / 0 as broken_ratio"

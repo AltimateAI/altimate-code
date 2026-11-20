@@ -31,6 +31,9 @@ const EXCERPT_CONTEXT_LINES = 20
 const COVERAGE_DIFF_CHARS = 16_000
 /** Current-file head kept under coverage when the diff section already carries every hunk of a long diff. */
 const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
+/** Default per-call size under coverage (~30k tokens): 30 quota files at up to ~22k chars each would
+ *  otherwise make one ~660k-char call that overruns common context windows. */
+const COVERAGE_BATCH_CHARS = 120_000
 
 /**
  * How much of the PR the lane sends. Defaults keep one bounded call; the
@@ -41,7 +44,7 @@ const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
 export interface AiInputBudget {
   maxFiles: number
   maxFileChars: number
-  /** Characters of file sections per call; Infinity keeps a single call. */
+  /** Characters of file sections per call; Infinity keeps a single call (the default without coverage). */
   batchChars: number
   /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
    *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
@@ -52,12 +55,13 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
     const n = Number(v)
     return v && Number.isFinite(n) && n > 0 ? n : d
   }
+  const coverageOn = env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
   return {
     maxFiles: num(env.ALTIMATE_REVIEW_AI_MAX_FILES, MAX_FILES),
     maxFileChars: num(env.ALTIMATE_REVIEW_AI_MAX_FILE_CHARS, MAX_DIFF_CHARS),
-    batchChars: num(env.ALTIMATE_REVIEW_AI_BATCH_CHARS, Infinity),
+    batchChars: num(env.ALTIMATE_REVIEW_AI_BATCH_CHARS, coverageOn ? COVERAGE_BATCH_CHARS : Infinity),
     coverage:
-      env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
+      coverageOn
         ? {
             diffChars: num(env.ALTIMATE_REVIEW_AI_COVERAGE_DIFF_CHARS, COVERAGE_DIFF_CHARS),
             quotas: {
