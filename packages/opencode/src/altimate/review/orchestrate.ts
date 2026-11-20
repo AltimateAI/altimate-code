@@ -458,13 +458,18 @@ async function qualityLane(
     // coerce, a function it doesn't know, or syntax it can't parse is a gap in the engine,
     // not an error in the model. Unresolved columns and tables are kept.
     const msg = String(issue.message ?? "")
-    if (rule === "validate" && (ENGINE_LIMIT_MESSAGE.test(msg) || /^syntax error/i.test(msg))) continue
+    if (rule === "validate" && ENGINE_LIMIT_MESSAGE.test(msg)) continue
+    // A syntax error on compiled SQL or on Jinja-templated raw SQL is a gap in the engine's parser or
+    // the template, not the model. On plain raw SQL (no compile ran) it may be a real regression, so it
+    // is kept as a suggestion with unknown confidence, which the verdict does not count.
+    const syntax = rule === "validate" && /^syntax error/i.test(msg)
+    if (syntax && (!linesMatchFile || /\{\{|\{%/.test(sql))) continue
     const cat = mapCheckCategory(issue.category)
     const isError = issue.severity === "error"
     // Error-severity contract/PII issues are blockable; others are warning/suggestion.
     let sev: Severity = isError ? "warning" : "suggestion"
     if (isError && (cat === "contract_violation" || cat === "pii_exposure")) sev = "critical"
-    sev = clampSeverity(cat, sev, "high")
+    sev = syntax ? "suggestion" : clampSeverity(cat, sev, "high")
     findings.push(
       makeFinding({
         severity: sev,
@@ -475,6 +480,7 @@ async function qualityLane(
         model,
         startLine: linesMatchFile ? issue.line : undefined,
         endLine: linesMatchFile ? issue.line : undefined,
+        ...(syntax ? { confidence: "unknown" as const } : {}),
         evidence: { tool: "altimate_core.check", result: issue },
         // Include the message so distinct instances of the same rule (e.g. two
         // different non-portable functions) don't collapse under one fingerprint.
@@ -1098,13 +1104,6 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
   ]
 }
 
-/**
- * dbt CONFIG lint — runs the core dbt-config parser (minijinja) over the RAW model
- * (the `{{ config() }}` block + body) and emits the config/Jinja findings: incremental
- * guard / unique_key, microbatch lookback, enforced-contract on_table_exists,
- * var-without-default, and materialization change (vs base). This replaces the regex
- * dbt-patterns config detectors — the parsing now lives in core.
- */
 /** Var names defined under `vars:` in dbt_project.yml (top level and project-scoped). */
 export function definedVars(projectYml?: string): Set<string> {
   const out = new Set<string>()
@@ -1200,6 +1199,13 @@ function changesMergeGrain(message: string, newSql: string, oldSql: string | und
   return !added.every((c) => new RegExp(`['"]${c.replace(/\W/g, "")}['"]`).test(partition))
 }
 
+/**
+ * dbt CONFIG lint — runs the core dbt-config parser (minijinja) over the RAW model
+ * (the `{{ config() }}` block + body) and emits the config/Jinja findings: incremental
+ * guard / unique_key, microbatch lookback, enforced-contract on_table_exists,
+ * var-without-default, and materialization change (vs base). This replaces the regex
+ * dbt-patterns config detectors — the parsing now lives in core.
+ */
 async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVars: Set<string> = new Set()): Promise<Finding[]> {
   if (!runner.dbtConfigLint) return []
   const { file, newSql, oldSql } = ctx
@@ -1243,12 +1249,6 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVar
 }
 
 /**
- * An incremental merge key that differs from every uniqueness test on the model:
- * one of the two is wrong. A test key missing a `unique_key` column fails once a
- * row per extra value lands; a `unique_key` missing a test column merges rows the
- * test treats as distinct.
- */
-/**
  * A new LEFT JOIN onto a model whose declared uniqueness tests don't cover the
  * join key: the joined model has stated its grain and the join ignores it (an
  * SCD2 dimension joined without `is_current`, a natural key instead of the
@@ -1288,8 +1288,20 @@ async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): P
 
 const TIME_PARTITION_COLUMN = /(^|_)(date|day|week|month|quarter|year|period|hour|ts|time|timestamp)(_|$)|_at$/i
 
-async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+/**
+ * An incremental merge key that differs from every uniqueness test on the model:
+ * one of the two is wrong. A test key missing a `unique_key` column fails once a
+ * row per extra value lands; a `unique_key` missing a test column merges rows the
+ * test treats as distinct.
+ *
+ * `uniquenessTestsChanged`: the PR changed a schema yml, where the uniqueness tests are declared.
+ */
+async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner, uniquenessTestsChanged: boolean): Promise<Finding[]> {
   if (!runner.modelConfig || !runner.declaredUniqueKeys || ctx.file.status === "deleted") return []
+  // Only when this PR touched one side of the comparison: the model's incremental config, or the yml tests.
+  // A long-standing mismatch is not re-reported on every edit to the model.
+  const configTouched = splitDiff(ctx.file.diff).added.some((l) => /\b(unique_key|materialized|incremental_strategy)\b/i.test(l))
+  if (!configTouched && !uniquenessTestsChanged && ctx.file.status !== "added") return []
   const model = modelNameFromPath(ctx.file.path)
   const cfg = await runner.modelConfig(model)
   if (cfg?.materialized !== "incremental" || !cfg.unique_key) return []
@@ -1750,6 +1762,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
   const projectYml = await getContent?.(projectYmlPath, "new").catch(() => undefined)
   const projectVars = definedVars(projectYml)
+  const ymlChanged = reviewable.some((f) => f.kind === "schema_yml")
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1857,7 +1870,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // enables those concerns without dbt_patterns.
     if (lanes.has("dbt_patterns") || lanes.has("materialization") || lanes.has("contract_violation")) {
       tasks.push(dbtConfigLane(ctx, input.runner, projectVars))
-      tasks.push(uniqueKeyMismatchLane(ctx, input.runner))
+      tasks.push(uniqueKeyMismatchLane(ctx, input.runner, ymlChanged))
       tasks.push(joinKeyUniquenessLane(ctx, input.runner))
       tasks.push(
         (input.runner.modelConfig?.(modelNameFromPath(ctx.file.path)) ?? Promise.resolve(undefined))
@@ -2182,13 +2195,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // exclusions and off-engine portability advice dropped, repeats merged, most
   // severe first. The AI lane is grounded in this list (its prompt keeps the
   // top 40), so dropped or repeated findings don't crowd out real ones.
-  const cleanFindings = (list: Finding[]): Finding[] => {
+  const cleanFindings = (list: Finding[], merge = true): Finding[] => {
     let out = dedupe(list).filter((f) => !exclusionReason(f, input.rubric))
     // Cross-engine portability advice from the regex catalog is noise for a
     // project that runs on one known engine. Core's dialect-aware check (a
     // function missing on THIS engine) is a real error and is kept.
     if (input.suppressPortability) out = out.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
-    out = mergeRepeats(out)
+    if (merge) out = mergeRepeats(out)
     return out.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
   }
 
@@ -2241,9 +2254,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   }
 
   // Flatten, drop excluded, dedupe, threshold-filter.
-  let findings = cleanFindings(merged)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
-  findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  const findings = cleanFindings(merged).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  // The verdict counts every instance; merging repeats is presentation only.
+  const verdictFindings = cleanFindings(merged, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
@@ -2255,6 +2269,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ai: aiStatus,
     policy: input.policy,
     findings,
+    verdictFindings,
     tier,
     mode: input.mode,
     rubric: input.rubric,

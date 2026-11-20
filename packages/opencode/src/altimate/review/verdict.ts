@@ -239,6 +239,9 @@ export type VerdictEnvelope = z.infer<typeof VerdictEnvelope>
 
 export interface BuildEnvelopeInput {
   findings: Finding[]
+  /** Every instance before same-rule repeats were merged for display. The verdict
+   *  and severity counts come from this list, so merging never softens the gate. */
+  verdictFindings?: Finding[]
   tier: RiskTier
   mode: ReviewMode
   rubric?: Rubric
@@ -297,7 +300,8 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   // An engine failure, a file whose review failed, a check that abstained, or
   // a model without compiled head SQL means some checks did not run: "no findings" is then unknown, not clean,
   // so the verdict cannot be APPROVE.
-  const computed = computeIdealVerdict(input.findings, rubric)
+  const instances = input.verdictFindings ?? input.findings
+  const computed = computeIdealVerdict(instances, rubric)
   const ideal = computed === "APPROVE" && reviewIncomplete(input) ? "COMMENT" : computed
   const verdict = applyMode(ideal, input.mode)
   const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
@@ -311,7 +315,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
     findings: input.findings.map((f) => ({ ...f, origin: findingOrigin(f) })),
-    summary: summarize(input.findings, degraded),
+    summary: summarize(instances, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,

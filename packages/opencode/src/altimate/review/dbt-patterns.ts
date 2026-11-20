@@ -1061,7 +1061,9 @@ export function detectModelPatterns(
  * (column is empty string for model-level tests). Yields nothing when the
  * document isn't shaped like a schema.yml.
  */
-function extractTestOccurrences(doc: unknown): Set<string> {
+/** `declared`, when given, collects every column each entity declares in the
+ *  yml (tested or not), keyed like the occurrence entity. */
+function extractTestOccurrences(doc: unknown, declared?: Map<string, Set<string>>): Set<string> {
   const out = new Set<string>()
   if (!doc || typeof doc !== "object") return out
   const d = doc as Record<string, unknown>
@@ -1123,6 +1125,10 @@ function extractTestOccurrences(doc: unknown): Set<string> {
         const c = col as Record<string, unknown>
         const cname = typeof c.name === "string" ? c.name : undefined
         if (!cname) continue
+        if (declared) {
+          if (!declared.has(entityName)) declared.set(entityName, new Set())
+          declared.get(entityName)!.add(cname)
+        }
         emitTests(entityName, cname, c.tests)
         emitTests(entityName, cname, c.data_tests)
       }
@@ -1616,28 +1622,21 @@ export function detectSchemaYmlPatterns(
       ? oldDoc !== undefined
       : newDoc !== undefined && (isAddedFile || oldDoc !== undefined)
     if (canCommit) {
-      const oldSet = extractTestOccurrences(oldDoc ?? {})
-      const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc)
-      // A test that moved with a column rename (old column gone, a new column on
-      // the same model carries the same test) is not a removal.
-      const cols = (set: Set<string>) => {
-        const m = new Map<string, Set<string>>()
-        for (const k of set) {
-          const [mod, col] = k.split("\x00")
-          if (!m.has(mod)) m.set(mod, new Set())
-          m.get(mod)!.add(col)
-        }
-        return m
-      }
-      const oldCols = cols(oldSet)
-      const newCols = cols(newSet)
+      const oldCols = new Map<string, Set<string>>()
+      const newCols = new Map<string, Set<string>>()
+      const oldSet = extractTestOccurrences(oldDoc ?? {}, oldCols)
+      const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc, newCols)
+      // A test that moved with a column rename is not a removal: the old column
+      // is no longer declared in the yml and exactly one newly declared column
+      // on the same model carries the same test. Column existence comes from
+      // the yml's `columns:` lists, not from which columns still have tests.
       const movedTo = (model: string, column: string, testField: string) =>
         !!column &&
         !newCols.get(model)?.has(column) &&
-        [...newSet].some((k) => {
+        [...newSet].filter((k) => {
           const [mod, col, tf] = k.split("\x00")
           return mod === model && tf === testField && !!col && !oldCols.get(model)?.has(col)
-        })
+        }).length === 1
       for (const key of oldSet) {
         if (newSet.has(key)) continue
         const [model, column, testField] = key.split("\x00")

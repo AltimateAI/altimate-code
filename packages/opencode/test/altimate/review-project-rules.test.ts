@@ -66,6 +66,10 @@ describe("Jinja structure", () => {
   test("set blocks, inline sets, raw blocks and whitespace control are balanced", () => {
     expect(jinjaBalance("{%- set q -%}select 1{%- endset -%}{% set y = 2 %}{% raw %}{% endif %}{% endraw %}{%- for c in cols -%}{{ c }}{%- endfor %}")).toBeUndefined()
   })
+  test("with/block/autoescape blocks, and a block set whose filter argument holds `=` in a string", () => {
+    expect(jinjaBalance("{% with a = 1 %}{{ a }}{% endwith %}{% block b %}x{% endblock %}{% autoescape false %}y{% endautoescape %}")).toBeUndefined()
+    expect(jinjaBalance(`{% set q | replace("x", "a=b") %}select x{% endset %}`)).toBeUndefined()
+  })
   test("reported only when this change broke it", () => {
     const broken = "{% if a %}x{% endif %}{% endif %}"
     expect(jinjaFindings(file("macros/m.sql", "{% endif %}"), "{% if a %}x{% endif %}", broken).map((f) => f.title)).toContain("m: Jinja block structure is broken")
@@ -88,6 +92,11 @@ describe("Jinja structure", () => {
     const old2 = "select * from {{ var('issue_merged') }}"
     const handedOn = "{{ github_union_connections(connection_dictionary=var('github_sources'), single_table_name='issue_merged') }}"
     expect(jinjaFindings(file("models/tmp/t.sql", handedOn), old2, handedOn).some((f) => /renamed/.test(f.title))).toBe(false)
+  })
+  test("an unrelated var() removed and another added is not a rename", () => {
+    const old = "select * from t where region = '{{ var('region') }}'"
+    const now = "select * from t\nwhere ds >= '{{ var('start_date') }}'"
+    expect(jinjaFindings(file("models/t.sql", now), old, now).some((f) => /renamed/.test(f.title))).toBe(false)
   })
   test("code its own comment marks temporary", () => {
     const sql = "where mod(abs(xxhash64(address)), 1000) = 0 -- TEMP CI VALIDATION SAMPLE - remove before merge"
@@ -135,6 +144,15 @@ describe("ref() targets", () => {
     expect(missingRefFindings(file("models/m.sql", "from {{ ref('stg_assets') }} join {{ ref('dim_customer', v=2) }}"), names)).toHaveLength(0)
     expect(missingRefFindings(file("models/m.sql", "from {{ ref('dbt_utils', 'some_model') }}"), names)).toHaveLength(0)
   })
+  test("a versioned model defined only in `_v1`/`_v2` files resolves with and without a version", () => {
+    const versioned = new Set(["dim_customers_v1", "dim_customers_v2"])
+    expect(missingRefFindings(file("models/m.sql", "from {{ ref('dim_customers') }} join {{ ref('dim_customers', v=2) }}"), versioned)).toHaveLength(0)
+  })
+  test("two missing refs in one file keep distinct ids, so dedupe keeps both", () => {
+    const fs = missingRefFindings(file("models/m.sql", "from {{ ref('x_missing') }} join {{ ref('y_missing') }}"), names)
+    expect(fs).toHaveLength(2)
+    expect(new Set(fs.map((f) => f.id)).size).toBe(2)
+  })
 })
 
 describe("join keys", () => {
@@ -166,6 +184,11 @@ describe("join keys", () => {
 describe("tests on columns the SQL sets to NULL", () => {
   test("literal NULL projections", () => {
     expect([...literalNullColumns("select id, null as platform_fk, cast(null as varchar) as note, null::int as n, coalesce(x, null) as y")]).toEqual(["platform_fk", "note", "n"])
+  })
+  test("only the final SELECT counts: a UNION branch or a CTE that sets NULL is not an always-NULL column", () => {
+    expect(literalNullColumns("select id, discount from a union all select id, null as discount from b").size).toBe(0)
+    expect(literalNullColumns("with s as (select id, null as discount from a)\nselect id, coalesce(discount, 0) as discount from s").size).toBe(0)
+    expect([...literalNullColumns("with s as (select id from a)\nselect id, null as discount from s")]).toEqual(["discount"])
   })
   test("a not_null/relationships test added on such a column", () => {
     const yml = "models:\n  - name: tfact_order\n    columns:\n      - name: platform_fk\n        data_tests:\n          - not_null\n          - relationships:\n              to: ref('dim_platform')\n              field: platform_pk\n      - name: order_id\n        data_tests: [not_null]\n"
@@ -212,15 +235,25 @@ describe("SQL shapes from the catalog", () => {
   test("duplicate WHEN compares literal text, so different literals are distinct", () => {
     expect(fires("case-duplicate-when", "case\n when status = 'a' then 1\n when status = 'b' then 2\nend")).toBe(false)
     expect(fires("case-duplicate-when", "case\n when spend = 0 then 1\n when clicks = 0 then 2\n when spend = 0 then 3\nend")).toBe(true)
+    expect(fires("case-duplicate-when", "case\n when grade = 'A' then 1\n when grade = 'a' then 2\nend")).toBe(false)
+    expect(fires("case-duplicate-when", "case\n when Grade = 'A' then 1\n WHEN grade  =  'A' then 2\nend")).toBe(true)
   })
   test("window ORDER BY repeating the partition key", () => {
     expect(fires("window-order-repeats-partition", "row_number() over (partition by tx_hash, evt_index order by tx_hash) as rn")).toBe(true)
     expect(fires("window-order-repeats-partition", "row_number() over (partition by tx_hash order by block_time desc) as rn")).toBe(false)
+    expect(fires("window-order-repeats-partition", "row_number() over (partition by a.id order by b.id) as rn")).toBe(false)
+    expect(fires("window-order-repeats-partition", "row_number() over (partition by a.id order by a.id, ts) as rn")).toBe(true)
+  })
+  test("hardcoded year only in a filter, not in a CASE", () => {
+    expect(fires("hardcoded-year-filter", "select * from t\nwhere academic_year = 2024")).toBe(true)
+    expect(fires("hardcoded-year-filter", "select case when fiscal_year = 2024 then 'current' end as label from t")).toBe(false)
   })
   test("IGNORE NULLS inside the call, across lines", () => {
     const sql = "select\n  last_value(\n    content_title\n    ignore nulls\n  ) over (partition by k order by d) as t\nfrom x"
     expect(fires("ignore-nulls-inside-call", sql, ["    ignore nulls"])).toBe(true)
     expect(fires("ignore-nulls-inside-call", "select last_value(t) ignore nulls over (partition by k order by d) from x")).toBe(false)
+    // DuckDB accepts IGNORE NULLS inside the call too, so it is not flagged as non-portable there.
+    expect(rule("ignore-nulls-inside-call").portability?.worksOn).toContain("duckdb")
   })
 })
 

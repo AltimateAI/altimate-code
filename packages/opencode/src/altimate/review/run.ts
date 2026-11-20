@@ -609,13 +609,16 @@ export async function projectResourceNames(
   const prefix = projectRootRel ? projectRootRel + "/" : ""
   const names = new Set<string>()
   for (const f of files) if (f.startsWith(prefix) && RESOURCE_FILE.test(f)) names.add(resourceName(f))
+  // Working-tree review reads the files on disk, from the repository root.
+  const repoRoot = head ? undefined : await gitRepoRoot(cwd)
   // dbt 1.9+ snapshots can be YAML-only (`snapshots: - name: x  relation: ...`), with no .sql file.
   for (const line of (await grepMatchesAt(cwd, head, "^snapshots:", `${prefix}*.yml`)) ?? []) {
     const rel = line.slice(line.indexOf(":") + 1, line.lastIndexOf(":snapshots:"))
     if (rel.includes("/dbt_packages/")) continue
     let doc: { snapshots?: { name?: unknown }[] } | null = null
     try {
-      doc = YAML.parse((await showAtRef(cwd, head ?? "HEAD", rel)) ?? "")
+      const text = head ? await showAtRef(cwd, head, rel) : await readFile(path.join(repoRoot ?? cwd, rel), "utf8")
+      doc = YAML.parse(text ?? "")
     } catch {
       continue
     }

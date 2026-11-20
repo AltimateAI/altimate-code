@@ -188,11 +188,15 @@ export async function listWorkingTreeFiles(cwd: string): Promise<string[] | unde
   }
 }
 
-/** Matches of `pattern` (extended regex) in tracked files at `ref` under the repo-root-relative `pathspec`, as `ref:path:match` lines; undefined when git fails. */
+/** Matches of `pattern` (extended regex) under the repo-root-relative `pathspec`, as `ref:path:match` lines;
+ *  undefined when git fails. With no `ref` it searches the working tree (tracked and untracked, non-ignored
+ *  files) and the ref part of each line is empty (`:path:match`). */
 export async function grepMatchesAt(cwd: string, ref: string | undefined, pattern: string, pathspec: string): Promise<string[] | undefined> {
   try {
-    const out = await git(["grep", "--full-name", "-o", "-E", "-e", pattern, ref || "HEAD", "--", `:(top)${pathspec}`], cwd)
-    return out.split("\n").filter(Boolean)
+    const where = ref ? [ref] : ["--untracked"]
+    const out = await git(["grep", "--full-name", "-o", "-E", "-e", pattern, ...where, "--", `:(top)${pathspec}`], cwd)
+    const lines = out.split("\n").filter(Boolean)
+    return ref ? lines : lines.map((l) => ":" + l)
   } catch (e) {
     // git grep exits 1 when nothing matches
     return (e as { code?: number }).code === 1 ? [] : undefined

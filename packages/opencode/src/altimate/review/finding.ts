@@ -249,7 +249,7 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
     if (g) g.push(f)
     else groups.set(key, [f])
   }
-  for (const g of groups.values()) {
+  for (const [key, g] of groups) {
     if (g.length === 1) {
       out.push(g[0])
       continue
@@ -258,6 +258,8 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
     const [first, ...rest] = g
     out.push({
       ...first,
+      // Keyed by the group, not by its first instance: fixing that instance must not re-post the comment.
+      id: "f_" + createHash("sha256").update(`merged ${key}`).digest("hex").slice(0, 16),
       title: `${first.title} (+${rest.length} more)`,
       body: `${first.body}\n\nSame rule, also here:\n${rest.map((f) => `- ${repeatLabel(f, first)}`).join("\n")}`,
     })

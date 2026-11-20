@@ -190,7 +190,7 @@ export function bodyTokens(sql: string): string {
   return (modelBody(sql).match(/[a-z0-9_$]+|'(?:[^']|'')*'|[^\s\w]/gi) ?? []).join(" ")
 }
 
-const CLAUSE_END = /^(group\s+by|order\s+by|select|union|limit|qualify|window|from|join|left|right|inner|full|cross|\{%)\b/i
+const CLAUSE_END = /^(group\s+by|order\s+by|select|union|limit|qualify|window|from|join|left|right|inner|full|cross|where|having|on|\{%)\b/i
 
 /**
  * The predicates inside a block: `where`/`having`/`on` clauses, or the whole
@@ -199,9 +199,9 @@ const CLAUSE_END = /^(group\s+by|order\s+by|select|union|limit|qualify|window|fr
  */
 function predicates(block: string): string[] {
   const s = modelBody(block)
-  if (/^(and|or|where|having)\b/.test(s)) return [s]
+  if (/^(and|or|where|having|on)\b/.test(s)) return [s]
   const out: string[] = []
-  for (const m of s.matchAll(/\b(where|having)\b/g)) {
+  for (const m of s.matchAll(/\b(where|having|on)\b/g)) {
     let depth = 0
     let i = (m.index ?? 0) + m[0].length
     const start = i
