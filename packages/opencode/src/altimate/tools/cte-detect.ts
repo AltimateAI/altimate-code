@@ -316,10 +316,16 @@ const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
 const BRACKETED = /\[(?:[^\]\n]|\]\]){1,256}\]/y
 
 /**
- * Position just past the `}}` that closes the Jinja expression at `pos`: quoted strings inside it are stepped
- * over and braces balanced, as Jinja's lexer does, so `{{ {"a": {"b": 1}}["a"] }}` ends at its last `}}`.
+ * Position just past the Jinja delimiter `{{`, `{%` or `{#` at `pos` closes: a comment at its first `#}`; an
+ * expression or statement at its `}}` or `%}` outside the quoted strings in it, an expression's braces balanced,
+ * as Jinja's lexer reads them.
  */
-function skipJinjaExpression(text: string, pos: number): number {
+function jinjaEnd(text: string, pos: number): number {
+  const kind = text[pos + 1]
+  if (kind === "#") {
+    const close = text.indexOf("#}", pos + 2)
+    return close === -1 ? text.length : close + 2
+  }
   let at = pos + 2
   let depth = 0
   while (at < text.length) {
@@ -328,36 +334,108 @@ function skipJinjaExpression(text: string, pos: number): number {
       at++
       while (at < text.length && text[at] !== char) at += text[at] === "\\" ? 2 : 1
       at++
-    } else if (char === "{") {
+    } else if (kind === "{" && char === "{") {
       depth++
       at++
-    } else if (char === "}" && depth > 0) {
+    } else if (kind === "{" && char === "}" && depth > 0) {
       depth--
       at++
-    } else if (char === "}" && text[at + 1] === "}") return at + 2
+    } else if (char === (kind === "{" ? "}" : "%") && text[at + 1] === "}") return at + 2
     else at++
   }
   return text.length
 }
 
+/** The blocks whose body is a string for dbt (`{% set x %}…{% endset %}`, a call, a macro), not the model's SQL. */
+const CAPTURING = new Set(["set", "call", "macro"])
+
 /**
- * Position just past the quoted text at `pos`: a single-quoted string, or a `"` or `` ` `` quoted name. A doubled
- * quote stays inside it, and so does Jinja (`'{{ var('x') }}'`, `"{{ var("x") }}"`, `'{# 'x' #}'`), whose own
- * quotes do not end it. In a single-quoted string a backslash-escaped quote stays inside too (Snowflake, BigQuery,
- * Databricks, MySQL); where a backslash is a plain character (Postgres, DuckDB), a string ending in one runs on
- * past its quote and pairs the quotes after it wrongly: names after it may be missed, or a name in a later
- * string read, so such a model's reads may be off either way.
+ * The text with its Jinja blanked to spaces, offsets kept: every `{{ }}`, `{% %}` and `{# #}`, and the body of a
+ * captured `set`, `call` or `macro` block. Jinja renders before the SQL is read, so a quote, comment mark or name
+ * inside it is not SQL, wherever it sits (in a string, a comment, a quoted name). The text inside `{% raw %}` is
+ * kept as written.
+ */
+function blankJinja(text: string): string {
+  const out: string[] = []
+  let kept = 0
+  const blank = (from: number, to: number) => {
+    out.push(text.substring(kept, from), text.substring(from, to).replace(/[^\n]/g, " "))
+    kept = to
+  }
+  let pos = 0
+  while (pos < text.length) {
+    const at = text.indexOf("{", pos)
+    if (at === -1 || at + 1 >= text.length) break
+    const kind = text[at + 1]
+    if (kind !== "{" && kind !== "%" && kind !== "#") {
+      pos = at + 1
+      continue
+    }
+    const end = jinjaEnd(text, at)
+    const head = kind === "%" ? /^\{%[-+]?\s*(\w+)/.exec(text.substring(at, Math.min(end, at + 200))) : null
+    const name = head?.[1]
+    if (name === "raw") {
+      // The text up to {% endraw %} is output as written.
+      const close = /\{%[-+]?\s*endraw\b[^%]*%\}/g
+      close.lastIndex = end
+      const found = close.exec(text)
+      blank(at, end)
+      if (found) {
+        out.push(text.substring(kept, found.index))
+        kept = found.index
+        blank(found.index, close.lastIndex)
+        pos = close.lastIndex
+      } else pos = text.length
+      continue
+    }
+    const inline = name === "set" && /^\{%[-+]?\s*set\s+[\w.,\s()]+=(?!=)/.test(text.substring(at, end))
+    if (name && CAPTURING.has(name) && !inline) {
+      // The block's body, to its own end tag (blocks of one kind nest), is blanked with it.
+      let depth = 1
+      let scan = end
+      while (depth > 0 && scan < text.length) {
+        const next = text.indexOf("{", scan)
+        if (next === -1 || next + 1 >= text.length) {
+          scan = text.length
+          break
+        }
+        if (text[next + 1] !== "%" && text[next + 1] !== "{" && text[next + 1] !== "#") {
+          scan = next + 1
+          continue
+        }
+        const tagEnd = jinjaEnd(text, next)
+        const tag = text[next + 1] === "%" ? /^\{%[-+]?\s*(end)?(\w+)/.exec(text.substring(next, Math.min(tagEnd, next + 200))) : null
+        if (tag?.[2] === name) {
+          const opensAgain = !tag[1] && !(name === "set" && /^\{%[-+]?\s*set\s+[\w.,\s()]+=(?!=)/.test(text.substring(next, tagEnd)))
+          if (tag[1]) depth--
+          else if (opensAgain) depth++
+        }
+        scan = tagEnd
+      }
+      blank(at, scan)
+      pos = scan
+      continue
+    }
+    blank(at, end)
+    pos = end
+  }
+  out.push(text.substring(kept))
+  return out.join("")
+}
+
+/**
+ * Position just past the SQL quoted text at `pos`: a single-quoted string, or a `"` or `` ` `` quoted name. A
+ * doubled quote stays inside it; in a single-quoted string so does a backslash-escaped quote (Snowflake,
+ * BigQuery, Databricks, MySQL). Where a backslash is a plain character (Postgres, DuckDB), a string ending in one
+ * runs on past its quote and pairs the quotes after it wrongly: names after it may be missed, or a name in a
+ * later string read, so such a model's reads may be off either way.
  */
 function skipQuoted(text: string, pos: number): number {
   const quote = text[pos]
   let at = pos + 1
   while (at < text.length) {
     const char = text[at]
-    if (char === "{" && text[at + 1] === "{") at = skipJinjaExpression(text, at)
-    else if (char === "{" && (text[at + 1] === "%" || text[at + 1] === "#")) {
-      const close = text.indexOf(text[at + 1] + "}", at + 2)
-      at = close === -1 ? text.length : close + 2
-    } else if (char === "\\" && quote === "'") at += 2
+    if (char === "\\" && quote === "'") at += 2
     else if (char === quote && text[at + 1] === quote) at += 2
     else if (char === quote) return at + 1
     else at++
@@ -367,66 +445,64 @@ function skipQuoted(text: string, pos: number): number {
 
 /**
  * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names
- * directly: a name outside strings, comments and Jinja (`{{ }}`, and `{% set %}`, `{% call %}` and `{% macro %}`
- * blocks, whose SQL is a string for dbt), not qualified by a dot (`schema . orders`) or inside a longer word,
- * equal to the CTE's in any letter case and quoting. A column or alias spelled like an earlier CTE counts too,
- * so a CTE may be listed as read when it is not; a CTE named only through Jinja is not seen, nor one after a
- * nested block comment. A client wanting a CTE's own time subtracts the CTEs it reads directly or through
- * another (the closure of `reads`), each once.
+ * directly: a name outside strings, comments and Jinja (blanked first: `{{ }}`, `{% %}`, `{# #}`, and the SQL a
+ * `{% set %}`, `{% call %}` or `{% macro %}` block captures, which is a string for dbt), not qualified by a dot
+ * (`schema . orders`) or inside a longer word, equal to the CTE's in any letter case and quoting. A name its own
+ * WITH defines again (`with orders as (…) select * from orders` inside the body) is that inner CTE, not a read.
+ * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not; a CTE
+ * named only through Jinja is not seen, nor one shadowed in a deeper subquery, nor one after a nested block
+ * comment. A client wanting a CTE's own time subtracts the CTEs it reads directly or through another (the
+ * closure of `reads`), each once.
  */
 export function cteReads(text: string, ctes: CteInfo[]): number[][] {
+  const sql = blankJinja(text)
   // Per WITH clause, the CTEs met so far by name: built up in source order, so each body is scanned once.
   const seen = new Map<number, Map<string, number[]>>()
   return ctes.map((cte, position) => {
     const earlier = seen.get(cte.withClauseStart) ?? new Map<string, number[]>()
     seen.set(cte.withClauseStart, earlier)
     const reads = new Set<number>()
+    // The names the body's own WITH defines shadow the outer CTEs of that name.
+    const body = sql.substring(cte.queryStart, cte.queryEnd)
+    const shadowed = new Set(earlier.size > 0 && /\bwith\b/i.test(body) ? detectCtes(body).map((inner) => referenceKey(stripColumnList(inner.name))) : [])
     let pos = cte.queryStart
-    // The last character of SQL read before `pos`, past whitespace, comments and Jinja: a dot qualifies the next name.
+    // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
     let previous = ""
     while (earlier.size > 0 && pos < cte.queryEnd) {
-      const char = text[pos]
+      const char = sql[pos]
       if (/\s/.test(char)) {
         pos++
         continue
       }
-      if (char === "{" && text[pos + 1] === "{") {
-        pos = skipJinjaExpression(text, pos)
-        continue
-      }
-      if (char === "{" && text[pos + 1] === "%") {
-        pos = skipJinjaBlock(text, pos)
-        continue
-      }
       if (char === "'") {
-        pos = skipQuoted(text, pos)
+        pos = skipQuoted(sql, pos)
         previous = "'"
         continue
       }
       let end = -1
-      if (char === '"' || char === "`") end = skipQuoted(text, pos)
+      if (char === '"' || char === "`") end = skipQuoted(sql, pos)
       else if (char === "[") {
         BRACKETED.lastIndex = pos
-        if (BRACKETED.test(text)) end = BRACKETED.lastIndex
+        if (BRACKETED.test(sql)) end = BRACKETED.lastIndex
       } else {
-        // A comment is skipped whole.
-        const skipped = skipLiteral(text, pos)
+        // A comment or a dollar-quoted string is skipped whole.
+        const skipped = skipLiteral(sql, pos)
         if (skipped !== pos) {
           if (char === "$") previous = "$"
           pos = skipped
           continue
         }
         BARE_WORD.lastIndex = pos
-        if (/[\p{L}_]/u.test(String.fromCodePoint(text.codePointAt(pos) ?? 32)) && BARE_WORD.test(text)) end = BARE_WORD.lastIndex
+        if (/[\p{L}_]/u.test(String.fromCodePoint(sql.codePointAt(pos) ?? 32)) && BARE_WORD.test(sql)) end = BARE_WORD.lastIndex
       }
       if (end === -1) {
         previous = char
         pos++
         continue
       }
-      if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(text[pos - 1] ?? " "))
-        for (const i of earlier.get(referenceKey(text.substring(pos, end))) ?? []) reads.add(i)
-      previous = text[end - 1]
+      const key = referenceKey(sql.substring(pos, end))
+      if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ") && !shadowed.has(key)) for (const i of earlier.get(key) ?? []) reads.add(i)
+      previous = sql[end - 1]
       pos = end
     }
     const key = referenceKey(stripColumnList(cte.name))

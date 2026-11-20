@@ -1717,6 +1717,29 @@ select * from c`
     expect(readsOf(sql)).toEqual({ orders: [], "\u{10400}orders": [], a: [], b: ["\u{10400}orders"] })
   })
 
+  it("reads Jinja before SQL: delimiters and quotes inside Jinja, wherever it sits, are not SQL", () => {
+    const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
+    const bodies = [
+      `select $$ {{ var('x', '$$ orders $$') | length }} $$ as label`,
+      `select 1 /* {{ var('x', '*/ orders /*') | length }} */ as n`,
+      `select '{% set label = "%} 'orders'" %}constant' as label`,
+      `select '\\{{ var('orders', 'n') }}' as label`,
+      `select [col{# ] orders #}] from raw.t`,
+      `select "{{ var("orders") }}" from raw.customers`,
+      `select 'prefix {# 'orders' #} suffix' as label`,
+      `{% call statement('x') %}select * from orders{% endcall %} select 1 as n`,
+    ]
+    for (const body of bodies) expect(readsOf(wrap(body)).b).toEqual([])
+    // Jinja output between real SQL keeps the SQL readable, and {% raw %} text is SQL as written.
+    expect(readsOf(wrap(`select {{ var('n') }} from orders`)).b).toEqual(["orders"])
+    expect(readsOf(wrap(`select * from {% raw %}orders{% endraw %}`)).b).toEqual(["orders"])
+  })
+
+  it("a name the body's own WITH defines again is that inner CTE, not a read of the outer one", () => {
+    const sql = "with orders as (select 1), b as (with orders as (select 2) select * from orders), c as (with x as (select 3) select * from x join orders on 1 = 1) select * from c"
+    expect(readsOf(sql)).toEqual({ orders: [], b: [], c: ["orders"] })
+  })
+
   it("lists the reads of a model with thousands of CTEs in linear time", () => {
     const parts = Array.from({ length: 10000 }, (_, i) => `c${i} as (select ${i} as x${i > 0 && i % 2 === 0 ? ` from c${i - 1}` : ""})`)
     const sql = `with ${parts.join(",\n")}\nselect * from c9999`
