@@ -966,6 +966,20 @@ describe("columnReach on SQL the engine cannot parse", () => {
 })
 
 describe("lineageGraph", () => {
+  test("a node carries the schema.yml that describes it, without dbt's package prefix", () => {
+    const graph = lineageGraph(
+      {
+        nodes: {
+          "model.shop.orders": { ...model("orders", [], "select 1", []), patch_path: "shop://models/marts/schema.yml" },
+          "model.shop.bare": model("bare", ["model.shop.orders"], "select 1", []),
+        },
+      },
+      "model.shop.orders",
+    )
+    expect(graph.nodes["model.shop.orders"].yml).toBe("models/marts/schema.yml")
+    expect(graph.nodes["model.shop.bare"].yml).toBeUndefined()
+  })
+
   test("a twelve-hop chain comes back whole to its source; upstream past 500 nodes is cut and marked", () => {
     const chain: Record<string, any> = {}
     for (let i = 1; i <= 12; i++)

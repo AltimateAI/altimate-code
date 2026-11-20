@@ -12,6 +12,8 @@ export interface GraphNode {
   label: string | null
   type: string
   path: string | null
+  /** The project-relative schema.yml that describes the node (dbt's patch_path without its `package://`), when there is one. */
+  yml?: string
   materialized: string | null
   /** database.schema.table, lower-cased. */
   relation: string | null
@@ -57,6 +59,7 @@ function nodeOf(id: string, node: any): GraphNode {
     label: type === "exposure" ? node?.label || node?.name || id : null,
     type,
     path: node?.original_file_path ?? null,
+    ...(typeof node?.patch_path === "string" ? { yml: node.patch_path.replace(/^[^:/]+:\/\//, "") } : {}),
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns: Object.entries<any>(node?.columns ?? {}).map(([key, col]) => String(col?.name ?? key)),
