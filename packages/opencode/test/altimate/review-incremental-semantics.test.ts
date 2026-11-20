@@ -60,6 +60,12 @@ describe("config parsing", () => {
     expect(s).toMatchObject({ materialized: "incremental", onSchemaChange: "fail", uniqueKey: ["id"] })
   })
 
+  test("the model body keeps string literals: `--` inside one and its case both count", () => {
+    expect(modelBody("select 'a--b' as x, y from t")).toContain("y from t")
+    expect(modelBody("select * from t where s = 'paid'")).not.toBe(modelBody("select * from t where s = 'PAID'"))
+    expect(modelBody("SELECT * FROM t")).toBe(modelBody("select * from t"))
+  })
+
   test("the model body ignores config, comments and whitespace", () => {
     expect(modelBody("{{ config(a='b') }}\nselect 1 -- x\n")).toBe(modelBody("{# doc #}{{ config(a='c') }} select   1"))
   })
@@ -99,6 +105,19 @@ describe("incremental change without a plan for existing rows", () => {
   test("partition_by change needs a full refresh", async () => {
     const cfg = (g: string) => `materialized='incremental', unique_key='id', partition_by={'field': 'd', 'granularity': '${g}'}`
     expect(await rules({ oldSql: INC("select 1", cfg("day")), newSql: INC("select 1", cfg("month")) })).toContain("incremental-partition-change")
+  })
+
+  test("partition_by moved from inline config to yml with the same value is not a change", async () => {
+    const withPart = "materialized='incremental', unique_key='id', partition_by={'field': 'd', 'granularity': 'day'}"
+    const without = "materialized='incremental', unique_key='id'"
+    const moved = { field: "d", granularity: "day" }
+    expect(
+      await rules({ oldSql: INC("select 1", withPart), newSql: INC("select 1", without), manifestConfig: { materialized: "incremental", partition_by: moved } }),
+    ).not.toContain("incremental-partition-change")
+    // Removed inline and not in yml either: the partitioning really changed.
+    expect(
+      await rules({ oldSql: INC("select 1", withPart), newSql: INC("select 1", without), manifestConfig: { materialized: "incremental" } }),
+    ).toContain("incremental-partition-change")
   })
 })
 
@@ -170,6 +189,15 @@ describe("snapshots", () => {
       "snapshot-tracking-change",
     ])
   })
+  test("check_cols moved from inline config to yml with the same value is not a tracking change", () => {
+    const inline = `{% snapshot s %}\n{{ config(unique_key='id', strategy='check', check_cols=['status']) }}\nselect id, status from src\n{% endsnapshot %}`
+    const bare = `{% snapshot s %}\n{{ config(unique_key='id') }}\nselect id, status from src\n{% endsnapshot %}`
+    const moved = snapshotFindings({ file, model: "s", oldSql: inline, newSql: bare, prText: "", manifestConfig: { strategy: "check", check_cols: ["status"] } })
+    expect(rule(moved)).toEqual([])
+    const changed = snapshotFindings({ file, model: "s", oldSql: inline, newSql: bare, prText: "", manifestConfig: { strategy: "check", check_cols: ["status", "amount"] } })
+    expect(rule(changed)).toEqual(["snapshot-tracking-change"])
+  })
+
   test("yml-defined snapshots (dbt 1.9+) are checked too", () => {
     const y = (cols: string) => `snapshots:\n  - name: orders_snap\n    relation: source('raw', 'orders')\n    config:\n      unique_key: id\n      strategy: check\n      check_cols: ${cols}\n`
     const yfile = { path: "snapshots/_snapshots.yml", status: "modified" as const }
@@ -234,6 +262,18 @@ describe("end to end through the orchestrator", () => {
       return m ? m[1].split(",").map((c) => ({ source: `"src"."${c.trim()}"`, target: c.trim() })) : []
     },
   } as ReviewRunner
+
+  test("lineage that returns nothing for one side leaves the column set unknown, not every expression removed", async () => {
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/fct.sql", status: "modified", diff: "-select id, upper(a) as a_up from src\n+select id, upper(a) as a_up, kind from src\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: { ...runner, async columnLineage(sql: string) { return sql.includes("kind") ? runner.columnLineage!(sql, "duckdb") : [] } } as ReviewRunner,
+      getContent: async (_f, side) => (side === "old" ? "select id, upper(a) as a_up from src" : "select id, upper(a) as a_up, kind from src"),
+    })
+    expect(env.findings.some((f) => f.title.includes("incremental change without a plan"))).toBe(false)
+  })
 
   test("an incremental model whose materialization is set in yml (manifest) still gets the rule; findings never block", async () => {
     const env = await runReview({

@@ -645,7 +645,11 @@ async function outputColumns(runner: ReviewRunner, sql: string, dialect: string)
   const cols = (await runner.columnLineage(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean)
   // A star in the output means the list is incomplete: report nothing rather than guess.
   if (cols.some((c) => c === "*" || c.endsWith(".*"))) return new Set()
-  // `*` in the final SELECT: keep lineage's own answer (it expands stars it can resolve).
+  // Lineage returned nothing (failed, or could not analyse this side): the
+  // set is unknown. Filling it from the select list alone would make every
+  // unaliased expression look removed when only one side's lineage failed.
+  if (!cols.length) return new Set()
+  // `*` in the final SELECT makes `named` null: keep lineage's own answer.
   const named = selectListNames(sql)
   return new Set([...cols, ...(named ?? [])])
 }
@@ -827,7 +831,7 @@ async function consumerListLane(
   return out
 }
 
-/** Incremental / microbatch / table-replace semantics (incremental-semantics.ts). */
+/** Incremental / table-replace semantics (incremental-semantics.ts). */
 async function incrementalSemanticsLane(
   ctx: ModelContext,
   runner: ReviewRunner,
@@ -1693,7 +1697,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         try {
           const [oldSql, newSql] = await Promise.all([getContent?.(file.oldPath ?? file.path, "old"), getContent?.(file.path, "new")])
           if (!newSql) return []
-          return snapshotFindings({ file, model: modelNameFromPath(file.path), newSql, oldSql, prText })
+          const model = modelNameFromPath(file.path)
+          const manifestConfig = await input.runner.modelConfig?.(model)
+          return snapshotFindings({ file, model, newSql, oldSql, prText, manifestConfig })
         } catch (err) {
           failedFile(file, err)
           return []

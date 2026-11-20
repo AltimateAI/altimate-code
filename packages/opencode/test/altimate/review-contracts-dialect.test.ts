@@ -342,4 +342,16 @@ describe("dialect packs apply to their own engine", () => {
     expect(packs({ dialect: "snowflake", dialectKnown: false }).length).toBeGreaterThan(0)
     expect(packs().length).toBeGreaterThan(0)
   })
+  test("Spark rules fire only on Databricks/Spark once the engine is known", () => {
+    const line = "select to_date(order_date), explode(items) from t"
+    const spark = (ctx?: { dialect: string; dialectKnown: boolean }) =>
+      evaluateCatalog(file, line, [line], [], DEFAULT_RUBRIC, ctx)
+        .map((f) => f.title)
+        .filter((t) => /: Spark(\/Databricks)?:/.test(t))
+    expect(spark({ dialect: "snowflake", dialectKnown: true })).toEqual([])
+    expect(spark({ dialect: "postgres", dialectKnown: true })).toEqual([])
+    expect(spark({ dialect: "databricks", dialectKnown: true })).toHaveLength(2)
+    expect(spark({ dialect: "spark", dialectKnown: true })).toHaveLength(2)
+    expect(spark()).toHaveLength(2)
+  })
 })
