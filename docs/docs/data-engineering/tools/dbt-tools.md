@@ -158,7 +158,7 @@ altimate-dbt run
 altimate-dbt test
 
 # Utilities
-altimate-dbt execute "SELECT 1"    # Run a query via dbt adapter
+altimate-dbt execute --query "SELECT 1"    # Run a query via dbt adapter
 altimate-dbt columns my_model      # List model columns
 altimate-dbt graph                 # View lineage/DAG
 altimate-dbt deps                  # Manage dependencies
