@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { untilStopped } from "../src/stop"
+import { isStopRequest, untilStopped } from "../src/stop"
+import { QueryTimeoutError } from "../src/types"
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const never = () => new Promise<never>(() => {})
@@ -31,6 +32,24 @@ describe("untilStopped", () => {
     const controller = new AbortController()
     controller.abort(new Error("stop"))
     expect(await untilStopped(never(), { deadlineMs: 1_000, signal: controller.signal })).toEqual({ stopped: "aborted" })
+  })
+
+  test("an abort that stopsOnAbort declines is not a stop: the work is waited on to its end", async () => {
+    const controller = new AbortController()
+    const stops: string[] = []
+    const work = sleep(30).then(() => 7)
+    const pending = untilStopped(work, { signal: controller.signal, stopsOnAbort: () => false, onStop: (why) => stops.push(why) })
+    await sleep(5)
+    controller.abort(new Error("ignored"))
+    expect(await pending).toEqual({ value: 7 })
+    expect(stops).toEqual([])
+  })
+
+  test("a client-side query timeout is not a stop request; any other abort is", () => {
+    // As `executeQuery` builds it when its own deadline passes.
+    expect(isStopRequest(new QueryTimeoutError({ engine: "snowflake", timeoutMs: 120_000, cancelled: false }))).toBe(false)
+    expect(isStopRequest(new Error("session stopped"))).toBe(true)
+    expect(isStopRequest(new DOMException("The operation was aborted.", "AbortError"))).toBe(true)
   })
 
   test("work that fails after the stop does not go unhandled", async () => {

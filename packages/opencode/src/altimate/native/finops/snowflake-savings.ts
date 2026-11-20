@@ -16,7 +16,7 @@ import * as Registry from "../connections/registry"
 import { silenceWith, type CoreTelemetrySwitch } from "../core-telemetry"
 import type { QueryContext } from "../query-execution"
 import { savingsWindow } from "./databricks-savings"
-import { reasonOf, savingsRun } from "./savings-run"
+import { reasonOf, SavingsLimitError, savingsRun } from "./savings-run"
 import { resolveFinopsWarehouse } from "./warehouse-resolver"
 import type { SnowflakeSavingsParams, SnowflakeSavingsReport, SnowflakeSavingsResult } from "../types"
 
@@ -498,8 +498,9 @@ export async function snowflakeSavings(
     // query its time. Most accounts cannot read it (it needs organization access); list price stands in.
     const rate = await read("credit rate", SNOWFLAKE_RATE_SQL).catch((e) => {
       if (signal?.aborted) throw e
-      // An unreadable rate sheet is ordinary; a query that may still be running is worth naming.
-      if (reasonOf(e).includes("may still be running")) skipped.push({ check: "The account's credit rate", reason: reasonOf(e) })
+      // An unreadable rate sheet is ordinary; a lookup the time limit stopped, or that may still be
+      // running, is named, so the list price is not passed off as an unreadable rate sheet.
+      if (e instanceof SavingsLimitError) skipped.push({ check: "The account's credit rate", reason: reasonOf(e) })
       return [] as Row[]
     })
     const price = creditPrice(rate[0])

@@ -118,7 +118,9 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
     warehouse: z
       .string()
       .optional()
-      .describe("Databricks connection name. Optional — omit to use the first configured Databricks connection."),
+      .describe(
+        "Databricks connection name. Optional — omit to use the first configured Databricks connection whose http_path names a SQL warehouse.",
+      ),
     confirm: z
       .boolean()
       .optional()

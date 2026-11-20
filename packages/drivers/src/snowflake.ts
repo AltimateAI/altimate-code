@@ -6,7 +6,7 @@ import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { toPkcs8Pem } from "./snowflake-key"
 import { QueryTimeoutError } from "./types"
-import { untilStopped } from "./stop"
+import { isStopRequest, untilStopped } from "./stop"
 import { loadOptionalDriver } from "./resolve"
 import { emitBrowserSignIn, openInBrowser } from "./sign-in"
 import { emitReconnect, type ReconnectEvent } from "./reconnect-events"
@@ -509,7 +509,9 @@ export async function connect(
       await noteSession(sql, binds, ranIn, startedInEpoch)
       return result
     } catch (err) {
-      if (!connectOptions || !isClosedConnectionError(err)) throw err
+      // A stopped statement is not run again, so its closed session is not reopened for it (a reopen can
+      // mean a browser sign-in): the next statement reopens it if it is still down.
+      if (!connectOptions || !isClosedConnectionError(err) || stop?.stopped) throw err
       // Reopen only if the failed connection is still the current one: a late error from a connection
       // another statement already replaced must not tear down its replacement.
       if (connection === used) await reconnect("closed-during-statement")
@@ -597,8 +599,8 @@ export async function connect(
   }
 
   /**
-   * Past `cancelAfterMs`, or when `signal` aborts, the statement is cancelled on Snowflake. One still waiting on
-   * a reconnect is never sent, so nothing is left running.
+   * Past `cancelAfterMs`, or when `signal` is stopped, the statement is cancelled on Snowflake. One still waiting
+   * on a reconnect is never sent, so nothing is left running. A client-side query timeout cancels nothing.
    */
   async function executeWithCancel(
     sql: string,
@@ -609,7 +611,12 @@ export async function connect(
     signal?.throwIfAborted()
     const stop: StatementStop = { statements: [] }
     const work = executeQuery(sql, binds, stop)
-    const outcome = await untilStopped(work, { deadlineMs, signal, onStop: (why) => (stop.stopped = why) })
+    const outcome = await untilStopped(work, {
+      deadlineMs,
+      signal,
+      stopsOnAbort: isStopRequest,
+      onStop: (why) => (stop.stopped = why),
+    })
     if (!outcome.stopped) return outcome.value
     // A statement still waiting on a reconnect was never sent: nothing ran, so nothing was cancelled.
     const unsent = stop.statements.length === 0

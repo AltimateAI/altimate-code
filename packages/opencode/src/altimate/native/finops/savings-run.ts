@@ -17,6 +17,9 @@ export const SAVINGS_RUN_LIMIT_MS = 9 * 60_000
 /** The limit as the tools and their messages state it. */
 export const SAVINGS_RUN_LIMIT_MINUTES = SAVINGS_RUN_LIMIT_MS / 60_000
 
+/** Work the check's time limit stopped, or never started. */
+export class SavingsLimitError extends Error {}
+
 /**
  * One check's run: it stops at its own limit, or earlier at the session's query cutoff (`altimate run
  * --time-budget`). Stopping the session cancels the running query and starts no other.
@@ -35,10 +38,10 @@ export function savingsRun(context?: QueryContext) {
   async function beforeStop<T>(start: () => Promise<T>, what: string): Promise<T> {
     signal?.throwIfAborted()
     const left = stopsAt - Date.now()
-    if (left <= 0) throw new Error(`${what} was not started: ${limitName} had already passed.`)
+    if (left <= 0) throw new SavingsLimitError(`${what} was not started: ${limitName} had already passed.`)
     const outcome = await untilStopped(start(), { deadlineMs: left, signal })
     if (outcome.stopped === "aborted") throw signal!.reason
-    if (outcome.stopped) throw new Error(`${what} took longer than ${limitName}.`)
+    if (outcome.stopped) throw new SavingsLimitError(`${what} took longer than ${limitName}.`)
     return outcome.value
   }
 
@@ -46,7 +49,7 @@ export function savingsRun(context?: QueryContext) {
   async function query(connector: Connector, what: string, sql: string, rowLimit: number, binds: unknown[]) {
     signal?.throwIfAborted()
     const left = stopsAt - Date.now()
-    if (left <= 0) throw new Error(`The ${what} query was not started: it would run past ${limitName}.`)
+    if (left <= 0) throw new SavingsLimitError(`The ${what} query was not started: it would run past ${limitName}.`)
     try {
       return await connector.execute(sql, rowLimit, binds, { cancelAfterMs: left, signal })
     } catch (e) {
@@ -57,7 +60,7 @@ export function savingsRun(context?: QueryContext) {
         : cancelled
           ? "and was cancelled on the warehouse"
           : "and may still be running on the warehouse"
-      throw new Error(`The ${what} query ran past ${limitName} ${outcome}.`)
+      throw new SavingsLimitError(`The ${what} query ran past ${limitName} ${outcome}.`)
     }
   }
 

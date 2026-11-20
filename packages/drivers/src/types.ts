@@ -45,9 +45,10 @@ export interface ExecuteOptions {
    *  120 s default (see `query-timeout.ts`). */
   queryTimeoutMs?: number
   /** Cancel the statement on the server once this many milliseconds pass. Opt-in:
-   *  `executeQuery` fills in `queryTimeoutMs` for every call, which cancels nothing, so
-   *  only callers that set this get a server-side deadline. An aborted `signal` cancels
-   *  the statement with or without it. Databricks and Snowflake. */
+   *  `executeQuery` fills in `queryTimeoutMs` for every call, and when that deadline passes
+   *  it aborts `signal` with a `QueryTimeoutError`, which abandons the statement but cancels
+   *  nothing. So only callers that set this get a server-side deadline. Any other abort of
+   *  `signal` cancels the statement with or without it. Databricks and Snowflake. */
   cancelAfterMs?: number
   /** DuckDB only: called once after handing this query to its helper; callback errors do not affect execution. */
   onDispatch?: () => void

@@ -4,19 +4,36 @@
  */
 
 import { MAX_TIMER_MS } from "./query-timeout"
+import { isQueryTimeoutError } from "./types"
 
 export type StopReason = "deadline" | "aborted"
 
 export type Stopped<T> = { stopped?: undefined; value: T } | { stopped: StopReason }
 
 /**
+ * Whether an abort asks the drivers to cancel the statement. `executeQuery` aborts its signal with a
+ * `QueryTimeoutError` when its own client-side deadline passes: that deadline abandons the statement
+ * (its error says it may still be running), and a caller that wants one enforced on the server sets
+ * `cancelAfterMs`. Any other abort, such as a stopped session, is a stop.
+ */
+export function isStopRequest(reason: unknown): boolean {
+  return !isQueryTimeoutError(reason)
+}
+
+/**
  * Waits for `work`, or until `deadlineMs` passes or `signal` aborts, whichever comes first. `onStop` runs
  * at the moment of the stop, before this returns, so work still in flight can see it. A stopped
- * `work` that fails later does not go unhandled. No deadline waits on the signal alone.
+ * `work` that fails later does not go unhandled. No deadline waits on the signal alone. An abort that
+ * `stopsOnAbort` returns false for is not a stop: `work` is then waited on to its end.
  */
 export async function untilStopped<T>(
   work: Promise<T>,
-  opts: { deadlineMs?: number; signal?: AbortSignal; onStop?: (why: StopReason) => void },
+  opts: {
+    deadlineMs?: number
+    signal?: AbortSignal
+    onStop?: (why: StopReason) => void
+    stopsOnAbort?: (reason: unknown) => boolean
+  },
 ): Promise<Stopped<T>> {
   const { deadlineMs, signal } = opts
   let stopped: StopReason | undefined
@@ -29,7 +46,10 @@ export async function untilStopped<T>(
     wake()
   }
   const timer = deadlineMs === undefined ? undefined : setTimeout(() => halt("deadline"), Math.min(Math.max(0, deadlineMs), MAX_TIMER_MS))
-  const onAbort = () => halt("aborted")
+  const onAbort = () => {
+    if (opts.stopsOnAbort?.(signal!.reason) === false) return
+    halt("aborted")
+  }
   if (signal?.aborted) onAbort()
   else signal?.addEventListener("abort", onAbort, { once: true })
   try {

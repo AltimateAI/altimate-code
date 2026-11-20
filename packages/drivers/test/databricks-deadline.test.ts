@@ -5,7 +5,7 @@
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test"
 import { restoreModuleMocksAfterTests } from "./module-mock"
-import { isQueryTimeoutError } from "../src/types"
+import { isQueryTimeoutError, QueryTimeoutError } from "../src/types"
 
 await restoreModuleMocksAfterTests("@databricks/sql")
 
@@ -217,6 +217,22 @@ describe("Databricks cancel on abort without a deadline", () => {
     const result = await db.execute("SELECT 1", 10, [], { signal: new AbortController().signal })
     expect(result.rows).toEqual([[1]])
     expect(cancels).toBe(0)
+  })
+
+  test("a client-side query timeout abandons the statement: it is not cancelled and runs to its end", async () => {
+    fetch = async () => {
+      await sleep(40)
+      return [{ n: 1 }]
+    }
+    const controller = new AbortController()
+    const db = await connector()
+    const pending = db.execute("SELECT 1", 10, [], { queryTimeoutMs: 10, signal: controller.signal })
+    await sleep(10)
+    // As `executeQuery` aborts its signal when its own deadline passes.
+    controller.abort(new QueryTimeoutError({ engine: "databricks", timeoutMs: 10, cancelled: false }))
+    const result = await pending
+    expect(result.rows).toEqual([[1]])
+    expect([cancels, closes]).toEqual([0, 1])
   })
 
   test("with a signal and no `cancelAfterMs`, the close is awaited before the rows return, as on the plain path", async () => {

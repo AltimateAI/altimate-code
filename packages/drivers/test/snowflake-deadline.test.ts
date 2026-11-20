@@ -4,7 +4,7 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test"
 import { connect, keepSdkOffCloudMetadata } from "../src/snowflake"
-import { isQueryTimeoutError } from "../src/types"
+import { isQueryTimeoutError, QueryTimeoutError } from "../src/types"
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -17,6 +17,8 @@ let sent: string[] = []
 let up = true
 let holdConnect: Promise<void> | undefined
 let failFirstWith: { code: string; message: string } | undefined
+let failFirstAfterMs = 1
+let connections = 0
 
 beforeEach(() => {
   finishAfterMs = undefined
@@ -28,12 +30,15 @@ beforeEach(() => {
   up = true
   holdConnect = undefined
   failFirstWith = undefined
+  failFirstAfterMs = 1
+  connections = 0
 })
 
 function fakeSdk() {
   return {
     configure() {},
     createConnection() {
+      connections++
       return {
         connect(cb: (err: Error | null) => void) {
           if (holdConnect) holdConnect.then(() => cb(null))
@@ -45,7 +50,7 @@ function fakeSdk() {
           if (failFirstWith) {
             const failure = Object.assign(new Error(failFirstWith.message), { code: failFirstWith.code })
             failFirstWith = undefined
-            setTimeout(() => options.complete(failure, null, []), 1)
+            setTimeout(() => options.complete(failure, null, []), failFirstAfterMs)
           } else if (queryError) setTimeout(() => options.complete(queryError!, null, []), 1)
           else if (finishAfterMs !== undefined) {
             setTimeout(() => options.complete(null, null, [{ N: 1 }]), finishAfterMs)
@@ -152,6 +157,30 @@ describe("Snowflake server-side cancel", () => {
     const result = await db.execute("SELECT 1", 10, [], { signal: new AbortController().signal })
     expect(result.rows).toEqual([[1]])
     expect(cancels).toBe(0)
+  })
+
+  test("a client-side query timeout abandons the statement: it is not cancelled and runs to its end", async () => {
+    finishAfterMs = 40
+    const controller = new AbortController()
+    const db = await connector()
+    const pending = db.execute("SELECT 1", 10, [], { queryTimeoutMs: 10, signal: controller.signal })
+    await sleep(10)
+    // As `executeQuery` aborts its signal when its own deadline passes.
+    controller.abort(new QueryTimeoutError({ engine: "snowflake", timeoutMs: 10, cancelled: false }))
+    const result = await pending
+    expect(result.rows).toEqual([[1]])
+    expect(cancels).toBe(0)
+  })
+
+  test("a session that closes under a statement already stopped is not reopened for it", async () => {
+    failFirstWith = { code: "407002", message: "Unable to perform operation using terminated connection." }
+    failFirstAfterMs = 40
+    const db = await connector()
+    const error = await db.execute("SELECT 1", 10, [], { cancelAfterMs: 15 }).catch((e) => e)
+    expect(isQueryTimeoutError(error)).toBe(true)
+    await sleep(60)
+    expect(connections).toBe(1)
+    expect(sent).toEqual(["SELECT 1 LIMIT 11"])
   })
 
   test("an already-aborted signal sends nothing", async () => {

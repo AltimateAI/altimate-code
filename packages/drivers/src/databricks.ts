@@ -4,7 +4,7 @@
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { QueryTimeoutError } from "./types"
-import { untilStopped, type Stopped } from "./stop"
+import { isStopRequest, untilStopped, type Stopped } from "./stop"
 import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -41,8 +41,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     return cancelled
   }
 
-  // Past `cancelAfterMs`, or when `signal` aborts, the statement is cancelled on the warehouse: SQL
-  // warehouses ignore the client's server-side `queryTimeout`. With neither, it runs to the end.
+  // Past `cancelAfterMs`, or when `signal` is stopped, the statement is cancelled on the warehouse: SQL
+  // warehouses ignore the client's server-side `queryTimeout`. Otherwise, a client-side query timeout
+  // included, it runs to the end.
   async function runStatement(
     query: string,
     stmtOptions: Record<string, any>,
@@ -79,7 +80,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     })()
     let outcome: Stopped<any[]>
     try {
-      outcome = await untilStopped(work, { deadlineMs, signal, onStop: () => (stopped = true) })
+      outcome = await untilStopped(work, { deadlineMs, signal, stopsOnAbort: isStopRequest, onStop: () => (stopped = true) })
     } catch (error) {
       // The fetch failed before any stop: the statement is still open on the session.
       if (operation) void closeQuietly(operation)

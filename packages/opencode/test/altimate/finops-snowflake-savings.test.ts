@@ -664,10 +664,11 @@ describe("snowflake savings handler over a stubbed connection", () => {
     expect(result.skipped).toEqual([
       { check: "Frequent Restart Overcharge", reason: "The restart events query was not started: it would run past the check's 9-minute limit." },
       { check: "The short-query signal of Downsize Warehouse", reason: "The query history query was not started: it would run past the check's 9-minute limit." },
+      { check: "The account's credit rate", reason: "The credit rate query was not started: it would run past the check's 9-minute limit." },
     ])
   })
 
-  test("the optional rate lookup cannot take a usage query's time: with none left, list price stands in", async () => {
+  test("the optional rate lookup cannot take a usage query's time: with none left, list price stands in and the result says why", async () => {
     let now = 1_000_000
     tracked(spyOn(Date, "now")).mockImplementation(() => now)
     connect((sql) => {
@@ -685,7 +686,9 @@ describe("snowflake savings handler over a stubbed connection", () => {
     ])
     expect(result.success).toBe(true)
     expect(result.price).toEqual({ per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" })
-    expect(result.skipped).toEqual([])
+    expect(result.skipped).toEqual([
+      { check: "The account's credit rate", reason: "The credit rate query was not started: it would run past the check's 9-minute limit." },
+    ])
   })
 
   test("stopping the session cancels the running query and starts no other", async () => {
