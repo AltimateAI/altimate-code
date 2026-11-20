@@ -18,8 +18,8 @@ import { DEFAULT_DBT_DIRS, type DbtProjectLayout } from "./diff-filter"
  *     the base ref compiled into a sibling target dir)
  *
  * When no compiled artifact exists (no `dbt compile` ran, or a raw single-file
- * diff), the caller falls back to raw Jinja and the engine result is treated as
- * approximate/undecidable — never fabricated. A proper offline renderer
+ * diff), raw Jinja is never sent to the engine: a templated model skips the
+ * engine lanes and is recorded in `scope.unverified`. A proper offline renderer
  * (minijinja + dbt builtin stubs, à la dbt-Fusion) is the documented future
  * fallback; it is intentionally NOT a regex strip.
  */

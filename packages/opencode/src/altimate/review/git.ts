@@ -268,13 +268,14 @@ export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<Resol
   // The head's parent, so a custom --head is never compared against an
   // unrelated checkout commit.
   const parent = `${head}~1`
-  const sha = (await git(["rev-parse", parent], opts.cwd).catch(() => parent)).trim()
+  const sha = (await git(["rev-parse", "--verify", "--quiet", `${parent}^{commit}`], opts.cwd).catch(() => "")).trim()
+  if (!sha) {
+    throw new Error(
+      `No review base could be resolved for ${head}: no PR target branch, no main/master, and ${head} has no parent ` +
+        `(root commit or shallow clone). Fetch history (fetch-depth: 0) or pass --base.`,
+    )
+  }
   return { ref: parent, sha, source: "parent" }
-}
-
-/** Resolve a default base SHA. Kept for callers that only need the commit. */
-export async function defaultBaseRef(cwd: string, head?: string): Promise<string> {
-  return (await resolveReviewBase({ cwd, head })).sha
 }
 
 /** Compute a short hash of the manifest file for the verdict envelope. */

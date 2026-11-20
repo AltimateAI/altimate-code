@@ -95,7 +95,10 @@ function roleFromLayout(rel: string, dirs: Record<DbtRole, string[]>): DbtRole |
   for (const [role, list] of Object.entries(dirs) as Array<[DbtRole, string[]]>) {
     for (const d of list) {
       const dir = norm(d).toLowerCase().replace(/^\.\/?/, "").replace(/\/+$/, "")
-      if (dir && p.startsWith(dir + "/") && (!best || dir.length > best.len)) best = { role, len: dir.length }
+      // `model-paths: ["."]` normalises to "": it matches every path at length 0,
+      // so a more specific directory still wins.
+      const matches = dir === "" || p.startsWith(dir + "/")
+      if (matches && (!best || dir.length > best.len)) best = { role, len: dir.length }
     }
   }
   return best?.role
@@ -226,8 +229,13 @@ export interface ScopeResult {
   inScope: ChangedFile[]
   /** Changed files outside the dbt project root (counted, not reviewed). */
   outOfScope: number
-  /** Renames with identical content that keep the model name (a pure move). */
+  /** Non-model renames with identical content that keep the name, role and layer (a pure move). */
   movedUnchanged: number
+}
+
+const isModel = (p: string, layout?: DbtProjectLayout) => {
+  const kind = classifyDbtFile(p, layout)
+  return kind === "model_sql" || kind === "python_model"
 }
 
 /**
@@ -236,14 +244,13 @@ export interface ScopeResult {
  * - Files outside `root` belong to another project or to non-dbt code: they
  *   are counted, never reviewed (a monorepo with several dbt projects must not
  *   review its siblings).
- * - A rename at 100% similarity that keeps the file name, its dbt role, and
- *   its layer (the first folder under the role directory, e.g. `staging` in
- *   `models/staging/…`) is a pure move: dbt resolves `ref()` by name, so
- *   re-reviewing it would only repeat pre-existing findings. A rename that
- *   changes the file name stays in scope (it renames the model and can break
- *   downstream refs), as does a move across roles (`models/` → `tests/`) or
- *   layers (`staging/` → `marts/`), which can change folder-level config,
- *   materialization and risk-path matches.
+ * - Every model move stays in scope, even a same-name 100% rename: a model's
+ *   folder can carry config in `dbt_project.yml` (materialization, schema,
+ *   tags) and match risk paths, so moving it can change how it builds.
+ * - A non-model rename at 100% similarity that keeps the file name, its dbt
+ *   role, and its layer (the first folder under the role directory) is a pure
+ *   move and is dropped: re-reviewing it would only repeat pre-existing
+ *   findings. A move across roles or layers stays in scope.
  * - A rename across the project boundary is a deletion from one project and an
  *   addition to the other: only the side inside `root` is kept, rewritten as
  *   `deleted` (old path) or `added` (new path).
@@ -275,6 +282,7 @@ export function scopeToProject(
       f.status === "renamed" &&
       f.similarity === 100 &&
       f.oldPath &&
+      !isModel(f.path, layout) &&
       basename(f.oldPath) === basename(f.path) &&
       classifyDbtFile(f.oldPath, layout) === classifyDbtFile(f.path, layout) &&
       layerOf(f.oldPath, root, layout) === layerOf(f.path, root, layout)

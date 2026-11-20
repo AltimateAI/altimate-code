@@ -104,7 +104,7 @@ export const ReviewScope = z.object({
   projectRoot: z.string().optional(),
   /** Changed files outside the dbt project: counted, not reviewed. */
   outOfScopeFiles: z.number().int().nonnegative().optional(),
-  /** Renames with unchanged content and name (pure moves): not re-reviewed. */
+  /** Non-model renames with unchanged content, name, role and layer (pure moves): not re-reviewed. */
   movedUnchangedFiles: z.number().int().nonnegative().optional(),
   /** Models the engine lanes could not verify, with the reason. */
   unverified: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),

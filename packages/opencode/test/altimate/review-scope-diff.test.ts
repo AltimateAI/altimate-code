@@ -95,6 +95,27 @@ describe("resolveReviewBase: the PR's real target branch, as a merge-base", () =
     )
   })
 
+  test("no base and no parent (root commit) fails with a clear error, never a symbolic SHA", async () => {
+    const root = await newRepo()
+    await g(root, "checkout", "-q", "-b", "trunk")
+    await g(root, "branch", "-D", "main").catch(() => undefined)
+    await write(root, "a.sql", "select 1\n")
+    await commitAll(root, "root")
+    await expect(resolveReviewBase({ cwd: root, env: noEnv })).rejects.toThrow(/No review base could be resolved/)
+  })
+
+  test("the parent fallback returns a real commit SHA", async () => {
+    const root = await newRepo()
+    await g(root, "checkout", "-q", "-b", "trunk")
+    await write(root, "a.sql", "select 1\n")
+    const first = await commitAll(root, "one")
+    await write(root, "a.sql", "select 2\n")
+    await commitAll(root, "two")
+    const r = await resolveReviewBase({ cwd: root, env: noEnv })
+    expect(r.source).toBe("parent")
+    expect(r.sha).toBe(first)
+  })
+
   test("explicit --base wins and is reduced to the merge-base", async () => {
     const root = await newRepo()
     await write(root, "a.sql", "select 1\n")
@@ -196,11 +217,14 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
 
   test("monorepo: sibling projects and non-dbt files are counted, not reviewed", () => {
     const r = scopeToProject(files, "projects/a")
-    expect(r.inScope.map((f) => f.path)).toEqual(["projects/a/models/x.sql", "projects/a/models/w2.sql"])
+    expect(r.inScope.map((f) => f.path)).toEqual([
+      "projects/a/models/x.sql",
+      "projects/a/models/staging/core/z.sql",
+      "projects/a/models/w2.sql",
+    ])
     expect(r.outOfScope).toBe(2)
-    // A pure directory move keeps the model name → dropped; a rename that
-    // changes the file (model) name can break refs → kept.
-    expect(r.movedUnchanged).toBe(1)
+    // Every model move is reviewed, including a same-name directory move.
+    expect(r.movedUnchanged).toBe(0)
   })
 
   test("project at the repo root keeps every file", () => {
@@ -208,7 +232,7 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
   })
 
   test("unknown project root scopes nothing out", () => {
-    expect(scopeToProject(files, undefined).inScope.length).toBe(4)
+    expect(scopeToProject(files, undefined).inScope.length).toBe(5)
   })
 
   test("a move across layers or roles stays in scope; it can change config, materialization and risk", () => {
@@ -216,10 +240,26 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
       { path: "models/marts/x.sql", oldPath: "models/staging/x.sql", status: "renamed", similarity: 100 },
       { path: "tests/y.sql", oldPath: "models/y.sql", status: "renamed", similarity: 100 },
       { path: "models/moved/z.sql", oldPath: "models/z.sql", status: "renamed", similarity: 100 },
-      { path: "models/staging/sub/w.sql", oldPath: "models/staging/w.sql", status: "renamed", similarity: 100 },
+      { path: "seeds/moved/s.csv", oldPath: "seeds/s.csv", status: "renamed", similarity: 100 },
     ]
     const r = scopeToProject(moves, "")
-    expect(r.inScope.map((f) => f.path)).toEqual(["models/marts/x.sql", "tests/y.sql", "models/moved/z.sql"])
+    expect(r.inScope.map((f) => f.path)).toEqual([
+      "models/marts/x.sql",
+      "tests/y.sql",
+      "models/moved/z.sql",
+      "seeds/moved/s.csv",
+    ])
+    expect(r.movedUnchanged).toBe(0)
+  })
+
+  test("every model move stays in scope; only a same-name, same-role, same-layer non-model move is dropped", () => {
+    const moves: ChangedFile[] = [
+      { path: "models/staging/sub/w.sql", oldPath: "models/staging/w.sql", status: "renamed", similarity: 100 },
+      { path: "models/marts/finance/f.py", oldPath: "models/marts/core/f.py", status: "renamed", similarity: 100 },
+      { path: "macros/utils/sub/m.sql", oldPath: "macros/utils/m.sql", status: "renamed", similarity: 100 },
+    ]
+    const r = scopeToProject(moves, "")
+    expect(r.inScope.map((f) => f.path)).toEqual(["models/staging/sub/w.sql", "models/marts/finance/f.py"])
     expect(r.movedUnchanged).toBe(1)
   })
 
@@ -249,6 +289,15 @@ describe("classifyDbtFile: the project's own directories decide", () => {
     expect(classifyDbtFile("projects/a/models/tests/helper.sql", layout)).toBe("model_sql")
     // Without the layout a custom model path is unknown.
     expect(classifyDbtFile("projects/a/cases/i01/i01_revenue.sql")).toBe("other")
+  })
+
+  test("model-paths: [\".\"] makes every project file a model, and more specific dirs still win", async () => {
+    const root = await newRepo()
+    await write(root, "dbt_project.yml", "name: a\nmodel-paths: [\".\"]\nseed-paths: [seeds]\n")
+    const layout = await dbtProjectLayout(root, "")
+    expect(classifyDbtFile("models/orders.sql", layout)).toBe("model_sql")
+    expect(classifyDbtFile("orders.sql", layout)).toBe("model_sql")
+    expect(classifyDbtFile("seeds/countries.csv", layout)).toBe("seed")
   })
 
   test("without a layout the outermost conventional directory wins", () => {
