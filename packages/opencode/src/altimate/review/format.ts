@@ -222,7 +222,11 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   if (undecided) notes.push(`${undecided} finding(s) could not be decided by the engine and are marked _unverified_.`)
   const unverified = env.scope?.unverified ?? []
   const byReason = new Map<string, string[]>()
-  for (const u of unverified) byReason.set(u.reason, [...(byReason.get(u.reason) ?? []), u.path])
+  for (const u of unverified) {
+    const paths = byReason.get(u.reason)
+    if (paths) paths.push(u.path)
+    else byReason.set(u.reason, [u.path])
+  }
   for (const [reason, paths] of byReason) {
     const head = paths.slice(0, 5).map((p) => `\`${p}\``).join(", ")
     const more = paths.length > 5 ? ` and ${paths.length - 5} more` : ""

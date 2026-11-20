@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
-import { type VerdictEnvelope, VCS_EVENT } from "./verdict"
+import { type VerdictEnvelope, VCS_EVENT, FAILED_FILE_REASON } from "./verdict"
 import {
   commentableLines,
   inlineComments,
@@ -71,14 +71,24 @@ export interface PostResult {
   dismissedReviews?: number
 }
 
-/** Headline of a review this bot posted (see verdictHeadline). */
 /** True when no engine call and no file failed, so missing findings mean "fixed", not "not checked". */
 export function runCompleted(env: VerdictEnvelope): boolean {
   if (env.engineErrors?.length) return false
-  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith("review failed for this file"))
+  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith(FAILED_FILE_REASON))
 }
 
+/** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
+/** Hidden marker in the body of every review this bot posts. */
+const BOT_REVIEW_MARKER = "<!-- altimate-code-review:verdict -->"
+
+/** A review this bot posted: the headline, plus the marker or a bot author
+ *  (reviews posted before the marker existed). A human review that quotes the
+ *  headline is never treated as the bot's. */
+function isBotReview(r: { body?: string | null; user?: { type?: string } | null }): boolean {
+  const body = r.body ?? ""
+  return BOT_REVIEW_RE.test(body) && (body.includes(BOT_REVIEW_MARKER) || r.user?.type === "Bot")
+}
 
 /** The Octokit surface the poster uses; injectable so the posting rules
  *  (dedup, dismissal, skip) are testable without the network. */
@@ -118,7 +128,8 @@ export async function postGitHubReview(
   //    this map only translates verdict → GitHub event. APPROVE always maps to a
   //    COMMENT event — the bot must never submit a formal GitHub approval.
   const event = VCS_EVENT[env.verdict]
-  const reviewBody = verdictHeadline(env)
+  const headline = verdictHeadline(env)
+  const reviewBody = `${headline}\n\n${BOT_REVIEW_MARKER}`
 
   // Rerun dedup: a finding already commented inline (same fingerprint, which
   // ignores line numbers) is not posted again on the next push.
@@ -132,12 +143,10 @@ export async function postGitHubReview(
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
     // Reviews are listed oldest first; only this bot's own reviews count. When
-    // the bot's login is unknown, fall back to the headline match alone for
-    // dismissal, and never skip (no own-review headline to compare).
-    const botReviews = reviews.filter(
-      (r) => BOT_REVIEW_RE.test(r.body ?? "") && (!botLogin || r.user?.login === botLogin),
-    )
-    lastBotHeadline = botLogin ? botReviews.at(-1)?.body?.trim() : undefined
+    // the bot's login is unknown, fall back to the headline/marker match alone
+    // for dismissal, and never skip (no own-review headline to compare).
+    const botReviews = reviews.filter((r) => isBotReview(r) && (!botLogin || r.user?.login === botLogin))
+    lastBotHeadline = botLogin ? botReviews.at(-1)?.body?.replace(BOT_REVIEW_MARKER, "").trim() : undefined
     staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
   } catch {
     /* listing failed: post everything rather than nothing */
@@ -170,7 +179,7 @@ export async function postGitHubReview(
           repo,
           pull_number: prNumber,
           review_id: id,
-          message: `Superseded by a newer altimate review: ${reviewBody}`,
+          message: `Superseded by a newer altimate review: ${headline}`,
         })
         dismissed++
       } catch {
@@ -184,7 +193,7 @@ export async function postGitHubReview(
   // the same thing: the updated summary comment covers it; another identical
   // timeline entry per push is noise. A blocking verdict always posts, and a
   // changed headline (e.g. after "Changes requested") posts a new review.
-  if (!comments.length && event === "COMMENT" && lastBotHeadline === reviewBody) {
+  if (!comments.length && event === "COMMENT" && lastBotHeadline === headline) {
     result.reviewSkipped = true
     return result
   }

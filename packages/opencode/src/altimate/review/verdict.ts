@@ -249,13 +249,19 @@ function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["sum
   return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
 }
 
+/** Prefix of the `scope.unverified` reason for a file whose review threw. */
+export const FAILED_FILE_REASON = "review failed for this file"
+
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
 export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   const rubric = input.rubric ?? DEFAULT_RUBRIC
-  // An engine failure means some checks did not run: "no findings" is then
-  // unknown, not clean, so the verdict cannot be APPROVE.
+  // An engine failure or a file whose review failed means some checks did not
+  // run: "no findings" is then unknown, not clean, so the verdict cannot be APPROVE.
   const computed = computeIdealVerdict(input.findings, rubric)
-  const ideal = computed === "APPROVE" && input.engineErrors?.length ? "COMMENT" : computed
+  const incomplete =
+    !!input.engineErrors?.length ||
+    (input.scope?.unverified ?? []).some((u) => u.reason.startsWith(FAILED_FILE_REASON))
+  const ideal = computed === "APPROVE" && incomplete ? "COMMENT" : computed
   const verdict = applyMode(ideal, input.mode)
   const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
   return VerdictEnvelope.parse({
