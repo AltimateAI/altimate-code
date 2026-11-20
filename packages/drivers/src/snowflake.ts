@@ -6,7 +6,7 @@ import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { toPkcs8Pem } from "./snowflake-key"
 import { QueryTimeoutError } from "./types"
-import { MAX_TIMER_MS } from "./query-timeout"
+import { untilStopped } from "./stop"
 import { loadOptionalDriver } from "./resolve"
 import { emitBrowserSignIn, openInBrowser } from "./sign-in"
 import { emitReconnect, type ReconnectEvent } from "./reconnect-events"
@@ -597,40 +597,25 @@ export async function connect(
   }
 
   /**
-   * `cancelAfterMs` is an opt-in deadline: past it, or when `signal` aborts, the statement is cancelled on
-   * Snowflake. One still waiting on a reconnect is never sent, so nothing is left running.
+   * Past `cancelAfterMs`, or when `signal` aborts, the statement is cancelled on Snowflake. One still waiting on
+   * a reconnect is never sent, so nothing is left running.
    */
   async function executeWithCancel(
     sql: string,
     binds: any[] | undefined,
-    deadlineMs: number,
+    deadlineMs: number | undefined,
     signal?: AbortSignal,
   ): Promise<{ columns: string[]; rows: any[][] }> {
     signal?.throwIfAborted()
     const stop: StatementStop = { statements: [] }
-    const STOPPED = Symbol("stopped")
-    let wake: () => void = () => {}
-    const stopping = new Promise<typeof STOPPED>((resolve) => (wake = () => resolve(STOPPED)))
-    const halt = (why: "deadline" | "aborted") => {
-      stop.stopped ??= why
-      wake()
-    }
-    const timer = setTimeout(() => halt("deadline"), Math.min(deadlineMs, MAX_TIMER_MS))
-    const onAbort = () => halt("aborted")
-    signal?.addEventListener("abort", onAbort, { once: true })
     const work = executeQuery(sql, binds, stop)
-    let outcome: { columns: string[]; rows: any[][] } | typeof STOPPED
-    try {
-      outcome = await Promise.race([work, stopping])
-    } finally {
-      clearTimeout(timer)
-      signal?.removeEventListener("abort", onAbort)
-    }
-    if (outcome !== STOPPED) return outcome
-    work.catch(() => {})
-    const cancelled = (await Promise.all(stop.statements.map(cancelStatement))).every(Boolean)
-    if (stop.stopped === "aborted") throw signal!.reason
-    throw new QueryTimeoutError({ engine: "snowflake", timeoutMs: deadlineMs, cancelled })
+    const outcome = await untilStopped(work, { deadlineMs, signal, onStop: (why) => (stop.stopped = why) })
+    if (!outcome.stopped) return outcome.value
+    // A statement still waiting on a reconnect was never sent: nothing ran, so nothing was cancelled.
+    const unsent = stop.statements.length === 0
+    const cancelled = !unsent && (await Promise.all(stop.statements.map(cancelStatement))).every(Boolean)
+    if (outcome.stopped === "aborted") throw signal!.reason
+    throw new QueryTimeoutError({ engine: "snowflake", timeoutMs: deadlineMs!, cancelled, unsent })
   }
 
   return {
@@ -798,9 +783,9 @@ export async function connect(
         query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
 
-      const deadlineMs = options?.cancelAfterMs
+      const deadlineMs = options?.cancelAfterMs && options.cancelAfterMs > 0 ? options.cancelAfterMs : undefined
       const result =
-        deadlineMs && deadlineMs > 0
+        deadlineMs !== undefined || options?.signal
           ? await executeWithCancel(query, binds, deadlineMs, options?.signal)
           : await executeQuery(query, binds)
       const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit

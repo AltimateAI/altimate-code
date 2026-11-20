@@ -1,7 +1,7 @@
 /**
  * Databricks server-side cancel: a caller that sets `cancelAfterMs` gets its statement cancelled
- * on the warehouse when the deadline passes or its signal aborts. `queryTimeoutMs`, which every
- * `executeQuery` call fills in, does not cancel anything.
+ * on the warehouse when the deadline passes, and an aborted signal cancels it with or without one.
+ * `queryTimeoutMs`, which every `executeQuery` call fills in, does not cancel anything.
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test"
 import { restoreModuleMocksAfterTests } from "./module-mock"
@@ -181,5 +181,41 @@ describe("Databricks statement cleanup when the fetch fails", () => {
     const result = await db.execute("SELECT 1", 10, [])
     expect(result.rows).toEqual([[1]])
     expect([cancels, closes]).toEqual([0, 1])
+  })
+
+  test("a close that fails after the rows were fetched does not fail the query", async () => {
+    closeResult = async () => {
+      throw new Error("close failed")
+    }
+    const db = await connector()
+    const result = await db.execute("SELECT 1", 10, [])
+    expect(result.rows).toEqual([[1]])
+    expect(closes).toBe(1)
+  })
+})
+
+describe("Databricks cancel on abort without a deadline", () => {
+  test("without `cancelAfterMs`, an aborted signal still cancels the statement on the warehouse", async () => {
+    fetch = never
+    const controller = new AbortController()
+    const db = await connector()
+    const pending = db.execute("SELECT 1", 10, [], { queryTimeoutMs: 60_000, signal: controller.signal }).catch((e) => e)
+    await sleep(20)
+    controller.abort(new Error("session stopped"))
+    const error = await pending
+    expect(isQueryTimeoutError(error)).toBe(false)
+    expect(error.message).toBe("session stopped")
+    expect([cancels, closes]).toEqual([1, 1])
+  })
+
+  test("with a signal that never aborts and no `cancelAfterMs`, a slow statement still returns its rows", async () => {
+    fetch = async () => {
+      await sleep(40)
+      return [{ n: 1 }]
+    }
+    const db = await connector()
+    const result = await db.execute("SELECT 1", 10, [], { signal: new AbortController().signal })
+    expect(result.rows).toEqual([[1]])
+    expect(cancels).toBe(0)
   })
 })

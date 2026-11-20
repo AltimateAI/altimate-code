@@ -1,6 +1,6 @@
 /**
  * Snowflake server-side cancel: a caller-named `cancelAfterMs` cancels the statement when it runs
- * out or when `signal` aborts; without one, execution is unchanged.
+ * out, and an aborted `signal` cancels it with or without one; with neither, execution is unchanged.
  */
 import { beforeEach, describe, expect, test } from "bun:test"
 import { connect, keepSdkOffCloudMetadata } from "../src/snowflake"
@@ -135,6 +135,25 @@ describe("Snowflake server-side cancel", () => {
     expect(cancels).toBe(1)
   })
 
+  test("without `cancelAfterMs`, an aborted signal still cancels the statement on Snowflake", async () => {
+    const controller = new AbortController()
+    const db = await connector()
+    const pending = db.execute("SELECT 1", 10, [], { queryTimeoutMs: 60_000, signal: controller.signal }).catch((e) => e)
+    await sleep(10)
+    controller.abort(new Error("session stopped"))
+    const error = await pending
+    expect(error.message).toBe("session stopped")
+    expect(cancels).toBe(1)
+  })
+
+  test("with a signal that never aborts and no `cancelAfterMs`, a slow statement still returns its rows", async () => {
+    finishAfterMs = 40
+    const db = await connector()
+    const result = await db.execute("SELECT 1", 10, [], { signal: new AbortController().signal })
+    expect(result.rows).toEqual([[1]])
+    expect(cancels).toBe(0)
+  })
+
   test("an already-aborted signal sends nothing", async () => {
     const controller = new AbortController()
     controller.abort(new Error("session stopped"))
@@ -151,8 +170,11 @@ describe("Snowflake server-side cancel", () => {
     up = false
     const error = await db.execute("SELECT 1", 10, [], { cancelAfterMs: 30 }).catch((e) => e)
     expect(isQueryTimeoutError(error)).toBe(true)
-    // Nothing reached Snowflake, so nothing is left running there.
-    expect(error.cancelled).toBe(true)
+    // Nothing reached Snowflake: nothing ran, so nothing was cancelled, and the error says so.
+    expect(error.unsent).toBe(true)
+    expect(error.cancelled).toBe(false)
+    expect(error.message).toContain("before it was sent, so it did not run")
+    expect(error.message).not.toContain("may still be running")
     expect(cancels).toBe(0)
     up = true
     release()

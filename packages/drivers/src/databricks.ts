@@ -4,7 +4,7 @@
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { QueryTimeoutError } from "./types"
-import { MAX_TIMER_MS } from "./query-timeout"
+import { untilStopped, type Stopped } from "./stop"
 import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -22,7 +22,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   // How long to wait for the server to acknowledge a cancel before reporting the statement as
   // possibly still running.
   const CANCEL_WAIT_MS = 30_000
-  const STOPPED = Symbol("stopped")
+
+  /** Frees the statement on the server. A failed close never replaces the query's own outcome. */
+  const closeQuietly = (operation: any): Promise<void> => operation.close().catch(() => {})
 
   async function cancelAndClose(operation: any): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -35,19 +37,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         timer = setTimeout(() => resolve(false), CANCEL_WAIT_MS)
       }),
     ]).finally(() => clearTimeout(timer))
-    operation.close().catch(() => {})
+    void closeQuietly(operation)
     return cancelled
   }
 
-  // `cancelAfterMs` is an opt-in deadline: past it, or when `signal` aborts, the statement is
-  // cancelled on the warehouse. SQL warehouses ignore the client's server-side `queryTimeout`.
+  // Past `cancelAfterMs`, or when `signal` aborts, the statement is cancelled on the warehouse: SQL
+  // warehouses ignore the client's server-side `queryTimeout`. With neither, it runs to the end.
   async function runStatement(
     query: string,
     stmtOptions: Record<string, any>,
     options?: ExecuteOptions,
   ): Promise<any[]> {
-    const deadlineMs = options?.cancelAfterMs
-    if (!deadlineMs || deadlineMs <= 0) {
+    const deadlineMs = options?.cancelAfterMs && options.cancelAfterMs > 0 ? options.cancelAfterMs : undefined
+    const signal = options?.signal
+    if (deadlineMs === undefined && !signal) {
       const operation = await session.executeStatement(query, stmtOptions)
       let rows: any[]
       try {
@@ -55,29 +58,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       } catch (error) {
         // A statement that failed while fetching is still open on the session: free it, and
         // report the fetch's own error rather than any from the close.
-        operation.close().catch(() => {})
+        void closeQuietly(operation)
         throw error
       }
-      await operation.close()
+      await closeQuietly(operation)
       return rows
     }
-    const signal = options?.signal
     signal?.throwIfAborted()
-    let stopped: "deadline" | "aborted" | undefined
-    let stop: () => void = () => {}
-    const stopping = new Promise<typeof STOPPED>((resolve) => (stop = () => resolve(STOPPED)))
-    const timer = setTimeout(
-      () => {
-        stopped ??= "deadline"
-        stop()
-      },
-      Math.min(deadlineMs, MAX_TIMER_MS),
-    )
-    const onAbort = () => {
-      stopped ??= "aborted"
-      stop()
-    }
-    signal?.addEventListener("abort", onAbort, { once: true })
+    let stopped = false
     let operation: any
     const work = (async () => {
       const started = await session.executeStatement(query, stmtOptions)
@@ -89,27 +77,23 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       operation = started
       return operation.fetchAll() as Promise<any[]>
     })()
-    let outcome: any[] | typeof STOPPED
+    let outcome: Stopped<any[]>
     try {
-      outcome = await Promise.race([work, stopping])
+      outcome = await untilStopped(work, { deadlineMs, signal, onStop: () => (stopped = true) })
     } catch (error) {
       // The fetch failed before any stop: the statement is still open on the session.
-      operation?.close().catch(() => {})
+      if (operation) void closeQuietly(operation)
       throw error
-    } finally {
-      clearTimeout(timer)
-      signal?.removeEventListener("abort", onAbort)
     }
-    if (outcome !== STOPPED) {
+    if (!outcome.stopped) {
       // Closing frees the server's result; a slow or failed close must not hold up or fail a query
       // that already returned.
-      operation.close().catch(() => {})
-      return outcome
+      void closeQuietly(operation)
+      return outcome.value
     }
-    work.catch(() => {})
     const cancelled = operation ? await cancelAndClose(operation) : false
-    if (stopped === "aborted") throw signal!.reason
-    throw new QueryTimeoutError({ engine: "databricks", timeoutMs: deadlineMs, cancelled })
+    if (outcome.stopped === "aborted") throw signal!.reason
+    throw new QueryTimeoutError({ engine: "databricks", timeoutMs: deadlineMs!, cancelled })
   }
 
   return {
