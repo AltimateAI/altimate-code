@@ -6,6 +6,7 @@
  * schema.inspect
  */
 
+import path from "path"
 import { register } from "../dispatcher"
 import { listSchemaTables } from "./schema-list"
 import * as Registry from "./registry"
@@ -57,13 +58,15 @@ let dbtAdapter: any | null | undefined = undefined
 let dbtAdapterInflight: Promise<any | null> | undefined
 /** The project root the cached attempt read from the dbt config; null when it found none. */
 let dbtProjectRoot: string | null = null
+/** The Python the cached attempt runs dbt with; null when it found no config. */
+let dbtPythonPath: string | null = null
 
 /** Test seams for the single-flight. Production leaves `readConfig` unset. */
 export const dbtAdapterInternals: {
   /** Replaces the dbt config read, so a test can hold an attempt open. */
   readConfig?: () => Promise<unknown>
   /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
-  create?: (config: any) => Promise<any>
+  create?: (config: any, options?: { targetPath?: string }) => Promise<any>
   /** Replaces the check for dbt-integration's lineage, which a test's fake adapter provides itself. */
   hasModelLineage?: (adapter?: unknown) => boolean
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
@@ -109,21 +112,27 @@ async function ensureDbtAdapter(): Promise<any | null> {
         : await readDbtConfig()
       if (dbtAdapterInflight === mine) {
         dbtProjectRoot = typeof dbtConfig?.projectRoot === "string" ? dbtConfig.projectRoot : null
+        dbtPythonPath = typeof dbtConfig?.pythonPath === "string" ? dbtConfig.pythonPath : null
       }
       if (!dbtConfig) return publish(null)
 
       // Check if dbt_project.yml exists
       const fs = await import("fs")
-      const path = await import("path")
       if (
         !fs.existsSync(path.join(dbtConfig.projectRoot, "dbt_project.yml"))
       ) {
         return publish(null)
       }
 
-      // Create the adapter
+      // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's
+      // target/manifest.json is the user's (and other tools'), and a tool's compile or show would rewrite
+      // it with compiled SQL for only the nodes that command compiled.
+      // Only in the modes whose dbt-integration reads the artifacts back from where dbt wrote them.
       const create = dbtAdapterInternals.create ?? (await import("../../../../../dbt-tools/src/adapter")).create
-      return publish(await create(dbtConfig), dbtConfig.projectRoot)
+      const options = SEPARATE_TARGET_MODES.has(dbtConfig.dbtIntegration || "core")
+        ? { targetPath: await dbtToolTargetPath(dbtConfig.projectRoot) }
+        : {}
+      return publish(await create(dbtConfig, options), dbtConfig.projectRoot)
     } catch {
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
@@ -133,6 +142,22 @@ async function ensureDbtAdapter(): Promise<any | null> {
   })()
   dbtAdapterInflight = mine
   return mine
+}
+
+/**
+ * The dbt-integration modes (dbt.json's `dbtIntegration`, `core` when unset) that read the manifest back from the
+ * target path dbt itself reports, DBT_TARGET_PATH included. Fusion and dbt Cloud read `<project>/target` whatever
+ * dbt was told, so they keep writing there: a separate folder would leave them reading a manifest nothing updates.
+ */
+export const SEPARATE_TARGET_MODES: ReadonlySet<string> = new Set(["core", "corecommand"])
+
+/** The folder, inside the project's target folder, where the tools' dbt adapter writes its dbt artifacts. */
+export const DBT_TOOL_TARGET_DIR = ".altimate-code"
+
+/** Where the tools' dbt adapter has dbt write manifest.json and the rest: never the project's own target folder. */
+export async function dbtToolTargetPath(projectRoot: string): Promise<string> {
+  const { resolveDbtTargetPath } = await import("../../validators/validator-utils")
+  return path.join(await resolveDbtTargetPath(projectRoot), DBT_TOOL_TARGET_DIR)
 }
 
 /** Where a `warehouse`-less call would actually go. */
@@ -316,6 +341,11 @@ export async function getDbtProjectRoot(): Promise<string | undefined> {
   }
 }
 
+/** The Python the dbt adapter runs dbt with, once an attempt has read the dbt config. */
+export function getDbtPythonPath(): string | undefined {
+  return dbtPythonPath ?? undefined
+}
+
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
@@ -326,6 +356,7 @@ export function resetDbtAdapter(): void {
   dbtAdapterInternals.attempts = 0
   dbtAdapterInternals.writes = 0
   dbtProjectRoot = null
+  dbtPythonPath = null
 }
 
 // ---------------------------------------------------------------------------

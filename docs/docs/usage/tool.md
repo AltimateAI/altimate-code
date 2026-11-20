@@ -68,12 +68,14 @@ altimate-code tool daemon status
 altimate-code tool daemon stop
 ```
 
-`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS` and `ALTIMATE_DISABLE_WORKSPACE` environment variables. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
+`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS`, `ALTIMATE_DISABLE_WORKSPACE`, `VIRTUAL_ENV` and `CONDA_PREFIX` environment variables. The last two are part of the daemon's identity because, when `~/.altimate-code/dbt.json` sets no `pythonPath` and the project has no `.venv`, `venv` or `env` folder of its own, they pick the Python the daemon's dbt adapter runs dbt with: activating the project's virtualenv then gets a daemon that uses it rather than one started without it. A `pythonPath` in `dbt.json` always wins; change it there. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
 
 | Setting | Description |
 |---|---|
 | `ALTIMATE_TOOL_DAEMON=0` | Always run in-process. |
 | `ALTIMATE_TOOL_DAEMON_IDLE_MS` | Idle time before the daemon exits (default `600000`). |
+
+The tools that start the dbt adapter (`dbt_lineage`, `dbt_cte_profile`, `dbt_sql_graph`, `dbt_health`, `dbt_cost_estimate`, and `sql_execute` routed through dbt) have dbt write its artifacts to `<target-path>/.altimate-code/` rather than the project's own `target/` in the `core` and `corecommand` integration modes: a dbt command rewrites `manifest.json` with compiled SQL for only what it compiled, so the project's `target/manifest.json` is left as your own `dbt compile` wrote it. The `fusion` and `cloud` modes read `<project>/target` whatever dbt is told, so there dbt still writes to it.
 
 The daemon listens on a local socket (a named pipe on Windows) under the Altimate Code state directory and removes it on exit.
 

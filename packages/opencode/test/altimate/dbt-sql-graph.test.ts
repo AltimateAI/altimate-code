@@ -15,6 +15,8 @@ import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connecti
 import { initTool } from "./tool-fixture"
 import {
   buildSqlGraph,
+  clauseName,
+  CLAUSE_NAME_CHARS,
   formatSqlGraph,
   mergeColumns,
   remapSqlLineage,
@@ -625,12 +627,19 @@ describe("the backend's real node shapes", () => {
     expect(byId["raw.customers_222"]).toMatchObject({ nodeId: "source.shop.raw.customers", type: "source" })
     expect(byId.LEFT_JOIN_9).toEqual({
       id: "LEFT_JOIN_9",
-      name: "LEFT_JOIN_9",
+      name: "LEFT JOIN raw.customers ON 1 = 1",
       type: "LEFT_JOIN",
       sql: "LEFT JOIN raw.customers ON 1 = 1",
       columns: [],
     })
     expect(byId.WHERE_7.sql).toBe("WHERE amount > 0")
+  })
+
+  test("a join or filter is named by its clause, not the backend's generated key, which stays its id", () => {
+    const byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n]))
+    expect(byId.WHERE_7.id).toBe("WHERE_7")
+    expect(byId.WHERE_7.name).toBe("WHERE amount > 0")
+    expect(graph.edges).toContainEqual(["WHERE_7", "orders"])
   })
 
   test("two relations of one name and schema in different databases are told apart by the database", () => {
@@ -843,5 +852,48 @@ describe("final-select identity and the text output", () => {
     } as any)
     expect(text).toContain("    columns: id, x")
     expect(text).toContain("    sql: select id from t")
+  })
+})
+
+describe("clauseName", () => {
+  // The shapes the backend sends for a dbt model's joins, filters and groups (DuckDB, quoted relations).
+  test.each([
+    [{ type: "FILTER", expression: "WHERE   stg_orders.status <> 'returned'" }, "WHERE stg_orders.status <> 'returned'"],
+    [{ type: "GROUP", expression: "GROUP BY\n  items.order_id" }, "GROUP BY items.order_id"],
+    [
+      { type: "INNER_JOIN", expression: 'JOIN "shop"."main"."stg_products" AS products   ON items.product_id = products.product_id' },
+      "INNER JOIN stg_products AS products ON items.product_id = products.product_id",
+    ],
+    [{ type: "LEFT_JOIN", expression: "LEFT JOIN payments AS payments   ON orders.order_id = payments.order_id" }, "LEFT JOIN payments ON orders.order_id = payments.order_id"],
+    [{ type: "INNER_JOIN", expression: "JOIN `proj`.`ds`.`orders` AS `orders` ON a = b" }, "INNER JOIN orders ON a = b"],
+    [{ type: "LEFT_JOIN", expression: "LEFT JOIN raw.customers ON 1 = 1" }, "LEFT JOIN raw.customers ON 1 = 1"],
+  ])("%o is named %p", (details, name) => {
+    expect(clauseName(details)).toBe(name)
+  })
+
+  test("whitespace inside a quoted string or identifier is kept, and an alias differing only in case stays", () => {
+    expect(clauseName({ type: "FILTER", expression: "WHERE   code = 'a,  b''s'\n  AND \"x  y\" = 1" })).toBe("WHERE code = 'a,  b''s' AND \"x  y\" = 1")
+    expect(clauseName({ type: "LEFT_JOIN", expression: 'LEFT JOIN "db"."s"."Orders" AS "orders" ON 1 = 1' })).toBe("LEFT JOIN Orders AS orders ON 1 = 1")
+    expect(clauseName({ type: "FILTER", expression: "WHERE  [order  status]]x] = 1" })).toBe("WHERE [order  status]]x] = 1")
+    expect(clauseName({ type: "FILTER", expression: "WHERE msg <> 'a\nb'" })).toBe("WHERE msg <> 'a b'")
+    // A name that needs its quotes keeps them.
+    expect(clauseName({ type: "LEFT_JOIN", expression: 'LEFT JOIN "db"."s"."my table" AS "x y" ON 1 = 1' })).toBe('LEFT JOIN "my table" AS "x y" ON 1 = 1')
+  })
+
+  test("an AS inside a condition is left as written", () => {
+    expect(clauseName({ type: "FILTER", expression: "WHERE CAST(a.b AS INT) > 0" })).toBe("WHERE CAST(a.b AS INT) > 0")
+  })
+
+  test("a long clause is cut with an ellipsis, and a node with no clause has no name of its own", () => {
+    const name = clauseName({ type: "FILTER", expression: `WHERE ${"x = 1 AND ".repeat(30)}y = 2` })!
+    expect(name.length).toBe(CLAUSE_NAME_CHARS)
+    expect(name.endsWith("…")).toBe(true)
+    expect(clauseName({ type: "GROUP" })).toBeUndefined()
+    const graph = remapSqlLineage(
+      { tableEdges: [], details: { Sort_1: { type: "SORT" } } },
+      { name: "m", uniqueId: "model.p.m", resourceType: "model" },
+      [],
+    )
+    expect(graph.nodes.find((n) => n.id === "Sort_1")?.name).toBe("Sort_1")
   })
 })

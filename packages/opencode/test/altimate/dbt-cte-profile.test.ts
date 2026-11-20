@@ -8,7 +8,7 @@ import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
-import { DbtCteProfileTool } from "@/altimate/tools/dbt-cte-profile"
+import { DbtCteProfileTool, dbtCteProfileInternals, dbtQueryMs } from "@/altimate/tools/dbt-cte-profile"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -41,7 +41,11 @@ select * from final
 
 let project: string
 let queries: { sql: string; name: string; limit: number }[]
+/** The trivial queries the tool times dbt's start-up with, kept apart from the count queries. */
+let baselines: { sql: string; name: string; limit: number }[]
 let respond: (sql: string) => Promise<unknown>
+/** The adapter's dbt target folder, where a real dbt writes run_results.json; undefined: the adapter has none. */
+let adapterTarget: string | undefined
 
 function useAdapter() {
   dbtAdapterInternals.readConfig = async () => ({
@@ -53,8 +57,9 @@ function useAdapter() {
   dbtAdapterInternals.create = async () => ({
     isInitialized: () => true,
     dispose: async () => {},
+    getTargetPath: () => adapterTarget,
     immediatelyExecuteSQLWithLimit: async (sql: string, name: string, limit: number) => {
-      queries.push({ sql, name, limit })
+      ;(sql === dbtCteProfileInternals.baselineQuery ? baselines : queries).push({ sql, name, limit })
       return respond(sql)
     },
   })
@@ -104,7 +109,9 @@ afterAll(async () => {
 })
 
 beforeEach(() => {
+  adapterTarget = undefined
   queries = []
+  baselines = []
   respond = async () => ({ columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }] })
   resetDbtAdapter()
   useAdapter()
@@ -503,5 +510,197 @@ describe("dbt_cte_profile run", () => {
     const tool = await initTool(DbtCteProfileTool)
     await expect(tool.execute({ model: "customers", cte: "orders" }, { ...ctx, abort: controller.signal })).rejects.toMatchObject({ name: "AbortError" })
     expect(queries).toEqual([])
+  })
+})
+
+/** What dbt writes for one `dbt show --inline`: its start, and the execute step's span. */
+function runResults(opts: { started: Date; executeMs: number; compiled: string; which?: string }) {
+  const iso = (d: Date) => d.toISOString().replace("Z", "123Z")
+  const exec0 = new Date(opts.started.getTime() + 1500)
+  return JSON.stringify({
+    metadata: { invocation_started_at: iso(opts.started), generated_at: iso(new Date(exec0.getTime() + opts.executeMs + 5)) },
+    args: { which: opts.which ?? "show" },
+    results: [
+      {
+        unique_id: "sql_operation.jaffle_shop.inline_query",
+        execution_time: (opts.executeMs + 2) / 1000,
+        compiled_code: opts.compiled,
+        timing: [
+          { name: "compile", started_at: iso(new Date(exec0.getTime() - 2)), completed_at: iso(exec0) },
+          { name: "execute", started_at: iso(exec0), completed_at: iso(new Date(exec0.getTime() + opts.executeMs)) },
+        ],
+      },
+    ],
+  })
+}
+
+describe("dbt_cte_profile timing", () => {
+  let target: string
+  beforeEach(async () => {
+    target = await mkdtemp(path.join(os.tmpdir(), "dbt-cte-profile-target-"))
+    adapterTarget = target
+  })
+  afterEach(async () => {
+    await rm(target, { recursive: true, force: true })
+  })
+
+  const compiledOf = (sql: string) => sql.replace(/\{\{[^}]*\}\}/g, "x").trim()
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+  test("the time is dbt's own timing of the query, without dbt's start-up", async () => {
+    respond = async (sql) => {
+      const started = new Date()
+      // A command-line dbt spends most of the call starting up.
+      await sleep(60)
+      await writeFile(path.join(target, "run_results.json"), runResults({ started, executeMs: 7, compiled: compiledOf(sql) }))
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const result = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, timing: "dbt", queryMs: 7, rows: 42 })
+    expect(result.metadata.totalMs).toBeGreaterThanOrEqual(60)
+    expect(result.output).toContain("orders: 7 ms on the warehouse")
+    expect(result.output).toContain(`${result.metadata.totalMs} ms in all`)
+    expect(queries).toHaveLength(1)
+    expect(queries[0].sql).toMatch(/^\/\* altimate-code cte profile [0-9a-f-]{36} \*\/\n/)
+    expect(baselines).toEqual([])
+  })
+
+  test("without dbt's timing, a trivial query's time through dbt is taken off, measured once per adapter", async () => {
+    respond = async (sql) => {
+      await sleep(sql === dbtCteProfileInternals.baselineQuery ? 40 : 100)
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const first = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+    const second = await tool.execute({ model: "customers", cte: "final" }, ctx)
+    for (const result of [first, second]) {
+      expect(result.metadata.timing).toBe("baseline")
+      expect(result.metadata.queryMs).toBe(result.metadata.totalMs - result.metadata.startupMs)
+      expect(result.metadata.startupMs).toBeGreaterThanOrEqual(35)
+      expect(result.metadata.queryMs).toBeLessThan(result.metadata.totalMs)
+    }
+    expect(baselines).toEqual([{ sql: dbtCteProfileInternals.baselineQuery, name: "", limit: 1 }])
+  })
+
+  test("a run_results.json from before the call, of another command, or without the call's tag is not this query's timing", async () => {
+    const tag = "altimate-code cte profile t-1"
+    const mine = `/* ${tag} */ select 1`
+    const before = new Date(Date.now() - 60_000)
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: before, executeMs: 3, compiled: mine }))
+    expect(dbtQueryMs(target, Date.now(), tag)).toBeUndefined()
+    const now = Date.now()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: "/* altimate-code cte profile t-2 */ select 1" }))
+    expect(dbtQueryMs(target, now, tag)).toBeUndefined()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine, which: "build" }))
+    expect(dbtQueryMs(target, now, tag)).toBeUndefined()
+    await writeFile(path.join(target, "run_results.json"), runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine }))
+    expect(dbtQueryMs(target, now, tag)).toBe(3)
+    // Without the execute step's timing there is no warehouse time: execution_time also counts the compile.
+    const noTiming = JSON.parse(runResults({ started: new Date(now + 5), executeMs: 3, compiled: mine }))
+    noTiming.results[0].timing = []
+    await writeFile(path.join(target, "run_results.json"), JSON.stringify(noTiming))
+    expect(dbtQueryMs(target, now, tag)).toBeUndefined()
+  })
+
+  test("dbt's timestamps without a zone are read as UTC", async () => {
+    const now = Date.now()
+    const naive = runResults({ started: new Date(now + 5), executeMs: 9, compiled: "/* t */ select 1" }).replaceAll(/(\d{3})123Z/g, "$1123")
+    await writeFile(path.join(target, "run_results.json"), naive)
+    expect(dbtQueryMs(target, now, "t")).toBe(9)
+  })
+
+  test("two calls counting the same CTE at once each take only their own run's timing", async () => {
+    // A's dbt writes its run_results.json, then B's overwrites it before A's call returns.
+    let releaseA = () => {}
+    const aWritten = new Promise<void>((resolve) => (releaseA = resolve))
+    let bDone = () => {}
+    const bWritten = new Promise<void>((resolve) => (bDone = resolve))
+    let calls = 0
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery) return { columnNames: ["N"], data: [{ N: 1 }] }
+      const which = calls++ === 0 ? "A" : "B"
+      const started = new Date()
+      await sleep(5)
+      if (which === "A") {
+        await writeFile(path.join(target, "run_results.json"), runResults({ started, executeMs: 500, compiled: compiledOf(sql) }))
+        releaseA()
+        await bWritten
+      } else {
+        await aWritten
+        await writeFile(path.join(target, "run_results.json"), runResults({ started, executeMs: 3, compiled: compiledOf(sql) }))
+        bDone()
+      }
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 42 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const [a, b] = await Promise.all([
+      tool.execute({ model: "customers", cte: "orders" }, ctx),
+      tool.execute({ model: "customers", cte: "orders" }, ctx),
+    ])
+    // Whichever call ran first wrote 500 ms and saw it overwritten: it falls back to the start-up baseline
+    // rather than report the other run's 3 ms, and only the run that wrote 3 ms reports it.
+    const timings = [a.metadata, b.metadata].map((m) => `${m.timing}:${m.timing === "dbt" ? m.queryMs : "-"}`).sort()
+    expect(timings).toEqual(["baseline:-", "dbt:3"])
+    // The same CTE, but each run's SQL is its own.
+    expect(queries[0].sql).not.toBe(queries[1].sql)
+    expect(queries[0].sql.replace(/^\/\* .*? \*\/\n/, "")).toBe(queries[1].sql.replace(/^\/\* .*? \*\/\n/, ""))
+  })
+
+  test("a call waiting on another call's start-up measurement stops at its own abort", async () => {
+    let finish = () => {}
+    const held = new Promise<void>((resolve) => (finish = resolve))
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery) await held
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 1 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const first = tool.execute({ model: "customers", cte: "orders" }, ctx)
+    while (baselines.length === 0) await sleep(1)
+    const controller = new AbortController()
+    const second = tool.execute({ model: "customers", cte: "final" }, { ...ctx, abort: controller.signal })
+    // The second call's count has answered: it is now waiting on the first call's measurement.
+    while (queries.length < 2) await sleep(1)
+    await sleep(5)
+    expect(baselines).toHaveLength(1)
+    controller.abort(new Error("stopped"))
+    await expect(second).rejects.toThrow("stopped")
+    finish()
+    expect((await first).metadata.timing).toBe("baseline")
+    expect(baselines).toHaveLength(1)
+  })
+
+  test("a finished count waits only so long for a stalled start-up measurement", async () => {
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery) return new Promise(() => {})
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 1 }] }
+    }
+    const saved = dbtCteProfileInternals.baselineWaitMs
+    dbtCteProfileInternals.baselineWaitMs = 20
+    try {
+      const tool = await initTool(DbtCteProfileTool)
+      const result = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+      expect(result.metadata.timing).toBe("wall")
+      expect(result.metadata.queryMs).toBe(result.metadata.totalMs)
+    } finally {
+      dbtCteProfileInternals.baselineWaitMs = saved
+    }
+  })
+
+  test("when the trivial query fails too, the call's own time is given as including start-up, and the next call measures again", async () => {
+    let fail = true
+    respond = async (sql) => {
+      if (sql === dbtCteProfileInternals.baselineQuery && fail) throw new Error("no warehouse")
+      return { columnNames: ["_PROFILE_COUNT"], data: [{ _PROFILE_COUNT: 1 }] }
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const first = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+    expect(first.metadata).toMatchObject({ timing: "wall" })
+    expect(first.metadata.queryMs).toBe(first.metadata.totalMs)
+    expect(first.output).toContain("start-up included")
+    fail = false
+    const second = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+    expect(second.metadata.timing).toBe("baseline")
+    expect(baselines).toHaveLength(2)
   })
 })

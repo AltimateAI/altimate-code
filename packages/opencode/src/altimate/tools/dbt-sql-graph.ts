@@ -117,6 +117,68 @@ export function mergeColumns(
   return Object.fromEntries(merged)
 }
 
+/** Longest name a join, filter, group or sort node is given; its full expression stays in `sql`. */
+export const CLAUSE_NAME_CHARS = 80
+
+/** An identifier as written, without its quotes. */
+function unquote(part: string): string {
+  const q = part[0]
+  if ((q === '"' || q === "`") && part.endsWith(q) && part.length > 1) return part.slice(1, -1).replaceAll(q + q, q)
+  if (q === "[" && part.endsWith("]")) return part.slice(1, -1)
+  return part
+}
+
+const IDENT = String.raw`(?:"(?:[^"]|"")+"|\`(?:[^\`]|\`\`)+\`|\[[^\]]+\]|[A-Za-z_][\w$]*)`
+// A join's own relation, right after its JOIN keyword: `JOIN "db"."schema"."table" AS alias`.
+const JOINED_RELATION = new RegExp(String.raw`^((?:[A-Za-z]+\s+)*JOIN\s+)(${IDENT}(?:\s*\.\s*${IDENT})*)(?:\s+AS)?\s+(?!ON\b|USING\b)(${IDENT})(?=\s|$)`, "i")
+
+/** SQL on one line: runs of whitespace become one space, except inside quoted strings and identifiers (`[…]` included), where only a line break does. */
+function oneLine(sql: string): string {
+  let out = ""
+  for (let i = 0; i < sql.length; ) {
+    const ch = sql[i]
+    if (ch === "'" || ch === '"' || ch === "`" || ch === "[") {
+      // To the closing quote (`]` for a bracketed name); a doubled one is an escaped one.
+      const close = ch === "[" ? "]" : ch
+      let j = i + 1
+      while (j < sql.length && !(sql[j] === close && sql[j + 1] !== close)) j += sql[j] === close ? 2 : 1
+      // Its spacing is kept, but not a line break: the name stays on one line.
+      out += sql.slice(i, j + 1).replace(/\r?\n/g, " ")
+      i = j + 1
+    } else if (/\s/.test(ch)) {
+      while (i < sql.length && /\s/.test(sql[i])) i++
+      out += " "
+    } else {
+      out += ch
+      i++
+    }
+  }
+  return out.trim()
+}
+
+/**
+ * A name for a node the backend leaves unnamed (a join, filter, group or sort): its clause on one line, a relation
+ * written as its own name (`LEFT JOIN payments ON …`, `WHERE status <> 'returned'`), cut at CLAUSE_NAME_CHARS.
+ * Undefined when the node has no clause to show.
+ */
+export function clauseName(details: Pick<SqlLineageNodeDetails, "type" | "expression" | "sql">): string | undefined {
+  let text = oneLine(details.expression ?? details.sql ?? "")
+  if (!text) return undefined
+  // A joined relation keeps its last name part; its alias goes when it only repeats that name. Nothing else in
+  // the clause is rewritten: an `AS` in a condition (a CAST) is not a relation.
+  text = text.replace(JOINED_RELATION, (_all, join: string, relation: string, alias: string) => {
+    // A name that needs its quotes (a space, a keyword-like spelling) keeps them; a plain one is shown bare.
+    const shown = (part: string) => (/^[A-Za-z_][\w$]*$/.test(unquote(part)) ? unquote(part) : part)
+    const last = relation.match(new RegExp(IDENT, "g"))!.at(-1)!
+    // Exactly the same spelling: a quoted alias that differs in case can name another relation.
+    return `${join}${unquote(last) === unquote(alias) ? shown(last) : `${shown(last)} AS ${shown(alias)}`}`
+  })
+  // The backend writes an inner join as a bare JOIN; its type says which join it is.
+  const kind = /^([A-Z]+)_JOIN$/i.exec(details.type ?? "")?.[1]
+  if (kind && /^JOIN\b/i.test(text)) text = `${kind.toUpperCase()} ${text}`
+  return text.length > CLAUSE_NAME_CHARS ? `${text.slice(0, CLAUSE_NAME_CHARS - 1).trimEnd()}…` : text
+}
+
 /**
  * The backend names the model's own select `__final_select__`: name it after the model (or `<model> (final select)` when the SQL has a node of that name), tie each
  * relation node to the dbt node it stands for, and drop the layout positions the list doesn't use.
@@ -177,9 +239,10 @@ export function remapSqlLineage(
   const nodes: SqlGraphNode[] = Object.entries(details).map(([key, d]) => {
     const merged = { ...d, ...mapping[key] }
     return {
-      // The key is the node's identity (edges use it); the name is only what is shown.
+      // The key is the node's identity (edges use it); the name is only what is shown. A join, filter, group
+      // or sort has no name from the backend, only a generated key (`Where_1405…`): it is named by its clause.
       id: key,
-      name: key === finalKey ? finalKey : (merged.name ?? key),
+      name: key === finalKey ? finalKey : (merged.name ?? clauseName(merged) ?? key),
       type: merged.type,
       ...(merged.nodeId ? { nodeId: merged.nodeId } : {}),
       sql: merged.sql ?? merged.expression ?? "",
