@@ -59,6 +59,21 @@ const KNOWN_KEYS = new Set([
   "tools",
 ])
 
+// altimate_change start — callers can name the top-level keys that `normalize` folds into `options`
+// The fold is a published contract: `AgentConfig` allows additional properties, an agent's
+// `audience` is read from `options`, and legacy markdown agents carry provider request options
+// as top-level keys that `migrateAgent` moves into `request.body`. It stays; the loaders log
+// the keys it folded so a typo (`budget` for `steps`) is no longer silent.
+/** Top-level keys the agent schema interprets; every other top-level key is folded into `options`. */
+export const knownKeys: readonly string[] = [...KNOWN_KEYS]
+
+/** The top-level keys of a raw agent config that `normalize` folds into `options`. */
+export function unknownKeys(agent: unknown): string[] {
+  if (typeof agent !== "object" || agent === null || Array.isArray(agent)) return []
+  return Object.keys(agent).filter((key) => !KNOWN_KEYS.has(key))
+}
+// altimate_change end
+
 const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema.Type<typeof AgentSchema> => {
   const options: Record<string, unknown> = { ...agent.options }
   for (const [key, value] of Object.entries(agent)) {
