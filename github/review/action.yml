@@ -207,7 +207,8 @@ runs:
         build "$PROJECT" "$PROJECT/target"
         if [[ "$IN_PREPARE" == "full" ]]; then
           echo "Generating catalog.json…"
-          ( cd "$PROJECT" && "${DBT[@]}" docs generate --target-path "$PROJECT/target" ${PROFILES[@]+"${PROFILES[@]}"} )
+          ( cd "$PROJECT" && "${DBT[@]}" docs generate --target-path "$PROJECT/target" ${PROFILES[@]+"${PROFILES[@]}"} ) ||
+            echo "::warning::dbt docs generate failed; continuing without catalog.json."
         fi
         # The base side: the PR's merge-base, compiled into target-base/.
         BASE="${IN_BASE:-$EVENT_BASE}"
@@ -221,8 +222,10 @@ runs:
         fi
         if [[ -z "$MB" ]]; then echo "::warning::Could not find the merge-base with $BASE; skipping the base compile."; exit 0; fi
         WT="$RUNNER_TEMP/altimate-review-base"
-        git worktree add --detach "$WT" "$MB" >/dev/null
         trap 'git worktree remove --force "$WT" >/dev/null 2>&1 || true' EXIT
+        git worktree add --detach "$WT" "$MB" >/dev/null || { echo "::warning::Could not check out the base; skipping the base compile."; exit 0; }
+        # A stale target-base/ from an earlier run must not stand in for a failed compile.
+        rm -rf "$PROJECT/target-base"
         echo "Compiling the base ($BASE @ ${MB:0:12})…"
         build "$WT/$REL" "$PROJECT/target-base" || echo "::warning::The base compile failed; equivalence will be marked unverified."
 

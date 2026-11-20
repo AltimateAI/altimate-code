@@ -25,7 +25,6 @@ const SELF_COMPARE = new Set([
   "equality",
   "equal_rowcount",
   "cardinality_equality",
-  "fewer_rows_than",
   "expect_table_row_count_to_equal_other_table",
   "expect_table_aggregation_to_equal_other_table",
 ])
@@ -80,6 +79,19 @@ function finding(file: ChangedFile, model: string | undefined, rule: string, sev
     evidence: { tool: "test-adequacy", result: { rule } },
     ruleKey: `test_coverage:${rule}${extra}`,
   })
+}
+
+/**
+ * Failing rows an `error_if` condition tolerates: `!= 0` / `> 0` → 0, `> 10` → 10,
+ * `>= 10` → 9. Undefined when the condition isn't a simple bound.
+ */
+function allowedFailures(cond: string | undefined): number | undefined {
+  const m = cond ? /^(!=|<>|>=|>)\s*(\d+)$/.exec(cond.trim()) : null
+  if (!m) return undefined
+  const n = Number(m[2])
+  if (m[1] === ">=") return Math.max(0, n - 1)
+  if (m[1] === ">") return n
+  return n === 0 ? 0 : undefined
 }
 
 /** `+severity` / `+error_if` / `+warn_if` (with or without `+`) on one config node. */
@@ -145,8 +157,14 @@ export function detectTestAdequacy(input: {
 
   for (const t of added) {
     const name = shortName(t.test)
+    // Different expressions on the same model are a valid invariant (e.g. sum of
+    // line items equals the order total); only the same expression is circular.
+    const sameExpression =
+      name !== "expect_table_aggregation_to_equal_other_table" ||
+      String(arg(t, "compare_expression") ?? arg(t, "expression") ?? "").replace(/\s+/g, "").toLowerCase() ===
+        String(arg(t, "expression") ?? "").replace(/\s+/g, "").toLowerCase()
     const self =
-      (SELF_COMPARE.has(name) && ["compare_model", "to", "compare_to"].some((a) => refsEntity(arg(t, a), t.entity))) ||
+      (SELF_COMPARE.has(name) && sameExpression && ["compare_model", "to", "compare_to"].some((a) => refsEntity(arg(t, a), t.entity))) ||
       (name === "relationships" && refsEntity(arg(t, "to"), t.entity) && String(arg(t, "field") ?? "").toLowerCase() === (t.column ?? "").toLowerCase())
     if (self)
       out.push(
@@ -171,7 +189,7 @@ export function detectTestAdequacy(input: {
           `They inherit \`severity: warn\` from \`dbt_project.yml\`${where}, so failures are reported but never fail \`dbt build\`. ` +
             "If a test should gate the build, set `config: {severity: error}` on it."),
       )
-    else if (loose.length && inherited.error_if && inherited.error_if !== "!= 0")
+    else if (loose.length && inherited.error_if && allowedFailures(inherited.error_if) !== 0)
       out.push(
         finding(file, undefined, "test-inherits-threshold", "suggestion", `${loose.length} new test(s) in ${file.path} inherit \`error_if: ${inherited.error_if}\``,
           `They fail only when \`${inherited.error_if}\` rows fail, a threshold inherited from \`dbt_project.yml\`${where}. ` +
@@ -201,7 +219,13 @@ export function detectThresholdLoosening(file: ChangedFile, oldContent?: string,
   for (const [path, t] of flat(newDoc)) {
     const prev = before.get(path) ?? {}
     const toWarn = t.severity === "warn" && prev.severity !== "warn"
-    const newThreshold = t.error_if && t.error_if !== "!= 0" && t.error_if !== prev.error_if
+    // Only a threshold that tolerates more failing rows than before loosens;
+    // a changed condition that is not a simple bound is still reported.
+    const allowed = allowedFailures(t.error_if)
+    const newThreshold =
+      !!t.error_if &&
+      t.error_if !== prev.error_if &&
+      (allowed === undefined || allowed > (allowedFailures(prev.error_if) ?? 0))
     if (!toWarn && !newThreshold) continue
     out.push(
       finding(file, undefined, "test-thresholds-loosened", "warning", `test thresholds loosened for \`${path}\``,

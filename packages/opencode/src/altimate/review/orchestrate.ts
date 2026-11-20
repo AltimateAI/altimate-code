@@ -647,11 +647,14 @@ async function columnDelta(
   return delta(current, before)
 }
 
-/** Output names of a raw (Jinja) model's final SELECT; empty when a Jinja expression is in the list. */
+/** Output names of a raw (Jinja) model's final SELECT; empty when a Jinja
+ *  expression or tag is in the list. */
 function rawSelectList(sql: string): Set<string> {
   const plain = sql
     .replace(/\{#[\s\S]*?#\}/g, " ")
-    .replace(/\{%[\s\S]*?%\}/g, " ")
+    // A tag in the list (`{% if %}` / `{% for %}`) makes its columns conditional:
+    // it becomes its own `__jinja__` item, which marks the list unknown.
+    .replace(/\{%[\s\S]*?%\}/g, " , __jinja__ , ")
     .replace(/\{\{[\s\S]*?\}\}/g, " __jinja__ ")
   const names = selectListNames(plain)
   if (!names || names.includes("__jinja__")) return new Set()

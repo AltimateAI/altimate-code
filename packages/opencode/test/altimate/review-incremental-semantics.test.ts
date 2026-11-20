@@ -314,6 +314,19 @@ describe("dedup windows split across lines", () => {
   test("a window the PR doesn't touch is not reported", () => {
     expect(rulesFor("+select 1 as unrelated\n")).not.toContain("dedup_load_timestamp_only")
   })
+  test("with hunk headers, an added line matching window text elsewhere doesn't touch the window", () => {
+    const noOrder =
+      "select\n  tenant\n  , row_number() over (partition by tenant, id) as rn\nfrom t\nunion all\nselect\n  tenant\n  , id\nfrom u"
+    const rules = (diff: string) =>
+      detectModelPatterns({ path: "models/m.sql", status: "modified", diff }, noOrder, DEFAULT_RUBRIC).map(
+        (f) => (f.evidence?.result as { rule?: string })?.rule,
+      )
+    // Line 8 (`  , id`) in the second branch was added; the window on line 3 is old code.
+    expect(rules("@@ -7,1 +7,2 @@\n   tenant\n+  , id\n")).not.toContain("dedup_no_tiebreaker")
+    expect(rules("@@ -3,1 +3,1 @@\n-  , row_number() over () as rn\n+  , row_number() over (partition by tenant, id) as rn\n")).toContain(
+      "dedup_no_tiebreaker",
+    )
+  })
 })
 
 describe("column changes without compiled SQL (dbt parse-only CI)", () => {
@@ -349,5 +362,42 @@ describe("column changes without compiled SQL (dbt parse-only CI)", () => {
       getContent: async (_f, side) => (side === "old" ? oldSql : newSql),
     })
     expect(env.findings.find((f) => f.title.includes("on_schema_change"))?.body).toContain("adds `region`")
+  })
+
+  test("columns inside a `{% if %}` block are unknown, not added", async () => {
+    const cfg = "{{ config(materialized='incremental', unique_key='id', on_schema_change='fail') }}\n"
+    const review = (oldSql: string, newSql: string) =>
+      runReview({
+        changedFiles: [{ path: "models/marts/fct.sql", status: "modified", diff: `-${oldSql}\n+${newSql}\n` }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          async impact() {
+            return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+          },
+          async grade() {
+            return {}
+          },
+          async check() {
+            return { issues: [], ran: true }
+          },
+          async equivalence() {
+            return { decided: false }
+          },
+          async detectPii() {
+            return { columns: [] }
+          },
+          async columnLineage() {
+            return []
+          },
+        } as ReviewRunner,
+        getContent: async (_f, side) => (side === "old" ? oldSql : newSql),
+      })
+    const conditional = await review(
+      `${cfg}select id, amount from {{ ref('src') }}`,
+      `${cfg}select id, amount {% if var('with_region', false) %}, region {% endif %} from {{ ref('src') }}`,
+    )
+    expect(conditional.findings.some((f) => f.title.includes("on_schema_change"))).toBe(false)
   })
 })

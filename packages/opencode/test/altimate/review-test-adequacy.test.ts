@@ -31,6 +31,22 @@ describe("tests that compare a model with itself", () => {
     expect(detectTestAdequacy({ file, oldContent: yml("ref('fct_orders')"), newContent: yml("ref('fct_orders')") })).toEqual([])
   })
 
+  test("fewer_rows_than against itself, or an aggregation with a different expression, is not flagged", () => {
+    const y = `models:
+  - name: fct_orders
+    data_tests:
+      - dbt_utils.fewer_rows_than:
+          compare_model: ref('fct_orders')
+      - dbt_expectations.expect_table_aggregation_to_equal_other_table:
+          expression: sum(line_total)
+          compare_model: ref('fct_orders')
+          compare_expression: sum(order_total)
+`
+    expect(detectTestAdequacy({ file, newContent: y })).toEqual([])
+    const same = y.replace("sum(order_total)", "sum( line_total )")
+    expect(rule(detectTestAdequacy({ file, newContent: same }))).toEqual(["test-compares-model-with-itself"])
+  })
+
   test("dbt 1.8+ `arguments:` form is read too", () => {
     const y = `models:\n  - name: m\n    data_tests:\n      - dbt_utils.equality:\n          arguments:\n            compare_model: ref("m")\n`
     expect(rule(detectTestAdequacy({ file: { path: "models/_m.yml", status: "added" }, newContent: y }))).toEqual(["test-compares-model-with-itself"])
@@ -79,5 +95,16 @@ data_tests:
     const out = detectThresholdLoosening({ path: "dbt_project.yml", status: "modified" }, before, after)
     expect(out.map((f) => f.title)).toEqual(["test thresholds loosened for `shop → marts`"])
     expect(detectThresholdLoosening({ path: "dbt_project.yml", status: "modified" }, after, after)).toEqual([])
+  })
+
+  test("error_if: only a bound that tolerates more failures loosens; strict forms are the default", () => {
+    const at = (cond: string) => `name: shop\ndata_tests:\n  shop:\n    marts:\n      +error_if: "${cond}"\n`
+    const loosened = (from: string, to: string) =>
+      detectThresholdLoosening({ path: "dbt_project.yml", status: "modified" }, at(from), at(to)).length > 0
+    expect(loosened(">100", ">10")).toBe(false)
+    expect(loosened(">10", ">100")).toBe(true)
+    expect(loosened("!= 0", "> 0")).toBe(false)
+    expect(loosened("!= 0", ">=1")).toBe(false)
+    expect(loosened("!= 0", ">5")).toBe(true)
   })
 })
