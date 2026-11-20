@@ -475,7 +475,8 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
     const text = sql.substring(from, to)
     for (const one of detectCtes(text)) {
       // In a WITH RECURSIVE clause a CTE's name means that CTE across the whole clause, its own body included.
-      const recursive = /^with\s+recursive\b/i.test(text.substring(one.withClauseStart, one.withClauseStart + 40))
+      const afterWith = skipTrivia(text, one.withClauseStart + 4, true)
+      const recursive = /^recursive\b/i.test(text.substring(afterWith, afterWith + 10))
       out.push({ written: written(stripColumnList(one.name)), at: from + one.nameStart, from: from + (recursive ? one.withClauseStart : one.queryEnd), to })
     }
   }

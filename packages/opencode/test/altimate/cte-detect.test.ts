@@ -1747,6 +1747,8 @@ select * from c`
     // In WITH RECURSIVE the inner CTE's own body already means it.
     expect(readsOf("with dates as (select 999 as n), result as (with recursive dates(n) as (select 1 union all select n + 1 from dates where n < 3) select * from dates) select * from result").result).toEqual([])
     expect(readsOf("with dates as (select 999 as n), result as (with dates2(n) as (select n from dates) select * from dates2) select * from result").result).toEqual(["dates"])
+    for (const gap of [" /* generate calendar */ ", " -- calendar\n ", " ".repeat(60)])
+      expect(readsOf(`with dates as (select 999 as n), result as (with${gap}recursive dates(n) as (select 1 union all select n + 1 from dates where n < 3) select * from dates) select * from result`).result).toEqual([])
     // A subquery's WITH shadows too, only inside that subquery.
     expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s) select * from b").b).toEqual([])
     expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s join orders on 1 = 1) select * from b").b).toEqual(["orders"])
