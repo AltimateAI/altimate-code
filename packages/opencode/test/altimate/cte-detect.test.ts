@@ -1677,10 +1677,37 @@ select * from b`
     expect(readsOf(sql)).toEqual({ orders: [], a: [], b: ["orders"] })
   })
 
-  it("matches a quoted name as written, a bare one in any case, and keeps to its own WITH clause", () => {
-    const sql = `with "Big" as (select 1), big as (select 2),
-q as (select * from "Big"), r as (select * from Big)
+  it("matches a name in any letter case and quoting, brackets included, and keeps to its own WITH clause", () => {
+    const sql = `with "Big" as (select 1), other as (select 2),
+q as (select * from big), r as (select * from "OTHER"), s as (select * from [Big]), t as (select * from \`other\`)
 select * from (with inner_cte as (select * from q) select * from inner_cte)`
-    expect(readsOf(sql)).toEqual({ '"Big"': [], big: [], q: ['"Big"'], r: ["big"] })
+    expect(readsOf(sql)).toEqual({ '"Big"': [], other: [], q: ['"Big"'], r: ["other"], s: ['"Big"'], t: ["other"] })
+    const bracketed = "with [Big Spenders] as (select 1), [we]]ird] as (select 2), b as (select * from [Big Spenders] join [WE]]IRD] on 1 = 1) select * from b"
+    expect(readsOf(bracketed)).toEqual({ "[Big Spenders]": [], "[we]]ird]": [], b: ["[Big Spenders]", "[we]]ird]"] })
+  })
+
+  it("does not count a name inside Jinja: an expression, a ref with either quotes, a captured set block", () => {
+    const sql = `with orders as (select 1 as id),
+a as (select * from {{ ref("orders") }} join {{ orders }} on 1 = 1),
+b as ({% set q %}select * from orders{% endset %} select 2 as id),
+c as ({% if true %}select * from orders{% endif %})
+select * from c`
+    expect(readsOf(sql)).toEqual({ orders: [], a: [], b: [], c: ["orders"] })
+  })
+
+  it("does not count a qualified name with spaces around the dot", () => {
+    expect(readsOf("with orders as (select 1), a as (select * from analytics . orders) select * from a")).toEqual({ orders: [], a: [] })
+  })
+
+  it("lists the reads of a model with thousands of CTEs in linear time", () => {
+    const parts = Array.from({ length: 10000 }, (_, i) => `c${i} as (select ${i} as x${i > 0 && i % 2 === 0 ? ` from c${i - 1}` : ""})`)
+    const sql = `with ${parts.join(",\n")}\nselect * from c9999`
+    const started = performance.now()
+    const ctes = detectCtesInText(sql)
+    const reads = cteReads(sql, ctes)
+    expect(reads.length).toBe(10000)
+    expect(reads[2]).toEqual([1])
+    expect(reads[3]).toEqual([])
+    expect(performance.now() - started).toBeLessThan(3000)
   })
 })

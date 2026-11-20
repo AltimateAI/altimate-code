@@ -301,55 +301,79 @@ export function detectCtes(text: string): CteInfo[] {
   return ctes
 }
 
-/** A CTE's name for matching a reference: a quoted one as written, a bare one in lower case (as most warehouses fold it). */
+/**
+ * A CTE's name for matching a reference, quotes removed and in lower case: warehouses fold a bare name
+ * (Snowflake to upper case, most others to lower), so `orders` and `"ORDERS"` may name the same CTE.
+ */
 function referenceKey(name: string): string {
   const quote = name[0]
-  if ((quote === '"' || quote === "`") && name.length > 1 && name.endsWith(quote)) return name.slice(1, -1).replaceAll(quote + quote, quote)
-  if (quote === "[" && name.endsWith("]")) return name.slice(1, -1).replaceAll("]]", "]")
+  if ((quote === '"' || quote === "`") && name.length > 1 && name.endsWith(quote)) return name.slice(1, -1).replaceAll(quote + quote, quote).toLowerCase()
+  if (quote === "[" && name.endsWith("]")) return name.slice(1, -1).replaceAll("]]", "]").toLowerCase()
   return name.toLowerCase()
 }
 
 const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
+const BRACKETED = /\[(?:[^\]\n]|\]\]){1,256}\]/y
+
+/** Whether the last character before `pos` that is not whitespace is a dot: the name there is qualified (`schema . orders`). */
+function afterDot(text: string, pos: number): boolean {
+  let at = pos - 1
+  while (at >= 0 && /\s/.test(text[at])) at--
+  return text[at] === "."
+}
 
 /**
- * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names:
- * a name outside strings and comments, not after a dot, equal to the CTE's (letter case aside when bare).
- * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not;
- * a CTE that only a Jinja expression names is not seen.
+ * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names
+ * directly: a name outside strings, comments and Jinja (`{{ }}`, and `{% set %}`, `{% call %}` and `{% macro %}`
+ * blocks, whose SQL is a string for dbt), not after a dot or inside a longer word, equal to the CTE's in any
+ * letter case and quoting. A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as
+ * read when it is not; a CTE named only through Jinja is not seen. A client wanting a CTE's own time subtracts
+ * the CTEs it reads directly or through another (the closure of `reads`), each once.
  */
 export function cteReads(text: string, ctes: CteInfo[]): number[][] {
-  return ctes.map((cte) => {
-    const earlier = new Map<string, number[]>()
-    ctes.forEach((other, i) => {
-      if (other.withClauseStart !== cte.withClauseStart || other.index >= cte.index) return
-      const key = referenceKey(stripColumnList(other.name))
-      earlier.set(key, [...(earlier.get(key) ?? []), i])
-    })
+  // Per WITH clause, the CTEs met so far by name: built up in source order, so each body is scanned once.
+  const seen = new Map<number, Map<string, number[]>>()
+  return ctes.map((cte, position) => {
+    const earlier = seen.get(cte.withClauseStart) ?? new Map<string, number[]>()
+    seen.set(cte.withClauseStart, earlier)
     const reads = new Set<number>()
     let pos = cte.queryStart
     while (earlier.size > 0 && pos < cte.queryEnd) {
       const char = text[pos]
-      const quoted = char === '"' || char === "`"
-      const skipped = skipLiteral(text, pos)
-      // A string or a comment is skipped whole; a quoted name is read.
-      if (!quoted && skipped !== pos) {
-        pos = skipped
+      if (char === "{" && text[pos + 1] === "{") {
+        const close = text.indexOf("}}", pos + 2)
+        pos = close === -1 ? text.length : close + 2
         continue
       }
-      let end = pos + 1
-      if (quoted) end = skipped
-      else {
-        BARE_WORD.lastIndex = pos
-        if (BARE_WORD.test(text)) end = BARE_WORD.lastIndex
-        else {
-          pos = end
+      if (char === "{" && text[pos + 1] === "%") {
+        pos = skipJinjaBlock(text, pos)
+        continue
+      }
+      let end = -1
+      if (char === '"' || char === "`") end = skipLiteral(text, pos)
+      else if (char === "[") {
+        BRACKETED.lastIndex = pos
+        if (BRACKETED.test(text)) end = BRACKETED.lastIndex
+      } else {
+        // A string or a comment is skipped whole.
+        const skipped = skipLiteral(text, pos)
+        if (skipped !== pos) {
+          pos = skipped
           continue
         }
+        BARE_WORD.lastIndex = pos
+        if (/[\p{L}_]/u.test(char) && BARE_WORD.test(text)) end = BARE_WORD.lastIndex
       }
-      const before = text[pos - 1] ?? " "
-      if (before !== "." && !/[\p{L}\p{N}_$]/u.test(before)) for (const i of earlier.get(referenceKey(text.substring(pos, end))) ?? []) reads.add(i)
+      if (end === -1) {
+        pos++
+        continue
+      }
+      if (!/[\p{L}\p{N}_$]/u.test(text[pos - 1] ?? " ") && !afterDot(text, pos))
+        for (const i of earlier.get(referenceKey(text.substring(pos, end))) ?? []) reads.add(i)
       pos = end
     }
+    const key = referenceKey(stripColumnList(cte.name))
+    earlier.set(key, [...(earlier.get(key) ?? []), position])
     return [...reads].sort((a, b) => a - b)
   })
 }
