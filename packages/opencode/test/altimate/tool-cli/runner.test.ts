@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { bootstrap } from "../../../src/cli/bootstrap"
 import { createRunner, resultsDirectory, type Runner } from "../../../src/altimate/tool-cli/runner"
+import { createAdapter } from "../../../src/altimate/mcp-server/adapter"
 import { EXPOSED } from "../../../src/altimate/tool-cli/allow-list"
 import { BILLABLE_RUN_PERMISSIONS, READ_PERMISSIONS, askFor, isBlockedStatement } from "../../../src/altimate/tool-cli/permissions"
 import { Effect, Exit } from "effect"
@@ -16,6 +17,8 @@ import { initTool } from "../tool-fixture"
 
 let dir: string
 let runner: Runner
+// The same adapter `mcp serve` builds: every tool advertised, and no `cli` flag.
+let mcp: Awaited<ReturnType<typeof createAdapter>>
 let done: () => void
 let finished: Promise<void>
 let ready: Promise<void>
@@ -28,9 +31,11 @@ beforeAll(async () => {
   ready = new Promise((resolve, reject) => {
     booted = bootstrap(dir, async () => {
       runner = await createRunner()
+      mcp = await createAdapter({ allTools: true })
       resolve()
       await finished
       await runner.close()
+      await mcp.close()
     })
     booted.catch(reject)
   })
@@ -162,6 +167,34 @@ describe("savings checks under tool run", () => {
         expect(result.output).toContain("stub: no warehouse")
       }
       expect(seen).toEqual([{ warehouse: "w" }, { warehouse: "w" }])
+    } finally {
+      registerDefaultNativeHandlers()
+      Registry.reset()
+    }
+  })
+})
+
+describe("savings checks over MCP", () => {
+  test.each([
+    ["finops_databricks_savings", "finops.databricks_savings", { type: "databricks", http_path: "/sql/1.0/warehouses/abc123" }],
+    ["finops_snowflake_savings", "finops.snowflake_savings", { type: "snowflake" }],
+  ])("%s is refused before any dispatch unless the server allows writes", async (tool, method, config) => {
+    const seen: unknown[] = []
+    Registry.setConfigs({ w: config } as any)
+    Dispatcher.register(method as any, async (params: unknown) => {
+      seen.push(params)
+      return { success: false, window: { start: "2026-01-05", end: "2026-01-12" }, error: "stub: ran" } as any
+    })
+    const outcome = (allowWrite: boolean) =>
+      mcp.execute(tool, { warehouse: "w" }, new AbortController().signal, { allowWrite }).then(
+        (result) => result.output,
+        (error) => String(error instanceof Error ? error.message : error),
+      )
+    try {
+      expect(await outcome(false)).toContain("can start a stopped warehouse that then bills")
+      expect(seen).toEqual([])
+      expect(await outcome(true)).toContain("stub: ran")
+      expect(seen).toEqual([{ warehouse: "w" }])
     } finally {
       registerDefaultNativeHandlers()
       Registry.reset()
