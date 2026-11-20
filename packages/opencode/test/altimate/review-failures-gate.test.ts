@@ -90,8 +90,11 @@ describe("one file's failure degrades only that file", () => {
     })
     expect(checked).toContain("select 2 as id")
     expect(env.scope?.unverified).toEqual([
-      { path: "models/a.sql", reason: "review failed for this file: EACCES: permission denied" },
+      { path: "models/a.sql", reason: "review failed for this file: EACCES: permission denied", kind: "failed" },
     ])
+    // A file that was never reviewed is not a clean pass.
+    expect(env.verdict).not.toBe("APPROVE")
+    expect(env.idealVerdict).toBe("COMMENT")
   })
 
   test("a lane that throws on one file keeps the other file's findings", async () => {
@@ -135,7 +138,7 @@ describe("a file whose review failed is never approved", () => {
         throw new Error("git show failed")
       },
     })
-    expect(env.scope?.unverified).toEqual([{ path: "models/schema.yml", reason: "review failed for this file: git show failed" }])
+    expect(env.scope?.unverified).toEqual([{ path: "models/schema.yml", reason: "review failed for this file: git show failed", kind: "failed" }])
     expect(env.idealVerdict).toBe("COMMENT")
   })
 })
@@ -155,7 +158,11 @@ describe("PII abstention", () => {
       getContent: async (_f, side) => (side === "new" ? "select email from users" : "select 1 as id"),
     })
     expect(env.findings.filter((f) => f.category === "pii_exposure")).toHaveLength(0)
-    expect(env.scope?.unverified).toContainEqual({ path: "models/a.sql", reason: "the PII check could not analyse the base model" })
+    expect(env.scope?.unverified).toContainEqual({
+      path: "models/a.sql",
+      reason: "the PII check could not analyse the base model",
+      kind: "abstained",
+    })
   })
 
   test("a PII check that could not analyse the model is reported, not treated as clean", async () => {
@@ -171,8 +178,12 @@ describe("PII abstention", () => {
       }),
       getContent: async () => "select 1 as id",
     })
-    expect(env.scope?.unverified).toEqual([{ path: "models/a.sql", reason: "the PII check could not analyse this model" }])
+    expect(env.scope?.unverified).toEqual([
+      { path: "models/a.sql", reason: "the PII check could not analyse this model", kind: "abstained" },
+    ])
     expect(renderSummary(env)).toContain("the PII check could not analyse this model")
+    // An abstention is "not checked", so the run cannot APPROVE.
+    expect(env.idealVerdict).toBe("COMMENT")
   })
 })
 
@@ -286,6 +297,78 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     const b = fakeClient({ reviews: blocking })
     await postGitHubReview(fileFailed, target, b.client)
     expect(b.calls.dismissReview).toHaveLength(0)
+  })
+
+  test("a rerun where the PII check abstained does not clear an earlier PII block", async () => {
+    const blocking = [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot }]
+    const abstained = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "gate",
+      scope: { unverified: [{ path: "models/m.sql", reason: "the PII check could not analyse this model", kind: "abstained" }] },
+    })
+    expect(abstained.idealVerdict).toBe("COMMENT")
+    const { client, calls } = fakeClient({ reviews: blocking })
+    await postGitHubReview(abstained, target, client)
+    expect(calls.dismissReview).toHaveLength(0)
+  })
+
+  test("a run on an older push never clears the block", async () => {
+    const env = buildEnvelope({ findings: [], tier: "lite", mode: "gate", scope: { headSha: "old" } })
+    const { client, calls } = fakeClient({
+      reviews: [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot }],
+    })
+    await postGitHubReview(env, target, client)
+    expect(calls.dismissReview).toHaveLength(0)
+    const current = buildEnvelope({ findings: [], tier: "lite", mode: "gate", scope: { headSha: "abc" } })
+    const b = fakeClient({
+      reviews: [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot }],
+    })
+    await postGitHubReview(current, target, b.client)
+    expect(b.calls.dismissReview.map((c) => c.review_id)).toEqual([11])
+  })
+
+  test("in a monorepo one project's clean run never dismisses another project's block", async () => {
+    const env = buildEnvelope({ findings: [engineFinding(3)], tier: "lite", mode: "gate", scope: { projectRoot: "projects/a" } })
+    const { client, calls } = fakeClient({
+      reviews: [
+        {
+          id: 31,
+          body: "🛑 Changes requested — 1 critical (full tier)\n\n<!-- altimate-code-review:verdict project=projects/b -->",
+          state: "CHANGES_REQUESTED",
+          user: bot,
+        },
+        {
+          id: 32,
+          body: "🛑 Changes requested — 1 critical (full tier)\n\n<!-- altimate-code-review:verdict project=projects/a -->",
+          state: "CHANGES_REQUESTED",
+          user: bot,
+        },
+      ],
+    })
+    await postGitHubReview(env, target, client)
+    expect(calls.dismissReview.map((c) => c.review_id)).toEqual([32])
+    expect(calls.createReview[0].body).toContain("<!-- altimate-code-review:verdict project=projects/a -->")
+  })
+
+  test("the block is dismissed only after the replacement review is posted", async () => {
+    const env = buildEnvelope({ findings: [engineFinding(3)], tier: "lite", mode: "gate" })
+    const { client, calls } = fakeClient({
+      reviews: [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot }],
+    })
+    const order: string[] = []
+    ;(client.rest.pulls as any).createReview = async () => {
+      order.push("create")
+      throw Object.assign(new Error("Server Error"), { status: 502 })
+    }
+    ;(client.rest.pulls as any).dismissReview = async () => {
+      order.push("dismiss")
+      return { data: {} }
+    }
+    const r = await postGitHubReview(env, target, client)
+    expect(r.postError).toContain("502")
+    expect(order).toEqual(["create", "create"])
+    expect(calls.dismissReview).toHaveLength(0)
   })
 
   test("a still-blocking rerun does not dismiss and posts REQUEST_CHANGES", async () => {

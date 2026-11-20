@@ -3,6 +3,7 @@ import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
+import { errorReason } from "./verdict"
 
 /**
  * Production ReviewRunner backed by the native Dispatcher (the Rust core).
@@ -108,7 +109,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
   // instead of reading as "no findings".
   const failures = new Map<string, { reason: string; count: number }>()
   function fail(method: string, err: unknown) {
-    const reason = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 200)
+    const reason = errorReason(err)
     const prev = failures.get(method)
     failures.set(method, { reason: prev?.reason ?? reason, count: (prev?.count ?? 0) + 1 })
   }
@@ -365,15 +366,13 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         out.push(...asArray((res.data as any)?.findings))
       } catch (err) {
         fail("dbtConfigLint", err)
-        /* skip */
       }
       if (oldRawSql) {
         try {
           const res = await callCore("altimate_core.dbt_config_diff", { base_sql: oldRawSql, head_sql: rawSql })
           out.push(...asArray((res.data as any)?.findings))
         } catch (err) {
-          fail("dbtConfigLint", err)
-          /* skip */
+          fail("dbtConfigDiff", err)
         }
       }
       return out
@@ -474,7 +473,11 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           target_warehouse: warehouse || undefined,
         })
         const r = res as any
-        if (!r || r.success === false) return null
+        if (r?.success === false) {
+          fail("dataDiff", r.error ?? "data.diff failed")
+          return null
+        }
+        if (!r) return null
         const o = (r.outcome ?? {}) as Record<string, any>
         return {
           rowsOnlyInBase: o.rows_only_in_source ?? o.removed ?? o.exclusive_source,

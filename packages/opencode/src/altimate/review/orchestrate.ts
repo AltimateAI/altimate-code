@@ -18,6 +18,7 @@ import {
   type VerdictEnvelope,
   FAILED_FILE_REASON,
   buildEnvelope,
+  errorReason,
   signEnvelope,
 } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
@@ -1121,7 +1122,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // both SQL sides. This avoids duplicate engine calls and lets tiering see PII.
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
   const ctxByPath = new Map<string, ModelContext>()
-  const unverified: Array<{ path: string; reason: string }> = []
+  const unverified: NonNullable<ReviewScope["unverified"]> = []
   let anyManifest = false
   if (input.runner.manifestAvailable) {
     anyManifest = await input.runner.manifestAvailable().catch(() => false)
@@ -1130,13 +1131,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const laneErrors: Array<{ method: string; reason: string; count: number }> = []
   const prLevel = (method: string, lane: Promise<Finding[]>) =>
     lane.catch((err) => {
-      laneErrors.push({ method, reason: (err instanceof Error ? err.message : String(err)).slice(0, 200), count: 1 })
+      laneErrors.push({ method, reason: errorReason(err, 200), count: 1 })
       return [] as Finding[]
     })
   const failedFile = (file: { path: string }, err: unknown) =>
     unverified.push({
       path: file.path,
-      reason: `${FAILED_FILE_REASON}: ${(err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 160)}`,
+      reason: `${FAILED_FILE_REASON}: ${errorReason(err, 160)}`,
+      kind: "failed",
     })
   await Promise.all(
     modelFiles.map(async (file) => {
@@ -1160,13 +1162,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         const engineNewSql = compiledNew ?? (file.kind === "model_sql" && hasJinja(newSql) ? undefined : newSql)
         const engineOldSql = compiledOld ?? (file.kind === "model_sql" && hasJinja(oldSql) ? undefined : oldSql)
         if (file.status !== "deleted" && newSql && !engineNewSql)
-          unverified.push({ path: file.path, reason: "no compiled SQL for the head (run dbt compile)" })
+          unverified.push({ path: file.path, reason: "no compiled SQL for the head (run dbt compile)", kind: "not_compiled" })
         else if (withOld && oldSql && !engineOldSql)
-          unverified.push({ path: file.path, reason: "no compiled SQL for the base (compile the base into target-base)" })
+          unverified.push({
+            path: file.path,
+            reason: "no compiled SQL for the base (compile the base into target-base)",
+            kind: "not_compiled",
+          })
         const impact = await input.runner.impact(model)
         if (impact.hasManifest) anyManifest = true
         const piiRes = engineNewSql ? await input.runner.detectPii(engineNewSql, dialect) : { columns: [] }
-        if (piiRes.abstained) unverified.push({ path: file.path, reason: "the PII check could not analyse this model" })
+        if (piiRes.abstained)
+          unverified.push({ path: file.path, reason: "the PII check could not analyse this model", kind: "abstained" })
         const pii = piiRes.columns
         const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
         ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
@@ -1317,7 +1324,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           if (fallbackPii.length && baseAbstained) {
             // An unanalysable base says nothing about what it exposed; reporting
             // every head column as newly exposed would be a false positive.
-            unverified.push({ path: currentCtx.file.path, reason: "the PII check could not analyse the base model" })
+            unverified.push({
+              path: currentCtx.file.path,
+              reason: "the PII check could not analyse the base model",
+              kind: "abstained",
+            })
             fallbackPii = []
           } else {
             fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))

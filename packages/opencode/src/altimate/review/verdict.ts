@@ -118,8 +118,14 @@ export const ReviewScope = z.object({
   outOfScopeFiles: z.number().int().nonnegative().optional(),
   /** Non-model renames with unchanged content, name, role and layer (pure moves): not re-reviewed. */
   movedUnchangedFiles: z.number().int().nonnegative().optional(),
-  /** Models the engine lanes could not verify, with the reason. */
-  unverified: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
+  /** Head commit the review ran on; a run on an older push never clears a block. */
+  headSha: z.string().optional(),
+  /** Models the engine lanes could not verify, with the reason and its kind:
+   *  `failed` (the file's review threw), `abstained` (a check could not analyse
+   *  the SQL), `not_compiled` (no compiled SQL; engine lanes skipped). */
+  unverified: z
+    .array(z.object({ path: z.string(), reason: z.string(), kind: z.enum(["failed", "abstained", "not_compiled"]).optional() }))
+    .optional(),
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
@@ -249,19 +255,32 @@ function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["sum
   return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
 }
 
+/** An error as one bounded line, for envelope reasons and the PR comment. */
+export function errorReason(err: unknown, max = 200): string {
+  return (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim().slice(0, max)
+}
+
 /** Prefix of the `scope.unverified` reason for a file whose review threw. */
 export const FAILED_FILE_REASON = "review failed for this file"
+
+/** True when some check did not run: an engine call failed, a file's review
+ *  threw, or a check abstained on a model. Missing findings then mean "not
+ *  checked", so the run can neither APPROVE nor clear an earlier block. */
+export function reviewIncomplete(input: Pick<BuildEnvelopeInput, "engineErrors" | "scope">): boolean {
+  if (input.engineErrors?.length) return true
+  return (input.scope?.unverified ?? []).some(
+    (u) => u.kind === "failed" || u.kind === "abstained" || u.reason.startsWith(FAILED_FILE_REASON),
+  )
+}
 
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
 export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   const rubric = input.rubric ?? DEFAULT_RUBRIC
-  // An engine failure or a file whose review failed means some checks did not
-  // run: "no findings" is then unknown, not clean, so the verdict cannot be APPROVE.
+  // An engine failure, a file whose review failed, or a check that abstained
+  // means some checks did not run: "no findings" is then unknown, not clean,
+  // so the verdict cannot be APPROVE.
   const computed = computeIdealVerdict(input.findings, rubric)
-  const incomplete =
-    !!input.engineErrors?.length ||
-    (input.scope?.unverified ?? []).some((u) => u.reason.startsWith(FAILED_FILE_REASON))
-  const ideal = computed === "APPROVE" && incomplete ? "COMMENT" : computed
+  const ideal = computed === "APPROVE" && reviewIncomplete(input) ? "COMMENT" : computed
   const verdict = applyMode(ideal, input.mode)
   const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
   return VerdictEnvelope.parse({
