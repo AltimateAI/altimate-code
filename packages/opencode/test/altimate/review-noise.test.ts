@@ -322,6 +322,15 @@ describe("repeats of one rule within a file", () => {
     expect(m.body).toContain("- grain column `evt_index`")
     expect(m.body).toContain("- grain column `tx_hash`")
   })
+  test("same-titled lint findings keep each message and line", () => {
+    const lint = (line: number, msg: string) =>
+      makeFinding({ severity: "suggestion", category: "sql_quality", title: "m: L001", body: msg, file: "models/m.sql", startLine: line })
+    const [m, ...rest] = mergeRepeats([lint(3, "first issue"), lint(9, "second issue"), lint(12, "third issue")])
+    expect(rest).toHaveLength(0)
+    const all = `${m.body}`
+    for (const t of ["first issue", "second issue", "third issue"]) expect(all).toContain(t)
+    expect(all).toMatch(/\(line (3|9|12)\)/)
+  })
   test("other files, other rules, and critical findings stay separate", () => {
     const other = { ...grain("tx_hash"), id: "x", file: "models/other.yml" }
     const crit = [grain("a", "critical"), { ...grain("b", "critical"), id: "y" }]

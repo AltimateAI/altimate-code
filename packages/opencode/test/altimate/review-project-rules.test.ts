@@ -173,9 +173,27 @@ describe("tests on columns the SQL sets to NULL", () => {
     const fs = testsOnNullColumns(file("models/_fact_tables.yml", "          - not_null"), yml, sql)
     expect(fs.map((f) => f.title)).toEqual(["_fact_tables: `tfact_order.platform_fk` is tested but the model sets it to NULL"])
   })
+  test("only a test added on that column counts; relationships alone is not flagged", () => {
+    const yml = "models:\n  - name: t\n    columns:\n      - name: platform_fk\n        data_tests:\n          - not_null\n      - name: order_id\n        data_tests:\n          - not_null\n      - name: other_fk\n        data_tests:\n          - relationships:\n              to: ref('d')\n              field: id\n"
+    const sql = new Map([["t", "select order_id, null as platform_fk, null as other_fk from o"]])
+    const hunk = (line: number, text: string): ChangedFile => ({ path: "models/_t.yml", status: "modified", diff: `@@ -${line},0 +${line},1 @@\n+${text}\n` })
+    // `- not_null` added under order_id: the old test on platform_fk is not this PR's.
+    expect(testsOnNullColumns(hunk(9, "          - not_null"), yml, sql)).toHaveLength(0)
+    // `- not_null` added under platform_fk.
+    expect(testsOnNullColumns(hunk(6, "          - not_null"), yml, sql)).toHaveLength(1)
+    // A relationships test skips NULL keys.
+    expect(testsOnNullColumns(hunk(12, "          - relationships:"), yml, sql)).toHaveLength(0)
+  })
 })
 
 describe("SQL shapes from the catalog", () => {
+  test("left-join-filtered-in-where fires only when the change touches the right side", () => {
+    const sql = "select a.id, b.x\nfrom a\nleft join b on a.id = b.id\nwhere b.status = 'active'\n  and a.kind = 'x'"
+    // An unrelated `and` on the left side: the old filter is not this PR's.
+    expect(fires("left-join-filtered-in-where", sql, ["  and a.kind = 'x'"])).toBe(false)
+    expect(fires("left-join-filtered-in-where", sql, ["where b.status = 'active'"])).toBe(true)
+    expect(fires("left-join-filtered-in-where", sql, ["left join b on a.id = b.id"])).toBe(true)
+  })
   test("LEFT JOIN filtered in WHERE; an IS NULL anti-join or a predicate in ON is fine", () => {
     expect(leftJoinNullifiedByWhere("select * from uc left join {{ ref('cd') }} as cd on uc.id = cd.id where cd.kind = ''")).toBe(true)
     expect(leftJoinNullifiedByWhere("select * from s left join g on s.id = g.id where g.id is not null")).toBe(true)

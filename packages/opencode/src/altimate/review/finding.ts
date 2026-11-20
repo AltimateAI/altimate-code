@@ -220,6 +220,13 @@ export function ruleTitle(f: Pick<Finding, "title">): string {
     .replace(/`[^`]*`/g, "`…`")
 }
 
+/** One merged instance: its title, or its message when the title is the same as
+ *  the first's (lint titles carry only the rule name), plus its line. */
+function repeatLabel(f: Finding, first: Finding): string {
+  const label = f.title === first.title ? (f.body.split("\n")[0] ?? "") : f.title.replace(/^[\w.\-/]+: /, "")
+  return f.startLine ? `${label} (line ${f.startLine})` : label
+}
+
 /**
  * Merge repeats of one rule within one file (one finding per column of a grain
  * test, one per join onto the same kind of key) into a single finding that
@@ -248,7 +255,7 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
     out.push({
       ...first,
       title: `${first.title} (+${rest.length} more)`,
-      body: `${first.body}\n\nSame rule, also here:\n${rest.map((f) => `- ${f.title.replace(/^[\w.\-/]+: /, "")}`).join("\n")}`,
+      body: `${first.body}\n\nSame rule, also here:\n${rest.map((f) => `- ${repeatLabel(f, first)}`).join("\n")}`,
     })
   }
   return out

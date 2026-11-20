@@ -178,6 +178,16 @@ export async function listFilesAt(cwd: string, ref?: string): Promise<string[] |
   }
 }
 
+/** Files in the index plus untracked, non-ignored files (the working tree), repo-root relative; undefined when git fails. */
+export async function listWorkingTreeFiles(cwd: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(["ls-files", "--full-name", "--cached", "--others", "--exclude-standard", "--", ":(top)"], cwd)
+    return out.split("\n").filter(Boolean)
+  } catch {
+    return undefined
+  }
+}
+
 /** Matches of `pattern` (extended regex) in tracked files at `ref` under the repo-root-relative `pathspec`, as `ref:path:match` lines; undefined when git fails. */
 export async function grepMatchesAt(cwd: string, ref: string | undefined, pattern: string, pathspec: string): Promise<string[] | undefined> {
   try {
