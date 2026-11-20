@@ -63,6 +63,23 @@ describe("only the engine blocks", () => {
     expect(computeIdealVerdict([cred], DEFAULT_RUBRIC)).toBe("COMMENT")
   })
 
+  test("blockingRules ids match with either spelling (`pii_into_mart` / `pii-into-mart`)", () => {
+    const pii = f("dbt-patterns", "critical", "pii_exposure", 1, "pii_into_mart")
+    const cred = f("rule-catalog", "critical", "sql_correctness", 2, "hardcoded-credential")
+    const rubric = Rubric.parse({ blockingRules: ["pii-into-mart", "Hardcoded_Credential"] })
+    expect(verdictEligible(pii, rubric)).toBe(true)
+    expect(verdictEligible(cred, rubric)).toBe(true)
+    expect(computeIdealVerdict([pii], rubric)).toBe("REQUEST_CHANGES")
+  })
+
+  test("a supplied origin never overrides the evidence tool", () => {
+    const ai = [1, 2, 3].map((i) => ({ ...f("ai-review", "warning", "sql_quality", i), origin: "engine" as const }))
+    expect(findingOrigin(ai[0])).toBe("ai")
+    expect(computeIdealVerdict(ai)).toBe("COMMENT")
+    const env = buildEnvelope({ findings: ai, mode: "gate", tier: "full", generatedAt: "2026-11-20T00:00:00Z" } as any)
+    expect(env.findings.every((x) => x.origin === "ai")).toBe(true)
+  })
+
   test("engine criticals and engine warning patterns still block", () => {
     expect(computeIdealVerdict([f("impact_analysis", "critical", "lineage_breakage", 1)])).toBe("REQUEST_CHANGES")
     const three = [1, 2, 3].map((i) => f("altimate_core.check", "warning", "sql_quality", i))
@@ -174,6 +191,19 @@ describe("policy comes from the base branch", () => {
     expect(tightened.mode).toBe("gate")
     const loose = await repo("mode: comment\n", undefined)
     expect((await reviewPullRequest({ cwd: loose, head: "HEAD", noAi: true, mode: "gate" })).mode).toBe("gate")
+  }, 60_000)
+
+  test("the signed policy hash describes the policy after the flags", async () => {
+    const root = await repo("mode: comment\nseverityThreshold: warning\n", undefined)
+    const plain = await reviewPullRequest({ cwd: root, head: "HEAD", noAi: true })
+    const tightened = await reviewPullRequest({ cwd: root, head: "HEAD", noAi: true, mode: "gate", severityThreshold: "suggestion" })
+    expect(plain.policy?.hash).toMatch(/^[0-9a-f]{16}$/)
+    expect(tightened.policy?.hash).not.toBe(plain.policy?.hash)
+  }, 60_000)
+
+  test("an unparsable base review.yml fails closed and names the recovery path", async () => {
+    const root = await repo("mode: [unclosed\n", "mode: comment\n")
+    await expect(reviewPullRequest({ cwd: root, head: "HEAD", noAi: true })).rejects.toThrow(/fix the file on the base branch/)
   }, 60_000)
 
   test("showAtRef: a path missing at the ref is absent, any other git failure surfaces", async () => {

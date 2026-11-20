@@ -1,7 +1,7 @@
 import path from "node:path"
 import { readFile, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
-import { loadReviewPolicy, resolveRubric } from "./config"
+import { loadReviewPolicy, policyHash, resolveRubric } from "./config"
 import { SEVERITY_ORDER, type Severity } from "./finding"
 import {
   collectChangedFiles,
@@ -274,6 +274,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       )
     } else config.severityThreshold = opts.severityThreshold
   }
+  // The signed hash describes the policy actually applied, after the flags.
+  policy.hash = policyHash(config)
   const rubric = resolveRubric(config)
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
