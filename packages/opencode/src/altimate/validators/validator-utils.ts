@@ -694,7 +694,8 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // required makes the deliverable gate reject the correct implementation
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
-    let spans = inlineCodeSpans(requirementHead(line, verb.index))
+    const head = requirementHead(line, verb.index)
+    let spans = modelCandidateSpans(head)
     // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
     // destination is required to exist once the rename is done — the source
     // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
@@ -768,6 +769,193 @@ function inlineCodeSpans(line: string): string[] {
   let m: RegExpExecArray | null
   while ((m = CODE_SPAN_RE.exec(line)) !== null) {
     if (m[1]) out.push(m[1])
+  }
+  return out
+}
+
+/**
+ * Words that mark the code span they introduce as something other than a
+ * model: a column, a dbt variable, a macro. "Add the column `order_id`" and
+ * "add a variable called `use_x`" name real things, but not relations, so
+ * requiring a model by that name blocks a correct implementation forever.
+ */
+const NON_MODEL_KIND = "columns?|fields?|attributes?|variables?|vars?|macros?|settings?|parameters?"
+/**
+ * "a column called", "the variable named": a kind word led by a determiner,
+ * a short phrase without a deliverable noun, then "called"/"named". Also
+ * accepted without a determiner when the whole clause holds no deliverable
+ * noun ("has columns called"). A deliverable noun before an undetermined kind
+ * word ("a table of customer attributes called `x`") leaves the span a model.
+ */
+const INTRODUCED_CALLED_RE = new RegExp(
+  `\\b(?:a|an|the|one|another|each|every|this|that)\\s+(?:(?:new|extra|additional)\\s+)?(?:${NON_MODEL_KIND})\\b((?:[^.;:,!?]|\\.(?=\\w)){0,60}?)\\b(?:called|named)\\s*$`,
+  "i",
+)
+const INTRODUCED_BARE_CALLED_RE = new RegExp(
+  `\\b(?:${NON_MODEL_KIND})\\b(?:[^.;:,!?]|\\.(?=\\w)){0,60}?\\b(?:called|named)\\s*$`,
+  "i",
+)
+const INTRODUCED_COLON_RE = new RegExp(`\\b(?:${NON_MODEL_KIND})\\b\\s*[:\\-(]?\\s*$`, "i")
+/** A span directly introduced by a deliverable noun ("the model `x`", "table called `x`") is a model. */
+const INTRODUCED_AS_MODEL_RE =
+  /\b(?:models?|tables?|views?|seeds?|snapshots?|marts?|files?)\s*(?:(?:called|named)\s*)?:?\s*$/i
+/** ... and so is a span followed by one ("`x` model"). */
+const FOLLOWED_BY_MODEL_NOUN_RE = new RegExp(
+  `^\\s*(?:as\\s+(?:an?\\s+|the\\s+)?)?(?:models?|tables?|views?|seeds?|snapshots?|files?)\\b(?!\\s+(?:${NON_MODEL_KIND})\\b)`,
+  "i",
+)
+/**
+ * "`x` column", "`x` variable": the kind word follows the span and ends the
+ * noun phrase. "`x` column names" is attributive and does not qualify.
+ */
+const FOLLOWED_BY_NON_MODEL_RE = new RegExp(
+  `^\\s*(?:as\\s+(?:an?\\s+|the\\s+)?(?:(?:new|extra|additional|separate)\\s+)?(?:(?:model|table|view)\\s+)?)?(${NON_MODEL_KIND})\\b(?=\\s*(?:$|[,.;:)]|(?:to|in|of|on|from|that|which|with|for|as|and|or|is|are|should|must|so|called|named|by)\\b))`,
+  "i",
+)
+/** "should have `a`, `b`": what a model has or exposes is its columns. */
+const HAS_LIST_RE =
+  /\b(?:have|has|having|includes?|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
+/**
+ * The words just before a "have/include/contain" verb must name the model being
+ * described ("It should", "that has", "the resulting table should", "These models
+ * must"). "This project should have `x`" or "ensure the project includes `x`" names
+ * a different subject, so `x` stays a requirement.
+ */
+const MODEL_SUBJECT_BEFORE_VERB_RE =
+  /(?:\b(?:it|they|that|which|these|those|this|each)|\b(?:these|those|both)\s+(?:models|tables|views|snapshots|seeds)|\b(?:model|table|view|snapshot|seed))\s+(?:(?:also|should|must|will|can|then)\s+)*$/i
+/** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
+const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
+/** "rename column `a` to `b`": the target of a column rename is a column. */
+const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
+/** A bare relation-style name; only these count as the model a "have" list describes. */
+const BARE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+/** A span that collection will keep as a model name (not a stopword such as `date`). */
+function countsAsModel(text: string): boolean {
+  const name = text.toLowerCase()
+  return BARE_IDENTIFIER_RE.test(text) && IDENTIFIER_RE.test(name) && !DELIVERABLE_STOPWORDS.has(name)
+}
+/** Compound noun ("model column"): the model noun belongs to the kind word and introduces no model. */
+const COMPOUND_KIND_RE = new RegExp(`\\b(?:models?|tables?|views?)\\s+(?=(?:${NON_MODEL_KIND})\\b)`, "gi")
+/** A span followed by "should have" etc. starts its own clause; it is not another item of the previous list. */
+const CLAUSE_VERB_AFTER_RE = /^\s*(?:should|must|will|needs?|has|have)\b/i
+/** A literal path or file name stays eligible for the file check even when it is not a relation. */
+const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
+/** True when `before` ends in a have/include/contain verb whose subject is the model just named. */
+function hasModelDescriptionVerb(before: string, previousSpanIsModel: boolean): boolean {
+  const verb = HAS_LIST_RE.exec(before)
+  if (verb === null) return false
+  const subject = before.slice(0, verb.index)
+  // "`orders` should have `order_id`": the subject is the kept span just before the verb.
+  if (previousSpanIsModel && /^\s*(?:(?:also|should|must|will|can|then)\s+)*$/i.test(subject)) return true
+  return MODEL_SUBJECT_BEFORE_VERB_RE.test(subject)
+}
+/** End of a sentence or independent clause inside a gap between spans. */
+const SENTENCE_END_RE = /[.!?;]["')\]]*(?=\s|$)/
+/** A rename verb that is not negated ("do not rename the model" is not a rename). */
+function hasAffirmativeRename(head: string): boolean {
+  const re = /\brenam(?:e|es|ed|ing)\b/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(head)) !== null) if (!verbIsNegated(head, m.index)) return true
+  return false
+}
+
+/**
+ * Code spans of a requirement line that can name a model: every span except
+ * those the line itself introduces as a column, field, variable or macro.
+ * A span is dropped only on explicit wording around it ("column called `x`",
+ * "`x` column", "should have `a`, `b`", a list continuing such a span); with no
+ * such wording it stays, so a bare name is still required.
+ *
+ * Preference when the wording is ambiguous: the costlier error for a finish-time
+ * validator is the false alarm (a retry turn spent on a requirement nobody made),
+ * so a span that the text marks as a column, field, variable or macro by any
+ * explicit cue ("column", "as a new column", "model column", "should have" said of
+ * the model just named) is not required. A span with NO such cue is not ambiguous,
+ * it is named like a deliverable ("create model X", "the project should have X"),
+ * and is required exactly as before this filter existed: losing it would empty the
+ * contract and silence both completion gates. This is pattern matching on English
+ * phrasing, not understanding; wording it does not recognise falls on the "required"
+ * side because that is what the validator did before.
+ *
+ * Dropping errs toward keeping: a span introduced or followed by a deliverable
+ * noun is never dropped, a path-shaped span is never dropped (the file check
+ * still needs it), "have `x`" drops only when an earlier span of the sentence
+ * is kept or the sentence continues the description of the model ("It should
+ * have ..."), and the target of "to"/"as" is dropped only on a rename line.
+ * Dropping a real model could leave the line with no name at all, which makes
+ * the whole contract read as absent and silences both completion gates.
+ */
+function modelCandidateSpans(line: string): string[] {
+  const out: string[] = []
+  CODE_SPAN_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  const matches: { text: string; start: number; end: number }[] = []
+  while ((m = CODE_SPAN_RE.exec(line)) !== null) {
+    if (m[1]) matches.push({ text: m[1], start: m.index, end: m.index + m[0].length })
+  }
+  const gapBefore = (i: number) => line.slice(i === 0 ? 0 : matches[i - 1]!.end, matches[i]!.start)
+  const gapAfter = (i: number) => line.slice(matches[i]!.end, matches[i + 1]?.start ?? line.length)
+  // "`dim_a` and `dim_b` models": a trailing model noun covers the whole list before it.
+  const modelList: boolean[] = matches.map(() => false)
+  for (let i = matches.length - 1; i >= 0; i--) {
+    modelList[i] =
+      FOLLOWED_BY_MODEL_NOUN_RE.test(gapAfter(i)) || (!!modelList[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i)))
+  }
+  const isModelLike = (i: number) =>
+    PATH_SHAPED_RE.test(matches[i]!.text) || INTRODUCED_AS_MODEL_RE.test(gapBefore(i)) || modelList[i]!
+  let keptModels = 0
+  // Rename context is read once per sentence, not by rescanning the growing prefix for every span.
+  const hasRenameWord = /\brenam/i.test(line)
+  let sentenceStart = 0
+  const nonModel: boolean[] = matches.map(() => false)
+  // Only a plural kind ("`a` and `b` columns") reaches back over a list; "`x` column" is just `x`.
+  const pluralKind: boolean[] = matches.map((_, i) =>
+    /s$/i.test(FOLLOWED_BY_NON_MODEL_RE.exec(gapAfter(i))?.[1] ?? ""),
+  )
+
+  // Trailing kind word ("`a` and `b` columns"): applies to the whole list it ends.
+  let pluralList = false
+  for (let i = matches.length - 1; i >= 0; i--) {
+    if (isModelLike(i)) {
+      pluralList = false
+      continue
+    }
+    if (FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i))) {
+      nonModel[i] = true
+      pluralList = pluralKind[i]!
+    } else if (pluralList && nonModel[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i))) {
+      nonModel[i] = true
+    } else {
+      pluralList = false
+    }
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const before = gapBefore(i)
+    const afterBoundary = before.split(SENTENCE_END_RE).pop() ?? ""
+    const sentenceBroke = SENTENCE_END_RE.test(before)
+    if (sentenceBroke) sentenceStart = matches[i]!.start - (afterBoundary.length)
+    const renameLine = hasRenameWord && hasAffirmativeRename(line.slice(sentenceStart, matches[i]!.start))
+    if (!isModelLike(i) && !nonModel[i]) {
+      // "column ... called `x`" counts only inside one clause that holds no deliverable noun
+      // before the kind word.
+      const clause = (before.split(/[;:!?,]|\.(?!\w)/).pop() ?? "").replace(COMPOUND_KIND_RE, "")
+      // The colon form ("settings: `x`") is judged on the clause up to the colon.
+      const colonClause = (before.split(/[;!?,]|\.(?!\w)/).pop() ?? "").replace(COMPOUND_KIND_RE, "")
+      const called = INTRODUCED_CALLED_RE.exec(clause)
+      nonModel[i] =
+        (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
+        (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
+        (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(colonClause)) ||
+        (keptModels > 0 && hasModelDescriptionVerb(before, i > 0 && !nonModel[i - 1] && countsAsModel(matches[i - 1]!.text))) ||
+        (i > 0 &&
+          nonModel[i - 1] &&
+          !CLAUSE_VERB_AFTER_RE.test(gapAfter(i)) &&
+          (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before))))
+    }
+    if (!nonModel[i]) {
+      out.push(matches[i]!.text)
+      if (countsAsModel(matches[i]!.text)) keptModels++
+    }
   }
   return out
 }
