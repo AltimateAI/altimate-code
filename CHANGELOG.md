@@ -54,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dbt tool argument errors name the field**, and activating a different virtualenv (`VIRTUAL_ENV`, `CONDA_PREFIX`) gets a `tool run` daemon that uses it. (#1781)
 - **Release review fixes.**
   - The `ALTIMATE_INTEGRATIONS_*_API` overrides must be https or a local address, judged by the parsed host, with no credentials in the URL.
-  - The missing-fields hint gives full commands, with a secret source for `set-secret`, and names `update` after a failed update.
+  - The missing-fields hint gives full commands, with a secret source for `set-secret`, and its re-run keeps the failed call's `update`, `--local-only`, `--share` and `--variant`.
   - The dbt adapter refusal names the fix that applies: `--allow-write`, or leaving plan mode.
   - `dbt_run_results` accepts a UNC target path and skips a `run_results.json` over 256 MiB.
   - The dbt Power User tools and `integrations` are documented.

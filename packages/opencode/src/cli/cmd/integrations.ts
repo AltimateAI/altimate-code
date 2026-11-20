@@ -239,8 +239,12 @@ async function runCredentials(args: any, update: boolean) {
       out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${clean(os.hostname())}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
     } else {
       out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
-      if (r.status === "missing_fields")
-        out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}\`, fill them with \`altimate integrations set ${id} <field> <value>\` or \`altimate integrations set-secret ${id} <field> --stdin\` (or \`--from-env VAR\`, \`--from-clipboard\`), then run \`altimate integrations ${update ? "update" : "connect"} ${id}\` again.${S.TEXT_NORMAL}`)
+      if (r.status === "missing_fields") {
+        // The re-run keeps the flags of the call that failed: without --local-only it would sync the credential.
+        const variant = typeof args.variant === "string" && args.variant ? ` --variant ${clean(args.variant)}` : ""
+        const rerun = `${update ? "update" : "connect"} ${id}${variant}${args.share ? " --share" : ""}${!update && args["local-only"] ? " --local-only" : ""}`
+        out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}${variant}\`, fill them with \`altimate integrations set ${id} <field> <value>\` or \`altimate integrations set-secret ${id} <field> --stdin\` (or \`--from-env VAR\`, \`--from-clipboard\`), then run \`altimate integrations ${rerun}\` again.${S.TEXT_NORMAL}`)
+      }
     }
   } catch (e) {
     fail(e, args.json)

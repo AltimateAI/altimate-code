@@ -278,6 +278,38 @@ describe("v0.12.12: integration API overrides receive the token only on https or
   })
 })
 
+describe("v0.12.12: the missing-fields hint re-runs the call that failed", () => {
+  // An empty environment with only bun on PATH: no gh login or token can be detected and used.
+  const run = async (...args: string[]) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "release-v0.12.12-hint-"))
+    try {
+      await fs.mkdir(path.join(dir, "bin"))
+      await fs.symlink(process.execPath, path.join(dir, "bin", "bun"))
+      const cli = path.join(import.meta.dir, "../../src/index.ts")
+      const p = Bun.spawnSync([path.join(dir, "bin", "bun"), "run", cli, "integrations", ...args], {
+        env: { HOME: dir, PATH: path.join(dir, "bin"), ALTIMATE_INTEGRATIONS_DIR: dir, ALTIMATE_INTEGRATIONS_MOCK: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      return p.stdout.toString() + p.stderr.toString()
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  }
+
+  test("--local-only is kept, so following the hint does not sync the credential", async () => {
+    const out = await run("connect", "github", "--local-only")
+    expect(out).toContain("Missing:")
+    expect(out).toContain("`altimate integrations connect github --local-only` again")
+  }, 60_000)
+
+  test("--variant goes on fields and the re-run, and --share is kept", async () => {
+    const out = await run("connect", "jira", "--variant", "server", "--share")
+    expect(out).toContain("`altimate integrations fields jira --variant server`")
+    expect(out).toContain("`altimate integrations connect jira --variant server --share` again")
+  }, 60_000)
+})
+
 describe("v0.12.12: source guards", () => {
   test("integration API overrides are used only for https or a local http address", async () => {
     const text = await read("altimate/integrations/credentials.ts")
