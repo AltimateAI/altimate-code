@@ -267,7 +267,7 @@ function records(result: { columns: string[]; rows: unknown[][] }): Row[] {
 }
 
 /** A map entry, created on first use. */
-function entry<V>(map: Map<string, V>, key: string, create: () => V): V {
+function entry<K, V>(map: Map<K, V>, key: K, create: () => V): V {
   let found = map.get(key)
   if (found === undefined) {
     found = create()
@@ -323,6 +323,9 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  *   away from a name that was then reused).
  * A metered hour counts from its start, which can be up to an hour before the creation inside it, and other
  * times may read up to a minute early. A name that several ids belong to keeps the one used last.
+ * Without ids in `SHOW WAREHOUSES`, two cases stay ambiguous: an older warehouse renamed into a dropped one's
+ * name, with no usage under it in the window, takes the dropped one's usage; and a predecessor metered only in
+ * the hour of the new warehouse's creation, with no other row, keeps that hour.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
  * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits,
  * periods, restarts or queries): that earlier usage is left out.
@@ -345,10 +348,9 @@ export function buildFacts(rows: FactRows) {
       const name = String(row.warehouse_name ?? "")
       const start = startOf(row)
       const at = Number.isFinite(start) ? start : -Infinity
-      rowsById.set(id, [...(rowsById.get(id) ?? []), { row, hourly }])
-      const names = namesById.get(id) ?? new Map<string, number>()
+      entry(rowsById, id, () => []).push({ row, hourly })
+      const names = entry(namesById, id, () => new Map<string, number>())
       names.set(name, Math.max(names.get(name) ?? -Infinity, at))
-      namesById.set(id, names)
     }
   }
   /** An id's names, latest first; on a tie a listed name comes first. */
@@ -363,7 +365,10 @@ export function buildFacts(rows: FactRows) {
       const start = startOf(row)
       return hourly ? start + HOUR_MS > created : start + CLOCK_SKEW_MS >= created
     })
-  /** The listed warehouse an id belongs to, if any. An unreadable creation time proves nothing either way. */
+  /**
+   * The listed warehouse an id belongs to, if any. An unreadable creation time on its last name keeps the id
+   * there; it never moves an id to another name.
+   */
   const ownerOf = (id: number): string | undefined => {
     const [last, ...earlier] = namesOf(id)
     if (last !== undefined && listed.has(last)) {
@@ -380,7 +385,7 @@ export function buildFacts(rows: FactRows) {
   for (const [id, list] of rowsById) {
     const owner = ownerOf(id)
     if (owner !== undefined) {
-      idsByOwner.set(owner, [...(idsByOwner.get(owner) ?? []), id])
+      entry(idsByOwner, owner, () => []).push(id)
       continue
     }
     const last = namesOf(id)[0] ?? ""

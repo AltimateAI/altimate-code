@@ -626,7 +626,7 @@ describe("building the facts", () => {
     test.each([
       ["after the rename", "2026-11-12T13:00:00Z", false],
       ["in the hour of the rename", "2026-11-12T12:00:00Z", false],
-      ["in the hour of the rename, listed first", "2026-11-12T12:00:00Z", true],
+      ["in the hour of the rename, rows in reverse order", "2026-11-12T12:00:00Z", true],
     ])("a warehouse renamed away the day its old name is reused keeps its usage, its new name's first row %s", (_, renamed, reversed) => {
       // Id 5 was BI_WH until 12:30 and is now ETL_WH; the new BI_WH (id 9) was created at 18:00.
       const rows = [
@@ -646,6 +646,22 @@ describe("building the facts", () => {
         ["ETL_WH", "5", [13]],
       ])
       expect(replaced).toEqual([])
+    })
+
+    test.each([false, true])("of two names seen at the same instant, the listed one is the id's (rows reversed: %s)", (reversed) => {
+      const rows = [
+        { warehouse_id: 5, warehouse_name: "GONE_WH", usage_day: day, idle_day: day, credits_used: 2, first_start: at("2026-11-12T12:00:00Z") },
+        { warehouse_id: 5, warehouse_name: "ETL_WH", usage_day: day, idle_day: day, credits_used: 3, first_start: at("2026-11-12T12:00:00Z") },
+      ]
+      const { facts, unlisted } = buildFacts({
+        warehouses: [show({ name: "ETL_WH" })],
+        metering: reversed ? rows.reverse() : rows,
+        periods: [],
+        restarts: [],
+        queries: [],
+      })
+      expect(facts[0]).toMatchObject({ warehouse_id: "5", usage_days: [{ day, credits_used: 5 }] })
+      expect(unlisted).toEqual([])
     })
 
     test("a warehouse renamed within a metered hour keeps its usage when its old name is reused", () => {

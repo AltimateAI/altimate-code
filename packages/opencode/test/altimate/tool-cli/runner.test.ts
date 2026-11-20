@@ -19,6 +19,8 @@ let dir: string
 let runner: Runner
 // The same adapter `mcp serve` builds: every tool advertised, and no `cli` flag.
 let mcp: Awaited<ReturnType<typeof createAdapter>>
+// Started as `mcp serve --allow-write` would start it.
+let mcpAllowingWrites: Awaited<ReturnType<typeof createAdapter>>
 let done: () => void
 let finished: Promise<void>
 let ready: Promise<void>
@@ -32,10 +34,12 @@ beforeAll(async () => {
     booted = bootstrap(dir, async () => {
       runner = await createRunner()
       mcp = await createAdapter({ allTools: true })
+      mcpAllowingWrites = await createAdapter({ allTools: true, allowWrite: true })
       resolve()
       await finished
       await runner.close()
       await mcp.close()
+      await mcpAllowingWrites.close()
     })
     booted.catch(reject)
   })
@@ -185,15 +189,16 @@ describe("savings checks over MCP", () => {
       seen.push(params)
       return { success: false, window: { start: "2026-01-05", end: "2026-01-12" }, error: "stub: ran" } as any
     })
-    const outcome = (allowWrite: boolean) =>
-      mcp.execute(tool, { warehouse: "w" }, new AbortController().signal, { allowWrite }).then(
+    // Called as `mcp serve` calls it: no per-call options, so only the server's own flag can allow writes.
+    const outcome = (adapter: typeof mcp) =>
+      adapter.execute(tool, { warehouse: "w" }, new AbortController().signal).then(
         (result) => result.output,
         (error) => String(error instanceof Error ? error.message : error),
       )
     try {
-      expect(await outcome(false)).toContain("can start a stopped warehouse that then bills")
+      expect(await outcome(mcp)).toContain("can start a stopped warehouse that then bills")
       expect(seen).toEqual([])
-      expect(await outcome(true)).toContain("stub: ran")
+      expect(await outcome(mcpAllowingWrites)).toContain("stub: ran")
       expect(seen).toEqual([{ warehouse: "w" }])
     } finally {
       registerDefaultNativeHandlers()
