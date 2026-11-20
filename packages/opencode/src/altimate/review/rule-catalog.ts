@@ -791,8 +791,12 @@ const CORRECTNESS: Rule[] = [
     "SQL text concatenated in Jinja without a space",
     "A string of SQL is joined with `~` to a macro call or variable with no space at the seam, so the rendered SQL runs the two together (`ticket_id` + `, source_relation` works, `ticket_id` + `source_relation` does not). Put a space inside the string next to `~`.",
     {
-      // A literal holding SQL (it has whitespace) that ends, or starts, with a word character right at the `~`.
-      added: /'[^'\n]*\s[^'\n]*[A-Za-z0-9]'\s*~\s*[A-Za-z_][\w.]*|[\w)]\s*~\s*'[A-Za-z0-9][^'\n]*\s[^'\n]*'/,
+      // A literal holding SQL (it has whitespace) that ends, or starts, with a word character right at the `~`,
+      // inside an open `{{`/`{%` on the line (a bare `col ~ 'a b'` is a Postgres regex match, not Jinja).
+      added:
+        /\{[{%](?:(?![}%]\}).)*?(?:'[^'\n]*\s[^'\n]*[A-Za-z0-9]'\s*~\s*[A-Za-z_][\w.]*|[\w)]\s*~\s*'[A-Za-z0-9][^'\n]*\s[^'\n]*')/,
+      // Messages are not SQL.
+      unless: /\b(?:log|print|raise_compiler_error|warn)\s*\(/,
       macros: true,
     },
     { add: "{{ dbt.datediff('a', 'lead(a) over (partition by ticket_id' ~ pkg.partition_cols() ~ ' order by a)', 'second') }}" },
