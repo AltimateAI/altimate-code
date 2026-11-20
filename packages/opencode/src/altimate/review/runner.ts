@@ -450,27 +450,30 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         if (!hit.forPaths.includes(forPath)) hit.forPaths.push(forPath)
         parents.set(key, hit)
       }
+      // Paths are only resolvable for the root project's files; installed packages live elsewhere.
+      const local = (n: any) => !project || !n?.package_name || n.package_name === project
       for (const node of nodes) {
         const ofp: string | undefined = node?.original_file_path
-        if (!ofp) continue
+        if (!ofp || !local(node)) continue
         const changed = owner(ofp)
         if (!changed) continue
         const base = changed.slice(0, changed.length - ofp.length)
         for (const uid of asArray<string>(node.depends_on?.nodes)) {
           const parent = raw.nodes?.[uid]
           if (parent?.original_file_path && ["model", "seed", "snapshot"].includes(parent.resource_type)) {
+            if (!local(parent)) continue
             add(uid, { path: base + parent.original_file_path, kind: parent.resource_type, name: parent.name }, changed)
             continue
           }
           const source = raw.sources?.[uid]
-          if (source) {
+          if (source && local(source)) {
             const columns = Object.keys(source.columns ?? {})
             add(uid, { path: base + source.original_file_path, kind: "source", name: `${source.source_name}.${source.name}`, columns }, changed)
           }
         }
         for (const uid of asArray<string>(node.depends_on?.macros)) {
           const macro = raw.macros?.[uid]
-          if (macro?.original_file_path && macro.package_name === project)
+          if (macro?.original_file_path && project && macro.package_name === project)
             add(uid, { path: base + macro.original_file_path, kind: "macro", name: macro.name }, changed)
         }
       }
