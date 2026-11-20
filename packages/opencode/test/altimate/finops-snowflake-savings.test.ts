@@ -327,6 +327,13 @@ describe("the fact queries", () => {
     expect(SNOWFLAKE_RATE_SQL).toContain("AND EFFECTIVE_RATE > 0\nORDER BY DATE DESC, EFFECTIVE_RATE LIMIT 1")
   })
 
+  test("each fact query returns its rows' earliest start, so a recreated warehouse's usage can be told apart", () => {
+    expect(SNOWFLAKE_METERING_FACTS_SQL).toContain("DATE_PART(epoch_second, MIN(hour_start)) AS first_start")
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("DATE_PART(epoch_second, MIN(valid_from)) AS first_start")
+    expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("DATE_PART(epoch_second, MIN(ts)) AS first_start")
+    expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("DATE_PART(epoch_second, MIN(q.st)) AS first_start")
+  })
+
   test("a bounce is the full resume, suspend, resume sequence on distinct events", () => {
     expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain("SELECT DISTINCT")
     expect(SNOWFLAKE_RESTART_FACTS_SQL).toContain(
@@ -524,6 +531,102 @@ describe("building the facts", () => {
     expect(buildFacts({ warehouses: [show({ created_on: "not a time" })], ...rows }).facts[0]!.warehouse_id).toBe("100")
   })
 
+  describe("a warehouse recreated under the same name", () => {
+    // BI_WH is dropped and recreated at 18:00 UTC; its predecessor (id 100) ran that morning.
+    const created = new Date("2026-11-12T18:00:00Z")
+    const at = (iso: string) => Date.parse(iso) / 1000
+    const listed = [show({ size: "Small", created_on: created })]
+    const day = "2026-11-12"
+    const predecessor = {
+      metering: [{ warehouse_id: 100, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 42, first_start: at("2026-11-12T08:00:00Z") }],
+      periods: [{ warehouse_id: 100, warehouse_name: "BI_WH", cluster_number: 1, usage_day: day, idle_day: day, periods: 3, short_periods: 1, active_seconds: 900, idle_seconds: 300, first_start: at("2026-11-12T08:05:00Z") }],
+      restarts: [{ warehouse_id: 100, warehouse_name: "BI_WH", day, gap_seconds: 20, bounces: 5, first_start: at("2026-11-12T09:00:00Z") }],
+      queries: [{ warehouse_id: 100, warehouse_name: "BI_WH", query_count: 50, sub_five_second_queries: 49, sub_five_second_credits: 2, first_start: at("2026-11-12T08:10:00Z") }],
+    }
+
+    test("the predecessor's same-day usage is not the new warehouse's: none is attributed and the name is reported", () => {
+      const { facts, replaced, unlisted } = buildFacts({ warehouses: listed, ...predecessor })
+      expect(facts[0]).toMatchObject({ warehouse_id: "unused:BI_WH", warehouse_size: "Small", query_count: 0, sub_five_second_credits: 0 })
+      expect(facts[0]).toMatchObject({ usage_days: [], idle_days: [], cluster_days: [], restart_days: [] })
+      expect(replaced).toEqual(["BI_WH"])
+      expect(unlisted).toEqual([])
+    })
+
+    test.each(["metering", "periods", "restarts", "queries"] as const)(
+      "a predecessor seen only in %s before the creation is still left out",
+      (source) => {
+        const rows = { warehouses: listed, metering: [], periods: [], restarts: [], queries: [], [source]: predecessor[source] }
+        const { facts, replaced } = buildFacts(rows)
+        expect(facts[0]!.warehouse_id).toBe("unused:BI_WH")
+        expect(replaced).toEqual(["BI_WH"])
+      },
+    )
+
+    test("usage from after the creation is the new warehouse's, the same day included", () => {
+      const current = {
+        // A metered hour starting before the creation it contains still counts.
+        metering: [{ warehouse_id: 200, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 3, first_start: at("2026-11-12T17:00:01Z") }],
+        periods: [{ warehouse_id: 200, warehouse_name: "BI_WH", cluster_number: 1, usage_day: day, idle_day: day, periods: 1, short_periods: 0, active_seconds: 600, idle_seconds: 60, first_start: at("2026-11-12T17:59:30Z") }],
+        restarts: [{ warehouse_id: 200, warehouse_name: "BI_WH", day, gap_seconds: 30, bounces: 1, first_start: at("2026-11-12T19:00:00Z") }],
+        queries: [{ warehouse_id: 200, warehouse_name: "BI_WH", query_count: 7, sub_five_second_queries: 6, sub_five_second_credits: 0.5, first_start: at("2026-11-12T18:02:00Z") }],
+      }
+      const { facts, replaced } = buildFacts({
+        warehouses: listed,
+        metering: [...predecessor.metering, ...current.metering],
+        periods: [...predecessor.periods, ...current.periods],
+        restarts: [...predecessor.restarts, ...current.restarts],
+        queries: [...predecessor.queries, ...current.queries],
+      })
+      expect(facts[0]).toMatchObject({ warehouse_id: "200", query_count: 7, sub_five_second_queries: 6, sub_five_second_credits: 0.5 })
+      expect(facts[0]!.usage_days).toEqual([{ day, credits_used: 3, active_periods: 1, short_periods: 0 }])
+      expect(facts[0]!.restart_days).toEqual([{ day, gaps: [{ gap_seconds: 30, bounces: 1 }] }])
+      expect(replaced).toEqual(["BI_WH"])
+    })
+
+    test("a metered hour that ended before the creation, or an event over a minute early, is the predecessor's", () => {
+      const early = (source: "metering" | "periods", first: string) =>
+        buildFacts({
+          warehouses: listed,
+          metering: [],
+          periods: [],
+          restarts: [],
+          queries: [],
+          [source]: [{ ...predecessor[source][0], warehouse_id: 200, first_start: at(first) }],
+        }).facts[0]!.warehouse_id
+      expect(early("metering", "2026-11-12T17:00:00Z")).toBe("unused:BI_WH")
+      expect(early("metering", "2026-11-12T17:00:01Z")).toBe("200")
+      expect(early("periods", "2026-11-12T17:58:59Z")).toBe("unused:BI_WH")
+      expect(early("periods", "2026-11-12T17:59:00Z")).toBe("200")
+    })
+
+    test("usage whose start cannot be read is not attributed to a warehouse with a known creation time", () => {
+      const query = { ...predecessor.queries[0]!, warehouse_id: 200, first_start: null }
+      const rows = { metering: [], periods: [], restarts: [], queries: [query] }
+      expect(buildFacts({ warehouses: listed, ...rows })).toMatchObject({ replaced: ["BI_WH"], facts: [{ warehouse_id: "unused:BI_WH", query_count: 0 }] })
+      // Without a creation time there is nothing to compare, so the usage stays.
+      expect(buildFacts({ warehouses: [show()], ...rows }).facts[0]).toMatchObject({ warehouse_id: "200", query_count: 50 })
+    })
+
+    test("a predecessor from the day before is still left out, with or without new usage", () => {
+      const yesterday = {
+        ...predecessor,
+        metering: [{ ...predecessor.metering[0]!, usage_day: "2026-11-11", idle_day: "2026-11-11", first_start: at("2026-11-11T08:00:00Z") }],
+        periods: [],
+        restarts: [],
+        queries: [],
+      }
+      expect(buildFacts({ warehouses: listed, ...yesterday })).toMatchObject({ replaced: ["BI_WH"], facts: [{ warehouse_id: "unused:BI_WH" }] })
+      const both = buildFacts({
+        warehouses: listed,
+        ...yesterday,
+        metering: [...yesterday.metering, { warehouse_id: 200, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 4, first_start: at("2026-11-12T18:00:00Z") }],
+      })
+      expect(both.facts[0]!.warehouse_id).toBe("200")
+      expect(both.facts[0]!.usage_days.map((one) => one.credits_used)).toEqual([4])
+      expect(both.replaced).toEqual(["BI_WH"])
+    })
+  })
+
   test("a warehouse that billed credits but cannot be listed is named", () => {
     const { facts, unlisted } = buildFacts({
       warehouses: [show()],
@@ -697,7 +800,7 @@ describe("snowflake savings handler over a stubbed connection", () => {
     expect(result.skipped).toEqual([
       {
         check: "Earlier usage of 1 warehouse name",
-        reason: "BI_WH also billed credits as an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked",
+        reason: "BI_WH also had usage from an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked",
       },
     ])
   })

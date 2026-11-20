@@ -44,7 +44,8 @@ export const SNOWFLAKE_WAREHOUSES_SQL = `SHOW WAREHOUSES`
 
 /**
  * Credits per warehouse by UTC day (`usage_day`), and by the 24 hours from 23:00 UTC the day before
- * (`idle_day`), the window the idle check reads.
+ * (`idle_day`), the window the idle check reads. Every fact query also returns `first_start`, its rows'
+ * earliest start in epoch seconds (UTC), which tells a recreated warehouse's usage from its predecessor's.
  */
 export const SNOWFLAKE_METERING_FACTS_SQL = `
 WITH m AS (
@@ -56,7 +57,7 @@ WITH m AS (
 SELECT warehouse_id, warehouse_name,
        IFF(hour_start >= DATEADD(day, -7, ${WINDOW_END_UTC}), TO_VARCHAR(hour_start::DATE, 'YYYY-MM-DD'), NULL) AS usage_day,
        IFF(hour_start < DATEADD(hour, -1, ${WINDOW_END_UTC}), TO_VARCHAR(DATEADD(hour, 1, hour_start)::DATE, 'YYYY-MM-DD'), NULL) AS idle_day,
-       SUM(credits_used) AS credits_used
+       SUM(credits_used) AS credits_used, DATE_PART(epoch_second, MIN(hour_start)) AS first_start
 FROM m GROUP BY 1, 2, 3, 4 ORDER BY 2, 3, 4
 `
 
@@ -135,7 +136,8 @@ SELECT warehouse_id, warehouse_name, cluster_number,
        IFF(valid_from >= DATEADD(day, -7, ${WINDOW_END_UTC}), TO_VARCHAR(valid_from::DATE, 'YYYY-MM-DD'), NULL) AS usage_day,
        IFF(valid_from < DATEADD(hour, -1, ${WINDOW_END_UTC}), TO_VARCHAR(DATEADD(hour, 1, valid_from)::DATE, 'YYYY-MM-DD'), NULL) AS idle_day,
        COUNT(*) AS periods, COUNT_IF(active_seconds <= 80) AS short_periods,
-       SUM(active_seconds) AS active_seconds, SUM(idle_seconds) AS idle_seconds
+       SUM(active_seconds) AS active_seconds, SUM(idle_seconds) AS idle_seconds,
+       DATE_PART(epoch_second, MIN(valid_from)) AS first_start
 FROM per_period GROUP BY 1, 2, 3, 4, 5 ORDER BY 2, 3, 4, 5
 `
 
@@ -162,7 +164,8 @@ s AS (
   FROM e
 )
 SELECT warehouse_id, warehouse_name, TO_VARCHAR(ts::DATE, 'YYYY-MM-DD') AS day,
-       TRUNC(DATEDIFF('millisecond', ts, t4) / 1000) AS gap_seconds, COUNT(*) AS bounces
+       TRUNC(DATEDIFF('millisecond', ts, t4) / 1000) AS gap_seconds, COUNT(*) AS bounces,
+       DATE_PART(epoch_second, MIN(ts)) AS first_start
 FROM s
 WHERE event_name = 'RESUME_WAREHOUSE' AND n1 = 'WAREHOUSE_CONSISTENT' AND n2 = 'SUSPEND_WAREHOUSE'
   AND n3 = 'WAREHOUSE_CONSISTENT' AND n4 = 'RESUME_WAREHOUSE'
@@ -211,7 +214,7 @@ allocated AS (
   FROM (SELECT *, SUM(ran_ms) OVER (PARTITION BY warehouse_id, hour_start) AS total_ms FROM overlap WHERE ran_ms > 0)
   GROUP BY 1
 )
-SELECT q.warehouse_id, q.warehouse_name,
+SELECT q.warehouse_id, q.warehouse_name, DATE_PART(epoch_second, MIN(q.st)) AS first_start,
        COUNT(*) AS query_count,
        COUNT_IF(q.execution_ms <= 5000) AS sub_five_second_queries,
        COALESCE(SUM(IFF(q.execution_ms <= 5000,
@@ -288,14 +291,35 @@ function timeOf(value: unknown): number {
   return Date.parse(String(json ?? value ?? ""))
 }
 
+const HOUR_MS = 3_600_000
+
+/** How far an event or query time may read before `created_on`, which Snowflake stamps on its own clock. */
+const CLOCK_SKEW_MS = 60_000
+
+/**
+ * When a fact row's usage began, in milliseconds: its `first_start` (epoch seconds), or the start of its
+ * UTC day when that is missing, the earliest it could have begun.
+ */
+function startOf(row: Row): number {
+  if (row.first_start != null && row.first_start !== "") return num(row.first_start) * 1000
+  const day = row.usage_day ?? row.idle_day ?? row.day
+  return day == null ? Number.NaN : Date.parse(`${String(day)}T00:00:00Z`)
+}
+
+/** Whether a row shows any usage worth naming when it is left out. */
+const active = (row: Row) =>
+  num(row.credits_used) > 0 || whole(row.periods) > 0 || whole(row.bounces) > 0 || whole(row.query_count) > 0
+
 /**
  * The input core reads, one entry per warehouse `SHOW WAREHOUSES` lists, which gives names and no ids.
  * Usage belongs to a warehouse id: a renamed warehouse keeps its id, so an id's usage goes to the last
- * name it was seen under. A dropped warehouse's name can come back on a new one, so a name keeps its
- * newest id, and usage that ended before the listed warehouse was created is its predecessor's.
+ * name it was seen under. A dropped warehouse's name can come back on a new one, so a listed warehouse's
+ * id is the newest of its name's ids with no usage from before the warehouse was created; a metered hour
+ * counts from its start, which can be up to an hour before the creation inside it, and other times may
+ * read up to a minute early. Usage under that name from any other id is its predecessor's and is left out.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
- * `replaced` names the listed ones whose name an earlier warehouse also billed credits under: that
- * earlier usage is left out.
+ * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits, periods,
+ * restarts or queries): that earlier usage is left out.
  */
 export function buildFacts(rows: FactRows) {
   const listed = new Set(rows.warehouses.map((row) => String(row.name ?? "")))
@@ -313,49 +337,58 @@ export function buildFacts(rows: FactRows) {
   for (const row of rows.restarts) see(row, row.day)
   for (const row of rows.queries) see(row, "")
 
-  const newestId = new Map<string, number>()
-  for (const [id, { name }] of lastSeen) newestId.set(name, Math.max(newestId.get(name) ?? 0, id))
   const nameOf = (row: Row) => lastSeen.get(num(row.warehouse_id))?.name ?? ""
-  const of = (list: Row[]) => {
-    const byName = new Map<string, Row[]>()
+  // Every id's rows from every source, each with whether its time is hourly (metering).
+  const sources = [
+    { list: rows.metering, hourly: true },
+    { list: rows.periods, hourly: false },
+    { list: rows.restarts, hourly: false },
+    { list: rows.queries, hourly: false },
+  ]
+  const idsByName = new Map<string, Set<number>>()
+  // Keyed by the id as text, so `entry` can create each list.
+  const rowsById = new Map<string, { row: Row; hourly: boolean }[]>()
+  for (const { list, hourly } of sources) {
     for (const row of list) {
-      const name = nameOf(row)
-      if (newestId.get(name) === num(row.warehouse_id)) entry(byName, name, () => []).push(row)
+      const id = num(row.warehouse_id)
+      entry(idsByName, nameOf(row), () => new Set()).add(id)
+      entry(rowsById, String(id), () => []).push({ row, hourly })
     }
-    return byName
   }
-  const metering = of(rows.metering)
+  /** Whether none of an id's usage began before `created`; an unreadable creation time proves nothing either way. */
+  const startedAfter = (id: number, created: number) =>
+    !Number.isFinite(created) ||
+    (rowsById.get(String(id)) ?? []).every(({ row, hourly }) => {
+      const start = startOf(row)
+      return Number.isFinite(start) && (hourly ? start + HOUR_MS > created : start + CLOCK_SKEW_MS >= created)
+    })
   const replaced = new Set<string>()
-  for (const row of rows.metering) {
-    const name = nameOf(row)
-    if (listed.has(name) && newestId.get(name) !== num(row.warehouse_id) && num(row.credits_used) > 0) replaced.add(name)
-  }
-  const periods = of(rows.periods)
-  const restarts = of(rows.restarts)
-  const queries = of(rows.queries)
 
-  /** The listed warehouse's id, unless its usage all predates it. */
+  /** The listed warehouse's id, or undefined when every id under its name predates it. */
   const idFor = (row: Row): number | undefined => {
-    const id = newestId.get(String(row.name ?? ""))
-    if (id === undefined) return undefined
+    const name = String(row.name ?? "")
     const created = timeOf(row.created_on)
-    const day = lastSeen.get(id)?.day
-    if (day && Number.isFinite(created) && day < new Date(created).toISOString().slice(0, 10)) return undefined
+    const ids = [...(idsByName.get(name) ?? [])]
+    const own = ids.filter((id) => startedAfter(id, created))
+    const id = own.length ? Math.max(...own) : undefined
+    for (const other of ids) {
+      if (other === id) continue
+      if (rowsById.get(String(other))?.some(({ row: one }) => active(one))) replaced.add(name)
+    }
     return id
   }
+  const of = (list: Row[], id: number | undefined) => (id === undefined ? [] : list.filter((one) => num(one.warehouse_id) === id))
 
   const facts = rows.warehouses.map((row) => {
     const name = String(row.name ?? "")
     const id = idFor(row)
-    if (id === undefined && (metering.get(name) ?? []).some((one) => num(one.credits_used) > 0)) replaced.add(name)
-    const usedBy = <T>(byName: Map<string, T[]>) => (id === undefined ? [] : (byName.get(name) ?? []))
     const usage = new Map<string, { day: string; credits_used: number | null; active_periods: number; short_periods: number }>()
     const idle = new Map<string, { day: string; active_seconds: number; idle_seconds: number; credits_used: number }>()
     const clusters = new Map<string, Map<string, { cluster_number: number; idle_seconds: number; busy_seconds: number }>>()
     const usageDay = (day: string) => entry(usage, day, () => ({ day, credits_used: null, active_periods: 0, short_periods: 0 }))
     const idleDay = (day: string) => entry(idle, day, () => ({ day, active_seconds: 0, idle_seconds: 0, credits_used: 0 }))
 
-    for (const one of usedBy(metering)) {
+    for (const one of of(rows.metering, id)) {
       const credits = num(one.credits_used)
       if (one.usage_day != null) {
         const day = usageDay(String(one.usage_day))
@@ -363,7 +396,7 @@ export function buildFacts(rows: FactRows) {
       }
       if (one.idle_day != null) idleDay(String(one.idle_day)).credits_used += credits
     }
-    for (const one of usedBy(periods)) {
+    for (const one of of(rows.periods, id)) {
       const active = whole(one.active_seconds)
       const idleSeconds = whole(one.idle_seconds)
       if (one.usage_day != null) {
@@ -388,13 +421,13 @@ export function buildFacts(rows: FactRows) {
     }
     // A rename splits a day's or the window's rows by name; they are one warehouse's.
     const gaps = new Map<string, Map<string, { gap_seconds: number; bounces: number }>>()
-    for (const one of usedBy(restarts)) {
+    for (const one of of(rows.restarts, id)) {
       const seconds = whole(one.gap_seconds)
       const gap = entry(entry(gaps, String(one.day), () => new Map()), String(seconds), () => ({ gap_seconds: seconds, bounces: 0 }))
       gap.bounces += whole(one.bounces)
     }
     const query = { count: 0, short: 0, credits: 0 }
-    for (const one of usedBy(queries)) {
+    for (const one of of(rows.queries, id)) {
       query.count += whole(one.query_count)
       query.short += whole(one.sub_five_second_queries)
       query.credits += num(one.sub_five_second_credits)
@@ -416,7 +449,7 @@ export function buildFacts(rows: FactRows) {
       restart_days: [...gaps].map(([day, byGap]) => ({ day, gaps: [...byGap.values()] })),
     }
   })
-  const unlisted = [...metering.keys()].filter((name) => !listed.has(name)).sort()
+  const unlisted = [...new Set(rows.metering.map(nameOf))].filter((name) => !listed.has(name)).sort()
   return { facts, unlisted, replaced: [...replaced].sort() }
 }
 
@@ -524,7 +557,7 @@ export async function snowflakeSavings(
     if (replaced.length > 0) {
       skipped.push({
         check: `Earlier usage of ${replaced.length} warehouse name${replaced.length === 1 ? "" : "s"}`,
-        reason: `${replaced.slice(0, 5).join(", ")}${replaced.length > 5 ? ", …" : ""} also billed credits as an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked`,
+        reason: `${replaced.slice(0, 5).join(", ")}${replaced.length > 5 ? ", …" : ""} also had usage from an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked`,
       })
     }
     const report = rules(JSON.stringify({ lookback_days: LOOKBACK_DAYS, price_per_credit: price.per_credit, warehouses: facts }))
