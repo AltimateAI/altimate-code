@@ -57,7 +57,7 @@ export function suppressSnowflakeLogging(snowflake: any): void {
 }
 
 /**
- * In assessment mode nothing but the warehouse may be contacted. When it loads, snowflake-sdk otherwise probes
+ * In assessment mode a savings check may contact nothing but the warehouse. When it loads, snowflake-sdk otherwise probes
  * the AWS, Azure and GCP metadata and identity services to report the platform it runs on. Its certificate
  * revocation requests need no switch here: they start from an HTTPS agent that Bun, which runs the packaged
  * CLI, does not use.

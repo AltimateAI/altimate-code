@@ -113,7 +113,7 @@ export namespace Flag {
   export const OPENCODE_DISABLE_LSP_DOWNLOAD = truthy("OPENCODE_DISABLE_LSP_DOWNLOAD")
   export const OPENCODE_ENABLE_EXPERIMENTAL_MODELS = truthy("OPENCODE_ENABLE_EXPERIMENTAL_MODELS")
   export const OPENCODE_DISABLE_AUTOCOMPACT = truthy("OPENCODE_DISABLE_AUTOCOMPACT")
-  // altimate_change start — assessment mode: nothing leaves the machine except the customer's own warehouse calls
+  // altimate_change start — assessment mode: a savings check contacts nothing but the customer's own warehouse
   /** Read live; fails closed (any value but empty, `0` or `false` turns it on). */
   export function assessmentMode(): boolean {
     return killSwitchSet(process.env["ALTIMATE_ASSESSMENT_MODE"])

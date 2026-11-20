@@ -430,7 +430,7 @@ async function req<T>(
     // altimate_change end
   } = {},
 ): Promise<T> {
-  // altimate_change start — assessment mode talks to no Altimate service, whoever the caller acts as
+  // altimate_change start — in assessment mode the workspace client contacts no Altimate service, whoever the caller acts as
   if (Flag.assessmentMode()) throw new NotConfiguredError()
   // altimate_change end
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS

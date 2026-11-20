@@ -89,7 +89,7 @@ export namespace AltimateApi {
   }
 
   export async function isConfigured(): Promise<boolean> {
-    // Assessment mode talks to no Altimate service: to every caller the user is signed out.
+    // In assessment mode every caller that checks this treats the user as signed out.
     if (Flag.assessmentMode()) return false
     return credentialsPresent()
   }

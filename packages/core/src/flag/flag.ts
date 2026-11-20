@@ -97,7 +97,7 @@ export const Flag = {
   OPENCODE_DISABLE_TERMINAL_TITLE: truthy("OPENCODE_DISABLE_TERMINAL_TITLE"),
   OPENCODE_SHOW_TTFD: truthy("OPENCODE_SHOW_TTFD"),
   OPENCODE_DISABLE_AUTOCOMPACT: truthy("OPENCODE_DISABLE_AUTOCOMPACT"),
-  // altimate_change start — assessment mode: nothing leaves the machine except the customer's own warehouse calls
+  // altimate_change start — assessment mode: a savings check contacts nothing but the customer's own warehouse
   // Fails closed like the other kill switches: `yes` or `on` must not leave the CLI contacting hosts.
   get ALTIMATE_ASSESSMENT_MODE() {
     return killSwitchSet(process.env["ALTIMATE_ASSESSMENT_MODE"])
