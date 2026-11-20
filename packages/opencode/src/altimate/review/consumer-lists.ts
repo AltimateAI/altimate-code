@@ -69,11 +69,15 @@ export async function loadConsumerLists(opts: {
       process.stderr.write(`⚠️  consumerColumnLists: invalid pattern ${JSON.stringify(cfg.pattern)} (${String(e)}); skipped.\n`)
       continue
     }
-    const pathspec = `:(glob)${cfg.files}`
-    const args = opts.head ? ["ls-tree", "-r", "--name-only", opts.head, "--", pathspec] : ["ls-files", "--", pathspec]
+    // `git ls-tree` rejects `:(glob)` pathspec magic, so list every file and
+    // match the glob here, the same way for the head ref and the working tree.
+    const args = opts.head ? ["ls-tree", "-r", "-z", "--name-only", opts.head] : ["ls-files", "-z"]
+    const glob = new Bun.Glob(cfg.files)
     let files: string[] = []
     try {
-      files = (await exec("git", args, { cwd: opts.gitRoot, maxBuffer: 16 * 1024 * 1024 })).stdout.split("\n").filter(Boolean)
+      files = (await exec("git", args, { cwd: opts.gitRoot, maxBuffer: 64 * 1024 * 1024 })).stdout
+        .split("\0")
+        .filter((f) => f && glob.match(f))
     } catch {
       files = []
     }
