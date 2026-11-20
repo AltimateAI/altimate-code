@@ -1,7 +1,15 @@
 type SqlToken = { kind: "code" | "comment" | "literal" | "identifier"; text: string }
 
 // PostgreSQL, DuckDB and Redshift also allow any non-ASCII character in identifiers and dollar tags.
-const DOLLAR_TAG = /\$(?:[A-Za-z_\u0080-\uffff][\w\u0080-\uffff]*)?\$/y
+const DOLLAR_TAG_SOURCE = "\\$(?:[A-Za-z_\\u0080-\\uffff][\\w\\u0080-\\uffff]*)?\\$"
+const DOLLAR_TAG = new RegExp(DOLLAR_TAG_SOURCE, "y")
+/** Text that opens a dollar quote, anywhere. */
+export const DOLLAR_TAG_ANYWHERE = new RegExp(DOLLAR_TAG_SOURCE)
+
+/** Dialects whose lexer reads dollar quotes (ClickHouse heredocs read alike). */
+export function lexesDollarQuotes(dialect?: string): boolean {
+  return /^(postgres|postgresql|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")
+}
 const IDENTIFIER_CHAR = /[\w$\u0080-\uffff]/
 
 /** A supported warehouse dialect these lexing rules model; anything else (none, "generic",
@@ -36,7 +44,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   // Where nesting is not known either way, a /* inside a comment makes its end uncertain.
   const nestingKnown = nestedComments || /^(mysql|mariadb|sqlite|oracle|trino)$/i.test(dialect ?? "")
   // ClickHouse heredocs ($tag$...$tag$) read like PostgreSQL dollar quotes.
-  const dollarQuotes = /^(postgres|redshift|duckdb|snowflake|clickhouse)$/i.test(dialect ?? "")
+  const dollarQuotes = lexesDollarQuotes(dialect)
   // Quoting is dialect-specific: brackets can contain executable array expressions,
   // and PostgreSQL backticks can be operators. Unknown dialects keep both visible.
   const backtickIdentifiers = /^(mysql|mariadb|sqlite|bigquery|clickhouse|spark|databricks|hive)$/i.test(dialect ?? "")
