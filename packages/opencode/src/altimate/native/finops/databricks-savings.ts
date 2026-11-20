@@ -421,13 +421,18 @@ function records(result: { columns: string[]; rows: unknown[][] }): Record<strin
   return result.rows.map((row) => Object.fromEntries(result.columns.map((name, at) => [name, row[at]])))
 }
 
+/** The SQL warehouse a connection's queries run on, from its http_path; undefined when it names none. */
+function sqlWarehouseOf(connection: string): string | undefined {
+  const config = Registry.getConfig(connection) as Record<string, unknown> | undefined
+  return WAREHOUSE_PATH.exec(String(config?.http_path ?? config?.httpPath ?? ""))?.[1]
+}
+
 /** With no connection named: the first Databricks connection that runs through a SQL warehouse, if any. */
 function preferredConnection(): string | undefined {
   return Registry.list().warehouses.find((one) => {
     // `connections.json` is edited by hand: a `type` that is not a string is not Databricks.
     if (typeof one.type !== "string" || one.type.toLowerCase() !== "databricks") return false
-    const config = Registry.getConfig(one.name) as Record<string, unknown> | undefined
-    return WAREHOUSE_PATH.test(String(config?.http_path ?? config?.httpPath ?? ""))
+    return sqlWarehouseOf(one.name) !== undefined
   })?.name
 }
 
@@ -437,12 +442,6 @@ function resolveConnection(warehouse: string | undefined) {
     supportedTypes: SUPPORTED_TYPES,
     operationName: "The Databricks savings check",
   })
-}
-
-/** The SQL warehouse a connection's queries run on, from its http_path; undefined when it names none. */
-function sqlWarehouseOf(connection: string): string | undefined {
-  const config = Registry.getConfig(connection) as Record<string, unknown> | undefined
-  return WAREHOUSE_PATH.exec(String(config?.http_path ?? config?.httpPath ?? ""))?.[1]
 }
 
 const notOnWarehouse = (connection: string) =>
