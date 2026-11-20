@@ -470,8 +470,9 @@ describe("verifier evidence (opt-in)", () => {
     evidence: { tool: "ai-review", result: { confidence: "medium" } },
     rule: "ai-review:sql-correctness",
   }
-  const run = (aiVerify: boolean | undefined, seen: { input?: AiReviewInput }) =>
+  const run = (aiVerify: boolean | undefined, seen: { input?: AiReviewInput }, prFiles?: string[]) =>
     runReview({
+      ...(prFiles ? { prFiles } : {}),
       changedFiles: [mod("models/marts/m.sql", "@@ -1 +1 @@\n-select 1 as id\n+select 2 as id\n")],
       config: { ...DEFAULT_REVIEW_CONFIG },
       rubric: DEFAULT_RUBRIC,
@@ -510,6 +511,13 @@ describe("verifier evidence (opt-in)", () => {
     expect([...ev.addedLines.get("models/marts/m.sql")!]).toEqual([1])
     expect(ev.files.map((f) => f.path)).toEqual(["models/marts/m.sql"])
     expect(ev.dialect).toBe(DEFAULT_REVIEW_CONFIG.dialect)
+  })
+
+  test("the PR file list given to the lane and the verifier drops credential files", async () => {
+    const seen: { input?: AiReviewInput } = {}
+    await run(true, seen, ["models/marts/m.sql", "config/profiles.yml", ".env", "tests/test_m.py"])
+    expect(seen.input!.evidence!.prFiles).toEqual(["models/marts/m.sql", "tests/test_m.py"])
+    expect(seen.input!.prFiles).toEqual(["models/marts/m.sql", "tests/test_m.py"])
   })
 })
 
@@ -1107,6 +1115,29 @@ describe("focused batches for large PRs (opt-in ALTIMATE_REVIEW_AI_FOCUSED=1)", 
     for (const b of plan.batches) expect(b).toEqual(files.filter((f) => b.includes(f)))
   })
 
+  test("focused packing honours batchChars, splitting past maxBatches when it must", () => {
+    // 30 files of ~6k chars each under coverage, 4 balanced calls of ~45k: none may exceed a 30k batch budget.
+    const files = Array.from({ length: 30 }, (_, i) => file(`models/d${i}/m${i}.sql`, "model_sql", "x".repeat(16_000)))
+    const env = { ...FOCUSED, ALTIMATE_REVIEW_AI_COVERAGE: "1", ALTIMATE_REVIEW_AI_QUOTA_MODEL: "30", ALTIMATE_REVIEW_AI_BATCH_CHARS: "30000" }
+    const plan = planAiInput({ grounding: [], files }, env)
+    expect(plan.focused).toBe(true)
+    expect(plan.batches.flat()).toHaveLength(30)
+    const chars = plan.batches.map((b) => b.reduce((n, f) => n + plan.input.find((r) => r.path === f.path)!.chars, 0))
+    expect(Math.max(...chars)).toBeLessThanOrEqual(plan.budget.batchChars)
+    expect(plan.batches.length).toBeGreaterThan(4)
+    // A related group that fits the file count but not batchChars is split too.
+    const small = Array.from({ length: 8 }, (_, i) => file(`models/s/m${i}.sql`, "model_sql", "y".repeat(2_500)))
+    const budget = { ...aiInputBudget(FOCUSED), batchChars: 3_000 }
+    const packed = packFocusedBatches(groupAiFiles(small), budget)
+    expect(packed.flat()).toHaveLength(8)
+    for (const b of packed) expect(b.length === 1 || b.reduce((n, f) => n + f.sql!.length, 0) <= 3_000).toBe(true)
+  })
+
+  test("focus settings must be positive integers", () => {
+    const b = aiInputBudget({ ...FOCUSED, ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES: "2.5", ALTIMATE_REVIEW_AI_FOCUS_MAX_BATCHES: "0", ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES: "x" })
+    expect(b.focused).toEqual({ minFiles: 7, batchFiles: 5, maxBatches: 4 })
+  })
+
   test("fewer than 7 selected files: today's batching", () => {
     const files = Array.from({ length: 6 }, (_, i) => file(`models/d${i}/m${i}.sql`))
     const plan = planAiInput({ grounding: [], files }, FOCUSED)
@@ -1155,7 +1186,7 @@ describe("focused batches for large PRs (opt-in ALTIMATE_REVIEW_AI_FOCUSED=1)", 
     expect(planAiInput({ grounding: [], files }, { ALTIMATE_REVIEW_AI_COVERAGE: "1" }).input.every((r) => r.batch === undefined)).toBe(true)
     expect(aiInputBudget(FOCUSED).focused).toEqual({ minFiles: 7, batchFiles: 5, maxBatches: 4 })
     expect(
-      aiInputBudget({ ...FOCUSED, ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES: "3", ALTIMATE_REVIEW_AI_MAX_BATCHES: "6", ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES: "10" }).focused,
+      aiInputBudget({ ...FOCUSED, ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES: "3", ALTIMATE_REVIEW_AI_FOCUS_MAX_BATCHES: "6", ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES: "10" }).focused,
     ).toEqual({ minFiles: 10, batchFiles: 3, maxBatches: 6 })
   })
 })

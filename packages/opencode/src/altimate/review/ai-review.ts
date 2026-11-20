@@ -54,7 +54,8 @@ export interface AiInputBudget {
    *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
   coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number> }
   /** `ALTIMATE_REVIEW_AI_FOCUSED=1`: on PRs with at least `minFiles` selected files, review
-   *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls. */
+   *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls
+   *  unless `batchChars` needs more. */
   focused?: AiFocusBudget
 }
 export interface AiFocusBudget {
@@ -66,6 +67,10 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
   const num = (v: string | undefined, d: number) => {
     const n = Number(v)
     return v && Number.isFinite(n) && n > 0 ? n : d
+  }
+  const int = (v: string | undefined, d: number) => {
+    const n = Number(v)
+    return v && Number.isInteger(n) && n > 0 ? n : d
   }
   // A quota of 0 disables that bucket.
   const quota = (v: string | undefined, d: number) => {
@@ -92,9 +97,9 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
     focused:
       env.ALTIMATE_REVIEW_AI_FOCUSED === "1"
         ? {
-            minFiles: num(env.ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES, FOCUS_DEFAULTS.minFiles),
-            batchFiles: num(env.ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES, FOCUS_DEFAULTS.batchFiles),
-            maxBatches: num(env.ALTIMATE_REVIEW_AI_MAX_BATCHES, FOCUS_DEFAULTS.maxBatches),
+            minFiles: int(env.ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES, FOCUS_DEFAULTS.minFiles),
+            batchFiles: int(env.ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES, FOCUS_DEFAULTS.batchFiles),
+            maxBatches: int(env.ALTIMATE_REVIEW_AI_FOCUS_MAX_BATCHES, FOCUS_DEFAULTS.maxBatches),
           }
         : undefined,
   }
@@ -118,6 +123,12 @@ For each changed macro, materialization or generic test whose runtime behaviour 
 
 /** Most PR paths listed for the test-gap instruction. */
 const TEST_GAP_FILES_MAX = 40
+
+/** Files a batch message already names: the batch, plus the other reviewed files a focused message lists. */
+export function listedFiles(plan: Pick<AiInputPlan, "files" | "focused">, batch: AiReviewFile[]): AiReviewFile[] {
+  if (!plan.focused) return batch
+  return [...batch, ...plan.files.filter((f) => !batch.includes(f)).slice(0, FOCUS_OTHER_FILES)]
+}
 
 /** The PR's other changed paths, appended to a batch message for the test-gap instruction. */
 export function testGapFileList(message: string, batch: AiReviewFile[], prFiles: string[] = []): string {
@@ -576,26 +587,34 @@ export function groupAiFiles(files: AiReviewFile[]): AiReviewFile[][] {
 }
 
 /**
- * Pack related-file groups into calls: groups over `batchFiles` split into
- * consecutive chunks, chunks fill calls of up to `batchFiles` files without being
- * split; over `maxBatches` calls, the chunks are balanced by prompt size into
- * exactly `maxBatches` calls instead.
+ * Pack related-file groups into calls: groups over `batchFiles` files or
+ * `batchChars` characters split into consecutive chunks, chunks fill calls of up
+ * to `batchFiles` files and `batchChars` characters without being split; over
+ * `maxBatches` calls, the chunks are balanced by prompt size into at most
+ * `maxBatches` calls instead. `batchChars` keeps each call inside the model's
+ * context window, so it wins over `maxBatches`: a balanced call over it is split
+ * again, and the plan then has more than `maxBatches` calls.
  */
 export function packFocusedBatches(groups: AiReviewFile[][], budget: AiInputBudget): AiReviewFile[][] {
   const { batchFiles, maxBatches } = budget.focused ?? FOCUS_DEFAULTS
+  const chars = new Map<AiReviewFile, number>()
+  const size = (c: AiReviewFile[]) =>
+    c.reduce((n, f) => {
+      if (!chars.has(f)) chars.set(f, fileSection(f, budget.maxFileChars, budget.coverage).length)
+      return n + chars.get(f)!
+    }, 0)
   const chunks = groups.flatMap((g) => {
     const out: AiReviewFile[][] = []
-    for (let i = 0; i < g.length; i += batchFiles) out.push(g.slice(i, i + batchFiles))
+    for (let i = 0; i < g.length; i += batchFiles) out.push(...batchAiFiles(g.slice(i, i + batchFiles), budget))
     return out
   })
   const batches: AiReviewFile[][] = []
   for (const c of chunks) {
     const cur = batches.at(-1)
-    if (cur && cur.length + c.length <= batchFiles) cur.push(...c)
+    if (cur && cur.length + c.length <= batchFiles && size(cur) + size(c) <= budget.batchChars) cur.push(...c)
     else batches.push([...c])
   }
   if (batches.length <= maxBatches) return batches
-  const size = (c: AiReviewFile[]) => c.reduce((n, f) => n + fileSection(f, budget.maxFileChars, budget.coverage).length, 0)
   const bins = Array.from({ length: maxBatches }, () => ({ chars: 0, chunks: [] as number[] }))
   chunks
     .map((c, i) => ({ i, chars: size(c) }))
@@ -605,7 +624,29 @@ export function packFocusedBatches(groups: AiReviewFile[][], budget: AiInputBudg
       bin.chars += chars
       bin.chunks.push(i)
     })
-  return bins.filter((b) => b.chunks.length).map((b) => b.chunks.sort((x, y) => x - y).flatMap((i) => chunks[i]))
+  return bins
+    .filter((b) => b.chunks.length)
+    .flatMap((b) => (b.chars <= budget.batchChars ? [b.chunks] : splitByChars(b.chunks.sort((x, y) => x - y), (i) => size(chunks[i]), budget.batchChars)))
+    .map((ids) => ids.sort((x, y) => x - y).flatMap((i) => chunks[i]))
+}
+
+/** Consecutive runs of `ids` whose summed size fits `max` (an oversized id goes alone). */
+function splitByChars(ids: number[], sizeOf: (i: number) => number, max: number): number[][] {
+  const out: number[][] = []
+  let cur: number[] = []
+  let total = 0
+  for (const i of ids) {
+    const n = sizeOf(i)
+    if (cur.length && total + n > max) {
+      out.push(cur)
+      cur = []
+      total = 0
+    }
+    cur.push(i)
+    total += n
+  }
+  if (cur.length) out.push(cur)
+  return out
 }
 
 /** Findings from several calls without repeats: same file, line and title (case and punctuation aside). */
@@ -908,7 +949,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     const results: BatchResult[] = []
     for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
       const slice = batches.slice(i, i + BATCH_CONCURRENCY)
-      results.push(...(await Promise.all(slice.map((b, j) => reviewBatch(testGap ? testGapFileList(plan.messages[i + j], b, input.prFiles) : plan.messages[i + j], b, system, model)))))
+      results.push(...(await Promise.all(slice.map((b, j) => reviewBatch(testGap ? testGapFileList(plan.messages[i + j], listedFiles(plan, b), input.prFiles) : plan.messages[i + j], b, system, model)))))
     }
     let findings = results.flatMap((r) => r.findings)
     if (plan.focused) findings = dedupAiFindings(findings)

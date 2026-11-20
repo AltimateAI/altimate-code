@@ -22,6 +22,15 @@ import { readStreamStep, type StepToolCall } from "../llm/stream-text"
 
 const log = Log.create({ service: "ai-verify" })
 
+// Connection profiles, env files, key material and Terraform variables hold credentials: never sent to a model.
+const CREDENTIAL_FILE =
+  /(^|\/)(profiles\.ya?ml|\.env(\.[^/]*)?|\.netrc|\.pgpass|id_(rsa|dsa|ecdsa|ed25519)|[^/]+\.(pem|key|p12|pfx|tfvars))$/i
+
+/** A path whose content may hold credentials; the AI lane and the verifier never read or show it. */
+export function isCredentialPath(path: string): boolean {
+  return CREDENTIAL_FILE.test(path)
+}
+
 /** What the verifier may read: the PR's files, the engine, and the dbt project. */
 export interface AiVerifyEvidence {
   dialect?: string
@@ -803,7 +812,7 @@ export function verifierTools(
       ...graph.downstream.map((d) => d.path),
       ...(ev.prFiles ?? []),
     ]),
-  ]
+  ].filter((p) => !isCredentialPath(p))
   /** A requested path inside the review scope, as the repo-relative path to read; a project-relative path resolves too. */
   const resolve = (p: unknown): string | undefined => {
     const want = String(p ?? "").replace(/^\.?\/+/, "")
@@ -938,8 +947,9 @@ export function verifierTools(
       async run({ pattern, glob }) {
         if (!ev.grepProject) return NA("project search unavailable")
         if (String(pattern).length < 2) return NA("pattern needs at least 2 characters")
-        const hits = await ev.grepProject(String(pattern), glob as string | undefined)
-        if (!hits) return NA("the search failed (git error, timeout, or a glob outside the project); this is not evidence of absence")
+        const found = await ev.grepProject(String(pattern), glob as string | undefined)
+        if (!found) return NA("the search failed (git error, timeout, or a glob outside the project); this is not evidence of absence")
+        const hits = found.filter((h) => !isCredentialPath(h.path))
         return hits.length ? hits.map((h) => `${h.path}:${h.line}: ${h.text}`).join("\n") : "no matches"
       },
     },

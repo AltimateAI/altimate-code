@@ -402,11 +402,19 @@ export function yamlParseFindings(file: ChangedFile, oldContent: string | undefi
   if (!/\.ya?ml$/i.test(file.path) || file.status === "deleted" || !newContent) return []
   const err = yamlError(newContent)
   if (!err || (oldContent !== undefined && yamlError(oldContent))) return []
-  // Some errors carry no line, or one past the edit (an unterminated quote fails where the scan
-  // ends): anchor on the added line at or before it, else the first added line.
-  const added = [...walkDiffRows(file.diff)].filter((r) => r.kind === "+")
-  const at = (err.line ? added.find((r) => r.line === err.line) ?? [...added].reverse().find((r) => r.line < err.line!) : undefined) ?? added[0]
-  const text = at?.text ?? (err.line ? newContent.split("\n")[err.line - 1] : undefined)
+  // Some errors land one past the edit (an unterminated quote fails where the scan ends): anchor
+  // on the added line at or before the error line, else on the error line when a hunk shows it
+  // (a deletion-only edit), else on the file. An error with no line goes on the first added line.
+  const rows = [...walkDiffRows(file.diff)]
+  const added = rows.filter((r) => r.kind === "+")
+  const errLine = err.line
+  const at =
+    errLine === undefined
+      ? added[0]
+      : (added.find((r) => r.line === errLine) ??
+        [...added].reverse().find((r) => r.line < errLine) ??
+        rows.find((r) => r.kind === " " && r.line === errLine))
+  const text = at?.text ?? (errLine ? newContent.split("\n")[errLine - 1] : undefined)
   const f = finding(
     file,
     "yaml-parse-error",

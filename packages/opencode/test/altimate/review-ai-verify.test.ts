@@ -13,6 +13,7 @@ import {
   runAiVerify,
   toolsChars,
   verifierTools,
+  isCredentialPath,
   type AiVerifyEvidence,
   type VerifierLlm,
   type VerifierStep,
@@ -1062,6 +1063,28 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(await defs.read_file.run({ path: "packages/transform/tests/unit/test_override.py" })).toBe("1: def test_x(): ...")
     expect(await defs.read_file.run({ path: "other/secret.py" })).toStartWith("not available: outside review scope")
     expect(read).toEqual(["packages/transform/tests/unit/test_override.py"])
+  })
+
+  test("credential files the PR changes stay unreadable, whatever lists them, and never show in grep hits", async () => {
+    const read: string[] = []
+    const secrets = ["config/profiles.yml", "dbt/.env", "infra/prod.tfvars", "certs/client.pem", "profiles.yaml"]
+    const defs = verifierTools(
+      evidence({
+        prFiles: ["models/fct.sql", ...secrets],
+        addedLines: new Map([["config/profiles.yml", new Set([1])]]),
+        readFile: async (p) => (read.push(p), "1: password: hunter2"),
+        grepProject: async () => [
+          { path: "config/profiles.yml", line: 3, text: "password: hunter2" },
+          { path: "models/fct.sql", line: 1, text: "select password_hash" },
+        ],
+      }),
+      { parents: [{ name: "profiles", kind: "model", path: "profiles.yaml" }], downstream: [] } as any,
+    )
+    for (const p of [...secrets, "profiles.yml"]) expect(await defs.read_file.run({ path: p })).toStartWith("not available: outside review scope")
+    expect(read).toEqual([])
+    expect(await defs.grep_project.run({ pattern: "password" })).toBe("models/fct.sql:1: select password_hash")
+    expect(isCredentialPath("models/profiles_summary.sql")).toBe(false)
+    expect(isCredentialPath("models/env.yml")).toBe(false)
   })
 
   test("a test-coverage candidate lists the PR's files; other candidates don't", () => {

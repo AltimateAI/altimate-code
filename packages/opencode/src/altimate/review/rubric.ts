@@ -70,13 +70,14 @@ export function blockingCategories(rubric: Rubric): Set<string> {
   return new Set(rubric.blockOn)
 }
 
+/** Findings that break `dbt parse` for the whole project, so a dev/sandbox/scratch folder doesn't excuse them. */
+const PROJECT_BREAKING_RULES = new Set(["dbt-project-rules:yaml-parse-error", "dbt-project-rules:doc-block-missing"])
+
 /**
  * Apply the rubric's exclusion predicates. Returns the reason a finding should
  * be dropped, or null to keep it. Centralizing this here (vs prompt text) is
  * what keeps the false-positive rate down deterministically.
  */
-/** Findings that break `dbt parse` for the whole project, so a dev/sandbox/scratch folder doesn't excuse them. */
-const PROJECT_BREAKING_RULES = new Set(["dbt-project-rules:yaml-parse-error", "dbt-project-rules:doc-block-missing"])
 
 export function exclusionReason(finding: Finding, rubric: Rubric): string | null {
   const ex = rubric.exclusions
