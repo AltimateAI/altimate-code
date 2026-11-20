@@ -1699,6 +1699,18 @@ select * from c`
     expect(readsOf("with orders as (select 1), a as (select * from analytics . orders) select * from a")).toEqual({ orders: [], a: [] })
   })
 
+  it("steps over a Jinja string holding }}, and a backslash-escaped quote in a SQL string", () => {
+    const jinja = `with orders as (select 1), b as (select {{ "}}" | length }} as n, {{ "'}}'" }} as m from orders) select * from b`
+    expect(readsOf(jinja)).toEqual({ orders: [], b: ["orders"] })
+    const escaped = "with orders as (select 1), b as (select 'it\\'s orders \\'text' as label, 'x''orders' as y) select * from b"
+    expect(readsOf(escaped)).toEqual({ orders: [], b: [] })
+  })
+
+  it("does not count a name qualified across a comment, and reads a name that starts outside the BMP", () => {
+    const sql = "with orders as (select 1), \u{10400}orders as (select 2), a as (select * from analytics . /* t */ orders join analytics.-- x\n orders on 1 = 1), b as (select * from \u{10400}orders) select * from b"
+    expect(readsOf(sql)).toEqual({ orders: [], "\u{10400}orders": [], a: [], b: ["\u{10400}orders"] })
+  })
+
   it("lists the reads of a model with thousands of CTEs in linear time", () => {
     const parts = Array.from({ length: 10000 }, (_, i) => `c${i} as (select ${i} as x${i > 0 && i % 2 === 0 ? ` from c${i - 1}` : ""})`)
     const sql = `with ${parts.join(",\n")}\nselect * from c9999`
