@@ -61,6 +61,16 @@ const VERIFIED_ACCEPTED = ["gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.6-luna", "gp
  * will not drop them for us — the allowlist is what has to. */
 const RETIRED_FROM_SUBSCRIPTION = ["gpt-5.4", "gpt-5.4-mini"]
 
+/** Catalog-verified, NOT backend-probed.
+ *
+ * `openai/codex`'s shipped codex-rs/models-manager/models.json lists each with
+ * `visibility: "list"` and `plus`/`pro` in `available_in_plans`, and models.dev
+ * carries each under `openai`. Nobody has sent these to the live endpoint yet,
+ * so they are kept apart from VERIFIED_ACCEPTED. Once probed, move each into
+ * VERIFIED_ACCEPTED (HTTP 200) or VERIFIED_REJECTED (HTTP 400, and drop it from
+ * OAUTH_ALLOWED_MODELS). */
+const CATALOG_VERIFIED_UNPROBED = ["gpt-6.1-terra"]
+
 /** Verified HTTP 400 "not supported when using Codex with a ChatGPT account". */
 const VERIFIED_REJECTED = [
   "gpt-5",
@@ -94,10 +104,28 @@ describe("OAUTH_ALLOWED_MODELS — verified subscription truth table", () => {
     }
   })
 
-  test("the allowlist contains nothing beyond the verified-accepted set", () => {
+  test("every catalog-verified id is allowlisted", () => {
+    // The Codex catalog lists these for Plus/Pro; hiding them is a false
+    // negative on models the official client offers subscribers.
+    for (const id of CATALOG_VERIFIED_UNPROBED) {
+      expect(OAUTH_ALLOWED_MODELS.has(id)).toBe(true)
+      expect(shouldAllowOAuthModel(id)).toBe(true)
+    }
+  })
+
+  test("catalog-verified ids are kept apart from the probed lists", () => {
+    // An id belongs in exactly one bucket. Probing one moves it out of here.
+    for (const id of CATALOG_VERIFIED_UNPROBED) {
+      expect(VERIFIED_ACCEPTED).not.toContain(id)
+      expect(VERIFIED_REJECTED).not.toContain(id)
+    }
+  })
+
+  test("the allowlist contains nothing beyond the verified-accepted and catalog-verified sets", () => {
     // Trip-wire against speculative additions. To add an id here, probe it
-    // against the live endpoint first and land it in VERIFIED_ACCEPTED too.
-    expect([...OAUTH_ALLOWED_MODELS].sort()).toEqual([...VERIFIED_ACCEPTED].sort())
+    // against the live endpoint and land it in VERIFIED_ACCEPTED, or cite the
+    // Codex catalog and land it in CATALOG_VERIFIED_UNPROBED.
+    expect([...OAUTH_ALLOWED_MODELS].sort()).toEqual([...VERIFIED_ACCEPTED, ...CATALOG_VERIFIED_UNPROBED].sort())
   })
 
   test("ids retired from the subscription picker are not offered", () => {
