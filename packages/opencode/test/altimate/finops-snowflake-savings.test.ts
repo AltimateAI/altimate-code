@@ -435,9 +435,12 @@ describe("building the facts", () => {
     expect(facts.map((one) => one.warehouse_id)).toEqual(["5", "unused:B"])
   })
 
-  test("of two ids under one name last seen at the same time, the newer (larger) id is kept", () => {
-    const { facts } = buildFacts({ warehouses: [show()], metering: [meter(9, "BI_WH", "2026-11-12"), meter(7, "BI_WH", "2026-11-12")], periods: [], restarts: [], queries: [] })
-    expect(facts[0]!.warehouse_id).toBe("9")
+  test.each([
+    [7, 9],
+    [9, 7],
+  ])("of two ids under one name last seen at the same time, the newer (larger) id is kept (%d first)", (first, second) => {
+    const metering = [meter(first, "BI_WH", "2026-11-12"), meter(second, "BI_WH", "2026-11-12")]
+    expect(buildFacts({ warehouses: [show()], metering, periods: [], restarts: [], queries: [] }).facts[0]!.warehouse_id).toBe("9")
   })
 
   test("the earlier warehouse's billed usage under a reused name is named, not dropped silently", () => {
