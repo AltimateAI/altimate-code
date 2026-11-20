@@ -21,4 +21,13 @@ describe("action: dbt_prepare", () => {
     // The base is compiled into target-base/, where the compiled-SQL resolver looks.
     expect(prep.run).toContain('"$PROJECT/target-base"')
   })
+
+  test("a failed docs generate or base checkout warns and lets the review run", async () => {
+    const action = YAML.parse(await fs.readFile(actionPath, "utf8"))
+    const prep = (action.runs.steps as Array<{ name: string; run?: string }>).find((s) => s.name === "Prepare dbt artifacts")!
+    const run = prep.run!
+    expect(run).toMatch(/docs generate[^\n]*\) \|\|\n\s*echo "::warning::/)
+    expect(run).toMatch(/git worktree add[^\n]*\|\| \{ echo "::warning::/)
+    expect(run.indexOf('rm -rf "$PROJECT/target-base"')).toBeLessThan(run.indexOf('build "$WT/$REL"'))
+  })
 })

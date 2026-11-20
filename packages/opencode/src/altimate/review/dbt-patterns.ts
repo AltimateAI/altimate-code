@@ -225,13 +225,38 @@ const detectNotIn: Detector = (c) => {
   })
 }
 
+/** Head-side line numbers of the added lines; undefined when the diff has no hunk headers. */
+function addedLineNumbers(diff: string | undefined): Set<number> | undefined {
+  if (!diff || !/^@@ /m.test(diff)) return undefined
+  const out = new Set<number>()
+  let right = 0
+  let inHunk = false
+  for (const line of diff.split("\n")) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (h) {
+      right = Number(h[1])
+      inHunk = true
+      continue
+    }
+    if (!inHunk || line.startsWith("\\")) continue
+    if (line.startsWith("+")) out.add(right++)
+    else if (line.startsWith(" ") || line === "") right++
+    else if (!line.startsWith("-")) inHunk = false
+  }
+  return out
+}
+
 /**
  * `row_number() over (…)` windows in the model, read from the whole file so a
  * window split across lines is seen whole. A window counts as part of the
- * change when one of the PR's added lines falls inside it.
+ * change when one of the PR's added lines falls inside its line span (by text
+ * only when the diff carries no hunk headers).
  */
 function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
-  const sql = stripComments(c.newSql)
+  // Comments blanked with newlines kept, so offsets map to head line numbers.
+  const sql = c.newSql.replace(/\/\*[\s\S]*?\*\/|--[^\n]*|\{#[\s\S]*?#\}/g, (m) => m.replace(/[^\n]/g, " "))
+  const lineAt = (offset: number) => sql.slice(0, offset).split("\n").length
+  const addedLines = addedLineNumbers(c.file.diff)
   const added = c.added.map((l) => stripComments(l).trim()).filter((l) => l.length >= 3)
   const out: Array<{ spec: string; text: string }> = []
   for (const m of sql.matchAll(/row_number\s*\(\s*\)\s*over\s*\(/gi)) {
@@ -247,7 +272,10 @@ function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
     }
     if (close < 0) continue
     const text = sql.slice(m.index!, close + 1)
-    if (!added.some((l) => text.includes(l) || l.includes(text.replace(/\s+/g, " ")))) continue
+    const touched = addedLines
+      ? [...addedLines].some((n) => n >= lineAt(m.index!) && n <= lineAt(close))
+      : added.some((l) => text.includes(l) || l.includes(text.replace(/\s+/g, " ")))
+    if (!touched) continue
     out.push({ spec: sql.slice(open + 1, close).replace(/\s+/g, " ").trim(), text: text.replace(/\s+/g, " ") })
   }
   return out
