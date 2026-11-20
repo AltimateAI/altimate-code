@@ -398,7 +398,14 @@ export function buildFacts(rows: FactRows) {
     idOf.set(owner, id!)
     if (others.some((other) => rowsById.get(other)?.some(({ row }) => active(row)))) replaced.add(owner)
   }
-  const of = (list: Row[], id: number | undefined) => (id === undefined ? [] : list.filter((one) => num(one.warehouse_id) === id))
+  // Each source's rows by id, grouped once so every listed warehouse reads only its own.
+  const byId = (list: Row[]) => {
+    const grouped = new Map<number, Row[]>()
+    for (const row of list) entry(grouped, num(row.warehouse_id), () => []).push(row)
+    return grouped
+  }
+  const [metering, periods, restarts, queries] = [rows.metering, rows.periods, rows.restarts, rows.queries].map(byId)
+  const of = (grouped: Map<number, Row[]> | undefined, id: number | undefined) => (id === undefined ? [] : (grouped?.get(id) ?? []))
 
   const facts = rows.warehouses.map((row) => {
     const name = String(row.name ?? "")
@@ -409,7 +416,7 @@ export function buildFacts(rows: FactRows) {
     const usageDay = (day: string) => entry(usage, day, () => ({ day, credits_used: null, active_periods: 0, short_periods: 0 }))
     const idleDay = (day: string) => entry(idle, day, () => ({ day, active_seconds: 0, idle_seconds: 0, credits_used: 0 }))
 
-    for (const one of of(rows.metering, id)) {
+    for (const one of of(metering, id)) {
       const credits = num(one.credits_used)
       if (one.usage_day != null) {
         const day = usageDay(String(one.usage_day))
@@ -417,7 +424,7 @@ export function buildFacts(rows: FactRows) {
       }
       if (one.idle_day != null) idleDay(String(one.idle_day)).credits_used += credits
     }
-    for (const one of of(rows.periods, id)) {
+    for (const one of of(periods, id)) {
       const active = whole(one.active_seconds)
       const idleSeconds = whole(one.idle_seconds)
       if (one.usage_day != null) {
@@ -442,13 +449,13 @@ export function buildFacts(rows: FactRows) {
     }
     // A rename splits a day's or the window's rows by name; they are one warehouse's.
     const gaps = new Map<string, Map<string, { gap_seconds: number; bounces: number }>>()
-    for (const one of of(rows.restarts, id)) {
+    for (const one of of(restarts, id)) {
       const seconds = whole(one.gap_seconds)
       const gap = entry(entry(gaps, String(one.day), () => new Map()), String(seconds), () => ({ gap_seconds: seconds, bounces: 0 }))
       gap.bounces += whole(one.bounces)
     }
     const query = { count: 0, short: 0, credits: 0 }
-    for (const one of of(rows.queries, id)) {
+    for (const one of of(queries, id)) {
       query.count += whole(one.query_count)
       query.short += whole(one.sub_five_second_queries)
       query.credits += num(one.sub_five_second_credits)
