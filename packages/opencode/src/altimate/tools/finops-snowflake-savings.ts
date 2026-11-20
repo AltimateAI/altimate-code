@@ -4,6 +4,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SnowflakeSavingsFinding, SnowflakeSavingsReport, SnowflakeSavingsResult } from "../native/types"
 import { SAVINGS_RUN_LIMIT_MINUTES } from "../native/finops/savings-run"
+import { savingsConnection } from "../native/finops/snowflake-savings"
 import { oneLine, range } from "./finops-formatting"
 
 /** One shape for every outcome, so a reader of the metadata never guesses which fields exist. */
@@ -117,16 +118,18 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
     // The check can resume a suspended warehouse that then bills, so nothing reaches Snowflake until the
     // permission system says yes: a prompt in a session, a rule in the user's config, or the user's own
     // `altimate-code tool run`. A refusal throws here, before any connection is opened.
+    // Ask about the connection the check runs on, so a rule for one connection holds however the call names it.
+    const connection = savingsConnection(args.warehouse)
     await ctx.ask({
       permission: "finops_snowflake_savings",
-      patterns: [args.warehouse ?? "*"],
+      patterns: [connection ?? (args.warehouse?.trim() || "*")],
       always: ["*"],
       metadata: {},
     })
     try {
       const result = await Dispatcher.call(
         "finops.snowflake_savings",
-        { warehouse: args.warehouse },
+        { warehouse: connection ?? args.warehouse },
         { signal: ctx.abort, sessionID: ctx.sessionID },
       )
       if (!result.success || !result.report) {

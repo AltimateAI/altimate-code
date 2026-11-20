@@ -4,7 +4,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { DatabricksSavingsFinding, DatabricksSavingsReport, DatabricksSavingsResult } from "../native/types"
 import { SAVINGS_RUN_LIMIT_MINUTES } from "../native/finops/savings-run"
-import { ROW_LIMIT } from "../native/finops/databricks-savings"
+import { ROW_LIMIT, savingsConnection } from "../native/finops/databricks-savings"
 import { dollars, oneLine, range } from "./finops-formatting"
 
 /** One shape for every outcome, so a reader of the metadata never guesses which fields exist. */
@@ -84,7 +84,8 @@ export function formatSavings(result: DatabricksSavingsResult): string {
     `${result.jobs_checked ?? 0} jobs`,
   ].join(", ")
   const lines: string[] = [`Databricks savings: ${counted} checked, the ${report.lookback_days} days to ${result.window.end}, at list price.`]
-  for (const one of result.skipped ?? []) lines.push(`Not checked: ${one.check} (${one.reason})`)
+  // Reasons come from warehouse errors and can hold control or invisible characters.
+  for (const one of result.skipped ?? []) lines.push(`Not checked: ${oneLine(one.check)} (${oneLine(one.reason)})`)
   for (const what of result.limited ?? []) lines.push(`Only the first ${ROW_LIMIT.toLocaleString("en-US")} ${what} were read; any beyond them were not checked.`)
   if (report.findings.length === 0) {
     lines.push(result.skipped?.length || result.limited?.length ? "No savings found in what could be checked." : "No savings found.")
@@ -125,16 +126,18 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
     // The check can start a stopped SQL warehouse that then bills, so nothing reaches Databricks until the
     // permission system says yes: a prompt in a session, a rule in the user's config, or the user's own
     // `altimate-code tool run`. A refusal throws here, before any connection is opened.
+    // Ask about the connection the check runs on, so a rule for one connection holds however the call names it.
+    const connection = savingsConnection(args.warehouse)
     await ctx.ask({
       permission: "finops_databricks_savings",
-      patterns: [args.warehouse ?? "*"],
+      patterns: [connection ?? (args.warehouse?.trim() || "*")],
       always: ["*"],
       metadata: {},
     })
     try {
       const result = await Dispatcher.call(
         "finops.databricks_savings",
-        { warehouse: args.warehouse },
+        { warehouse: connection ?? args.warehouse },
         { signal: ctx.abort, sessionID: ctx.sessionID },
       )
       if (!result.success || !result.report) {

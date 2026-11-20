@@ -5,7 +5,9 @@
  *
  *   bun test/altimate/fixtures/finops-savings/generate.ts <path to the binding's index.js> <core commit>
  *
- * The facts are synthetic: every warehouse, cluster, job and workspace name below is made up.
+ * The facts are synthetic: every warehouse, cluster, job and workspace name below is made up. The committed
+ * reports come from the core build the next pin bump ships, ahead of its release; regenerate them from the
+ * installed binding whenever that pin moves, and `finops-savings-fixtures.test.ts` checks the shape again.
  */
 import { writeFileSync } from "fs"
 import path from "path"

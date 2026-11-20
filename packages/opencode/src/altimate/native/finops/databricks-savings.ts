@@ -431,6 +431,20 @@ function preferredConnection(): string | undefined {
   })?.name
 }
 
+function resolveConnection(warehouse: string | undefined) {
+  return resolveFinopsWarehouse({
+    requested: warehouse?.trim() || preferredConnection(),
+    supportedTypes: SUPPORTED_TYPES,
+    operationName: "The Databricks savings check",
+  })
+}
+
+/** The connection a check with this `warehouse` argument runs on, or undefined when none resolves. */
+export function savingsConnection(warehouse?: string): string | undefined {
+  const resolved = resolveConnection(warehouse)
+  return resolved.kind === "error" ? undefined : resolved.warehouse
+}
+
 /** `rules` defaults to the installed core's; tests pass their own. */
 export async function databricksSavings(
   params: DatabricksSavingsParams,
@@ -440,11 +454,7 @@ export async function databricksSavings(
   const window = savingsWindow(params.now_ms ?? Date.now())
   const failed = (error: string): DatabricksSavingsResult => ({ success: false, window, error })
 
-  const resolved = resolveFinopsWarehouse({
-    requested: params.warehouse?.trim() || preferredConnection(),
-    supportedTypes: SUPPORTED_TYPES,
-    operationName: "The Databricks savings check",
-  })
+  const resolved = resolveConnection(params.warehouse)
   if (resolved.kind === "error") return failed(resolved.error)
 
   const config = Registry.getConfig(resolved.warehouse) as Record<string, unknown> | undefined

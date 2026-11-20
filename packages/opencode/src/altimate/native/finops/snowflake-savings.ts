@@ -429,6 +429,20 @@ export function creditPrice(rate: Row | undefined): { per_credit: number; source
   return { per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" }
 }
 
+function resolveConnection(warehouse: string | undefined) {
+  return resolveFinopsWarehouse({
+    requested: warehouse?.trim() || undefined,
+    supportedTypes: SUPPORTED_TYPES,
+    operationName: "The Snowflake savings check",
+  })
+}
+
+/** The connection a check with this `warehouse` argument runs on, or undefined when none resolves. */
+export function savingsConnection(warehouse?: string): string | undefined {
+  const resolved = resolveConnection(warehouse)
+  return resolved.kind === "error" ? undefined : resolved.warehouse
+}
+
 /** `rules` defaults to the installed core's; tests pass their own. */
 export async function snowflakeSavings(
   params: SnowflakeSavingsParams,
@@ -438,11 +452,7 @@ export async function snowflakeSavings(
   const window = savingsWindow(params.now_ms ?? Date.now())
   const failed = (error: string): SnowflakeSavingsResult => ({ success: false, window, error })
 
-  const resolved = resolveFinopsWarehouse({
-    requested: params.warehouse?.trim() || undefined,
-    supportedTypes: SUPPORTED_TYPES,
-    operationName: "The Snowflake savings check",
-  })
+  const resolved = resolveConnection(params.warehouse)
   if (resolved.kind === "error") return failed(resolved.error)
 
   if (!rules) {

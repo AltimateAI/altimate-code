@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import * as Registry from "../../src/altimate/native/connections/registry"
+import { Permission } from "../../src/permission"
 import {
   LIST_PRICE_PER_CREDIT,
   ROW_LIMIT,
@@ -98,6 +99,7 @@ describe("finops_snowflake_savings tool", () => {
     let opened: number
     let queried: number
     let asks: any[]
+    let sent: unknown[]
     const ctx = (allow: boolean) => ({
       ...stubCtx(),
       ask: async (input: unknown) => {
@@ -110,9 +112,10 @@ describe("finops_snowflake_savings tool", () => {
       opened = 0
       queried = 0
       asks = []
+      sent = []
       Registry.setConfigs({ sf: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" } } as any)
       const rules = () => ({ lookback_days: 7, price_per_credit: 3, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] })
-      Dispatcher.register("finops.snowflake_savings" as any, async (params: any) => (dispatched++, snowflakeSavings(params, rules)))
+      Dispatcher.register("finops.snowflake_savings" as any, async (params: any) => (dispatched++, sent.push(params), snowflakeSavings(params, rules)))
       tracked(spyOn(Registry, "get")).mockImplementation((async () => {
         opened++
         return { execute: async () => (queried++, { columns: [], rows: [], truncated: false }) }
@@ -135,12 +138,36 @@ describe("finops_snowflake_savings tool", () => {
     test("once allowed, the check runs on the warehouse", async () => {
       const tool = await initTool(FinopsSnowflakeSavingsTool)
       const result = await tool.execute({}, ctx(true))
-      expect(asks).toEqual([expect.objectContaining({ permission: "finops_snowflake_savings", patterns: ["*"] })])
+      // No connection named: the ask names the one the check picks, and the check runs on that one.
+      expect(asks).toEqual([expect.objectContaining({ permission: "finops_snowflake_savings", patterns: ["sf"] })])
+      expect(sent).toEqual([{ warehouse: "sf" }])
       expect(dispatched).toBe(1)
       expect(opened).toBe(1)
       // Empty answers fail the check later on; what matters here is that it reached the warehouse.
       expect(queried).toBeGreaterThan(0)
       expect(result.output).toContain("savings check")
+    })
+
+    test("a rule for one connection holds however the call names it", async () => {
+      Registry.setConfigs({ sf: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" }, other: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" } } as any)
+      const rules = Permission.fromConfig({ finops_snowflake_savings: { "*": "allow", sf: "deny" } })
+      // Answers the way the session's permission service does: the last matching rule wins.
+      const decide = {
+        ...stubCtx(),
+        ask: async (input: any) => {
+          asks.push(input)
+          for (const pattern of input.patterns)
+            if (Permission.evaluate(input.permission, pattern, rules).action === "deny") throw new Error("denied by rule")
+        },
+      }
+      const tool = await initTool(FinopsSnowflakeSavingsTool)
+      // Omitted (the check would pick it) and padded with spaces (the check would trim them): both are denied.
+      for (const args of [{}, { warehouse: " sf " }]) await expect(tool.execute(args, decide)).rejects.toThrow("denied by rule")
+      expect(asks.map((one) => one.patterns)).toEqual([["sf"], ["sf"]])
+      expect(dispatched).toBe(0)
+      expect(opened).toBe(0)
+      await tool.execute({ warehouse: "other" }, decide)
+      expect(sent).toEqual([{ warehouse: "other" }])
     })
 
     test("the description says it bills, stops after 9 minutes and asks first", async () => {
