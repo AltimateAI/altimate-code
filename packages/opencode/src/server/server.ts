@@ -11,7 +11,7 @@ import z from "zod"
 import { Provider } from "../provider/provider"
 import { NamedError } from "@opencode-ai/core/util/error"
 // altimate_change start — client-safe error responses
-import { unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
+import { errorRef, unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
 // altimate_change end
 import { LSP } from "../lsp"
 import { Format } from "../format"
@@ -266,9 +266,13 @@ export namespace Server {
     // altimate_change end
     return app
       .onError((err, c) => {
+        // altimate_change start — one log line per error, under the ref an unknown error's response carries
+        const ref = errorRef()
         log.error("failed", {
+          ref,
           error: err,
         })
+        // altimate_change end
         if (err instanceof NamedError) {
           let status: ContentfulStatusCode
           if (err instanceof NotFoundError) status = 404
@@ -298,8 +302,13 @@ export namespace Server {
         }
         // altimate_change end
         if (err instanceof HTTPException) return err.getResponse()
-        // altimate_change start — never send an error's text or stack to the client: a fixed message and a ref, logged in full.
-        return c.json(unknownErrorBody(log, err), {
+        // altimate_change start — a busy session answers 400 with its message, as the instance routes' handler does
+        // (middleware.ts); everything else unrecognised gets a fixed message and the ref it was logged under, never
+        // the error's text or stack.
+        if (err instanceof Session.BusyError) {
+          return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 400 })
+        }
+        return c.json(unknownErrorBody(ref), {
           status: 500,
         })
         // altimate_change end

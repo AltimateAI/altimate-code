@@ -11,7 +11,15 @@ import { Hono } from "hono"
 import { ConfigErrorV1 } from "@opencode-ai/core/v1/config/error"
 import { Server } from "../../src/server/server"
 import { errorHandler } from "../../src/server/middleware"
-import { clientMessage, unknownErrorBody, upstreamStatus, UNEXPECTED } from "../../src/altimate/server/error-response"
+import { NamedError } from "@opencode-ai/core/util/error"
+import { Session } from "../../src/session"
+import {
+  clientMessage,
+  errorRef,
+  unknownErrorBody,
+  upstreamStatus,
+  UNEXPECTED,
+} from "../../src/altimate/server/error-response"
 import type { Log } from "../../src/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
@@ -47,6 +55,12 @@ describe("clientMessage", () => {
     expect(clientMessage("    at new Promise (<anonymous>)")).toBe(UNEXPECTED)
   })
 
+  test("reads a NamedError's text from data.message, where it keeps it", () => {
+    const err = new NamedError.Unknown({ message: "provider refused the key\n    at call (/srv/p.ts:3:4)" })
+    expect(err.message).toBe("UnknownError")
+    expect(clientMessage(err)).toBe("provider refused the key")
+  })
+
   test("falls back to the fixed message when nothing is left", () => {
     expect(clientMessage(new Error(""))).toBe(UNEXPECTED)
     expect(clientMessage("    at fn (/a.js:1:2)")).toBe(UNEXPECTED)
@@ -59,15 +73,10 @@ test("upstreamStatus is 502 only for an unavailable remote config", () => {
   expect(upstreamStatus("UnknownError")).toBeUndefined()
 })
 
-test("unknownErrorBody carries a fixed message and a ref, and logs the error under that ref", () => {
-  const { log, calls } = capturingLog()
-  const err = new Error("secret marker")
-  const body = unknownErrorBody(log, err) as { name: string; data: { message: string; ref: string } }
-  expect(body.name).toBe("UnknownError")
-  expect(body.data.message).toBe(UNEXPECTED)
-  expect(body.data.ref).toMatch(/^err_[0-9a-f-]{8}$/)
-  expect(JSON.stringify(body)).not.toContain("secret marker")
-  expect(calls).toEqual([{ message: "unexpected error", extra: { ref: body.data.ref, error: err } }])
+test("unknownErrorBody carries only the fixed message and the ref it is given", () => {
+  const ref = errorRef()
+  expect(ref).toMatch(/^err_[0-9a-f-]{8}$/)
+  expect(unknownErrorBody(ref)).toEqual({ name: "UnknownError", data: { message: UNEXPECTED, ref } })
 })
 
 describe("middleware.ts errorHandler", () => {
@@ -89,7 +98,14 @@ describe("middleware.ts errorHandler", () => {
     expect(text).not.toMatch(STACKISH)
     const body = JSON.parse(text)
     expect(body).toMatchObject({ name: "UnknownError", data: { message: UNEXPECTED } })
-    expect(calls.some((c) => c.extra.ref === body.data.ref && c.extra.error === err)).toBe(true)
+    // One log line, and it names the ref the client got.
+    expect(calls).toEqual([{ message: "failed", extra: { ref: body.data.ref, error: err } }])
+  })
+
+  test("a busy session answers 400 with its message", async () => {
+    const response = await app(new Session.BusyError("ses_busy")).hono.request("/boom")
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ name: "UnknownError", data: { message: "Session ses_busy is busy" } })
   })
 
   test("an unavailable remote config answers 502 with its name, remote, status and reason", async () => {
@@ -153,6 +169,45 @@ describe("full server, remote config unavailable", () => {
     expect(JSON.parse(text)).toEqual({
       name: "ConfigRemoteUnavailableError",
       data: { remote: `${remote.url.origin}/.well-known/opencode`, status: 500, reason: "HTTP 500" },
+    })
+  })
+
+  test("an /api route sends no stack either (an empty 500: the instance fails to load before any handler runs)", async () => {
+    const remote = Bun.serve({ port: 0, fetch: () => new Response("upstream exploded", { status: 500 }) })
+    servers.push(remote)
+    await withWellKnown(remote.url.origin)
+    await using dir = await tmpdir({ git: true })
+    const response = await Server.Default().request("/api/config", { headers: { "x-opencode-directory": dir.path } })
+    const text = await response.text()
+    expect(response.status).toBe(500)
+    expect(text).not.toMatch(STACKISH)
+    expect(text).not.toContain("upstream exploded")
+  })
+
+  test("a failing remote config URL is named by its template, never with the token filled in", async () => {
+    const asked: string[] = []
+    const remote = Bun.serve({
+      port: 0,
+      fetch: (req) => {
+        const url = new URL(req.url)
+        asked.push(url.pathname + url.search)
+        if (url.pathname === "/.well-known/opencode") {
+          return Response.json({ remote_config: { url: `${url.origin}/cfg?token={env:TEST_TOKEN}` } })
+        }
+        return new Response("no", { status: 500 })
+      },
+    })
+    servers.push(remote)
+    await withWellKnown(remote.url.origin)
+    await using dir = await tmpdir({ git: true })
+    const response = await Server.Default().request("/agent", { headers: { "x-opencode-directory": dir.path } })
+    const text = await response.text()
+    expect(asked).toContain("/cfg?token=test-token")
+    expect(response.status).toBe(502)
+    expect(text).not.toContain("test-token")
+    expect(JSON.parse(text)).toEqual({
+      name: "ConfigRemoteUnavailableError",
+      data: { remote: `${remote.url.origin}/cfg?token={env:TEST_TOKEN}`, status: 500, reason: "HTTP 500" },
     })
   })
 
