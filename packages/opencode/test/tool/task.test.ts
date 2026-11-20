@@ -688,6 +688,219 @@ describe("tool.task", () => {
     )
   }
 
+  // altimate_change start — run mode: the child's completion token stays out of <task_result>,
+  // and a bare DONE acknowledgement does not replace the child's report
+  const withRunMode = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const previous = process.env.ALTIMATE_RUN_MODE
+        process.env.ALTIMATE_RUN_MODE = "1"
+        return previous
+      }),
+      () => effect,
+      (previous) =>
+        Effect.sync(() => {
+          if (previous === undefined) delete process.env.ALTIMATE_RUN_MODE
+          else process.env.ALTIMATE_RUN_MODE = previous
+        }),
+    )
+  const taskContext = (chat: { id: SessionID }, assistant: { id: MessageID }, promptOps: TaskPromptOps) => ({
+    sessionID: chat.id,
+    messageID: assistant.id,
+    agent: "build",
+    abort: new AbortController().signal,
+    extra: { promptOps },
+    messages: [],
+    metadata: () => Effect.void,
+    ask: () => Effect.void,
+  })
+
+  it.instance("run mode strips the child's trailing DONE from the task result", () =>
+    withRunMode(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const result = yield* def.execute(
+          { description: "inspect cache", prompt: "look into the cache key", subagent_type: "general" },
+          taskContext(chat, assistant, stubOps({ text: "The cache key is stable.\n\nDONE" })),
+        )
+        expect(result.output).toContain("<task_result>\nThe cache key is stable.\n</task_result>")
+        expect(result.output).not.toMatch(/^DONE$/m)
+      }),
+    ),
+  )
+
+  it.instance("run mode returns the child's report when its last reply is a bare DONE", () =>
+    withRunMode(
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const promptOps: TaskPromptOps = {
+          ...stubOps(),
+          prompt: (input) =>
+            Effect.gen(function* () {
+              // The prompt's own user message, which SessionPrompt.prompt writes with this id; the
+              // child's turns follow it in time.
+              const created = Date.now()
+              yield* sessions.updateMessage({
+                id: input.messageID!,
+                role: "user",
+                sessionID: input.sessionID,
+                agent: "general",
+                model: coreRef,
+                time: { created },
+              })
+              const report = {
+                ...assistant,
+                id: MessageID.ascending(),
+                sessionID: input.sessionID,
+                parentID: input.messageID!,
+                time: { created: created + 1 },
+              }
+              yield* sessions.updateMessage(report)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: report.id,
+                sessionID: input.sessionID,
+                type: "text",
+                text: "Found two callers of the cache key; both pass the tenant.",
+              })
+              // A compaction and the run-mode nudge follow; the child acknowledges with a bare DONE.
+              const nudge = yield* sessions.updateMessage({
+                id: MessageID.ascending(),
+                role: "user",
+                sessionID: input.sessionID,
+                agent: "general",
+                model: coreRef,
+                time: { created: created + 2 },
+              })
+              const ack = {
+                ...assistant,
+                id: MessageID.ascending(),
+                sessionID: input.sessionID,
+                parentID: nudge.id,
+                time: { created: created + 3 },
+              }
+              yield* sessions.updateMessage(ack)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: ack.id,
+                sessionID: input.sessionID,
+                type: "text",
+                text: "DONE",
+              })
+              return reply(input, "DONE")
+            }),
+        }
+        const result = yield* def.execute(
+          { description: "inspect cache", prompt: "look into the cache key", subagent_type: "general" },
+          taskContext(chat, assistant, promptOps),
+        )
+        expect(result.output).toContain("Found two callers of the cache key; both pass the tenant.")
+        expect(result.output).not.toContain("<task_result>\nDONE")
+      }),
+    ),
+  )
+
+  // Interrupted path: partial findings get the same run-mode report selection.
+  for (const rejects of [true, false]) {
+    it.instance(`run mode strips DONE from partial findings when an aborted prompt ${rejects ? "rejects" : "returns empty text"}`, () =>
+      withRunMode(
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const { chat, assistant } = yield* seed()
+          const def = yield* (yield* TaskTool).init()
+          const controller = new AbortController()
+          const ready = yield* Deferred.make<void>()
+          const cancelled = yield* Deferred.make<void>()
+          const promptOps: TaskPromptOps = {
+            ...stubOps(),
+            cancel: () => Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid),
+            prompt: (input) =>
+              Effect.gen(function* () {
+                const report = { ...assistant, id: MessageID.ascending(), sessionID: input.sessionID, parentID: input.messageID! }
+                yield* sessions.updateMessage(report)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: report.id,
+                  sessionID: input.sessionID,
+                  type: "text",
+                  text: "The archive contains three matching records.",
+                })
+                // The child then acknowledges with a bare DONE in a later message of the same prompt.
+                const ack = { ...assistant, id: MessageID.ascending(), sessionID: input.sessionID, parentID: input.messageID! }
+                yield* sessions.updateMessage(ack)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: ack.id,
+                  sessionID: input.sessionID,
+                  type: "text",
+                  text: "DONE",
+                })
+                yield* Deferred.succeed(ready, undefined)
+                yield* Deferred.await(cancelled)
+                if (rejects) return yield* Effect.die(new DOMException("Task cancelled", "AbortError"))
+                return reply(input, "")
+              }),
+          }
+          const fiber = yield* def
+            .execute(
+              { description: "inspect archive", prompt: "count matching records", subagent_type: "general" },
+              { ...taskContext(chat, assistant, promptOps), abort: controller.signal },
+            )
+            .pipe(Effect.forkChild)
+          yield* Deferred.await(ready).pipe(Effect.timeout("2 seconds"))
+          controller.abort()
+          const result = yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds"))
+          expect(result.output).toContain("The archive contains three matching records.")
+          expect(result.output).not.toMatch(/^DONE$/m)
+          expect(result.metadata.interrupted).toBe(true)
+        }),
+      ),
+    )
+  }
+
+  it.instance("partial findings keep a trailing DONE outside run mode", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const childID = (yield* sessions.create({ parentID: chat.id, title: "child" })).id
+      const promptID = MessageID.ascending()
+      const message = { ...assistant, id: MessageID.ascending(), sessionID: childID, parentID: promptID }
+      yield* sessions.updateMessage(message)
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: message.id,
+        sessionID: childID,
+        type: "text",
+        text: "Print it.\nDONE",
+      })
+      const output = yield* Effect.promise(() => interruptedTaskOutput(childID, promptID))
+      expect(output).toContain("Print it.\nDONE")
+    }),
+  )
+
+  it.instance("outside run mode the child's text is returned unchanged", () =>
+    Effect.gen(function* () {
+      const previous = process.env.ALTIMATE_RUN_MODE
+      process.env.ALTIMATE_RUN_MODE = "0"
+      try {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const result = yield* def.execute(
+          { description: "inspect cache", prompt: "look into the cache key", subagent_type: "general" },
+          taskContext(chat, assistant, stubOps({ text: "Print it.\nDONE" })),
+        )
+        expect(result.output).toContain("<task_result>\nPrint it.\nDONE\n</task_result>")
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_RUN_MODE
+        else process.env.ALTIMATE_RUN_MODE = previous
+      }
+    }),
+  )
+  // altimate_change end
+
   it.instance("partial task recovery excludes findings from an earlier prompt", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service

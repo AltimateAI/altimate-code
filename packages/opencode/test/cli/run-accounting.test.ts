@@ -281,6 +281,32 @@ describe("RunAccounting retry classification", () => {
 })
 
 describe("RunAccounting done_reason + idle-done bookkeeping", () => {
+  // altimate_change start — a blocked ending is reported as blocked, never as done
+  test("stop + a final BLOCKED: line reports done_reason=blocked", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "Read the config.\nBLOCKED: the warehouse password is missing")
+    acc.onStepFinish("m1", "stop")
+    const t = acc.termination()
+    expect(t.done_reason).toBe("blocked")
+    expect(t.why_model_stopped).toBe("stop")
+    expect(t.why_harness_stopped).toBe("none")
+  })
+
+  test("a BLOCKED line followed by DONE is a completion, and a later plain reply clears blocked", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "BLOCKED: example of the format\nDONE")
+    acc.onStepFinish("m1", "stop")
+    expect(acc.termination().done_reason).toBe("explicit_done")
+    acc.onAssistantMessage({ id: "m2", agent: "build" })
+    acc.onText("m2", "BLOCKED: no access")
+    acc.onText("m2", "Actually the file was readable; continuing.")
+    acc.onStepFinish("m2", "stop")
+    expect(acc.termination().done_reason).toBe("none")
+  })
+  // altimate_change end
+
   test("bare finishReason stop is NEVER reported as done", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })

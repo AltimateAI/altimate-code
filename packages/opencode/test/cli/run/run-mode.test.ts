@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { applyRunModeDefault } from "@/cli/cmd/run/run-mode"
+// altimate_change start — local run-mode output gate
+import { applyRunModeDefault, isLocalRunMode } from "@/cli/cmd/run/run-mode"
+// altimate_change end
 import { Flag } from "@/flag/flag"
 // altimate_change — behavioural coverage of the child-env marker strip
 import { stripHostMarkers, stripRunModeMarkers } from "@/tool/bash"
@@ -261,6 +263,22 @@ describe("run-mode markers do not leak into bash child processes", () => {
   test("an absent marker stays absent", () => {
     const env = stripRunModeMarkers({})
     expect("ALTIMATE_RUN_MODE" in env).toBe(false)
+  })
+})
+// altimate_change end
+
+// altimate_change start — run-mode output handling (DONE stripping, blocked exit) is local-only
+describe("isLocalRunMode", () => {
+  test("active only for a local run with run mode on", () => {
+    expect(isLocalRunMode({ runMode: true, attach: false })).toBe(true)
+  })
+
+  test("ALTIMATE_RUN_MODE=0 turns it off", () => {
+    expect(isLocalRunMode({ runMode: false, attach: false })).toBe(false)
+  })
+
+  test("--attach turns it off even when run mode is exported locally", () => {
+    expect(isLocalRunMode({ runMode: true, attach: true })).toBe(false)
   })
 })
 // altimate_change end
