@@ -59,6 +59,7 @@ describe("clientMessage", () => {
     const err = new NamedError.Unknown({ message: "provider refused the key\n    at call (/srv/p.ts:3:4)" })
     expect(err.message).toBe("UnknownError")
     expect(clientMessage(err)).toBe("provider refused the key")
+    expect(clientMessage(new NamedError.Unknown({ message: "" }))).toBe(UNEXPECTED)
   })
 
   test("falls back to the fixed message when nothing is left", () => {
@@ -180,8 +181,7 @@ describe("full server, remote config unavailable", () => {
     const response = await Server.Default().request("/api/config", { headers: { "x-opencode-directory": dir.path } })
     const text = await response.text()
     expect(response.status).toBe(500)
-    expect(text).not.toMatch(STACKISH)
-    expect(text).not.toContain("upstream exploded")
+    expect(text).toBe("")
   })
 
   test("a failing remote config URL is named by its template, never with the token filled in", async () => {

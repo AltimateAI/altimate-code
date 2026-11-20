@@ -25,7 +25,7 @@ function namedErrorMessage(err: unknown): string | undefined {
   const data = (err as { data?: unknown }).data
   if (typeof data !== "object" || data === null) return undefined
   const message = (data as { message?: unknown }).message
-  return typeof message === "string" && message ? message : undefined
+  return typeof message === "string" ? message : undefined
 }
 
 /**
