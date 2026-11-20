@@ -341,22 +341,25 @@ function skipJinjaExpression(text: string, pos: number): number {
 }
 
 /**
- * Position just past the single-quoted string at `pos`. A doubled quote and a backslash-escaped one (Snowflake,
- * BigQuery, Databricks, MySQL) stay inside it, and so does Jinja (`'{{ var('x') }}'`, whose own quotes do not
- * end the string). Where a backslash is a plain character (Postgres, DuckDB), a string ending in one runs on past
- * its quote and pairs the quotes after it wrongly: names after it may be missed, or a name in a later string
- * read, so such a model's reads may be off either way.
+ * Position just past the quoted text at `pos`: a single-quoted string, or a `"` or `` ` `` quoted name. A doubled
+ * quote stays inside it, and so does Jinja (`'{{ var('x') }}'`, `"{{ var("x") }}"`, `'{# 'x' #}'`), whose own
+ * quotes do not end it. In a single-quoted string a backslash-escaped quote stays inside too (Snowflake, BigQuery,
+ * Databricks, MySQL); where a backslash is a plain character (Postgres, DuckDB), a string ending in one runs on
+ * past its quote and pairs the quotes after it wrongly: names after it may be missed, or a name in a later
+ * string read, so such a model's reads may be off either way.
  */
-function skipSingleQuoted(text: string, pos: number): number {
+function skipQuoted(text: string, pos: number): number {
+  const quote = text[pos]
   let at = pos + 1
   while (at < text.length) {
-    if (text[at] === "{" && text[at + 1] === "{") at = skipJinjaExpression(text, at)
-    else if (text[at] === "{" && text[at + 1] === "%") {
-      const close = text.indexOf("%}", at + 2)
+    const char = text[at]
+    if (char === "{" && text[at + 1] === "{") at = skipJinjaExpression(text, at)
+    else if (char === "{" && (text[at + 1] === "%" || text[at + 1] === "#")) {
+      const close = text.indexOf(text[at + 1] + "}", at + 2)
       at = close === -1 ? text.length : close + 2
-    } else if (text[at] === "\\") at += 2
-    else if (text[at] === "'" && text[at + 1] === "'") at += 2
-    else if (text[at] === "'") return at + 1
+    } else if (char === "\\" && quote === "'") at += 2
+    else if (char === quote && text[at + 1] === quote) at += 2
+    else if (char === quote) return at + 1
     else at++
   }
   return text.length
@@ -396,12 +399,12 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
         continue
       }
       if (char === "'") {
-        pos = skipSingleQuoted(text, pos)
+        pos = skipQuoted(text, pos)
         previous = "'"
         continue
       }
       let end = -1
-      if (char === '"' || char === "`") end = skipLiteral(text, pos)
+      if (char === '"' || char === "`") end = skipQuoted(text, pos)
       else if (char === "[") {
         BRACKETED.lastIndex = pos
         if (BRACKETED.test(text)) end = BRACKETED.lastIndex

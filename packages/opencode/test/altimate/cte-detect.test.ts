@@ -1708,6 +1708,8 @@ select * from c`
     expect(readsOf(escaped)).toEqual({ orders: [], b: [] })
     const jinjaInString = "with orders as (select 1), b as (select '{{ var('orders') }}' as label, '{% if x %}orders{% endif %}' as l2), c as (select '{{ var('x') }}' as l3 from orders) select * from c"
     expect(readsOf(jinjaInString)).toEqual({ orders: [], b: [], c: ["orders"] })
+    const jinjaInQuotes = `with orders as (select 1), b as (select "{{ var("orders") }}" from raw.customers), c as (select 'prefix {# 'orders' #} suffix' as label) select * from c`
+    expect(readsOf(jinjaInQuotes)).toEqual({ orders: [], b: [], c: [] })
   })
 
   it("does not count a name qualified across a comment, and reads a name that starts outside the BMP", () => {
