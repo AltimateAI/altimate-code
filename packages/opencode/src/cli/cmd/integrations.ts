@@ -241,7 +241,9 @@ async function runCredentials(args: any, update: boolean) {
       out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
       if (r.status === "missing_fields") {
         // The re-run keeps the flags of the call that failed: without --local-only it would sync the credential.
-        const variant = typeof args.variant === "string" && args.variant ? ` --variant ${clean(args.variant)}` : ""
+        // A variant named by its label ("Jira Server / Data Center") is quoted so the copied command parses.
+        const shellWord = (v: string) => (/^[\w.:/-]+$/.test(v) ? v : `'${v.replace(/'/g, "'\\''")}'`)
+        const variant = typeof args.variant === "string" && args.variant ? ` --variant ${shellWord(clean(args.variant))}` : ""
         const rerun = `${update ? "update" : "connect"} ${id}${variant}${args.share ? " --share" : ""}${!update && args["local-only"] ? " --local-only" : ""}`
         out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}${variant}\`, fill them with \`altimate integrations set ${id} <field> <value>\` or \`altimate integrations set-secret ${id} <field> --stdin\` (or \`--from-env VAR\`, \`--from-clipboard\`), then run \`altimate integrations ${rerun}\` again.${S.TEXT_NORMAL}`)
       }

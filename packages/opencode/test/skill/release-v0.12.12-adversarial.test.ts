@@ -308,6 +308,11 @@ describe("v0.12.12: the missing-fields hint re-runs the call that failed", () =>
     expect(out).toContain("`altimate integrations fields jira --variant server`")
     expect(out).toContain("`altimate integrations connect jira --variant server --share` again")
   }, 60_000)
+
+  test("a variant named by its label is quoted, so the copied command parses", async () => {
+    const out = await run("connect", "jira", "--variant", "Jira Server / Data Center")
+    expect(out).toContain("`altimate integrations fields jira --variant 'Jira Server / Data Center'`")
+  }, 60_000)
 })
 
 describe("v0.12.12: source guards", () => {
