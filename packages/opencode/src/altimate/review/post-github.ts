@@ -85,13 +85,29 @@ export function runCompleted(env: VerdictEnvelope): boolean {
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 /** Hidden marker in the body of every review this bot posts; reviews of a
  *  dbt project below the repository root also name it (`project=<dir>`,
- *  URI-encoded so a directory with spaces stays one token). */
-const BOT_REVIEW_MARKER_RE = /<!-- altimate-code-review:verdict(?: project=(\S+))? -->/
+ *  URI-encoded so a directory with spaces stays one token). An `--all-projects`
+ *  review names every project it covers (`projects=<dir>,<dir>`, each
+ *  URI-component-encoded, "." for the repository root). */
+const BOT_REVIEW_MARKER_RE = /<!-- altimate-code-review:verdict(?: project=(\S+)| projects=(\S+))? -->/
 
-function botReviewMarker(projectRoot: string | undefined): string {
+function botReviewMarker(projectRoot: string | undefined, coveredProjects: string[] | undefined): string {
+  if (coveredProjects?.length)
+    return `<!-- altimate-code-review:verdict projects=${coveredProjects.map((r) => encodeURIComponent(r || ".")).join(",")} -->`
   return projectRoot
     ? `<!-- altimate-code-review:verdict project=${encodeURI(projectRoot)} -->`
     : "<!-- altimate-code-review:verdict -->"
+}
+
+function markerProjects(encoded: string): string[] {
+  return encoded.split(",").map((e) => {
+    let r = e
+    try {
+      r = decodeURIComponent(e)
+    } catch {
+      /* keep as written */
+    }
+    return r === "." ? "" : r
+  })
 }
 
 function markerProject(encoded: string | undefined): string {
@@ -105,20 +121,23 @@ function markerProject(encoded: string | undefined): string {
 
 type ReviewLike = { body?: string | null; user?: { type?: string; login?: string } | null }
 
-/** A review this bot posted for this dbt project. The author must be a bot
- *  (GitHub App / `github-actions[bot]`) or the token's own login: a human
- *  review that quotes the bot's body, marker included, is never the bot's.
- *  The marker then scopes it to a project, so in a monorepo one project's run
- *  never touches another project's review. A bot review without the marker
- *  (posted before it existed) matches every project. */
-function isBotReview(r: ReviewLike, projectRoot: string | undefined, selfLogin: string | undefined): boolean {
+/** A review this bot posted for the projects this run covers. The author must
+ *  be a bot (GitHub App / `github-actions[bot]`) or the token's own login: a
+ *  human review that quotes the bot's body, marker included, is never the bot's.
+ *  The marker then scopes it to projects, so in a monorepo one project's run
+ *  never touches another project's review: it is this run's only when every
+ *  project it names is in `covered` (one project's root, or every project an
+ *  `--all-projects` run covers). A bot review without the marker (posted
+ *  before it existed) matches every project. */
+function isBotReview(r: ReviewLike, covered: Set<string>, selfLogin: string | undefined): boolean {
   const body = r.body ?? ""
   if (!BOT_REVIEW_RE.test(body)) return false
   const byBot = r.user?.type === "Bot" || (!!selfLogin && r.user?.login === selfLogin)
   if (!byBot) return false
   const marker = BOT_REVIEW_MARKER_RE.exec(body)
   if (!marker) return true
-  return markerProject(marker[1]) === (projectRoot ?? "")
+  const named = marker[2] !== undefined ? markerProjects(marker[2]) : [markerProject(marker[1])]
+  return named.every((p) => covered.has(p))
 }
 
 /** True only when the run is known to have reviewed the PR's current head:
@@ -158,6 +177,8 @@ export async function postGitHubReview(
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
   const projectRoot = env.scope?.projectRoot || undefined
+  const coveredProjects = env.scope?.coveredProjects
+  const covered = new Set(coveredProjects?.length ? coveredProjects : [projectRoot ?? ""])
 
   // 1. Read what is already on the PR. Rerun dedup: a finding already
   //    commented inline (same fingerprint, which ignores line numbers) is not
@@ -173,7 +194,7 @@ export async function postGitHubReview(
     posted = postedFindingIds(reviewComments.map((c) => c.body))
     const needsLogin = reviews.some((r) => r.user?.type !== "Bot" && BOT_REVIEW_MARKER_RE.test(r.body ?? ""))
     const selfLogin = needsLogin ? await tokenLogin(octo) : undefined
-    const botReviews = reviews.filter((r) => isBotReview(r, projectRoot, selfLogin))
+    const botReviews = reviews.filter((r) => isBotReview(r, covered, selfLogin))
     priorBotReview = botReviews.length > 0
     staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
   } catch {
@@ -209,7 +230,7 @@ export async function postGitHubReview(
   //    COMMENT event — the bot must never submit a formal GitHub approval.
   const event = VCS_EVENT[env.verdict]
   const headline = verdictHeadline(env)
-  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot)}`
+  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot, coveredProjects)}`
   const { comments } = inlineComments(env, posted)
   const posting = postingPolicy(env)
   result.inlineSkippedAsPosted = env.findings.filter((f) => inlineEligible(f, posting) && posted.has(f.id)).length

@@ -159,6 +159,10 @@ export const ReviewScope = z.object({
    *  project, moved, not a dbt file, no check at this tier, no manifest), with
    *  the reason; also repeats the `unverified` entries. */
   notReviewed: z.array(z.object({ path: z.string(), reason: z.string() })).default([]),
+  /** Multi-project review (`--all-projects`): every dbt project root the review
+   *  speaks for (the projects the PR does not touch have nothing to flag). The
+   *  poster treats earlier bot reviews of these projects as this review's own. */
+  coveredProjects: z.array(z.string()).optional(),
   /** Multi-project review (`--all-projects`): each dbt project reviewed, its
    *  changed-file count and its own verdict. */
   projects: z

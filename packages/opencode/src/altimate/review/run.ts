@@ -47,6 +47,9 @@ export interface ReviewPullRequestOptions {
   head?: string
   /** Override the manifest path from config. */
   manifestPath?: string
+  /** Directories whose `.altimate/review` policy applies, in order, when `cwd` has none
+   *  (`--all-projects`: the invocation directory, then the repository root). */
+  policyFallbackDirs?: string[]
   /** Override the review mode from config. */
   mode?: ReviewMode
   /** Override the minimum severity to surface. */
@@ -258,14 +261,24 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
 
   // The policy (.altimate/review.yml) comes from the BASE commit, so the PR
   // under review cannot relax its own rules; what it would change is listed.
-  const cwdRel = await repoRelative(gitRoot, opts.cwd, true)
-  const policy = await loadReviewPolicy({
-    cwd: opts.cwd,
-    readBase:
-      resolved && cwdRel !== undefined
-        ? (rel) => showAtRef(opts.cwd, resolved.sha, path.posix.join(cwdRel, rel))
-        : undefined,
-  })
+  // The first of cwd and `policyFallbackDirs` that has a policy file wins.
+  const policyAt = async (dir: string) => {
+    const dirRel = await repoRelative(gitRoot, dir, true)
+    return loadReviewPolicy({
+      cwd: dir,
+      readBase:
+        resolved && dirRel !== undefined ? (rel) => showAtRef(opts.cwd, resolved.sha, path.posix.join(dirRel, rel)) : undefined,
+    })
+  }
+  let policy = await policyAt(opts.cwd)
+  const policyChangedHere = policy.changedInPr
+  for (const dir of opts.policyFallbackDirs ?? []) {
+    if (policy.source !== "default") break
+    policy = await policyAt(dir)
+  }
+  // A policy file the PR adds next to the project would replace the fallback: list it too.
+  if (policyChangedHere.length && policy.changedInPr !== policyChangedHere)
+    policy.changedInPr = [...new Set([...policy.changedInPr, ...policyChangedHere])]
   const config = policy.config
   if (policy.changedInPr.length) {
     process.stderr.write(
