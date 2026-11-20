@@ -98,14 +98,21 @@ export type FindingOrigin = NonNullable<Finding["origin"]>
  *  warehouse) rather than text patterns. */
 const ENGINE_TOOLS = new Set(["impact_analysis", "dbt.manifest", "data.diff", "schema.detect_pii"])
 
-/** The layer a finding came from. Unknown or missing evidence counts as
- *  `catalog`, so a new detector can never block until it is classified. */
+/** The layer a finding came from, always derived from `evidence.tool`: a
+ *  supplied `origin` is ignored, so an externally built finding cannot claim
+ *  to be engine-backed. Unknown or missing evidence counts as `catalog`, so a
+ *  new detector can never block until it is classified. */
 export function findingOrigin(f: Pick<Finding, "evidence" | "origin">): FindingOrigin {
-  if (f.origin) return f.origin
   const tool = f.evidence?.tool ?? ""
   if (tool === "ai-review") return "ai"
   if (tool.startsWith("altimate_core.") || ENGINE_TOOLS.has(tool)) return "engine"
   return "catalog"
+}
+
+/** A rule id in one spelling: catalog sources use `hardcoded-credential` and
+ *  `pii_into_mart` alike, so ids compare lowercased with `_` as `-`. */
+export function normalizeRuleId(id: string): string {
+  return id.trim().toLowerCase().replace(/_/g, "-")
 }
 
 /** The catalog rule id behind a finding (`evidence.result.rule`), if any. */

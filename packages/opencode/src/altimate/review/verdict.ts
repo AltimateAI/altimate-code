@@ -1,6 +1,6 @@
 import z from "zod"
 import { createHmac, createHash } from "node:crypto"
-import { Finding, type Severity, catalogRuleId, findingOrigin } from "./finding"
+import { Finding, type Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
 
 /**
@@ -49,7 +49,9 @@ export function verdictEligible(f: Finding, rubric: Rubric = DEFAULT_RUBRIC): bo
   if (origin === "engine") return true
   if (origin === "ai") return false
   const rule = catalogRuleId(f)
-  return !!rule && rubric.blockingRules.includes(rule)
+  if (!rule) return false
+  const id = normalizeRuleId(rule)
+  return rubric.blockingRules.some((r) => normalizeRuleId(r) === id)
 }
 
 /**
@@ -256,7 +258,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierReasons: input.tierReasons,
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
-    findings: input.findings.map((f) => (f.origin ? f : { ...f, origin: findingOrigin(f) })),
+    findings: input.findings.map((f) => ({ ...f, origin: findingOrigin(f) })),
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,

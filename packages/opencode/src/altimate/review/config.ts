@@ -199,7 +199,11 @@ export async function loadReviewPolicy(opts: {
   try {
     config = baseText === undefined ? structuredClone(DEFAULT_REVIEW_CONFIG) : parseReviewConfig(baseText)
   } catch (e: any) {
-    throw new Error(`Failed to load the base branch's .altimate/review config: ${e?.message ?? e}`)
+    throw new Error(
+      `Failed to load the base branch's .altimate/review config: ${e?.message ?? e}. ` +
+        "The policy is read from the base branch so a PR cannot relax it; fix the file on the base branch " +
+        "(a PR that repairs it is reviewed under the broken base file, so merge it with an admin bypass).",
+    )
   }
   const headText = await readFirst((rel) => fs.readFile(path.join(opts.cwd, rel), "utf8").catch(() => undefined))
   let changedInPr: string[] = []
