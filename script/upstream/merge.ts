@@ -29,6 +29,7 @@ import { RESET, BOLD, DIM, CYAN, GREEN, RED, YELLOW, MAGENTA, bold, dim, cyan, g
 import { loadConfig, repoRoot, type MergeConfig, type StringReplacement } from "./utils/config"
 import { createReport, addFileReport, printSummary, writeReport, type MergeReport, type FileReport, type Change } from "./utils/report"
 import { validateRelease, getReleaseTags } from "./utils/github"
+import { assertSameMajor } from "./utils/version"
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -605,6 +606,8 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
+  assertSameMajor(version, config.upstreamBaseline)
+
   const mergeRef = version
 
   const baseBranch = args["base-branch"] || config.baseBranch
@@ -811,6 +814,8 @@ async function continueAfterConflicts(config: MergeConfig): Promise<void> {
     logger.info("Start a new merge with: bun run script/upstream/merge.ts --version <tag>")
     process.exit(1)
   }
+
+  assertSameMajor(state.version, config.upstreamBaseline)
 
   logger.info(`Resuming merge of ${cyan(state.version)}`)
   logger.info(`Merge branch: ${cyan(state.mergeBranch)}`)
