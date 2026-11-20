@@ -152,6 +152,10 @@ describe("Jinja structure", () => {
     expect(temp("    -- take this out before release")).toBe(true)
     // Only comments count: the phrase in code or a string literal is not a marker.
     expect(temp("    select 'take this out' as label")).toBe(false)
+    // Without removal intent the phrases describe code meant to stay.
+    expect(temp("    limit 10  -- handy while debugging: take this out of the CTE to see raw rows")).toBe(false)
+    expect(temp("    and is_test = false  -- surfaced while debugging the refund mismatch")).toBe(false)
+    expect(temp("    limit 10  -- added while debugging")).toBe(true)
   })
 })
 
@@ -324,8 +328,10 @@ describe("SQL shapes from the catalog", () => {
     const sql = "select\n  last_value(\n    content_title\n    ignore nulls\n  ) over (partition by k order by d) as t\nfrom x"
     expect(fires("ignore-nulls-inside-call", sql, ["    ignore nulls"])).toBe(true)
     expect(fires("ignore-nulls-inside-call", "select last_value(t) ignore nulls over (partition by k order by d) from x")).toBe(false)
-    // DuckDB accepts IGNORE NULLS inside the call too, so it is not flagged as non-portable there.
-    expect(rule("ignore-nulls-inside-call").portability?.worksOn).toContain("duckdb")
+    // DuckDB accepts IGNORE NULLS inside a navigation window call, so that form is portable there.
+    const duck = rule("ignore-nulls-inside-call").portability?.alsoWorksOn
+    expect(duck?.engines).toContain("duckdb")
+    expect(duck?.check(sql)).toBe(true)
   })
   test("IGNORE NULLS inside an aggregate call followed by ORDER BY", () => {
     expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status IGNORE NULLS ORDER BY order_date) as s from o")).toBe(true)

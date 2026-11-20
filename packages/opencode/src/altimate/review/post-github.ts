@@ -345,6 +345,16 @@ export async function postGitHubReview(
         /* fall through to the event-only review */
       }
     }
+    // The summary listed inline findings as one-line pointers; with the inline
+    // comments gone, rewrite it with every finding in full so none loses its body.
+    if (comments.length && result.summaryCommentId !== undefined) {
+      try {
+        const body = renderSummary(env, { alreadyPosted: posted, inline: false, allowSilent: false })
+        await octo.rest.issues.updateComment({ owner, repo, comment_id: result.summaryCommentId, body })
+      } catch {
+        /* the event-only review below still records the verdict */
+      }
+    }
     try {
       const r = await octo.rest.pulls.createReview({
         owner,

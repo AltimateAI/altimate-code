@@ -43,7 +43,7 @@ import { finalSelectNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
-import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
+import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
 import { ruleTier } from "./rule-tiers"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
@@ -2521,7 +2521,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     supporting.forEach((f, i) =>
       aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
     )
-    touch(aiFiles)
+    // Only the files within the AI lane's file cap are reached; the rest stay in the ledger.
+    touch(selectAiFiles(aiFiles, aiInputBudget().maxFiles))
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     try {
       const res = await input.aiReview({
