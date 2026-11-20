@@ -295,7 +295,10 @@ rubric:
   under (switch to `comment` mode, drop a `blockOn` category, exclude its own
   paths). If the PR edits the file, the comment lists the changed settings; they
   take effect after merge. The applied policy's hash is signed into the envelope
-  (`policy`).
+  (`policy`). The action's `mode` and `severity_threshold` inputs (`--mode`,
+  `--severity`) can only tighten a base policy: they cannot turn `mode: gate`
+  into `comment` or raise its severity threshold. Other workflow steps are still
+  PR-editable, so protect `.github/` with CODEOWNERS or branch rules.
 - **Only the deterministic engine blocks.** Findings carry an `origin`:
   `engine` (AST, lineage, manifest, equivalence, data-diff), `catalog` (pattern
   rules) or `ai`. Only `engine` findings count toward REQUEST_CHANGES. A pattern

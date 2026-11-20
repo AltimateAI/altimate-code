@@ -283,8 +283,13 @@ export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<Resol
 export async function showAtRef(cwd: string, ref: string, rel: string): Promise<string | undefined> {
   try {
     return await git(["show", `${ref}:${rel}`], cwd)
-  } catch {
-    return undefined
+  } catch (err) {
+    // Only "the path is not in that commit" means absent. Any other failure
+    // (bad ref, corrupt object, git missing) must surface: callers such as the
+    // base-policy loader would otherwise fall back to the permissive default.
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/does not exist in|exists on disk, but not in/i.test(msg)) return undefined
+    throw err
   }
 }
 

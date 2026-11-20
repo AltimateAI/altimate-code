@@ -9,6 +9,7 @@ import { DEFAULT_RUBRIC, Rubric } from "../../src/altimate/review/rubric"
 import { buildEnvelope, computeIdealVerdict, signEnvelope, verdictEligible, verifyEnvelope } from "../../src/altimate/review/verdict"
 import { DEFAULT_REVIEW_CONFIG, policyChanges, policyHash } from "../../src/altimate/review/config"
 import { reviewPullRequest } from "../../src/altimate/review/run"
+import { showAtRef } from "../../src/altimate/review/git"
 import { renderSummary } from "../../src/altimate/review/format"
 
 /**
@@ -163,6 +164,23 @@ describe("policy comes from the base branch", () => {
     expect(env.mode).toBe("gate")
     expect(env.policy?.changedInPr).toBeUndefined()
     expect(env.policy?.hash).toMatch(/^[0-9a-f]{16}$/)
+  }, 60_000)
+
+  test("--mode and --severity from the workflow cannot relax a base policy, only tighten it", async () => {
+    const root = await repo("mode: gate\nseverityThreshold: warning\n", undefined)
+    const relaxed = await reviewPullRequest({ cwd: root, head: "HEAD", noAi: true, mode: "comment", severityThreshold: "critical" })
+    expect(relaxed.mode).toBe("gate")
+    const tightened = await reviewPullRequest({ cwd: root, head: "HEAD", noAi: true, severityThreshold: "suggestion" })
+    expect(tightened.mode).toBe("gate")
+    const loose = await repo("mode: comment\n", undefined)
+    expect((await reviewPullRequest({ cwd: loose, head: "HEAD", noAi: true, mode: "gate" })).mode).toBe("gate")
+  }, 60_000)
+
+  test("showAtRef: a path missing at the ref is absent, any other git failure surfaces", async () => {
+    const root = await repo("mode: gate\n", undefined)
+    expect(await showAtRef(root, "main", ".altimate/review.yaml")).toBeUndefined()
+    expect(await showAtRef(root, "main", ".altimate/review.yml")).toBe("mode: gate\n")
+    await expect(showAtRef(root, "no-such-ref", ".altimate/review.yml")).rejects.toThrow()
   }, 60_000)
 
   test("allowForceTier: false in the base policy rejects --force-tier", async () => {
