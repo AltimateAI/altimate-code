@@ -18,6 +18,9 @@ process.chdir(dir)
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 import { walkInputs } from "./stamp-inputs"
+// altimate_change start — upstream_fix: Bedrock event-stream decoding under the browser condition
+import { smithyNodeSerdePlugin } from "./smithy-node-serde-plugin"
+// altimate_change end
 import { assertUsableCatalog, catalogDiagnosticOrigin, formatCatalogSummary } from "./models-catalog"
 import { FreeTierUrl } from "../src/altimate/free/url"
 
@@ -599,7 +602,11 @@ for (const item of targets) {
   await Bun.build({
     conditions: ["browser"],
     tsconfig: "./tsconfig.json",
-    plugins: [solidPlugin, altimateCoreResolverPlugin],
+    // altimate_change start — upstream_fix: smithyNodeSerdePlugin keeps Bedrock Converse streams non-empty
+    // (see script/smithy-node-serde-plugin.ts); it only affects `@smithy/core/serde` as imported by
+    // `@smithy/util-buffer-from`.
+    plugins: [solidPlugin, altimateCoreResolverPlugin, smithyNodeSerdePlugin()],
+    // altimate_change end
     sourcemap: "external",
     // IMPORTANT: Without code splitting, Bun inlines dynamic import() targets
     // into the main chunk. Any external require() in those targets will fail
