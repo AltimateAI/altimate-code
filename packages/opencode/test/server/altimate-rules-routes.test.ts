@@ -122,6 +122,26 @@ describe("workspace request routes", () => {
     }
   })
 
+  test("a rule proposal's withdraw or new wording is validated before anything is asked, and refused from a browser", async () => {
+    const origin = { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    const refused = await request("POST", "/altimate/rules/r-1/withdraw", {}, origin)
+    expect([403, 409]).toContain(refused.status)
+    const unknown = await request("POST", "/altimate/rules/r-1/approve", {})
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toMatchObject({ ok: false, code: "unknown_action" })
+    for (const body of [{}, { text: "  " }, { text: 5 }]) {
+      const response = await request("POST", "/altimate/rules/r-1/resubmit", body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ ok: false, code: "invalid_text" })
+    }
+    // The version the client read, when it sends one, is a positive integer.
+    for (const body of [{ expected_version: 0 }, { expected_version: "2" }, { expected_version: 1.5 }]) {
+      const response = await request("POST", "/altimate/rules/r-1/withdraw", body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ ok: false, code: "invalid_version" })
+    }
+  })
+
   test("without a link, the list still answers with the person's rules and says why skills and knowledge are missing", async () => {
     await using dir = await tmpdir({ git: true })
     const response = await Server.Default().request("/altimate/workspace/requests", { headers: { "x-opencode-directory": dir.path } })
@@ -186,4 +206,81 @@ describe("rules sync route", () => {
       poll.mockRestore()
     }
   }, 15_000)
+})
+
+describe("workspace activity routes", () => {
+  test("a browser origin is refused", async () => {
+    const origin = { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    for (const [method, url, body] of [
+      ["GET", "/altimate/workspace/activity?host=tui"],
+      ["POST", "/altimate/workspace/activity/seen", { host: "tui", seen: { at: "" } }],
+    ] as const) {
+      const response = await request(method, url, body, origin)
+      expect([403, 409]).toContain(response.status)
+      expect(await response.json()).toMatchObject({ ok: false })
+    }
+  })
+
+  test("a deferred look is passed through, and its mark comes back for the client to confirm", async () => {
+    const { WorkspaceActivity } = await import("../../src/altimate/workspace/workspace-activity")
+    const { spyOn } = await import("bun:test")
+    const seen = {
+      at: "2026-11-12T10:00:00Z",
+      ids: [{ id: "e1", at: "2026-11-12T10:00:00Z" }],
+      overlap: true,
+      from: "",
+      scope: "s-1",
+    }
+    const look = spyOn(WorkspaceActivity, "changesSince").mockResolvedValue({
+      status: "ok",
+      workspace: { id: 42, name: "Growth" },
+      items: [],
+      line: "Since your last session in Growth: 1 skill added (naming).",
+      seen,
+    })
+    try {
+      const deferred = await request("GET", "/altimate/workspace/activity?host=tui&defer=1")
+      expect(await deferred.json()).toMatchObject({ ok: true, status: "ok", seen })
+      expect(look.mock.calls[0]?.[1]).toBe("tui")
+      expect(look.mock.calls[0]?.[2]).toEqual({ defer: true })
+      await request("GET", "/altimate/workspace/activity?host=vscode")
+      expect(look.mock.calls[1]?.[2]).toEqual({ defer: false })
+    } finally {
+      look.mockRestore()
+    }
+  })
+
+  test("confirming a shown line takes the mark back; anything else is refused before it is recorded", async () => {
+    const { WorkspaceActivity } = await import("../../src/altimate/workspace/workspace-activity")
+    const { spyOn } = await import("bun:test")
+    const acknowledge = spyOn(WorkspaceActivity, "acknowledge").mockResolvedValue({ status: "ok" })
+    try {
+      for (const body of [
+        {},
+        { host: "Bad Host", seen: { at: "" } },
+        { host: "tui" },
+        { host: "tui", seen: { at: 5 } },
+        { host: "tui", seen: "2026-11-12T10:00:00Z" },
+        // A mark without the workspace and account it came from.
+        { host: "tui", seen: { at: "2026-11-12T10:00:00Z", ids: [], overlap: true, from: "" } },
+      ]) {
+        const response = await request("POST", "/altimate/workspace/activity/seen", body)
+        expect(response.status).toBe(400)
+        expect(await response.json()).toMatchObject({ ok: false })
+      }
+      expect(acknowledge).not.toHaveBeenCalled()
+      const seen = { at: "2026-11-12T10:00:00Z", ids: [], overlap: true, from: "", scope: "s-1" }
+      const ok = await request("POST", "/altimate/workspace/activity/seen", { host: "tui", seen })
+      expect(await ok.json()).toEqual({ ok: true, status: "ok" })
+      expect(acknowledge.mock.calls[0]?.[1]).toBe("tui")
+      expect(acknowledge.mock.calls[0]?.[2]).toEqual(seen)
+      // Relinked or signed in as someone else since the look.
+      acknowledge.mockResolvedValue({ status: "scope_changed" })
+      const moved = await request("POST", "/altimate/workspace/activity/seen", { host: "tui", seen })
+      expect(moved.status).toBe(409)
+      expect(await moved.json()).toMatchObject({ ok: false, status: "scope_changed" })
+    } finally {
+      acknowledge.mockRestore()
+    }
+  })
 })

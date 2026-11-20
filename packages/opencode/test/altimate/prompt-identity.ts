@@ -7,8 +7,8 @@
 // (7bbf8a6d23f5aa880be3e8436d3e74764e5928a4). A deliberate prompt edit must
 // update this pin — and that PR then needs its own quality evidence, because
 // byte identity no longer covers it.
-export const EXPECTED_SHA256 = "17663410dd9accc527b4cbd84558fc577ccc36d33d0428c5c5205d5df25400d7"
-export const EXPECTED_BYTES = 14773
+export const EXPECTED_SHA256 = "37bd335a70f9ba4f4fb0495ad59fb0752e501cce98eb19ceedb07ac03e698cf3"
+export const EXPECTED_BYTES = 15127
 
 export function sha256(text: string): string {
   return new Bun.CryptoHasher("sha256").update(text).digest("hex")

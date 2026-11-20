@@ -81,8 +81,22 @@ function terminal(): DBTTerminal {
   }
 }
 
-function env(cfg: Config): RuntimePythonEnvironment {
+/** What `create` needs besides the saved config. */
+export type CreateOptions = {
+  /**
+   * The folder dbt writes its artifacts to (manifest.json, partial_parse.msgpack, run_results.json) for
+   * every command this adapter runs, given to dbt as DBT_TARGET_PATH. Unset, dbt writes to the project's
+   * own target-path, which is what a command run for the user should do. A caller that parses and
+   * compiles for its own reading passes a folder of its own: dbt rewrites manifest.json on every
+   * command, with compiled SQL only for what that command compiled, so writing to the project's target
+   * would take the compiled SQL of every other model away from whoever reads that manifest.
+   */
+  targetPath?: string
+}
+
+function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
   const vars = { ...process.env }
+  if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
   return {
     // A Fusion config may have none: dbt-integration runs Fusion with an empty one.
     pythonPath: cfg.pythonPath ?? "",
@@ -99,7 +113,7 @@ export function hasModelLineage(adapter?: DBTProjectIntegrationAdapter): boolean
   return typeof target.getModelLineage === "function"
 }
 
-export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter> {
+export async function create(cfg: Config, options: CreateOptions = {}): Promise<DBTProjectIntegrationAdapter> {
   const config = configuration(cfg)
   const term = terminal()
   const factory = new DBTCommandFactory(config)
@@ -107,7 +121,7 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
   const http = new AltimateHttpClient(term, config)
   const client = new DbtIntegrationClient(http, term)
 
-  const runtime = env(cfg)
+  const runtime = env(cfg, options)
   const provider = {
     getCurrentEnvironment: () => runtime,
     onEnvironmentChanged: () => () => {},

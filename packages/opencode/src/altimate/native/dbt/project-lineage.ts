@@ -98,14 +98,261 @@ const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
  * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
  * name for it. A name the SQL itself writes (`amount as _1`) is a real alias.
  */
-function engineMade(name: string, stripped: string): boolean {
+export function engineMade(name: string, stripped: string): boolean {
   return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
 }
 
-/** Whether a SELECT list's output names are the columns the warehouse makes: none unaliased, none repeated. */
-function namesItsOutputs(outputs: string[], stripped: string): boolean {
+/**
+ * Whether a SELECT list's output names are the columns the warehouse makes. The engine lists no outputs for an
+ * unaliased expression or a `*`, so an empty list doesn't settle; neither does a repeated name, which the
+ * warehouse renames.
+ */
+function namesItsOutputs(outputs: string[]): boolean {
   const names = outputs.map((name) => name.toLowerCase())
-  return names.length > 0 && new Set(names).size === names.length && !names.some((name) => engineMade(name, stripped))
+  return names.length > 0 && new Set(names).size === names.length
+}
+
+const QUOTED = '"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]'
+const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowerCase()
+
+/**
+ * The items of the SQL's outermost SELECT list (the first one outside parentheses, so after any WITH), split at
+ * top-level commas, from literal- and comment-stripped SQL; [] when there is none.
+ */
+export function selectItems(stripped: string): string[] {
+  // A quoted name is blanked whole, so `"from"` or `"a,b"` ends no item.
+  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+  let depth = 0
+  let start = -1
+  const items: string[] = []
+  let from = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "(") depth++
+    else if (ch === ")") depth--
+    if (depth !== 0) continue
+    const word = /^[a-z_]+/i.exec(text.slice(i))?.[0]?.toLowerCase()
+    const boundary = i === 0 || !/[\w$]/.test(text[i - 1]!)
+    if (start < 0) {
+      if (boundary && word === "select") {
+        start = i + 6
+        start += modifierLength(text, start)
+        from = start
+        i = start - 1
+      }
+      continue
+    }
+    if (ch === ",") {
+      items.push(stripped.slice(from, i).trim())
+      from = i + 1
+    } else if (boundary && word && /^(from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/.test(word)) {
+      items.push(stripped.slice(from, i).trim())
+      return items.filter((one) => one !== "")
+    }
+  }
+  if (start >= 0) items.push(stripped.slice(from).trim())
+  return items.filter((one) => one !== "")
+}
+
+/** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
+const ENDS_EXPRESSION = /^(?:null|true|false|end)$/i
+/** Words after which the next word is an operand (`a and b`, `sum(x) over w`), not an alias. */
+const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|between|case|when|then|else|over|collate|escape|interval|distinct|by|as|at|zone|any|all|some|exists|div|mod|xor)$/i
+
+/**
+ * A SELECT item's output name when the SQL gives one (`x as name`, `x name`, a bare `t.col`), `*` for a star,
+ * else null.
+ */
+export function itemName(item: string): string | null {
+  if (/^(?:[\w$]+\.)*\*(?:\s|$)/.test(item)) return "*"
+  const as = new RegExp(`\\s+as\\s+(${QUOTED}|[\\w$]+)$`, "i").exec(item)
+  if (as) return unquoteName(as[1]!)
+  const bare = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(item)
+  if (bare) return unquoteName(bare[1]!)
+  // An alias without AS: the last word, after an expression that ends in a name, a `)`, a quote or a literal.
+  const plain = new RegExp(`^([\\s\\S]*?[\\w$)"\`\\]'])\\s+(${QUOTED}|[\\w$]+)$`).exec(item)
+  if (!plain) return null
+  const before = /([\w$]+)\s*$/.exec(plain[1]!)?.[1]
+  if ((before && TAKES_OPERAND.test(before)) || /(?<![\w$])interval\s+(?:''|[\d.]+)$/i.test(plain[1]!)) return null
+  return ENDS_EXPRESSION.test(plain[2]!) ? null : unquoteName(plain[2]!)
+}
+
+/**
+ * The length of the modifier a SELECT list starts with at `at` in quote-blanked text: `distinct on (…)` up to its
+ * matching `)`, `top N`, or the whole word `distinct` or `all` (`allocation` and `distinct_users` are names); 0 when
+ * there is none.
+ */
+function modifierLength(text: string, at: number): number {
+  const rest = text.slice(at)
+  const on = /^\s+distinct\s+on\s*\(/i.exec(rest)
+  if (on) {
+    const end = closingParen(rest, on[0].length - 1)
+    return end < 0 ? 0 : end + 1
+  }
+  // The same name characters as the cast reader's, so `allé` is a name too.
+  return /^\s+(?:top\s+\d+|(?:distinct|all)(?![\p{L}\p{N}_$]))/iu.exec(rest)?.[0].length ?? 0
+}
+
+/** The index of the `)` that closes the `(` at `open` in quote-blanked text, -1 when it isn't closed. */
+function closingParen(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "(") depth++
+    else if (text[i] === ")" && --depth === 0) return i
+  }
+  return -1
+}
+
+/** A token of a SELECT item for the cast reader. `other` is any character the reader never accepts (`+`, `-`, `|`, …). */
+type CastToken = { kind: "name" | "quoted" | "number" | "string" | "punct" | "other"; text: string }
+
+const CAST_TOKEN =
+  /\s+|("(?:[^"]|"")*"|`(?:[^`]|``)*`)|('(?:[^']|'')*')|(\d+(?:\.\d*)?(?:e[+-]?\d+)?|\.\d+(?:e[+-]?\d+)?)|([\p{L}_$][\p{L}\p{N}_$]*)|(::|[().,[\]])|([^])/iuy
+
+/** The tokens of a literal- and comment-stripped SELECT item, whitespace dropped. */
+function castTokens(item: string): CastToken[] {
+  const out: CastToken[] = []
+  CAST_TOKEN.lastIndex = 0
+  for (let m = CAST_TOKEN.exec(item); m; m = CAST_TOKEN.exec(item)) {
+    const kind = m[1] ? "quoted" : m[2] ? "string" : m[3] ? "number" : m[4] ? "name" : m[5] ? "punct" : m[6] ? "other" : undefined
+    if (kind) out.push({ kind, text: m[0] })
+  }
+  return out
+}
+
+/** Words a type name never holds: an item with one after `::` is more than a cast (`amount::numeric is not null`). */
+const NOT_TYPE =
+  /^(?:as|is|not|isnull|notnull|null|true|false|between|in|like|ilike|similar|and|or|div|mod|xor|collate|at|over|filter|case|when|then|else|end|escape)$/i
+
+/**
+ * The column a SELECT item casts, unaliased; null otherwise. It reads the item as tokens, in this grammar, and the
+ * whole item must match:
+ *
+ *   item    = operand { "::" type }          (at least one cast or one pair of parentheses)
+ *   operand = column | "(" item ")" | "cast" "(" item "as" type ")"
+ *   column  = name { "." name }              (a bare `null`, `true`, `false` or `end` is a literal)
+ *   type    = word { word | "." | "(" mod { "," mod } ")" | "[" [ number ] "]" }   (mod = number | name)
+ *
+ * So `amount::numeric`, `(amount)::numeric`, `cast((amount)as numeric)`, `cast(amount as numeric)::int` and `q.end::int`
+ * name a column; `amount::numeric + 1`, `coalesce(amount)::numeric`, `(1.5)::numeric` and `(null)::int` don't.
+ */
+export function castColumn(item: string): string | null {
+  const t = castTokens(item)
+  let at = 0
+  let shaped = false
+  const punct = (k: number, text: string) => t[k]?.kind === "punct" && t[k]!.text === text
+  const word = (k: number, text: string) => t[k]?.kind === "name" && t[k]!.text.toLowerCase() === text
+  const named = (k: number) => t[k]?.kind === "quoted" || t[k]?.kind === "name"
+  // A type modifier: a number (`numeric(10, 2)`) or a name (`varchar(max)`, `geometry(Point, 4326)`).
+  const modifier = (k: number) => t[k]?.kind === "number" || named(k)
+
+  const type = (): boolean => {
+    let words = 0
+    for (;;) {
+      const k = t[at]
+      if (k && (k.kind === "quoted" || (k.kind === "name" && !NOT_TYPE.test(k.text)))) at++, words++
+      else if (words && punct(at, ".")) at++
+      else if (words && punct(at, "(") && modifier(at + 1)) {
+        at += 2
+        while (punct(at, ",") && modifier(at + 1)) at += 2
+        if (!punct(at, ")")) return false
+        at++
+      } else if (words && punct(at, "[")) {
+        at += t[at + 1]?.kind === "number" ? 2 : 1
+        if (!punct(at, "]")) return false
+        at++
+      } else return words > 0
+    }
+  }
+  const column = (): string | null => {
+    if (!named(at)) return null
+    const start = at++
+    while (punct(at, ".") && named(at + 1)) at += 2
+    const last = t[at - 1]!
+    // Only the token's own quote is escaped by doubling: `"a``b"` is a``b.
+    if (last.kind === "quoted") {
+      const q = last.text[0]!
+      return last.text.slice(1, -1).replaceAll(q + q, q).toLowerCase()
+    }
+    return at - start === 1 && ENDS_EXPRESSION.test(last.text) ? null : last.text.toLowerCase()
+  }
+  const operand = (): string | null => {
+    if (punct(at, "(")) {
+      at++
+      const name = chain()
+      if (name === null || !punct(at, ")")) return null
+      at++
+      shaped = true
+      return name
+    }
+    if (word(at, "cast") && punct(at + 1, "(")) {
+      at += 2
+      const name = chain()
+      if (name === null || !word(at, "as")) return null
+      at++
+      if (!type() || !punct(at, ")")) return null
+      at++
+      shaped = true
+      return name
+    }
+    return column()
+  }
+  const chain = (): string | null => {
+    const name = operand()
+    if (name === null) return null
+    while (punct(at, "::")) {
+      at++
+      if (!type()) return null
+      shaped = true
+    }
+    return name
+  }
+
+  const name = chain()
+  return name !== null && shaped && at === t.length ? name : null
+}
+
+/**
+ * The alias templates `COLUMNS(...) AS "…"` items give (DuckDB's `"col_\0"`, which hold a `\N` marker), lower-cased.
+ * An alias without a marker is the output's own name.
+ */
+function columnsTemplates(stripped: string): Set<string> {
+  const out = new Set<string>()
+  const call = new RegExp(COLUMNS_CALL.source, "gi")
+  // A quoted name is blanked whole, so a `)` or `columns(` inside one neither ends nor starts a call.
+  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+  for (let m = call.exec(text); m; m = call.exec(text)) {
+    let depth = 0
+    let i = m.index + m[0].length - 1
+    for (; i < text.length; i++) {
+      if (text[i] === "(") depth++
+      else if (text[i] === ")" && --depth === 0) break
+    }
+    const alias = new RegExp(`^\\s*as\\s+(${QUOTED}|[\\w$]+)`, "i").exec(stripped.slice(i + 1))
+    if (alias && /\\\d/.test(alias[1]!)) out.add(unquoteName(alias[1]!))
+  }
+  return out
+}
+
+/**
+ * The names DuckDB gives a SELECT list's repeated outputs, in list order: an output whose name is already used takes
+ * the first free `_N` (`val, val, val` is `val, val_1, val_2`; `id, id, amount as id_1` is `id, id_1, id_1_1`).
+ */
+function duckdbRepeats(outputs: string[]): string[] {
+  const used = new Set<string>()
+  const out: string[] = []
+  for (const raw of outputs) {
+    const name = raw.toLowerCase()
+    if (!used.has(name)) {
+      used.add(name)
+      continue
+    }
+    let k = 1
+    while (used.has(`${name}_${k}`)) k++
+    used.add(`${name}_${k}`)
+    out.push(`${name}_${k}`)
+  }
+  return out
 }
 
 /**
@@ -504,14 +751,21 @@ export class ProjectLineage {
     if (n?.resource_type === "seed") for (const c of this.seedHeader(n)) add(c)
     if (this.traced(id) && !this.busy.has(id)) {
       // Names from the SQL that aren't the warehouse's: the engine's own name for an unaliased expression
-      // (`_1`, `_col_1`), and, where the SQL calls COLUMNS(), an alias template with a backslash and a digit
-      // (`as "col_\0"`). A documented name is kept as it is.
+      // (`_1`, `_col_1`), and the alias template a COLUMNS(...) item gives (`as "col_\0"`). A documented name is
+      // kept as it is.
       const sql = this.sqlOf(id)
       const stripped = sql ? stripSql(sql) : ""
-      const template = COLUMNS_CALL.test(stripped)
-      const real = (name: string) => !engineMade(name, stripped) && !(template && /\\\d/.test(name))
-      for (const e of this.lineage(id).edges) if (real(e.to)) add(e.to)
-      if (sql) for (const c of this.outputColumns(sql)) if (real(c)) add(c)
+      const templates = columnsTemplates(stripped)
+      const edges = this.lineage(id).edges
+      // A name a parent column of the same name passes on (`select * from r` over r's real `_1`) is that column.
+      const passed = new Set(edges.filter((e) => e.fromCol === e.to).map((e) => e.to))
+      const real = (name: string) => !templates.has(name.toLowerCase()) && (passed.has(name) || !engineMade(name, stripped))
+      for (const e of edges) if (real(e.to)) add(e.to)
+      const outputs = sql ? this.outputColumns(sql).filter(real) : []
+      for (const c of outputs) add(c)
+      // DuckDB keeps a repeated output under a new name (`val`, `val_1`): a `select *` over it reads both. Only
+      // the SELECT list decides the names; a documented `val_1` is that rename.
+      if (this.dialect === "duckdb") for (const c of duckdbRepeats(outputs)) add(c)
     }
     const out = [...found.values()]
     this.columnMemo.set(id, out)
@@ -541,12 +795,22 @@ export class ProjectLineage {
     if (settled && this.traced(id)) {
       const sql = this.sqlOf(id)
       settled = !!sql && !/(?<![\w$])(?:identifier|columns)\s*\(/i.test(stripSql(sql)) && (selectsStar(sql)
-        ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined)
-        : namesItsOutputs(this.outputColumns(sql), stripSql(sql)))
+        ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined) &&
+          !this.renamesBesideStar(id, stripSql(sql))
+        : namesItsOutputs(this.outputColumns(sql)))
     }
     const out = settled ? names : undefined
     this.settledMemo.set(id, out)
     return out
+  }
+
+  /** Whether a bare `*` sits beside an output that repeats a name the star brings in (`select *, val as id`). */
+  private renamesBesideStar(id: string, stripped: string): boolean {
+    const items = selectItems(stripped)
+    if (!items.some((item) => /^\*(?:\s|$)/.test(item))) return false
+    const brought = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
+    const explicit = items.map(itemName).filter((name): name is string => !!name && name !== "*")
+    return new Set(explicit).size !== explicit.length || explicit.some((name) => brought.has(name))
   }
 
   lineage(id: string): ModelLineage {
@@ -628,10 +892,22 @@ export class ProjectLineage {
     }
     // The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and
     // `_col_N`, how unknown. Keep the second; the warehouse picks the real name.
+    // A `_N` the SQL itself writes (`amount as _1`) is a real alias and stays.
+    const stripped = stripSql(raw)
     const named = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.from}|${e.fromCol}|${e.to.slice(5)}`))
     for (let i = edges.length - 1; i >= 0; i--) {
       const e = edges[i]!
-      if (/^_\d+$/.test(e.to) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
+      if (/^_\d+$/.test(e.to) && engineMade(e.to, stripped) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
+    }
+    // Postgres and Redshift name an unaliased cast of a column after the column (`amount::numeric` is `amount`).
+    if (this.dialect === "postgres" || this.dialect === "redshift") {
+      const items = selectItems(stripped)
+      for (const e of edges) {
+        // A `_col_N` the SQL writes itself (`amount::numeric as _col_1`) is that output's name: keep it.
+        const n = engineMade(e.to, stripped) ? /^_col_(\d+)$/.exec(e.to)?.[1] : undefined
+        const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
+        if (name && !edges.some((o) => o.from === e.from && o.fromCol === e.fromCol && o.to === name)) e.to = name
+      }
     }
     const errors: unknown[] = Array.isArray(result.errors) ? result.errors : []
     const firstError = (): string => {

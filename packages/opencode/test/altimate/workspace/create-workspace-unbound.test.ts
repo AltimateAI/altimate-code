@@ -50,6 +50,7 @@ interface Captured {
   url: string
   method: string
   body: Record<string, unknown>
+  headers: Headers
 }
 
 let captured: Captured[] = []
@@ -61,6 +62,7 @@ function respondWith(status: number, reply: unknown) {
       url: String(input),
       method: String(init?.method ?? "GET"),
       body: init?.body ? JSON.parse(String(init.body)) : {},
+      headers: new Headers(init?.headers),
     })
     return new Response(JSON.stringify(reply), {
       status,
@@ -83,6 +85,19 @@ afterAll(() => {
 })
 
 describe("createWorkspaceUnbound", () => {
+  test("runs as the given credential, not the configured one", async () => {
+    respondWith(200, { id: 77 })
+    await WorkspaceApi.createWorkspaceUnbound({
+      name: "jaffle_shop",
+      actAs: { url: "https://other.example.test", instance: "other", apiKey: "other-key" },
+    })
+
+    expect(captured).toHaveLength(1)
+    expect(captured[0].url).toBe("https://other.example.test/datamates/")
+    expect(captured[0].headers.get("x-tenant")).toBe("other")
+    expect(captured[0].headers.get("authorization")).toBe("Bearer other-key")
+  })
+
   test("posts to /datamates/, NOT to the binding router", async () => {
     respondWith(200, { id: 77 })
     await WorkspaceApi.createWorkspaceUnbound({ name: "jaffle_shop" })

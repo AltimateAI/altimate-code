@@ -176,6 +176,35 @@ export function zodToJsonSchema(schema: z.ZodType): JSONSchema7 {
     : rest) as JSONSchema7
 }
 
+// altimate_change start — argument errors that name the field
+/** The value at `path` in `input`, undefined when any step is missing. */
+function valueAt(input: unknown, path: readonly PropertyKey[]): unknown {
+  let value = input
+  for (const key of path) {
+    if (typeof value !== "object" || value === null || !Object.hasOwn(value, key)) return undefined
+    value = (value as Record<PropertyKey, unknown>)[key]
+  }
+  return value
+}
+
+/**
+ * Each issue of a failed zod parse as one clause that names its field: `change_type is required (expected
+ * one of "remove"|"rename")` for a missing one, `limit: Too small: expected number to be >=1` for a wrong one.
+ */
+export function describeZodIssues(error: z.ZodError, input: unknown): string {
+  const clauses = error.issues.map((issue) => {
+    if (issue.path.length === 0) return issue.message
+    const field = issue.path.map((p, i) => (typeof p === "number" ? `[${p}]` : `${i === 0 ? "" : "."}${String(p)}`)).join("")
+    if (valueAt(input, issue.path) === undefined) {
+      const expected = issue.message.replace(/^Invalid (?:input|option):\s*/, "").replace(/,\s*received undefined$/, "")
+      return `${field} is required (${expected})`
+    }
+    return `${field}: ${issue.message}`
+  })
+  return clauses.length > 0 ? clauses.join("; ") : error.message
+}
+// altimate_change end
+
 /** Build a `DefWithoutID` from a resolved legacy tool object (no Effect wrapper). */
 function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
   const validationSchema = zodToJsonSchema(legacy.parameters)
@@ -200,24 +229,24 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
     // tool needs hidden compatibility arguments that should not be advertised.
     jsonSchema: legacy.jsonSchema ?? validationSchema,
     // altimate_change end
-    ...(legacy.formatValidationError
-      ? {
-          // altimate_change start — the new Tool API decodes via Schema.declare, so the
-          // error reaching us is an Effect SchemaIssue (no zod `.issues`/`.path`), not a
-          // z.ZodError. Recover the original input from Effect SchemaError.issue.actual and
-          // re-run the zod schema to produce the real z.ZodError the legacy formatter
-          // expects; fall back to the original error if recovery is impossible.
-          formatValidationError: (error: unknown) => {
-            const actual = schemaErrorActual(error)
-            if (actual.found) {
-              const parsed = legacy.parameters.safeParse(actual.value)
-              if (!parsed.success) return legacy.formatValidationError!(parsed.error)
-            }
-            return legacy.formatValidationError!(error as z.ZodError)
-          },
-          // altimate_change end
-        }
-      : {}),
+    // altimate_change start — the new Tool API decodes via Schema.declare, so the error reaching
+    // us is an Effect SchemaIssue (no zod `.issues`/`.path`), not a z.ZodError: on its own it reads
+    // "Expected <Declaration>" and names no field. Recover the original input from Effect
+    // SchemaError.issue.actual and re-run the zod schema to produce the real z.ZodError, for the
+    // legacy tool's own formatter or, when it has none, one that names each field and what it
+    // expects; fall back to the original error if recovery is impossible.
+    formatValidationError: (error: unknown) => {
+      const actual = schemaErrorActual(error)
+      if (actual.found) {
+        const parsed = legacy.parameters.safeParse(actual.value)
+        if (!parsed.success)
+          return legacy.formatValidationError
+            ? legacy.formatValidationError(parsed.error)
+            : describeZodIssues(parsed.error, actual.value)
+      }
+      return legacy.formatValidationError ? legacy.formatValidationError(error as z.ZodError) : String(error)
+    },
+    // altimate_change end
     execute: (args: unknown, ctx: NewContext) =>
       // altimate_change start — bridge the ambient Instance ALS into the Effect InstanceRef so
       // legacy tools whose execute calls async facades (Skill.get, Agent.list, …) — which resolve

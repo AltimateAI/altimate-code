@@ -1,6 +1,6 @@
 import z from "zod"
 import path from "path"
-import { rm } from "node:fs/promises"
+import { rm, stat } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
 import { currentCredentials } from "./credentials-context"
@@ -86,11 +86,14 @@ export namespace AltimateApi {
     return Filesystem.exists(credentialsPath())
   }
 
+  /** A `${env:NAME}` in the credentials file names a variable that isn't set. */
+  class MissingEnvVar extends Error {}
+
   function resolveEnvVars(obj: unknown): unknown {
     if (typeof obj === "string") {
       return obj.replace(/\$\{env:([^}]+)\}/g, (_, envVar) => {
         const value = process.env[envVar]
-        if (value === undefined) throw new Error(`Environment variable ${envVar} not found`)
+        if (value === undefined) throw new MissingEnvVar(`Environment variable ${envVar} not found`)
         return value
       })
     }
@@ -318,25 +321,82 @@ export namespace AltimateApi {
     return data.auth_token
   }
 
-  async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
+  /** Test seams. */
+  export const requestInternals = {
+    /** How long an API request may take, body included, before it is aborted. */
+    timeoutMs: 15_000,
+  }
+
+  /**
+   * Why a request couldn't be sent, never quoting the error's text. Bun refuses a header value with a
+   * control character as a TypeError that quotes the value after trimming it, so no redaction of the
+   * stored key can be relied on: only the error's name and code are shown.
+   */
+  function sendFailure(e: unknown): string {
+    const word = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined)
+    const name = (e instanceof Error && word(e.name)) || "Error"
+    const code = word((e as { code?: unknown } | null)?.code)
+    // A network failure carries its code, whatever its class.
+    if (code) return `${name} (${code}).`
+    // The URL and the body are checked before sending, so an uncoded TypeError is the header check.
+    if (e instanceof TypeError)
+      return "the request was refused before it was sent (TypeError): the stored API key or tenant name may not be a valid header value."
+    return `${name}.`
+  }
+
+  async function request(
+    creds: AltimateCredentials,
+    method: string,
+    endpoint: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ) {
     const url = `${creds.altimateUrl}${endpoint}`
+    // Checked here so that only the header check can make fetch throw a TypeError before sending. Only
+    // http(s) is sent: "localhost:3000" parses as a URL with the scheme "localhost:".
+    if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol))
+      throw new Error(`API ${method} ${endpoint} could not be sent: the stored API URL is not an http(s) URL.`)
+    // Any body but undefined is sent: null, false, 0 and "" are JSON values too. A body that can't be
+    // serialised fails here with its own error, which quotes no credential.
+    const payload = body !== undefined ? JSON.stringify(body) : undefined
+    // Bun's fetch throws at once, not as a rejection, when it refuses a header: both are caught.
+    const send = async (start: () => Promise<Response>) => {
+      try {
+        return await start()
+      } catch (e) {
+        // A timeout or the caller's abort rejects with its own reason, which holds no header. An abort
+        // that raced a refused header leaves the header error, so match the reason, not the flag.
+        // A signal that isn't aborted has no reason yet: a rejection with none is a send failure.
+        if ((controller.signal.aborted && e === controller.signal.reason) || (signal?.aborted && e === signal.reason))
+          throw e
+        // Others can quote a header: Bun's check of a header value with CR/LF quotes `Bearer <key>`.
+        throw new Error(`API ${method} ${endpoint} could not be sent: ${sendFailure(e)}`)
+      }
+    }
     // altimate_change start — upstream_fix: bound every API request. Without a
     // signal a stalled server holds the caller indefinitely. The abort stays
     // armed until the BODY is read: `fetch` resolves on headers.
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15_000)
+    const seconds = requestInternals.timeoutMs / 1000
+    const timeout = setTimeout(
+      () =>
+        controller.abort(new DOMException(`API ${method} ${endpoint} timed out after ${seconds} s`, "TimeoutError")),
+      requestInternals.timeoutMs,
+    )
     try {
-      const res = await fetch(url, {
-        signal: controller.signal,
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${creds.altimateApiKey}`,
-          "x-tenant": creds.altimateInstanceName,
-          ...clientHeaders(),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-      })
+      const res = await send(() =>
+        fetch(url, {
+          signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+          method,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creds.altimateApiKey}`,
+            "x-tenant": creds.altimateInstanceName,
+            ...clientHeaders(),
+          },
+          ...(payload !== undefined ? { body: payload } : {}),
+        }),
+      )
       if (!res.ok) {
         throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
       }
@@ -345,6 +405,56 @@ export namespace AltimateApi {
       clearTimeout(timeout)
     }
     // altimate_change end
+  }
+
+  /** What is wrong with the stored credentials, naming fields but never quoting the file's text. */
+  function credentialsProblem(e: unknown): string {
+    // The parser's message quotes the text it stopped at, which can be the key.
+    if (e instanceof SyntaxError) return "the file is not valid JSON."
+    if (e instanceof z.ZodError) {
+      const fields = [...new Set(e.issues.map((issue) => issue.path.join(".")))]
+      if (fields.length === 0 || fields.includes("")) return "the file does not hold the credentials object."
+      return `${fields.join(", ")} ${fields.length === 1 ? "is" : "are"} missing or not valid.`
+    }
+    // The variable's name is the file's text, which can be a key written in its place.
+    if (e instanceof MissingEnvVar) return "an ${env:…} variable it refers to is not set."
+    // A file system error names a path, not a value.
+    return e instanceof Error ? e.message : String(e)
+  }
+
+  /**
+   * Calls an Altimate API endpoint with the stored credentials (Bearer key and x-tenant headers) and
+   * returns the parsed JSON body. Endpoint functions in other files go through this. Fails with a
+   * message naming the credentials file when none are stored or they can't be read. `signal` (a tool
+   * call's `ctx.abort`) cancels the request as well as the 15 s timeout. No error it raises quotes the
+   * stored key or the credentials file's text.
+   */
+  export async function apiRequest(
+    method: string,
+    endpoint: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<any> {
+    signal?.throwIfAborted()
+    let creds: AltimateCredentials
+    try {
+      creds = await getCredentials()
+    } catch (e) {
+      const p = credentialsPath()
+      // Only a file that isn't there is "not stored": a directory without search permission hides it too.
+      const unseen = await stat(p).then(
+        () => undefined,
+        (err: NodeJS.ErrnoException) => err,
+      )
+      if (unseen && unseen.code !== "ENOENT" && unseen.code !== "ENOTDIR")
+        throw new Error(`The Altimate credentials in ${p} can't be read (${unseen.code ?? unseen.name}).`)
+      if (unseen)
+        throw new Error(
+          `No Altimate credentials are stored: sign in to Altimate in altimate-code first (they are saved to ${p}).`,
+        )
+      throw new Error(`The Altimate credentials in ${p} can't be used: ${credentialsProblem(e)}`)
+    }
+    return request(creds, method, endpoint, body, signal)
   }
 
   export async function listDatamates(creds?: AltimateCredentials) {

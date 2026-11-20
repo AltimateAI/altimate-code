@@ -140,6 +140,17 @@ describe("connection env in the socket name", () => {
     }
   })
 
+  test("changes with the Python environment the dbt adapter runs dbt with", async () => {
+    const dir = await temp()
+    const none = socketName(dir, "1.0.0", undefined, undefined, { PATH: "/bin" })
+    const venv = socketName(dir, "1.0.0", undefined, undefined, { PATH: "/bin", VIRTUAL_ENV: "/p/.venv" })
+    // A daemon started outside the virtualenv found another Python: the caller inside it gets its own daemon.
+    expect(venv).not.toBe(none)
+    expect(socketName(dir, "1.0.0", undefined, undefined, { VIRTUAL_ENV: "/q/.venv" })).not.toBe(venv)
+    expect(socketName(dir, "1.0.0", undefined, undefined, { CONDA_PREFIX: "/opt/conda/envs/dbt" })).not.toBe(none)
+    expect(socketName(dir, "1.0.0", undefined, undefined, { VIRTUAL_ENV: "" })).toBe(none)
+  })
+
   test("uses the registry's prefix", async () => {
     const { CONN_ENV_PREFIX } = await import("../../../src/altimate/native/connections/registry")
     const dir = await temp()

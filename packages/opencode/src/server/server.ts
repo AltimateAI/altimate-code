@@ -1434,6 +1434,51 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — workspace review: request changes. The person's own rule proposal, still open on the
+      // server: withdraw it, or send a new wording of one sent back for changes (`text`).
+      .post("/altimate/rules/:id/:action", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const action = c.req.param("action")
+        if (action !== "withdraw" && action !== "resubmit")
+          return c.json({ ok: false, code: "unknown_action", error: "action must be withdraw or resubmit." }, 404)
+        const read = await readJsonObject(() => c.req.text(), `rule ${action}`)
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const text = read.body.text
+        if (action === "resubmit" && (typeof text !== "string" || !text.trim()))
+          return c.json({ ok: false, code: "invalid_text", error: "text must be the new wording." }, 400)
+        // Optional: the version the client read. Without it, the last pull's version is sent.
+        const expected = read.body.expected_version
+        if (expected !== undefined && (typeof expected !== "number" || !Number.isInteger(expected) || expected < 1))
+          return c.json({ ok: false, code: "invalid_version", error: "expected_version must be a positive integer." }, 400)
+        try {
+          const { ReviewRequests } = await import("../altimate/workspace/review-requests")
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          const result = await ReviewRequests.actOnRule(root, Instance.directory, c.req.param("id"), action, typeof text === "string" ? text : undefined, expected)
+          const [{ RuleEvents }, { Bus }] = await Promise.all([import("../altimate/rules/events"), import("@/bus")])
+          const changed = () => Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
+          if (!result.ok) {
+            // The server may have acted (no answer), or the proposal changed since the last pull: a sync records what
+            // it holds, so `/rules` stops offering an action that no longer applies.
+            if (result.uncertain) {
+              const [{ RulesService }, { Config }] = await Promise.all([import("../altimate/rules/service"), import("@/config/config")])
+              void RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+                // The run publishes its own change event.
+                .then((learn) => RulesService.syncNow(root, Instance.directory, learn, "refresh"))
+                .catch((error) => log.warn("rules sync after a rule action failed", { error: error instanceof Error ? error.message : String(error) }))
+              return c.json({ ok: false, code: result.code, error: `${result.error} Syncing rules to check what the workspace has.` }, result.status)
+            }
+            return c.json({ ok: false, code: result.code, error: result.error }, result.status)
+          }
+          await changed()
+          return c.json({ ok: true as const, request: result.request })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error(`rule ${action} failed`, { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — workspace review: the person's own requests (rules, skills, knowledge) for clients, and
       // withdrawing or removing a skill or knowledge request. Approving and rejecting stay in the web app.
       .get("/altimate/workspace/requests", async (c) => {
@@ -1460,6 +1505,49 @@ export namespace Server {
           return c.json({ ok: false, error }, 500)
         }
       })
+      // altimate_change start — workspace activity: what changed in the workspace's skills and knowledge since this
+      // client (`host`) last looked, as one line to show when a session starts. Marks it seen; the first look says
+      // nothing. With `defer=1` a line leaves the mark for `POST .../activity/seen` once the client showed it.
+      .get("/altimate/workspace/activity", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const host = c.req.query("host") ?? ""
+        if (!/^[a-z][a-z0-9-]{0,31}$/.test(host)) return c.json({ ok: false, error: "host must name the client, e.g. vscode." }, 400)
+        try {
+          const { WorkspaceActivity } = await import("../altimate/workspace/workspace-activity")
+          const changes = await WorkspaceActivity.changesSince(Instance.directory, host, { defer: c.req.query("defer") === "1" })
+          // `status`: ok, first (nothing said the first time), signed_out, not_linked, account_changed, unconfirmed,
+          // unsupported, failed.
+          return c.json({ ok: true as const, ...changes })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace activity failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/workspace/activity/seen", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "workspace activity seen")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const host = typeof read.body.host === "string" ? read.body.host : ""
+        if (!/^[a-z][a-z0-9-]{0,31}$/.test(host)) return c.json({ ok: false, error: "host must name the client, e.g. vscode." }, 400)
+        try {
+          const { WorkspaceActivity } = await import("../altimate/workspace/workspace-activity")
+          const seen = WorkspaceActivity.SeenMark.safeParse(read.body.seen)
+          if (!seen.success) return c.json({ ok: false, error: "seen must be the mark a deferred look returned." }, 400)
+          const result = await WorkspaceActivity.acknowledge(Instance.directory, host, seen.data)
+          // The project was relinked, or another account signed in, since the look: its mark is not this workspace's.
+          if (result.status === "scope_changed")
+            return c.json({ ok: false, status: result.status, error: "The workspace or account changed since that look." }, 409)
+          return c.json({ ok: true as const, ...result })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace activity seen failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       .post("/altimate/workspace/requests/:id/:action", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)

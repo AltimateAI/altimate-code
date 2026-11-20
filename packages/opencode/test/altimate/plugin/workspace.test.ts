@@ -56,7 +56,7 @@ const { syncInternals } = await import("../../../src/altimate/workspace/engine-s
 // per-test override of the module state.
 import { AltimateApi } from "../../../src/altimate/api/client"
 import { stubEmptySkillList } from "../workspace/skill-list-fixture"
-import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
+import { ConflictError, WorkspaceApi } from "../../../src/altimate/workspace/api-client"
 import { findNamesakes } from "../../../src/altimate/workspace/workspace-name"
 import { createRoot } from "solid-js"
 import * as Manage from "../../../src/altimate/workspace/manage"
@@ -1077,6 +1077,54 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     dialog.onSelect({ value: "namesake" })
     await settle()
     expect(calls.bindAs).toEqual(["acme"])
+  })
+
+  // The hidden-binding message waits on an account lookup. The picker must close before it,
+  // or a dialog the user opened in the meantime is the one that gets closed.
+  test("picker: a hidden-binding failure closes the picker before the account lookup", async () => {
+    stubWorkspaces([{ id: 2, name: "analytics", ownerId: ME }])
+    stubCreds("acme", "https://api.acme.example.com")
+    original.signedInAccount = api.signedInAccount
+    let answer: (a: { email: string; instance: string }) => void = () => {}
+    api.signedInAccount = () => new Promise((resolve) => (answer = resolve))
+    api.bindExisting = async () => {
+      throw new ConflictError({ message: "already linked", existing_datamate_id: 38, existing_datamate_name: null })
+    }
+    const { tui, h } = harness()
+    render(() => linkDialogInternals.PickerDialog({ api: tui, identifier, mode: "attach" }))
+    await settle()
+    h.selects[0]!.onSelect({ value: 2 })
+    await settle()
+    // Lookup still pending: the picker is already closed, and nothing has been said yet.
+    expect(h.cleared).toBe(1)
+    expect(h.toasts).toEqual([])
+    answer({ email: "serviceuser@example.com", instance: "acme" })
+    await settle()
+    // The lookup's answer arrives as a toast and closes nothing else.
+    expect(h.cleared).toBe(1)
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0]).toContain('(workspace id 38) that serviceuser@example.com on instance "acme"')
+  })
+
+  test("picker: a link whose account is switched mid-request closes the picker and says so", async () => {
+    stubWorkspaces([{ id: 2, name: "analytics", ownerId: ME }])
+    stubCreds("acme", "https://api.acme.example.com")
+    api.bindExisting = async (id: number) => {
+      stubCreds("other-tenant", "https://api.other.example.com")
+      return {
+        binding: { id: 1, datamate_id: id, datamate_name: "analytics", repo_remote: identifier.repoRemote, project_path: null },
+      }
+    }
+    const { tui, h } = harness()
+    render(() => linkDialogInternals.PickerDialog({ api: tui, identifier, mode: "attach" }))
+    await settle()
+    h.selects[0]!.onSelect({ value: 2 })
+    await settle()
+    // Linked server-side under "acme", but the account changed: no confirmation dialog, the
+    // picker closed so it cannot link a second time, and the warning explains why.
+    expect(h.replaced).toHaveLength(0)
+    expect(h.cleared).toBe(1)
+    expect(h.toasts.some((m) => m.includes("account changed during the link"))).toBe(true)
   })
 })
 

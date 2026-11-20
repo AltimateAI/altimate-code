@@ -47,9 +47,9 @@ const { createThenBindOrRebind } = await import("@/cli/cmd/link")
 const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await import(
   "@/plugin/tui/altimate/workspace"
 )
-const { recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { recordApprovedBinding, readLocalBinding } = await import("@/altimate/workspace/state")
 const { flushPendingSyncs } = await import("@/altimate/workspace/skill-sync")
-const { HIDDEN_BINDING_MESSAGE, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
+const { hiddenBindingMessage, QUICK_WORKSPACE_PRIVATE_NOTE, WorkspaceApi } = await import(
   "@/altimate/workspace/api-client"
 )
 
@@ -59,19 +59,25 @@ interface Call {
   method: string
   path: string
   body: Record<string, unknown>
+  tenant?: string
 }
 let calls: Call[] = []
 let routes: Array<{ match: RegExp; method?: string; status: number; body: unknown }> = []
+/** Runs when a request matches, before its answer: lets a test act while a request is in flight. */
+let onRequest: ((call: Call) => void) | undefined
 
 function stubFetch() {
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     const url = new URL(String(input))
     const method = String(init?.method ?? "GET")
-    calls.push({
+    const call: Call = {
       method,
       path: url.pathname,
       body: init?.body ? JSON.parse(String(init.body)) : {},
-    })
+      tenant: new Headers(init?.headers).get("x-tenant") ?? undefined,
+    }
+    calls.push(call)
+    onRequest?.(call)
     const route = routes.find(
       (r) => r.match.test(url.pathname) && (r.method === undefined || r.method === method),
     )
@@ -114,6 +120,7 @@ const EXISTING = {
 beforeEach(() => {
   calls = []
   routes = []
+  onRequest = undefined
   opened.length = 0
   stubFetch()
 })
@@ -184,6 +191,56 @@ describe("CLI: createThenBindOrRebind", () => {
     expect(process.exitCode ?? 0).toBe(0)
   })
 
+  test("with no readable credential it creates nothing", async () => {
+    const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = ws.captureCredentials
+    ws.captureCredentials = async () => null
+    const written: string[] = []
+    const streams = [process.stdout, process.stderr]
+    const writes = streams.map((s) => s.write)
+    for (const s of streams)
+      s.write = ((chunk: string | Uint8Array) => {
+        written.push(String(chunk))
+        return true
+      }) as typeof s.write
+    try {
+      await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", EXISTING)
+    } finally {
+      streams.forEach((s, i) => (s.write = writes[i]!))
+      ws.captureCredentials = original
+    }
+    expect(sequence()).toEqual([])
+    expect(process.exitCode).toBe(1)
+    // Stopped before the spinner started, so nothing is left spinning over the error.
+    expect(written.join("")).not.toContain("Creating workspace")
+    expect(written.join("")).toContain("nothing was created")
+  })
+
+  test("the unbound create and its rebind both run as the credential the flow captured", async () => {
+    routes = [
+      { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
+      { match: /by-remote/, method: "PUT", status: 200, body: { binding: BINDING } },
+    ]
+    const api = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = { create: api.createWorkspaceUnbound, rebind: api.rebindByRemote }
+    const ranAs: string[] = []
+    api.createWorkspaceUnbound = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`create:${input.actAs?.instance}`)
+      return original.create(input)
+    }
+    api.rebindByRemote = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`rebind:${input.actAs?.instance}`)
+      return original.rebind(input)
+    }
+    try {
+      await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", EXISTING)
+    } finally {
+      api.createWorkspaceUnbound = original.create
+      api.rebindByRemote = original.rebind
+    }
+    expect(ranAs).toEqual(["create:acme", "rebind:acme"])
+  })
+
   test("a failed rebind reports the orphan rather than claiming success", async () => {
     routes = [
       { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
@@ -252,6 +309,73 @@ describe("TUI: createAndBindInline", () => {
     expect(sequence()).toEqual(["POST /datamate-project-bindings/"])
   })
 
+  test("the unbound create and its rebind both run as the credential the flow captured", async () => {
+    routes = [
+      { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
+      { match: /by-remote/, method: "PUT", status: 200, body: { binding: BINDING } },
+    ]
+    const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = { create: ws.createWorkspaceUnbound, rebind: ws.rebindByRemote }
+    const ranAs: string[] = []
+    ws.createWorkspaceUnbound = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`create:${input.actAs?.instance}`)
+      return original.create(input)
+    }
+    ws.rebindByRemote = (input: { actAs?: { instance: string } }) => {
+      ranAs.push(`rebind:${input.actAs?.instance}`)
+      return original.rebind(input)
+    }
+    const { api } = stubApi()
+    try {
+      await createAndBindInline(api, IDENTIFIER, "proj", { expectedCurrentDatamateId: 3, matchedBy: "remote" })
+    } finally {
+      ws.createWorkspaceUnbound = original.create
+      ws.rebindByRemote = original.rebind
+    }
+    expect(ranAs).toEqual(["create:acme", "rebind:acme"])
+  })
+
+  test("with no readable credential it creates nothing", async () => {
+    const ws = WorkspaceApi as unknown as Record<string, (...a: any[]) => Promise<unknown>>
+    const original = ws.captureCredentials
+    ws.captureCredentials = async () => null
+    const { api, toasts } = stubApi()
+    try {
+      await createAndBindInline(api, IDENTIFIER, "proj", { expectedCurrentDatamateId: 3, matchedBy: "remote" })
+    } finally {
+      ws.captureCredentials = original
+    }
+    expect(sequence()).toEqual([])
+    expect(toasts.some((t) => t.variant === "error" && /nothing was created/.test(t.message))).toBe(true)
+  })
+
+  test("a create whose account is switched mid-request is not recorded under the next account", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings\/$/,
+        method: "POST",
+        status: 200,
+        body: { datamate: { id: 7, name: "proj" }, binding: BINDING, manage_url: "https://x.test/w/7" },
+      },
+    ]
+    const credentials = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const acme = { altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }
+    onRequest = (call) => {
+      if (call.method === "POST" && call.path === "/datamate-project-bindings/")
+        writeFileSync(credentials, JSON.stringify({ ...acme, altimateInstanceName: "other", altimateApiKey: "other-key" }))
+    }
+    const { api, toasts } = stubApi()
+    try {
+      await createAndBindInline(api, IDENTIFIER, "proj")
+      // Workspace 7 belongs to "acme": the account signed in now must not find it as its link.
+      expect(await readLocalBinding("/tmp/proj")).toBeNull()
+      // And the confirmation says the link stands but nothing was synced, instead of the usual one.
+      expect(toasts.some((t) => t.variant === "warning" && /account changed during the link/.test(t.message))).toBe(true)
+    } finally {
+      writeFileSync(credentials, JSON.stringify(acme))
+    }
+  })
+
   test("a failed rebind toasts the orphan instead of reporting success", async () => {
     routes = [
       { match: /\/datamates\/$/, method: "POST", status: 200, body: { id: 7 } },
@@ -298,7 +422,7 @@ describe("TUI: hidden-binding conflict toast", () => {
     const { api, toasts } = stubApi()
     // existing=undefined → bindExisting → 409 (name withheld) → hidden-binding toast.
     await bindOrRebindInline(api, IDENTIFIER, 5, undefined)
-    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
+    expect(toasts.some((t) => t.message === hiddenBindingMessage({ message: "already linked", existing_datamate_id: 7 }))).toBe(true)
     expect(toasts.some((t) => /claimed this project while you were choosing/i.test(t.message))).toBe(false)
   })
 
@@ -315,10 +439,105 @@ describe("TUI: hidden-binding conflict toast", () => {
     // No `rebindFrom`: the project looks unlinked to this user, because the binding that
     // owns it belongs to a workspace they cannot see. This is Bob, a minute after cloning.
     await createAndBindInline(api, IDENTIFIER, "proj")
-    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
+    expect(toasts.some((t) => t.message === hiddenBindingMessage({ message: "already linked", existing_datamate_id: 7 }))).toBe(true)
     // The advice that sent him round the loop: a picker scoped to workspaces he can see
     // lists none of them, so "use the palette to change" had nothing to offer.
     expect(toasts.some((t) => /Link this project to a workspace/.test(t.message))).toBe(false)
+  })
+
+  test("names the hidden workspace and the account signed in now, so a second sign-in is diagnosable", async () => {
+    // The exact body the service returns when the remote is bound to a private workspace the
+    // caller does not own: the id is sent, the name and path are withheld.
+    routes = [
+      {
+        match: /datamate-project-bindings/,
+        method: "POST",
+        status: 409,
+        body: {
+          detail: {
+            message: "This project is already linked to a different workspace",
+            existing_datamate_id: 38,
+            existing_datamate_name: null,
+            repo_remote: "https://github.com/acme/proj",
+            project_path: null,
+          },
+        },
+      },
+      { match: /^\/users\/me$/, method: "GET", status: 200, body: { id: 1, email: "serviceuser@example.com" } },
+    ]
+    const { api, toasts } = stubApi()
+    await bindOrRebindInline(api, IDENTIFIER, 29, undefined)
+    const toast = toasts.find((t) => /already linked/.test(t.message))
+    expect(toast?.message).toBe(
+      hiddenBindingMessage(
+        { message: "x", existing_datamate_id: 38 },
+        { email: "serviceuser@example.com", instance: "acme" },
+      ),
+    )
+    expect(toast?.message).toContain('(workspace id 38) that serviceuser@example.com on instance "acme" can\'t see')
+  })
+
+  const HIDDEN_409 = {
+    match: /datamate-project-bindings/,
+    method: "POST",
+    status: 409,
+    body: {
+      detail: {
+        message: "This project is already linked to a different workspace",
+        existing_datamate_id: 38,
+        existing_datamate_name: null,
+        repo_remote: "https://github.com/acme/proj",
+        project_path: null,
+      },
+    },
+  }
+  const CREDENTIALS = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+  const ACME = { altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }
+  /** Signs in as another account while the bind is in flight, and back afterwards. */
+  const switchAccountDuringBind = () => {
+    onRequest = (call) => {
+      if (call.method === "POST" && call.path.includes("/bind"))
+        writeFileSync(CREDENTIALS, JSON.stringify({ ...ACME, altimateInstanceName: "other", altimateApiKey: "other-key" }))
+    }
+  }
+
+  for (const listed of [true, false]) {
+    test(`names the account the bind ran as, not one signed in since (${listed ? "listed" : "ambient"} credential)`, async () => {
+      routes = [
+        HIDDEN_409,
+        { match: /^\/users\/me$/, method: "GET", status: 200, body: { id: 1, email: "serviceuser@example.com" } },
+      ]
+      switchAccountDuringBind()
+      const { api, toasts } = stubApi()
+      try {
+        const listedAs = listed ? { url: API_URL, instance: "acme", apiKey: "test-key" } : undefined
+        await bindOrRebindInline(api, IDENTIFIER, 29, undefined, listedAs)
+      } finally {
+        writeFileSync(CREDENTIALS, JSON.stringify(ACME))
+      }
+      expect(calls.filter((c) => c.path === "/users/me").map((c) => c.tenant)).toEqual(["acme"])
+      expect(toasts.find((t) => /already linked/.test(t.message))?.message).toContain(
+        'that serviceuser@example.com on instance "acme" can\'t see',
+      )
+    })
+  }
+
+  test("when the account answer has no email, the message still names the workspace", async () => {
+    routes = [HIDDEN_409, { match: /^\/users\/me$/, method: "GET", status: 200, body: { id: 1 } }]
+    const { api, toasts } = stubApi()
+    await bindOrRebindInline(api, IDENTIFIER, 29, undefined)
+    expect(toasts.find((t) => /already linked/.test(t.message))?.message).toBe(
+      hiddenBindingMessage({ message: "x", existing_datamate_id: 38 }),
+    )
+  })
+
+  test("when the account lookup fails, the message still names the workspace", async () => {
+    routes = [HIDDEN_409, { match: /^\/users\/me$/, method: "GET", status: 500, body: { detail: "boom" } }]
+    const { api, toasts } = stubApi()
+    await bindOrRebindInline(api, IDENTIFIER, 29, undefined)
+    expect(toasts.find((t) => /already linked/.test(t.message))?.message).toBe(
+      hiddenBindingMessage({ message: "x", existing_datamate_id: 38 }),
+    )
   })
 
   test("a NAMED 409 is still a real race, and still names the workspace", async () => {
@@ -333,7 +552,7 @@ describe("TUI: hidden-binding conflict toast", () => {
     const { api, toasts } = stubApi()
     await createAndBindInline(api, IDENTIFIER, "proj")
     expect(toasts.some((t) => /already linked to "team-ws"/.test(t.message))).toBe(true)
-    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(false)
+    expect(toasts.some((t) => t.message === hiddenBindingMessage({ message: "already linked", existing_datamate_id: 7 }))).toBe(false)
   })
 })
 
@@ -447,5 +666,42 @@ describe("TUI: /workspace menu options", () => {
     expect(values).toContain("link")
     expect(m.cap.options.find((o) => o.value === "link")?.title).toBe("Link to a workspace")
     expect(values).not.toContain("unlink")
+  })
+})
+
+describe("CLI: hidden-binding conflict", () => {
+  test("create-and-bind names the hidden workspace and the account it ran as, not one signed in since", async () => {
+    const credentials = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const acme = { altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }
+    onRequest = (call) => {
+      if (call.method === "POST" && call.path === "/datamate-project-bindings/")
+        writeFileSync(credentials, JSON.stringify({ ...acme, altimateInstanceName: "other", altimateApiKey: "other-key" }))
+    }
+    routes = [
+      {
+        match: /datamate-project-bindings\/$/,
+        method: "POST",
+        status: 409,
+        body: { detail: { message: "already linked", existing_datamate_id: 38, existing_datamate_name: null } },
+      },
+      { match: /^\/users\/me$/, method: "GET", status: 200, body: { id: 1, email: "serviceuser@example.com" } },
+    ]
+    const written: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      written.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    try {
+      await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", null)
+    } finally {
+      process.stdout.write = write
+      writeFileSync(credentials, JSON.stringify(acme))
+    }
+    expect(calls.filter((c) => c.path === "/users/me").map((c) => c.tenant)).toEqual(["acme"])
+    const out = written.join("")
+    expect(out).toContain('(workspace id 38) that serviceuser@example.com on instance "acme" can\'t see')
+    expect(out).toContain("Nothing was created.")
+    expect(process.exitCode).toBe(1)
   })
 })

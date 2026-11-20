@@ -435,12 +435,13 @@ describe("the dbt adapter sql_execute uses", () => {
     await disposeDbtAdapter()
     expect(disposed).toBe(1)
 
-    let finish!: (value: unknown) => void
+    let finish: ((value: unknown) => void) | undefined
     dbtAdapterInternals.create = () => new Promise((resolve) => (finish = resolve))
     const starting = getDbtAdapter()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Creation starts after the config and target-folder reads: wait until it is under way.
+    while (!finish) await new Promise((resolve) => setTimeout(resolve, 1))
     await disposeDbtAdapter()
-    finish(adapter)
+    finish!(adapter)
     await starting
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(disposed).toBe(2)

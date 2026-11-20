@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, describeAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach, namesColumn } from "../../src/altimate/native/dbt/column-reach"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
-import { clearLineageCaches, hasNestedWith, howOf, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
+import { castColumn, clearLineageCaches, hasNestedWith, howOf, itemName, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -843,7 +843,7 @@ describe("column answer: why a model may carry it", () => {
     const a = columnAnswer(write(base(`select id from ${T("f")} where id > 0`)), "f", "val")
     expect(reasons(a)).toEqual({ after: ["not_traced", null], r: ["not_traced", null] })
     expect(a.counts).toMatchObject({ models: 0, may_carry_models: 2, not_traced_models: 2, model_level: 2 })
-    expect(describeAnswer(a)).toContain("; 2 more of the 2 downstream may carry it, 2 of them with no sign (not traced)")
+    expect(describeAnswer(a)).toContain("; 2 more of the 2 downstream may carry it, 2 of them not traced (no sign either way)")
   })
 
   test("a reader that names the column with no traced edge may carry it, and what sits past it is below it", () => {
@@ -1186,3 +1186,270 @@ describe("both tools: names that aren't columns", () => {
     expect(JSON.stringify((lineage.raw_lineage as any).column_dict?.val ?? [])).toContain("__altimate_unknown_0__")
   })
 })
+
+// Names at the edges: aliases that look like the engine's own names, templates, casts, repeats.
+describe("both tools: names at the edges", () => {
+  const nodes = (dialect: string, list: any[]) => ({ metadata: { adapter_type: dialect }, sources: {}, nodes: Object.fromEntries(list.map((n) => [n.unique_id, n])) })
+  const carried = (a: ColumnAnswer) => a.columns.slice(1).map((c) => `${named(a, c.model)}.${c.column}`)
+
+  test("a real _1 column a select * child inherits stays a column of the child", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, amount as _1 from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    expect(() => columnReach(path, "child", "_1")).not.toThrow()
+    expect(carried(columnAnswer(path, "child", "_1", "upstream"))).toEqual(expect.arrayContaining(["r._1", "f.amount"]))
+  })
+
+  test("a real alias named like the engine's _N keeps its edge beside an engine-named twin", () => {
+    for (const sql of [`select amount as _1, amount as _col_1 from ${T("f")}`, `select id, amount * 2, amount as _1 from ${T("f")}`]) {
+      const path = write(nodes("duckdb", [
+        model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+        model("r", ["f"], sql),
+        model("child", ["r"], `select _1 as x from ${T("r")}`),
+      ]))
+      expect(carried(columnAnswer(path, "f", "amount"))).toEqual(expect.arrayContaining(["r._1", "child.x"]))
+    }
+  })
+
+  test("a repeated name beside a * doesn't settle: the warehouse renames it", () => {
+    // With AS, without AS, and after a quoted name that is a keyword.
+    for (const item of ["val as id", "val id", `val as "from", val as id`]) {
+      const path = write(nodes("duckdb", [
+        model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        model("r", ["f"], `select *, ${item} from ${T("f")}`),
+        model("child", ["r"], `select id_1 as x from ${T("r")}`),
+      ]))
+      expect(columnReach(path, "r", "id_1").models.map((one) => one.name)).toEqual(["child"])
+      expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+    }
+  })
+
+  test("an alias without AS is read, and the end of an expression isn't taken for one", () => {
+    const named = { "val id": "id", "count(*) n": "n", "t.col c2": "c2", "'' label": "label", '"My Col"': "my col", "a.b as c": "c", "f.*": "*" }
+    for (const [item, name] of Object.entries(named)) expect(itemName(item)).toBe(name)
+    for (const item of ["x is null", "x is not true", "case when a > 0 then 1 else 0 end", "sum(x) over w", "a and b", "a + b",
+      "a div b", "a mod b", "a xor b", "x between a and b", "interval '' day", "interval 1 day", "interval 1.5 hour", `x collate "C"`, "amount::numeric"])
+      expect(itemName(item)).toBeNull()
+  })
+
+  test("a COLUMNS() alias without a \\N marker is the output's name, not a template", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, columns('amount') as total, columns('amount') as "x_\\0" from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    const names = Object.keys((lineage.raw_lineage as any).column_dict ?? {})
+    expect(names).toContain("total")
+    expect(names).not.toContain("x_\\0")
+  })
+
+  test("a quoted name holding a paren doesn't hide a COLUMNS() template", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], `select 1 as id, 2.5 as "amount)"`, ["id", "amount)"]),
+      model("r", ["f"], `select id, columns("amount)") as "x_\\0" from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).not.toContain("x_\\0")
+  })
+
+  test("a COLUMNS() call elsewhere in the SQL leaves a real backslash alias a column", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, amount as "col_\\0" from ${T("f")} where columns('amount') > 0`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["col_\\0", "id"])
+  })
+
+  test("on Postgres and Redshift a cast of a column is named after it, so the trace goes on", () => {
+    for (const dialect of ["postgres", "redshift"]) {
+      for (const cast of ["amount::numeric", "cast(amount as numeric)", "amount::int[]", "cast(amount as int[])", `amount::"numeric"`, "amount::numeric::int",
+        "amount::int[3]", "amount::pg_catalog.numeric", "amount::double precision", "amount::numeric(10, 2)"]) {
+        if (dialect === "redshift" && cast.includes("[")) continue // Redshift has no array types
+        const path = write(nodes(dialect, [
+          model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+          model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`),
+          model("child", ["r"], `select order_id, amount from ${T("r")}`),
+        ]))
+        expect(carried(columnAnswer(path, "orders", "amount"))).toEqual(expect.arrayContaining(["r.amount", "child.amount"]))
+        const up = columnAnswer(path, "child", "amount", "upstream")
+        expect(up.may_carry.map((m) => m.name)).not.toContain("orders")
+      }
+    }
+    // A quoted name that is a keyword doesn't end the SELECT list, so the cast after it is still read.
+    const quoted = write(nodes("postgres", [
+      model("orders", [], `select 1 as "order", 2.5 as amount`, ["order", "amount"]),
+      model("r", ["orders"], `select "order", amount::numeric from ${T("orders")}`),
+    ]))
+    expect(carried(columnAnswer(quoted, "orders", "amount"))).toEqual(["r.amount"])
+    // `_col_N` counts SELECT items from 0, unnamed or not: each of two casts keeps its own column's name.
+    const two = write(nodes("postgres", [
+      model("orders", [], "select 1 as order_id, 2 as status, 2.5 as amount", ["order_id", "status", "amount"]),
+      model("r", ["orders"], `select order_id::int, status, amount::numeric from ${T("orders")}`),
+    ]))
+    expect(carried(columnAnswer(two, "orders", "amount"))).toEqual(["r.amount"])
+    expect(carried(columnAnswer(two, "orders", "order_id"))).toEqual(["r.order_id"])
+    // Elsewhere the warehouse picks another name: the engine's label stays.
+    const duck = write(nodes("duckdb", [
+      model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+      model("r", ["orders"], `select order_id, amount::decimal(10,2) from ${T("orders")}`),
+    ]))
+    expect(carried(columnAnswer(duck, "orders", "amount"))).toEqual(["r._col_1"])
+  })
+
+  test("a column name that starts with all or distinct isn't read as a SELECT modifier", () => {
+    for (const name of ["allocation", "distinct_users", "all_time", "all$x"]) {
+      const path = write(nodes("postgres", [
+        model("f", [], `select 2.5 as ${name}`, [name]),
+        model("r", ["f"], `with q as (select * from ${T("f")}) select ${name}::numeric from q`),
+        model("child", ["r"], `select * from ${T("r")}`),
+      ]))
+      expect(() => columnReach(path, "r", name)).not.toThrow()
+      expect(() => columnAnswer(path, "r", name)).not.toThrow()
+      const lineage = dbtLineage({ manifest_path: path, model: "child" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).toContain(name)
+    }
+  })
+
+  test("a cast after a SELECT modifier is named after its column, so a settled model has it", () => {
+    // Most throw "r has no column amount" on main, where the modifier or the parentheses hid the cast.
+    // `distinct on (id) id, …` and `top 5 amount…` already answer there; they stay as controls.
+    for (const dialect of ["postgres", "redshift"]) {
+      const lists = ["distinct(amount)::numeric, id", "all(amount)::numeric, id", "distinct ((amount))::numeric, id", "id, (amount)::numeric",
+        "id, cast((amount) as numeric)"]
+      // DISTINCT ON is Postgres only; TOP is Redshift's.
+      if (dialect === "postgres")
+        lists.push("distinct on(id)amount::numeric, id", "distinct on (coalesce(id, 0)) id, amount::numeric", "distinct on (id) id, amount::numeric")
+      if (dialect === "redshift") lists.push("top 5amount::numeric, id", "top 5 amount::numeric, id")
+      for (const list of lists) {
+        const path = write(nodes(dialect, [
+          model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+          model("r", ["f"], `with q as (select * from ${T("f")}) select ${list} from q`),
+          model("child", ["r"], `select * from ${T("r")}`),
+        ]))
+        expect(() => columnReach(path, "r", "amount")).not.toThrow()
+        expect(carried(columnAnswer(path, "r", "amount"))).toEqual(["child.amount"])
+      }
+    }
+  })
+
+  test("a qualified column named like a literal keeps its name through a cast", () => {
+    for (const dialect of ["postgres", "redshift"]) {
+      for (const [name, cast] of [["end", "q.end::int"], ["end", "cast(q.end as int)"], ["end", "(q.end)::int"], ["null", "q.null::int"], ["true", "q.true::int"]]) {
+        const path = write(nodes(dialect, [
+          model("f", [], `select 1 as id, 2 as "${name}"`, ["id", name!]),
+          model("r", ["f"], `with q as (select * from ${T("f")}) select id, ${cast} from q`),
+          model("child", ["r"], `select * from ${T("r")}`),
+        ]))
+        expect(() => columnReach(path, "r", name!)).not.toThrow()
+        expect(carried(columnAnswer(path, "r", name!))).toEqual([`child.${name}`])
+      }
+    }
+  })
+
+  // Every cast form the reviews of this reader found, with the name Postgres gives it (null: not a cast of a column, so
+  // the engine's `_col_N` stays). Items are as `selectItems` hands them over: string literals already stripped to `''`.
+  const CAST_FORMS: [string, string | null][] = [
+    // Whole-item casts of a column.
+    ["amount::numeric", "amount"], ["cast(amount as numeric)", "amount"], ["t.amount::numeric", "amount"],
+    ["cast(t.amount as numeric)", "amount"], ["amount::int[]", "amount"], ["cast(amount as int[])", "amount"],
+    ["amount::int[3]", "amount"], ['amount::"numeric"', "amount"], ["amount::pg_catalog.numeric", "amount"],
+    ["amount::double precision", "amount"], ["amount::numeric(10, 2)", "amount"], ["cast(amount as numeric(10, 2))", "amount"],
+    ["amount::timestamp(3) with time zone", "amount"], ["amount::geometry(Point,4326)", "amount"],
+    ["cast(amount as geometry(Point, 4326))", "amount"], ["amount::varchar(max)", "amount"],
+    // Chains and parentheses.
+    ["amount::numeric::int", "amount"], ["cast(amount as numeric)::int", "amount"], ["cast(cast(amount as numeric) as int)", "amount"],
+    ["(amount::numeric)::int", "amount"], ["(amount)::numeric", "amount"], ["((amount))::numeric", "amount"],
+    ["cast((amount) as numeric)", "amount"], ["(amount)", "amount"],
+    // No space beside `as`, and quoted names.
+    ["cast((amount)as numeric)", "amount"], ['cast("amount"as numeric)', "amount"], ['cast(amount as"numeric")', "amount"],
+    ['"Amount"::int', "amount"], ['("a""b")::numeric', 'a"b'], ['("null")::int', "null"], ['"a``b"::int', "a``b"], ['`a""b`::int', 'a""b'],
+    // Qualified names that read like literals or keywords.
+    ["q.end::int", "end"], ["cast(q.end as int)", "end"], ["(q.end)::int", "end"], ["q.null::int", "null"], ["q.true::int", "true"],
+    ["cast(t.has as int)", "has"], ["allé::numeric", "allé"],
+    // Not a cast of a column.
+    ["amount", null], ["t.amount", null], ["(null)::int", null], ["(true)::boolean", null], ["(1)::int", null], ["1::int", null],
+    ["cast(1.5 as numeric)", null], ["(1.0)::numeric", null], ["''::int", null], ["coalesce(amount)::numeric", null],
+    ["-(amount)::numeric", null], ["(amount)::numeric * 2", null], ["(amount + 1)::int", null], ["amount::numeric + 1", null],
+    ["cast(amount as int) * 2", null], ["amount::text || ''", null], ["cast(amount as int) between 1 and 2", null],
+    ["amount::numeric is not null", null], ["amount::int in (1, 2)", null], ["amount::numeric as _col_1", null],
+    ["amount::timestamp at time zone ''", null], ["amount::text collate \"C\"", null], ["arr[1]::int", null], ["cast(amount)", null],
+    ["cast(amount as)", null], ["amount::", null], ["(amount", null],
+  ]
+
+  test("castColumn reads every cast form found so far", () => {
+    const wrong = CAST_FORMS.filter(([item, name]) => castColumn(item) !== name).map(([item, name]) => `${item} → ${castColumn(item)} (want ${name})`)
+    expect(wrong).toEqual([])
+  })
+
+  test("mixed and nested cast chains of a column are named after it", () => {
+    for (const cast of ["cast(amount as numeric)::int", "cast(cast(amount as numeric) as int)", "(amount::numeric)::int"]) {
+      const path = write(nodes("postgres", [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`),
+      ]))
+      expect(carried(columnAnswer(path, "orders", "amount"))).toEqual(["r.amount"])
+    }
+  })
+
+  test("an expression that only starts with a cast isn't named after the column, and a _col_N the SQL writes stays", () => {
+    for (const item of ["amount::numeric is not null", "amount::int in (1, 2)", "cast(amount as int) between 1 and 2", "amount::numeric as _col_1",
+      "(amount + 1)::int", "amount::numeric + 1", "cast(amount as int) * 2"]) {
+      const path = write(nodes("postgres", [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select order_id, ${item} from ${T("orders")}`),
+      ]))
+      expect(carried(columnAnswer(path, "orders", "amount"))).toEqual(["r._col_1"])
+    }
+  })
+
+  test("DuckDB names a repeated output from a join val_1, and a select * child lists it", () => {
+    const path = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("b", [], "select 1 as id, 3 as val", ["id", "val"]),
+      model("r", ["a", "b"], `select a.id, a.val, b.val from ${T("a")} a join ${T("b")} b on a.id = b.id`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
+    // Docs that list the rename add no `val_2`.
+    const documented = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("b", [], "select 1 as id, 3 as val", ["id", "val"]),
+      model("r", ["a", "b"], `select a.id, a.val, b.val from ${T("a")} a join ${T("b")} b on a.id = b.id`, ["id", "val", "val_1"]),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const listed = dbtLineage({ manifest_path: documented, model: "child" })
+    expect(Object.keys((listed.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
+    // In list order, as DuckDB names them: `id, id, amount as id_1` is `id, id_1, id_1_1`, with no `id_2`.
+    const clash = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, id, amount as id_1 from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const named = dbtLineage({ manifest_path: clash, model: "child" })
+    expect(Object.keys((named.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "id_1", "id_1_1"])
+    // Names repeat regardless of case: `Val, val` is `val, val_1`.
+    const cased = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, amount as Val, id as val from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const folded = dbtLineage({ manifest_path: cased, model: "child" })
+    expect(Object.keys((folded.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
+  })
+
+  test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("r", ["f"], `select id from ${T("f")} where id > 0`),
+    ]))
+    expect(describeAnswer(columnAnswer(path, "f", "val"))).toContain("; 1 more of the 1 downstream may carry it, 1 of them not traced (no sign either way)")
+  })
+})
+

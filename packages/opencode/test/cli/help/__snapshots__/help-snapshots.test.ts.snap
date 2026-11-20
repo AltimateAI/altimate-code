@@ -536,9 +536,9 @@ Commands:
   altimate-code tool run <name>             run one data tool without a model and print its result
   altimate-code tool daemon [action]        run, inspect or stop the long-running tool process for a
                                             project
-  altimate-code tool report-event <action>  record what a person did with the Claude Code plugin's
-                                            lineage report (usage telemetry; nothing is sent when
-                                            telemetry is off)
+  altimate-code tool report-event <action>  record the Claude Code plugin's usage: its lineage
+                                            report, a session start, a feature used (usage
+                                            telemetry; nothing is sent when telemetry is off)
 
 Options:
   -h, --help          show help                                                            [boolean]
