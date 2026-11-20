@@ -1355,12 +1355,13 @@ export function isFailedRunStatus(status: string): boolean {
   return !OK_RUN_STATUSES.has(status.toLowerCase())
 }
 
-/**
- * Read and parse `<target>/run_results.json`. Returns null when the artifact
- * is absent or unparseable — callers decide what that means for their gate.
- */
 /** A run_results.json larger than this is not read into memory; it is far above what a large project writes. */
 const MAX_RUN_RESULTS_BYTES = 256 * 1024 * 1024
+
+/**
+ * Read and parse `<target>/run_results.json`. Returns null when the artifact
+ * is absent, unparseable or over {@link MAX_RUN_RESULTS_BYTES} — callers decide what that means for their gate.
+ */
 
 export async function readRunResults(dbtRoot: string, targetPathOverride?: string): Promise<RunResultsArtifact | null> {
   const targetPath = await resolveDbtTargetPath(dbtRoot, targetPathOverride)

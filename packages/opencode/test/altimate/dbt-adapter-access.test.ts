@@ -205,7 +205,9 @@ describe("dbtAdapterFor", () => {
       expect(access.reason).toContain("Activate the project's virtualenv")
       expect(access.reason).toContain("altimate-code tool daemon stop")
     } finally {
-      process.env.HOME = saved
+      if (saved === undefined) delete process.env.HOME
+      else process.env.HOME = saved
+      await rm(home, { recursive: true, force: true })
     }
   })
 

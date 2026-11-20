@@ -15,8 +15,9 @@
  *   - `sql_explain`'s refusal naming a backslash on Snowflake rather than an unterminated quote.
  *   - The dbt adapter refusal naming plan mode, and source guards for the integrations API overrides.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
+import { promises as fsp } from "fs"
 import os from "os"
 import path from "path"
 import { Effect } from "effect"
@@ -37,6 +38,7 @@ import { SqlExplainTool } from "@/altimate/tools/sql-explain"
 import * as Registry from "@/altimate/native/connections/registry"
 import { initTool } from "../altimate/tool-fixture"
 import { resolveReviewBase } from "@/altimate/review/git"
+import { credentialsInternals } from "@/altimate/integrations/credentials"
 
 const src = path.join(import.meta.dir, "../../src")
 const read = (file: string) => fs.readFile(path.join(src, file), "utf8")
@@ -109,7 +111,9 @@ describe("v0.12.12: plan parsers against hostile JSON", () => {
   })
   test("Snowflake: negative or non-numeric bytes give no estimate", () => {
     for (const bytesAssigned of [-1, "12", NaN, Infinity])
-      expect(parseSnowflakeExplain([JSON.stringify({ GlobalStats: { bytesAssigned, partitionsAssigned: 1, partitionsTotal: 1 } })])).toBeUndefined()
+      expect(parseSnowflakeExplain(JSON.stringify({ GlobalStats: { bytesAssigned, partitionsAssigned: 1, partitionsTotal: 1 } }))).toBeUndefined()
+    // The same plan with a real count is read, so the cases above fail on the bytes, not the shape.
+    expect(parseSnowflakeExplain(JSON.stringify({ GlobalStats: { bytesAssigned: 5, partitionsAssigned: 1, partitionsTotal: 1 } }))).toBeDefined()
   })
   test("Databricks: junk gives no estimate and does not throw", () => {
     for (const value of junk) expect(() => parseDatabricksExplainCost(value)).not.toThrow()
@@ -149,11 +153,16 @@ describe("v0.12.12: SQL classification hardening (#1644)", () => {
 
 describe("v0.12.12: readRunResults against hostile files", () => {
   let root: string
+  // An inherited DBT_TARGET_PATH would point readRunResults at another folder.
+  const savedTarget = process.env.DBT_TARGET_PATH
   beforeEach(async () => {
+    delete process.env.DBT_TARGET_PATH
     root = await fs.mkdtemp(path.join(os.tmpdir(), "release-v0.12.12-"))
     await fs.mkdir(path.join(root, "target"))
   })
   afterEach(async () => {
+    if (savedTarget === undefined) delete process.env.DBT_TARGET_PATH
+    else process.env.DBT_TARGET_PATH = savedTarget
     await fs.rm(root, { recursive: true, force: true })
   })
   const write = (text: string) => fs.writeFile(path.join(root, "target", "run_results.json"), text)
@@ -167,15 +176,22 @@ describe("v0.12.12: readRunResults against hostile files", () => {
       await write(text)
       expect(await readRunResults(root)).toBeNull()
     }
-    expect(({} as any).results).toBeUndefined()
+    expect(Object.prototype).not.toHaveProperty("results")
   })
 
   test("a file over the size cap is not read", async () => {
     const file = path.join(root, "target", "run_results.json")
     await write('{"results":[]}')
-    // A sparse file: the size is over the cap without writing the bytes.
+    // A sparse file on POSIX: the size is over the cap without writing the bytes.
     await fs.truncate(file, 257 * 1024 * 1024)
-    expect(await readRunResults(root)).toBeNull()
+    // The cap, not a parse failure, must reject it: the file is never read.
+    const read = spyOn(fsp, "readFile")
+    try {
+      expect(await readRunResults(root)).toBeNull()
+      expect(read.mock.calls.some(([p]) => String(p) === file)).toBe(false)
+    } finally {
+      read.mockRestore()
+    }
   })
 
   test("a well-formed file is read", async () => {
@@ -228,6 +244,37 @@ describe("v0.12.12: refusal messages name the real cause", () => {
   })
 })
 
+describe("v0.12.12: integration API overrides receive the token only on https or this machine", () => {
+  const NAME = "ALTIMATE_INTEGRATIONS_GITHUB_API"
+  const saved = process.env[NAME]
+  afterEach(() => {
+    if (saved === undefined) delete process.env[NAME]
+    else process.env[NAME] = saved
+  })
+  const override = (value: string) => {
+    process.env[NAME] = value
+    return credentialsInternals.apiOverride(NAME)
+  }
+  test("https and a local http address are used", () => {
+    for (const v of ["https://ghe.example/api/v3", "http://127.0.0.1:8080", "http://localhost", "http://[::1]:9/x"]) expect(override(v)).toBe(v)
+  })
+  test("userinfo before a remote host, credentials, a remote http host and junk are ignored", () => {
+    for (const v of [
+      "http://localhost:1234@evil.example",
+      "http://127.0.0.1@evil.example/",
+      "https://user:pass@ghe.example",
+      "http://localhost.evil.example",
+      "http://127.0.0.1.evil.example",
+      "http://ghe.example",
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "not a url",
+      "   ",
+    ])
+      expect(override(v)).toBeUndefined()
+  })
+})
+
 describe("v0.12.12: source guards", () => {
   test("integration API overrides are used only for https or a local http address", async () => {
     const text = await read("altimate/integrations/credentials.ts")
@@ -239,7 +286,7 @@ describe("v0.12.12: source guards", () => {
 
   test("the nine dbt Power User tools stay out of the in-session agent registry", async () => {
     const registry = await read("tool/registry.ts")
-    for (const name of ["DbtCostEstimateTool", "DbtHealthTool", "DbtCteProfileTool", "DbtRunResultsTool", "DocsShareCommentsTool"])
+    for (const name of ["DbtCostEstimateTool", "DbtCteProfileTool", "DbtDeferStateTool", "DbtDocsCoverageTool", "DbtHealthTool", "DbtMapRelationsTool", "DbtRunResultsTool", "DbtSqlGraphTool", "DocsShareCommentsTool"])
       expect(registry).not.toContain(name)
   })
 })

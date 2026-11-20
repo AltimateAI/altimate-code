@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **What `dbt_cost_estimate` runs.** It never runs the query itself. On Databricks, `EXPLAIN COST` can start a stopped SQL warehouse, which is billed while it runs. Snowflake's number is an upper bound, except when the plan reads an external table, a stage or a secure view, or reports 0, which the answer says. A query that may hold a second statement, or that reads files on Databricks (including through `IDENTIFIER()`), gets no estimate. An EXPLAIN that takes over 90 s answers "explain failed". `dbt_cte_profile` runs one `COUNT(*)` per CTE timed.
 - **The tool CLI and MCP server refuse more SQL, even with `--allow-write`.** The new refusals are `DROP CATALOG`, `DROP NAMESPACE`, `DROP EXTERNAL SCHEMA`, `DROP PLUGGABLE DATABASE`, and MySQL and MariaDB executable comments (`/*! ... */`). Jinja in SQL sent to a dbt target counts as a write. `sql_explain` explains one statement only, without leading `EXPLAIN` or its options.
 - **On Snowflake, MySQL and ClickHouse, a backslash inside a quoted string makes the SQL uncertain.** `sql_explain` refuses it and says so, and `sql_execute` treats it as a write. Regexes and Windows paths are the usual triggers. Tracked in #1782.
-- **`altimate integrations` keeps secrets in the macOS keychain on macOS.** On Linux and Windows they are kept in a file in the data directory. Tracked in #1785.
+- **`altimate integrations` keeps secrets in the macOS keychain on macOS**, unless `ALTIMATE_INTEGRATIONS_DIR` is set. On Linux and Windows, and on macOS with that variable, they are kept in a file (in the data directory, or in `ALTIMATE_INTEGRATIONS_DIR`). Tracked in #1785.
 - **The tools that start the dbt adapter no longer write to the project's `target/`.** In the `core` and `corecommand` modes dbt writes their artifacts to `<target-path>/.altimate-code/`, so `target/manifest.json` stays as your own `dbt compile` left it. The first such call on a project parses it in full, so it is slower once. The `fusion` and `cloud` modes still write to `target/`.
 - **`altimate review` in CI now fails when the PR's target branch isn't fetched**, instead of guessing `origin/main`. Use `fetch-depth: 0`. `--base` with no common history also fails.
 - **New integration surfaces for plugins.** `skill publish --json` refusals carry a `code`. Requests can have the status `changes requested`. `serve` adds `POST /altimate/rules/{id}/withdraw|resubmit` `GET /altimate/workspace/activity` and `POST /altimate/workspace/activity/seen`.
@@ -53,8 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A missing npm on Windows is reported as missing**, not as a failed driver install. (#1790)
 - **dbt tool argument errors name the field**, and activating a different virtualenv (`VIRTUAL_ENV`, `CONDA_PREFIX`) gets a `tool run` daemon that uses it. (#1781)
 - **Release review fixes.**
-  - `integrations connect` names the next step when fields are missing.
-  - The `ALTIMATE_INTEGRATIONS_*_API` overrides must be https or a local address.
+  - The `ALTIMATE_INTEGRATIONS_*_API` overrides must be https or a local address, judged by the parsed host, with no credentials in the URL.
+  - The missing-fields hint gives full commands, with a secret source for `set-secret`, and names `update` after a failed update.
   - The dbt adapter refusal names plan mode.
   - `dbt_run_results` accepts a UNC target path and skips a `run_results.json` over 256 MiB.
   - The dbt Power User tools and `integrations` are documented.

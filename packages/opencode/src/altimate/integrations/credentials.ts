@@ -605,10 +605,23 @@ export interface Validation {
 }
 
 // An override receives the real token, so it must be https or a local http address, as a Jira server URL must; any other value is ignored.
+// The parsed host decides, so `http://localhost@remote.example` (userinfo before a remote host) is not local, and an override
+// carrying credentials of its own is refused.
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"])
 const apiOverride = (name: string) => {
-  const v = process.env[name]
-  return v && (/^https:\/\//i.test(v) || /^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(v)) ? v : undefined
+  const v = process.env[name]?.trim()
+  if (!v) return undefined
+  let u: URL
+  try {
+    u = new URL(v)
+  } catch {
+    return undefined
+  }
+  if (u.username || u.password) return undefined
+  return u.protocol === "https:" || (u.protocol === "http:" && LOCAL_HOSTS.has(u.hostname)) ? v : undefined
 }
+/** For tests. */
+export const credentialsInternals = { apiOverride }
 const githubApi = () => (apiOverride("ALTIMATE_INTEGRATIONS_GITHUB_API") || "https://api.github.com").replace(/\/+$/, "")
 const linearApi = () => apiOverride("ALTIMATE_INTEGRATIONS_LINEAR_API") || "https://api.linear.app/graphql"
 const jiraCloudBase = (site: string) => (apiOverride("ALTIMATE_INTEGRATIONS_JIRA_API") || `https://${site}.atlassian.net`).replace(/\/+$/, "")

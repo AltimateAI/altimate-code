@@ -240,7 +240,7 @@ async function runCredentials(args: any, update: boolean) {
     } else {
       out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
       if (r.status === "missing_fields")
-        out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}\`, fill them with \`set ${id} <field> <value>\` or \`set-secret ${id} <field>\`, then run \`connect ${id}\` again.${S.TEXT_NORMAL}`)
+        out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}\`, fill them with \`altimate integrations set ${id} <field> <value>\` or \`altimate integrations set-secret ${id} <field> --stdin\` (or \`--from-env VAR\`, \`--from-clipboard\`), then run \`altimate integrations ${update ? "update" : "connect"} ${id}\` again.${S.TEXT_NORMAL}`)
     }
   } catch (e) {
     fail(e, args.json)
