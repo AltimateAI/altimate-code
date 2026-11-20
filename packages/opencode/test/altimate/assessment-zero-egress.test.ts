@@ -44,7 +44,8 @@ async function packagedBinary(): Promise<string> {
     cwd: root,
     stdout: "pipe",
     stderr: "pipe",
-    env: cleanEnv(),
+    // The catalog every other CI build pins, so the build does not fetch models.dev.
+    env: { ...cleanEnv(), MODELS_DEV_API_JSON: path.join(root, "test/tool/fixtures/models-api.json") },
   })
   if (build.exitCode !== 0) throw new Error(`build failed: ${build.stderr.toString()}`)
   const dist = path.join(root, "dist")
@@ -214,16 +215,22 @@ describe("assessment mode on the packaged CLI", () => {
     expect(output).not.toContain("none are set up")
   }, 120_000)
 
-  posixOnly("signed in to Altimate: no host is contacted", async () => {
-    // The ambient PATH: with a bare one the project-binding lookup is never reached, so the case would prove nothing.
-    const result = await run(savings, { ...assessment, PATH: process.env.PATH ?? "" }, async (home) => {
+  posixOnly("signed in to Altimate: no host is contacted, though the same home reaches Altimate without the mode", async () => {
+    const backend = "altimate-backend.invalid"
+    const signedIn = async (home: string) => {
       await writeFile(
         path.join(home, ".altimate", "altimate.json"),
-        JSON.stringify({ altimateUrl: `https://${TELEMETRY_SINK}`, altimateInstanceName: "acme", altimateApiKey: "x" }),
+        JSON.stringify({ altimateUrl: `https://${backend}`, altimateInstanceName: "acme", altimateApiKey: "x" }),
       )
-    })
+    }
+    // The ambient PATH: with a bare one the project-binding lookup is never reached, so the case would prove nothing.
+    const ambient = { PATH: process.env.PATH ?? "" }
+    const result = await run(savings, { ...assessment, ...ambient }, signedIn)
     expect(result.hosts).toEqual([])
-  }, 120_000)
+    // Control: the credentials are read and used, so only the mode keeps the backend lookup off.
+    const control = await run(savings, { ALTIMATE_TELEMETRY_DISABLED: "true", ...ambient }, signedIn)
+    expect(control.hosts.some((host) => host.startsWith(backend))).toBe(true)
+  }, 240_000)
 
   posixOnly("a well-known remote config entry and project plugin sources: no host is contacted", async () => {
     const result = await run(savings, assessment, async (home, project) => {
@@ -242,8 +249,6 @@ describe("assessment mode on the packaged CLI", () => {
   }, 120_000)
 
   posixOnly("a tool daemon started without the mode does not serve a run that sets it", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "assessment-daemon-"))
-    scratch.push(dir)
     const { connectionEnvKey } = await import("../../src/altimate/tool-cli/daemon")
     expect(connectionEnvKey({ ALTIMATE_ASSESSMENT_MODE: "true" })).not.toBe(connectionEnvKey({}))
   })

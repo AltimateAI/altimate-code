@@ -748,9 +748,7 @@ export const layer = Layer.effect(
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
-          // altimate_change start — assessment mode installs no plugin dependencies (npm)
-          if (!Flag.ALTIMATE_ASSESSMENT_MODE && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
-          // altimate_change end
+          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
             const dep = yield* npmSvc
               .install(dir, {
                 add: [
