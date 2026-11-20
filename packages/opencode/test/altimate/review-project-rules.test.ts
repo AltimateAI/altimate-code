@@ -475,6 +475,11 @@ describe("adapter.dispatch keyword a variant does not take", () => {
   test("a variant that reads `kwargs` accepts any keyword", () => {
     expect(run(head("col, dtype, size", "{{ kwargs.get('scale') }}"))).toHaveLength(0)
   })
+  test("`varargs` or a `kwargs` mention in a comment or string does not accept keywords", () => {
+    expect(run(head("col, dtype, size", "{{ varargs }}"))).toHaveLength(1)
+    expect(run(head("col, dtype, size", "{# no kwargs here #}"))).toHaveLength(1)
+    expect(run(head("col, dtype, size", "{{ log('kwargs ignored') }}"))).toHaveLength(1)
+  })
   test("a `{% test %}` block named like a variant is skipped, not a crash", () => {
     const sql = head("col, dtype, size, scale=none") + "\n{% test bigquery__ghost(model) %}select 1{% endtest %}"
     expect(dispatchVariants(sql, "ghost").map((v) => v.macro)).toEqual(["default__ghost", "snowflake__ghost"])
@@ -504,6 +509,13 @@ describe("singular test lookback window shortened", () => {
   test("twin: the same window written another way, or a longer window, is silent", () => {
     expect(edit("where d >= current_date - interval 1 day", "where d >= current_date - interval 24 hour")).toHaveLength(0)
     expect(edit("where d >= current_date - interval 1 day", "where d >= current_date - interval 2 day")).toHaveLength(0)
+  })
+  test("a shorter window that makes the test stricter is silent (future bound, or column below the clock)", () => {
+    expect(edit("where ts > current_timestamp + interval '2 day'", "where ts > current_timestamp + interval '1 day'")).toHaveLength(0)
+    expect(edit("where ts < {{ dbt.dateadd('day', -30, 'current_date') }}", "where ts < {{ dbt.dateadd('day', -7, 'current_date') }}")).toHaveLength(0)
+  })
+  test("clock on the left of `<=` is still a lookback", () => {
+    expect(edit("where current_date - interval 7 day <= d", "where current_date - interval 3 day <= d")).toHaveLength(1)
   })
   test("a rewritten filter (window replaced by a var) is not a literal shrink", () => {
     expect(edit("where d >= timestamp_sub(ts, interval 1 hour)", "where d >= timestamp('{{ var(\"batch_start\") }}')")).toHaveLength(0)
@@ -734,5 +746,11 @@ describe("SQL text concatenated in Jinja without a space", () => {
     expect(seam("where name ~ 'acme corp'")).toBe(false)
     expect(seam("where {{ col }} ~ 'acme corp' and x = {{ var('y') }}")).toBe(false)
     expect(seam("{{ log('Running model' ~ model.name, info=true) }}")).toBe(false)
+  })
+  test("a long line with an unclosed literal is scanned in linear time", () => {
+    const t = performance.now()
+    expect(seam("{{ x ~ 'a " + "x ".repeat(50_000))).toBe(false)
+    expect(seam("{{ 'a " + "x ".repeat(50_000))).toBe(false)
+    expect(performance.now() - t).toBeLessThan(200)
   })
 })

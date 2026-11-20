@@ -1654,4 +1654,24 @@ describe("join predicate repeated from an earlier join", () => {
     ].join("\n")
     expect(redundant(body, ["select * from y join a on e.region = a.target_region"])).toHaveLength(0)
   })
+  test("an unaliased table-function join does not crash the detector and abstains", () => {
+    for (const rel of ["unnest(a.arr)", "table(flatten(a.arr))"]) {
+      const body = `select * from a inner join b on a.id = b.id inner join ${rel} on a.id = b.id`
+      expect(() => redundant(body, [body])).not.toThrow()
+      expect(redundant(body, [body])).toHaveLength(0)
+    }
+  })
+  test("literal case is significant: 'X' and 'x' are different predicates", () => {
+    const body = "select * from a inner join b on a.flag = 'X' inner join c on b.id = c.id and a.flag = 'x'"
+    expect(redundant(body, [body])).toHaveLength(0)
+    expect(redundant(body.replace("'x'", "'X'"), [body.replace("'x'", "'X'")])).toHaveLength(1)
+  })
+  test("a RIGHT or FULL join re-introduces rows: an earlier predicate repeated after it is silent", () => {
+    for (const kind of ["right", "full outer"]) {
+      const body = `select * from a inner join b on a.id = b.id ${kind} join c on b.id = c.id inner join d on c.id = d.id and a.id = b.id`
+      expect(redundant(body, [body])).toHaveLength(0)
+    }
+    const inner = "select * from a inner join b on a.id = b.id inner join c on b.id = c.id inner join d on c.id = d.id and a.id = b.id"
+    expect(redundant(inner, [inner])).toHaveLength(1)
+  })
 })
