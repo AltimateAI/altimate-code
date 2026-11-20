@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
   buildCountQuery,
+  cteReads,
   detectCtes as detectCtesInText,
   extractRowCount,
   quoteSqlIdentifier,
@@ -1637,5 +1638,49 @@ describe("extractRowCount", () => {
     expect(extractRowCount([])).toBe(0)
     expect(extractRowCount(undefined)).toBe(0)
     expect(extractRowCount([{ _PROFILE_COUNT: "not-a-number" }])).toBe(0)
+  })
+})
+
+describe("cteReads", () => {
+  const readsOf = (sql: string) => {
+    const ctes = detectCtesInText(sql)
+    const reads = cteReads(sql, ctes)
+    return Object.fromEntries(ctes.map((c, i) => [c.name, reads[i].map((j) => ctes[j].name)]))
+  }
+
+  it("lists only the earlier CTEs a body names: siblings read nothing of each other", () => {
+    const sql = `with orders as (select * from {{ ref('stg_orders') }}),
+order_items as (select order_id, sum(price) as total from {{ ref('stg_order_items') }} group by 1),
+payments as (select order_id, sum(amount) as paid from {{ ref('stg_payments') }} group by order_id),
+customer_orders as (
+  select orders.customer_id, sum(order_items.total), sum(payments.paid)
+  from orders left join order_items on orders.order_id = order_items.order_id
+  left join payments on orders.order_id = payments.order_id group by 1
+),
+ranked as (select *, rank() over (order by 1) from customer_orders)
+select * from ranked`
+    expect(readsOf(sql)).toEqual({
+      orders: [],
+      order_items: [],
+      payments: [],
+      customer_orders: ["orders", "order_items", "payments"],
+      ranked: ["customer_orders"],
+    })
+  })
+
+  it("does not count a name in a string, a comment, after a dot, or inside a longer word", () => {
+    const sql = `with orders as (select 1 as id),
+a as (select 'orders' as s, x.orders, my_orders, orders2 from t as x -- orders
+  /* orders */ {# orders #}),
+b as (select * from ORDERS)
+select * from b`
+    expect(readsOf(sql)).toEqual({ orders: [], a: [], b: ["orders"] })
+  })
+
+  it("matches a quoted name as written, a bare one in any case, and keeps to its own WITH clause", () => {
+    const sql = `with "Big" as (select 1), big as (select 2),
+q as (select * from "Big"), r as (select * from Big)
+select * from (with inner_cte as (select * from q) select * from inner_cte)`
+    expect(readsOf(sql)).toEqual({ '"Big"': [], big: [], q: ['"Big"'], r: ["big"] })
   })
 })

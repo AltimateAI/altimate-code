@@ -301,6 +301,59 @@ export function detectCtes(text: string): CteInfo[] {
   return ctes
 }
 
+/** A CTE's name for matching a reference: a quoted one as written, a bare one in lower case (as most warehouses fold it). */
+function referenceKey(name: string): string {
+  const quote = name[0]
+  if ((quote === '"' || quote === "`") && name.length > 1 && name.endsWith(quote)) return name.slice(1, -1).replaceAll(quote + quote, quote)
+  if (quote === "[" && name.endsWith("]")) return name.slice(1, -1).replaceAll("]]", "]")
+  return name.toLowerCase()
+}
+
+const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
+
+/**
+ * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names:
+ * a name outside strings and comments, not after a dot, equal to the CTE's (letter case aside when bare).
+ * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not;
+ * a CTE that only a Jinja expression names is not seen.
+ */
+export function cteReads(text: string, ctes: CteInfo[]): number[][] {
+  return ctes.map((cte) => {
+    const earlier = new Map<string, number[]>()
+    ctes.forEach((other, i) => {
+      if (other.withClauseStart !== cte.withClauseStart || other.index >= cte.index) return
+      const key = referenceKey(stripColumnList(other.name))
+      earlier.set(key, [...(earlier.get(key) ?? []), i])
+    })
+    const reads = new Set<number>()
+    let pos = cte.queryStart
+    while (earlier.size > 0 && pos < cte.queryEnd) {
+      const char = text[pos]
+      const quoted = char === '"' || char === "`"
+      const skipped = skipLiteral(text, pos)
+      // A string or a comment is skipped whole; a quoted name is read.
+      if (!quoted && skipped !== pos) {
+        pos = skipped
+        continue
+      }
+      let end = pos + 1
+      if (quoted) end = skipped
+      else {
+        BARE_WORD.lastIndex = pos
+        if (BARE_WORD.test(text)) end = BARE_WORD.lastIndex
+        else {
+          pos = end
+          continue
+        }
+      }
+      const before = text[pos - 1] ?? " "
+      if (before !== "." && !/[\p{L}\p{N}_$]/u.test(before)) for (const i of earlier.get(referenceKey(text.substring(pos, end))) ?? []) reads.add(i)
+      pos = end
+    }
+    return [...reads].sort((a, b) => a - b)
+  })
+}
+
 /**
  * Offset from which the CTEs could not be read, or undefined when every CTE was read: the
  * comma after the last CTE read of a WITH clause that goes on, or the start of a clause where none was read

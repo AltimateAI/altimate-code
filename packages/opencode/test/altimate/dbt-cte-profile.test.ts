@@ -130,14 +130,14 @@ describe("dbt_cte_profile list", () => {
     expect(result.metadata.success).toBe(true)
     expect(result.metadata.file).toBe(path.join("models", "marts", "customers.sql"))
     expect(result.metadata.ctes).toEqual([
-      { name: "orders", line: 4, index: 0, clause: expect.any(Number), position: 0 },
-      { name: '"Big Spenders"', line: 8, index: 1, clause: expect.any(Number), position: 1 },
-      { name: "final", line: 12, index: 2, clause: expect.any(Number), position: 2 },
+      { name: "orders", line: 4, index: 0, clause: expect.any(Number), position: 0, reads: [] },
+      { name: '"Big Spenders"', line: 8, index: 1, clause: expect.any(Number), position: 1, reads: [0] },
+      { name: "final", line: 12, index: 2, clause: expect.any(Number), position: 2, reads: [1] },
     ])
     expect(result.output).toContain("3 CTEs")
     // The numbers shown are the ones `position` takes: it counts from 0.
     expect(result.output).toContain("position 0: orders (line 4)")
-    expect(result.output).toContain("position 2: final (line 12)")
+    expect(result.output).toContain('position 2: final (line 12; reads "Big Spenders")')
     expect(queries).toEqual([])
   })
 

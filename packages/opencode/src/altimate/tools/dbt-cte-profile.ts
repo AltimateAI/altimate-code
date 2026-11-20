@@ -9,7 +9,7 @@ import { isQueryTimeoutError } from "@altimateai/drivers/types"
 import { executeQuery } from "../native/query-execution"
 import { dbtAdapterFor } from "./dbt-adapter-access"
 import { untilAbort } from "./dbt-cost-estimate"
-import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, unclosedJinjaBlock, unreadCteAfter, type CteInfo } from "./cte-detect"
+import { buildCountQuery, cteReads, detectCtes, extractRowCount, stripColumnList, unclosedJinjaBlock, unreadCteAfter, type CteInfo } from "./cte-detect"
 
 /** Folders a model search never enters. */
 const SKIPPED_DIRS = new Set(["target", "dbt_packages", "dbt_modules", "node_modules", "logs", "venv", "site-packages"])
@@ -252,7 +252,7 @@ function failure(title: string, output: string, extra: Record<string, unknown> =
 
 export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
   description:
-    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the row count and the query's milliseconds on the warehouse (`queryMs`): dbt's own timing of the query's execute step where dbt reports one (run_results.json), else the call's time less that of a trivial query through dbt, so a command-line dbt's start-up of a second or more per query is not counted; `totalMs` is the count query's whole call through dbt, start-up included, and `timing` says which measure `queryMs` is (dbt, baseline, or wall when neither was available); that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE whose count query reads is_incremental() or this, in its own SQL, an earlier CTE or the model header, is not run, because the count runs outside the model. Macros the query calls are not opened: one that reads is_incremental() inside is not caught, so treat the count of such a model as a full-history count.",
+    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position, and `reads`: the positions of the earlier CTEs of its WITH clause its body names, so a CTE's own time is its count's time less the CTEs it reads, not less the CTE before it) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the row count and the query's milliseconds on the warehouse (`queryMs`): dbt's own timing of the query's execute step where dbt reports one (run_results.json), else the call's time less that of a trivial query through dbt, so a command-line dbt's start-up of a second or more per query is not counted; `totalMs` is the count query's whole call through dbt, start-up included, and `timing` says which measure `queryMs` is (dbt, baseline, or wall when neither was available); that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE. The list stops at a CTE whose name Jinja builds, and `incomplete` is set in the metadata then; a CTE whose count query reads is_incremental() or this, in its own SQL, an earlier CTE or the model header, is not run, because the count runs outside the model. Macros the query calls are not opened: one that reads is_incremental() inside is not caught, so treat the count of such a model as a full-history count.",
   parameters: z.object({
     model: z
       .string()
@@ -285,17 +285,19 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
         for (; counted < offset; counted++) if (text[counted] === "\n") line++
         return line
       }
+      const reads = cteReads(text, ctes)
       const list = ctes.map((c, position) => ({
         name: stripColumnList(c.name),
         line: lineAt(c.nameStart),
         index: c.index,
         clause: c.withClauseStart,
         position,
+        reads: reads[position],
       }))
       const stop = unreadCteAfter(text, ctes)
       const note = stop === undefined ? "" : `\nThe list is incomplete: the CTEs from line ${text.substring(0, stop).split("\n").length} on could not be read (its name is built by a Jinja expression or loop).`
       const output = (list.length
-        ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `position ${c.position}: ${c.name} (line ${c.line})`)].join("\n")
+        ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `position ${c.position}: ${c.name} (line ${c.line}${c.reads.length ? `; reads ${c.reads.map((i) => list[i].name).join(", ")}` : ""})`)].join("\n")
         : `No CTEs in ${file}.`) + note
       return {
         title: `dbt_cte_profile: ${list.length} CTE${list.length === 1 ? "" : "s"} in ${args.model}`,
