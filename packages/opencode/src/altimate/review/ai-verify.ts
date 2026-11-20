@@ -35,7 +35,8 @@ export interface AiVerifyEvidence {
   compiledSql(path: string, side: "old" | "new"): Promise<string | undefined>
   runner: ReviewRunner
   /** Fixed-string search over the project's dbt directories at head (≤50 hits). */
-  grepProject?(pattern: string, glob?: string): Promise<Array<{ path: string; line: number; text: string }>>
+  /** Undefined when the search failed (git error, timeout, glob outside the project). */
+  grepProject?(pattern: string, glob?: string): Promise<Array<{ path: string; line: number; text: string }> | undefined>
   prTitle?: string
   prBody?: string
   /** Head-side line numbers each changed file adds (see `addedLinesByFile`). */
@@ -900,6 +901,7 @@ export function verifierTools(
         if (!ev.grepProject) return NA("project search unavailable")
         if (String(pattern).length < 2) return NA("pattern needs at least 2 characters")
         const hits = await ev.grepProject(String(pattern), glob as string | undefined)
+        if (!hits) return NA("the search failed (git error, timeout, or a glob outside the project); this is not evidence of absence")
         return hits.length ? hits.map((h) => `${h.path}:${h.line}: ${h.text}`).join("\n") : "no matches"
       },
     },

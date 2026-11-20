@@ -38,6 +38,11 @@ import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
 import { LLM } from "../../src/session/llm"
+import { mkdirSync, writeFileSync } from "fs"
+import { execFileSync } from "child_process"
+import { grepFixedAt, projectGrepSpecs } from "../../src/altimate/review/git"
+import path from "path"
+import { tmpdir } from "../fixture/fixture"
 import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
@@ -113,6 +118,16 @@ describe("wiring", () => {
   test("the runner's columnReach never throws (no manifest → undefined)", async () => {
     const runner = createDispatcherRunner({ manifestPath: "/nonexistent/manifest.json" })
     expect(await runner.columnReach!("m", "id")).toBeUndefined()
+    expect(runner.failures!()).toEqual([])
+  })
+
+  test("the runner's columnReach answers an unknown model with undefined, not an engine failure", async () => {
+    await using tmp = await tmpdir()
+    const manifestPath = path.join(tmp.path, "manifest.json")
+    writeFileSync(manifestPath, JSON.stringify({ metadata: {}, nodes: { "model.p.fct": { resource_type: "model", name: "fct", depends_on: { nodes: [] } } } }))
+    const runner = createDispatcherRunner({ manifestPath })
+    expect(await runner.columnReach!("no_such_model", "id")).toBeUndefined()
+    expect(runner.failures!()).toEqual([])
   })
 
   test("with the env unset, runAiReview makes one call and reports no verifier, even when given evidence", async () => {
@@ -997,6 +1012,36 @@ describe("runAiVerify: the bounded tool loop", () => {
       "not available: models/fct.sql has no compiled base SQL",
     )
     expect(await defs.grain.run({ path: "models/fct.sql" })).toBe("not available: grain analysis unavailable")
+  })
+
+  test("grep_project: a failed search is reported as failed, never as no matches", async () => {
+    const failed = verifierTools({ ...evidence(), grepProject: async () => undefined })
+    expect(await failed.grep_project.run({ pattern: "amount" })).toContain("the search failed")
+    const empty = verifierTools({ ...evidence(), grepProject: async () => [] })
+    expect(await empty.grep_project.run({ pattern: "amount" })).toBe("no matches")
+  })
+
+  test("projectGrepSpecs: no doubled project prefix, `..` rejected, dirs under the root", () => {
+    expect(projectGrepSpecs("dbt", ["models"], "dbt/models/**")).toEqual(["dbt/models/**"])
+    expect(projectGrepSpecs("dbt", ["models"], "models/**")).toEqual(["dbt/models/**"])
+    expect(projectGrepSpecs("dbt", ["models"], "./models/x.sql")).toEqual(["dbt/models/x.sql"])
+    expect(projectGrepSpecs("dbt", ["models"], "models/../../secrets/**")).toBeUndefined()
+    expect(projectGrepSpecs("dbt", ["models", "macros"])).toEqual(["dbt/models", "dbt/macros"])
+    expect(projectGrepSpecs("", ["models", "../outside"], undefined)).toEqual(["models"])
+  })
+
+  test("grepFixedAt: no match is [], a git failure or empty pathspecs is undefined", async () => {
+    await using tmp = await tmpdir()
+    const run = (...args: string[]) => execFileSync("git", args, { cwd: tmp.path })
+    run("init", "-q")
+    mkdirSync(path.join(tmp.path, "models"))
+    writeFileSync(path.join(tmp.path, "models", "a.sql"), "select amount from t\n")
+    run("add", ".")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+    expect(await grepFixedAt(tmp.path, "HEAD", "amount", ["models"])).toEqual([{ path: "models/a.sql", line: 1, text: "select amount from t" }])
+    expect(await grepFixedAt(tmp.path, "HEAD", "nothing_here", ["models"])).toEqual([])
+    expect(await grepFixedAt(tmp.path, "no-such-ref", "amount", ["models"])).toBeUndefined()
+    expect(await grepFixedAt(tmp.path, "HEAD", "amount", [])).toBeUndefined()
   })
 })
 
