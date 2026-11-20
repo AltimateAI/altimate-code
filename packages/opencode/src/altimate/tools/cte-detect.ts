@@ -342,13 +342,19 @@ function skipJinjaExpression(text: string, pos: number): number {
 
 /**
  * Position just past the single-quoted string at `pos`. A doubled quote and a backslash-escaped one (Snowflake,
- * BigQuery, Databricks, MySQL) stay inside it; where a backslash is a plain character (Postgres, DuckDB), a string
- * ending in one runs on past its quote, so the names after it are missed and the CTE is listed as reading less.
+ * BigQuery, Databricks, MySQL) stay inside it, and so does Jinja (`'{{ var('x') }}'`, whose own quotes do not
+ * end the string). Where a backslash is a plain character (Postgres, DuckDB), a string ending in one runs on past
+ * its quote and pairs the quotes after it wrongly: names after it may be missed, or a name in a later string
+ * read, so such a model's reads may be off either way.
  */
 function skipSingleQuoted(text: string, pos: number): number {
   let at = pos + 1
   while (at < text.length) {
-    if (text[at] === "\\") at += 2
+    if (text[at] === "{" && text[at + 1] === "{") at = skipJinjaExpression(text, at)
+    else if (text[at] === "{" && text[at + 1] === "%") {
+      const close = text.indexOf("%}", at + 2)
+      at = close === -1 ? text.length : close + 2
+    } else if (text[at] === "\\") at += 2
     else if (text[at] === "'" && text[at + 1] === "'") at += 2
     else if (text[at] === "'") return at + 1
     else at++
