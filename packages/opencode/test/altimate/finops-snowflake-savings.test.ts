@@ -607,6 +607,31 @@ describe("building the facts", () => {
       expect(buildFacts({ warehouses: [show()], ...rows }).facts[0]).toMatchObject({ warehouse_id: "200", query_count: 50 })
     })
 
+    test.each([
+      ["after the rename", "2026-11-12T13:00:00Z", false],
+      ["in the hour of the rename", "2026-11-12T12:00:00Z", false],
+      ["in the hour of the rename, listed first", "2026-11-12T12:00:00Z", true],
+    ])("a warehouse renamed away the day its old name is reused keeps its usage, its new name's first row %s", (_, renamed, reversed) => {
+      // Id 5 was BI_WH until 12:30 and is now ETL_WH; the new BI_WH (id 9) was created at 18:00.
+      const rows = [
+        { warehouse_id: 5, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 6, first_start: at("2026-11-12T12:00:00Z") },
+        { warehouse_id: 5, warehouse_name: "ETL_WH", usage_day: day, idle_day: day, credits_used: 7, first_start: at(renamed) },
+        { warehouse_id: 9, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 1, first_start: at("2026-11-12T18:00:00Z") },
+      ]
+      const { facts, replaced } = buildFacts({
+        warehouses: [...listed, show({ name: "ETL_WH", created_on: new Date("2026-10-01T00:00:00Z") })],
+        metering: reversed ? rows.reverse() : rows,
+        periods: [],
+        restarts: [],
+        queries: [],
+      })
+      expect(facts.map((one) => [one.warehouse_name, one.warehouse_id, one.usage_days.map((d) => d.credits_used)])).toEqual([
+        ["BI_WH", "9", [1]],
+        ["ETL_WH", "5", [13]],
+      ])
+      expect(replaced).toEqual([])
+    })
+
     test("a predecessor from the day before is still left out, with or without new usage", () => {
       const yesterday = {
         ...predecessor,

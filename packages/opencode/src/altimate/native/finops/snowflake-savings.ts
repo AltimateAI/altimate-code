@@ -312,8 +312,8 @@ const active = (row: Row) =>
 
 /**
  * The input core reads, one entry per warehouse `SHOW WAREHOUSES` lists, which gives names and no ids.
- * Usage belongs to a warehouse id: a renamed warehouse keeps its id, so an id's usage goes to the last
- * name it was seen under. A dropped warehouse's name can come back on a new one, so a listed warehouse's
+ * Usage belongs to a warehouse id: a renamed warehouse keeps its id, so an id's usage goes to the name
+ * its latest usage was under. A dropped warehouse's name can come back on a new one, so a listed warehouse's
  * id is the newest of its name's ids with no usage from before the warehouse was created; a metered hour
  * counts from its start, which can be up to an hour before the creation inside it, and other times may
  * read up to a minute early. Usage under that name from any other id is its predecessor's and is left out.
@@ -323,19 +323,18 @@ const active = (row: Row) =>
  */
 export function buildFacts(rows: FactRows) {
   const listed = new Set(rows.warehouses.map((row) => String(row.name ?? "")))
-  const lastSeen = new Map<number, { day: string; name: string }>()
-  const see = (row: Row, day: unknown) => {
+  const createdAt = new Map(rows.warehouses.map((row) => [String(row.name ?? ""), timeOf(row.created_on)]))
+  // On a tie, a listed name beats an unlisted one, and a warehouse that existed by then beats one created later.
+  const rank = (name: string, at: number) => (listed.has(name) ? 2 : 0) + (at < (createdAt.get(name) ?? Number.NaN) ? 0 : 1)
+  const lastSeen = new Map<number, { at: number; name: string }>()
+  for (const row of [...rows.metering, ...rows.periods, ...rows.restarts, ...rows.queries]) {
     const id = num(row.warehouse_id)
     const name = String(row.warehouse_name ?? "")
-    const at = String(day ?? "")
+    const start = startOf(row)
+    const at = Number.isFinite(start) ? start : -Infinity
     const known = lastSeen.get(id)
-    if (!known || at > known.day || (at === known.day && listed.has(name) && !listed.has(known.name))) {
-      lastSeen.set(id, { day: at, name })
-    }
+    if (!known || at > known.at || (at === known.at && rank(name, at) > rank(known.name, at))) lastSeen.set(id, { at, name })
   }
-  for (const row of [...rows.metering, ...rows.periods]) see(row, row.usage_day ?? row.idle_day)
-  for (const row of rows.restarts) see(row, row.day)
-  for (const row of rows.queries) see(row, "")
 
   const nameOf = (row: Row) => lastSeen.get(num(row.warehouse_id))?.name ?? ""
   // Every id's rows from every source, each with whether its time is hourly (metering).
@@ -355,12 +354,15 @@ export function buildFacts(rows: FactRows) {
       entry(rowsById, String(id), () => []).push({ row, hourly })
     }
   }
-  /** Whether none of an id's usage began before `created`; an unreadable creation time proves nothing either way. */
+  /**
+   * Whether none of an id's usage began before `created`. An unreadable creation time proves nothing either way;
+   * an unreadable start compares false, so that usage is not attributed.
+   */
   const startedAfter = (id: number, created: number) =>
     !Number.isFinite(created) ||
     (rowsById.get(String(id)) ?? []).every(({ row, hourly }) => {
       const start = startOf(row)
-      return Number.isFinite(start) && (hourly ? start + HOUR_MS > created : start + CLOCK_SKEW_MS >= created)
+      return hourly ? start + HOUR_MS > created : start + CLOCK_SKEW_MS >= created
     })
   const replaced = new Set<string>()
 
