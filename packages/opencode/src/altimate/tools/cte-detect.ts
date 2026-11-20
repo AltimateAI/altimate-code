@@ -315,14 +315,24 @@ function referenceKey(name: string): string {
 const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
 const BRACKETED = /\[(?:[^\]\n]|\]\]){1,256}\]/y
 
-/** Position just past the `}}` that closes the Jinja expression at `pos`, stepping over quoted strings inside it. */
+/**
+ * Position just past the `}}` that closes the Jinja expression at `pos`: quoted strings inside it are stepped
+ * over and braces balanced, as Jinja's lexer does, so `{{ {"a": {"b": 1}}["a"] }}` ends at its last `}}`.
+ */
 function skipJinjaExpression(text: string, pos: number): number {
   let at = pos + 2
+  let depth = 0
   while (at < text.length) {
     const char = text[at]
     if (char === "'" || char === '"') {
       at++
       while (at < text.length && text[at] !== char) at += text[at] === "\\" ? 2 : 1
+      at++
+    } else if (char === "{") {
+      depth++
+      at++
+    } else if (char === "}" && depth > 0) {
+      depth--
       at++
     } else if (char === "}" && text[at + 1] === "}") return at + 2
     else at++

@@ -1702,6 +1702,8 @@ select * from c`
   it("steps over a Jinja string holding }}, and a backslash-escaped quote in a SQL string", () => {
     const jinja = `with orders as (select 1), b as (select {{ "}}" | length }} as n, {{ "'}}'" }} as m from orders) select * from b`
     expect(readsOf(jinja)).toEqual({ orders: [], b: ["orders"] })
+    const nested = `with orders as (select 1), b as (select {{ {"x": {"y": 1}}["x"].get("orders", 0) }} as n, {{ {"a": {"b": 1}}[orders]["b"] }} as m) select * from b`
+    expect(readsOf(nested)).toEqual({ orders: [], b: [] })
     const escaped = "with orders as (select 1), b as (select 'it\\'s orders \\'text' as label, 'x''orders' as y) select * from b"
     expect(readsOf(escaped)).toEqual({ orders: [], b: [] })
   })
