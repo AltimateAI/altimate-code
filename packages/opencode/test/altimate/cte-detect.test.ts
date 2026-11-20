@@ -1744,6 +1744,9 @@ select * from c`
     // Inside its own definition, or in an inner CTE before it, the name is still the outer CTE.
     expect(readsOf("with orders as (select 1), b as (with x as (select * from orders), orders as (select 2) select * from x) select * from b").b).toEqual(["orders"])
     expect(readsOf("with orders as (select 1), b as (with orders as (select * from orders) select * from orders) select * from b").b).toEqual(["orders"])
+    // A subquery's WITH shadows too, only inside that subquery.
+    expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s) select * from b").b).toEqual([])
+    expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s join orders on 1 = 1) select * from b").b).toEqual(["orders"])
     const sql = "with orders as (select 1), b as (with orders as (select 2) select * from orders), c as (with x as (select 3) select * from x join orders on 1 = 1) select * from c"
     expect(readsOf(sql)).toEqual({ orders: [], b: [], c: ["orders"] })
   })

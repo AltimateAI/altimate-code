@@ -465,14 +465,49 @@ function skipQuoted(text: string, pos: number): number {
 }
 
 /**
+ * The CTEs the WITH clauses between `start` and `end` define: the query's own, and every subquery's that starts
+ * with WITH. Each with where its name is written (`at`), where its definition ends (`from`) and where the query
+ * holding it ends (`to`): its name means it from `from` to `to`.
+ */
+function shadowsIn(sql: string, start: number, end: number): { written: Written; at: number; from: number; to: number }[] {
+  const out: { written: Written; at: number; from: number; to: number }[] = []
+  const add = (from: number, to: number) => {
+    for (const one of detectCtes(sql.substring(from, to))) out.push({ written: written(stripColumnList(one.name)), at: from + one.nameStart, from: from + one.queryEnd, to })
+  }
+  if (!/\bwith\b/i.test(sql.substring(start, end))) return out
+  add(start, end)
+  let pos = start
+  while (pos < end) {
+    const char = sql[pos]
+    if (char === "'" || char === '"' || char === "`") {
+      pos = skipQuoted(sql, pos)
+      continue
+    }
+    const skipped = skipLiteral(sql, pos)
+    if (skipped !== pos) {
+      pos = skipped
+      continue
+    }
+    if (char === "(") {
+      const first = skipTrivia(sql, pos + 1, false)
+      if (/^with\b/i.test(sql.substring(first, first + 5))) {
+        const close = findMatchingClosingParen(sql, pos)
+        if (close > pos) add(pos + 1, close)
+      }
+    }
+    pos++
+  }
+  return out
+}
+
+/**
  * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names
  * directly: a name outside strings, comments and Jinja (blanked first: `{{ }}`, `{% %}`, `{# #}`, and the SQL a
  * `{% set %}`, `{% call %}` or `{% macro %}` block captures, which is a string for dbt), not qualified by a dot
  * (`schema . orders`) or inside a longer word, that names the CTE (see `sameName`). Once a CTE the body's own
- * WITH defines has ended, its name is that inner CTE, not a read of the outer one.
+ * WITH or a subquery's WITH defines has ended, its name is that inner CTE there, not a read of the outer one.
  * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not; a CTE
- * named only through Jinja is not seen, nor one shadowed in a deeper subquery, nor one after a nested block
- * comment. A client wanting a CTE's own time subtracts the CTEs it reads directly or through another (the
+ * named only through Jinja is not seen, nor one after a nested block comment. A client wanting a CTE's own time subtracts the CTEs it reads directly or through another (the
  * closure of `reads`), each once.
  */
 export function cteReads(text: string, ctes: CteInfo[]): number[][] {
@@ -485,10 +520,9 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
     const earlier = seen.get(cte.withClauseStart) ?? new Map<string, { written: Written; position: number }[]>()
     seen.set(cte.withClauseStart, earlier)
     const reads = new Set<number>()
-    // The CTEs the body's own WITH defines: each shadows an outer CTE of its name once its definition has ended
-    // (in the later inner CTEs and the body's main query), not inside its own definition or before it.
-    const body = sql.substring(cte.queryStart, cte.queryEnd)
-    const inner = earlier.size > 0 && /\bwith\b/i.test(body) ? detectCtes(body).map((one) => ({ written: written(stripColumnList(one.name)), at: cte.queryStart + one.nameStart, from: cte.queryStart + one.queryEnd })) : []
+    // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
+    // once its definition has ended, to the end of the query that holds it.
+    const inner = earlier.size > 0 ? shadowsIn(sql, cte.queryStart, cte.queryEnd) : []
     let pos = cte.queryStart
     // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
     let previous = ""
@@ -527,7 +561,7 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
       if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ")) {
         const ref = written(sql.substring(pos, end))
         // An inner CTE's own name where it is defined is no reference at all.
-        const shadowed = inner.some((one) => one.at === pos || (one.from < pos && sameName(one.written, ref)))
+        const shadowed = inner.some((one) => one.at === pos || (one.from < pos && pos < one.to && sameName(one.written, ref)))
         if (!shadowed) for (const one of earlier.get(bucket(ref.name)) ?? []) if (sameName(one.written, ref)) reads.add(one.position)
       }
       previous = sql[end - 1]
