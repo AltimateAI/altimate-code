@@ -31,7 +31,10 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
-      reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write, or outside plan mode",
+      reason:
+        ctx.agent === "plan"
+          ? "this needs the dbt adapter, which plan mode doesn't start: run it outside plan mode"
+          : "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
     }
   // One deadline and the call's abort bound every wait below, the dbt config reads included: a stalled
   // read gives up with the start's timeout, and a cancelled call stops waiting at once.

@@ -91,7 +91,7 @@ altimate-code integrations connect jira           # check the credential with th
 
 - `set-secret` reads a secret only from `--from-clipboard`, `--from-env <VAR>` or `--stdin`, never from the command line. `open-token-page <provider>` opens the page where the provider's token is created.
 - `connect` checks the credential with the provider before saving it. With `--local-only` it stays on this machine. Otherwise it is saved to the linked workspace. Attaching it to a workspace that is not private, so its members can use it, needs `--share`.
-- `update <provider>` saves a new credential and keeps the sync mode. `sync [provider] | --all` pushes credentials to the workspace. `block` and `unblock` keep a provider on this machine only or allow it to sync again. `discard` forgets fields typed in but not connected. `disconnect` removes the local credential and the workspace connection.
+- `update <provider>` saves a new credential and keeps the sync mode. `sync [provider] | --all` pushes credentials to the workspace. `block` and `unblock` keep a provider on this machine only or allow it to sync again. `block` refuses a provider whose connection is saved only in the workspace; when the workspace can't be checked it blocks anyway, and a copy already saved there stays until you `disconnect` it. `discard` forgets fields typed in but not connected. `disconnect` removes the local credential and the workspace connection.
 - On macOS, secrets are kept in the keychain, unless `ALTIMATE_INTEGRATIONS_DIR` is set, which keeps them in a file in that folder. On Linux and Windows they are kept in a file in your altimate-code data directory (or `ALTIMATE_INTEGRATIONS_DIR`), readable only by you on Linux (mode 0600). Windows does not apply that mode.
 
 ## Global Flags

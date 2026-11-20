@@ -144,7 +144,7 @@ unit_tests:
 
 These tools bring dbt Power User features to the command line. Call them with `altimate-code tool run <id> --args '<json>'` (see [Tool CLI](../../usage/tool.md)) or from another coding agent through `altimate-code mcp serve`. The agent in the TUI does not offer them.
 
-Some of them start the project's dbt integration (the dbt adapter), which runs `dbt deps` and renders the project's Jinja. Jinja `run_query` calls can run billed queries. A read-only call (`altimate-code tool run` without `--allow-write`, or plan mode) does not start the adapter, so these tools refuse it.
+Some of them start the project's dbt integration (the dbt adapter), which runs `dbt deps` and renders the project's Jinja. Jinja `run_query` calls can run billed queries. A read-only call (`altimate-code tool run` without `--allow-write`, or plan mode) does not start the adapter, so these tools refuse it and say which of the two to change.
 
 ### Tools that start the dbt adapter and so need `--allow-write`
 
@@ -153,7 +153,7 @@ Some of them start the project's dbt integration (the dbt adapter), which runs `
 | `dbt_cost_estimate` | The bytes a model or a query would scan, without running it. | `model` or `sql` (may use Jinja), not both | BigQuery: a dry run. Snowflake: `EXPLAIN USING JSON`, bytes left after pruning, an upper bound. Databricks: `EXPLAIN COST`, the sizes of the tables it reads, which can start a stopped SQL warehouse (billed while it runs). A query that may hold a second statement, or that reads files on Databricks, is refused rather than planned. |
 | `dbt_health` | DataPilot project health insights per model, such as hard-coded references, missing tests or documentation, and naming and structure issues. | `config_path` (optional DataPilot config) | Nothing. It needs the `altimate-datapilot-cli` Python package in the project's Python. |
 | `dbt_cte_profile` | Without `cte` or `position`: the model's CTEs in source order. With one: that CTE's row count and its warehouse time in milliseconds (`queryMs`, without dbt's start-up; `timing` says how it was measured, and `wall` means neither measure was available, so the time includes dbt's start-up). | `model` (name, unique_id or `.sql` path), `cte`, `position` | Listing runs nothing and works read-only. Timing runs `SELECT COUNT(*)` over that CTE and the CTEs before it, so a model of N CTEs costs N queries. |
-| `dbt_sql_graph` | A model's CTEs, joins and filters as a graph, each relation tied to the dbt node it stands for. | `model` | Nothing. |
+| `dbt_sql_graph` | A model's CTEs, joins and filters as a graph, each relation tied to the dbt node it stands for. | `model` | Reads the column metadata of the model's parent relations. Runs no query on their data. |
 
 ### Read-only tools
 

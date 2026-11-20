@@ -732,7 +732,9 @@ describe("dbt_health", () => {
   test("plan mode is refused as a read-only call", async () => {
     const plan = await run({}, { agent: "plan" })
     expect(plan.metadata).toMatchObject({ success: false, refusal: "read_only" })
-    expect(plan.output).toContain("--allow-write")
+    // --allow-write does nothing in plan mode, so the refusal names leaving plan mode instead.
+    expect(plan.output).toContain("outside plan mode")
+    expect(plan.output).not.toContain("--allow-write")
   })
 
   test("an answer whose model_insights is an array, or holds a non-list, is a failure, not an empty report", async () => {

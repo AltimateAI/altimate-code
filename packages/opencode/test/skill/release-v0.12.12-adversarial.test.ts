@@ -227,14 +227,17 @@ describe("v0.12.12: refusal messages name the real cause", () => {
     expect(result.output).toContain("unterminated")
   })
 
-  test("the dbt adapter refusal names plan mode and the flag", async () => {
-    for (const c of [ctx({ agent: "plan" }), ctx({ extra: { forceReadOnly: true } })]) {
-      const access = await dbtAdapterFor(c)
+  test("the dbt adapter refusal names only the fix that applies: plan mode, or --allow-write", async () => {
+    const plan = await dbtAdapterFor(ctx({ agent: "plan" }))
+    const readOnly = await dbtAdapterFor(ctx({ extra: { forceReadOnly: true } }))
+    for (const access of [plan, readOnly]) {
       expect(access.adapter).toBeUndefined()
       expect(access.refusal).toBe("read_only")
-      expect(access.reason).toContain("--allow-write")
-      expect(access.reason).toContain("plan mode")
     }
+    expect(plan.reason).toContain("outside plan mode")
+    expect(plan.reason).not.toContain("--allow-write")
+    expect(readOnly.reason).toContain("--allow-write")
+    expect(readOnly.reason).not.toContain("plan mode")
   })
 
   test("a cancelled call is not answered with a refusal", async () => {
