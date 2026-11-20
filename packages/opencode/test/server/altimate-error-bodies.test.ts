@@ -20,7 +20,7 @@ import {
   upstreamStatus,
   UNEXPECTED,
 } from "../../src/altimate/server/error-response"
-import type { Log } from "../../src/util/log"
+import { Log } from "../../src/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
@@ -101,6 +101,31 @@ describe("middleware.ts errorHandler", () => {
     expect(body).toMatchObject({ name: "UnknownError", data: { message: UNEXPECTED } })
     // One log line, and it names the ref the client got.
     expect(calls).toEqual([{ message: "failed", extra: { ref: body.data.ref, error: err } }])
+  })
+
+  test("with print-logs off, an unknown error's ref is in opencode.log with the full error", async () => {
+    const saved = [process.env["ALTIMATE_PRINT_LOGS"], process.env["OPENCODE_PRINT_LOGS"]] as const
+    delete process.env["ALTIMATE_PRINT_LOGS"]
+    delete process.env["OPENCODE_PRINT_LOGS"]
+    try {
+      const err = new Error("retained marker")
+      const hono = new Hono().onError(errorHandler(Log.create({ service: "test" }))).get("/boom", () => {
+        throw err
+      })
+      const response = await hono.request("/boom")
+      const body = await response.json()
+      expect(response.status).toBe(500)
+      const logged = await Bun.file(path.join(Global.Path.log, "opencode.log")).text()
+      const line = logged.split("\n").find((entry) => entry.includes(`ref=${body.data.ref}`))
+      expect(line).toBeDefined()
+      expect(line).toContain("level=ERROR")
+      expect(line).toContain("retained marker")
+    } finally {
+      if (saved[0] === undefined) delete process.env["ALTIMATE_PRINT_LOGS"]
+      else process.env["ALTIMATE_PRINT_LOGS"] = saved[0]
+      if (saved[1] === undefined) delete process.env["OPENCODE_PRINT_LOGS"]
+      else process.env["OPENCODE_PRINT_LOGS"] = saved[1]
+    }
   })
 
   test("a busy session answers 400 with its message", async () => {

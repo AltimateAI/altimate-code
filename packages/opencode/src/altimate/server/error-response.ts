@@ -1,7 +1,10 @@
+import { NodeFileSystem } from "@effect/platform-node"
+import { fileLogger } from "@opencode-ai/core/observability/logging"
 import { NamedError } from "@opencode-ai/core/util/error"
+import { Cause, Effect, Layer, Logger } from "effect"
 
 // What the server's error handlers send back. For an error they don't recognise, a fixed message and a ref: never
-// the error's own text, stack or file paths. Each handler logs the full error once, under the same ref.
+// the error's own text, stack or file paths. The full error is recorded under the same ref (recordUnknownError).
 
 /** HTTP status for an error the handlers know by name: a remote the server depends on failed (502). */
 export function upstreamStatus(name: string): 502 | undefined {
@@ -45,4 +48,22 @@ export function clientMessage(err: unknown): string {
 /** The response body for an error no handler recognises: the fixed message and the ref it was logged under. */
 export function unknownErrorBody(ref: string) {
   return new NamedError.Unknown({ message: UNEXPECTED, ref }).toObject()
+}
+
+const unknownErrorLog = Logger.layer([fileLogger()], { mergeWithExisting: false }).pipe(
+  Layer.provide(NodeFileSystem.layer),
+)
+
+/**
+ * Record an error no handler recognises under its ref in opencode.log: the file the /api error middleware's refs go
+ * to, written whether or not --print-logs is on. Only the file, never stderr, which belongs to the TUI when it runs
+ * the server in-process. A failed write never fails the response.
+ */
+export function recordUnknownError(service: string, ref: string, error: unknown): Promise<void> {
+  return Effect.runPromise(
+    Effect.logError("unexpected error", { ref, cause: Cause.pretty(Cause.die(error)) }).pipe(
+      Effect.annotateLogs({ service }),
+      Effect.provide(unknownErrorLog),
+    ),
+  ).catch(() => undefined)
 }

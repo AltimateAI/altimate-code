@@ -11,7 +11,7 @@ import z from "zod"
 import { Provider } from "../provider/provider"
 import { NamedError } from "@opencode-ai/core/util/error"
 // altimate_change start — client-safe error responses
-import { errorRef, unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
+import { errorRef, recordUnknownError, unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
 // altimate_change end
 import { LSP } from "../lsp"
 import { Format } from "../format"
@@ -308,9 +308,7 @@ export namespace Server {
         if (err instanceof Session.BusyError) {
           return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 400 })
         }
-        return c.json(unknownErrorBody(ref), {
-          status: 500,
-        })
+        return recordUnknownError("server", ref, err).then(() => c.json(unknownErrorBody(ref), { status: 500 }))
         // altimate_change end
       })
       .use((c, next) => {

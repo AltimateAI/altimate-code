@@ -8,7 +8,7 @@ import { HTTPException } from "hono/http-exception"
 import type { Log } from "../util/log"
 // altimate_change start — client-safe error responses
 import { NamedError as CoreNamedError } from "@opencode-ai/core/util/error"
-import { errorRef, unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
+import { errorRef, recordUnknownError, unknownErrorBody, upstreamStatus } from "../altimate/server/error-response"
 // altimate_change end
 
 export function errorHandler(log: Log.Logger): ErrorHandler {
@@ -38,10 +38,8 @@ export function errorHandler(log: Log.Logger): ErrorHandler {
     if (err instanceof CoreNamedError) {
       return c.json(err.toObject(), { status: upstreamStatus(err.name) ?? 500 })
     }
-    // Never send an error's text or stack to the client: a fixed message and a ref, logged in full.
-    return c.json(unknownErrorBody(ref), {
-      status: 500,
-    })
+    // Never send an error's text or stack to the client: a fixed message and a ref, recorded in full first.
+    return recordUnknownError("server", ref, err).then(() => c.json(unknownErrorBody(ref), { status: 500 }))
     // altimate_change end
   }
 }
