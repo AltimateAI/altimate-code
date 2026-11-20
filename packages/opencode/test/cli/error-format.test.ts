@@ -36,6 +36,18 @@ describe("FormatError: known error types", () => {
     expect(result).toContain("anthropic")
   })
 
+  // altimate_change start — an unavailable remote config names the remote and why
+  test("Config.RemoteUnavailableError names the remote and the reason", () => {
+    const err = {
+      name: "ConfigRemoteUnavailableError",
+      data: { remote: "https://config.example.com/.well-known/opencode", status: 503, reason: "HTTP 503" },
+    }
+    expect(FormatError(err)).toBe(
+      "Failed to load remote config from https://config.example.com/.well-known/opencode: the remote is unavailable (HTTP 503).",
+    )
+  })
+  // altimate_change end
+
   test("Config.JsonError with message", () => {
     const err = { name: "ConfigJsonError", data: { path: "/home/user/.config/altimate.json", message: "Unexpected token" } }
     const result = FormatError(err)
