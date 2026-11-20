@@ -107,4 +107,50 @@ data_tests:
     expect(loosened("!= 0", ">=1")).toBe(false)
     expect(loosened("!= 0", ">5")).toBe(true)
   })
+
+  test("loosening is judged on effective values: a deleted stricter override is reported, a redundant warn is not", () => {
+    const yml = (body: string) => `name: shop\ndata_tests:\n  +severity: warn\n  shop:\n${body}`
+    const ch = (a: string, b: string) => detectThresholdLoosening({ path: "dbt_project.yml", status: "modified" }, a, b)
+    // Root warn, marts override to error deleted: every marts test now warns.
+    const deleted = ch(yml("    marts:\n      +severity: error\n"), yml("    marts:\n      +materialized: view\n"))
+    expect(deleted.map((f) => f.title)).toEqual(["test thresholds loosened for `shop → marts`"])
+    // A redundant warn under an already-warn root changes nothing.
+    expect(ch(yml("    marts:\n      +enabled: true\n"), yml("    marts:\n      +severity: warn\n"))).toEqual([])
+    // Loosening at the root is reported once, not again for each folder below it.
+    const root = ch("data_tests:\n  shop:\n    marts:\n      x:\n        +enabled: true\n", "data_tests:\n  +severity: warn\n  shop:\n    marts:\n      x:\n        +enabled: true\n")
+    expect(root.map((f) => f.title)).toEqual(["test thresholds loosened for `(all tests)`"])
+  })
+
+  test("a local warn_if or error_if leaves severity inherited", () => {
+    const withCfg = (cfg: string) => newTests(`:\n              config:\n                ${cfg}`)
+    expect(rule(detectTestAdequacy({ file, newContent: withCfg("warn_if: '>10'"), projectYml: project }))).toEqual(["test-inherits-warn"])
+    expect(rule(detectTestAdequacy({ file, newContent: withCfg("error_if: '!= 0'"), projectYml: project }))).toEqual(["test-inherits-warn"])
+    // Under an inherited threshold, a local severity: error still inherits error_if.
+    const stg = { path: "models/staging/_stg.yml", status: "modified" as const }
+    expect(rule(detectTestAdequacy({ file: stg, newContent: withCfg("severity: error"), projectYml: project }))).toEqual(["test-inherits-threshold"])
+    expect(detectTestAdequacy({ file: stg, newContent: withCfg("error_if: '!= 0'"), projectYml: project })).toEqual([])
+  })
+
+  test("a seed yml is resolved below the seed path, not as a `seeds` folder", () => {
+    const proj = "name: shop\ndata_tests:\n  shop:\n    +severity: warn\n    seeds:\n      +severity: error\n"
+    const seedYml = "seeds:\n  - name: countries\n    columns:\n      - name: code\n        data_tests:\n          - not_null\n"
+    const out = detectTestAdequacy({ file: { path: "seeds/_seeds.yml", status: "added" }, newContent: seedYml, projectYml: proj })
+    expect(rule(out)).toEqual(["test-inherits-warn"])
+  })
+})
+
+describe("cardinality_equality against the same model", () => {
+  const y = (field: string) => `models:
+  - name: m
+    columns:
+      - name: a
+        data_tests:
+          - dbt_utils.cardinality_equality:
+              to: ref('m')
+              field: ${field}
+`
+  test("a different field is a real check; the same field is circular", () => {
+    expect(detectTestAdequacy({ file, newContent: y("b") })).toEqual([])
+    expect(rule(detectTestAdequacy({ file, newContent: y("a") }))).toEqual(["test-compares-model-with-itself"])
+  })
 })

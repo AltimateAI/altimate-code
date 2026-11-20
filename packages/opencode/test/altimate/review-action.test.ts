@@ -30,4 +30,21 @@ describe("action: dbt_prepare", () => {
     expect(run).toMatch(/git worktree add[^\n]*\|\| \{ echo "::warning::/)
     expect(run.indexOf('rm -rf "$PROJECT/target-base"')).toBeLessThan(run.indexOf('build "$WT/$REL"'))
   })
+
+  test("a mismatched head, an empty dbt_command or a failed head compile never builds the wrong artifacts or fails the job", async () => {
+    const action = YAML.parse(await fs.readFile(actionPath, "utf8"))
+    const prep = (action.runs.steps as Array<{ name: string; run?: string; env?: Record<string, string> }>).find(
+      (s) => s.name === "Prepare dbt artifacts",
+    )!
+    const run = prep.run!
+    expect(prep.env?.IN_HEAD).toBe("${{ inputs.head }}")
+    expect(prep.env?.IN_MANIFEST).toBe("${{ inputs.manifest_path }}")
+    expect(run).toMatch(/\$\{#DBT\[@\]\} -eq 0 \]\]; then echo "::error::/)
+    // The head check runs before anything is compiled.
+    expect(run.indexOf('"$IN_HEAD^{commit}"')).toBeLessThan(run.indexOf('build "$PROJECT"'))
+    expect(run).toMatch(/if ! build "\$PROJECT" "\$TARGET"; then\n\s*echo "::warning::/)
+    expect(run).toContain('TARGET="$(dirname "$MANIFEST")"')
+    expect(run).toContain('cp "$PROJECT/profiles.yml" "$WT/$REL/profiles.yml"')
+    expect(action.inputs.dbt_prepare.description).not.toContain("usually works offline")
+  })
 })

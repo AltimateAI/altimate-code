@@ -32,11 +32,11 @@ inputs:
     required: false
     default: "true"
   dbt_prepare:
-    description: "Build the dbt artifacts the full review uses before reviewing. `none` (default): you build them in earlier steps. `compile`: `dbt compile` on the head, and on the PR's merge-base into `target-base/` (equivalence and lineage proofs). `full`: also `dbt docs generate` for `catalog.json` (complete column types). `compile` usually works offline; `full` needs warehouse credentials in the profile."
+    description: "Build the dbt artifacts the full review uses before reviewing. `none` (default): you build them in earlier steps. `compile`: `dbt compile` on the head, and on the PR's merge-base into `target-base/` (equivalence and lineage proofs). `full`: also `dbt docs generate` for `catalog.json` (complete column types). `compile` needs a profile dbt can load, and many adapters connect while compiling; `full` needs warehouse credentials. A failed compile is a warning and the review runs without that side's artifacts."
     required: false
     default: "none"
   dbt_command:
-    description: "How to invoke dbt for `dbt_prepare`, e.g. `dbt`, `uv run dbt`, `poetry run dbt`."
+    description: "How to invoke dbt for `dbt_prepare`, e.g. `dbt`, `uv run dbt`, `poetry run dbt`. Split on whitespace (no shell quoting)."
     required: false
     default: "dbt"
   dbt_profiles_dir:
@@ -188,12 +188,21 @@ runs:
         IN_DBT: ${{ inputs.dbt_command }}
         IN_PROFILES: ${{ inputs.dbt_profiles_dir }}
         IN_PROJECT_DIR: ${{ inputs.project_dir }}
+        IN_MANIFEST: ${{ inputs.manifest_path }}
         IN_BASE: ${{ inputs.base }}
+        IN_HEAD: ${{ inputs.head }}
         EVENT_BASE: ${{ github.event.pull_request.base.ref }}
       run: |
         set -euo pipefail
         case "$IN_PREPARE" in compile|full) ;; *) echo "::error::dbt_prepare must be none, compile or full (got '$IN_PREPARE')"; exit 1 ;; esac
         read -ra DBT <<< "$IN_DBT"
+        if [[ ${#DBT[@]} -eq 0 ]]; then echo "::error::dbt_command is empty; set it to how dbt is invoked (e.g. dbt)."; exit 1; fi
+        # Artifacts are built from the checkout: a different `head` would be reviewed
+        # against another commit's compiled SQL, so skip preparing instead.
+        if [[ -n "${IN_HEAD:-}" && "$(git rev-parse --verify -q "$IN_HEAD^{commit}" || true)" != "$(git rev-parse HEAD)" ]]; then
+          echo "::warning::head ($IN_HEAD) is not the checked-out commit; skipping dbt_prepare. Check out the head to build its artifacts."
+          exit 0
+        fi
         PROJECT="$(cd "${IN_PROJECT_DIR:-.}" && pwd)"
         REL="$(git -C "$PROJECT" rev-parse --show-prefix)"
         PROFILES=()
@@ -203,11 +212,18 @@ runs:
             [[ -f packages.yml || -f dependencies.yml ]] && "${DBT[@]}" deps ${PROFILES[@]+"${PROFILES[@]}"}
             "${DBT[@]}" compile --target-path "$2" ${PROFILES[@]+"${PROFILES[@]}"} )
         }
+        # The head goes where the review reads the manifest (`manifest_path`).
+        MANIFEST="${IN_MANIFEST:-target/manifest.json}"
+        [[ "$MANIFEST" == /* ]] || MANIFEST="$PROJECT/$MANIFEST"
+        TARGET="$(dirname "$MANIFEST")"
         echo "Compiling the head…"
-        build "$PROJECT" "$PROJECT/target"
+        if ! build "$PROJECT" "$TARGET"; then
+          echo "::warning::The head compile failed (dbt may need a warehouse connection to compile); the review runs without compiled artifacts."
+          exit 0
+        fi
         if [[ "$IN_PREPARE" == "full" ]]; then
           echo "Generating catalog.json…"
-          ( cd "$PROJECT" && "${DBT[@]}" docs generate --target-path "$PROJECT/target" ${PROFILES[@]+"${PROFILES[@]}"} ) ||
+          ( cd "$PROJECT" && "${DBT[@]}" docs generate --target-path "$TARGET" ${PROFILES[@]+"${PROFILES[@]}"} ) ||
             echo "::warning::dbt docs generate failed; continuing without catalog.json."
         fi
         # The base side: the PR's merge-base, compiled into target-base/.
@@ -226,6 +242,11 @@ runs:
         git worktree add --detach "$WT" "$MB" >/dev/null || { echo "::warning::Could not check out the base; skipping the base compile."; exit 0; }
         # A stale target-base/ from an earlier run must not stand in for a failed compile.
         rm -rf "$PROJECT/target-base"
+        # A profiles.yml generated into the project dir at runtime is untracked, so
+        # the base worktree lacks it.
+        if [[ ${#PROFILES[@]} -eq 0 && -f "$PROJECT/profiles.yml" && ! -f "$WT/$REL/profiles.yml" ]]; then
+          cp "$PROJECT/profiles.yml" "$WT/$REL/profiles.yml"
+        fi
         echo "Compiling the base ($BASE @ ${MB:0:12})…"
         build "$WT/$REL" "$PROJECT/target-base" || echo "::warning::The base compile failed; equivalence will be marked unverified."
 

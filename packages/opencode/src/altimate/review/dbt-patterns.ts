@@ -250,14 +250,20 @@ function addedLineNumbers(diff: string | undefined): Set<number> | undefined {
  * `row_number() over (…)` windows in the model, read from the whole file so a
  * window split across lines is seen whole. A window counts as part of the
  * change when one of the PR's added lines falls inside its line span (by text
- * only when the diff carries no hunk headers).
+ * only when the diff carries no hunk headers, and then only for added lines
+ * that themselves hold window syntax).
  */
 function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
   // Comments blanked with newlines kept, so offsets map to head line numbers.
   const sql = c.newSql.replace(/\/\*[\s\S]*?\*\/|--[^\n]*|\{#[\s\S]*?#\}/g, (m) => m.replace(/[^\n]/g, " "))
   const lineAt = (offset: number) => sql.slice(0, offset).split("\n").length
   const addedLines = addedLineNumbers(c.file.diff)
-  const added = c.added.map((l) => stripComments(l).trim()).filter((l) => l.length >= 3)
+  // Text fallback (diff without hunk headers): only added lines that are part
+  // of a window spec can touch one; a bare identifier elsewhere never does.
+  const squash = (t: string) => t.replace(/\s+/g, " ").trim()
+  const added = c.added
+    .map((l) => squash(stripComments(l)))
+    .filter((l) => l.length >= 3 && /\b(row_number|over|partition\s+by|order\s+by)\b/i.test(l))
   const out: Array<{ spec: string; text: string }> = []
   for (const m of sql.matchAll(/row_number\s*\(\s*\)\s*over\s*\(/gi)) {
     const open = m.index! + m[0].length - 1
@@ -274,7 +280,7 @@ function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
     const text = sql.slice(m.index!, close + 1)
     const touched = addedLines
       ? [...addedLines].some((n) => n >= lineAt(m.index!) && n <= lineAt(close))
-      : added.some((l) => text.includes(l) || l.includes(text.replace(/\s+/g, " ")))
+      : added.some((l) => squash(text).includes(l) || l.includes(squash(text)))
     if (!touched) continue
     out.push({ spec: sql.slice(open + 1, close).replace(/\s+/g, " ").trim(), text: text.replace(/\s+/g, " ") })
   }
