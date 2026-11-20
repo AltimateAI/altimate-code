@@ -95,6 +95,17 @@ function lintCategory(rule: string, code: string): string | undefined {
   return undefined // → sql_quality default downstream
 }
 
+/** Core error text for SQL it could not parse (unsupported dialect syntax). */
+const PARSE_FAILURE_RE =
+  /\bparse ?error\b|\bparser error\b|(cannot|could not|failed to|unable to) parse (?!(the )?(schema|manifest|dbt|ya?ml|json|policy)\b)|\bsyntax error\b|unsupported (dialect|syntax|statement)|\bunexpected token\b|\bexpected\b[^\n]*\b(found|got)\b/i
+
+export function isParseFailure(message: string): boolean {
+  return PARSE_FAILURE_RE.test(message)
+}
+
+/** The engine could not parse the SQL: the check abstains on it. */
+class CoreParseError extends Error {}
+
 export interface DispatcherRunnerOptions {
   manifestPath: string
   /** Optional inline schema context to enable real equivalence proofs. */
@@ -109,6 +120,10 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
   // instead of reading as "no findings".
   const failures = new Map<string, { reason: string; count: number }>()
   function fail(method: string, err: unknown) {
+    // The engine could not parse this SQL (dialect syntax it does not support):
+    // the check abstains on that model, it did not fail. Each method still
+    // returns its "unknown" result (`check` reports ran:false, so PII abstains).
+    if (err instanceof CoreParseError) return
     const reason = errorReason(err)
     const prev = failures.get(method)
     failures.set(method, { reason: prev?.reason ?? reason, count: (prev?.count ?? 0) + 1 })
@@ -116,9 +131,13 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
   // The altimate_core handlers catch their own exceptions and return
   // `{ success: false, error }` instead of throwing. Rethrow so each method's
   // catch records the failure; otherwise a failed call reads as a clean result.
+  // A parse failure is rethrown as CoreParseError: an abstention, not a fault.
   const callCore: typeof Dispatcher.call = async (method, params, context) => {
     const res: any = await Dispatcher.call(method, params, context)
-    if (res?.success === false) throw new Error(res.error || `${method} failed`)
+    if (res?.success === false) {
+      const message = res.error || `${method} failed`
+      throw isParseFailure(message) ? new CoreParseError(message) : new Error(message)
+    }
     return res
   }
   let manifestPromise: Promise<CachedManifest> | undefined

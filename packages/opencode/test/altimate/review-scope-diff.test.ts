@@ -463,7 +463,7 @@ describe("a shallow CI checkout without the target branch", () => {
     expect(resolved.source).toBe("github_env")
     expect(resolved.sha).toBe(branchPoint)
   }, 60_000)
-  test("deepening follows --head (not the checkout) and goes beyond 50 commits", async () => {
+  test("with --head on a branch other than the checkout, the merge-base is found beyond 50 commits", async () => {
     const exec = (await import("node:util")).promisify((await import("node:child_process")).execFile)
     const fsp = (await import("node:fs")).promises
     const os = await import("node:os")

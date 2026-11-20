@@ -1204,12 +1204,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         const engineNewSql = compiledNew ?? (file.kind === "model_sql" && hasJinja(newSql) ? undefined : newSql)
         const engineOldSql = compiledOld ?? (file.kind === "model_sql" && hasJinja(oldSql) ? undefined : oldSql)
         if (file.status !== "deleted" && newSql && !engineNewSql)
-          unverified.push({ path: file.path, reason: "no compiled SQL for the head (run dbt compile)", kind: "not_compiled" })
+          unverified.push({
+            path: file.path,
+            reason: "no compiled SQL for the head (run dbt compile)",
+            kind: "not_compiled",
+            side: "head",
+          })
         else if (withOld && oldSql && !engineOldSql)
           unverified.push({
             path: file.path,
             reason: "no compiled SQL for the base (compile the base into target-base)",
             kind: "not_compiled",
+            side: "base",
           })
         const impact = await input.runner.impact(model)
         if (impact.hasManifest) anyManifest = true

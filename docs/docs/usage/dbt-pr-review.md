@@ -308,8 +308,8 @@ rubric:
   PII check. Now pattern-rule findings comment but don't block. To keep a
   pattern rule blocking, add its id to `rubric.blockingRules`. A blocking
   review is dismissed only by a later run that completed: when an engine call
-  or a file failed, or a check (such as PII) could not analyse a model, the
-  earlier block stays.
+  or a file failed, a check (such as PII) could not analyse a model, or a
+  changed model had no compiled SQL, the earlier block stays.
 
 ### What the PR comment shows
 
@@ -330,14 +330,23 @@ rubric:
   warnings that may predate the PR. A model the PII check could not analyse is
   listed as not fully verified.
 - **Failures are never a clean pass:** if an engine check fails, a file's
-  review fails, or a check could not analyse a model, the comment names it and
-  the verdict is at most COMMENT, never APPROVE (envelope `engineErrors` and
-  `scope.unverified`). A failure on one file marks that file unverified and the
-  rest of the PR is still reviewed.
+  review fails, a check could not analyse a model, or a changed model has no
+  compiled head SQL (its engine and PII checks were skipped), the comment names
+  it and an otherwise clean verdict becomes COMMENT, never APPROVE (envelope
+  `engineErrors` and `scope.unverified`); a real blocking finding still
+  blocks. A project reviewed without `dbt compile` (parse-only) therefore never
+  gets APPROVE for a changed Jinja model. A failure on one file marks that file
+  unverified and the rest of the PR is still reviewed. SQL the engine cannot
+  parse in your dialect is not an engine failure: the affected checks abstain
+  on that model (a PII abstention still marks it not fully verified).
 - **The gate clears itself:** when a completed rerun on the PR's current head
   no longer blocks, the earlier blocking altimate review for the same dbt
   project is dismissed after the new review is posted (needs
-  `pull-requests: write`).
+  `pull-requests: write`). "Current head" means the reviewed commit is the PR
+  head, or the merge commit a `pull_request` checkout builds from it
+  (`refs/pull/N/merge`). When either the reviewed commit or the PR head cannot
+  be determined, the block stays. Only reviews authored by a bot (or by the
+  token's own user) are dismissed.
 
 ### Risk-tier path tokens
 
