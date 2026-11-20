@@ -294,16 +294,8 @@ describe("v0.12.9 adversarial: askFor (the CLI's permission handler)", () => {
     }
   })
 
-  test("READ_PERMISSIONS is exactly the four read kinds and the two savings checks", () => {
-    // The savings checks only read, but bill the warehouse: under the CLI the caller's own call is the go-ahead.
-    expect([...READ_PERMISSIONS].sort()).toEqual([
-      "answer_commit",
-      "finops_databricks_savings",
-      "finops_snowflake_savings",
-      "schema_inspect",
-      "sql_execute",
-      "sql_execute_read",
-    ])
+  test("READ_PERMISSIONS is exactly the four read kinds", () => {
+    expect([...READ_PERMISSIONS].sort()).toEqual(["answer_commit", "schema_inspect", "sql_execute", "sql_execute_read"])
     expect(READ_PERMISSIONS.has("sql_execute_write")).toBe(false)
   })
 

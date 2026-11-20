@@ -192,7 +192,7 @@ describe("finops_snowflake_savings tool", () => {
       const tool = await initTool(FinopsSnowflakeSavingsTool)
       expect(tool.description).toContain("bills while the check runs; the check stops after 9 minutes, cancelling any query still running.")
       expect(tool.description).toContain("In an altimate-code session the user is asked for permission before the first query")
-      expect(tool.description).toContain("a caller using those must get the user's go-ahead first.")
+      expect(tool.description).toContain("a caller using it must get the user's go-ahead first, and over MCP the check is refused unless the server allows writes.")
       expect(tool.description).not.toContain("confirm")
     })
   })

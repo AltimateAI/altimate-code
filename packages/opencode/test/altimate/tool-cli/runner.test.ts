@@ -5,7 +5,7 @@ import path from "node:path"
 import { bootstrap } from "../../../src/cli/bootstrap"
 import { createRunner, resultsDirectory, type Runner } from "../../../src/altimate/tool-cli/runner"
 import { EXPOSED } from "../../../src/altimate/tool-cli/allow-list"
-import { askFor, isBlockedStatement } from "../../../src/altimate/tool-cli/permissions"
+import { BILLABLE_RUN_PERMISSIONS, READ_PERMISSIONS, askFor, isBlockedStatement } from "../../../src/altimate/tool-cli/permissions"
 import { Effect, Exit } from "effect"
 import { Global } from "../../../src/global"
 import * as Registry from "../../../src/altimate/native/connections/registry"
@@ -176,11 +176,26 @@ describe("ask handler", () => {
   test("reads pass, everything else is denied by default", () => {
     for (const kind of ["sql_execute", "sql_execute_read", "schema_inspect", "answer_commit"])
       expect(Exit.isSuccess(ask(false, kind))).toBe(true)
-    // The savings checks are reads that bill the warehouse; calling `tool run` is the user's go-ahead.
-    for (const kind of ["finops_databricks_savings", "finops_snowflake_savings"])
-      expect(Exit.isSuccess(ask(false, kind, ["dbx"]))).toBe(true)
+
     for (const kind of ["sql_execute_write", "bash", "external_directory", "edit", "warehouse_add"])
       expect(Exit.isFailure(ask(false, kind))).toBe(true)
+  })
+
+  test("a savings check is a billable run, not a read: only a direct CLI call or --allow-write grants it", () => {
+    const savings = ["finops_databricks_savings", "finops_snowflake_savings"]
+    for (const kind of savings) {
+      expect(READ_PERMISSIONS.has(kind)).toBe(false)
+      expect(BILLABLE_RUN_PERMISSIONS.has(kind)).toBe(true)
+      const run = (allowWrite: boolean, cli?: boolean) =>
+        Effect.runSyncExit(askFor(allowWrite, cli ? "Re-run" : "Restart", { cli })({ permission: kind, patterns: ["dbx"], always: [], metadata: {} }))
+      // `tool run`: the user's own call is the decision.
+      expect(Exit.isSuccess(run(false, true))).toBe(true)
+      // MCP, read-only: the model makes the call and nothing can ask the user, so it is refused.
+      const refused = run(false)
+      expect(Exit.isFailure(refused)).toBe(true)
+      expect(String(Exit.isFailure(refused) ? refused.cause : "")).toContain("can start a stopped warehouse that then bills")
+      expect(Exit.isSuccess(run(true))).toBe(true)
+    }
   })
 
   test("blocked statements are refused for read permissions too", () => {
