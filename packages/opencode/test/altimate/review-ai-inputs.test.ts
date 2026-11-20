@@ -196,15 +196,18 @@ describe("graph context: the changed files' unchanged dbt parents", () => {
         nodes: {
           "model.shop.fct": {
             resource_type: "model", name: "fct", original_file_path: "models/fct.sql",
-            depends_on: { nodes: ["model.shop.stg", "seed.shop.codes", "source.shop.raw.orders"], macros: ["macro.shop.cents", "macro.dbt_utils.star"] },
+            depends_on: { nodes: ["model.shop.stg", "seed.shop.codes", "source.shop.raw.orders", "model.pkg.calendar", "source.pkg.ext.events"], macros: ["macro.shop.cents", "macro.dbt_utils.star"] },
           },
           "model.shop.stg": { resource_type: "model", name: "stg", original_file_path: "models/stg.sql", depends_on: { nodes: [] } },
+          // Installed-package nodes: their paths are relative to the package, not the project.
+          "model.pkg.calendar": { resource_type: "model", name: "calendar", package_name: "pkg", original_file_path: "models/calendar.sql", depends_on: { nodes: [] } },
           "seed.shop.codes": { resource_type: "seed", name: "codes", original_file_path: "seeds/codes.csv", depends_on: { nodes: [] } },
           "test.shop.unique_stg_id": {
             resource_type: "test", name: "unique_stg_id", original_file_path: "models/_schema.yml", depends_on: { nodes: ["model.shop.stg"] },
           },
         },
         sources: {
+          "source.pkg.ext.events": { source_name: "ext", name: "events", package_name: "pkg", original_file_path: "models/src.yml" },
           "source.shop.raw.orders": { source_name: "raw", name: "orders", original_file_path: "models/_sources.yml", columns: { id: {}, status: {} } },
         },
         macros: {
