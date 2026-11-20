@@ -214,9 +214,13 @@ Compiling the base (optional, for equivalence and column-breakage):
 ```yaml
       - name: Compile the base into target-base/
         run: |
-          git worktree add ../base "origin/${{ github.base_ref }}"
+          # The review diffs against the merge-base, not the target branch tip.
+          git worktree add ../base "$(git merge-base "origin/${{ github.base_ref }}" HEAD)"
           (cd ../base && dbt deps && dbt compile --target-path "$GITHUB_WORKSPACE/target-base")
 ```
+
+With `project_dir`, compile from that folder and write next to its own
+`target/`: `(cd ../base/<project_dir> && dbt deps && dbt compile --target-path "$GITHUB_WORKSPACE/<project_dir>/target-base")`.
 
 **Monorepos:** set `project_dir` to the folder holding `dbt_project.yml`. Only
 changes inside it are reviewed, `manifest_path` is resolved relative to it, and

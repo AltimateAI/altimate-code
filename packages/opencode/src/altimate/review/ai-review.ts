@@ -143,7 +143,13 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       const chosen = input.model ? Provider.parseModel(input.model) : await Provider.defaultModel()
       model = await Provider.getModel(chosen.providerID, chosen.modelID)
     } catch (err) {
-      return done([], { state: "skipped", reason: `no usable model: ${safeReason(err)}`, model: input.model })
+      // An explicitly requested model that cannot be resolved is an error, not
+      // the same as `--no-ai`; only a missing default is a skip.
+      return done([], {
+        state: input.model ? "error" : "skipped",
+        reason: `no usable model: ${safeReason(err)}`,
+        model: input.model,
+      })
     }
     modelLabel = `${model.providerID}/${model.id}`
 
@@ -188,7 +194,16 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       text,
       valid_files: files.map((f) => f.path),
     })
-    const parsed = (((parseRes.data ?? {}) as Record<string, unknown>).findings as any[]) ?? []
+    // The core parser reports failure in-band (`success: false`) rather than
+    // throwing; that is an error, never an "ok" run with no findings.
+    const parsedRaw = ((parseRes.data ?? {}) as Record<string, unknown>).findings
+    if (parseRes.success === false || !Array.isArray(parsedRaw))
+      return done([], {
+        state: "error",
+        reason: `could not parse the model's answer: ${safeReason(parseRes.error ?? "no findings list")}`,
+        model: modelLabel,
+      })
+    const parsed = parsedRaw as any[]
     const byFile = new Map(files.map((f) => [f.path, f]))
 
     const out: Finding[] = []

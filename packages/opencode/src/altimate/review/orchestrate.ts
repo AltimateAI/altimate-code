@@ -14,7 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
+import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
  * The deterministic review recipe.
@@ -1441,7 +1441,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
     } catch (err) {
       // A failed AI lane must never fail the review — but it must say so.
-      aiStatus = { state: "error", reason: String((err as Error)?.message ?? err).slice(0, 200) }
+      aiStatus = { state: "error", reason: safeReason(err) }
     }
   }
 

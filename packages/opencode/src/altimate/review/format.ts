@@ -130,12 +130,15 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   if (undecided) notes.push(`${undecided} finding(s) could not be decided by the engine and are marked _unverified_.`)
   const unverified = env.scope?.unverified ?? []
   if (unverified.length) {
-    const head = unverified.slice(0, 5).map((u) => `\`${u.path}\``).join(", ")
-    const more = unverified.length > 5 ? ` and ${unverified.length - 5} more` : ""
-    notes.push(
-      `${unverified.length} model(s) not verified by the engine — ${unverified[0].reason}: ${head}${more}. ` +
-        "Run `dbt compile` (and compile the base into `target-base/`) for equivalence and lineage checks.",
-    )
+    // One line per reason: models can lack the head compile or the base compile.
+    const byReason = new Map<string, string[]>()
+    for (const u of unverified) byReason.set(u.reason, [...(byReason.get(u.reason) ?? []), u.path])
+    for (const [reason, paths] of byReason) {
+      const head = paths.slice(0, 5).map((p) => `\`${p}\``).join(", ")
+      const more = paths.length > 5 ? ` and ${paths.length - 5} more` : ""
+      notes.push(`${paths.length} model(s) not verified by the engine — ${reason}: ${head}${more}.`)
+    }
+    notes.push("Run `dbt compile` (and compile the base into `target-base/`) for equivalence and lineage checks.")
   }
   if (env.scope?.outOfScopeFiles)
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)

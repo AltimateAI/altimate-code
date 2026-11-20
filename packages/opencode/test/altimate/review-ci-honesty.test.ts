@@ -108,6 +108,17 @@ describe("advisory AI lane status", () => {
     expect(env.ai).toEqual({ state: "error", reason: "provider exploded" })
   })
 
+  test("a throwing lane's reason is masked and kept on one line", async () => {
+    const env = await review({
+      aiReview: async () => {
+        throw new Error("upstream failed\nAuthorization: Bearer abcdefghijklmnop123456\nretry later")
+      },
+    })
+    expect(env.ai?.state).toBe("error")
+    expect(env.ai?.reason).not.toContain("abcdefghijklmnop123456")
+    expect(env.ai?.reason).not.toContain("\n")
+  })
+
   test("a successful lane is ok, its model goes in the footer, and the model selector is passed through", async () => {
     let sawModel: string | undefined
     const env = await review({
@@ -205,5 +216,24 @@ describe("safeReason: AI-lane errors reach a public PR comment with credentials 
 
   test("an ordinary error message survives intact", () => {
     expect(safeReason(new Error("model not found: openai/gpt-x"))).toBe("model not found: openai/gpt-x")
+  })
+})
+
+describe("unverified models are listed per reason", () => {
+  test("a model missing the head compile and one missing the base compile get their own lines", async () => {
+    const env = await review()
+    const notes = coverageNotes({
+      ...env,
+      scope: {
+        ...env.scope,
+        unverified: [
+          { path: "models/a.sql", reason: "no compiled SQL for the base (compile the base into target-base)" },
+          { path: "models/b.sql", reason: "no compiled SQL for the head (run dbt compile)" },
+        ],
+      },
+    } as any)
+    expect(notes.find((n) => n.includes("models/a.sql"))).toContain("for the base")
+    expect(notes.find((n) => n.includes("models/b.sql"))).toContain("for the head")
+    expect(notes.find((n) => n.includes("models/a.sql"))).not.toContain("models/b.sql")
   })
 })
