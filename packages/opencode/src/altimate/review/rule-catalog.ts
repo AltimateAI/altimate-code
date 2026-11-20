@@ -422,9 +422,9 @@ const r = (
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
 
 
-/** Columns named in a comma list, without qualifiers, lowercased. */
+/** Columns named in a comma list, lowercased; qualifiers are kept so `a.id` and `b.id` stay distinct. */
 const colList = (s: string) =>
-  s.split(",").map((c) => c.trim().replace(/\s+(asc|desc)(\s+nulls\s+(first|last))?$/i, "").replace(/^.*\./, "").toLowerCase()).filter(Boolean)
+  s.split(",").map((c) => c.trim().replace(/\s+(asc|desc)(\s+nulls\s+(first|last))?$/i, "").toLowerCase()).filter(Boolean)
 
 /** An OVER clause whose ORDER BY repeats a PARTITION BY column (constant within each partition). */
 function windowOrderRepeatsPartition(sql: string): boolean {
@@ -434,10 +434,16 @@ function windowOrderRepeatsPartition(sql: string): boolean {
     const om = /\border\s+by\b([\s\S]*?)(?=\brows\b|\brange\b|$)/i.exec(body)
     if (!pm || !om) continue
     const parts = new Set(colList(pm[1]))
-    if (colList(om[1]).some((c) => /^\w+$/.test(c) && parts.has(c))) return true
+    if (colList(om[1]).some((c) => /^\w+(\.\w+)?$/.test(c) && parts.has(c))) return true
   }
   return false
 }
+
+/** A condition with whitespace collapsed and keywords lowercased outside quotes; quoted text stays exact ('A' is not 'a'). */
+const normalizeCondition = (c: string) =>
+  c
+    .replace(/('[^']*'|"[^"]*")|[^'"]+/g, (seg, quoted) => (quoted ? seg : seg.replace(/\s+/g, " ").toLowerCase()))
+    .trim()
 
 /** A CASE with two WHEN branches whose conditions are identical: the second is unreachable. */
 function duplicateCaseWhen(sql: string): boolean {
@@ -452,7 +458,7 @@ function duplicateCaseWhen(sql: string): boolean {
       if (kw === "case") depth++
       else if (kw === "end") {
         if (--depth === 0) break
-      } else if (depth === 1) conds.push(x[2].replace(/\s+/g, " ").trim().toLowerCase())
+      } else if (depth === 1) conds.push(normalizeCondition(x[2]))
     }
     if (new Set(conds).size < conds.length) return true
   }
@@ -561,7 +567,7 @@ const FEASIBLE: Rule[] = [
       added: /\bignore\s+nulls\b/i,
       check: (sql) => /\(\s*[^()]*?\bignore\s+nulls\s*\)/i.test(sql),
       macros: true,
-      portability: { worksOn: ["bigquery"] },
+      portability: { worksOn: ["bigquery", "duckdb"] },
     },
     { add: "last_value(x ignore nulls) over (partition by k order by d)" },
     { add: "last_value(x) ignore nulls over (partition by k order by d)" },
@@ -602,7 +608,7 @@ const FEASIBLE: Rule[] = [
     "suggestion",
     "hardcoded year in a filter won't roll forward",
     "A literal year in the filter freezes the model to that year. Read it from a var or derive it from the current date, or say in a comment why it is fixed.",
-    { added: /\b\w*(year|yr)\w*\s*(=|>=|<=|<|>)\s*20\d\d\b/i, unless: /var\s*\(/i },
+    { added: /\b(where|and|or|on|having)\s+\(?\s*[\w.]*?(year|yr)\w*\s*(=|>=|<=|<|>)\s*20\d\d\b/i, unless: /var\s*\(/i },
     { add: "where academic_year = 2024" },
     { add: "where academic_year = {{ var('current_academic_year') }}" },
   ),

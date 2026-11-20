@@ -16,6 +16,8 @@ function finding(
   category: ReviewCategory,
   title: string,
   body: string,
+  /** What the finding is about (a ref target, a column, a macro), so two findings of one rule in one file keep distinct ids. */
+  subject?: string,
 ): Finding {
   const model = nameOf(file.path)
   return makeFinding({
@@ -27,7 +29,7 @@ function finding(
     model,
     confidence: "high",
     evidence: { tool: "dbt-project-rules", result: { rule } },
-    ruleKey: `${category}:${rule}`,
+    ruleKey: subject ? `${category}:${rule}:${subject}` : `${category}:${rule}`,
   })
 }
 
@@ -131,6 +133,7 @@ export function dbtProjectFindings(file: ChangedFile, oldContent: string | undef
             "sql_quality",
             `duplicate grantee under \`${at}.${priv}\``,
             `${[...new Set(dups)].map((d) => `\`${d}\``).join(", ")} is listed more than once. Usually a copy-paste where another role was meant; check the list is complete.`,
+            `${at}.${priv}`,
           ),
         )
     }
@@ -162,7 +165,7 @@ function sameDup(before: any, at: string, priv: string, dups: string[]): boolean
 
 // ── Jinja structure (macros, models, tests, snapshots) ──────────────────────
 
-const BLOCK_OPEN = ["if", "for", "macro", "call", "filter", "raw", "materialization", "test", "snapshot", "docs"]
+const BLOCK_OPEN = ["if", "for", "macro", "call", "filter", "raw", "materialization", "test", "snapshot", "docs", "with", "block", "autoescape"]
 
 /** Open/close balance of Jinja blocks; returns a message for the first problem, or undefined. */
 export function jinjaBalance(sql: string): string | undefined {
@@ -173,7 +176,7 @@ export function jinjaBalance(sql: string): string | undefined {
     const rest = m[2]
     if (tag === "set") {
       // `{% set x %}…{% endset %}` is a block; `{% set x = … %}` is not.
-      if (!/=/.test(rest)) stack.push("set")
+      if (!/=/.test(rest.replace(/'[^']*'|"[^"]*"/g, ""))) stack.push("set")
       continue
     }
     if (BLOCK_OPEN.includes(tag)) {
@@ -240,6 +243,7 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
             "sql_correctness",
             `\`${name}\` parameters moved position`,
             `${shifted.map((p) => `\`${p}\``).join(", ")} ${shifted.length === 1 ? "is" : "are"} no longer at the same position in \`${name}(${params.join(", ")})\`. Callers that pass arguments positionally now bind them to different parameters. Add new parameters at the end, or check every caller uses keywords.`,
+            name,
           ),
         )
     }
@@ -249,8 +253,15 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
     const newVars = varNames(newContent)
     // A key still named as a string literal is usually still read (handed to a macro that reads it).
     const gone = [...oldVars].filter((v) => !newVars.has(v) && !new RegExp(`['"]${v}['"]`).test(newContent))
-    const fresh = [...newVars].filter((v) => !oldVars.has(v))
-    if (gone.length && fresh.length)
+    const added = [...newVars].filter((v) => !oldVars.has(v))
+    // A rename, not an unrelated removal plus addition: some new line reads the new key where an
+    // old line, otherwise identical, read the old one.
+    const oldLines = new Set(oldContent.split("\n").map((l) => l.trim()))
+    const newLines = newContent.split("\n").map((l) => l.trim())
+    const renamedFrom = (f: string) => gone.find((g) => newLines.some((l) => l.includes(f) && oldLines.has(l.split(f).join(g))))
+    const fresh = added.filter((f) => renamedFrom(f))
+    const from = [...new Set(fresh.map((f) => renamedFrom(f)!))]
+    if (fresh.length)
       out.push(
         finding(
           file,
@@ -258,7 +269,7 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
           "warning",
           "semantic_change",
           "var() key renamed without a fallback",
-          `This file no longer reads ${gone.map((v) => `\`${v}\``).join(", ")} and now reads ${fresh.map((v) => `\`${v}\``).join(", ")}. Projects that set the old key in \`dbt_project.yml\` keep running with the default and no error. Read the new key with the old one as its default, e.g. \`var('${fresh[0]}', var('${gone[0]}', <default>))\`.`,
+          `This file no longer reads ${from.map((v) => `\`${v}\``).join(", ")} and now reads ${fresh.map((v) => `\`${v}\``).join(", ")}. Projects that set the old key in \`dbt_project.yml\` keep running with the default and no error. Read the new key with the old one as its default, e.g. \`var('${fresh[0]}', var('${renamedFrom(fresh[0])}', <default>))\`.`,
         ),
       )
   }
@@ -400,7 +411,7 @@ export function modelConfigFindings(
           "suggestion",
           "materialization",
           "incremental filter reads new rows only, not updated ones",
-          "The `is_incremental()` filter keys on a creation timestamp while the model also carries an update timestamp. Rows created before the last run and changed since are never picked up again. Filter on the update timestamp, or explain why rows never change.",
+          `The \`is_incremental()\` filter keys on a creation timestamp while ${/\b\w*(updated|modified|changed)(_at|_on|_date|_ts|_time)\b/i.test(newSql) ? "the model also carries an update timestamp" : "the model merges on \`unique_key\`, so existing rows are expected to change"}. Rows created before the last run and changed since are never picked up again. Filter on the update timestamp, or explain why rows never change.`,
         ),
       )
   }
@@ -428,7 +439,10 @@ export function missingRefFindings(file: ChangedFile, names: Set<string>): Findi
   const refs = new Set<string>()
   for (const l of addedLines(file.diff))
     for (const m of l.matchAll(/\bref\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*v(?:ersion)?\s*=\s*[^)]*)?\)/g)) refs.add(m[1])
-  const missing = [...refs].filter((r) => !names.has(r.toLowerCase()) && !names.has(r.toLowerCase().replace(/_v\d+$/, "")))
+  // Versioned models live in `<name>_v1.sql`, `<name>_v2.sql`; `ref('<name>')` resolves to one of them.
+  const known = new Set(names)
+  for (const n of names) known.add(n.replace(/_v\d+$/, ""))
+  const missing = [...refs].filter((r) => !known.has(r.toLowerCase()) && !known.has(r.toLowerCase().replace(/_v\d+$/, "")))
   return missing.map((r) => {
     const near = [...names].filter((n) => Math.abs(n.length - r.length) <= 2 && editDistance(n, r.toLowerCase()) <= 2)
     return finding(
@@ -438,6 +452,7 @@ export function missingRefFindings(file: ChangedFile, names: Set<string>): Findi
       "sql_correctness",
       `\`ref('${r}')\` points at no model`,
       `No model, seed or snapshot named \`${r}\` exists in this project or its installed packages, so dbt fails to parse the project.${near.length ? ` Did you mean ${near.slice(0, 3).map((n) => `\`${n}\``).join(", ")}?` : " Add the model in this PR or fix the name."}`,
+      r.toLowerCase(),
     )
   })
 }
@@ -472,7 +487,6 @@ function passThroughCtes(sql: string): Map<string, string> {
 
 const ON_STOP = /^(?:join|left|right|inner|full|cross|where|group|order|qualify|having|union|limit|window|select|\{%)\b/i
 
-/** Joins whose ON clause or JOIN line is on an added line, with the joined model and its key columns. */
 /** The top-level `and`-separated conditions of an ON clause. */
 function conjuncts(on: string): string[] {
   const top = topLevel(on)
@@ -486,6 +500,7 @@ function conjuncts(on: string): string[] {
   return out
 }
 
+/** Joins whose ON clause or JOIN line is on an added line, with the joined model and its key columns. */
 export function joinTargets(sql: string, added: string[]): JoinTarget[] {
   const ctes = passThroughCtes(sql)
   const changed = added.map((l) => l.replace(/--.*$/, "").trim()).filter((l) => /\w{2}/.test(l))
@@ -532,11 +547,20 @@ export function joinTargets(sql: string, added: string[]): JoinTarget[] {
 
 // ── tests on columns the SQL sets to NULL ───────────────────────────────────
 
-/** Columns a model projects as a bare NULL (`null as c`, `cast(null as t) as c`, `null::t as c`). */
+/** Columns the final SELECT projects as a bare NULL (`null as c`, `cast(null as t) as c`, `null::t as c`).
+ *  Empty when the model has a UNION: another branch may fill the column. A NULL set in a CTE is
+ *  not counted, since a later layer may still populate the column. */
 export function literalNullColumns(sql: string): Set<string> {
   const s = sql.replace(/--[^\n]*/g, " ").replace(/\{#[\s\S]*?#\}/g, " ")
   const out = new Set<string>()
-  for (const m of s.matchAll(/(?:^|[,(\s])(?:null(?:\s*::\s*\w+(?:\([^)]*\))?)?|cast\s*\(\s*null\s+as\s+[^)]*\))\s+as\s+["`]?(\w+)/gi)) out.add(m[1].toLowerCase())
+  if (/\bunion\b/i.test(s)) return out
+  const top = topLevel(s)
+  const selects = [...top.matchAll(/\bselect\b/gi)]
+  if (!selects.length) return out
+  const start = selects[selects.length - 1].index!
+  const from = /\bfrom\b/i.exec(top.slice(start))
+  const projection = s.slice(start, from ? start + from.index : undefined)
+  for (const m of projection.matchAll(/(?:^|[,(\s])(?:null(?:\s*::\s*\w+(?:\([^)]*\))?)?|cast\s*\(\s*null\s+as\s+[^)]*\))\s+as\s+["`]?(\w+)/gi)) out.add(m[1].toLowerCase())
   return out
 }
 
@@ -599,6 +623,7 @@ export function testsOnNullColumns(file: ChangedFile, ymlContent: string | undef
           "test_coverage",
           `\`${m.name}.${c.name}\` is tested but the model sets it to NULL`,
           `\`${m.name}\` selects \`${c.name}\` as a literal NULL, so its ${failing.map((t) => `\`${t}\``).join(" / ")} test fails on every row. Drop the test until the column is populated, or populate it.`,
+          `${m.name}.${c.name}`,
         ),
       )
     })

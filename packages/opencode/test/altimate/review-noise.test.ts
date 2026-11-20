@@ -336,4 +336,10 @@ describe("repeats of one rule within a file", () => {
     const crit = [grain("a", "critical"), { ...grain("b", "critical"), id: "y" }]
     expect(mergeRepeats([grain("tx_hash"), other, ...crit])).toHaveLength(4)
   })
+  test("the merged id is the group's, so fixing the first instance does not change it", () => {
+    const [all] = mergeRepeats([grain("tx_hash"), grain("evt_index"), grain("block_month")])
+    const [rest] = mergeRepeats([grain("tx_hash"), grain("evt_index")])
+    expect(all.id).toBe(rest.id)
+    expect(all.id).not.toBe(grain("block_month").id)
+  })
 })

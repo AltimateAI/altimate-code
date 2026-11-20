@@ -142,6 +142,15 @@ models:
     const dropped = "version: 2\nmodels:\n  - name: dim_ports\n    columns:\n      - name: port_sk\n        data_tests:\n          - not_null\n"
     expect(removed("port_sk", dropped).map((f) => f.title)).toEqual(["_dim.yml: unique test removed from dim_ports.port_sk"])
   })
+  test("a column that keeps its yml entry but loses its test is a removal, even when another column gains that test", () => {
+    const old = "version: 2\nmodels:\n  - name: dim_ports\n    columns:\n      - name: customer_id\n        data_tests:\n          - not_null\n"
+    const now = "version: 2\nmodels:\n  - name: dim_ports\n    columns:\n      - name: customer_id\n      - name: discount_code\n        data_tests:\n          - not_null\n"
+    const fs = detectSchemaYmlPatterns({ path: "models/marts/_dim.yml", status: "modified", diff: undefined }, DEFAULT_RUBRIC, {
+      oldContent: old,
+      newContent: now,
+    }).filter((f) => /test removed/.test(f.title))
+    expect(fs.map((f) => f.title)).toEqual(["_dim.yml: not_null test removed from dim_ports.customer_id"])
+  })
 })
 
 describe("incremental filter = predicates of the is_incremental() branch", () => {
@@ -161,6 +170,10 @@ select * from merged`
     expect(incrementalFilter(model("array_distinct(n.tags)", "where n.ts > (select max(ts) from {{ this }})"))).toBe(
       incrementalFilter(model("{{ array_distinct('n.tags') }}", "where n.ts > (select max(ts) from {{ this }})")),
     )
+  })
+  test("a changed incremental-only join predicate is a filter change", () => {
+    const join = (op: string) => `select * from {{ ref('raw') }} as n\n{% if is_incremental() %}\njoin {{ this }} as b on n.id = b.id and n.ts ${op} b.max_ts\n{% endif %}`
+    expect(incrementalFilter(join(">"))).not.toBe(incrementalFilter(join(">=")))
   })
   test("a changed predicate is", () => {
     expect(incrementalFilter(model("n.tags", "where n.ts > (select max(ts) from {{ this }})"))).not.toBe(
@@ -210,7 +223,13 @@ describe("changed macros are reviewed", () => {
 })
 
 describe("incremental unique_key vs the declared uniqueness test", () => {
-  const review = async (uniqueKey: unknown, declared: string[][]) => {
+  const review = async (
+    uniqueKey: unknown,
+    declared: string[][],
+    status: "added" | "modified" = "added",
+    diff = "+select 1",
+    extra: { path: string; status: "modified"; diff: string }[] = [],
+  ) => {
     const runner = {
       async impact() {
         return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
@@ -232,7 +251,7 @@ describe("incremental unique_key vs the declared uniqueness test", () => {
       },
     } as unknown as ReviewRunner
     const env = await runReview({
-      changedFiles: [{ path: "models/int_latest.sql", status: "added", diff: "+select 1" }],
+      changedFiles: [{ path: "models/int_latest.sql", status, diff }, ...extra],
       config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
@@ -255,6 +274,13 @@ describe("incremental unique_key vs the declared uniqueness test", () => {
     expect(await review(["course_pk", "effective_date"], [["course_pk"]])).toHaveLength(0)
     expect((await review(["address", "chain_id"], [["address"]]))[0].severity).toBe("suggestion")
     expect((await review(["date_start", "operator"], [["blockchain", "date_start", "operator"]]))[0].severity).toBe("warning")
+  })
+  test("a long-standing mismatch is reported only when the PR touches the merge key or the yml tests", async () => {
+    const key = ["charge_point_id", "connector_id", "port_id"]
+    const test = [["charge_point_id", "connector_id"]]
+    expect(await review(key, test, "modified", "+  , status")).toHaveLength(0)
+    expect(await review(key, test, "modified", "+{{ config(materialized='incremental', unique_key=['charge_point_id','connector_id','port_id']) }}")).toHaveLength(1)
+    expect(await review(key, test, "modified", "+  , status", [{ path: "models/_schema.yml", status: "modified", diff: "+  - unique" }])).toHaveLength(1)
   })
 })
 
@@ -316,7 +342,7 @@ describe("OR in a join condition", () => {
 })
 
 describe("engine check results in a dbt model", () => {
-  const review = async (issues: { rule: string; message: string; severity?: string }[]) => {
+  const run = async (issues: { rule: string; message: string; severity?: string }[], compiled?: string) => {
     const runner = {
       async impact() {
         return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
@@ -338,9 +364,18 @@ describe("engine check results in a dbt model", () => {
       mode: "comment",
       runner,
       getContent: async () => "select 1",
+      ...(compiled ? { getCompiled: async () => compiled } : {}),
     })
-    return env.findings.filter((f) => f.evidence?.tool === "altimate_core.check")
+    return env
   }
+  const review = async (issues: { rule: string; message: string; severity?: string }[], compiled?: string) =>
+    (await run(issues, compiled)).findings.filter((f) => f.evidence?.tool === "altimate_core.check")
+  test("repeats merged for display still count one by one toward the verdict", async () => {
+    const env = await run(["a", "b", "c"].map((c) => ({ rule: "validate", message: `Column '${c}' not found in table 't'` })))
+    expect(env.findings.filter((f) => f.evidence?.tool === "altimate_core.check")).toHaveLength(1)
+    expect(env.idealVerdict).toBe("REQUEST_CHANGES")
+    expect(env.summary.warning).toBe(3)
+  })
   test("injection rules and engine planner gaps: silent", async () => {
     expect(
       await review([
@@ -352,13 +387,22 @@ describe("engine check results in a dbt model", () => {
       ]),
     ).toHaveLength(0)
   })
-  test("a parser syntax error is dropped (the model compiled); an unresolved column stays a warning", async () => {
-    const fs = await review([
-      { rule: "validate", message: "Syntax error: sql parser error: Expected: ), found: omit" },
-      { rule: "validate", message: "Column 'group_name' not found in table 'run_results'" },
-    ])
+  test("a parser syntax error on compiled SQL is dropped; an unresolved column stays a warning", async () => {
+    const fs = await review(
+      [
+        { rule: "validate", message: "Syntax error: sql parser error: Expected: ), found: omit" },
+        { rule: "validate", message: "Column 'group_name' not found in table 'run_results'" },
+      ],
+      "select 1 as compiled",
+    )
     expect(fs.find((f) => /Syntax/.test(f.body))).toBeUndefined()
     expect(fs.find((f) => /not found/.test(f.body))?.severity).toBe("warning")
+  })
+  test("a syntax error on plain raw SQL (no compile) is kept as an unverified suggestion that cannot block", async () => {
+    const fs = await review([{ rule: "validate", message: "Syntax error: sql parser error: Expected: ), found: from" }])
+    const f = fs.find((x) => /Syntax/.test(x.body))
+    expect(f?.severity).toBe("suggestion")
+    expect(f?.confidence).toBe("unknown")
   })
 })
 
