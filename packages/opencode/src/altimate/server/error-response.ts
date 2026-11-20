@@ -10,8 +10,9 @@ export function upstreamStatus(name: string): 502 | undefined {
   return name === "ConfigRemoteUnavailableError" ? 502 : undefined
 }
 
-// An indented `at …` line ending in a source location, as V8, JSC and Bun print stack frames.
-const FRAME = /^\s+at\s.*(:\d+:\d+\)?|\(native[^)]*\))\s*$/
+// An indented `at …` line: how V8, JSC and Bun print every stack frame, with or without a source location
+// (`at new Promise (<anonymous>)`, `at async Promise.all (index 0)`).
+const FRAME = /^\s+at\s/
 
 export const UNEXPECTED = "Unexpected server error. Check server logs for details."
 

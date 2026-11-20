@@ -39,6 +39,14 @@ describe("clientMessage", () => {
     expect(clientMessage(err)).toBe("failed to load\nat least one model is required")
   })
 
+  test("drops frames without a source location too", () => {
+    const err = new Error(
+      "failed\n    at new Promise (<anonymous>)\n    at async Promise.all (index 0)\n    at forEach ([native code])\n    at <anonymous>",
+    )
+    expect(clientMessage(err)).toBe("failed")
+    expect(clientMessage("    at new Promise (<anonymous>)")).toBe(UNEXPECTED)
+  })
+
   test("falls back to the fixed message when nothing is left", () => {
     expect(clientMessage(new Error(""))).toBe(UNEXPECTED)
     expect(clientMessage("    at fn (/a.js:1:2)")).toBe(UNEXPECTED)
