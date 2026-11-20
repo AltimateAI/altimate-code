@@ -161,7 +161,19 @@ export const ReviewScope = z.object({
   notReviewed: z.array(z.object({ path: z.string(), reason: z.string() })).default([]),
   /** Multi-project review (`--all-projects`): each dbt project reviewed, its
    *  changed-file count and its own verdict. */
-  projects: z.array(z.object({ root: z.string(), files: z.number().int().nonnegative(), verdict: Verdict })).optional(),
+  projects: z
+    .array(
+      z.object({
+        root: z.string(),
+        files: z.number().int().nonnegative(),
+        verdict: Verdict,
+        mode: ReviewMode.optional(),
+        /** The project's own manifest and policy (the top level keeps one only when all agree). */
+        manifestHash: z.string().optional(),
+        policyHash: z.string().optional(),
+      }),
+    )
+    .optional(),
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
@@ -238,7 +250,14 @@ export const VerdictEnvelope = z.object({
       calls: z.number().int().nonnegative().optional(),
       /** Multi-project review (`--all-projects`): each project's AI lane state. */
       projects: z
-        .array(z.object({ root: z.string(), state: z.string(), calls: z.number().int().nonnegative().optional() }))
+        .array(
+          z.object({
+            root: z.string(),
+            state: z.string(),
+            reason: z.string().optional(),
+            calls: z.number().int().nonnegative().optional(),
+          }),
+        )
         .optional(),
       /** Generator findings replayed from an earlier envelope: tokens, cost and calls are that run's. */
       replayed: z.boolean().optional(),

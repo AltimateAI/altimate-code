@@ -7,6 +7,7 @@ import { promisify } from "node:util"
 import { reviewPullRequest } from "../../src/altimate/review/run"
 import {
   assignToProjects,
+  discoverDbtProjects,
   mergeProjectEnvelopes,
   owningProject,
   reviewAllProjects,
@@ -77,7 +78,8 @@ describe("reviewAllProjects: one envelope for every dbt project a PR touches", (
 
     expect(env.scope?.projects?.map((p) => p.root)).toEqual(["proj_a", "proj_b"])
     expect(env.scope?.projects?.map((p) => p.files)).toEqual([1, 2])
-    expect(env.scope?.projectRoot).toBe("proj_a")
+    // No single project root: the projects carry their own.
+    expect(env.scope?.projectRoot).toBeUndefined()
     const outside = (env.scope?.notReviewed ?? []).filter((n) => /^outside the dbt project/.test(n.reason))
     expect(outside.map((n) => n.path)).toEqual([".github/workflows/x.yml"])
     expect(env.scope?.outOfScopeFiles).toBe(1)
@@ -136,18 +138,44 @@ describe("reviewAllProjects: one envelope for every dbt project a PR touches", (
     await write(root, "proj_b/models/orders.sql", STAR_MODEL)
     await commitAll(root, "head")
     // Outside target/, so auto-discovery cannot find it: only the flag supplies it.
-    // The merged envelope carries the first project's (proj_a) manifest hash,
-    // so it shows whether proj_a received the manifest.
     const body = JSON.stringify({ metadata: { adapter_type: "postgres" }, nodes: {}, sources: {} })
     for (const p of ["proj_a", "proj_b"]) await write(root, `${p}/artifacts/manifest.json`, body)
+    const hashes = (env: VerdictEnvelope) => env.scope?.projects?.map((p) => [p.root, !!p.manifestHash])
     const run = (owner: string) =>
       reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true, manifestPath: path.join(root, owner, "artifacts", "manifest.json") })
 
-    expect((await run("proj_a")).manifestHash).toBeDefined()
+    const a = await run("proj_a")
+    expect(hashes(a)).toEqual([["proj_a", true], ["proj_b", false]])
+    // The projects disagree, so the top level carries no manifest hash.
+    expect(a.manifestHash).toBeUndefined()
     // A relative --manifest resolves against --cwd, as in the single-project path.
     const rel = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true, manifestPath: "proj_a/artifacts/manifest.json" })
-    expect(rel.manifestHash).toBeDefined()
-    expect((await run("proj_b")).manifestHash).toBeUndefined()
+    expect(hashes(rel)).toEqual([["proj_a", true], ["proj_b", false]])
+    expect(hashes(await run("proj_b"))).toEqual([["proj_a", false], ["proj_b", true]])
+  }, 60_000)
+
+  test("--manifest outside every project (CI's $RUNNER_TEMP) goes to the one touched project", async () => {
+    const { root, base } = await fixture()
+    await write(root, "proj_a/models/orders.sql", STAR_MODEL)
+    await commitAll(root, "head")
+    const tmp = await fs.mkdtemp(path.join(tmpdir(), "review-manifest-"))
+    const manifestPath = path.join(tmp, "manifest.json")
+    await fs.writeFile(manifestPath, JSON.stringify({ metadata: { adapter_type: "postgres" }, nodes: {}, sources: {} }))
+    const env = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true, manifestPath })
+    expect(env.manifestHash).toBeDefined()
+    // Two touched projects: it can't be attributed, so neither uses it (and a warning says so).
+    await write(root, "proj_b/models/orders.sql", STAR_MODEL)
+    await commitAll(root, "head2")
+    const two = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true, manifestPath })
+    expect(two.scope?.projects?.map((p) => p.manifestHash)).toEqual([undefined, undefined])
+  }, 60_000)
+
+  test("projects are discovered under non-ASCII directory names (head tree and working tree)", async () => {
+    const { root } = await fixture()
+    await write(root, "projé/dbt_project.yml", "name: proj_e\nversion: '1.0'\nprofile: x\n")
+    await commitAll(root, "head")
+    expect(await discoverDbtProjects(root, "HEAD")).toEqual(["proj_a", "proj_b", "projé"])
+    expect(await discoverDbtProjects(root)).toEqual(["proj_a", "proj_b", "projé"])
   }, 60_000)
 })
 
@@ -199,13 +227,69 @@ describe("mergeProjectEnvelopes", () => {
     expect(merged.ai).toMatchObject({ state: "ok", model: "p/m", calls: 2, cost: 0.5 })
     expect(merged.ai?.tokens).toEqual({ input: 1, inputTotal: 2, output: 3, reasoning: 4, cacheRead: 1 })
     expect(merged.ai?.projects).toEqual([
-      { root: "a", state: "skipped", calls: 0 },
+      { root: "a", state: "skipped", reason: "x", calls: 0 },
       { root: "b", state: "ok", calls: 2 },
     ])
     expect(verifyEnvelope(merged)).toBe(true)
 
     // A comment-mode override softens the merged ideal verdict.
     expect(mergeProjectEnvelopes([{ root: "a", paths: [], env: a }, { root: "b", paths: [], env: b }], "comment").verdict).toBe("COMMENT")
+  })
+
+  test("a comment-mode project's REQUEST_CHANGES does not block a gate-mode merge", () => {
+    const soft = signEnvelope(buildEnvelope({ findings: [finding("a/models/x.sql", "critical", "altimate_core.equivalence")], tier: "full", mode: "comment" }))
+    const gate = signEnvelope(buildEnvelope({ findings: [finding("b/models/y.sql", "suggestion", "rule-catalog")], tier: "full", mode: "gate" }))
+    expect([soft.idealVerdict, soft.verdict, gate.verdict]).toEqual(["REQUEST_CHANGES", "COMMENT", "COMMENT"])
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: soft },
+      { root: "b", paths: [], env: gate },
+    ])
+    expect(merged.mode).toBe("gate")
+    expect(merged.verdict).toBe("COMMENT")
+    expect(merged.idealVerdict).toBe("REQUEST_CHANGES")
+    expect(merged.scope?.projects?.map((p) => p.mode)).toEqual(["comment", "gate"])
+  })
+
+  test("a sibling's AI error is not hidden by another project's ok; differing policies and manifests stay per project", () => {
+    const env = (root: string, ai: VerdictEnvelope["ai"], hash: string, manifestHash: string) =>
+      signEnvelope(
+        buildEnvelope({
+          findings: [],
+          tier: "lite",
+          mode: "comment",
+          ai,
+          manifestHash,
+          policy: { source: root === "a" ? "base" : "working_tree", hash, posting: undefined },
+          scope: { projectRoot: root, notReviewed: [] },
+        }),
+      )
+    const a = env("a", { state: "ok", model: "p/m", calls: 1 }, "h_a", "m_a")
+    const b = env("b", { state: "error", reason: "rate limited", calls: 1 }, "h_b", "m_b")
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: a },
+      { root: "b", paths: [], env: b },
+    ])
+    expect(merged.ai).toMatchObject({ state: "error", reason: "b: rate limited", model: "p/m", calls: 2 })
+    expect(merged.ai?.projects?.map((p) => [p.root, p.state, p.reason])).toEqual([
+      ["a", "ok", undefined],
+      ["b", "error", "rate limited"],
+    ])
+    expect(merged.manifestHash).toBeUndefined()
+    expect(merged.policy?.source).toBe("working_tree")
+    expect(merged.policy?.hash).not.toBe("h_a")
+    expect(merged.scope?.projectRoot).toBeUndefined()
+    expect(merged.scope?.projects?.map((p) => [p.manifestHash, p.policyHash])).toEqual([
+      ["m_a", "h_a"],
+      ["m_b", "h_b"],
+    ])
+    expect(verifyEnvelope(merged)).toBe(true)
+    // Identical policies are kept as they are.
+    const same = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: a },
+      { root: "c", paths: [], env: env("a", { state: "ok", calls: 0 }, "h_a", "m_a") },
+    ])
+    expect(same.policy).toEqual(a.policy)
+    expect(same.manifestHash).toBe("m_a")
   })
 
   test("assignment helpers pick the deepest root and fall back to a rename's old path", () => {

@@ -1,5 +1,6 @@
 import path from "node:path"
 import { realpath } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { collectChangedFiles, gitRepoRoot, listFilesAt, listWorkingTreeFiles, resolveReviewBase } from "./git"
 import { reviewPullRequest, type ReviewPullRequestOptions } from "./run"
 import { applyMode, signEnvelope, summarize, VerdictEnvelope, type RiskTier, type Verdict } from "./verdict"
@@ -68,7 +69,7 @@ async function canonical(p: string): Promise<string> {
 /** `abs` relative to the repo root in POSIX form, or undefined when outside it. */
 function repoRel(gitRootReal: string, abs: string): string | undefined {
   const rel = path.relative(gitRootReal, abs).replace(/\\/g, "/")
-  if (rel.startsWith("..") || path.isAbsolute(rel)) return undefined
+  if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) return undefined
   return rel
 }
 
@@ -95,18 +96,28 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
     : undefined
   const manifestRel = manifestAbs ? repoRel(gitRootReal, manifestAbs) : undefined
   const manifestOwner = manifestRel !== undefined ? owningProject(manifestRel, roots) : undefined
+  // A manifest outside every project (CI's `$RUNNER_TEMP/manifest.json`) can't be matched by
+  // path; it goes to the touched project when there is only one.
+  const manifestFor = (root: string) =>
+    root === manifestOwner || (manifestOwner === undefined && touched.length === 1) ? manifestAbs : undefined
   const optsFor = (root: string): ReviewPullRequestOptions => ({
     ...opts,
     cwd: path.join(gitRootReal, root),
-    manifestPath: root === manifestOwner ? manifestAbs : undefined,
+    manifestPath: manifestFor(root),
   })
 
   if (touched.length === 1) {
     // Invoked from inside the touched project: exactly the single-project review.
     const cwdRel = repoRel(gitRootReal, await canonical(opts.cwd))
     if (cwdRel !== undefined && owningProject(cwdRel + "/", roots) === touched[0]) return reviewPullRequest(opts)
-    return reviewPullRequest(optsFor(touched[0]))
   }
+  if (manifestAbs && !touched.some((r) => manifestFor(r))) {
+    const where = manifestOwner === undefined ? "is outside every dbt project" : `belongs to ${manifestOwner || "."}, which this PR does not change`
+    process.stderr.write(
+      `⚠️  --manifest ${opts.manifestPath} ${where}, so no reviewed project uses it; each project auto-discovers its own. Place the manifest inside the project it describes (e.g. its target/), or review that project on its own.\n`,
+    )
+  }
+  if (touched.length === 1) return reviewPullRequest(optsFor(touched[0]))
 
   // Each project sees its own files plus the files outside every project (so
   // those are listed as not reviewed); other projects' files are left out.
@@ -140,7 +151,10 @@ export function mergeProjectEnvelopes(
   const findings = envs.flatMap((e) => e.findings).filter((f) => !seenIds.has(f.id) && !!seenIds.add(f.id))
 
   const mode = modeOverride ?? (envs.some((e) => e.mode === "gate") ? "gate" : first.mode)
-  const idealVerdict = envs.map((e) => e.idealVerdict).reduce((a, b) => (VERDICT_RANK[b] > VERDICT_RANK[a] ? b : a))
+  const worst = (vs: Verdict[]) => vs.reduce((a, b) => (VERDICT_RANK[b] > VERDICT_RANK[a] ? b : a))
+  const idealVerdict = worst(envs.map((e) => e.idealVerdict))
+  // Each project's verdict already has its own mode applied: a comment-mode project never blocks.
+  const verdict = applyMode(worst(envs.map((e) => e.verdict)), mode)
   const tier = envs.map((e) => e.tier).reduce((a, b) => (TIER_RANK[b] > TIER_RANK[a] ? b : a))
   const tierReasons = [...new Set(envs.flatMap((e) => e.tierReasons ?? []))]
 
@@ -169,29 +183,69 @@ export function mergeProjectEnvelopes(
     engineErrors.set(key, prev ? { ...prev, count: prev.count + err.count } : { ...err })
   }
 
+  // Per-project values are recorded in `scope.projects`; the top level carries one only when every project agrees.
+  const shared = <T>(vals: T[]): T | undefined =>
+    vals.every((v) => JSON.stringify(v) === JSON.stringify(vals[0])) ? vals[0] : undefined
+  const classified = envs.map((e) => e.tierClassified)
   const merged: VerdictEnvelope = {
-    ...first,
-    verdict: applyMode(idealVerdict, mode),
+    version: first.version,
+    verdict,
     idealVerdict,
     mode,
     tier,
     tierReasons: tierReasons.length ? tierReasons : undefined,
+    tierForced: first.tierForced,
+    tierClassified: classified.every((t) => t !== undefined)
+      ? classified.reduce((a, b) => (TIER_RANK[b!] > TIER_RANK[a!] ? b : a))
+      : undefined,
     findings,
     summary: summarize(findings, envs.some((e) => e.summary.degraded)),
+    engine: first.engine,
+    manifestHash: shared(envs.map((e) => e.manifestHash)),
     staleManifest: envs.some((e) => e.staleManifest) ? true : undefined,
     engineErrors: engineErrors.size ? [...engineErrors.values()] : undefined,
+    policy: mergePolicy(envs),
     scope: {
-      ...first.scope,
+      baseRef: first.scope?.baseRef,
+      baseSha: first.scope?.baseSha,
+      baseSource: first.scope?.baseSource,
       outOfScopeFiles: outsideCount || undefined,
       movedUnchangedFiles: movedCount || undefined,
       unverified: unverified.length ? unverified : undefined,
       notReviewed,
-      projects: runs.map((r) => ({ root: r.root, files: r.paths.length, verdict: r.env.verdict })),
+      projects: runs.map((r) => ({
+        root: r.root,
+        files: r.paths.length,
+        verdict: r.env.verdict,
+        mode: r.env.mode,
+        manifestHash: r.env.manifestHash,
+        policyHash: r.env.policy?.hash,
+      })),
     },
     ai: mergeAi(runs),
-    signature: undefined,
+    generatedAt: first.generatedAt,
   }
   return signEnvelope(VerdictEnvelope.parse(merged))
+}
+
+/** Least-trusted source first: a policy the PR controls outranks the defaults, which outrank the base branch's. */
+const POLICY_SOURCE_RANK = { base: 0, default: 1, working_tree: 2 } as const
+
+/** One project's policy when all agree; otherwise the least-trusted source, a hash of every
+ *  project's hash, every setting the PR changes, and the posting policy only if shared. */
+function mergePolicy(envs: VerdictEnvelope[]): VerdictEnvelope["policy"] {
+  const policies = envs.map((e) => e.policy)
+  if (policies.some((p) => !p)) return undefined
+  const all = policies as NonNullable<VerdictEnvelope["policy"]>[]
+  if (all.every((p) => JSON.stringify(p) === JSON.stringify(all[0]))) return all[0]
+  const changed = [...new Set(all.flatMap((p) => p.changedInPr ?? []))]
+  const postings = all.map((p) => JSON.stringify(p.posting))
+  return {
+    source: all.map((p) => p.source).reduce((a, b) => (POLICY_SOURCE_RANK[b] > POLICY_SOURCE_RANK[a] ? b : a)),
+    hash: createHash("sha256").update(all.map((p) => p.hash).join("\n")).digest("hex").slice(0, 16),
+    changedInPr: changed.length ? changed : undefined,
+    posting: postings.every((x) => x === postings[0]) ? all[0].posting : undefined,
+  }
 }
 
 function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEnvelope["ai"] {
@@ -213,14 +267,23 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
         cacheRead: a.cacheRead + b.cacheRead,
       }))
     : undefined
+  // The worst state wins (a sibling's error or timeout is not hidden by another project's ok),
+  // with that project's reason; `skipped` (nothing to send) ranks below `ok`.
+  const worst = lanes.reduce((a, b) => (AI_STATE_RANK[b.env.ai!.state] > AI_STATE_RANK[a.env.ai!.state] ? b : a))
+  const state = worst.env.ai!.state
+  const reason = worst.env.ai!.reason
   const base = ok ?? first
   return {
     ...base,
+    state,
+    reason: state === "ok" ? base.reason : reason && lanes.length > 1 ? `${worst.root || "."}: ${reason}` : reason,
     model: base.model ?? first.model,
     calls: sum((a) => a.calls),
     tokens,
     cost: sum((a) => a.cost),
     durationMs: sum((a) => a.durationMs),
-    projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, calls: r.env.ai!.calls })),
+    projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }
 }
+
+const AI_STATE_RANK: Record<NonNullable<VerdictEnvelope["ai"]>["state"], number> = { skipped: 0, ok: 1, timeout: 2, error: 3 }
