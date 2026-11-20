@@ -95,7 +95,7 @@ const SAVINGS_CHECKS: Record<string, string> = {
   finops_snowflake_savings: "Snowflake",
 }
 const SAVINGS_BILLING_LINE =
-  "Read-only queries that can start this connection's warehouse and bill while they run (at most 9 minutes)."
+  "Read-only queries that can start this connection's warehouse and bill while they run."
 // altimate_change end
 
 export function permissionInfo(request: PermissionRequest): PermissionInfo {

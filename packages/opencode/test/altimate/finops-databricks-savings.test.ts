@@ -195,6 +195,14 @@ describe("finops_databricks_savings tool", () => {
       expect(result.output).toContain("savings check")
     })
 
+    test("with no connection to run on, \"always\" allows nothing for later connections", async () => {
+      Registry.setConfigs({} as any)
+      const tool = await initTool(FinopsDatabricksSavingsTool)
+      await tool.execute({}, ctx(true))
+      expect(asks).toEqual([expect.objectContaining({ permission: "finops_databricks_savings", patterns: ["*"], always: [] })])
+      expect(opened).toBe(0)
+    })
+
     test("a rule for one connection holds however the call names it", async () => {
       Registry.setConfigs({ dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" }, other: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" } } as any)
       const rules = Permission.fromConfig({ finops_databricks_savings: { "*": "allow", dbx: "deny" } })
@@ -220,7 +228,8 @@ describe("finops_databricks_savings tool", () => {
     test("the description says it bills, stops after 9 minutes and asks first", async () => {
       const tool = await initTool(FinopsDatabricksSavingsTool)
       expect(tool.description).toContain("bills while the check runs; the check stops after 9 minutes, cancelling any query still running.")
-      expect(tool.description).toContain("The user is asked for permission before the first query.")
+      expect(tool.description).toContain("In an altimate-code session the user is asked for permission before the first query")
+      expect(tool.description).toContain("a caller using those must get the user's go-ahead first.")
       expect(tool.description).not.toContain("confirm")
     })
   })

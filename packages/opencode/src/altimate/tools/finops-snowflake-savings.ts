@@ -107,7 +107,7 @@ export function formatSavings(result: SnowflakeSavingsResult): string {
 
 export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings", {
   description:
-    `Check a Snowflake account for savings with Altimate's rules: warehouses that sit idle, could run one size smaller, keep an unneeded extra cluster, or restart so often they are billed twice. Read-only: SHOW WAREHOUSES plus five queries on the connection's warehouse: four read up to eleven days of SNOWFLAKE.ACCOUNT_USAGE, to report on seven, and one reads the rate sheet. Snowflake resumes that warehouse if it is suspended and auto-resume is on, and it bills while the check runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. The user is asked for permission before the first query. Returns each finding with its monthly dollar range and evidence.`,
+    `Check a Snowflake account for savings with Altimate's rules: warehouses that sit idle, could run one size smaller, keep an unneeded extra cluster, or restart so often they are billed twice. Read-only: SHOW WAREHOUSES plus five queries on the connection's warehouse: four read up to eleven days of SNOWFLAKE.ACCOUNT_USAGE, to report on seven, and one reads the rate sheet. Snowflake resumes that warehouse if it is suspended and auto-resume is on, and it bills while the check runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. In an altimate-code session the user is asked for permission before the first query; altimate-code tool run and MCP cannot ask, so a caller using those must get the user's go-ahead first. Returns each finding with its monthly dollar range and evidence.`,
   parameters: z.object({
     warehouse: z
       .string()
@@ -120,12 +120,12 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
     // `altimate-code tool run`. A refusal throws here, before any connection is opened.
     // Ask about the connection the check runs on, so a rule for one connection holds however the call names it.
     const connection = savingsConnection(args.warehouse)
-    const pattern = connection ?? (args.warehouse?.trim() || "*")
-    // "Always" covers this connection only, so allowing one does not allow the others.
+    // "Always" covers this connection only, so allowing one does not allow the others; with no connection
+    // to run on, the check fails before any query and there is nothing to keep allowing.
     await ctx.ask({
       permission: "finops_snowflake_savings",
-      patterns: [pattern],
-      always: [pattern],
+      patterns: [connection ?? (args.warehouse?.trim() || "*")],
+      always: connection ? [connection] : [],
       metadata: {},
     })
     try {

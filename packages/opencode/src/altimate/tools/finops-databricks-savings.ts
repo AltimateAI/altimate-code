@@ -113,7 +113,7 @@ export function formatSavings(result: DatabricksSavingsResult): string {
 
 export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_savings", {
   description:
-    `Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled or continuous jobs running on all-purpose clusters. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped and bills while the check runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. The user is asked for permission before the first query. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes.`,
+    `Check a Databricks workspace for savings with Altimate's rules: SQL warehouses that would cost less as serverless or smaller, idle all-purpose clusters, and scheduled or continuous jobs running on all-purpose clusters. Read-only queries over seven days of system tables (billing, compute, query history, jobs), covering every workspace those tables show, on the connection's SQL warehouse, which Databricks starts if it is stopped and bills while the check runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. In an altimate-code session the user is asked for permission before the first query; altimate-code tool run and MCP cannot ask, so a caller using those must get the user's go-ahead first. Returns each finding with its monthly dollar range and evidence, and what each flagged warehouse would cost at other sizes.`,
   parameters: z.object({
     warehouse: z
       .string()
@@ -128,12 +128,12 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
     // `altimate-code tool run`. A refusal throws here, before any connection is opened.
     // Ask about the connection the check runs on, so a rule for one connection holds however the call names it.
     const connection = savingsConnection(args.warehouse)
-    const pattern = connection ?? (args.warehouse?.trim() || "*")
-    // "Always" covers this connection only, so allowing one does not allow the others.
+    // "Always" covers this connection only, so allowing one does not allow the others; with no connection
+    // to run on, the check fails before any query and there is nothing to keep allowing.
     await ctx.ask({
       permission: "finops_databricks_savings",
-      patterns: [pattern],
-      always: [pattern],
+      patterns: [connection ?? (args.warehouse?.trim() || "*")],
+      always: connection ? [connection] : [],
       metadata: {},
     })
     try {

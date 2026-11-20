@@ -16,6 +16,9 @@ import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../config"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
+// altimate_change start — savings check prompts
+import { savingsPermissionPrompt } from "../../util/savings-permission"
+// altimate_change end
 
 type PermissionStage = "permission" | "always" | "reject"
 
@@ -372,20 +375,14 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
             }
 
             // altimate_change start — the savings checks bill the warehouse they run on, so the prompt names it
-            const savings = (
-              { finops_databricks_savings: "Databricks", finops_snowflake_savings: "Snowflake" } as Record<string, string>
-            )[permission]
+            const savings = savingsPermissionPrompt(permission, props.request.patterns)
             if (savings) {
-              const connection = props.request.patterns?.[0]
               return {
                 icon: "$",
-                title: `Run the ${savings} savings check on ${typeof connection === "string" && connection !== "*" ? connection : "the default connection"}`,
+                title: savings.title,
                 body: (
                   <box paddingLeft={1}>
-                    <text fg={theme.textMuted}>
-                      Read-only queries that can start this connection's warehouse and bill while they run (at most
-                      9 minutes).
-                    </text>
+                    <text fg={theme.textMuted}>{savings.note}</text>
                   </box>
                 ),
               }

@@ -148,6 +148,14 @@ describe("finops_snowflake_savings tool", () => {
       expect(result.output).toContain("savings check")
     })
 
+    test("with no connection to run on, \"always\" allows nothing for later connections", async () => {
+      Registry.setConfigs({} as any)
+      const tool = await initTool(FinopsSnowflakeSavingsTool)
+      await tool.execute({}, ctx(true))
+      expect(asks).toEqual([expect.objectContaining({ permission: "finops_snowflake_savings", patterns: ["*"], always: [] })])
+      expect(opened).toBe(0)
+    })
+
     test("a rule for one connection holds however the call names it", async () => {
       Registry.setConfigs({ sf: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" }, other: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" } } as any)
       const rules = Permission.fromConfig({ finops_snowflake_savings: { "*": "allow", sf: "deny" } })
@@ -173,7 +181,8 @@ describe("finops_snowflake_savings tool", () => {
     test("the description says it bills, stops after 9 minutes and asks first", async () => {
       const tool = await initTool(FinopsSnowflakeSavingsTool)
       expect(tool.description).toContain("bills while the check runs; the check stops after 9 minutes, cancelling any query still running.")
-      expect(tool.description).toContain("The user is asked for permission before the first query.")
+      expect(tool.description).toContain("In an altimate-code session the user is asked for permission before the first query")
+      expect(tool.description).toContain("a caller using those must get the user's go-ahead first.")
       expect(tool.description).not.toContain("confirm")
     })
   })
