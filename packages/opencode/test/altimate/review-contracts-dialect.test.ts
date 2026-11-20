@@ -214,6 +214,26 @@ describe("opt-in consumer column lists", () => {
     })
     expect(lists.map((l) => [l.path, l.columns])).toEqual([["loaders/fct.py", ["id", "amount"]]])
   })
+
+  test("with a head ref the files are listed from that commit (ls-tree takes no glob magic)", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "review-lists-head-")))
+    const g = (...a: string[]) => exec("git", a, { cwd: root })
+    await g("init", "-q", "-b", "main")
+    await fs.mkdir(path.join(root, "loaders", "nested"), { recursive: true })
+    await fs.writeFile(path.join(root, "loaders", "nested", "fct.py"), 'COLS = ["id", "amount"]\n')
+    await fs.writeFile(path.join(root, "loaders", "other.txt"), 'COLS = ["x"]\n')
+    await g("add", "-A")
+    await g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+    // Only in the working tree: must not be listed when reading the head.
+    await fs.writeFile(path.join(root, "loaders", "untracked.py"), 'COLS = ["y"]\n')
+    const lists = await loadConsumerLists({
+      configs: [{ files: "loaders/**/*.py", pattern: "COLS\\s*=\\s*\\[([^\\]]*)\\]", model: "fct" }],
+      gitRoot: root,
+      head: "HEAD",
+      read: (p) => fs.readFile(path.join(root, p), "utf8"),
+    })
+    expect(lists.map((l) => [l.path, l.columns])).toEqual([["loaders/nested/fct.py", ["id", "amount"]]])
+  })
 })
 
 describe("unit tests that cannot exercise the model", () => {
@@ -233,6 +253,17 @@ describe("unit tests that cannot exercise the model", () => {
     const [f] = detectUnitTestFixtures(file, undefined, yml("[]"))
     expect(f.title).toContain("doesn't exercise the model")
     expect(f.severity).toBe("suggestion")
+  })
+
+  test("a null `given` entry (valid YAML) is skipped, not a crash", () => {
+    const doc = `unit_tests:
+  - name: t1
+    model: fct
+    given: [null]
+    expect:
+      rows: []
+`
+    expect(detectUnitTestFixtures(file, undefined, doc)).toEqual([])
   })
 
   test("all inputs empty but rows expected", () => {

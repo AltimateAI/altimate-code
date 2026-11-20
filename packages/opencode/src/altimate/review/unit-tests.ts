@@ -48,7 +48,7 @@ export function detectUnitTestFixtures(file: ChangedFile, oldContent?: string, n
     const prev = before.get(name)
     if (prev && JSON.stringify(prev) === JSON.stringify(test)) continue
     const given = Array.isArray(test.given) ? test.given : []
-    const allInputsEmpty = given.length > 0 && given.every((g) => isDict(g.format) && Array.isArray(g.rows) && g.rows.length === 0)
+    const allInputsEmpty = given.length > 0 && given.every((g) => isDict(g?.format) && Array.isArray(g?.rows) && g.rows.length === 0)
     const expectRows = test.expect?.rows
     if (!allInputsEmpty || !isDict(test.expect?.format) || !Array.isArray(expectRows)) continue
     const model = test.model ?? ""
