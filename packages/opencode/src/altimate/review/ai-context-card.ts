@@ -28,7 +28,7 @@ export interface ModelCard {
 
 /** Manifest facts about one macro. */
 export interface MacroCard {
-  /** The macro the card describes (resolved by name, else by file path). */
+  /** The macro the card describes (resolved by file path in the project, else by name). */
   name: string
   /** Models whose `depends_on.macros` include it (at most 10, models changed in the PR first). */
   callers: string[]
@@ -92,26 +92,27 @@ export function renderContextCard(card: ContextCard | ContextCard[], maxChars = 
   return text.slice(0, maxChars - 1) + "…"
 }
 
-const MODEL_KINDS = new Set(["model_sql", "python_model", "snapshot"])
+const MODEL_KINDS = new Set(["model_sql", "python_model", "snapshot", "seed"])
 const DECLARING_KINDS = new Set(["schema_yml", "source_yml", "test"])
 
 interface CardSource {
-  modelCard?(name: string): Promise<ModelCard | undefined>
+  modelCard?(name: string, opts?: { path?: string }): Promise<ModelCard | undefined>
+  patchedModels?(path: string): Promise<string[]>
   macroCard?(name: string, opts?: { path?: string; changedModels?: string[] }): Promise<MacroCard | undefined>
   graphParents?(paths: string[]): Promise<Array<{ kind: string; name: string }>>
 }
 
 /**
- * Attach a rendered card to each file the manifest knows: models and snapshots
- * get their own card, macros theirs, a yml or singular test the cards of the
- * models it declares or tests (at most 3). Files without facts get none. Never throws.
+ * Attach a rendered card to each file the manifest knows: models, snapshots and
+ * seeds get their own card, macros theirs, a yml or singular test the cards of the
+ * models it declares (`patch_path`) or tests (at most 3). Files without facts get none. Never throws.
  */
 export async function attachContextCards(files: AiReviewFile[], runner: CardSource): Promise<void> {
   const changedModels = files.filter((f) => MODEL_KINDS.has(f.kind ?? "model_sql")).map((f) => f.model)
   const cardsFor = async (f: AiReviewFile): Promise<ContextCard[]> => {
     const kind = f.kind ?? "model_sql"
     if (MODEL_KINDS.has(kind)) {
-      const model = await runner.modelCard?.(f.model)
+      const model = await runner.modelCard?.(f.model, { path: f.path })
       return model ? [{ name: f.model, model }] : []
     }
     if (kind === "macro") {
@@ -119,8 +120,12 @@ export async function attachContextCards(files: AiReviewFile[], runner: CardSour
       return macro ? [{ name: macro.name, macro }] : []
     }
     if (!DECLARING_KINDS.has(kind)) return []
-    const parents = (await runner.graphParents?.([f.path])) ?? []
-    const names = [...new Set(parents.filter((p) => p.kind === "model").map((p) => p.name))].slice(0, 3)
+    const [declared, parents] = await Promise.all([
+      runner.patchedModels?.(f.path) ?? Promise.resolve([]),
+      runner.graphParents?.([f.path]) ?? Promise.resolve([]),
+    ])
+    const tested = (parents ?? []).filter((p) => p.kind === "model").map((p) => p.name)
+    const names = [...new Set([...(declared ?? []), ...tested])].slice(0, 3)
     const cards = await Promise.all(names.map(async (name) => ({ name, model: await runner.modelCard?.(name) })))
     return cards.flatMap((c) => (c.model ? [{ name: c.name, model: c.model }] : []))
   }
