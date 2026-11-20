@@ -32,7 +32,7 @@ const hours = (seconds: unknown) => (Number(seconds) / 3_600).toFixed(1)
 
 /** What a finding rests on, one short line each. */
 export function evidenceLines(finding: SnowflakeSavingsFinding): string[] {
-  const e = finding.evidence as Record<string, unknown> & { kind: string }
+  const e = finding.evidence
   switch (e.kind) {
     case "high_idle_time":
       return [
@@ -52,9 +52,10 @@ export function evidenceLines(finding: SnowflakeSavingsFinding): string[] {
       ]
     }
     case "underutilized_cluster":
+      // Core checks only the top cluster, whose number is the warehouse's maximum cluster count.
       return [
-        `Cluster ${e.cluster_number} of ${e.max_cluster_count} was barely needed on ${days(e.flagged_days)} (up to ${Number(e.highest_idle_percent).toFixed(0)}% idle)`,
-        `Lowering the maximum to ${e.recommended_max_cluster_count} cluster${e.recommended_max_cluster_count === 1 ? "" : "s"} may add some queueing; no dollar estimate`,
+        `Its top cluster (${e.max_cluster_count} of ${e.max_cluster_count}) was barely needed on ${days(e.flagged_days)} (up to ${Number(e.highest_idle_percent).toFixed(0)}% idle)`,
+        `Lowering the maximum from ${e.max_cluster_count} to ${e.recommended_max_cluster_count} cluster${e.recommended_max_cluster_count === 1 ? "" : "s"} may add some queueing; no dollar estimate`,
       ]
     case "frequent_restart":
       return [

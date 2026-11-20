@@ -1,0 +1,56 @@
+{
+  "generated_by": "generate.ts",
+  "core_commit": "d6bbf67a",
+  "input": {
+    "lookback_days": 7,
+    "warehouses": [
+      {
+        "workspace_id": "1000000000000001",
+        "wall_clock_uptime_sec": 100800,
+        "cluster_weighted_uptime_sec": 100800,
+        "idle_ratio": 0.9,
+        "total_dbu_consumed": 600,
+        "total_cost": 0,
+        "price_per_dbu": 0,
+        "serverless_price_per_dbu": 0.7,
+        "total_query_count": 4000,
+        "parallelism_query_count": 3500,
+        "parallelism_ratio_p50": 1,
+        "parallelism_ratio_p99": 3,
+        "parallelism_ratio_max": 6,
+        "no_spill_query_pct": 0.99,
+        "no_queue_query_pct": 0.99,
+        "warehouse_id": "wh-unpriced",
+        "warehouse_name": "synthetic unpriced",
+        "warehouse_type": "CLASSIC",
+        "warehouse_size": "MEDIUM"
+      }
+    ],
+    "clusters": [
+      {
+        "cluster_id": "cluster-unpriced",
+        "workspace_id": "1000000000000001",
+        "cluster_name": "synthetic unpriced cluster",
+        "auto_termination_minutes": 120,
+        "total_node_minutes": 6000,
+        "active_util_days": 6,
+        "total_worker_minutes": 6000,
+        "idle_node_minutes": 5200,
+        "avg_cpu_active_pct": 3.5,
+        "peak_cpu_active_pct": 22,
+        "total_cost": 0
+      }
+    ],
+    "jobs": []
+  },
+  "report": {
+    "findings": [],
+    "lookback_days": 7,
+    "total": {
+      "monthly_max": 0,
+      "monthly_min": 0,
+      "resources": 0
+    },
+    "what_if": []
+  }
+}

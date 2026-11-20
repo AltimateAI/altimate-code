@@ -658,13 +658,68 @@ export interface DatabricksSavingsFinding {
   daily_max: number
   monthly_min: number
   monthly_max: number
-  evidence: Record<string, unknown> & { kind: "serverless" | "over_sized" | "idle_cluster" | "job_on_all_purpose" }
+  evidence: DatabricksSavingsEvidence
 }
+
+/** What a Databricks finding rests on, field for field as altimate-core's `Evidence` serializes it. */
+export type DatabricksSavingsEvidence =
+  | {
+      kind: "serverless"
+      warehouse_type: string
+      warehouse_size: string | null
+      idle_ratio: number
+      wall_clock_uptime_hours: number
+      total_query_count: number
+      price_per_dbu: number
+      serverless_price_per_dbu: number
+      current_dbu_cost: number
+      projected_serverless_dbu_cost: number
+      wasted_cost: number
+    }
+  | {
+      kind: "over_sized"
+      current_size: string
+      recommended_size: string
+      available_cores: number
+      p99_utilization: number
+      parallelism_query_count: number
+      no_spill_query_pct: number
+      no_queue_query_pct: number
+      current_dbu_per_hour: number
+      recommended_dbu_per_hour: number
+      total_cost: number
+      wasted_cost: number
+    }
+  | {
+      kind: "idle_cluster"
+      idle_pattern: string
+      idle_ratio: number
+      auto_termination_minutes: number | null
+      active_days: number
+      avg_cpu_active_pct: number
+      peak_cpu_active_pct: number
+      total_cost: number
+      wasted_cost: number
+    }
+  | {
+      kind: "job_on_all_purpose"
+      host_cluster_id: string
+      host_cluster_name: string
+      trigger_type: string
+      task_runs: number
+      task_hours: number
+      estimated_dbus: number
+      all_purpose_rate_per_dbu: number
+      jobs_rate_per_dbu: number
+      jobs_rate_estimated: boolean
+      wasted_cost: number
+    }
 
 /** A flagged SQL warehouse's cost at each alternative, as altimate-core computes it. */
 export interface DatabricksWhatIf {
   resource_id: string
   resource_name: string
+  workspace_id: string | null
   current_label: string
   current_monthly_cost: number
   choices: { label: string; monthly_cost: number; monthly_saving: number; fits: boolean; cores: number; cores_needed: number }[]
@@ -723,10 +778,48 @@ export interface SnowflakeSavingsFinding {
   daily_max: number
   monthly_min: number
   monthly_max: number
-  evidence: Record<string, unknown> & {
-    kind: "high_idle_time" | "downsize_warehouse" | "underutilized_cluster" | "frequent_restart"
-  }
+  evidence: SnowflakeSavingsEvidence
 }
+
+/** What a Snowflake finding rests on, field for field as altimate-core's `Evidence` serializes it. */
+export type SnowflakeSavingsEvidence =
+  | {
+      kind: "high_idle_time"
+      idle_ratio: number
+      idle_seconds: number
+      active_seconds: number
+      flagged_days: string[]
+      credits_used: number
+      price_per_credit: number
+      wasted_cost: number
+    }
+  | {
+      kind: "downsize_warehouse"
+      current_size: string
+      recommended_size: string
+      /** Each signal is present only when it qualified the warehouse; at least one of the two is. */
+      short_period_percent: number | null
+      sub_five_second_percent: number | null
+      query_count: number
+      cost_basis: number
+      price_per_credit: number
+    }
+  | {
+      /** The top cluster is always cluster `max_cluster_count`: core reports no cluster number. */
+      kind: "underutilized_cluster"
+      max_cluster_count: number
+      recommended_max_cluster_count: number
+      highest_idle_percent: number
+      flagged_days: string[]
+    }
+  | {
+      kind: "frequent_restart"
+      bounces: number
+      double_billed_seconds: number
+      credits_per_hour: number
+      flagged_days: string[]
+      price_per_credit: number
+    }
 
 export interface SnowflakeSavingsReport {
   lookback_days: number

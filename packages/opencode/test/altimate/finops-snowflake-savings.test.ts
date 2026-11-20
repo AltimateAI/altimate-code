@@ -65,7 +65,7 @@ const REPORT = {
       finding("downsize_warehouse", { kind: "downsize_warehouse", current_size: "Large", recommended_size: "Medium", short_period_percent: 95, sub_five_second_percent: 91.5, query_count: 1200, cost_basis: 42, price_per_credit: 3 }, 54, 90),
       finding("high_idle_time", { kind: "high_idle_time", idle_ratio: 0.6, idle_seconds: 7200, active_seconds: 12000, flagged_days: ["2026-11-11", "2026-11-12"], credits_used: 10, price_per_credit: 3, wasted_cost: 18 }, 54, 77.14),
       finding("frequent_restart_overcharge", { kind: "frequent_restart", bounces: 12, double_billed_seconds: 300, credits_per_hour: 4, flagged_days: ["2026-11-11"], price_per_credit: 3 }, 4.29, 6.43),
-      finding("underutilized_cluster", { kind: "underutilized_cluster", cluster_number: 2, max_cluster_count: 2, recommended_max_cluster_count: 1, highest_idle_percent: 70, flagged_days: ["2026-11-13"] }, 0, 0),
+      finding("underutilized_cluster", { kind: "underutilized_cluster", max_cluster_count: 2, recommended_max_cluster_count: 1, highest_idle_percent: 70, flagged_days: ["2026-11-13"] }, 0, 0),
     ],
     total: { monthly_min: 54, monthly_max: 90, resources: 1 },
     what_if: [],
@@ -88,7 +88,8 @@ describe("finops_snowflake_savings tool", () => {
     expect(result.output).toContain("60% idle on 2 days above 40%: 2.0 of 3.3 active hours")
     expect(result.output).toContain("12 suspend-and-resume bounces inside a billed minute on 1 day")
     expect(result.output).toContain("Underutilized Cluster · no dollar estimate")
-    expect(result.output).toContain("Lowering the maximum to 1 cluster may add some queueing")
+    expect(result.output).toContain("Its top cluster (2 of 2) was barely needed on 1 day (up to 70% idle)")
+    expect(result.output).toContain("Lowering the maximum from 2 to 1 cluster may add some queueing")
   })
 
   test("without the user's go-ahead nothing runs: the agent is told to ask first", async () => {

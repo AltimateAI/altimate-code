@@ -97,6 +97,7 @@ const REPORT: DatabricksSavingsResult = {
       {
         resource_id: "a3688f261647f580",
         resource_name: "Classic",
+        workspace_id: null,
         current_label: "SMALL (CLASSIC)",
         current_monthly_cost: 101.05,
         choices: [

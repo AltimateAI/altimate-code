@@ -48,11 +48,12 @@ const aboutTenths = (value: unknown) => {
 
 /** What a finding rests on, one short line each. */
 export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
-  const e = finding.evidence as Record<string, number | string | null | boolean> & { kind: string }
+  const e = finding.evidence
   switch (e.kind) {
     case "serverless":
       return [
-        `${e.warehouse_type} ${size(e.warehouse_size)} warehouse, ${percent(e.idle_ratio)} idle over ${Number(e.wall_clock_uptime_hours).toFixed(1)} running hours (${Number(e.total_query_count).toLocaleString("en-US")} queries)`,
+        // Core reports no size when the warehouse's size is unknown.
+        `${e.warehouse_type}${e.warehouse_size ? ` ${size(e.warehouse_size)}` : ""} warehouse, ${percent(e.idle_ratio)} idle over ${Number(e.wall_clock_uptime_hours).toFixed(1)} running hours (${Number(e.total_query_count).toLocaleString("en-US")} queries)`,
         `$${Number(e.current_dbu_cost).toFixed(2)} in DBUs over the window; serverless would bill $${Number(e.projected_serverless_dbu_cost).toFixed(2)} for the busy time alone`,
       ]
     case "over_sized":

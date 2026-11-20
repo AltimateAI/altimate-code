@@ -1,0 +1,206 @@
+{
+  "generated_by": "generate.ts",
+  "core_commit": "d6bbf67a",
+  "input": {
+    "lookback_days": 7,
+    "price_per_credit": 3,
+    "warehouses": [
+      {
+        "warehouse_type": "STANDARD",
+        "min_cluster_count": 1,
+        "max_cluster_count": 3,
+        "query_count": 0,
+        "sub_five_second_queries": 0,
+        "sub_five_second_credits": 0,
+        "usage_days": [],
+        "idle_days": [],
+        "cluster_days": [
+          {
+            "day": "2026-01-05",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          },
+          {
+            "day": "2026-01-06",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          },
+          {
+            "day": "2026-01-07",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          },
+          {
+            "day": "2026-01-08",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          },
+          {
+            "day": "2026-01-09",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          },
+          {
+            "day": "2026-01-10",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          },
+          {
+            "day": "2026-01-11",
+            "clusters": [
+              {
+                "cluster_number": 1,
+                "idle_seconds": 3000,
+                "busy_seconds": 30000
+              },
+              {
+                "cluster_number": 2,
+                "idle_seconds": 6000,
+                "busy_seconds": 6000
+              },
+              {
+                "cluster_number": 3,
+                "idle_seconds": 2700,
+                "busy_seconds": 300
+              }
+            ]
+          }
+        ],
+        "restart_days": [],
+        "warehouse_id": "103",
+        "warehouse_name": "SYNTHETIC_MULTI_WH",
+        "warehouse_size": "Medium"
+      }
+    ]
+  },
+  "report": {
+    "findings": [
+      {
+        "check_id": "underutilized_cluster",
+        "daily_max": 0,
+        "daily_min": 0,
+        "evidence": {
+          "flagged_days": [
+            "2026-01-05",
+            "2026-01-06",
+            "2026-01-07",
+            "2026-01-08",
+            "2026-01-09",
+            "2026-01-10",
+            "2026-01-11"
+          ],
+          "highest_idle_percent": 90,
+          "kind": "underutilized_cluster",
+          "max_cluster_count": 3,
+          "recommended_max_cluster_count": 2
+        },
+        "monthly_max": 0,
+        "monthly_min": 0,
+        "resource_id": "103",
+        "resource_name": "SYNTHETIC_MULTI_WH",
+        "resource_type": "sql_warehouse",
+        "severity": "low",
+        "title": "Underutilized Cluster",
+        "workspace_id": null
+      }
+    ],
+    "lookback_days": 7,
+    "price_per_credit": 3,
+    "total": {
+      "monthly_max": 0,
+      "monthly_min": 0,
+      "resources": 0
+    },
+    "what_if": []
+  }
+}
