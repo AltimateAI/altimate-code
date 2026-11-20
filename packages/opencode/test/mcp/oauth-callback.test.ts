@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach } from "bun:test"
-import { createServer } from "net"
+import { createConnection, createServer } from "net"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
 import { parseRedirectUri } from "../../src/mcp/oauth-provider"
 
@@ -19,6 +19,23 @@ function freePort(): Promise<number> {
     })
   })
 }
+
+// altimate_change start — upstream_fix: loopback-only bind test helper (anomalyco/opencode#30022)
+function canConnect(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port })
+    const done = (ok: boolean) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(ok)
+    }
+    socket.setTimeout(500)
+    socket.once("connect", () => done(true))
+    socket.once("error", () => done(false))
+    socket.once("timeout", () => done(false))
+  })
+}
+// altimate_change end
 
 describe("parseRedirectUri", () => {
   test("returns defaults when no URI provided", () => {
@@ -87,4 +104,14 @@ describe("McpOAuthCallback.ensureRunning", () => {
 
     expect(await response.text()).toContain('<div class="error">The user denied access</div>')
   })
+
+  // altimate_change start — upstream_fix: the callback server must not be reachable off-host (anomalyco/opencode#30022)
+  test("binds the callback server to IPv4 loopback only", async () => {
+    const port = await freePort()
+    await McpOAuthCallback.ensureRunning(`http://127.0.0.1:${port}/custom/callback`)
+
+    expect(await canConnect("127.0.0.1", port)).toBe(true)
+    expect(await canConnect("::1", port)).toBe(false)
+  })
+  // altimate_change end
 })
