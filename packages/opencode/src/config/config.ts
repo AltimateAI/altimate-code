@@ -373,7 +373,9 @@ export const layer = Layer.effect(
         // altimate_change end
       }
       return yield* Schema.decodeEffect(Schema.fromJsonString(schema))(body).pipe(
-        Effect.catch((error) => Effect.die(new Error(`failed to decode remote config from ${url}: ${String(error)}`))),
+        // altimate_change start — see `shown` above
+        Effect.catch((error) => Effect.die(new Error(`failed to decode remote config from ${shown}: ${String(error)}`))),
+        // altimate_change end
       )
     })
 
@@ -575,17 +577,19 @@ export const layer = Layer.effect(
             )
             const fetchedConfig = remote
               ? yield* Effect.gen(function* () {
-                  yield* Effect.logDebug("fetching remote config", { url: remote.url })
-                  // altimate_change start — errors name the remote by its template (`{env:…}` and all), not the
-                  // substituted URL, which can carry the auth token
+                  // altimate_change start — errors and logs name the remote by its template (`{env:…}` and all), not
+                  // the substituted URL, which can carry the auth token
                   const template = isRecord(wellknown.remote_config) ? wellknown.remote_config.url : undefined
                   const shown = typeof template === "string" ? template : url
+                  yield* Effect.logDebug("fetching remote config", { url: shown })
                   const data = yield* fetchRemoteJson(remote.url, remote.headers, Schema.Json, url, shown)
                   // altimate_change end
                   if (isRecord(data) && isRecord(data.config)) return data.config
                   if (isRecord(data)) return data
                   return yield* Effect.die(
-                    new Error(`failed to decode remote config from ${remote.url}: expected object`),
+                    // altimate_change start — see `shown` above
+                    new Error(`failed to decode remote config from ${shown}: expected object`),
+                    // altimate_change end
                   )
                 })
               : {}
