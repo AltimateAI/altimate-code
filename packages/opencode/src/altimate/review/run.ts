@@ -2,7 +2,7 @@ import path from "node:path"
 import { readFile, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
 import { loadReviewPolicy, resolveRubric } from "./config"
-import type { Severity } from "./finding"
+import { SEVERITY_ORDER, type Severity } from "./finding"
 import {
   collectChangedFiles,
   makeContentResolver,
@@ -258,8 +258,22 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     throw new Error("--force-tier is disabled by `allowForceTier: false` in the base branch's .altimate/review.yml")
   }
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
-  if (opts.mode) config.mode = opts.mode
-  if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  // `--mode` / `--severity` come from the PR-editable workflow. Against a base
+  // policy they may only tighten it: they cannot turn `gate` into `comment`
+  // or hide severities the base policy surfaces.
+  const fromBase = policy.source === "base"
+  if (opts.mode) {
+    if (fromBase && config.mode === "gate" && opts.mode !== "gate") {
+      process.stderr.write(`ℹ️  --mode ${opts.mode} ignored: the base branch's policy sets \`mode: gate\`.\n`)
+    } else config.mode = opts.mode
+  }
+  if (opts.severityThreshold) {
+    if (fromBase && SEVERITY_ORDER[opts.severityThreshold] > SEVERITY_ORDER[config.severityThreshold]) {
+      process.stderr.write(
+        `ℹ️  --severity ${opts.severityThreshold} ignored: the base branch's policy surfaces ${config.severityThreshold} and above.\n`,
+      )
+    } else config.severityThreshold = opts.severityThreshold
+  }
   const rubric = resolveRubric(config)
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
