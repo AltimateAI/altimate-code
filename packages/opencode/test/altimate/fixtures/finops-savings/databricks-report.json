@@ -1,0 +1,449 @@
+{
+  "generated_by": "generate.ts",
+  "core_commit": "d6bbf67a",
+  "input": {
+    "lookback_days": 7,
+    "warehouses": [
+      {
+        "workspace_id": "1000000000000001",
+        "wall_clock_uptime_sec": 100800,
+        "cluster_weighted_uptime_sec": 100800,
+        "idle_ratio": 0.85,
+        "total_dbu_consumed": 600,
+        "total_cost": 1320,
+        "price_per_dbu": 2.2,
+        "serverless_price_per_dbu": 0.7,
+        "total_query_count": 4000,
+        "parallelism_query_count": 3500,
+        "parallelism_ratio_p50": 1,
+        "parallelism_ratio_p99": 3,
+        "parallelism_ratio_max": 6,
+        "no_spill_query_pct": 0.99,
+        "no_queue_query_pct": 0.99,
+        "warehouse_id": "wh-idle-classic",
+        "warehouse_name": "synthetic idle classic",
+        "warehouse_type": "CLASSIC",
+        "warehouse_size": "SMALL"
+      },
+      {
+        "workspace_id": "1000000000000001",
+        "wall_clock_uptime_sec": 100800,
+        "cluster_weighted_uptime_sec": 100800,
+        "idle_ratio": 0.1,
+        "total_dbu_consumed": 600,
+        "total_cost": 1320,
+        "price_per_dbu": 2.2,
+        "serverless_price_per_dbu": 0.7,
+        "total_query_count": 4000,
+        "parallelism_query_count": 3500,
+        "parallelism_ratio_p50": 1,
+        "parallelism_ratio_p99": 3,
+        "parallelism_ratio_max": 6,
+        "no_spill_query_pct": 0.99,
+        "no_queue_query_pct": 0.99,
+        "warehouse_id": "wh-oversized",
+        "warehouse_name": "synthetic oversized pro",
+        "warehouse_type": "PRO",
+        "warehouse_size": "LARGE"
+      },
+      {
+        "workspace_id": "1000000000000001",
+        "wall_clock_uptime_sec": 100800,
+        "cluster_weighted_uptime_sec": 100800,
+        "idle_ratio": 0.7,
+        "total_dbu_consumed": 600,
+        "total_cost": 1320,
+        "price_per_dbu": 2.2,
+        "serverless_price_per_dbu": 0.7,
+        "total_query_count": 4000,
+        "parallelism_query_count": 3500,
+        "parallelism_ratio_p50": 1,
+        "parallelism_ratio_p99": 3,
+        "parallelism_ratio_max": 6,
+        "no_spill_query_pct": 0.99,
+        "no_queue_query_pct": 0.99,
+        "warehouse_id": "wh-no-size",
+        "warehouse_name": "synthetic sizeless",
+        "warehouse_type": "PRO",
+        "warehouse_size": null
+      }
+    ],
+    "clusters": [
+      {
+        "cluster_id": "cluster-idle",
+        "workspace_id": "1000000000000001",
+        "cluster_name": "synthetic idle cluster",
+        "auto_termination_minutes": 120,
+        "total_node_minutes": 6000,
+        "active_util_days": 6,
+        "total_worker_minutes": 6000,
+        "idle_node_minutes": 5200,
+        "avg_cpu_active_pct": 3.5,
+        "peak_cpu_active_pct": 22,
+        "total_cost": 900
+      },
+      {
+        "cluster_id": "cluster-no-autostop",
+        "workspace_id": "1000000000000002",
+        "cluster_name": "synthetic always-on cluster",
+        "auto_termination_minutes": null,
+        "total_node_minutes": 9000,
+        "active_util_days": 7,
+        "total_worker_minutes": 9000,
+        "idle_node_minutes": 4000,
+        "avg_cpu_active_pct": 12,
+        "peak_cpu_active_pct": 60,
+        "total_cost": 1400
+      }
+    ],
+    "jobs": [
+      {
+        "job_id": "1001",
+        "workspace_id": "1000000000000001",
+        "job_name": "synthetic nightly job",
+        "task_key": "load",
+        "trigger_type": "CRON",
+        "host_cluster_id": "cluster-idle",
+        "host_cluster_name": "synthetic idle cluster",
+        "task_runs": 7,
+        "task_hours": 14,
+        "host_cluster_cost": 900,
+        "host_cluster_dbus": 400,
+        "host_cluster_billed_hours": 100,
+        "jobs_rate_per_dbu": 0.3
+      },
+      {
+        "job_id": "1002",
+        "workspace_id": "1000000000000002",
+        "job_name": "synthetic continuous job",
+        "task_key": "stream",
+        "trigger_type": "CONTINUOUS",
+        "host_cluster_id": "cluster-no-autostop",
+        "host_cluster_name": "synthetic always-on cluster",
+        "task_runs": 1,
+        "task_hours": 150,
+        "host_cluster_cost": 1400,
+        "host_cluster_dbus": 700,
+        "host_cluster_billed_hours": 160,
+        "jobs_rate_per_dbu": null
+      }
+    ]
+  },
+  "report": {
+    "findings": [
+      {
+        "check_id": "wh_classic_pro_to_serverless",
+        "daily_max": 179.57142857142858,
+        "daily_min": 143.65714285714287,
+        "evidence": {
+          "current_dbu_cost": 1320,
+          "idle_ratio": 0.85,
+          "kind": "serverless",
+          "price_per_dbu": 2.2,
+          "projected_serverless_dbu_cost": 63.00000000000001,
+          "serverless_price_per_dbu": 0.7,
+          "total_query_count": 4000,
+          "wall_clock_uptime_hours": 28,
+          "warehouse_size": "SMALL",
+          "warehouse_type": "CLASSIC",
+          "wasted_cost": 1257
+        },
+        "monthly_max": 5387.142857142858,
+        "monthly_min": 4309.714285714286,
+        "resource_id": "wh-idle-classic",
+        "resource_name": "synthetic idle classic",
+        "resource_type": "sql_warehouse",
+        "severity": "critical",
+        "title": "Migrate Classic/Pro to Serverless",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "check_id": "wh_classic_pro_to_serverless",
+        "daily_max": 170.57142857142858,
+        "daily_min": 136.45714285714288,
+        "evidence": {
+          "current_dbu_cost": 1320,
+          "idle_ratio": 0.7,
+          "kind": "serverless",
+          "price_per_dbu": 2.2,
+          "projected_serverless_dbu_cost": 126.00000000000001,
+          "serverless_price_per_dbu": 0.7,
+          "total_query_count": 4000,
+          "wall_clock_uptime_hours": 28,
+          "warehouse_size": null,
+          "warehouse_type": "PRO",
+          "wasted_cost": 1194
+        },
+        "monthly_max": 5117.142857142858,
+        "monthly_min": 4093.7142857142867,
+        "resource_id": "wh-no-size",
+        "resource_name": "synthetic sizeless",
+        "resource_type": "sql_warehouse",
+        "severity": "high",
+        "title": "Migrate Classic/Pro to Serverless",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "check_id": "wh_oversized",
+        "daily_max": 118.8,
+        "daily_min": 67.88571428571429,
+        "evidence": {
+          "available_cores": 128,
+          "current_dbu_per_hour": 40,
+          "current_size": "LARGE",
+          "kind": "over_sized",
+          "no_queue_query_pct": 0.99,
+          "no_spill_query_pct": 0.99,
+          "p99_utilization": 0.0234375,
+          "parallelism_query_count": 3500,
+          "recommended_dbu_per_hour": 4,
+          "recommended_size": "2X_SMALL",
+          "total_cost": 1320,
+          "wasted_cost": 1188
+        },
+        "monthly_max": 3564,
+        "monthly_min": 2036.5714285714287,
+        "resource_id": "wh-oversized",
+        "resource_name": "synthetic oversized pro",
+        "resource_type": "sql_warehouse",
+        "severity": "critical",
+        "title": "Over-Sized Warehouse",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "check_id": "wh_oversized",
+        "daily_max": 87.99999999999999,
+        "daily_min": 50.285714285714285,
+        "evidence": {
+          "available_cores": 32,
+          "current_dbu_per_hour": 12,
+          "current_size": "SMALL",
+          "kind": "over_sized",
+          "no_queue_query_pct": 0.99,
+          "no_spill_query_pct": 0.99,
+          "p99_utilization": 0.09375,
+          "parallelism_query_count": 3500,
+          "recommended_dbu_per_hour": 4,
+          "recommended_size": "2X_SMALL",
+          "total_cost": 1320,
+          "wasted_cost": 880
+        },
+        "monthly_max": 2639.9999999999995,
+        "monthly_min": 1508.5714285714284,
+        "resource_id": "wh-idle-classic",
+        "resource_name": "synthetic idle classic",
+        "resource_type": "sql_warehouse",
+        "severity": "high",
+        "title": "Over-Sized Warehouse",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "check_id": "ap_idle_cluster",
+        "daily_max": 66.85714285714286,
+        "daily_min": 33.42857142857143,
+        "evidence": {
+          "active_days": 6,
+          "auto_termination_minutes": 120,
+          "avg_cpu_active_pct": 3.5,
+          "idle_pattern": "zombie",
+          "idle_ratio": 0.8666666666666667,
+          "kind": "idle_cluster",
+          "peak_cpu_active_pct": 22,
+          "total_cost": 900,
+          "wasted_cost": 780
+        },
+        "monthly_max": 2005.7142857142858,
+        "monthly_min": 1002.8571428571429,
+        "resource_id": "cluster-idle",
+        "resource_name": "synthetic idle cluster",
+        "resource_type": "cluster",
+        "severity": "critical",
+        "title": "Idle Cluster Detection",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "check_id": "ap_idle_cluster",
+        "daily_max": 53.33333333333333,
+        "daily_min": 26.666666666666664,
+        "evidence": {
+          "active_days": 7,
+          "auto_termination_minutes": null,
+          "avg_cpu_active_pct": 12,
+          "idle_pattern": "between_task",
+          "idle_ratio": 0.4444444444444444,
+          "kind": "idle_cluster",
+          "peak_cpu_active_pct": 60,
+          "total_cost": 1400,
+          "wasted_cost": 622.2222222222222
+        },
+        "monthly_max": 1599.9999999999998,
+        "monthly_min": 799.9999999999999,
+        "resource_id": "cluster-no-autostop",
+        "resource_name": "synthetic always-on cluster",
+        "resource_type": "cluster",
+        "severity": "medium",
+        "title": "Idle Cluster Detection",
+        "workspace_id": "1000000000000002"
+      },
+      {
+        "check_id": "jobs_on_all_purpose_compute",
+        "daily_max": 40,
+        "daily_min": 26.67,
+        "evidence": {
+          "all_purpose_rate_per_dbu": 2,
+          "estimated_dbus": 388.8888888888889,
+          "host_cluster_id": "cluster-no-autostop",
+          "host_cluster_name": "synthetic always-on cluster",
+          "jobs_rate_estimated": true,
+          "jobs_rate_per_dbu": 1.2,
+          "kind": "job_on_all_purpose",
+          "task_hours": 150,
+          "task_runs": 1,
+          "trigger_type": "CONTINUOUS",
+          "wasted_cost": 311.11111111111114
+        },
+        "monthly_max": 1200,
+        "monthly_min": 800.1,
+        "resource_id": "1002",
+        "resource_name": "synthetic continuous job",
+        "resource_type": "job",
+        "severity": "high",
+        "title": "Job Running on All-Purpose Compute",
+        "workspace_id": "1000000000000002"
+      },
+      {
+        "check_id": "jobs_on_all_purpose_compute",
+        "daily_max": 13.11,
+        "daily_min": 8.74,
+        "evidence": {
+          "all_purpose_rate_per_dbu": 2.25,
+          "estimated_dbus": 53.33333333333332,
+          "host_cluster_id": "cluster-idle",
+          "host_cluster_name": "synthetic idle cluster",
+          "jobs_rate_estimated": false,
+          "jobs_rate_per_dbu": 0.3,
+          "kind": "job_on_all_purpose",
+          "task_hours": 14,
+          "task_runs": 7,
+          "trigger_type": "CRON",
+          "wasted_cost": 101.99999999999997
+        },
+        "monthly_max": 393.29999999999995,
+        "monthly_min": 262.2,
+        "resource_id": "1001",
+        "resource_name": "synthetic nightly job",
+        "resource_type": "job",
+        "severity": "medium",
+        "title": "Job Running on All-Purpose Compute",
+        "workspace_id": "1000000000000001"
+      }
+    ],
+    "lookback_days": 7,
+    "total": {
+      "monthly_max": 19267.300000000003,
+      "monthly_min": 13305.157142857144,
+      "resources": 7
+    },
+    "what_if": [
+      {
+        "choices": [
+          {
+            "cores": 0,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "SERVERLESS",
+            "monthly_cost": 270.00000000000006,
+            "monthly_saving": 5387.142857142857
+          },
+          {
+            "cores": 16,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "X_SMALL",
+            "monthly_cost": 2828.5714285714284,
+            "monthly_saving": 2828.5714285714284
+          },
+          {
+            "cores": 8,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "2X_SMALL",
+            "monthly_cost": 1885.7142857142858,
+            "monthly_saving": 3771.428571428571
+          }
+        ],
+        "current_label": "SMALL (CLASSIC)",
+        "current_monthly_cost": 5657.142857142857,
+        "resource_id": "wh-idle-classic",
+        "resource_name": "synthetic idle classic",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "choices": [
+          {
+            "cores": 0,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "SERVERLESS",
+            "monthly_cost": 1620,
+            "monthly_saving": 4037.142857142857
+          },
+          {
+            "cores": 64,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "MEDIUM",
+            "monthly_cost": 3394.285714285714,
+            "monthly_saving": 2262.8571428571427
+          },
+          {
+            "cores": 32,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "SMALL",
+            "monthly_cost": 1697.142857142857,
+            "monthly_saving": 3960
+          },
+          {
+            "cores": 16,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "X_SMALL",
+            "monthly_cost": 848.5714285714286,
+            "monthly_saving": 4808.571428571428
+          },
+          {
+            "cores": 8,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "2X_SMALL",
+            "monthly_cost": 565.7142857142857,
+            "monthly_saving": 5091.428571428572
+          }
+        ],
+        "current_label": "LARGE (PRO)",
+        "current_monthly_cost": 5657.142857142857,
+        "resource_id": "wh-oversized",
+        "resource_name": "synthetic oversized pro",
+        "workspace_id": "1000000000000001"
+      },
+      {
+        "choices": [
+          {
+            "cores": 0,
+            "cores_needed": 6,
+            "fits": true,
+            "label": "SERVERLESS",
+            "monthly_cost": 540.0000000000001,
+            "monthly_saving": 5117.142857142857
+          }
+        ],
+        "current_label": "size unknown (PRO)",
+        "current_monthly_cost": 5657.142857142857,
+        "resource_id": "wh-no-size",
+        "resource_name": "synthetic sizeless",
+        "workspace_id": "1000000000000001"
+      }
+    ]
+  }
+}

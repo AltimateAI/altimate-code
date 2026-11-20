@@ -95,6 +95,37 @@ describe("AltimateApi.signOut", () => {
     expect(await readJson(rootConfig)).toEqual({ mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
   })
 
+  test("in assessment mode it still removes the credentials and the MCP entries carrying the key, and sends nothing", async () => {
+    const saved = process.env.ALTIMATE_ASSESSMENT_MODE
+    const originalFetch = globalThis.fetch
+    let requests = 0
+    globalThis.fetch = (async () => {
+      requests++
+      throw new Error("no request expected")
+    }) as unknown as typeof fetch
+    process.env.ALTIMATE_ASSESSMENT_MODE = "1"
+    try {
+      await writeJson(AltimateApi.credentialsPath(), {
+        altimateUrl: "https://api.test",
+        altimateInstanceName: "tenant",
+        altimateApiKey: "gateway-test-key",
+      })
+      await writeJson(rootConfig, { mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
+
+      const removed = await AltimateApi.signOut(subdir)
+
+      expect(removed).toEqual([{ name: "datamate-sales", path: rootConfig }])
+      expect(await readJson(rootConfig)).toEqual({ mcp: {} })
+      expect(await fsp.stat(AltimateApi.credentialsPath()).then(() => true, () => false)).toBe(false)
+      expect(await AltimateApi.isConfigured()).toBe(false)
+      expect(requests).toBe(0)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (saved === undefined) delete process.env.ALTIMATE_ASSESSMENT_MODE
+      else process.env.ALTIMATE_ASSESSMENT_MODE = saved
+    }
+  })
+
   test("is a no-op when there is no credential file", async () => {
     await writeJson(rootConfig, { mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
 

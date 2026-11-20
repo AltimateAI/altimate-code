@@ -1,4 +1,5 @@
 import path from "path"
+import { Flag } from "../flag/flag"
 import { fileURLToPath, pathToFileURL } from "url"
 import npa from "npm-package-arg"
 import semver from "semver"
@@ -208,6 +209,9 @@ export async function checkPluginCompatibility(target: string, opencodeVersion: 
 
 export async function resolvePluginTarget(spec: string) {
   if (isPathPluginSpec(spec)) return resolvePathPluginTarget(spec)
+  // altimate_change start — assessment mode installs no npm plugin
+  if (Flag.assessmentMode()) throw new Error("npm plugins are not installed in assessment mode")
+  // altimate_change end
   const hit = parse(spec)
   const pkg = hit?.name && hit.raw === hit.name ? `${hit.name}@latest` : spec
   const result = await Npm.add(pkg)

@@ -74,6 +74,7 @@ import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
 // altimate_change start - telemetry import
 import { Telemetry } from "./telemetry"
+import { CoreTelemetry } from "./altimate/native/core-telemetry"
 // altimate_change end
 // altimate_change start - welcome banner
 import { showWelcomeBannerIfNeeded } from "./cli/welcome"
@@ -165,6 +166,10 @@ let cli = yargs(args)
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
+    // altimate_change start — assessment mode silences altimate-core's own usage event before any
+    // command can reach core, `mcp serve` (which returns just below) included
+    if (Flag.ALTIMATE_ASSESSMENT_MODE) await CoreTelemetry.silence()
+    // altimate_change end
     // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
     if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end

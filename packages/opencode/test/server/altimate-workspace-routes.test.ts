@@ -137,7 +137,7 @@ describe("POST /altimate/workspace/refresh", () => {
     // The refusal names the switch, so an operator knows what to unset.
     expect(await response.json()).toEqual({
       ok: false,
-      error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+      error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE or ALTIMATE_ASSESSMENT_MODE is set.",
     })
     expect(refresh).not.toHaveBeenCalled()
   })

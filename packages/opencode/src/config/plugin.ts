@@ -80,12 +80,13 @@ export function needsDependencies(dir: string, plugins: readonly ConfigPluginV1.
 
 // PURE mode skips dependency installs entirely: isolated-HOME environments and subprocess tests run
 // with no package cache, so the install attempt fails, npm retries, and the process hangs past exit.
-// Fold that check in here so both call sites (Config and TuiConfig) stay in sync.
+// Assessment mode installs nothing from npm either. Both checks live here so both call sites (Config
+// and TuiConfig) stay in sync.
 export function shouldInstallDependencies(
   dir: string,
   plugins: readonly ConfigPluginV1.Spec[] | undefined,
 ): boolean {
-  return !Flag.OPENCODE_PURE && needsDependencies(dir, plugins)
+  return !Flag.OPENCODE_PURE && !Flag.ALTIMATE_ASSESSMENT_MODE && needsDependencies(dir, plugins)
 }
 // altimate_change end
 

@@ -164,6 +164,9 @@ export namespace ModelsDev {
   }
 
   export async function refresh(force = false) {
+    // altimate_change start — assessment mode contacts no catalog host, even when asked to refresh
+    if (Flag.assessmentMode()) return
+    // altimate_change end
     if (skip(force)) return ModelsDev.Data.reset()
     await Flock.withLock(`models-dev:${filepath}`, async () => {
       if (skip(force)) return ModelsDev.Data.reset()

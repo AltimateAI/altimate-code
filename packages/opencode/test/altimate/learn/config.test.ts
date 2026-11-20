@@ -1,6 +1,6 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
-import { autoReflectEnabled, captureEnabled, learnEnabled } from "../../../src/altimate/learn/config"
+import { autoReflectEnabled, captureEnabled, learnEnabled, workspacesOn } from "../../../src/altimate/learn/config"
 
 describe("learning kill switch", () => {
   test("defaults enabled without configuration or an env override", () => {
@@ -38,5 +38,14 @@ describe("learning kill switch", () => {
     expect(autoReflectEnabled({ ...config, enabled: true }, { ...env, ALTIMATE_LEARN: "0" })).toBe(false)
     expect(captureEnabled(config, { ...env, ALTIMATE_LEARN: "1" })).toBe(true)
     expect(autoReflectEnabled(config, { ...env, ALTIMATE_LEARN: "1" })).toBe(true)
+  })
+})
+
+describe("workspaces switch", () => {
+  test("the kill switch and assessment mode each turn workspaces off, as Flag reads them", () => {
+    expect(workspacesOn({})).toBe(true)
+    expect(workspacesOn({ ALTIMATE_DISABLE_WORKSPACE: "1" })).toBe(false)
+    for (const value of ["true", "1", "yes", "on"]) expect(workspacesOn({ ALTIMATE_ASSESSMENT_MODE: value })).toBe(false)
+    for (const value of ["", "0", "false"]) expect(workspacesOn({ ALTIMATE_ASSESSMENT_MODE: value })).toBe(true)
   })
 })

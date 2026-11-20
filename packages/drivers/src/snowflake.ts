@@ -5,6 +5,8 @@
 import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { toPkcs8Pem } from "./snowflake-key"
+import { QueryTimeoutError } from "./types"
+import { isStopRequest, untilStopped } from "./stop"
 import { loadOptionalDriver } from "./resolve"
 import { emitBrowserSignIn, openInBrowser } from "./sign-in"
 import { emitReconnect, type ReconnectEvent } from "./reconnect-events"
@@ -53,6 +55,26 @@ export function suppressSnowflakeLogging(snowflake: any): void {
     }
   })
 }
+
+/**
+ * In assessment mode a savings check may contact nothing but the warehouse. When it loads, snowflake-sdk otherwise probes
+ * the AWS, Azure and GCP metadata and identity services to report the platform it runs on. Its certificate
+ * revocation requests need no switch here: they start from an HTTPS agent that Bun, which runs the packaged
+ * CLI, does not use.
+ */
+export function keepSdkOffCloudMetadata(env: NodeJS.ProcessEnv = process.env): void {
+  const mode = env.ALTIMATE_ASSESSMENT_MODE?.trim().toLowerCase()
+  if (mode && mode !== "0" && mode !== "false") env.SNOWFLAKE_DISABLE_PLATFORM_DETECTION = "true"
+}
+
+/** How long to wait for Snowflake to acknowledge a cancel before reporting the statement as possibly still running. */
+const CANCEL_WAIT_MS = 30_000
+
+/**
+ * How a caller's `cancelAfterMs` reaches what it covers: why it was stopped, and every statement sent. A read
+ * retried after a closed-session error leaves two, and the first may still be running.
+ */
+type StatementStop = { stopped?: "deadline" | "aborted"; statements: any[] }
 
 /**
  * Errors meaning the session is gone: 407002 is raised client-side for any
@@ -183,10 +205,12 @@ function describeAccount(account: unknown): string {
 export async function connect(
   config: ConnectionConfig,
   sdk?: unknown,
-  seams?: { connectTimeoutMs?: number },
+  seams?: { connectTimeoutMs?: number; cancelWaitMs?: number },
 ): Promise<Connector> {
   const connectTimeoutMs = seams?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS
+  const cancelWaitMs = seams?.cancelWaitMs ?? CANCEL_WAIT_MS
   let snowflake: any
+  keepSdkOffCloudMetadata()
   snowflake = sdk ?? (await loadOptionalDriver("snowflake", "snowflake-sdk"))
   snowflake = snowflake.default || snowflake
 
@@ -468,7 +492,11 @@ export async function connect(
    * reopened and a read-only statement is retried once; a write is not, because
    * it may already have run (see `isRetrySafe`).
    */
-  async function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+  async function executeQuery(
+    sql: string,
+    binds?: any[],
+    stop?: StatementStop,
+  ): Promise<{ columns: string[]; rows: any[][] }> {
     // Captured before any wait: a statement queued behind a reconnect started on the old session's assumptions.
     const started = generation
     const startedInEpoch = epoch
@@ -477,11 +505,13 @@ export async function connect(
     const used = connection
     const ranIn = generation
     try {
-      const result = await runTracked(used, sql, binds, ranIn)
+      const result = await runTracked(used, sql, binds, ranIn, stop)
       await noteSession(sql, binds, ranIn, startedInEpoch)
       return result
     } catch (err) {
-      if (!connectOptions || !isClosedConnectionError(err)) throw err
+      // A stopped statement is not run again, so its closed session is not reopened for it (a reopen can
+      // mean a browser sign-in): the next statement reopens it if it is still down.
+      if (!connectOptions || !isClosedConnectionError(err) || stop?.stopped) throw err
       // Reopen only if the failed connection is still the current one: a late error from a connection
       // another statement already replaced must not tear down its replacement.
       if (connection === used) await reconnect("closed-during-statement")
@@ -496,7 +526,7 @@ export async function connect(
         )
       }
       const ranAgainIn = generation
-      const result = await runTracked(connection, sql, binds, ranAgainIn)
+      const result = await runTracked(connection, sql, binds, ranAgainIn, stop)
       await noteSession(sql, binds, ranAgainIn, startedInEpoch)
       return result
     }
@@ -511,11 +541,11 @@ export async function connect(
 
   /** `runQuery`, counting a statement that may hold session state against the session it was sent to (`ran`) for
    * as long as it runs. Counted only once sent: one still waiting on a reconnect will run on the new session. */
-  async function runTracked(conn: any, sql: string, binds: any[] | undefined, ran: number) {
-    if (!mayHoldState(sql, binds)) return runQuery(conn, sql, binds)
+  async function runTracked(conn: any, sql: string, binds: any[] | undefined, ran: number, stop?: StatementStop) {
+    if (!mayHoldState(sql, binds)) return runQuery(conn, sql, binds, stop)
     stateStatementsRunning.set(ran, (stateStatementsRunning.get(ran) ?? 0) + 1)
     try {
-      return await runQuery(conn, sql, binds)
+      return await runQuery(conn, sql, binds, stop)
     } finally {
       const left = (stateStatementsRunning.get(ran) ?? 1) - 1
       if (left > 0) stateStatementsRunning.set(ran, left)
@@ -523,8 +553,15 @@ export async function connect(
     }
   }
 
-  function runQuery(conn: any, sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+  function runQuery(
+    conn: any,
+    sql: string,
+    binds?: any[],
+    stop?: StatementStop,
+  ): Promise<{ columns: string[]; rows: any[][] }> {
     return new Promise((resolve, reject) => {
+      // Stopped while waiting on a reconnect: the statement is never sent.
+      if (stop?.stopped) return reject(new Error("Snowflake statement stopped before it was sent"))
       const options: Record<string, any> = {
         sqlText: sql,
         complete(err: Error | null, _stmt: any, rows: any[]) {
@@ -541,8 +578,51 @@ export async function connect(
         },
       }
       if (binds && binds.length > 0) options.binds = binds
-      conn.execute(options)
+      const statement = conn.execute(options)
+      stop?.statements.push(statement)
     })
+  }
+
+  function cancelStatement(statement: any): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), cancelWaitMs)
+      const finish = (cancelled: boolean) => {
+        clearTimeout(timer)
+        resolve(cancelled)
+      }
+      try {
+        statement.cancel((err: Error | null | undefined) => finish(!err))
+      } catch {
+        finish(false)
+      }
+    })
+  }
+
+  /**
+   * Past `cancelAfterMs`, or when `signal` is stopped, the statement is cancelled on Snowflake. One still waiting
+   * on a reconnect is never sent, so nothing is left running. A client-side query timeout cancels nothing.
+   */
+  async function executeWithCancel(
+    sql: string,
+    binds: any[] | undefined,
+    deadlineMs: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<{ columns: string[]; rows: any[][] }> {
+    signal?.throwIfAborted()
+    const stop: StatementStop = { statements: [] }
+    const work = executeQuery(sql, binds, stop)
+    const outcome = await untilStopped(work, {
+      deadlineMs,
+      signal,
+      stopsOnAbort: isStopRequest,
+      onStop: (why) => (stop.stopped = why),
+    })
+    if (!outcome.stopped) return outcome.value
+    // A statement still waiting on a reconnect was never sent: nothing ran, so nothing was cancelled.
+    const unsent = stop.statements.length === 0
+    const cancelled = !unsent && (await Promise.all(stop.statements.map(cancelStatement))).every(Boolean)
+    if (outcome.stopped === "aborted") throw signal!.reason
+    throw new QueryTimeoutError({ engine: "snowflake", timeoutMs: deadlineMs!, cancelled, unsent })
   }
 
   return {
@@ -710,7 +790,11 @@ export async function connect(
         query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
 
-      const result = await executeQuery(query, binds)
+      const deadlineMs = options?.cancelAfterMs && options.cancelAfterMs > 0 ? options.cancelAfterMs : undefined
+      const result =
+        deadlineMs !== undefined || options?.signal
+          ? await executeWithCancel(query, binds, deadlineMs, options?.signal)
+          : await executeQuery(query, binds)
       const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit
       const rows = truncated
         ? result.rows.slice(0, effectiveLimit)

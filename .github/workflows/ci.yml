@@ -26,6 +26,7 @@ env:
   PROCESS_SUITES: >-
     test/altimate/learn/bootstrap-cli.test.ts
     test/altimate/tool-cli/cli.test.ts
+    test/altimate/assessment-zero-egress.test.ts
     test/altimate/rules/host-cli.test.ts
     test/upstream/bridge-merge-e2e.test.ts
 

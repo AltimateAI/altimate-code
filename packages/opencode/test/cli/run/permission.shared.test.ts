@@ -124,6 +124,15 @@ describe("run permission shared", () => {
       title: "Continue after repeated failures",
     })
 
+    // The savings checks name the connection they will run on, and that it can bill.
+    expect(permissionInfo(req({ permission: "finops_databricks_savings", patterns: ["prod_dbx"] }))).toMatchObject({
+      title: "Run the Databricks savings check on prod_dbx",
+      lines: [expect.stringContaining("can start this connection's warehouse and bill")],
+    })
+    expect(permissionInfo(req({ permission: "finops_snowflake_savings", patterns: ["*"] }))).toMatchObject({
+      title: "Run the Snowflake savings check on the default connection",
+    })
+
     expect(permissionInfo(req({ permission: "custom_tool" }))).toMatchObject({
       title: "Call tool custom_tool",
       lines: ["Tool: custom_tool"],

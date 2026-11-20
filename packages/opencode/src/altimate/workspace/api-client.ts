@@ -12,6 +12,7 @@
 // for 409/412 and surface it as a typed error rather than a bare status code.
 import { AltimateApi } from "@/altimate/api/client"
 import { Telemetry } from "@/altimate/telemetry"
+import { Flag } from "@/flag/flag"
 import { inertMessageValue } from "./workspace-name"
 
 const REQUEST_TIMEOUT_MS = 15_000
@@ -429,6 +430,9 @@ async function req<T>(
     // altimate_change end
   } = {},
 ): Promise<T> {
+  // altimate_change start — in assessment mode the workspace client contacts no Altimate service, whoever the caller acts as
+  if (Flag.assessmentMode()) throw new NotConfiguredError()
+  // altimate_change end
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
   const { url, instance, apiKey } = opts.actAs ?? (await creds())
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""

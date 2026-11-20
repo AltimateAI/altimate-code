@@ -135,6 +135,13 @@ export namespace Plugin {
       if (plugin.includes("opencode-openai-codex-auth") || plugin.includes("opencode-copilot-auth")) continue
       log.info("loading plugin", { path: plugin })
       if (!plugin.startsWith("file://")) {
+        // altimate_change start — assessment mode installs nothing: this loader installs every spec but
+        // a `file://` one, so exactly those are skipped and `file://` plugins still load
+        if (Flag.assessmentMode()) {
+          log.warn("skipping plugin: assessment mode installs nothing", { path: plugin })
+          continue
+        }
+        // altimate_change end
         const lastAtIndex = plugin.lastIndexOf("@")
         const pkg = lastAtIndex > 0 ? plugin.substring(0, lastAtIndex) : plugin
         const version = lastAtIndex > 0 ? plugin.substring(lastAtIndex + 1) : "latest"

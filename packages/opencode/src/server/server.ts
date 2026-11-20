@@ -99,7 +99,7 @@ export namespace Server {
         status: 409,
         body: {
           ok: false,
-          error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+          error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE or ALTIMATE_ASSESSMENT_MODE is set.",
         },
       }
     }

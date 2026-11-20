@@ -17,3 +17,20 @@ export function truncateQuery(text: string, maxLen: number): string {
   if (oneLine.length <= maxLen) return oneLine
   return oneLine.slice(0, maxLen - 3) + "..."
 }
+
+/** Dollars to the cent below $100, to the dollar from there. */
+export function dollars(value: number): string {
+  return value >= 100 ? `$${Math.round(value).toLocaleString("en-US")}` : `$${value.toFixed(2)}`
+}
+
+/** A low–high dollar range, or one figure when both read the same. */
+export function range(low: number, high: number): string {
+  return dollars(low) === dollars(high) ? dollars(high) : `${dollars(low)}–${dollars(high)}`
+}
+
+/** Free text from the warehouse on one line, with control and invisible characters gone. */
+export const oneLine = (value: unknown) =>
+  String(value ?? "")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/[\s\p{Cc}]+/gu, " ")
+    .trim()

@@ -202,13 +202,24 @@ test("mcp serve skips CLI middleware before starting the agent heap service", as
   const body = source.slice(start + opening.length, end)
   const code = new Bun.Transpiler({ loader: "ts" }).transformSync(`async function middleware(opts: any) {${body}\n}`)
   let starts = 0
-  const middleware = new Function("Heap", `${code}; return middleware`)({
-    start() {
-      starts++
-      throw new Error("Agent heap initialization reached by MCP server")
-    },
-  })
-  await middleware({ _: ["mcp", "serve"] })
+  let silenced = 0
+  const build = (assessment: boolean) =>
+    new Function("Heap", "Flag", "CoreTelemetry", `${code}; return middleware`)(
+      {
+        start() {
+          starts++
+          throw new Error("Agent heap initialization reached by MCP server")
+        },
+      },
+      { ALTIMATE_ASSESSMENT_MODE: assessment },
+      { silence: async () => void silenced++ },
+    )
+  await build(false)({ _: ["mcp", "serve"] })
   expect(starts).toBe(0)
+  expect(silenced).toBe(0)
+  // Assessment mode silences altimate-core's own telemetry before `mcp serve` returns.
+  await build(true)({ _: ["mcp", "serve"] })
+  expect(starts).toBe(0)
+  expect(silenced).toBe(1)
 })
 // altimate_change end

@@ -44,6 +44,12 @@ export interface ExecuteOptions {
    *  `query_timeout_ms`, then `ALTIMATE_SQL_QUERY_TIMEOUT_MS`, then the
    *  120 s default (see `query-timeout.ts`). */
   queryTimeoutMs?: number
+  /** Cancel the statement on the server once this many milliseconds pass. Opt-in:
+   *  `executeQuery` fills in `queryTimeoutMs` for every call, and when that deadline passes
+   *  it aborts `signal` with a `QueryTimeoutError`, which abandons the statement but cancels
+   *  nothing. So only callers that set this get a server-side deadline. Any other abort of
+   *  `signal` cancels the statement with or without it. Databricks and Snowflake. */
+  cancelAfterMs?: number
   /** DuckDB only: called once after handing this query to its helper; callback errors do not affect execution. */
   onDispatch?: () => void
 }
@@ -65,6 +71,8 @@ export class QueryTimeoutError extends Error {
   readonly cancelled: boolean
   /** Session state discarded to stop the query (temp tables, `:memory:` data). */
   readonly stateLost: boolean
+  /** Stopped before the statement was sent: nothing ran, so nothing needed cancelling. */
+  readonly unsent: boolean
 
   constructor(opts: {
     engine: string
@@ -72,11 +80,17 @@ export class QueryTimeoutError extends Error {
     cancelled?: boolean
     stateLost?: boolean
     detail?: string
+    unsent?: boolean
   }) {
-    const cancelled = opts.cancelled ?? true
+    const unsent = opts.unsent ?? false
+    const cancelled = !unsent && (opts.cancelled ?? true)
     super(
       `${QUERY_TIMEOUT_CODE}: ${opts.engine} query exceeded the ${formatDeadline(opts.timeoutMs)} execution deadline ` +
-        (cancelled ? "and was cancelled. " : "and was abandoned; it may still be running on the server. ") +
+        (unsent
+          ? "before it was sent, so it did not run. "
+          : cancelled
+            ? "and was cancelled. "
+            : "and was abandoned; it may still be running on the server. ") +
         (opts.detail ? `${opts.detail} ` : "") +
         "Narrow the query (filters, a smaller sample, pre-aggregation) or set query_timeout_ms on the connection " +
         "or ALTIMATE_SQL_QUERY_TIMEOUT_MS to allow longer runs.",
@@ -86,6 +100,7 @@ export class QueryTimeoutError extends Error {
     this.engine = opts.engine
     this.cancelled = cancelled
     this.stateLost = opts.stateLost ?? false
+    this.unsent = unsent
   }
 }
 

@@ -8,6 +8,7 @@
 // Ripgrep utility functions
 import path from "path"
 import { Global } from "../global"
+import { Flag } from "../flag/flag"
 import fs from "fs/promises"
 import z from "zod"
 import { NamedError } from "@opencode-ai/util/error"
@@ -100,6 +101,9 @@ export namespace Ripgrep {
       const config = PLATFORM[platformKey]
       if (!config) throw new UnsupportedPlatformError({ platform: platformKey })
 
+      // altimate_change start — assessment mode downloads nothing: a missing ripgrep fails the search
+      if (Flag.assessmentMode()) throw new Error("ripgrep is not installed and downloads are off in assessment mode")
+      // altimate_change end
       const version = "14.1.1"
       const filename = `ripgrep-${version}-${config.platform}.${config.extension}`
       const url = `https://github.com/BurntSushi/ripgrep/releases/download/${version}/${filename}`

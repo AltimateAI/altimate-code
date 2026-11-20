@@ -2549,6 +2549,30 @@ describe("workspace skill sync mirrors into .claude/skills", () => {
     expect(existsSync(copy("mirrored"))).toBe(false)
   })
 
+  test("assessment mode leaves the snapshot and its Claude Code copies as they are, and asks the server nothing", async () => {
+    mkdirSync(path.join(project, ".claude"), { recursive: true })
+    serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
+    await syncSkills(project)
+    expect(existsSync(copy("mirrored"))).toBe(true)
+
+    let requests = 0
+    globalThis.fetch = (async () => {
+      requests++
+      throw new Error("no request expected")
+    }) as unknown as typeof fetch
+    const saved = process.env.ALTIMATE_ASSESSMENT_MODE
+    process.env.ALTIMATE_ASSESSMENT_MODE = "1"
+    try {
+      expect(await syncSkills(project)).toEqual({ changed: false, skipped: [] })
+    } finally {
+      if (saved === undefined) delete process.env.ALTIMATE_ASSESSMENT_MODE
+      else process.env.ALTIMATE_ASSESSMENT_MODE = saved
+    }
+    expect(requests).toBe(0)
+    expect(existsSync(path.join(project, MANAGED))).toBe(true)
+    expect(existsSync(copy("mirrored"))).toBe(true)
+  })
+
   test("a project without .claude gets no copies from a sync", async () => {
     serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
     await syncSkills(project)
