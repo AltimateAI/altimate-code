@@ -679,6 +679,26 @@ describe("doc() reference with no docs block", () => {
     expect(ruleIds(env.findings)).toContain("dbt-project-rules:doc-block-missing")
     expect(searched).toContain("docs audience_id *.md")
   })
+  describe("end to end: docs blocks of installed packages", () => {
+    const solo = 'models:\n  - name: orders\n    description: "{{ doc(\'orders_grain\') }}"\n'
+    const files = [{ path: "models/orders.yml", status: "added" as const, head: solo }]
+    // The project keeps docs blocks of its own, but not `orders_grain`.
+    const grepProject = async (pattern: string) => (pattern === "docs" ? [{ path: "models/docs.md", line: 1, text: "{% docs other %}" }] : [])
+    test("a name an installed package defines is silent", async () => {
+      const env = await prReview(files, { grepProject, packageDocNames: async () => new Set(["orders_grain"]) })
+      expect(ruleIds(env.findings)).not.toContain("dbt-project-rules:doc-block-missing")
+    })
+    test("packages that can't be known (declared, not installed) keep the no-other-doc() path silent", async () => {
+      expect(ruleIds((await prReview(files, { grepProject, packageDocNames: async () => undefined })).findings)).not.toContain("dbt-project-rules:doc-block-missing")
+      expect(ruleIds((await prReview(files, { grepProject })).findings)).not.toContain("dbt-project-rules:doc-block-missing")
+    })
+    test("no package defines it: fires, and the body says why it is trusted", async () => {
+      const env = await prReview(files, { grepProject, packageDocNames: async () => new Set() })
+      const f = env.findings.find((x) => x.rule === "dbt-project-rules:doc-block-missing")
+      expect(f?.body).toContain("the project defines its own docs blocks")
+      expect(f?.body).not.toContain("other `doc()` references")
+    })
+  })
 })
 
 describe("package-lock.yml added to a dbt package", () => {

@@ -18,6 +18,7 @@ import {
   type NotReviewed,
   partitionChangedFiles,
   hasOldSide,
+  isExcludedPath,
   walkDiffLines,
   walkDiffRows,
 } from "./diff-filter"
@@ -304,6 +305,8 @@ export interface OrchestrateInput {
   layout?: DbtProjectLayout
   /** Names `ref()` can resolve to at head (repo resources + installed packages); undefined = unknown. */
   resourceNames?: () => Promise<Set<string> | undefined>
+  /** `{% docs %}` names installed packages define; undefined when that can't be known. */
+  packageDocNames?: () => Promise<Set<string> | undefined>
   /** What the review covered: base resolution and files left out of scope. */
   scope?: Omit<ReviewScope, "unverified" | "notReviewed"> & { notReviewed?: NotReviewed[] }
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
@@ -2380,6 +2383,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // dozens of yml files; serial `git show` per file adds up).
   // A `{% docs name %}` block in any of the project's .md files at head (cached per name).
   const docLookups = new Map<string, Promise<boolean>>()
+  // Docs blocks of installed packages (cached); undefined when they can't be known.
+  let pkgDocs: Promise<Set<string> | undefined> | undefined
+  const packageDocs = () => (pkgDocs ??= input.packageDocNames?.().catch(() => undefined) ?? Promise.resolve(undefined))
   const docExists = (name: string) => {
     if (!docLookups.has(name)) {
       const block = new RegExp(`\\{%-?\\s*docs\\s+${name}\\s*-?%\\}`)
@@ -2387,19 +2393,20 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         name,
         (input.grepProject?.(`docs ${name}`, "*.md") ?? Promise.resolve([]))
           // An unavailable search (undefined) is no evidence the block is missing.
-          .then((hits) => hits === undefined || hits.some((h) => block.test(h.text)))
+          .then(async (hits) => hits === undefined || hits.some((h) => block.test(h.text)) || !!(await packageDocs())?.has(name))
           // A failed search is no evidence the block is missing.
           .catch(() => true),
       )
     }
     return docLookups.get(name)!
   }
-  // The project defines docs blocks of its own (any `{% docs x %}` in its .md files).
+  // The project defines docs blocks of its own (any `{% docs x %}` in its .md files), and its
+  // installed packages' blocks are known: a package may define the name otherwise.
   let docsAny: Promise<boolean> | undefined
   const projectHasDocs = () =>
     (docsAny ??= (input.grepProject?.("docs", "*.md") ?? Promise.resolve([]))
-      .then((hits) => hits.some((h) => /\{%-?\s*docs\s+\w+\s*-?%\}/.test(h.text)))
-      // A failed search is no evidence: stay silent.
+      .then(async (hits) => !!hits?.some((h) => /\{%-?\s*docs\s+\w+\s*-?%\}/.test(h.text)) && (await packageDocs()) !== undefined)
+      // A failed or unavailable search is no evidence: stay silent.
       .catch(() => false))
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
   touch(schemaFiles)
@@ -2609,6 +2616,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
+    // Files the PR changes that the AI may list and the verifier may read; never the user's exclusions.
+    const prFiles = (input.prFiles ?? input.changedFiles.map((f) => f.path)).filter(
+      (p) => !isExcludedPath(p, input.rubric.exclusions.excludeGlobs),
+    )
     // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
     const evidence: AiVerifyEvidence | undefined = input.aiVerify
       ? {
@@ -2620,7 +2631,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           prTitle: input.prTitle,
           prBody: input.prBody,
           grepProject: input.grepProject,
-          prFiles: input.prFiles ?? input.changedFiles.map((f) => f.path),
+          prFiles,
           readFile: async (p, side, start, end) => numberedSlice(await getContent?.(p, side), start, end),
           compiledSql: async (p, side) => {
             const ctx = ctxByPath.get(p)
@@ -2637,7 +2648,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         prTitle: input.prTitle,
         prBody: input.prBody,
         model: input.aiModel,
-        prFiles: input.prFiles ?? input.changedFiles.map((f) => f.path),
+        prFiles,
         ...(evidence ? { evidence } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings

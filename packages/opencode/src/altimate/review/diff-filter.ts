@@ -254,6 +254,14 @@ export function partitionChangedFiles(
   return { reviewable, dropped }
 }
 
+/** True when a path is build output / vendored or matches one of the user's exclude globs:
+ *  files the review must not read, even outside the reviewable set. */
+export function isExcludedPath(path: string, extraExcludeGlobs: string[] = []): boolean {
+  const p = norm(path)
+  if (SKIP_DIR_PATTERNS.some((re) => re.test(p)) || SKIP_FILE_PATTERNS.some((re) => re.test(p))) return true
+  return extraExcludeGlobs.some((g) => globToRegExp(g).test(p))
+}
+
 /** Filter changed files down to the reviewable set, with their dbt kind. */
 export function filterChangedFiles(
   files: ChangedFile[],

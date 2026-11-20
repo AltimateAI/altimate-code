@@ -211,6 +211,27 @@ describe("files sent to the advisory AI lane", () => {
     const input = await aiInputFor([mod("models/marts/m.sql"), { path: "macros/old.sql", status: "deleted", diff: "-x\n" }])
     expect(input?.files.some((f) => f.path === "macros/old.sql")).toBe(false)
   })
+
+  test("PR files the user excluded, or build output, are neither listed nor readable by the verifier", async () => {
+    let seen: AiReviewInput | undefined
+    await runReview({
+      changedFiles: [mod("models/marts/m.sql")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: { ...DEFAULT_RUBRIC, exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["secrets/**"] } },
+      mode: "comment",
+      runner,
+      aiVerify: true,
+      getContent: async (f, side) => (side === "old" ? undefined : FILES[f]),
+      generatedAt: "2026-11-14T00:00:00Z",
+      prFiles: ["models/marts/m.sql", "secrets/key.sql", "target/run/m.sql", "tests/unit/test_m.py"],
+      aiReview: async (input) => {
+        seen = input
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    expect(seen?.prFiles).toEqual(["models/marts/m.sql", "tests/unit/test_m.py"])
+    expect(seen?.evidence?.prFiles).toEqual(["models/marts/m.sql", "tests/unit/test_m.py"])
+  })
 })
 
 describe("selection and prompt layout", () => {
