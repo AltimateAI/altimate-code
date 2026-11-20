@@ -189,7 +189,7 @@ Check a Databricks workspace for savings with Altimate's rules, on a Databricks 
 
 The tool measures each resource's usage; altimate-core decides what qualifies and what it saves. Prices are list prices. Each resource is counted once in the total, and each flagged warehouse also gets what it would cost at every smaller size and as serverless. If the connection cannot read the cluster or job tables, that check is named as not checked and the warehouse checks still report; the warehouse tables themselves are required.
 
-**What it does not assess.** Databricks Apps spend is not covered, and a serverless SQL warehouse gets only the Over-Sized Warehouse check. A SQL warehouse's cost is its billed usage for the six full days before the window's last day, counting only records Databricks had ingested before that day, spread over the seven-day window as Altimate's pipeline does, so it reads lower than seven days of billing (on one measured workspace, about 7% lower). A cluster's cost is its billed usage for the seven full days before the window's last day. A job's cost is estimated, because Databricks billing does not name the job on all-purpose compute: its task hours from the job timeline times the DBUs per hour its cluster billed. Jobs sharing a cluster never add up to more DBUs than the cluster billed. The connection needs the `@databricks/sql` driver installed.
+**What it does not assess.** Databricks Apps spend is not covered, and a serverless SQL warehouse gets only the Over-Sized Warehouse check. A SQL warehouse's cost is its billed usage for the six full days before the window's last day, counting only records Databricks had ingested before that day, spread over the seven-day window as Altimate's pipeline does, so it reads lower than seven days of billing (on one measured workspace, about 7% lower). A cluster's cost is its billed usage for the seven full days before the window's last day. A job's cost is estimated, because Databricks billing does not name the job on all-purpose compute: its task hours from the job timeline times the DBUs per hour its cluster billed. When the jobs on one cluster would add up to more DBUs than it billed, their estimates are scaled down to fit. The connection needs the `@databricks/sql` driver installed.
 
 **Asks first, and stops long queries.** The check runs only when called with `confirm: true`; without it, the agent is told to ask you first, since a run can start a stopped warehouse that then bills. It runs three queries and stops after 9 minutes, connecting included, cancelling any query still running on the warehouse (or sooner, at an `altimate run --time-budget` cutoff); stopping the session cancels the running query too. The Claude Code `/savings` command passes `confirm: true`, since typing it is the go-ahead.
 
@@ -204,6 +204,11 @@ Total: $85.17–$106 a month on 1 resource, each counted once at its largest sav
 Classic (sql warehouse, workspace 525779153077873) · Migrate Classic/Pro to Serverless · $85.17–$106 a month (critical)
   CLASSIC SMALL warehouse, 95% idle over 10.8 running hours (2,988 queries)
   $29.29 in DBUs over the window; serverless would bill $4.44 for the busy time alone
+
+What Classic (now SMALL (CLASSIC), $125 a month) would cost instead:
+  SERVERLESS: $19.03 a month, saving $106
+  X-SMALL: $62.60 a month, saving $62.60
+  2X-SMALL: $41.73 a month, saving $83.47
 ```
 
 
@@ -211,7 +216,7 @@ Classic (sql warehouse, workspace 525779153077873) · Migrate Classic/Pro to Ser
 
 ## finops_snowflake_savings
 
-Check a Snowflake account for savings with Altimate's rules. It lists warehouses with `SHOW WAREHOUSES` and, to report on seven days, reads up to eleven days of `SNOWFLAKE.ACCOUNT_USAGE` (`WAREHOUSE_METERING_HISTORY`, `WAREHOUSE_EVENTS_HISTORY`, `QUERY_HISTORY`), read-only, on the connection's warehouse. The role needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database, and sees only the warehouses it has access to; warehouses that billed credits but cannot be listed are named as not checked.
+Check a Snowflake account for savings with Altimate's rules. It lists warehouses with `SHOW WAREHOUSES` and, to report on seven days, reads up to eleven days of `SNOWFLAKE.ACCOUNT_USAGE` (`WAREHOUSE_METERING_HISTORY`, `WAREHOUSE_EVENTS_HISTORY`, `QUERY_HISTORY`), read-only, on the connection's warehouse. The role needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database, and sees only the warehouses it has access to; warehouses that billed credits but cannot be listed are named as not checked, and so is usage an earlier warehouse billed under a name a newer one now has.
 
 - **High Idle Time:** on days a warehouse sat idle for more than 40% of its active time, the idle share of that day's cost.
 - **Downsize Warehouse:** nearly all queries finish within 5 seconds, or nearly all active periods last 80 seconds or less, so one size smaller would do.
@@ -220,7 +225,7 @@ Check a Snowflake account for savings with Altimate's rules. It lists warehouses
 
 The tool measures each warehouse's usage; altimate-core decides what qualifies and what it saves. Credits are priced from `ORGANIZATION_USAGE.RATE_SHEET_DAILY` when the role can read it in dollars, otherwise at $3.00 (also for an account billed in another currency), and the output says which. Each warehouse is counted once in the total.
 
-**What it does not assess.** These are four of Altimate's warehouse checks. Storage, serverless features and individual query tuning are not covered. A warehouse that never suspended in the window has no completed active period, so it gets no idle finding. Days are UTC, and the window ends at 00:00 UTC on the latest day at least six hours past, because `ACCOUNT_USAGE` lags by up to that long.
+**What it does not assess.** These are four of Altimate's warehouse checks. Storage, serverless features and individual query tuning are not covered. As in Altimate's hosted product, idle time is measured within active periods (resume to the next suspend or resume) that ran at least one query, and a period counts on the day it started: a warehouse that never suspended in the window has no completed active period, and one resumed and left running with no query at all adds no idle time, so neither gets an idle finding for that time. Days are UTC, and the window ends at 00:00 UTC on the latest day at least six hours past, because `ACCOUNT_USAGE` lags by up to that long.
 
 **Asks first, and stops long queries.** The check runs only when called with `confirm: true`; without it, the agent is told to ask you first, since a run can resume a suspended warehouse that then bills. It runs six queries and stops after 9 minutes, connecting included, cancelling any query still running on Snowflake (or sooner, at an `altimate run --time-budget` cutoff); stopping the session cancels the running query too.
 

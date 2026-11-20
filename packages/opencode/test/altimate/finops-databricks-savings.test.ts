@@ -18,6 +18,13 @@ import {
 import { FinopsDatabricksSavingsTool, formatSavings } from "../../src/altimate/tools/finops-databricks-savings"
 import type { DatabricksSavingsResult } from "../../src/altimate/native/types"
 
+/** Every spy a test installs, restored after it whether or not its assertions passed. */
+const spies: { mockRestore(): void }[] = []
+const tracked = <T extends { mockRestore(): void }>(spy: T): T => (spies.push(spy), spy)
+afterEach(() => {
+  for (const spy of spies.splice(0).reverse()) spy.mockRestore()
+})
+
 function stubCtx(): any {
   return { sessionID: "test", messageID: "test", agent: "test", abort: new AbortController().signal, metadata: () => {}, ask: async () => {} }
 }
@@ -269,11 +276,10 @@ describe("databricks savings handler", () => {
     Registry.setConfigs({
       dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" },
     })
-    const get = spyOn(Registry, "get").mockRejectedValue(new Error("opened a connection"))
+    const get = tracked(spyOn(Registry, "get")).mockRejectedValue(new Error("opened a connection"))
     // A published core that predates the rules exports `initSdk` but not `databricksSavings`.
     const result = await databricksSavings({ warehouse: "dbx" }, rulesEngine({ initSdk: () => {} }))
     const connections = get.mock.calls.length
-    get.mockRestore()
     expect(result.success).toBe(false)
     expect(result.error).toBe(
       "This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.",
@@ -460,7 +466,7 @@ describe("databricks savings handler over a stubbed connection", () => {
   }
 
   const connect = (answer: (sql: string) => unknown) =>
-    spyOn(Registry, "get").mockResolvedValue({
+    tracked(spyOn(Registry, "get")).mockResolvedValue({
       execute: async (sql: string, limit: number, binds: unknown[], options?: { cancelAfterMs?: number; queryTimeoutMs?: number; signal?: AbortSignal }) => {
         calls.push({ sql, limit, binds, timeout: options?.cancelAfterMs, clientTimeout: options?.queryTimeoutMs, signal: options?.signal })
         return answer(sql)
@@ -473,7 +479,6 @@ describe("databricks savings handler over a stubbed connection", () => {
       return sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : table(JOB_ROW)
     })
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([{ check: "Idle Cluster Detection", reason: "[INSUFFICIENT_PERMISSIONS] system.compute.node_timeline" }])
     expect([result.warehouses_checked, result.clusters_checked, result.jobs_checked]).toEqual([1, 0, 1])
@@ -506,7 +511,6 @@ describe("databricks savings handler over a stubbed connection", () => {
           : { columns: [], rows: [], truncated: false },
     )
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
     expect(sent.jobs).toHaveLength(3)
     expect(result.jobs_checked).toBe(2)
     expect(result.success).toBe(true)
@@ -522,29 +526,28 @@ describe("databricks savings handler over a stubbed connection", () => {
           : { columns: [], rows: [], truncated: false },
     )
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.jobs_checked).toBe(2)
   })
 
-  test("a query past its limit fails the check with a plain reason, or skips an optional check", async () => {
-    const timeout = (cancelled: boolean) => Object.assign(new Error("QUERY_TIMEOUT: databricks query exceeded"), { code: "QUERY_TIMEOUT", cancelled })
-    let spy = connect((sql) => {
+  const timeout = (cancelled: boolean) => Object.assign(new Error("QUERY_TIMEOUT: databricks query exceeded"), { code: "QUERY_TIMEOUT", cancelled })
+
+  test("a required query past its limit fails the check with a plain reason", async () => {
+    connect((sql) => {
       if (sql === DATABRICKS_WAREHOUSE_FACTS_SQL) throw timeout(true)
       return table(JOB_ROW)
     })
-    let result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
     expect(result.success).toBe(false)
     expect(result.error).toBe("The SQL warehouses query ran past the check's 9-minute limit and was cancelled on the warehouse.")
+  })
 
-    calls = []
-    spy = connect((sql) => {
+  test("an optional query past its limit skips only its check", async () => {
+    connect((sql) => {
       if (sql === DATABRICKS_JOB_FACTS_SQL) throw timeout(false)
       return sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : table({ cluster_id: "c1" })
     })
-    result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([
       { check: "Job Running on All-Purpose Compute", reason: "The jobs query ran past the check's 9-minute limit and may still be running on the warehouse." },
@@ -554,15 +557,13 @@ describe("databricks savings handler over a stubbed connection", () => {
   test("a query is not started once the check's 9 minutes are used up", async () => {
     const realNow = Date.now
     let now = realNow()
-    const clock = spyOn(Date, "now").mockImplementation(() => now)
+    const clock = tracked(spyOn(Date, "now")).mockImplementation(() => now)
     const spy = connect((sql) => {
       // The warehouse query takes the whole limit.
       if (sql === DATABRICKS_WAREHOUSE_FACTS_SQL) now += SAVINGS_RUN_LIMIT_MS
       return table(WAREHOUSE_ROW)
     })
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
-    clock.mockRestore()
     expect(calls.map((one) => one.sql)).toEqual([DATABRICKS_WAREHOUSE_FACTS_SQL])
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([
@@ -582,7 +583,6 @@ describe("databricks savings handler over a stubbed connection", () => {
       return rows(JOB_ROW, { ...JOB_ROW, task_key: "other" }, { ...JOB_ROW, job_id: "j2", workspace_id: null })
     })
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.report?.findings).toEqual([])
     expect([result.warehouses_checked, result.clusters_checked, result.jobs_checked]).toEqual([1, 2, 2])
@@ -591,21 +591,34 @@ describe("databricks savings handler over a stubbed connection", () => {
 
   test("connecting counts toward the limit: a connection that never comes up ends the check in time", async () => {
     // A 30 ms session budget stands in for the last moments of the 9 minutes.
-    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 30)
-    const get = spyOn(Registry, "get").mockReturnValue(new Promise(() => {}) as any)
+    const budget = tracked(spyOn(RunBudget, "queryDeadline")).mockReturnValue(Date.now() + 30)
+    const get = tracked(spyOn(Registry, "get")).mockReturnValue(new Promise(() => {}) as any)
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { sessionID: "s1" })
-    get.mockRestore()
-    budget.mockRestore()
     expect(result.success).toBe(false)
     expect(result.error).toBe("Connecting to the warehouse took longer than the run's time budget.")
   })
 
+  test("a session that already stopped does not connect to the warehouse at all", async () => {
+    const controller = new AbortController()
+    controller.abort(new Error("session stopped"))
+    const get = tracked(spyOn(Registry, "get")).mockRejectedValue(new Error("connected"))
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { signal: controller.signal })
+    expect(result).toMatchObject({ success: false, error: "session stopped" })
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  test("a session time budget already used up does not connect to the warehouse at all", async () => {
+    tracked(spyOn(RunBudget, "queryDeadline")).mockReturnValue(Date.now() - 1)
+    const get = tracked(spyOn(Registry, "get")).mockRejectedValue(new Error("connected"))
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { sessionID: "s1" })
+    expect(result).toMatchObject({ success: false, error: "Connecting to the warehouse was not started: the run's time budget had already passed." })
+    expect(get).not.toHaveBeenCalled()
+  })
+
   test("a session time budget shorter than 9 minutes is the limit", async () => {
-    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 60_000)
+    const budget = tracked(spyOn(RunBudget, "queryDeadline")).mockReturnValue(Date.now() + 60_000)
     const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : table(JOB_ROW)))
     await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { sessionID: "s1" })
-    spy.mockRestore()
-    budget.mockRestore()
     for (const one of calls) expect(one.timeout).toBeLessThanOrEqual(60_000)
   })
 
@@ -619,7 +632,6 @@ describe("databricks savings handler over a stubbed connection", () => {
       return table(WAREHOUSE_ROW)
     })
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules, { signal: controller.signal })
-    spy.mockRestore()
     expect(result.success).toBe(false)
     expect(result.error).toBe("session stopped")
     // Each query got the session's signal, so the driver cancels it on the warehouse.
@@ -631,7 +643,6 @@ describe("databricks savings handler over a stubbed connection", () => {
   test("a query that fills the row limit is named, and the tool says so", async () => {
     const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : sql === DATABRICKS_JOB_FACTS_SQL ? table(JOB_ROW, true) : table({ cluster_id: "c1" })))
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
     expect(calls.every((one) => one.limit === 10_000)).toBe(true)
     expect(result.limited).toEqual(["job task rows"])
     expect(formatSavings(result)).toContain("Only the first 10,000 job task rows were read; any beyond them were not checked.")
@@ -647,7 +658,6 @@ describe("databricks savings handler over a stubbed connection", () => {
       return rules(input)
     }
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, picky)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(calls.length).toBe(2)
     expect(sent.warehouses[0].warehouse_id).toBe("abc123")
@@ -663,7 +673,17 @@ describe("databricks savings handler over a stubbed connection", () => {
     })
     const spy = connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : { columns: [], rows: [], truncated: false }))
     const result = await databricksSavings({ warehouse: " ", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
-    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.warehouse).toBe("dbx")
+  })
+
+  test("a hand-edited connection whose type is not text is passed over, not a crash", async () => {
+    Registry.setConfigs({
+      odd: { type: 42, server_hostname: "x", http_path: "/sql/1.0/warehouses/zzz", access_token: "x" },
+      dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" },
+    } as any)
+    connect((sql) => (sql === DATABRICKS_WAREHOUSE_FACTS_SQL ? table(WAREHOUSE_ROW) : { columns: [], rows: [], truncated: false }))
+    const result = await databricksSavings({ now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
     expect(result.success).toBe(true)
     expect(result.warehouse).toBe("dbx")
   })
@@ -680,7 +700,7 @@ describe("every workspace", () => {
     Registry.setConfigs({
       dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/endpoints/abc123", access_token: "x" },
     })
-    const spy = spyOn(Registry, "get").mockResolvedValue({
+    const spy = tracked(spyOn(Registry, "get")).mockResolvedValue({
       execute: async () => ({ columns: ["warehouse_id"], rows: [["abc123"]], truncated: false }),
     } as any)
     const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, () => ({
@@ -689,7 +709,6 @@ describe("every workspace", () => {
       total: { monthly_min: 0, monthly_max: 0, resources: 0 },
       what_if: [],
     }))
-    spy.mockRestore()
     Registry.reset()
     expect(result.success).toBe(true)
     expect(result.ran_on).toBe("abc123")

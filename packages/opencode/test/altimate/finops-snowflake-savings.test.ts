@@ -22,6 +22,13 @@ import { FinopsSnowflakeSavingsTool, formatSavings } from "../../src/altimate/to
 import type { SnowflakeSavingsResult } from "../../src/altimate/native/types"
 import { RunBudget } from "../../src/altimate/run-budget"
 
+/** Every spy a test installs, restored after it whether or not its assertions passed. */
+const spies: { mockRestore(): void }[] = []
+const tracked = <T extends { mockRestore(): void }>(spy: T): T => (spies.push(spy), spy)
+afterEach(() => {
+  for (const spy of spies.splice(0).reverse()) spy.mockRestore()
+})
+
 function stubCtx(): any {
   return { sessionID: "test", messageID: "test", agent: "test", abort: new AbortController().signal, metadata: () => {}, ask: async () => {} }
 }
@@ -324,6 +331,23 @@ describe("building the facts", () => {
     expect(facts[0]!.usage_days).toEqual([{ day: "2026-11-12", credits_used: 1, active_periods: 0, short_periods: 0 }])
   })
 
+  test("the earlier warehouse's billed usage under a reused name is named, not dropped silently", () => {
+    const billed = (credits: number) =>
+      buildFacts({
+        warehouses: [show()],
+        metering: [
+          { warehouse_id: 7, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: null, credits_used: credits },
+          { warehouse_id: 9, warehouse_name: "BI_WH", usage_day: "2026-11-12", idle_day: null, credits_used: 1 },
+        ],
+        periods: [],
+        restarts: [],
+        queries: [],
+      })
+    expect(billed(100)).toMatchObject({ unlisted: [], replaced: ["BI_WH"] })
+    // An earlier warehouse that billed nothing is nothing left out.
+    expect(billed(0).replaced).toEqual([])
+  })
+
   const meter = (id: number, name: string, day: string, credits = 1) => ({ warehouse_id: id, warehouse_name: name, usage_day: day, idle_day: null, credits_used: credits })
   const none = { periods: [], restarts: [], queries: [] }
 
@@ -406,6 +430,8 @@ describe("building the facts", () => {
     const recreated = buildFacts({ warehouses: [show({ created_on: new Date("2026-11-15T08:00:00Z") })], ...rows })
     expect(recreated.facts[0]).toMatchObject({ warehouse_id: "unused:BI_WH", usage_days: [] })
     expect(recreated.unlisted).toEqual([])
+    // That usage is named as not checked.
+    expect(recreated.replaced).toEqual(["BI_WH"])
     const older = buildFacts({ warehouses: [show({ created_on: "2026-01-01T00:00:00Z" })], ...rows })
     expect(older.facts[0]!.warehouse_id).toBe("100")
     // A creation time that cannot be read changes nothing.
@@ -461,7 +487,7 @@ describe("snowflake savings handler over a stubbed connection", () => {
     return { lookback_days: 7, price_per_credit: sent.price_per_credit, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
   }
   const connect = (answer: (sql: string) => unknown) =>
-    spyOn(Registry, "get").mockResolvedValue({
+    tracked(spyOn(Registry, "get")).mockResolvedValue({
       execute: async (sql: string, limit: number, binds: unknown[], options?: { cancelAfterMs?: number; queryTimeoutMs?: number; signal?: AbortSignal }) => {
         calls.push({ sql, limit, binds, timeout: options?.cancelAfterMs, clientTimeout: options?.queryTimeoutMs, signal: options?.signal })
         return answer(sql)
@@ -471,16 +497,16 @@ describe("snowflake savings handler over a stubbed connection", () => {
   test("every query is bound to the window end and gets what is left of the 9 minutes; the facts and rate reach core", async () => {
     const spy = connect(answers)
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.window).toEqual({ start: "2026-11-11", end: "2026-11-18" })
+    // The rate sheet is read last: only the price needs it.
     expect(calls.map((one) => one.sql)).toEqual([
       SNOWFLAKE_WAREHOUSES_SQL,
-      SNOWFLAKE_RATE_SQL,
       SNOWFLAKE_METERING_FACTS_SQL,
       SNOWFLAKE_PERIOD_FACTS_SQL,
       SNOWFLAKE_RESTART_FACTS_SQL,
       SNOWFLAKE_QUERY_FACTS_SQL,
+      SNOWFLAKE_RATE_SQL,
     ])
     for (const one of calls) {
       expect(one.binds).toEqual(Array(one.sql.split("?").length - 1).fill("2026-11-18"))
@@ -505,7 +531,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(sent.price_per_credit).toBe(LIST_PRICE_PER_CREDIT)
     expect(result.price).toEqual({ per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" })
@@ -518,20 +543,18 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([{ check: "Frequent Restart Overcharge", reason: "not authorized" }])
   })
 
   test("when no usage query could run, one that may still be running is the one named", async () => {
-    const timeout = Object.assign(new Error("QUERY_TIMEOUT"), { code: "QUERY_TIMEOUT", cancelled: false })
+    const stopped = timeout({ cancelled: false })
     const spy = connect((sql) => {
-      if (sql === SNOWFLAKE_PERIOD_FACTS_SQL) throw timeout
+      if (sql === SNOWFLAKE_PERIOD_FACTS_SQL) throw stopped
       if ([SNOWFLAKE_RESTART_FACTS_SQL, SNOWFLAKE_QUERY_FACTS_SQL].includes(sql)) throw new Error("not authorized")
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(false)
     expect(result.error).toContain("The active periods query ran past")
     expect(result.error).toContain("may still be running on the warehouse")
@@ -543,7 +566,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result).toMatchObject({ success: false, error: "No check could run. not authorized" })
     expect(sent).toBeUndefined()
   })
@@ -554,7 +576,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result).toMatchObject({ success: false, error: "Insufficient privileges" })
     expect(sent).toBeUndefined()
   })
@@ -562,7 +583,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
   test("a role that can list no warehouse gets a plain failure before any usage query", async () => {
     const spy = connect(() => table([]))
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.success).toBe(false)
     expect(result.error).toContain("SHOW WAREHOUSES lists no warehouse")
     expect(calls.length).toBe(1)
@@ -575,28 +595,54 @@ describe("snowflake savings handler over a stubbed connection", () => {
         : answers(sql),
     )
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.skipped).toEqual([
       { check: "1 warehouse that billed credits", reason: "SHOW WAREHOUSES does not list SECRET_WH: dropped, renamed, or not visible to the connection's role" },
     ])
   })
 
-  test("a query past its limit fails with a plain reason, or skips an optional check", async () => {
-    const timeout = (cancelled: boolean) => Object.assign(new Error("QUERY_TIMEOUT: snowflake query exceeded"), { code: "QUERY_TIMEOUT", cancelled })
-    let spy = connect((sql) => {
-      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw timeout(true)
-      return answers(sql)
-    })
-    let result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
-    expect(result.error).toBe("The metering query ran past the check's 9-minute limit and was cancelled on the warehouse.")
+  test("usage an earlier warehouse billed under a listed name is named as not checked", async () => {
+    connect((sql) =>
+      sql === SNOWFLAKE_METERING_FACTS_SQL
+        ? table([{ warehouse_id: 3, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: null, credits_used: 100 }, ...METERING])
+        : answers(sql),
+    )
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    expect(result.warehouses_checked).toBe(1)
+    expect(result.skipped).toEqual([
+      {
+        check: "Earlier usage of 1 warehouse name",
+        reason: "BI_WH also billed credits as an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked",
+      },
+    ])
+  })
 
-    spy = connect((sql) => {
-      if (sql === SNOWFLAKE_QUERY_FACTS_SQL) throw timeout(false)
+  const timeout = (fields: { cancelled?: boolean; unsent?: boolean }) =>
+    Object.assign(new Error("QUERY_TIMEOUT: snowflake query exceeded"), { code: "QUERY_TIMEOUT", ...fields })
+
+  test("a required query past its limit fails the check with a plain reason", async () => {
+    connect((sql) => {
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw timeout({ cancelled: true })
       return answers(sql)
     })
-    result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    expect(result.error).toBe("The metering query ran past the check's 9-minute limit and was cancelled on the warehouse.")
+  })
+
+  test("a query stopped before it was sent says it did not run", async () => {
+    connect((sql) => {
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw timeout({ cancelled: false, unsent: true })
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    expect(result.error).toBe("The metering query ran past the check's 9-minute limit before it was sent, so it did not run on the warehouse.")
+  })
+
+  test("an optional query past its limit skips only its check", async () => {
+    connect((sql) => {
+      if (sql === SNOWFLAKE_QUERY_FACTS_SQL) throw timeout({ cancelled: false })
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([
       { check: "The short-query signal of Downsize Warehouse", reason: "The query history query ran past the check's 9-minute limit and may still be running on the warehouse." },
@@ -605,7 +651,7 @@ describe("snowflake savings handler over a stubbed connection", () => {
 
   test("each query gets only what the earlier ones left; with nothing left it is not started", async () => {
     let now = 1_000_000
-    const clock = spyOn(Date, "now").mockImplementation(() => now)
+    const clock = tracked(spyOn(Date, "now")).mockImplementation(() => now)
     const spy = connect((sql) => {
       // The metering query uses up two minutes, and the period query all the rest.
       if (sql === SNOWFLAKE_METERING_FACTS_SQL) now += 120_000
@@ -613,14 +659,7 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
-    clock.mockRestore()
-    expect(calls.map((one) => one.timeout)).toEqual([
-      SAVINGS_RUN_LIMIT_MS,
-      SAVINGS_RUN_LIMIT_MS,
-      SAVINGS_RUN_LIMIT_MS,
-      SAVINGS_RUN_LIMIT_MS - 120_000,
-    ])
+    expect(calls.map((one) => one.timeout)).toEqual([SAVINGS_RUN_LIMIT_MS, SAVINGS_RUN_LIMIT_MS, SAVINGS_RUN_LIMIT_MS - 120_000])
     expect(result.success).toBe(true)
     expect(result.skipped).toEqual([
       { check: "Frequent Restart Overcharge", reason: "The restart events query was not started: it would run past the check's 9-minute limit." },
@@ -628,17 +667,25 @@ describe("snowflake savings handler over a stubbed connection", () => {
     ])
   })
 
-  test("reaching the limit before the required billing query fails the check", async () => {
+  test("the optional rate lookup cannot take a usage query's time: with none left, list price stands in", async () => {
     let now = 1_000_000
-    const clock = spyOn(Date, "now").mockImplementation(() => now)
-    const spy = connect((sql) => {
-      if (sql === SNOWFLAKE_RATE_SQL) now += SAVINGS_RUN_LIMIT_MS
+    tracked(spyOn(Date, "now")).mockImplementation(() => now)
+    connect((sql) => {
+      // The last usage query uses up the limit.
+      if (sql === SNOWFLAKE_QUERY_FACTS_SQL) now += SAVINGS_RUN_LIMIT_MS
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
-    clock.mockRestore()
-    expect(result).toMatchObject({ success: false, error: "The metering query was not started: it would run past the check's 9-minute limit." })
+    expect(calls.map((one) => one.sql)).toEqual([
+      SNOWFLAKE_WAREHOUSES_SQL,
+      SNOWFLAKE_METERING_FACTS_SQL,
+      SNOWFLAKE_PERIOD_FACTS_SQL,
+      SNOWFLAKE_RESTART_FACTS_SQL,
+      SNOWFLAKE_QUERY_FACTS_SQL,
+    ])
+    expect(result.success).toBe(true)
+    expect(result.price).toEqual({ per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" })
+    expect(result.skipped).toEqual([])
   })
 
   test("stopping the session cancels the running query and starts no other", async () => {
@@ -651,7 +698,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
-    spy.mockRestore()
     expect(result).toMatchObject({ success: false, error: "session stopped" })
     expect(result.skipped).toBeUndefined()
     expect(calls.at(-1)!.sql).toBe(SNOWFLAKE_PERIOD_FACTS_SQL)
@@ -662,50 +708,66 @@ describe("snowflake savings handler over a stubbed connection", () => {
 
   test("connecting counts toward the limit: a connection that never comes up ends the check in time", async () => {
     // A 30 ms session budget stands in for the last moments of the 9 minutes.
-    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 30)
-    const get = spyOn(Registry, "get").mockReturnValue(new Promise(() => {}) as any)
+    const budget = tracked(spyOn(RunBudget, "queryDeadline")).mockReturnValue(Date.now() + 30)
+    const get = tracked(spyOn(Registry, "get")).mockReturnValue(new Promise(() => {}) as any)
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { sessionID: "s1" })
-    get.mockRestore()
-    budget.mockRestore()
     expect(result).toMatchObject({ success: false, error: "Connecting to the warehouse took longer than the run's time budget." })
   })
 
   test("stopping the session while connecting ends the check at once", async () => {
     const controller = new AbortController()
-    const get = spyOn(Registry, "get").mockReturnValue(new Promise(() => {}) as any)
+    const get = tracked(spyOn(Registry, "get")).mockReturnValue(new Promise(() => {}) as any)
     const pending = snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
     controller.abort(new Error("session stopped"))
     const result = await pending
-    get.mockRestore()
     expect(result).toMatchObject({ success: false, error: "session stopped" })
   })
 
-  test("a connection that fails after the session already stopped is not left unhandled", async () => {
+  test("a session that already stopped does not connect to Snowflake at all", async () => {
     const controller = new AbortController()
     controller.abort(new Error("session stopped"))
+    const get = tracked(spyOn(Registry, "get")).mockRejectedValue(new Error("connected"))
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
+    expect(result).toMatchObject({ success: false, error: "session stopped" })
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  test("a session time budget already used up does not connect to Snowflake at all", async () => {
+    tracked(spyOn(RunBudget, "queryDeadline")).mockReturnValue(Date.now() - 1)
+    const get = tracked(spyOn(Registry, "get")).mockRejectedValue(new Error("connected"))
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { sessionID: "s1" })
+    expect(result).toMatchObject({ success: false, error: "Connecting to the warehouse was not started: the run's time budget had already passed." })
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  test("a connection that fails after the session stopped is not left unhandled", async () => {
+    const controller = new AbortController()
     const unhandled: unknown[] = []
     const note = (reason: unknown) => unhandled.push(reason)
     process.on("unhandledRejection", note)
-    let fail!: (reason: Error) => void
-    const connecting = new Promise((_, reject) => (fail = reject))
-    const get = spyOn(Registry, "get").mockReturnValue(connecting as any)
-    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
-    fail(new Error("connection refused"))
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    get.mockRestore()
-    process.off("unhandledRejection", note)
-    expect(result).toMatchObject({ success: false, error: "session stopped" })
-    expect(unhandled).toEqual([])
+    try {
+      let fail!: (reason: Error) => void
+      const connecting = new Promise((_, reject) => (fail = reject))
+      tracked(spyOn(Registry, "get")).mockReturnValue(connecting as any)
+      const pending = snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
+      controller.abort(new Error("session stopped"))
+      const result = await pending
+      fail(new Error("connection refused"))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(result).toMatchObject({ success: false, error: "session stopped" })
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off("unhandledRejection", note)
+    }
   })
 
   test("a rate query that may still be running is named, and list price is used", async () => {
-    const timeout = Object.assign(new Error("QUERY_TIMEOUT"), { code: "QUERY_TIMEOUT", cancelled: false })
+    const stopped = timeout({ cancelled: false })
     const spy = connect((sql) => {
-      if (sql === SNOWFLAKE_RATE_SQL) throw timeout
+      if (sql === SNOWFLAKE_RATE_SQL) throw stopped
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.price?.source).toBe("list_price")
     expect(result.skipped).toEqual([
       { check: "The account's credit rate", reason: "The credit rate query ran past the check's 9-minute limit and may still be running on the warehouse." },
@@ -713,15 +775,13 @@ describe("snowflake savings handler over a stubbed connection", () => {
   })
 
   test("a session time budget shorter than 9 minutes is the limit, and is named when it stops a query", async () => {
-    const budget = spyOn(RunBudget, "queryDeadline").mockReturnValue(Date.now() + 60_000)
-    const timeout = Object.assign(new Error("QUERY_TIMEOUT"), { code: "QUERY_TIMEOUT", cancelled: true })
+    const budget = tracked(spyOn(RunBudget, "queryDeadline")).mockReturnValue(Date.now() + 60_000)
+    const stopped = timeout({ cancelled: true })
     const spy = connect((sql) => {
-      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw timeout
+      if (sql === SNOWFLAKE_METERING_FACTS_SQL) throw stopped
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { sessionID: "s1" })
-    spy.mockRestore()
-    budget.mockRestore()
     for (const one of calls) expect(one.timeout).toBeLessThanOrEqual(60_000)
     expect(result.error).toBe("The metering query ran past the run's time budget and was cancelled on the warehouse.")
   })
@@ -736,7 +796,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
       return answers(sql)
     })
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules, { signal: controller.signal })
-    spy.mockRestore()
     expect(result).toMatchObject({ success: false, error: "session stopped" })
     expect(calls.at(-1)!.sql).toBe(SNOWFLAKE_RATE_SQL)
   })
@@ -744,7 +803,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
   test("a query that fills the row limit is named", async () => {
     const spy = connect((sql) => (sql === SNOWFLAKE_PERIOD_FACTS_SQL ? table([], true) : answers(sql)))
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
-    spy.mockRestore()
     expect(result.limited).toEqual(["active periods"])
   })
 
@@ -758,7 +816,6 @@ describe("snowflake savings handler over a stubbed connection", () => {
   test("a core without the rules is refused before any query", async () => {
     const spy = connect(answers)
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, null)
-    spy.mockRestore()
     expect(result.error).toContain("no Snowflake savings rules")
     expect(calls).toEqual([])
   })

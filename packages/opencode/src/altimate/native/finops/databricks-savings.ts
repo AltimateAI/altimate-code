@@ -9,9 +9,9 @@
 import * as core from "@altimateai/altimate-core"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Registry from "../connections/registry"
-import { isQueryTimeoutError } from "@altimateai/drivers/types"
+import { silenceWith, type CoreTelemetrySwitch } from "../core-telemetry"
 import type { QueryContext } from "../query-execution"
-import { RunBudget } from "../../run-budget"
+import { reasonOf, savingsRun } from "./savings-run"
 import { resolveFinopsWarehouse } from "./warehouse-resolver"
 import type { DatabricksSavingsParams, DatabricksSavingsResult, DatabricksSavingsReport } from "../types"
 
@@ -27,13 +27,17 @@ const WINDOW_END_MS = 6 * 3_600_000
 
 /** Rows read per query; a query that fills it says so in the result. */
 const ROW_LIMIT = 10_000
-// The whole check, connecting included, stops after this long; a query still running then is
-// cancelled on the warehouse. Claude Code runs a plugin's process for ten minutes at most, so the
-// check ends before it is killed.
-export const SAVINGS_RUN_LIMIT_MS = 9 * 60_000
+
+export { SAVINGS_RUN_LIMIT_MS } from "./savings-run"
 
 /** A SQL warehouse's id in a connection's HTTP path (`/sql/1.0/warehouses/<id>`, or the older `/sql/1.0/endpoints/<id>`). */
 const WAREHOUSE_PATH = /\/(?:warehouses|endpoints)\/([0-9a-z]+)\/?$/i
+
+/** List price of a usage row: the price in force when the usage started. */
+const LIST_PRICE_JOIN = `LEFT JOIN system.billing.list_prices lp
+    ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+   AND u.usage_start_time >= lp.price_start_time
+   AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)`
 
 /**
  * Per-warehouse usage over the seven days to 06:00 UTC on the parameter, for every warehouse of
@@ -112,10 +116,7 @@ bill_rows AS (
          lp.pricing.default AS price, u.usage_quantity * lp.pricing.default AS cost
   FROM system.billing.usage u
   CROSS JOIN w
-  LEFT JOIN system.billing.list_prices lp
-    ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-   AND u.usage_start_time >= lp.price_start_time
-   AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)
+  ${LIST_PRICE_JOIN}
   WHERE u.billing_origin_product = 'SQL'
     AND u.usage_metadata.warehouse_id IS NOT NULL
     AND u.workspace_id IN (SELECT workspace_id FROM inv) AND u.usage_metadata.warehouse_id IN (SELECT warehouse_id FROM inv)
@@ -155,12 +156,6 @@ CROSS JOIN type_prices tp
 WHERE inv.delete_time IS NULL
 ORDER BY inv.warehouse_name
 `
-
-/** List price of a usage row: the price in force when the usage started. */
-const LIST_PRICE_JOIN = `LEFT JOIN system.billing.list_prices lp
-    ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-   AND u.usage_start_time >= lp.price_start_time
-   AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)`
 
 /**
  * Per all-purpose cluster (created from the UI or API, not deleted) of every workspace the
@@ -328,7 +323,7 @@ ORDER BY t.task_hours DESC, t.workspace_id, t.job_id, t.task_key, t.cluster_id, 
 /** Core's rules: a `DatabricksSavingsInput` as JSON in, the report out. */
 export type RulesEngine = (input: string) => DatabricksSavingsReport
 
-type CoreModule = { databricksSavings?: unknown; initSdk?: (...args: [string, string, string, boolean, boolean]) => void }
+type CoreModule = { databricksSavings?: unknown } & CoreTelemetrySwitch
 
 /**
  * The installed core's rules, or null when its binary predates them. In assessment mode core's own
@@ -338,7 +333,7 @@ type CoreModule = { databricksSavings?: unknown; initSdk?: (...args: [string, st
 export function rulesEngine(lib: CoreModule = core as unknown as CoreModule): RulesEngine | null {
   const found = lib.databricksSavings
   if (typeof found !== "function") return null
-  if (Flag.ALTIMATE_ASSESSMENT_MODE) lib.initSdk?.("", "", "", false, false)
+  if (Flag.ALTIMATE_ASSESSMENT_MODE) silenceWith(lib)
   return found as RulesEngine
 }
 
@@ -429,7 +424,8 @@ function records(result: { columns: string[]; rows: unknown[][] }): Record<strin
 /** With no connection named: the first Databricks connection that runs through a SQL warehouse, if any. */
 function preferredConnection(): string | undefined {
   return Registry.list().warehouses.find((one) => {
-    if (one.type.toLowerCase() !== "databricks") return false
+    // `connections.json` is edited by hand: a `type` that is not a string is not Databricks.
+    if (typeof one.type !== "string" || one.type.toLowerCase() !== "databricks") return false
     const config = Registry.getConfig(one.name) as Record<string, unknown> | undefined
     return WAREHOUSE_PATH.test(String(config?.http_path ?? config?.httpPath ?? ""))
   })?.name
@@ -465,57 +461,18 @@ export async function databricksSavings(
     return failed("This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.")
   }
 
-  // Stopping the session cancels the running query and starts no other. The check stops at its own
-  // limit, or earlier at the session's query cutoff (`altimate run --time-budget`).
-  const signal = context?.signal
-  const ownLimitAt = Date.now() + SAVINGS_RUN_LIMIT_MS
-  const sessionCutoff = context?.sessionID ? RunBudget.queryDeadline(context.sessionID) : undefined
-  const stopsAt = Math.min(ownLimitAt, sessionCutoff ?? Infinity)
-  const limitName = stopsAt < ownLimitAt ? "the run's time budget" : "the check's 9-minute limit"
-
-  // Connecting can wait on a stopped warehouse: it counts toward the limit and yields to a stop.
-  const beforeStop = async <T>(work: Promise<T>, what: string): Promise<T> => {
-    signal?.throwIfAborted()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let onAbort: (() => void) | undefined
-    try {
-      return await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${what} took longer than ${limitName}.`)), Math.max(0, stopsAt - Date.now()))
-        }),
-        new Promise<never>((_, reject) => {
-          onAbort = () => reject(signal!.reason)
-          signal?.addEventListener("abort", onAbort, { once: true })
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-      if (onAbort) signal?.removeEventListener("abort", onAbort)
-      work.catch(() => {})
-    }
-  }
+  const run = savingsRun(context)
+  const signal = run.signal
 
   try {
-    const connector = await beforeStop(Registry.get(resolved.warehouse), "Connecting to the warehouse")
+    const connector = await run.beforeStop(() => Registry.get(resolved.warehouse), "Connecting to the warehouse")
     const binds = [window.end]
     // A query that fills the row limit reads only its first rows; the result names it.
     const limited: string[] = []
     const read = async (what: string, sql: string, rows = what) => {
-      signal?.throwIfAborted()
-      const left = stopsAt - Date.now()
-      if (left <= 0) throw new Error(`The ${what} query was not started: it would run past ${limitName}.`)
-      try {
-        const result = await connector.execute(sql, ROW_LIMIT, binds, { cancelAfterMs: left, signal })
-        if (result.truncated) limited.push(rows)
-        return records(result)
-      } catch (e) {
-        if (!isQueryTimeoutError(e)) throw e
-        const outcome = (e as { cancelled?: boolean }).cancelled
-          ? "and was cancelled on the warehouse"
-          : "and may still be running on the warehouse"
-        throw new Error(`The ${what} query ran past ${limitName} ${outcome}.`)
-      }
+      const result = await run.query(connector, what, sql, ROW_LIMIT, binds)
+      if (result.truncated) limited.push(rows)
+      return records(result)
     }
     const warehouses = await read("SQL warehouses", DATABRICKS_WAREHOUSE_FACTS_SQL)
     if (warehouses.length === 0) {
@@ -528,7 +485,7 @@ export async function databricksSavings(
         return await read(what, sql, rows)
       } catch (e) {
         if (signal?.aborted) throw e
-        skipped.push({ check, reason: (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 300) })
+        skipped.push({ check, reason: reasonOf(e) })
         return []
       }
     }
@@ -548,7 +505,7 @@ export async function databricksSavings(
       // cluster and job checks are named as skipped instead of losing every finding.
       if (input.clusters.length === 0 && input.jobs.length === 0) throw e
       report = rules(JSON.stringify({ ...input, clusters: [], jobs: [] }))
-      const reason = `core refused their facts: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 240)}`
+      const reason = `core refused their facts: ${reasonOf(e, 240)}`
       if (input.clusters.length > 0) skipped.push({ check: "Idle Cluster Detection", reason })
       if (input.jobs.length > 0) skipped.push({ check: "Job Running on All-Purpose Compute", reason })
       clusters.length = 0

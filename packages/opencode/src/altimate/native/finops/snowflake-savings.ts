@@ -11,12 +11,12 @@
  */
 
 import * as core from "@altimateai/altimate-core"
-import { isQueryTimeoutError } from "@altimateai/drivers/types"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Registry from "../connections/registry"
+import { silenceWith, type CoreTelemetrySwitch } from "../core-telemetry"
 import type { QueryContext } from "../query-execution"
-import { RunBudget } from "../../run-budget"
 import { savingsWindow } from "./databricks-savings"
+import { reasonOf, savingsRun } from "./savings-run"
 import { resolveFinopsWarehouse } from "./warehouse-resolver"
 import type { SnowflakeSavingsParams, SnowflakeSavingsReport, SnowflakeSavingsResult } from "../types"
 
@@ -34,9 +34,7 @@ export const SHOW_ROW_LIMIT = 9_999
 /** Dollars per credit when the account's rate sheet cannot be read: Enterprise list price. */
 export const LIST_PRICE_PER_CREDIT = 3
 
-// The whole check stops after this long, inside the 10 minutes a Claude Code plugin's process may
-// run, so a running query is cancelled here and not left behind when the process is killed.
-export const SAVINGS_RUN_LIMIT_MS = 9 * 60_000
+export { SAVINGS_RUN_LIMIT_MS } from "./savings-run"
 
 /** The end of the window as a timestamp for filtering `ACCOUNT_USAGE`, and as UTC wall-clock time. */
 const WINDOW_END = `TO_TIMESTAMP_TZ(? || ' 00:00:00 +0000', 'YYYY-MM-DD HH24:MI:SS TZHTZM')`
@@ -238,13 +236,13 @@ ORDER BY DATE DESC, EFFECTIVE_RATE LIMIT 1
 /** Core's rules: a `SnowflakeSavingsInput` as JSON in, the report out. */
 export type RulesEngine = (input: string) => SnowflakeSavingsReport
 
-type CoreModule = { snowflakeSavings?: unknown; initSdk?: (...args: [string, string, string, boolean, boolean]) => void }
+type CoreModule = { snowflakeSavings?: unknown } & CoreTelemetrySwitch
 
 /** The installed core's rules, or null when its binary predates them. See `databricks-savings.ts` for assessment mode. */
 export function rulesEngine(lib: CoreModule = core as unknown as CoreModule): RulesEngine | null {
   const found = lib.snowflakeSavings
   if (typeof found !== "function") return null
-  if (Flag.ALTIMATE_ASSESSMENT_MODE) lib.initSdk?.("", "", "", false, false)
+  if (Flag.ALTIMATE_ASSESSMENT_MODE) silenceWith(lib)
   return found as RulesEngine
 }
 
@@ -296,6 +294,8 @@ function timeOf(value: unknown): number {
  * name it was seen under. A dropped warehouse's name can come back on a new one, so a name keeps its
  * newest id, and usage that ended before the listed warehouse was created is its predecessor's.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
+ * `replaced` names the listed ones whose name an earlier warehouse also billed credits under: that
+ * earlier usage is left out.
  */
 export function buildFacts(rows: FactRows) {
   const listed = new Set(rows.warehouses.map((row) => String(row.name ?? "")))
@@ -325,6 +325,11 @@ export function buildFacts(rows: FactRows) {
     return byName
   }
   const metering = of(rows.metering)
+  const replaced = new Set<string>()
+  for (const row of rows.metering) {
+    const name = nameOf(row)
+    if (listed.has(name) && newestId.get(name) !== num(row.warehouse_id) && num(row.credits_used) > 0) replaced.add(name)
+  }
   const periods = of(rows.periods)
   const restarts = of(rows.restarts)
   const queries = of(rows.queries)
@@ -342,6 +347,7 @@ export function buildFacts(rows: FactRows) {
   const facts = rows.warehouses.map((row) => {
     const name = String(row.name ?? "")
     const id = idFor(row)
+    if (id === undefined && (metering.get(name) ?? []).some((one) => num(one.credits_used) > 0)) replaced.add(name)
     const usedBy = <T>(byName: Map<string, T[]>) => (id === undefined ? [] : (byName.get(name) ?? []))
     const usage = new Map<string, { day: string; credits_used: number | null; active_periods: number; short_periods: number }>()
     const idle = new Map<string, { day: string; active_seconds: number; idle_seconds: number; credits_used: number }>()
@@ -411,7 +417,7 @@ export function buildFacts(rows: FactRows) {
     }
   })
   const unlisted = [...metering.keys()].filter((name) => !listed.has(name)).sort()
-  return { facts, unlisted }
+  return { facts, unlisted, replaced: [...replaced].sort() }
 }
 
 /** The price of a credit: the account's rate when it can be read in dollars, otherwise list price. */
@@ -443,58 +449,18 @@ export async function snowflakeSavings(
     return failed("This altimate-code build's altimate-core has no Snowflake savings rules. Update altimate-code, then try again.")
   }
 
-  // Stopping the session cancels the running query and starts no other. The check stops at its own
-  // limit, or earlier at the session's query cutoff (`altimate run --time-budget`).
-  const signal = context?.signal
-  const ownLimitAt = Date.now() + SAVINGS_RUN_LIMIT_MS
-  const sessionCutoff = context?.sessionID ? RunBudget.queryDeadline(context.sessionID) : undefined
-  const stopsAt = Math.min(ownLimitAt, sessionCutoff ?? Infinity)
-  const limitName = stopsAt < ownLimitAt ? "the run's time budget" : "the check's 9-minute limit"
-
-  // Connecting can wait on the network or a sign-in: it counts toward the limit and yields to a stop.
-  const beforeStop = async <T>(work: Promise<T>, what: string): Promise<T> => {
-    // A stop can come first, and a later failure of `work` must not go unhandled.
-    work.catch(() => {})
-    signal?.throwIfAborted()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let onAbort: (() => void) | undefined
-    try {
-      return await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${what} took longer than ${limitName}.`)), Math.max(0, stopsAt - Date.now()))
-        }),
-        new Promise<never>((_, reject) => {
-          onAbort = () => reject(signal!.reason)
-          signal?.addEventListener("abort", onAbort, { once: true })
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-      if (onAbort) signal?.removeEventListener("abort", onAbort)
-    }
-  }
+  const run = savingsRun(context)
+  const signal = run.signal
 
   try {
-    const connector = await beforeStop(Registry.get(resolved.warehouse), "Connecting to the warehouse")
+    const connector = await run.beforeStop(() => Registry.get(resolved.warehouse), "Connecting to the warehouse")
     const config = Registry.getConfig(resolved.warehouse) as Record<string, unknown> | undefined
     const limited: string[] = []
     const read = async (what: string, sql: string, rowLimit = ROW_LIMIT) => {
-      signal?.throwIfAborted()
-      const left = stopsAt - Date.now()
-      if (left <= 0) throw new Error(`The ${what} query was not started: it would run past ${limitName}.`)
       const binds = Array.from({ length: sql.split("?").length - 1 }, () => window.end)
-      try {
-        const result = await connector.execute(sql, rowLimit, binds, { cancelAfterMs: left, signal })
-        if (result.truncated) limited.push(what)
-        return records(result)
-      } catch (e) {
-        if (!isQueryTimeoutError(e)) throw e
-        const outcome = (e as { cancelled?: boolean }).cancelled
-          ? "and was cancelled on the warehouse"
-          : "and may still be running on the warehouse"
-        throw new Error(`The ${what} query ran past ${limitName} ${outcome}.`)
-      }
+      const result = await run.query(connector, what, sql, rowLimit, binds)
+      if (result.truncated) limited.push(what)
+      return records(result)
     }
     const warehouses = await read("warehouses", SNOWFLAKE_WAREHOUSES_SQL, SHOW_ROW_LIMIT)
     if (warehouses.length === 0) return failed("SHOW WAREHOUSES lists no warehouse this connection's role can see.")
@@ -502,7 +468,6 @@ export async function snowflakeSavings(
     // A view the role may not read stops only the checks that need it; the rest still report.
     const skipped: { check: string; reason: string }[] = []
     let checksMissing = 0
-    const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 300)
     const optional = async (check: string, what: string, sql: string) => {
       try {
         return await read(what, sql)
@@ -513,13 +478,6 @@ export async function snowflakeSavings(
         return []
       }
     }
-    // Most accounts cannot read the rate sheet (it needs organization access); list price stands in.
-    const rate = await read("credit rate", SNOWFLAKE_RATE_SQL).catch((e) => {
-      if (signal?.aborted) throw e
-      // An unreadable rate sheet is ordinary; a query that may still be running is worth naming.
-      if (reasonOf(e).includes("may still be running")) skipped.push({ check: "The account's credit rate", reason: reasonOf(e) })
-      return [] as Row[]
-    })
     const metering = await read("metering", SNOWFLAKE_METERING_FACTS_SQL)
     const periods = await optional(
       "High Idle Time, Underutilized Cluster and the short-period signal of Downsize Warehouse",
@@ -536,12 +494,26 @@ export async function snowflakeSavings(
       return failed(`No check could run. ${reason.reason}`)
     }
 
+    // Read last: only the price needs it, and a slow or unreadable rate sheet must not cost a usage
+    // query its time. Most accounts cannot read it (it needs organization access); list price stands in.
+    const rate = await read("credit rate", SNOWFLAKE_RATE_SQL).catch((e) => {
+      if (signal?.aborted) throw e
+      // An unreadable rate sheet is ordinary; a query that may still be running is worth naming.
+      if (reasonOf(e).includes("may still be running")) skipped.push({ check: "The account's credit rate", reason: reasonOf(e) })
+      return [] as Row[]
+    })
     const price = creditPrice(rate[0])
-    const { facts, unlisted } = buildFacts({ warehouses, metering, periods, restarts, queries })
+    const { facts, unlisted, replaced } = buildFacts({ warehouses, metering, periods, restarts, queries })
     if (unlisted.length > 0) {
       skipped.push({
         check: `${unlisted.length} warehouse${unlisted.length === 1 ? "" : "s"} that billed credits`,
         reason: `SHOW WAREHOUSES does not list ${unlisted.slice(0, 5).join(", ")}${unlisted.length > 5 ? ", …" : ""}: dropped, renamed, or not visible to the connection's role`,
+      })
+    }
+    if (replaced.length > 0) {
+      skipped.push({
+        check: `Earlier usage of ${replaced.length} warehouse name${replaced.length === 1 ? "" : "s"}`,
+        reason: `${replaced.slice(0, 5).join(", ")}${replaced.length > 5 ? ", …" : ""} also billed credits as an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked`,
       })
     }
     const report = rules(JSON.stringify({ lookback_days: LOOKBACK_DAYS, price_per_credit: price.per_credit, warehouses: facts }))

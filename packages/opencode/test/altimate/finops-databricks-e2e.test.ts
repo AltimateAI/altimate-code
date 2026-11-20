@@ -215,6 +215,11 @@ describe.skipIf(!HAS_DATABRICKS)("Databricks FinOps Integration", () => {
       expect(result.error).toBeUndefined()
       expect(result.success).toBe(true)
       expect(result.warehouses_checked).toBeGreaterThan(0)
+      // The cluster and job queries ran against the real system tables: a broken query would
+      // only show up as a skipped check, never as a failure.
+      expect(result.skipped).toEqual([])
+      expect(typeof result.clusters_checked).toBe("number")
+      expect(typeof result.jobs_checked).toBe("number")
       expect(Array.isArray(result.report!.findings)).toBe(true)
       expect(result.report!.total.resources).toBe(
         new Set(result.report!.findings.map((f) => `${f.resource_type}:${f.workspace_id ?? ""}:${f.resource_id}`)).size,

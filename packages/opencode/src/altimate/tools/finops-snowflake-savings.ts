@@ -3,7 +3,8 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SnowflakeSavingsFinding, SnowflakeSavingsReport, SnowflakeSavingsResult } from "../native/types"
-import { dollars, oneLine, range } from "./finops-databricks-savings"
+import { SAVINGS_RUN_LIMIT_MINUTES } from "../native/finops/savings-run"
+import { oneLine, range } from "./finops-formatting"
 
 /** One shape for every outcome, so a reader of the metadata never guesses which fields exist. */
 type SavingsMetadata = {
@@ -116,7 +117,7 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
       .boolean()
       .optional()
       .describe(
-        "Set to true only after the user has agreed to run the check. It runs six queries on their Snowflake account; five use the connection's warehouse, which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs; the check stops after 9 minutes, cancelling any query still running.",
+        `Set to true only after the user has agreed to run the check. It runs six queries on their Snowflake account; five use the connection's warehouse, which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running.`,
       ),
   }),
   async execute(args, ctx) {
@@ -127,7 +128,7 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
         metadata: { success: true, needs_confirmation: true } as SavingsMetadata,
         output:
           "Not run. The Snowflake savings check runs six queries that read up to eleven days of account usage, to report on seven; five use the connection's warehouse, " +
-          "which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs. It stops after 9 minutes, cancelling any query still running. " +
+          `which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs. It stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. ` +
           "Ask the user whether to run it; if they agree, call this tool again with confirm: true.",
       }
     }

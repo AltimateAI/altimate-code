@@ -3,6 +3,8 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { DatabricksSavingsFinding, DatabricksSavingsReport, DatabricksSavingsResult } from "../native/types"
+import { SAVINGS_RUN_LIMIT_MINUTES } from "../native/finops/savings-run"
+import { dollars, oneLine, range } from "./finops-formatting"
 
 /** One shape for every outcome, so a reader of the metadata never guesses which fields exist. */
 type SavingsMetadata = {
@@ -23,16 +25,6 @@ type SavingsMetadata = {
   needs_confirmation?: boolean
 }
 
-export function dollars(value: number): string {
-  return value >= 100
-    ? `$${Math.round(value).toLocaleString("en-US")}`
-    : `$${value.toFixed(2)}`
-}
-
-export function range(low: number, high: number): string {
-  return dollars(low) === dollars(high) ? dollars(high) : `${dollars(low)}–${dollars(high)}`
-}
-
 function percent(share: unknown): string {
   return `${Math.round(Number(share) * 100)}%`
 }
@@ -47,12 +39,11 @@ const percentOf = (value: unknown) => `${Math.round(Number(value))}%`
 const tenths = (value: unknown) =>
   Number(value) < 0.05 ? "under 0.1" : Number(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })
 
-/** Free text from the workspace on one line, with control and invisible characters gone. */
-export const oneLine = (value: unknown) =>
-  String(value ?? "")
-    .replace(/\p{Cf}/gu, "")
-    .replace(/[\s\p{Cc}]+/gu, " ")
-    .trim()
+/** An estimate to one decimal: "about 1.2", or "under 0.1". */
+const aboutTenths = (value: unknown) => {
+  const text = tenths(value)
+  return text === "under 0.1" ? text : `about ${text}`
+}
 
 /** What a finding rests on, one short line each. */
 export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
@@ -76,7 +67,7 @@ export function evidenceLines(finding: DatabricksSavingsFinding): string[] {
       ]
     case "job_on_all_purpose":
       return [
-        `${Number(e.task_runs).toLocaleString("en-US")} task ${Number(e.task_runs) === 1 ? "run" : "runs"} (${String(e.trigger_type).toLowerCase()}), ${tenths(e.task_hours)} hours on all-purpose compute, ${Number(e.estimated_dbus) < 0.05 ? "under 0.1" : `about ${tenths(e.estimated_dbus)}`} DBUs, most on cluster ${JSON.stringify(oneLine(e.host_cluster_name) || oneLine(e.host_cluster_id))}`,
+        `${Number(e.task_runs).toLocaleString("en-US")} task ${Number(e.task_runs) === 1 ? "run" : "runs"} (${String(e.trigger_type).toLowerCase()}), ${tenths(e.task_hours)} hours on all-purpose compute, ${aboutTenths(e.estimated_dbus)} DBUs, most on cluster ${JSON.stringify(oneLine(e.host_cluster_name) || oneLine(e.host_cluster_id))}`,
         `$${Number(e.all_purpose_rate_per_dbu).toFixed(3)} a DBU now; a job cluster would be about $${Number(e.jobs_rate_per_dbu).toFixed(3)}${e.jobs_rate_estimated ? " (estimated: the workspace billed no jobs compute)" : ""}`,
       ]
     default:
@@ -131,7 +122,7 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
       .boolean()
       .optional()
       .describe(
-        "Set to true only after the user has agreed to run the check. It runs three queries on their SQL warehouse, which Databricks starts if it is stopped and bills while it runs; the check stops after 9 minutes, cancelling any query still running.",
+        `Set to true only after the user has agreed to run the check. It runs three queries on their SQL warehouse, which Databricks starts if it is stopped and bills while it runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running.`,
       ),
   }),
   async execute(args, ctx) {
@@ -142,7 +133,7 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
         metadata: { success: true, needs_confirmation: true } as SavingsMetadata,
         output:
           "Not run. The Databricks savings check runs three queries over seven days of system tables on the connection's SQL warehouse, " +
-          "which Databricks starts if it is stopped and bills while it runs. It stops after 9 minutes, cancelling any query still running. " +
+          `which Databricks starts if it is stopped and bills while it runs. It stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. ` +
           "Ask the user whether to run it; if they agree, call this tool again with confirm: true.",
       }
     }
