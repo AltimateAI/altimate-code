@@ -424,6 +424,22 @@ describe("building the facts", () => {
     expect(facts[0]!.usage_days).toEqual([{ day: "2026-11-12", credits_used: 1, active_periods: 0, short_periods: 0 }])
   })
 
+  test("an id renamed away and back belongs to the name it was seen under last", () => {
+    const { facts } = buildFacts({
+      warehouses: [show({ name: "A" }), show({ name: "B" })],
+      metering: [meter(5, "A", "2026-11-10"), meter(5, "B", "2026-11-11"), meter(5, "A", "2026-11-12")],
+      periods: [],
+      restarts: [],
+      queries: [],
+    })
+    expect(facts.map((one) => one.warehouse_id)).toEqual(["5", "unused:B"])
+  })
+
+  test("of two ids under one name last seen at the same time, the newer (larger) id is kept", () => {
+    const { facts } = buildFacts({ warehouses: [show()], metering: [meter(9, "BI_WH", "2026-11-12"), meter(7, "BI_WH", "2026-11-12")], periods: [], restarts: [], queries: [] })
+    expect(facts[0]!.warehouse_id).toBe("9")
+  })
+
   test("the earlier warehouse's billed usage under a reused name is named, not dropped silently", () => {
     const billed = (credits: number) =>
       buildFacts({
@@ -684,6 +700,33 @@ describe("building the facts", () => {
       })
       expect(facts.map((one) => one.warehouse_id)).toEqual(["unused:BI_WH", "unused:ETL_WH"])
       expect(replaced).toEqual(["BI_WH"])
+    })
+
+    test("an id with usage on both sides of the creation is not the new warehouse's", () => {
+      // Id 1 ran as BI_WH, was renamed BI_WH_OLD at 10:00 and kept running; the new BI_WH (id 2) was created at 18:00.
+      const { facts, replaced, unlisted } = buildFacts({
+        warehouses: listed,
+        metering: [
+          { warehouse_id: 1, warehouse_name: "BI_WH", usage_day: "2026-11-10", idle_day: "2026-11-10", credits_used: 9, first_start: at("2026-11-10T08:00:00Z") },
+          { warehouse_id: 1, warehouse_name: "BI_WH_OLD", usage_day: day, idle_day: day, credits_used: 4, first_start: at("2026-11-12T19:00:00Z") },
+          { warehouse_id: 2, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 1, first_start: at("2026-11-12T18:00:00Z") },
+        ],
+        periods: [],
+        restarts: [],
+        queries: [],
+      })
+      expect(facts[0]).toMatchObject({ warehouse_id: "2", usage_days: [{ day, credits_used: 1 }] })
+      expect({ replaced, unlisted }).toEqual({ replaced: [], unlisted: ["BI_WH_OLD"] })
+    })
+
+    test("a predecessor with nothing billed, run or queried is not reported", () => {
+      const idle = { ...predecessor.metering[0]!, credits_used: 0 }
+      expect(buildFacts({ warehouses: listed, metering: [idle], periods: [], restarts: [], queries: [] }).replaced).toEqual([])
+    })
+
+    test("a warehouse that is not listed is named only when it was metered", () => {
+      const query = { ...predecessor.queries[0]!, warehouse_id: 3, warehouse_name: "SECRET_WH" }
+      expect(buildFacts({ warehouses: listed, metering: [], periods: [], restarts: [], queries: [query] }).unlisted).toEqual([])
     })
 
     test("a predecessor from the day before is still left out, with or without new usage", () => {

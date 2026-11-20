@@ -316,8 +316,9 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
 /**
  * The input core reads, one entry per warehouse `SHOW WAREHOUSES` lists, which gives names and no ids.
  * Usage belongs to a warehouse id, and each id belongs to at most one listed warehouse:
- * - the name its latest usage was under, unless some of its usage began before the warehouse now holding
- *   that name was created (a dropped warehouse whose name was reused);
+ * - the name it was seen under last, by each row's start (a query row starts at that name's first query),
+ *   unless some of its usage began before the warehouse now holding that name was created (a dropped
+ *   warehouse whose name was reused);
  * - otherwise another listed name it was seen under, created before all of its usage (a warehouse renamed
  *   away from a name that was then reused).
  * A metered hour counts from its start, which can be up to an hour before the creation inside it, and other
