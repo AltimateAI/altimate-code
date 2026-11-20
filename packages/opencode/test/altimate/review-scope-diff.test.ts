@@ -163,6 +163,26 @@ describe("collectChangedFiles: only the PR's own changes", () => {
     expect(f.status).toBe("renamed")
     expect(f.similarity).toBe(100)
   })
+
+  test("non-ASCII paths come back raw, not C-quoted, with their hunk diff", async () => {
+    const root = await newRepo()
+    await write(root, "models/café/x.sql", "select 1 as id\n")
+    await write(root, "models/a/ü.sql", "select 1 as id\n")
+    await commitAll(root, "seed")
+    const base = await g(root, "rev-parse", "HEAD")
+    await write(root, "models/café/x.sql", "select 2 as id\n")
+    await fs.mkdir(path.join(root, "models/b"), { recursive: true })
+    await g(root, "mv", "models/a/ü.sql", "models/b/ü.sql")
+    await commitAll(root, "edit and move")
+    const files = await collectChangedFiles({ base, head: "HEAD", cwd: root })
+    const edited = files.find((f) => f.status === "modified")
+    expect(edited?.path).toBe("models/café/x.sql")
+    expect(edited?.diff).toContain("+select 2 as id")
+    const moved = files.find((f) => f.status === "renamed")
+    expect(moved?.path).toBe("models/b/ü.sql")
+    expect(moved?.oldPath).toBe("models/a/ü.sql")
+    expect(classifyDbtFile(edited!.path)).toBe("model_sql")
+  })
 })
 
 describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
@@ -170,7 +190,7 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
     { path: "projects/a/models/x.sql", status: "modified" },
     { path: "projects/b/models/y.sql", status: "modified" },
     { path: ".github/workflows/ci.yml", status: "modified" },
-    { path: "projects/a/models/moved/z.sql", oldPath: "projects/a/models/z.sql", status: "renamed", similarity: 100 },
+    { path: "projects/a/models/staging/core/z.sql", oldPath: "projects/a/models/staging/z.sql", status: "renamed", similarity: 100 },
     { path: "projects/a/models/w2.sql", oldPath: "projects/a/models/w.sql", status: "renamed", similarity: 100 },
   ]
 
@@ -189,6 +209,31 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
 
   test("unknown project root scopes nothing out", () => {
     expect(scopeToProject(files, undefined).inScope.length).toBe(4)
+  })
+
+  test("a move across layers or roles stays in scope; it can change config, materialization and risk", () => {
+    const moves: ChangedFile[] = [
+      { path: "models/marts/x.sql", oldPath: "models/staging/x.sql", status: "renamed", similarity: 100 },
+      { path: "tests/y.sql", oldPath: "models/y.sql", status: "renamed", similarity: 100 },
+      { path: "models/moved/z.sql", oldPath: "models/z.sql", status: "renamed", similarity: 100 },
+      { path: "models/staging/sub/w.sql", oldPath: "models/staging/w.sql", status: "renamed", similarity: 100 },
+    ]
+    const r = scopeToProject(moves, "")
+    expect(r.inScope.map((f) => f.path)).toEqual(["models/marts/x.sql", "tests/y.sql", "models/moved/z.sql"])
+    expect(r.movedUnchanged).toBe(1)
+  })
+
+  test("a rename across the project boundary is a deletion from one project and an addition to the other", () => {
+    const moves: ChangedFile[] = [
+      { path: "projects/b/models/out.sql", oldPath: "projects/a/models/out.sql", status: "renamed", similarity: 100 },
+      { path: "projects/a/models/in.sql", oldPath: "projects/b/models/in.sql", status: "renamed", similarity: 90 },
+    ]
+    const r = scopeToProject(moves, "projects/a")
+    expect(r.inScope).toEqual([
+      { path: "projects/a/models/out.sql", status: "deleted" },
+      { path: "projects/a/models/in.sql", status: "added" },
+    ])
+    expect(r.outOfScope).toBe(0)
   })
 })
 

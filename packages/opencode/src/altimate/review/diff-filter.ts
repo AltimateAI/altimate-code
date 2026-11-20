@@ -206,6 +206,21 @@ export function filterChangedFiles(
     .map((f) => ({ ...f, kind: classifyDbtFile(f.path, layout) }))
 }
 
+/** The first folder under the file's role directory (`staging` for
+ *  `models/staging/x.sql`), or "" for a file directly in it. Folder-level
+ *  config in dbt_project.yml and layer conventions key off this folder. */
+function layerOf(path: string, root: string | undefined, layout?: DbtProjectLayout): string {
+  const rel = (relativeToRoot(path, root ?? "") ?? norm(path)).toLowerCase()
+  const dirs = Object.values(layout?.dirs ?? DEFAULT_DBT_DIRS)
+    .flat()
+    .map((d) => norm(d).toLowerCase().replace(/^\.\/?/, "").replace(/\/+$/, ""))
+    .filter((d) => d && rel.startsWith(d + "/"))
+    .sort((a, b) => b.length - a.length)
+  const rest = dirs.length ? rel.slice(dirs[0].length + 1) : rel
+  const segments = rest.split("/")
+  return segments.length > 1 ? segments[0] : ""
+}
+
 export interface ScopeResult {
   /** Files inside the dbt project, with unchanged moves removed. */
   inScope: ChangedFile[]
@@ -221,19 +236,29 @@ export interface ScopeResult {
  * - Files outside `root` belong to another project or to non-dbt code: they
  *   are counted, never reviewed (a monorepo with several dbt projects must not
  *   review its siblings).
- * - A rename at 100% similarity that keeps the file name is a pure move: dbt
- *   resolves `ref()` by name, so nothing about the model changed and
+ * - A rename at 100% similarity that keeps the file name, its dbt role, and
+ *   its layer (the first folder under the role directory, e.g. `staging` in
+ *   `models/staging/…`) is a pure move: dbt resolves `ref()` by name, so
  *   re-reviewing it would only repeat pre-existing findings. A rename that
- *   changes the file name stays in scope — it renames the model and can break
- *   downstream refs.
+ *   changes the file name stays in scope (it renames the model and can break
+ *   downstream refs), as does a move across roles (`models/` → `tests/`) or
+ *   layers (`staging/` → `marts/`), which can change folder-level config,
+ *   materialization and risk-path matches.
+ * - A rename across the project boundary is a deletion from one project and an
+ *   addition to the other: only the side inside `root` is kept, rewritten as
+ *   `deleted` (old path) or `added` (new path).
  */
-export function scopeToProject(files: ChangedFile[], root: string | undefined): ScopeResult {
+export function scopeToProject(
+  files: ChangedFile[],
+  root: string | undefined,
+  layout?: DbtProjectLayout,
+): ScopeResult {
   let outOfScope = 0
   let movedUnchanged = 0
   const inScope: ChangedFile[] = []
-  const base = (p: string) => norm(p).split("/").pop()
+  const basename = (p: string) => norm(p).split("/").pop()
+  const isInside = (p: string) => root === undefined || relativeToRoot(p, root) !== undefined
   for (const f of files) {
-    const isInside = (p: string) => root === undefined || relativeToRoot(p, root) !== undefined
     const inside = isInside(f.path)
     // A rename moving a file into or out of the project still concerns it.
     const oldInside = !!f.oldPath && isInside(f.oldPath)
@@ -241,7 +266,19 @@ export function scopeToProject(files: ChangedFile[], root: string | undefined): 
       outOfScope++
       continue
     }
-    if (f.status === "renamed" && f.similarity === 100 && f.oldPath && base(f.oldPath) === base(f.path) && inside && oldInside) {
+    if (f.oldPath && inside !== oldInside) {
+      const { oldPath, similarity: _similarity, ...rest } = f
+      inScope.push(inside ? { ...rest, status: "added" } : { ...rest, path: oldPath, status: "deleted" })
+      continue
+    }
+    if (
+      f.status === "renamed" &&
+      f.similarity === 100 &&
+      f.oldPath &&
+      basename(f.oldPath) === basename(f.path) &&
+      classifyDbtFile(f.oldPath, layout) === classifyDbtFile(f.path, layout) &&
+      layerOf(f.oldPath, root, layout) === layerOf(f.path, root, layout)
+    ) {
       movedUnchanged++
       continue
     }

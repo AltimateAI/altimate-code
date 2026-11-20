@@ -286,7 +286,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   }
   const base = resolved?.sha ?? opts.base ?? ""
   const collected = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
-  const scoped = scopeToProject(collected, projectRootRel)
+  const scoped = scopeToProject(collected, projectRootRel, layout)
   const changedFiles = scoped.inScope
   if (scoped.outOfScope > 0) {
     process.stderr.write(

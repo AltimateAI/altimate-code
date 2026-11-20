@@ -45,19 +45,30 @@ export interface CollectOptions {
  *  after the PR branched. */
 export async function collectChangedFiles(opts: CollectOptions): Promise<ChangedFile[]> {
   const range = opts.head ? [`${opts.base}...${opts.head}`] : [opts.base]
-  const nameStatus = await git(["diff", "--name-status", "-M", ...range], opts.cwd)
+  // `-z`: NUL-separated fields with raw paths. Without it git C-quotes paths
+  // holding non-ASCII bytes, tabs or quotes ("models/caf\303\251/x.sql"),
+  // and the quoted form matches no file or project root.
+  const nameStatus = await git(["diff", "--name-status", "-z", "-M", ...range], opts.cwd)
 
-  // Parse the name-status lines first, then fetch per-file hunk diffs
+  // Parse the name-status records first, then fetch per-file hunk diffs
   // concurrently — a large PR must not spawn N serial git processes.
   const entries: Array<{ status: ChangedFile["status"]; newPath: string; oldPath?: string; similarity?: number }> = []
-  for (const line of nameStatus.split("\n")) {
-    if (!line.trim()) continue
-    const parts = line.split("\t")
-    const status = parseStatus(parts[0])
-    const oldPath = status === "renamed" ? parts[1] : undefined
-    const newPath = status === "renamed" ? parts[2] : parts[1]
+  const fields = nameStatus.split("\0")
+  for (let i = 0; i < fields.length; ) {
+    const code = fields[i++]
+    if (!code) continue
+    const status = parseStatus(code)
+    // Renames and copies carry two paths (old, new); every other status one.
+    const twoPaths = code.startsWith("R") || code.startsWith("C")
+    const oldPath = twoPaths ? fields[i++] : undefined
+    const newPath = fields[i++]
     if (!newPath) continue
-    entries.push({ status, newPath, oldPath, similarity: status === "renamed" ? parseSimilarity(parts[0]) : undefined })
+    entries.push({
+      status,
+      newPath,
+      oldPath: status === "renamed" ? oldPath : undefined,
+      similarity: status === "renamed" ? parseSimilarity(code) : undefined,
+    })
   }
 
   return Promise.all(
