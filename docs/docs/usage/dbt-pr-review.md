@@ -308,7 +308,8 @@ rubric:
   PII check. Now pattern-rule findings comment but don't block. To keep a
   pattern rule blocking, add its id to `rubric.blockingRules`. A blocking
   review is dismissed only by a later run that completed: when an engine call
-  or a file failed, the earlier block stays.
+  or a file failed, or a check (such as PII) could not analyse a model, the
+  earlier block stays.
 
 ### What the PR comment shows
 
@@ -328,12 +329,15 @@ rubric:
   SQL; when it can't be compiled, PII columns are reported as non-blocking
   warnings that may predate the PR. A model the PII check could not analyse is
   listed as not fully verified.
-- **Failures are never a clean pass:** if an engine check throws, the comment
-  names it and the verdict is at most COMMENT, never APPROVE (envelope
-  `engineErrors`). A failure on one file marks that file unverified and the rest
-  of the PR is still reviewed.
-- **The gate clears itself:** when a rerun no longer blocks, the earlier blocking
-  altimate review is dismissed (needs `pull-requests: write`).
+- **Failures are never a clean pass:** if an engine check fails, a file's
+  review fails, or a check could not analyse a model, the comment names it and
+  the verdict is at most COMMENT, never APPROVE (envelope `engineErrors` and
+  `scope.unverified`). A failure on one file marks that file unverified and the
+  rest of the PR is still reviewed.
+- **The gate clears itself:** when a completed rerun on the PR's current head
+  no longer blocks, the earlier blocking altimate review for the same dbt
+  project is dismissed after the new review is posted (needs
+  `pull-requests: write`).
 
 ### Risk-tier path tokens
 

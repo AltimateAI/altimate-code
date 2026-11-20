@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
-import { type VerdictEnvelope, VCS_EVENT, FAILED_FILE_REASON } from "./verdict"
+import { type VerdictEnvelope, VCS_EVENT, reviewIncomplete } from "./verdict"
 import { renderSummary, inlineComments, postedFindingIds, REVIEW_MARKER, verdictHeadline } from "./format"
 
 /**
@@ -63,23 +63,32 @@ export interface PostResult {
   dismissedReviews?: number
 }
 
-/** True when no engine call and no file failed, so missing findings mean "fixed", not "not checked". */
+/** True when every check ran (no engine error, no failed file, no abstained
+ *  check), so missing findings mean "fixed", not "not checked". */
 export function runCompleted(env: VerdictEnvelope): boolean {
-  if (env.engineErrors?.length) return false
-  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith(FAILED_FILE_REASON))
+  return !reviewIncomplete(env)
 }
 
 /** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
-/** Hidden marker in the body of every review this bot posts. */
-const BOT_REVIEW_MARKER = "<!-- altimate-code-review:verdict -->"
+/** Hidden marker in the body of every review this bot posts; reviews of a
+ *  dbt project below the repository root also name it (`project=<dir>`). */
+const BOT_REVIEW_MARKER_RE = /<!-- altimate-code-review:verdict(?: project=(\S+))? -->/
 
-/** A review this bot posted: the headline, plus the marker or a bot author
- *  (reviews posted before the marker existed). A human review that quotes the
- *  headline is never treated as the bot's. */
-function isBotReview(r: { body?: string | null; user?: { type?: string } | null }): boolean {
+function botReviewMarker(projectRoot: string | undefined): string {
+  return projectRoot ? `<!-- altimate-code-review:verdict project=${projectRoot} -->` : "<!-- altimate-code-review:verdict -->"
+}
+
+/** A review this bot posted for this dbt project: the headline, plus the
+ *  marker or a bot author (reviews posted before the marker existed). A human
+ *  review that quotes the headline is never treated as the bot's, and in a
+ *  monorepo one project's run never touches another project's review. */
+function isBotReview(r: { body?: string | null; user?: { type?: string } | null }, projectRoot: string | undefined): boolean {
   const body = r.body ?? ""
-  return BOT_REVIEW_RE.test(body) && (body.includes(BOT_REVIEW_MARKER) || r.user?.type === "Bot")
+  if (!BOT_REVIEW_RE.test(body)) return false
+  const marker = BOT_REVIEW_MARKER_RE.exec(body)
+  if (!marker && r.user?.type !== "Bot") return false
+  return (marker?.[1] ?? "") === (projectRoot ?? "")
 }
 
 /** The Octokit surface the poster uses; injectable so the posting rules
@@ -122,7 +131,8 @@ export async function postGitHubReview(
   //    COMMENT event — the bot must never submit a formal GitHub approval.
   const event = VCS_EVENT[env.verdict]
   const headline = verdictHeadline(env)
-  const reviewBody = `${headline}\n\n${BOT_REVIEW_MARKER}`
+  const projectRoot = env.scope?.projectRoot || undefined
+  const reviewBody = `${headline}\n\n${botReviewMarker(projectRoot)}`
 
   // Rerun dedup: a finding already commented inline (same fingerprint, which
   // ignores line numbers) is not posted again on the next push.
@@ -135,7 +145,7 @@ export async function postGitHubReview(
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    const botReviews = reviews.filter(isBotReview)
+    const botReviews = reviews.filter((r) => isBotReview(r, projectRoot))
     priorBotReview = botReviews.length > 0
     staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
   } catch {
@@ -145,12 +155,27 @@ export async function postGitHubReview(
   const withLine = env.findings.filter((f) => typeof f.startLine === "number").length
   result.inlineSkippedAsPosted = withLine - comments.length
 
+  // Anchor inline comments to the PR head commit. Without commit_id, GitHub's
+  // line-positioning is fragile and can 422 even on valid lines.
+  let commitId: string | undefined
+  try {
+    const pr = await octo.rest.pulls.get({ owner, repo, pull_number: prNumber })
+    commitId = pr.data.head.sha
+  } catch {
+    /* fall back to default head resolution */
+  }
+
   // Gate lifecycle: when this run no longer blocks, an earlier blocking
   // altimate review would keep the PR blocked forever. Dismiss it, pointing at
   // the new verdict. (Requires `pull-requests: write`; a failure is non-fatal.)
   // Only a run that actually completed may clear a block: when an engine call
-  // or a file failed, the blocking finding may simply not have been produced.
-  if (event === "COMMENT" && staleBlocking.length && runCompleted(env)) {
+  // or a file failed, or a check abstained, the blocking finding may simply
+  // not have been produced. A run on an older push (its head is no longer the
+  // PR's head) never clears the block a newer push's run may have posted.
+  const headSha = env.scope?.headSha
+  const onCurrentHead = !headSha || !commitId || headSha === commitId
+  const dismissStale = async () => {
+    if (event !== "COMMENT" || !staleBlocking.length || !runCompleted(env) || !onCurrentHead) return
     let dismissed = 0
     for (const id of staleBlocking) {
       try {
@@ -174,17 +199,8 @@ export async function postGitHubReview(
   // comments" entry per push is noise. A blocking verdict always posts.
   if (!comments.length && event === "COMMENT" && priorBotReview) {
     result.reviewSkipped = true
+    await dismissStale()
     return result
-  }
-
-  // Anchor inline comments to the PR head commit. Without commit_id, GitHub's
-  // line-positioning is fragile and can 422 even on valid lines.
-  let commitId: string | undefined
-  try {
-    const pr = await octo.rest.pulls.get({ owner, repo, pull_number: prNumber })
-    commitId = pr.data.head.sha
-  } catch {
-    /* fall back to default head resolution */
   }
 
   try {
@@ -198,6 +214,7 @@ export async function postGitHubReview(
       comments: comments.length ? comments : undefined,
     })
     result.reviewId = r.data.id
+    await dismissStale()
   } catch (e: any) {
     // Only a line-positioning error (422 Unprocessable) justifies dropping the
     // inline comments — anchoring outside the diff hunk. Other errors (auth,
@@ -221,7 +238,9 @@ export async function postGitHubReview(
         body: reviewBody,
       })
       result.reviewId = r.data.id
+      await dismissStale()
     } catch (e2: any) {
+      // The replacement review did not land: keep the earlier block.
       // Summary comment already landed; don't fail CI on a review-post error.
       result.postError = `${e2?.status ?? ""} ${e2?.message ?? e2}`.trim()
     }

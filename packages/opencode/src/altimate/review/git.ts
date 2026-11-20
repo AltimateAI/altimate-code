@@ -208,18 +208,29 @@ async function mergeBase(a: string, b: string, cwd: string): Promise<string | un
  * merge-base exists, so the review works without `fetch-depth: 0`. Returns
  * true once `found` resolves; false when it never does (no remote, no access).
  */
-async function fetchTargetHistory(branch: string, cwd: string, found: () => Promise<unknown>): Promise<boolean> {
+async function fetchTargetHistory(
+  branch: string,
+  head: string,
+  cwd: string,
+  found: () => Promise<unknown>,
+): Promise<boolean> {
   if (branch.startsWith("-")) return false
+  const shallow = async () => (await git(["rev-parse", "--is-shallow-repository"], cwd)).trim() === "true"
   try {
-    await git(["fetch", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], cwd)
+    // In a shallow checkout, fetch only recent target history; the loop below
+    // deepens it. A full fetch would pull the target branch's whole history.
+    const depth = (await shallow()) ? ["--depth=50"] : []
+    await git(["fetch", "--no-tags", ...depth, "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], cwd)
   } catch {
     return false
   }
   if (await found()) return true
   for (const depth of [50, 200, 1000]) {
     try {
-      if ((await git(["rev-parse", "--is-shallow-repository"], cwd)).trim() !== "true") return false
-      const headSha = (await git(["rev-parse", "HEAD"], cwd)).trim()
+      if (!(await shallow())) return false
+      // Deepen the history of the head being reviewed, which may differ from
+      // the checkout (`--head <ref>`).
+      const headSha = (await git(["rev-parse", "--verify", `${head}^{commit}`], cwd)).trim()
       await git(["fetch", "--no-tags", `--deepen=${depth}`, "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`, headSha], cwd)
     } catch {
       return false
@@ -275,7 +286,7 @@ export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<Resol
       }
       return undefined
     }
-    const found = (await find()) ?? ((await fetchTargetHistory(target.branch, opts.cwd, find)) ? await find() : undefined)
+    const found = (await find()) ?? ((await fetchTargetHistory(target.branch, head, opts.cwd, find)) ? await find() : undefined)
     if (found) return found
     throw new Error(
       `PR target branch '${target.branch}' (${target.source}) is not available locally. ` +
@@ -322,6 +333,15 @@ export async function showAtRef(cwd: string, ref: string, rel: string): Promise<
     const msg = err instanceof Error ? err.message : String(err)
     if (/does not exist in|exists on disk, but not in/i.test(msg)) return undefined
     throw err
+  }
+}
+
+/** The commit SHA a ref names, or undefined when it does not resolve. */
+export async function resolveCommit(ref: string, cwd: string): Promise<string | undefined> {
+  try {
+    return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)).trim() || undefined
+  } catch {
+    return undefined
   }
 }
 
