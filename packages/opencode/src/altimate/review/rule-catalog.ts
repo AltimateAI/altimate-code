@@ -220,11 +220,14 @@ const PACK_ENGINE: Record<string, string> = {
   Snowflake: "snowflake",
   Redshift: "redshift",
   Databricks: "databricks",
+  // Spark SQL runs on the Databricks/Spark adapters (the `spark` adapter maps to `databricks`).
+  Spark: "databricks",
+  "Spark/Databricks": "databricks",
 }
 
 /** The engine a dialect-pack rule is about (from its `Engine:` title prefix), if any. */
 export function ruleEngine(rule: Rule): string | undefined {
-  const m = /^(BigQuery|Snowflake|Redshift|Databricks):/.exec(rule.title)
+  const m = /^(BigQuery|Snowflake|Redshift|Databricks|Spark\/Databricks|Spark):/.exec(rule.title)
   return m ? PACK_ENGINE[m[1]] : undefined
 }
 
@@ -244,7 +247,7 @@ export function evaluateCatalog(
     // A dialect pack (BigQuery partition filters, Snowflake VARIANT…) only
     // applies to its own engine once the project's engine is known.
     const engine = ruleEngine(rule)
-    if (engine && ctx?.dialectKnown && ctx.dialect.toLowerCase() !== engine) continue
+    if (engine && ctx?.dialectKnown && ctx.dialect.toLowerCase().replace(/^spark$/, "databricks") !== engine) continue
     if (!ruleMatches(rule, input)) continue
     const body = gatedBody(rule, ctx)
     if (body === null) continue

@@ -22,4 +22,8 @@ describe("final SELECT output names", () => {
     expect(selectListNames("select 'a, b' as s, -- , trailing\n y from t")).toEqual(["s", "y"])
     expect(selectListNames("select distinct id, name from t")).toEqual(["id", "name"])
   })
+  test("`--` inside a string literal is not a comment", () => {
+    expect(selectListNames("select id, 'x--y' as tag, z from t")).toEqual(["id", "tag", "z"])
+    expect(selectListNames("select id, 'it''s -- fine' as note /* c, d */ , z from t")).toEqual(["id", "note", "z"])
+  })
 })

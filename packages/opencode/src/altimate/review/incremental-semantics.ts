@@ -2,9 +2,10 @@ import YAML from "yaml"
 import { makeFinding, type Finding } from "./finding"
 import type { ChangedFile } from "./diff-filter"
 import { capabilityFor } from "./adapter-capabilities"
+import { blankComments } from "./select-list"
 
 /**
- * dbt incremental, microbatch and snapshot semantics. These rules follow
+ * dbt incremental, table-replace and snapshot semantics. These rules follow
  * dbt-core behavior, which is the same on every adapter; where the outcome
  * depends on the adapter (atomic table replace) they read
  * the capability table and stay silent for adapters it doesn't cover.
@@ -12,7 +13,8 @@ import { capabilityFor } from "./adapter-capabilities"
  * Config comes from the manifest (dbt_project.yml + yml + inline, merged by
  * dbt) overlaid by the head's inline `{{ config() }}` (inline wins in dbt, and
  * the manifest may predate the PR). Change detection compares the inline
- * config of the two sides.
+ * config of the two sides; an inline value that moved to yml with the same
+ * value (per the manifest) is not a change.
  *
  * All findings are advisory (`dbt-semantics` evidence → catalog origin).
  */
@@ -88,6 +90,48 @@ export function inlineConfig(sql: string | undefined): Record<string, string> {
 const norm = (v: string | undefined) => v?.replace(/\s+/g, "").replace(/"/g, "'").toLowerCase()
 const unquote = (v: string) => v.trim().replace(/^['"]|['"]$/g, "")
 
+/** An inline config value (Jinja/Python literal text) as data, so it compares
+ *  with the manifest's parsed value; unparseable text stays a string. */
+function inlineValue(raw: string): unknown {
+  const t = raw.trim()
+  try {
+    return JSON.parse(
+      t.replace(/'/g, '"').replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false").replace(/\bNone\b/g, "null"),
+    )
+  } catch {
+    return unquote(t)
+  }
+}
+
+/** Canonical, case-insensitive form of a config value (object keys sorted). */
+function canonValue(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(typeof v === "string" ? v.toLowerCase() : v) ?? "null"
+  if (Array.isArray(v)) return "[" + v.map(canonValue).join(",") + "]"
+  const o = v as Record<string, unknown>
+  return "{" + Object.keys(o).filter((k) => o[k] !== undefined && o[k] !== null).sort().map((k) => `${JSON.stringify(k)}:${canonValue(o[k])}`).join(",") + "}"
+}
+
+/**
+ * Whether the effective value of `key` changed between the two sides' inline
+ * config. An inline value removed while the (head) manifest carries the same
+ * value moved to yml or `dbt_project.yml`: unchanged. A value only the new side
+ * sets inline can't be compared without the base's effective config, so it is
+ * not reported.
+ */
+function inlineConfigChanged(
+  key: string,
+  before: Record<string, string>,
+  after: Record<string, string>,
+  manifest?: Record<string, unknown>,
+): boolean {
+  const o = before[key]
+  const n = after[key]
+  if (o === undefined || norm(o) === norm(n)) return false
+  const m = manifest?.[key]
+  if (n === undefined && m !== undefined && m !== null && canonValue(inlineValue(o)) === canonValue(m)) return false
+  return true
+}
+
 function asList(v: unknown): string[] | undefined {
   if (v === undefined || v === null) return undefined
   if (Array.isArray(v)) return v.map((x) => String(x).toLowerCase())
@@ -123,7 +167,7 @@ export function modelSemantics(inline: Record<string, string>, manifest?: Record
 
 /** The SQL with config blocks, comments and whitespace removed: what the model computes. */
 export function modelBody(sql: string): string {
-  let s = sql.replace(/\{#[\s\S]*?#\}/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ")
+  let s = blankComments(sql.replace(/\{#[\s\S]*?#\}/g, " "))
   for (;;) {
     const m = /\{\{-?\s*config\s*\(/.exec(s)
     if (!m) break
@@ -132,7 +176,13 @@ export function modelBody(sql: string): string {
     if (end < 0) break
     s = s.slice(0, m.index) + s.slice(end + 2)
   }
-  return s.replace(/\s+/g, " ").trim().toLowerCase()
+  // Lowercase everything but string literals: `'paid'` → `'PAID'` is a change.
+  return s
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/('(?:[^']|'')*')/)
+    .map((part, k) => (k % 2 ? part : part.toLowerCase()))
+    .join("")
 }
 
 /** The body as a token stream, so formatting (spaces, line breaks, case) never counts as a change. */
@@ -208,7 +258,6 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
   const inlineOld = inlineConfig(input.oldSql)
   const cfg = modelSemantics(inlineNew, input.manifestConfig)
   const isNew = input.file.status === "added"
-  const configChanged = (k: string) => !isNew && norm(inlineOld[k]) !== norm(inlineNew[k])
   const addedText = input.added.join("\n")
   const out: Finding[] = []
   const cap = input.dialectKnown ? capabilityFor(input.dialect) : undefined
@@ -234,10 +283,10 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
       }
     }
 
-    if (configChanged("partition_by") && inlineOld.partition_by !== undefined)
+    if (!isNew && inlineConfigChanged("partition_by", inlineOld, inlineNew, input.manifestConfig))
       out.push(
         finding(input, "incremental-partition-change", "warning", "materialization", "`partition_by` changed on an incremental model",
-          "The existing table keeps its old partitioning; incremental runs don't rebuild it. Run `--full-refresh` on deploy."),
+          "Incremental runs don't rebuild the existing table: depending on the adapter, the next incremental run fails or the table keeps its old partitioning. Run `--full-refresh` on deploy."),
       )
 
     if (cfg.onSchemaChange === "fail" && !isNew) {
@@ -281,21 +330,28 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
     out.push(
       finding(input, "non-atomic-table-replace", "suggestion", "materialization", "table is unavailable while it rebuilds",
         `On ${input.dialect}, \`on_table_exists='${cfg.onTableExists}'\` ${gap}. ` +
-          (input.hasExposures
-            ? "Readers outside dbt (this model has exposures) can hit that window; `on_table_exists='rename'` swaps the table in at the end."
-            : "Readers outside dbt can hit that window; `on_table_exists='rename'` swaps the table in at the end.")),
+          `Readers outside dbt${input.hasExposures ? " (this model has exposures)" : ""} can hit that window; ` +
+          "`on_table_exists='rename'` swaps the table in at the end."),
     )
 
   return out
 }
 
 /** Snapshot definitions: a changed `check_cols`/strategy or SELECT on an existing snapshot. */
-export function snapshotFindings(input: { file: ChangedFile; model: string; newSql: string; oldSql?: string; prText: string }): Finding[] {
+export function snapshotFindings(input: {
+  file: ChangedFile
+  model: string
+  newSql: string
+  oldSql?: string
+  prText: string
+  /** The snapshot's `config` from the manifest, to tell a move to yml from a change. */
+  manifestConfig?: Record<string, unknown>
+}): Finding[] {
   if (input.file.status === "added" || !input.oldSql) return []
   const before = inlineConfig(input.oldSql)
   const after = inlineConfig(input.newSql)
   const out: Finding[] = []
-  const changed = ["check_cols", "strategy"].filter((k) => before[k] !== undefined && norm(before[k]) !== norm(after[k]))
+  const changed = ["check_cols", "strategy"].filter((k) => inlineConfigChanged(k, before, after, input.manifestConfig))
   if (changed.length)
     out.push(
       finding(input, "snapshot-tracking-change", "warning", "materialization", `snapshot ${changed.map((k) => `\`${k}\``).join(" and ")} changed`,

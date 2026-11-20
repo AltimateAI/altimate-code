@@ -7,9 +7,35 @@
  * column; anything else contributes nothing. `*` makes the list unknown.
  */
 
-/** Text with comments blanked, same length. */
-function blankComments(sql: string): string {
-  return sql.replace(/--[^\n]*/g, (m) => " ".repeat(m.length)).replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length))
+/** Text with `--` and block comments blanked, same length. Quoted strings and
+ *  quoted identifiers are skipped first, so `'x--y'` is not a comment. */
+export function blankComments(sql: string): string {
+  let out = ""
+  let i = 0
+  while (i < sql.length) {
+    const c = sql[i]
+    if (c === "'" || c === '"' || c === "`") {
+      // A doubled quote inside a string is an escaped quote.
+      let j = i + 1
+      while (j < sql.length && !(sql[j] === c && sql[j + 1] !== c)) j += sql[j] === c ? 2 : 1
+      out += sql.slice(i, j + 1)
+      i = j + 1
+    } else if (c === "-" && sql[i + 1] === "-") {
+      const end = sql.indexOf("\n", i)
+      const stop = end < 0 ? sql.length : end
+      out += " ".repeat(stop - i)
+      i = stop
+    } else if (c === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2)
+      const stop = end < 0 ? sql.length : end + 2
+      out += sql.slice(i, stop).replace(/[^\n]/g, " ")
+      i = stop
+    } else {
+      out += c
+      i++
+    }
+  }
+  return out
 }
 
 /** Text with comments, quoted strings and parenthesized groups blanked, same length. */
