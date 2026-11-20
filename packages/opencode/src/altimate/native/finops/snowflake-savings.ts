@@ -326,7 +326,7 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  * larger (newer) id.
  * Without ids in `SHOW WAREHOUSES`, two cases stay ambiguous: an older warehouse renamed into a dropped one's
  * name, with no usage under it in the window, takes the dropped one's usage; and a predecessor metered only in
- * the hour of the new warehouse's creation, with no other row, keeps that hour.
+ * the hour of the new warehouse's creation, with no other row, has that hour counted for the new warehouse.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
  * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits,
  * periods, restarts or queries): that earlier usage is left out.
@@ -405,7 +405,7 @@ export function buildFacts(rows: FactRows) {
     for (const row of list) entry(grouped, num(row.warehouse_id), () => []).push(row)
     return grouped
   }
-  const [metering, periods, restarts, queries] = [rows.metering, rows.periods, rows.restarts, rows.queries].map(byId)
+  const [metering, periods, restarts, queries] = sources.map(({ list }) => byId(list))
   const of = (grouped: Map<number, Row[]> | undefined, id: number | undefined) => (id === undefined ? [] : (grouped?.get(id) ?? []))
 
   const facts = rows.warehouses.map((row) => {
