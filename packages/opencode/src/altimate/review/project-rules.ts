@@ -612,8 +612,10 @@ export function addedDispatchKwargs(file: ChangedFile, sql: string): { name: str
 export function dispatchVariants(text: string, name: string): { macro: string; params: string[]; acceptsKwargs: boolean }[] {
   const out: { macro: string; params: string[]; acceptsKwargs: boolean }[] = []
   for (const [macro, sig] of signatures(text)) {
-    if (!macro.endsWith(`__${name}`) || macro === name) continue
-    const at = new RegExp(`\\{%-?\\s*macro\\s+${escapeRe(macro)}\\s*\\(`).exec(text)!.index
+    // `{% test %}` blocks are never dispatch targets.
+    if (sig.test || !macro.endsWith(`__${name}`) || macro === name) continue
+    const at = new RegExp(`\\{%-?\\s*macro\\s+${escapeRe(macro)}\\s*\\(`).exec(text)?.index
+    if (at === undefined) continue
     const end = text.slice(at).search(/\{%-?\s*endmacro\b/)
     const body = text.slice(at, end < 0 ? undefined : at + end)
     out.push({ macro, params: sig.params.map((p) => p.name), acceptsKwargs: /\bkwargs\b/.test(body) || /\bvarargs\b/.test(body) })
@@ -686,7 +688,7 @@ export function modelConfigFindings(
   if (!/config\s*\(|unique_key|partition_by|batch_size|materialized|incremental|is_incremental/i.test(touched)) return []
   const out: Finding[] = []
   const materialized = (unquote(cfg.materialized) || String(manifestConfig?.materialized ?? "")).toLowerCase()
-  const strategy = unquote(cfg.incremental_strategy).toLowerCase()
+  const strategy = (unquote(cfg.incremental_strategy) || String(manifestConfig?.incremental_strategy ?? "")).toLowerCase()
 
   if (cfg.unique_key && (materialized === "table" || materialized === "view"))
     out.push(

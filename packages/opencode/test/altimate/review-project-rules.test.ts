@@ -475,6 +475,10 @@ describe("adapter.dispatch keyword a variant does not take", () => {
   test("a variant that reads `kwargs` accepts any keyword", () => {
     expect(run(head("col, dtype, size", "{{ kwargs.get('scale') }}"))).toHaveLength(0)
   })
+  test("a `{% test %}` block named like a variant is skipped, not a crash", () => {
+    const sql = head("col, dtype, size, scale=none") + "\n{% test bigquery__ghost(model) %}select 1{% endtest %}"
+    expect(dispatchVariants(sql, "ghost").map((v) => v.macro)).toEqual(["default__ghost", "snowflake__ghost"])
+  })
   test("keywords on unchanged lines are not this change", () => {
     const f: ChangedFile = { path: "macros/ghost.sql", status: "modified", diff: "@@ -9 +9 @@\n-x\n+y\n" }
     const sql = head("col, dtype, size")
@@ -693,6 +697,17 @@ describe("BigQuery incremental merge without incremental_predicates", () => {
     expect(fs).toHaveLength(1)
     expect(fs[0].body).toContain("`event_at`")
   })
+  test("a strategy set in dbt_project.yml (manifest config) counts", () => {
+    const run = (strategy: string) =>
+      modelConfigFindings(
+        { path: "models/marts/ops.sql", status: "modified", diff: "@@ -8,2 +8,3 @@\n+{% if is_incremental() %}\n+where event_at >= timestamp('{{ var(\"batch_start\") }}')\n" },
+        inlineConfigSplats(sql()),
+        "bigquery",
+        { incremental_strategy: strategy },
+      ).filter((f) => f.rule === "dbt-project-rules:merge-no-incremental-predicates")
+    expect(run("insert_overwrite")).toHaveLength(0)
+    expect(run("merge")).toHaveLength(1)
+  })
   test("twin: incremental_predicates set", () => {
     expect(predicates(sql(',\n    "incremental_predicates": ["DBT_INTERNAL_DEST.event_at >= current_date - 3"]'))).toHaveLength(0)
   })
@@ -714,5 +729,10 @@ describe("SQL text concatenated in Jinja without a space", () => {
     expect(seam("{{ ref('stg_' ~ source_name) }}")).toBe(false)
     expect(seam("{% set rel = target.schema ~ '_staging' %}")).toBe(false)
     expect(seam("{{ \"'\" ~ value ~ \"'\" }}")).toBe(false)
+  })
+  test("a Postgres regex match is not Jinja; messages are not SQL", () => {
+    expect(seam("where name ~ 'acme corp'")).toBe(false)
+    expect(seam("where {{ col }} ~ 'acme corp' and x = {{ var('y') }}")).toBe(false)
+    expect(seam("{{ log('Running model' ~ model.name, info=true) }}")).toBe(false)
   })
 })
