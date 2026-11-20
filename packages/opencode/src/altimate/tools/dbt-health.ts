@@ -267,7 +267,7 @@ function failure(title: string, output: string, extra: Record<string, unknown> =
 
 export const DbtHealthTool = Tool.define("dbt_health", {
   description:
-    "DataPilot project health insights for the models of the dbt project (hard-coded references, missing tests or documentation, naming and structure issues, and so on). Uses the project's dbt integration (starts it, so it needs write permission) for a fresh manifest, then runs DataPilot (the `altimate-datapilot-cli` Python package, which must be installed in the project's Python) over the manifest, and the catalog when target/catalog.json exists. Returns `insights`: uniqueId, path, name, severity, message and recommendation for each, plus the model's absolute `file` and `properties` file for the project's own models. When dbt can't parse the project the answer is a failure with the parse errors (no insights from the last manifest); a failed project check alone is answered from the last good manifest, labelled `stale_manifest`. A very large result is cut at a byte limit: `truncated` is then true, and `total` counts every insight.",
+    "DataPilot project health insights for the models of the dbt project (hard-coded references, missing tests or documentation, naming and structure issues, and so on). Uses the project's dbt integration (starts it, so it needs write permission) for a fresh manifest, then runs DataPilot (the `altimate-datapilot-cli` Python package, which must be installed in the project's Python) over the manifest, and the catalog when the project's target/catalog.json exists. Returns `insights`: uniqueId, path, name, severity, message and recommendation for each, plus the model's absolute `file` and `properties` file for the project's own models. When dbt can't parse the project the answer is a failure with the parse errors (no insights from the last manifest); a failed project check alone is answered from the last good manifest, labelled `stale_manifest`. A very large result is cut at a byte limit: `truncated` is then true, and `total` counts every insight.",
   parameters: z.object({
     config_path: z
       .string()
@@ -346,8 +346,13 @@ export const DbtHealthTool = Tool.define("dbt_health", {
           age_seconds: Math.max(0, Math.round((Date.now() - written) / 1000)),
         }
     }
-    const catalogFile = path.join(path.dirname(manifest), "catalog.json")
-    const catalog = fs.existsSync(catalogFile) ? catalogFile : ""
+    // The adapter's dbt writes to a target folder of its own, where `dbt docs generate` never puts a catalog:
+    // the one beside its manifest, else the project's own.
+    const { resolveDbtTargetPath } = await import("../validators/validator-utils")
+    const catalog =
+      [path.join(path.dirname(manifest), "catalog.json"), path.join(await resolveDbtTargetPath(root), "catalog.json")].find((file) =>
+        fs.existsSync(file),
+      ) ?? ""
     let configPath = ""
     if (args.config_path) {
       configPath = path.resolve(root, args.config_path)

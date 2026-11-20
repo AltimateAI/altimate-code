@@ -23,6 +23,8 @@ description: |
 
 # dbt schema-verify
 
+The first time you name `altimate-dbt` to the user, say what it is: a command-line tool for dbt tasks, installed with altimate-code.
+
 ## When to invoke this skill — every time
 
 Run `altimate-dbt schema-verify --model <name>` before declaring any of the

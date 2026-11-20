@@ -5,6 +5,8 @@ description: Debug dbt errors — compilation failures, runtime database errors,
 
 # dbt Troubleshooting
 
+The first time you name `altimate-dbt` to the user, say what it is: a command-line tool for dbt tasks, installed with altimate-code.
+
 ## Requirements
 **Agent:** any (read-only diagnosis), builder (if applying fixes)
 **Tools used:** bash (runs `altimate-dbt` commands), read, glob, edit, altimate_core_semantics, altimate_core_column_lineage, altimate_core_correct, altimate_core_fix, sql_fix

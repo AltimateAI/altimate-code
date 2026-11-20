@@ -1,7 +1,7 @@
 // dbt_health: the DataPilot run through the project's dbt adapter. The adapter and the Python run are
 // replaced through their seams, so these tests need no dbt, no Python and no DataPilot.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -196,6 +196,28 @@ describe("dbt_health", () => {
       path.join(project, "target", "catalog.json"),
       path.join(project, "datapilot.yml"),
     ])
+  })
+
+  test("reads the project's catalog when the adapter's own dbt target folder has none", async () => {
+    // The tools' dbt writes to a folder of its own under target/, where `dbt docs generate` never puts a catalog.
+    const own = path.join(project, "target", ".altimate-code")
+    await mkdir(own, { recursive: true })
+    await writeFile(path.join(own, "manifest.json"), await readFile(path.join(project, "target", "manifest.json"), "utf8"))
+    await writeFile(path.join(project, "target", "catalog.json"), "{}")
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      getManifestPath: () => path.join(own, "manifest.json"),
+      parseManifest: async () => parsed,
+      dispose: async () => {},
+    })
+    try {
+      await run()
+    } finally {
+      await rm(path.join(project, "target", "catalog.json"))
+      await rm(own, { recursive: true, force: true })
+    }
+    expect(python.calls[0].args).toEqual([path.join(own, "manifest.json"), path.join(project, "target", "catalog.json"), ""])
   })
 
   test("runs DataPilot under the Python the dbt config names, not one found for the project", async () => {

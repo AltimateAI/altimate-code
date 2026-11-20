@@ -5,6 +5,8 @@ description: Generate dbt unit tests automatically for any model. Analyzes SQL l
 
 # dbt Unit Test Generation
 
+The first time you name `altimate-dbt` to the user, say what it is: a command-line tool for dbt tasks, installed with altimate-code.
+
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
 **Tools used:** dbt_unit_test_gen, dbt_manifest, dbt_lineage, altimate_core_validate, altimate_core_testgen, bash (runs `altimate-dbt` commands), read, glob, write, edit
