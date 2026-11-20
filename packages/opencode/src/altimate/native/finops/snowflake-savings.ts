@@ -218,7 +218,7 @@ SELECT q.warehouse_id, q.warehouse_name,
        COUNT_IF(q.execution_ms <= 5000) AS sub_five_second_queries,
        COALESCE(SUM(IFF(q.execution_ms <= 5000,
          COALESCE(a.compute_credits, 0)
-         + IFF(d.cloud_credits > 0, q.cloud_credits / d.cloud_credits * d.billable_cloud_credits, 0), 0)), 0) AS sub_five_second_credits
+         + IFF(d.cloud_credits > 0, COALESCE(q.cloud_credits, 0) / d.cloud_credits * d.billable_cloud_credits, 0), 0)), 0) AS sub_five_second_credits
 FROM q
 LEFT JOIN allocated a ON a.query_id = q.query_id
 LEFT JOIN daily d ON d.day = q.st::DATE

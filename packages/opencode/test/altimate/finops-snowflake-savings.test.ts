@@ -216,6 +216,8 @@ describe("the fact queries", () => {
     expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain("DATEDIFF('second', valid_from, valid_to)")
     expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("COUNT_IF(q.execution_ms <= 5000)")
     expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("SUM(compute_credits) * 0.1")
+    // A query with no cloud services credits still counts its share of compute credits.
+    expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("COALESCE(q.cloud_credits, 0) / d.cloud_credits")
   })
 
   test("the windows and filters are the ones the rules are defined on", () => {
