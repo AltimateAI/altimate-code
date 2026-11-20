@@ -12,7 +12,14 @@ import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
-import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
+import {
+  type ReviewMode,
+  type ReviewScope,
+  type VerdictEnvelope,
+  FAILED_FILE_REASON,
+  buildEnvelope,
+  signEnvelope,
+} from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
@@ -1171,7 +1178,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const failedFile = (file: { path: string }, err: unknown) =>
     unverified.push({
       path: file.path,
-      reason: `review failed for this file: ${(err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 160)}`,
+      reason: `${FAILED_FILE_REASON}: ${(err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 160)}`,
     })
   await Promise.all(
     modelFiles.map(async (file) => {
@@ -1303,7 +1310,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       )
     }
     if (lanes.has("lineage_breakage")) {
-      all.push(lineageBreakageLane(ctx.file, ctx.impact, input.rubric))
+      // Synchronous detectors run as tasks so a throw is isolated to this file.
+      tasks.push(Promise.resolve().then(() => lineageBreakageLane(ctx.file, ctx.impact, input.rubric)))
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
     }
     if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
@@ -1334,10 +1342,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           // Only columns this PR newly exposes: a PII column the base already
           // surfaced is not this change's concern (the docs promise "newly expose").
           if (fallbackPii.length && hasOldSide(currentCtx.file) && currentCtx.engineOldSql) {
-            const basePii = new Set(
-              (await input.runner.detectPii(currentCtx.engineOldSql, dialect)).columns.map((c) => c.toLowerCase()),
-            )
-            fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
+            const baseRes = await input.runner.detectPii(currentCtx.engineOldSql, dialect)
+            if (baseRes.abstained) {
+              // An unanalysable base says nothing about what it exposed; reporting
+              // every head column as newly exposed would be a false positive.
+              unverified.push({ path: currentCtx.file.path, reason: "the PII check could not analyse the base model" })
+              fallbackPii = []
+            } else {
+              const basePii = new Set(baseRes.columns.map((c) => c.toLowerCase()))
+              fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
+            }
           }
           const baseUnknown = hasOldSide(currentCtx.file) && !currentCtx.engineOldSql
           findings.push(...piiLane(currentCtx.file, fallbackPii, baseUnknown))
@@ -1347,7 +1361,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     )
     // Deterministic dbt anti-pattern detectors run on RAW SQL + diff (need Jinja).
     if (lanes.has("dbt_patterns")) {
-      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric))
+      tasks.push(Promise.resolve().then(() => detectModelPatterns(ctx.file, ctx.newSql, input.rubric)))
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its
@@ -1415,12 +1429,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
-        const oldRef = file.oldPath ?? file.path
-        const [oldContent, newContent] = await Promise.all([
-          file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
-          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
-        ])
-        return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
+        try {
+          const oldRef = file.oldPath ?? file.path
+          const [oldContent, newContent] = await Promise.all([
+            file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+            file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+          ])
+          return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
+        } catch (err) {
+          // One malformed schema file degrades that file only.
+          failedFile(file, err)
+          return [] as Finding[]
+        }
       }),
     )
     for (const findings of schemaFindingSets) all.push(findings)

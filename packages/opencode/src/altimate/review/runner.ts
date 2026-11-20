@@ -112,6 +112,14 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     const prev = failures.get(method)
     failures.set(method, { reason: prev?.reason ?? reason, count: (prev?.count ?? 0) + 1 })
   }
+  // The altimate_core handlers catch their own exceptions and return
+  // `{ success: false, error }` instead of throwing. Rethrow so each method's
+  // catch records the failure; otherwise a failed call reads as a clean result.
+  const callCore: typeof Dispatcher.call = async (method, params, context) => {
+    const res: any = await Dispatcher.call(method, params, context)
+    if (res?.success === false) throw new Error(res.error || `${method} failed`)
+    return res
+  }
   let manifestPromise: Promise<CachedManifest> | undefined
 
   async function loadManifest(): Promise<CachedManifest> {
@@ -207,7 +215,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         : hasTables
           ? { ...schema, dialect }
           : { tables: { _altimate_lint_: { columns: [{ name: "_", type: "string" }] } }, version: "1", dialect }
-      const res = await Dispatcher.call("altimate_core.check", { sql, schema_context: schemaContext, base_sql: baseSql })
+      const res = await callCore("altimate_core.check", { sql, schema_context: schemaContext, base_sql: baseSql })
       const data = (res.data ?? {}) as Record<string, any>
       // `altimate_core.check` is a composite: { validation, lint, safety }.
       // The AST anti-pattern findings live at data.lint.findings (each a
@@ -323,7 +331,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
 
     async grade(sql: string): Promise<GradeResult> {
       try {
-        const res = await Dispatcher.call("altimate_core.grade", { sql, schema_context: await resolveSchema() })
+        const res = await callCore("altimate_core.grade", { sql, schema_context: await resolveSchema() })
         const data = (res.data ?? {}) as Record<string, any>
         return { grade: data.overall_grade ?? data.grade }
       } catch (err) {
@@ -338,7 +346,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
 
     async grain(sql: string): Promise<{ group_by: string[]; dedup_partition: string[] }> {
       try {
-        const res = await Dispatcher.call("altimate_core.grain", { sql })
+        const res = await callCore("altimate_core.grain", { sql })
         const d = (res.data ?? {}) as Record<string, any>
         return { group_by: asArray<string>(d.group_by), dedup_partition: asArray<string>(d.dedup_partition) }
       } catch (err) {
@@ -353,7 +361,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     ): Promise<Array<{ code: string; rule: string; severity?: string; message: string; suggestion?: string }>> {
       const out: any[] = []
       try {
-        const res = await Dispatcher.call("altimate_core.dbt_config_lint", { sql: rawSql })
+        const res = await callCore("altimate_core.dbt_config_lint", { sql: rawSql })
         out.push(...asArray((res.data as any)?.findings))
       } catch (err) {
         fail("dbtConfigLint", err)
@@ -361,7 +369,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
       if (oldRawSql) {
         try {
-          const res = await Dispatcher.call("altimate_core.dbt_config_diff", { base_sql: oldRawSql, head_sql: rawSql })
+          const res = await callCore("altimate_core.dbt_config_diff", { base_sql: oldRawSql, head_sql: rawSql })
           out.push(...asArray((res.data as any)?.findings))
         } catch (err) {
           fail("dbtConfigLint", err)
@@ -376,7 +384,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       headSql: string,
     ): Promise<Array<{ code: string; rule: string; severity?: string; message: string; suggestion?: string }>> {
       try {
-        const res = await Dispatcher.call("altimate_core.structural_diff", { base_sql: baseSql, head_sql: headSql })
+        const res = await callCore("altimate_core.structural_diff", { base_sql: baseSql, head_sql: headSql })
         return asArray((res.data as any)?.findings)
       } catch (err) {
         fail("structuralDiff", err)
@@ -386,7 +394,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
 
     async sourceFilters(sql: string): Promise<Record<string, string[]>> {
       try {
-        const res = await Dispatcher.call("altimate_core.source_filters", { sql })
+        const res = await callCore("altimate_core.source_filters", { sql })
         const d = (res.data ?? {}) as Record<string, any>
         return (d.filters ?? {}) as Record<string, string[]>
       } catch (err) {
@@ -416,7 +424,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
 
     async isComplex(sql: string): Promise<boolean> {
       try {
-        const res = await Dispatcher.call("altimate_core.metadata", { sql })
+        const res = await callCore("altimate_core.metadata", { sql })
         const d = (res.data ?? {}) as Record<string, any>
         return !!(d.has_window_functions || d.has_subqueries || (typeof d.node_count === "number" && d.node_count >= 12))
       } catch (err) {
@@ -430,7 +438,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       try {
         // classify_pii classifies a SCHEMA's columns by name/type — feed it the
         // model's output columns as a one-table schema.
-        const res = await Dispatcher.call("altimate_core.classify_pii", {
+        const res = await callCore("altimate_core.classify_pii", {
           schema_context: {
             tables: { model: { columns: columns.map((name) => ({ name, type: "string" })) } },
             version: "1",
@@ -482,7 +490,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
 
     async columnLineage(sql: string, dialect?: string): Promise<Array<{ source: string; target: string }>> {
       try {
-        const res = await Dispatcher.call("altimate_core.column_lineage", {
+        const res = await callCore("altimate_core.column_lineage", {
           sql,
           schema_path: "",
           schema_context: await resolveSchema(),
@@ -502,7 +510,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     async lexicalScan(addedLines: string[]) {
       if (!addedLines.length) return []
       try {
-        const res = await Dispatcher.call("altimate_core.review_lexical_scan", { added_lines: addedLines })
+        const res = await callCore("altimate_core.review_lexical_scan", { added_lines: addedLines })
         const data = (res.data ?? {}) as Record<string, any>
         return asArray<any>(data.findings).map((f) => ({
           rule: String(f.rule ?? "lexical"),
@@ -519,7 +527,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     async equivalence(oldSql: string, newSql: string, dialect?: string): Promise<EquivalenceResult> {
       try {
         const schema = await resolveSchema()
-        const res = await Dispatcher.call("altimate_core.equivalence", {
+        const res = await callCore("altimate_core.equivalence", {
           sql1: oldSql,
           sql2: newSql,
           dialect,

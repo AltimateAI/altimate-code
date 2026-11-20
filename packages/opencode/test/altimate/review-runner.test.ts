@@ -162,3 +162,22 @@ describe("runner honors engine `decidable` flag (core 0.5.1)", () => {
     await tmp[Symbol.asyncDispose]?.()
   })
 })
+
+describe("engine handlers that report failure instead of throwing", () => {
+  test("a {success:false} result is an engine failure, not a clean or PII-free check", async () => {
+    await using tmp = await tmpdir()
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => ({
+      success: false,
+      data: {},
+      error: "Error: native core not loaded",
+    })) as any)
+    const runner = createDispatcherRunner({ manifestPath: path.join(tmp.path, "missing.json") })
+    expect((await runner.check("select 1 as id", "duckdb")).ran).toBe(false)
+    expect((await runner.detectPii("select 1 as id", "duckdb")).abstained).toBe(true)
+    expect(await runner.grain!("select 1 as id")).toEqual({ group_by: [], dedup_partition: [] })
+    const failed = runner.failures!().map((f) => f.method)
+    expect(failed).toContain("check")
+    expect(failed).toContain("grain")
+    expect(runner.failures!()[0].reason).toBe("Error: native core not loaded")
+  })
+})

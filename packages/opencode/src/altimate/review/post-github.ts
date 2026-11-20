@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
-import { type VerdictEnvelope, VCS_EVENT } from "./verdict"
+import { type VerdictEnvelope, VCS_EVENT, FAILED_FILE_REASON } from "./verdict"
 import { renderSummary, inlineComments, postedFindingIds, REVIEW_MARKER, verdictHeadline } from "./format"
 
 /**
@@ -63,14 +63,24 @@ export interface PostResult {
   dismissedReviews?: number
 }
 
-/** Headline of a review this bot posted (see verdictHeadline). */
 /** True when no engine call and no file failed, so missing findings mean "fixed", not "not checked". */
 export function runCompleted(env: VerdictEnvelope): boolean {
   if (env.engineErrors?.length) return false
-  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith("review failed for this file"))
+  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith(FAILED_FILE_REASON))
 }
 
+/** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
+/** Hidden marker in the body of every review this bot posts. */
+const BOT_REVIEW_MARKER = "<!-- altimate-code-review:verdict -->"
+
+/** A review this bot posted: the headline, plus the marker or a bot author
+ *  (reviews posted before the marker existed). A human review that quotes the
+ *  headline is never treated as the bot's. */
+function isBotReview(r: { body?: string | null; user?: { type?: string } | null }): boolean {
+  const body = r.body ?? ""
+  return BOT_REVIEW_RE.test(body) && (body.includes(BOT_REVIEW_MARKER) || r.user?.type === "Bot")
+}
 
 /** The Octokit surface the poster uses; injectable so the posting rules
  *  (dedup, dismissal, skip) are testable without the network. */
@@ -111,7 +121,8 @@ export async function postGitHubReview(
   //    this map only translates verdict → GitHub event. APPROVE always maps to a
   //    COMMENT event — the bot must never submit a formal GitHub approval.
   const event = VCS_EVENT[env.verdict]
-  const reviewBody = verdictHeadline(env)
+  const headline = verdictHeadline(env)
+  const reviewBody = `${headline}\n\n${BOT_REVIEW_MARKER}`
 
   // Rerun dedup: a finding already commented inline (same fingerprint, which
   // ignores line numbers) is not posted again on the next push.
@@ -124,7 +135,7 @@ export async function postGitHubReview(
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    const botReviews = reviews.filter((r) => BOT_REVIEW_RE.test(r.body ?? ""))
+    const botReviews = reviews.filter(isBotReview)
     priorBotReview = botReviews.length > 0
     staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
   } catch {
@@ -148,7 +159,7 @@ export async function postGitHubReview(
           repo,
           pull_number: prNumber,
           review_id: id,
-          message: `Superseded by a newer altimate review: ${reviewBody}`,
+          message: `Superseded by a newer altimate review: ${headline}`,
         })
         dismissed++
       } catch {

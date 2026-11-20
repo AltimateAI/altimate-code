@@ -113,7 +113,51 @@ describe("one file's failure degrades only that file", () => {
   })
 })
 
+describe("a file whose review failed is never approved", () => {
+  test("a failed-file entry downgrades an otherwise clean verdict to COMMENT", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      scope: { unverified: [{ path: "models/a.sql", reason: "review failed for this file: boom" }] } as any,
+    })
+    expect(env.idealVerdict).toBe("COMMENT")
+  })
+
+  test("a synchronous detector that throws degrades only its file", async () => {
+    const env = await runReview({
+      changedFiles: [{ path: "models/schema.yml", kind: "schema_yml", status: "modified" as const, diff: "-      - unique\n" }] as any,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: runner(),
+      getContent: async () => {
+        throw new Error("git show failed")
+      },
+    })
+    expect(env.scope?.unverified).toEqual([{ path: "models/schema.yml", reason: "review failed for this file: git show failed" }])
+    expect(env.idealVerdict).toBe("COMMENT")
+  })
+})
+
 describe("PII abstention", () => {
+  test("an unanalysable base does not report every head PII column as newly exposed", async () => {
+    const env = await runReview({
+      changedFiles: [{ path: "models/a.sql", status: "modified" as const, diff: "-select 1 as id\n+select email from users\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["pii_exposure"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: runner({
+        async detectPii(sql: string) {
+          return sql.includes("email") ? { columns: ["email"] } : { columns: [], abstained: true }
+        },
+      }),
+      getContent: async (_f, side) => (side === "new" ? "select email from users" : "select 1 as id"),
+    })
+    expect(env.findings.filter((f) => f.category === "pii_exposure")).toHaveLength(0)
+    expect(env.scope?.unverified).toContainEqual({ path: "models/a.sql", reason: "the PII check could not analyse the base model" })
+  })
+
   test("a PII check that could not analyse the model is reported, not treated as clean", async () => {
     const env = await runReview({
       changedFiles: [two[0]],
@@ -135,7 +179,7 @@ describe("PII abstention", () => {
 describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => {
   function fakeClient(state: {
     reviewComments?: Array<{ body: string }>
-    reviews?: Array<{ id: number; body: string; state: string }>
+    reviews?: Array<{ id: number; body: string; state: string; user?: { type: string } }>
   }) {
     const calls: Record<string, any[]> = { createReview: [], dismissReview: [], createComment: [], updateComment: [] }
     const client = {
@@ -177,6 +221,7 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     return { client: client as unknown as GitHubClient, calls }
   }
   const target = { token: "t", owner: "o", repo: "r", prNumber: 7 }
+  const bot = { type: "Bot" }
   const engineFinding = (line?: number) =>
     makeFinding({
       severity: "warning",
@@ -194,7 +239,7 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     const env = buildEnvelope({ findings: [], tier: "lite", mode: "gate" })
     const { client, calls } = fakeClient({
       reviews: [
-        { id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED" },
+        { id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot },
         { id: 12, body: "LGTM from a human", state: "CHANGES_REQUESTED" },
       ],
     })
@@ -203,8 +248,25 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     expect(r.dismissedReviews).toBe(1)
   })
 
+  test("a human review quoting the headline is never dismissed; the marker identifies the bot", async () => {
+    const env = buildEnvelope({ findings: [], tier: "lite", mode: "gate" })
+    const { client, calls } = fakeClient({
+      reviews: [
+        { id: 21, body: "Changes requested (full tier) until the backfill is fixed", state: "CHANGES_REQUESTED", user: { type: "User" } },
+        {
+          id: 22,
+          body: "🛑 Changes requested — 1 critical (full tier)\n\n<!-- altimate-code-review:verdict -->",
+          state: "CHANGES_REQUESTED",
+          user: { type: "User" },
+        },
+      ],
+    })
+    await postGitHubReview(env, target, client)
+    expect(calls.dismissReview.map((c) => c.review_id)).toEqual([22])
+  })
+
   test("a rerun where the engine or a file failed does not clear the block", async () => {
-    const blocking = [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED" }]
+    const blocking = [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot }]
     const crashed = buildEnvelope({
       findings: [],
       tier: "full",
@@ -237,11 +299,12 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     })
     const env = buildEnvelope({ findings: [blocking], tier: "full", mode: "gate" })
     const { client, calls } = fakeClient({
-      reviews: [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED" }],
+      reviews: [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED", user: bot }],
     })
     await postGitHubReview(env, target, client)
     expect(calls.dismissReview).toHaveLength(0)
     expect(calls.createReview[0].event).toBe("REQUEST_CHANGES")
+    expect(calls.createReview[0].body).toContain("<!-- altimate-code-review:verdict -->")
   })
 
   test("findings already on the PR are not re-posted, and with nothing new no review is added", async () => {
@@ -249,7 +312,7 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     const env = buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })
     const { client, calls } = fakeClient({
       reviewComments: [{ body: `⚠️ old\n\n${findingMarker(f.id)}` }],
-      reviews: [{ id: 5, body: "💬 Reviewed with comments — 1 warning (lite tier)", state: "COMMENTED" }],
+      reviews: [{ id: 5, body: "💬 Reviewed with comments — 1 warning (lite tier)", state: "COMMENTED", user: bot }],
     })
     const r = await postGitHubReview(env, target, client)
     expect(r.inlineSkippedAsPosted).toBe(1)
