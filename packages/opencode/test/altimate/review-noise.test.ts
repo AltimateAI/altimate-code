@@ -451,6 +451,18 @@ describe("per-rule tiers", () => {
     expect(ruleTier("impact-analysis:downstream-consumers", { "impact-analysis:*": "inline" })).toBe("inline")
   })
 
+  test("AI findings default to inline, and an explicit override wins", () => {
+    expect(ruleTier("ai-review:sql-quality")).toBe("inline")
+    expect(ruleTier("ai-review:sql-quality", { "ai-review:*": "summary" })).toBe("summary")
+    expect(ruleTier("ai-review:sql-quality", { "ai-review:sql_quality": "off" })).toBe("off")
+  })
+
+  test("override keys match in any spelling a finding id normalises from", () => {
+    expect(ruleTier("dbt-patterns:self-join", { "dbt_patterns:self_join": "off" })).toBe("off")
+    expect(ruleTier("dbt-patterns:self-join", { "DBT_Patterns:*": "inline" })).toBe("inline")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule_catalog:join_*": "summary" })).toBe("summary")
+  })
+
   test("default table keys are well-formed ids, and verdict-relevant engine rules are never off", () => {
     const keys = Object.keys(DEFAULT_RULE_TIERS)
     expect(keys.filter((k) => DEFAULT_RULE_TIERS[k] === "inline")).toHaveLength(14)
@@ -523,16 +535,18 @@ describe("inline posting policy", () => {
     expect(md).toContain("m3: inline issue 3")
   })
 
-  test("AI-lane findings are inline-eligible without a tier", () => {
-    const ai = finding({
-      severity: "warning",
-      category: "sql_quality",
-      startLine: 3,
-      title: "m: ai finding",
-      evidence: { tool: "ai-review", result: {} },
-    })
-    const env = buildEnvelope({ findings: [ai], tier: "lite", mode: "comment" })
-    expect(inlineComments(env).comments).toHaveLength(1)
+  test("AI-lane findings follow their tier like any other rule", () => {
+    const ai = (tier?: "inline" | "summary") =>
+      finding({
+        severity: "warning",
+        category: "sql_quality",
+        startLine: 3,
+        title: "m: ai finding",
+        evidence: { tool: "ai-review", result: {} },
+        ...(tier ? { tier } : {}),
+      })
+    expect(inlineComments(buildEnvelope({ findings: [ai("inline")], tier: "lite", mode: "comment" })).comments).toHaveLength(1)
+    expect(inlineComments(buildEnvelope({ findings: [ai("summary")], tier: "lite", mode: "comment" })).comments).toHaveLength(0)
   })
 
   test("most severe, then most confident, then file and line first", () => {
@@ -584,6 +598,7 @@ describe("output form", () => {
       title: "m: ai finding",
       startLine,
       evidence: { tool: "ai-review", result: {} },
+      tier: "inline",
       suggestion: { startLine, endLine, replacement },
     })
 

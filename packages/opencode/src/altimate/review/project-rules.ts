@@ -227,7 +227,7 @@ const macroSignatures = (sql: string | undefined) => {
 /** The comment text on a line (`-- …`, `/* … *\/`, `{# … #}`), or "". */
 const commentOf = (l: string) => /--(.*)$|\/\*(.*?)(\*\/|$)|\{#(.*?)(#\}|$)/.exec(l)?.slice(1).filter(Boolean).join(" ") ?? ""
 const TEMP_MARKER =
-  /\b(temp(orary)?\b.{0,40}\b(ci|test|validation|sample|debug|hack)|revert\b.{0,30}\b(to|before|after)\b|do\s+not\s+merge|remove\s+before\s+(merge|release)|ci\s+test\b|for\s+testing\s+only|take\s+(this|it)\s+out\b|\bwhile\s+debugging\b|(remove|delete|drop)\s+(this|it)\s+before\s+(merg|releas|deploy|prod))/i
+  /\b(temp(orary)?\b.{0,40}\b(ci|test|validation|sample|debug|hack)|revert\b.{0,30}\b(to|before|after)\b|do\s+not\s+merge|remove\s+before\s+(merge|release)|ci\s+test\b|for\s+testing\s+only|take\s+(this|it)\s+out\s+(before|once|after|when)\b|\b(added|enabled|only)\s+while\s+debugging\b|(remove|delete|drop)\s+(this|it)\s+before\s+(merg|releas|deploy|prod))/i
 
 const varNames = (sql: string | undefined) => new Set([...(sql ?? "").matchAll(/\bvar\s*\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]))
 

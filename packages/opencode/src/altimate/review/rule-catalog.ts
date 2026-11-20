@@ -474,12 +474,6 @@ function windowOrderRepeatsPartition(sql: string): boolean {
   return false
 }
 
-/** A condition with whitespace collapsed and keywords lowercased outside quotes; quoted text stays exact ('A' is not 'a'). */
-const normalizeCondition = (c: string) =>
-  c
-    .replace(/('[^']*'|"[^"]*")|[^'"]+/g, (seg, quoted) => (quoted ? seg : seg.replace(/\s+/g, " ").toLowerCase()))
-    .trim()
-
 /** A CASE with two WHEN branches whose conditions are identical: the second is unreachable. */
 function duplicateCaseWhen(sql: string): boolean {
   for (const m of sql.matchAll(/\bcase\b/gi)) {
@@ -500,10 +494,11 @@ function duplicateCaseWhen(sql: string): boolean {
   return false
 }
 
-/** Condition text for comparison: case and spacing folded outside string literals, literals kept verbatim. */
+/** Condition text for comparison: case and spacing folded outside string literals and quoted
+ *  identifiers, which are kept verbatim ('A' is not 'a'; "Col" is case-sensitive). */
 function normalizeCondition(cond: string): string {
   return cond
-    .split(/('(?:[^']|'')*')/)
+    .split(/('(?:[^']|'')*'|"(?:[^"]|"")*")/)
     .map((part, i) =>
       i % 2
         ? part

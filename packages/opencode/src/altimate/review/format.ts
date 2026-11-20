@@ -1,4 +1,4 @@
-import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, findingOrigin, ruleTitle } from "./finding"
+import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, ruleTitle } from "./finding"
 import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY } from "./verdict"
 
 /**
@@ -278,6 +278,9 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
     notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
+  } else if (env.ai?.reason) {
+    // Some calls answered and some failed: the files in the failed calls were not reviewed by the AI.
+    notes.push(`Advisory AI review partly failed: ${env.ai.reason}.`)
   }
   const out = notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
   return [...out, ...ledgerBlock(ledger)]
@@ -308,7 +311,7 @@ function ledgerBlock(ledger: Array<{ path: string; reason: string }>): string[] 
     const take = paths.slice(0, LEDGER_MAX_PATHS - shown)
     shown += take.length
     // Escape Markdown emphasis so a glob like `**/*.md` in a reason renders literally.
-    lines.push(`${reason.replace(/([*_])/g, "\\$1")} (${paths.length}):`, ...take.map((p) => `- \`${p}\``))
+    lines.push(`${reason.replace(/([*_])/g, "\\$1")} (${paths.length}):`, ...take.map((p) => `- ${codeSpan(p)}`))
     if (/^moved without edits/.test(reason)) lines.push("", MOVED_HINT)
     lines.push("")
   }
@@ -390,9 +393,10 @@ export function postingPolicy(env: VerdictEnvelope): PostingPolicy {
 const CONFIDENCE_ORDER: Record<Confidence, number> = { high: 3, medium: 2, low: 1, unknown: 0 }
 
 /** Whether a finding may be posted as an inline comment: an inline-tier rule
- *  or the AI lane, on a line the PR added, at or above the severity floor. */
+ *  (AI findings default to inline in `ruleTier`), on a line the PR added, at or
+ *  above the severity floor. */
 export function inlineEligible(f: Finding, posting: PostingPolicy): boolean {
-  if (f.tier !== "inline" && findingOrigin(f) !== "ai") return false
+  if (f.tier !== "inline") return false
   if (f.preExisting || typeof f.startLine !== "number") return false
   return SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[posting.inlineSeverityFloor]
 }

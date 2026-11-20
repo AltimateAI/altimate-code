@@ -1,3 +1,5 @@
+import { normRuleToken } from "./finding"
+
 /**
  * Per-rule posting policy. Every finding carries a stable `rule` id
  * (`tool:rule`, see `ruleId` in finding.ts); this table decides whether a rule
@@ -125,7 +127,12 @@ export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {
   ...Object.fromEntries(INLINE.map((r) => [r, "inline" as const])),
 }
 
-/** Engine rules that may never default below summary (verdict-relevant). */
+/** Engine rules (equivalence, lineage, impact, PII, contracts, data diff) that
+ *  are never off by default: a glob override cannot drop them, only an exact
+ *  id. Other engine rules are not on the floor; a few (structural-diff, grain,
+ *  source-filters detectors judged mostly wrong) default to `off` in the table
+ *  above, so their findings no longer count toward the verdict unless a team
+ *  turns them back on. */
 const ENGINE_FLOOR = [
   "altimate-core.equivalence:",
   "altimate-core.column-lineage:",
@@ -137,6 +144,17 @@ const ENGINE_FLOOR = [
   "data.diff:",
 ]
 
+/** A rule id or override key in the spelling finding ids use (`ruleId`):
+ *  `dbt_patterns:self_join` matches `dbt-patterns:self-join`. A trailing `*`
+ *  glob is kept. */
+function normRuleKey(key: string): string {
+  const glob = key.endsWith("*")
+  const body = glob ? key.slice(0, -1) : key
+  const i = body.indexOf(":")
+  const norm = i < 0 ? normRuleToken(body) : `${normRuleToken(body.slice(0, i))}:${normRuleToken(body.slice(i + 1))}`
+  return glob ? norm + "*" : norm
+}
+
 const isFloor = (rule: string) => ENGINE_FLOOR.some((p) => rule.startsWith(p))
 
 /**
@@ -144,8 +162,10 @@ const isFloor = (rule: string) => ENGINE_FLOOR.some((p) => rule.startsWith(p))
  * (`tool:*`, longest prefix wins), then the default table, then `summary`.
  * An engine-floor rule can be turned off only by an exact override.
  */
-export function ruleTier(rule: string | undefined, overrides: Record<string, RuleTier> = {}): RuleTier {
+export function ruleTier(rule: string | undefined, rawOverrides: Record<string, RuleTier> = {}): RuleTier {
   if (!rule) return "summary"
+  rule = normRuleKey(rule)
+  const overrides = Object.fromEntries(Object.entries(rawOverrides).map(([k, v]) => [normRuleKey(k), v]))
   const exact = overrides[rule]
   if (exact) return exact
   const floor = isFloor(rule)
@@ -156,6 +176,9 @@ export function ruleTier(rule: string | undefined, overrides: Record<string, Rul
     if (floor && tier === "off") continue
     return tier
   }
+  // AI reviewer findings were judged per finding by the verifier, not per rule:
+  // they default to inline, and an explicit override still wins above.
+  if (rule.startsWith("ai-review:")) return "inline"
   const tier = DEFAULT_RULE_TIERS[rule] ?? "summary"
   return floor && tier === "off" ? "summary" : tier
 }

@@ -14,7 +14,8 @@ import {
   type AiReviewFile,
   type AiReviewInput,
 } from "../../src/altimate/review/ai-review"
-import { renderSummary } from "../../src/altimate/review/format"
+import { inlineComments, renderSummary } from "../../src/altimate/review/format"
+import { makeFinding } from "../../src/altimate/review/finding"
 import { emitReviewRun } from "../../src/altimate/review/telemetry"
 import { Telemetry } from "../../src/altimate/telemetry"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
@@ -102,6 +103,75 @@ describe("files sent to the advisory AI lane", () => {
     expect(paths).toContain("dbt_project.yml")
     expect(paths.some((p) => /profiles\.ya?ml$/.test(p))).toBe(false)
     expect(JSON.stringify(input)).not.toContain("hunter2")
+  })
+
+  test("an explicit summary tier keeps an AI finding out of the inline comments", async () => {
+    const run = (rules: Record<string, "inline" | "summary" | "off">) =>
+      runReview({
+        changedFiles: [mod("models/marts/m.sql", "@@ -0,0 +1 @@\n+select 2 as id\n")],
+        config: { ...DEFAULT_REVIEW_CONFIG, rules },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        getContent: async (f, side) => (side === "old" ? undefined : FILES[f]),
+        generatedAt: "2026-11-14T00:00:00Z",
+        forceTier: "full",
+        aiReview: async () => ({
+          findings: [
+            makeFinding({
+              severity: "warning",
+              category: "sql_quality",
+              title: "m: ai finding",
+              body: "why",
+              file: "models/marts/m.sql",
+              model: "m",
+              startLine: 1,
+              rule: "ai-review:sql-quality",
+              evidence: { tool: "ai-review", result: {} },
+            }),
+          ],
+          status: { state: "ok" },
+        }),
+      })
+    const byDefault = await run({})
+    expect(byDefault.findings.find((f) => f.rule === "ai-review:sql-quality")?.tier).toBe("inline")
+    expect(inlineComments(byDefault).comments).toHaveLength(1)
+    const summary = await run({ "ai-review:*": "summary" })
+    expect(summary.findings.find((f) => f.rule === "ai-review:sql-quality")?.tier).toBe("summary")
+    expect(inlineComments(summary).comments).toHaveLength(0)
+  })
+
+  test("files past the AI file cap are not marked reviewed in the ledger", async () => {
+    const seeds = Array.from({ length: 21 }, (_, i) => mod(`seeds/s${String(i).padStart(2, "0")}.csv`, "+a,b\n"))
+    const env = await runReview({
+      changedFiles: seeds,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => undefined,
+      generatedAt: "2026-11-14T00:00:00Z",
+      forceTier: "full",
+      aiReview: async () => ({ findings: [], status: { state: "ok" } }),
+    })
+    expect(env.scope?.notReviewed?.map((e) => e.path)).toEqual(["seeds/s20.csv"])
+    expect(renderSummary(env)).toContain("Not reviewed: 1 file(s)")
+  })
+
+  test("a partial AI failure is shown even when the lane state is ok", async () => {
+    const env = await runReview({
+      changedFiles: [mod("models/marts/m.sql")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async (f, side) => (side === "old" ? undefined : FILES[f]),
+      generatedAt: "2026-11-14T00:00:00Z",
+      forceTier: "full",
+      aiReview: async () => ({ findings: [], status: { state: "ok", reason: "1 of 2 calls failed: timed out" } }),
+    })
+    const md = renderSummary(env)
+    expect(md).toContain("Advisory AI review partly failed: 1 of 2 calls failed: timed out.")
   })
 
   test("deleted files are not sent", async () => {
