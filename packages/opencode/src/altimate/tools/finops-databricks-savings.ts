@@ -10,6 +10,7 @@ type SavingsMetadata = {
   window?: { start: string; end: string }
   warehouse?: string
   ran_on?: string
+  workspaces_checked?: number
   warehouses_checked?: number
   clusters_checked?: number
   jobs_checked?: number
@@ -167,6 +168,7 @@ export const FinopsDatabricksSavingsTool = Tool.define("finops_databricks_saving
           window: result.window,
           warehouse: result.warehouse,
           ran_on: result.ran_on,
+          workspaces_checked: result.workspaces_checked,
           warehouses_checked: result.warehouses_checked,
           clusters_checked: result.clusters_checked,
           jobs_checked: result.jobs_checked,

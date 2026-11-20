@@ -122,6 +122,13 @@ describe("finops_databricks_savings tool", () => {
     expect(result.metadata.window).toEqual({ start: "2026-11-05", end: "2026-11-12" })
   })
 
+  test("the number of workspaces checked reaches the metadata", async () => {
+    Dispatcher.register("finops.databricks_savings" as any, async () => ({ ...REPORT, workspaces_checked: 3 }))
+    const tool = await initTool(FinopsDatabricksSavingsTool)
+    const result = await tool.execute({ confirm: true }, stubCtx())
+    expect(result.metadata.workspaces_checked).toBe(3)
+  })
+
   test("without the user's go-ahead nothing runs: the agent is told to ask first", async () => {
     let ran = 0
     Dispatcher.register("finops.databricks_savings" as any, async () => {
@@ -562,6 +569,24 @@ describe("databricks savings handler over a stubbed connection", () => {
       { check: "Idle Cluster Detection", reason: "The all-purpose clusters query was not started: it would run past the check's 9-minute limit." },
       { check: "Job Running on All-Purpose Compute", reason: "The jobs query was not started: it would run past the check's 9-minute limit." },
     ])
+  })
+
+  test("every workspace a checked row came from is counted, with or without a finding or a SQL warehouse", async () => {
+    // Workspace 111 has the SQL warehouse; 333 has only a cluster and 222 only a job, and nothing is flagged.
+    const CLUSTER_ROW = { workspace_id: "333", cluster_id: "c9", cluster_name: "adhoc", auto_termination_minutes: 30, total_node_minutes: 600, active_util_days: 3, total_worker_minutes: 600, idle_node_minutes: 60, total_cost: 12 }
+    const rows = (...all: Record<string, unknown>[]) => ({ columns: Object.keys(all[0]!), rows: all.map((one) => Object.values(one)), truncated: false })
+    const spy = connect((sql) => {
+      if (sql === DATABRICKS_WAREHOUSE_FACTS_SQL) return table(WAREHOUSE_ROW)
+      if (sql === DATABRICKS_CLUSTER_FACTS_SQL) return rows(CLUSTER_ROW, { ...CLUSTER_ROW, cluster_id: "c10", workspace_id: 333n })
+      // A second task of the same workspace, and a row with no workspace, add nothing.
+      return rows(JOB_ROW, { ...JOB_ROW, task_key: "other" }, { ...JOB_ROW, job_id: "j2", workspace_id: null })
+    })
+    const result = await databricksSavings({ warehouse: "dbx", now_ms: Date.parse("2026-11-18T10:00:00Z") }, rules)
+    spy.mockRestore()
+    expect(result.success).toBe(true)
+    expect(result.report?.findings).toEqual([])
+    expect([result.warehouses_checked, result.clusters_checked, result.jobs_checked]).toEqual([1, 2, 2])
+    expect(result.workspaces_checked).toBe(3)
   })
 
   test("connecting counts toward the limit: a connection that never comes up ends the check in time", async () => {

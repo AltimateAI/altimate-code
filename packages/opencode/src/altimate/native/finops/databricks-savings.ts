@@ -554,11 +554,18 @@ export async function databricksSavings(
       clusters.length = 0
       jobs.length = 0
     }
+    // Every workspace a checked row came from, whether or not it has a finding or a SQL warehouse.
+    const workspaces = new Set(
+      [...warehouses, ...clusters, ...jobs]
+        .map((row) => (row.workspace_id == null ? "" : String(row.workspace_id).trim()))
+        .filter((id) => id !== ""),
+    )
     return {
       success: true,
       window,
       warehouse: resolved.warehouse,
       ran_on: runsOn,
+      workspaces_checked: workspaces.size,
       warehouses_checked: warehouses.length,
       clusters_checked: clusters.length,
       // The query gives a row per task, cluster and trigger: each job is counted once.

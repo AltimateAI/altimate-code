@@ -686,6 +686,8 @@ export interface DatabricksSavingsResult {
   /** The connection that ran the check, and the SQL warehouse it runs on. */
   warehouse?: string
   ran_on?: string
+  /** Distinct workspaces across every warehouse, cluster and job row checked, with or without a finding. */
+  workspaces_checked?: number
   warehouses_checked?: number
   clusters_checked?: number
   jobs_checked?: number
