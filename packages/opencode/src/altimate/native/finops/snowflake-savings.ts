@@ -322,7 +322,8 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  * - otherwise another listed name it was seen under, created before all of its usage (a warehouse renamed
  *   away from a name that was then reused).
  * A metered hour counts from its start, which can be up to an hour before the creation inside it, and other
- * times may read up to a minute early. A name that several ids belong to keeps the one used last.
+ * times may read up to a minute early. A name that several ids belong to keeps the one seen last, then the
+ * larger (newer) id.
  * Without ids in `SHOW WAREHOUSES`, two cases stay ambiguous: an older warehouse renamed into a dropped one's
  * name, with no usage under it in the window, takes the dropped one's usage; and a predecessor metered only in
  * the hour of the new warehouse's creation, with no other row, keeps that hour.
