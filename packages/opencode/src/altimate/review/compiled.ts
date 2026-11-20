@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs"
 import path from "node:path"
 import YAML from "yaml"
 import { safeReadInside } from "./git"
+import { DEFAULT_DBT_DIRS, type DbtProjectLayout } from "./diff-filter"
 
 /**
  * Resolve dbt's COMPILED SQL for static analysis.
@@ -17,8 +18,8 @@ import { safeReadInside } from "./git"
  *     the base ref compiled into a sibling target dir)
  *
  * When no compiled artifact exists (no `dbt compile` ran, or a raw single-file
- * diff), the caller falls back to raw Jinja and the engine result is treated as
- * approximate/undecidable — never fabricated. A proper offline renderer
+ * diff), raw Jinja is never sent to the engine: a templated model skips the
+ * engine lanes and is recorded in `scope.unverified`. A proper offline renderer
  * (minijinja + dbt builtin stubs, à la dbt-Fusion) is the documented future
  * fallback; it is intentionally NOT a regex strip.
  */
@@ -32,6 +33,39 @@ export async function dbtProjectName(cwd: string): Promise<string | undefined> {
     } catch {
       /* try next */
     }
+  }
+  return undefined
+}
+
+const LAYOUT_KEYS: Record<keyof DbtProjectLayout["dirs"], string> = {
+  model: "model-paths",
+  snapshot: "snapshot-paths",
+  seed: "seed-paths",
+  macro: "macro-paths",
+  test: "test-paths",
+  analysis: "analysis-paths",
+}
+
+/**
+ * Read the project's directory layout (`model-paths`, `snapshot-paths`, …)
+ * from dbt_project.yml, falling back to dbt's defaults per key. `root` is the
+ * project directory relative to the repository root. Undefined when there is
+ * no readable dbt_project.yml in `projectDir`.
+ */
+export async function dbtProjectLayout(projectDir: string, root: string): Promise<DbtProjectLayout | undefined> {
+  for (const f of ["dbt_project.yml", "dbt_project.yaml"]) {
+    let doc: any
+    try {
+      doc = YAML.parse(await fs.readFile(path.join(projectDir, f), "utf8"))
+    } catch {
+      continue
+    }
+    const dirs = { ...DEFAULT_DBT_DIRS }
+    for (const [role, key] of Object.entries(LAYOUT_KEYS) as Array<[keyof typeof dirs, string]>) {
+      const v = doc?.[key]
+      if (Array.isArray(v) && v.length && v.every((x) => typeof x === "string")) dirs[role] = v
+    }
+    return { root: root.replace(/\\/g, "/"), dirs }
   }
   return undefined
 }

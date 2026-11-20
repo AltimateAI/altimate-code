@@ -18,7 +18,7 @@ inputs:
     required: false
     default: "suggestion"
   base:
-    description: "Base git ref to diff against. Defaults to the merge-base with origin/main."
+    description: "Base git ref to diff against. Defaults to the pull request's target branch (from the event), reduced to its merge-base with the head."
     required: false
   head:
     description: "Head git ref. Defaults to the checked-out PR head."
