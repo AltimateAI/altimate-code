@@ -533,13 +533,33 @@ const WINDOW_RES = [
   new RegExp(`\\bdate_?add\\s*\\(\\s*(?:datepart\\s*=\\s*)?['"]?${UNIT}['"]?\\s*,\\s*(?:interval\\s*=\\s*)?-\\s*(\\d+)`, "gi"),
 ]
 
-/** Window lengths on a line in seconds, and the line with every window masked (for pairing edits). */
+const COMPARISON = /(>=|<=|<>|!=|>|<|\bbetween\b)/gi
+
+/**
+ * Whether the window at `at..end` of `line` is a lookback a column must fall inside: the clock minus
+ * the window (`- interval`, `*_sub(…, interval …)`, or a negative `dateadd` count) on the right of
+ * `>`/`>=`/`between`, or on the left of `<`/`<=`. Shrinking any other window (`ts < now - 30 days`,
+ * `ts > now + interval '2 day'`) makes the test check more rows or a stricter bound, not fewer.
+ */
+function isLookback(line: string, at: number, end: number, kind: number): boolean {
+  const before = line.slice(0, at)
+  if (kind === 0 && !/-\s*$/.test(before) && !/\w*sub\s*\([^()]*(?:\([^()]*\)[^()]*)*$/i.test(before)) return false
+  const ops = [...line.matchAll(COMPARISON)]
+  const left = ops.filter((o) => o.index! < at).pop()
+  if (left) return /^(>=?|between)$/i.test(left[0])
+  const right = ops.find((o) => o.index! >= end)
+  return !!right && /^<=?$/.test(right[0])
+}
+
+/** Lookback window lengths on a line in seconds, and the line with every window masked (for pairing edits). */
 function windows(line: string): { secs: number[]; shape: string } {
   const secs: number[] = []
   let shape = line.replace(/--.*$/, "")
   WINDOW_RES.forEach((re, i) => {
-    shape = shape.replace(re, (_m, a: string, b: string) => {
+    const src = shape
+    shape = shape.replace(re, (m, a: string, b: string, at: number) => {
       const [n, unit] = i === 0 ? [a, b] : [b, a]
+      if (!isLookback(src, at, at + m.length, i)) return m
       secs.push(Number(n) * UNIT_SECONDS[unit.toLowerCase()])
       return "<window>"
     })
@@ -608,7 +628,7 @@ export function addedDispatchKwargs(file: ChangedFile, sql: string): { name: str
 }
 
 /** Every `{% macro <prefix>__<name>(…) %}` in `text`: its parameters, and whether its body reads
- *  `kwargs` (Jinja then accepts any extra keyword). */
+ *  `kwargs` outside comments and strings (Jinja then accepts any extra keyword). */
 export function dispatchVariants(text: string, name: string): { macro: string; params: string[]; acceptsKwargs: boolean }[] {
   const out: { macro: string; params: string[]; acceptsKwargs: boolean }[] = []
   for (const [macro, sig] of signatures(text)) {
@@ -618,7 +638,10 @@ export function dispatchVariants(text: string, name: string): { macro: string; p
     if (at === undefined) continue
     const end = text.slice(at).search(/\{%-?\s*endmacro\b/)
     const body = text.slice(at, end < 0 ? undefined : at + end)
-    out.push({ macro, params: sig.params.map((p) => p.name), acceptsKwargs: /\bkwargs\b/.test(body) || /\bvarargs\b/.test(body) })
+    // Only a real `kwargs` read takes extra keywords (`varargs` takes extra positionals only); a
+    // mention in a comment or string literal does not.
+    const code = body.replace(/\{#[\s\S]*?#\}/g, " ").replace(/'[^'\n]*'|"[^"\n]*"/g, "''")
+    out.push({ macro, params: sig.params.map((p) => p.name), acceptsKwargs: /\bkwargs\b/.test(code) })
   }
   return out
 }
