@@ -72,7 +72,8 @@ export interface PostResult {
 }
 
 /** True when every check ran (no engine error, no failed file, no abstained
- *  check), so missing findings mean "fixed", not "not checked". */
+ *  check, no model without compiled head SQL), so missing findings mean
+ *  "fixed", not "not checked". */
 export function runCompleted(env: VerdictEnvelope): boolean {
   return !reviewIncomplete(env)
 }
@@ -80,29 +81,69 @@ export function runCompleted(env: VerdictEnvelope): boolean {
 /** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 /** Hidden marker in the body of every review this bot posts; reviews of a
- *  dbt project below the repository root also name it (`project=<dir>`). */
+ *  dbt project below the repository root also name it (`project=<dir>`,
+ *  URI-encoded so a directory with spaces stays one token). */
 const BOT_REVIEW_MARKER_RE = /<!-- altimate-code-review:verdict(?: project=(\S+))? -->/
 
 function botReviewMarker(projectRoot: string | undefined): string {
-  return projectRoot ? `<!-- altimate-code-review:verdict project=${projectRoot} -->` : "<!-- altimate-code-review:verdict -->"
+  return projectRoot
+    ? `<!-- altimate-code-review:verdict project=${encodeURI(projectRoot)} -->`
+    : "<!-- altimate-code-review:verdict -->"
 }
 
-/** A review this bot posted for this dbt project: the headline, plus the
- *  marker or a bot author (reviews posted before the marker existed). A human
- *  review that quotes the headline is never treated as the bot's, and in a
- *  monorepo one project's run never touches another project's review. */
-function isBotReview(r: { body?: string | null; user?: { type?: string } | null }, projectRoot: string | undefined): boolean {
+function markerProject(encoded: string | undefined): string {
+  if (!encoded) return ""
+  try {
+    return decodeURI(encoded)
+  } catch {
+    return encoded
+  }
+}
+
+type ReviewLike = { body?: string | null; user?: { type?: string; login?: string } | null }
+
+/** A review this bot posted for this dbt project. The author must be a bot
+ *  (GitHub App / `github-actions[bot]`) or the token's own login: a human
+ *  review that quotes the bot's body, marker included, is never the bot's.
+ *  The marker then scopes it to a project, so in a monorepo one project's run
+ *  never touches another project's review. A bot review without the marker
+ *  (posted before it existed) matches every project. */
+function isBotReview(r: ReviewLike, projectRoot: string | undefined, selfLogin: string | undefined): boolean {
   const body = r.body ?? ""
   if (!BOT_REVIEW_RE.test(body)) return false
+  const byBot = r.user?.type === "Bot" || (!!selfLogin && r.user?.login === selfLogin)
+  if (!byBot) return false
   const marker = BOT_REVIEW_MARKER_RE.exec(body)
-  if (!marker && r.user?.type !== "Bot") return false
-  return (marker?.[1] ?? "") === (projectRoot ?? "")
+  if (!marker) return true
+  return markerProject(marker[1]) === (projectRoot ?? "")
+}
+
+/** True only when the run is known to have reviewed the PR's current head:
+ *  the reviewed commit is the head itself, or the merge commit a `pull_request`
+ *  checkout builds from it (`refs/pull/N/merge`, whose second parent is the
+ *  head). Unknown on either side means "not proven", so a block is kept. */
+export function reviewedPrHead(scope: VerdictEnvelope["scope"], prHeadSha: string | undefined): boolean {
+  const headSha = scope?.headSha
+  if (!headSha || !prHeadSha) return false
+  return headSha === prHeadSha || (scope?.headParents ?? []).slice(1).includes(prHeadSha)
 }
 
 /** The Octokit surface the poster uses; injectable so the posting rules
- *  (dedup, dismissal, skip) are testable without the network. */
+ *  (dedup, dismissal, skip) are testable without the network. `users` is
+ *  optional: it only resolves the token's login for non-bot tokens. */
 export type GitHubClient = Pick<Octokit, "paginate"> & {
-  rest: Pick<Octokit["rest"], "issues" | "pulls">
+  rest: Pick<Octokit["rest"], "issues" | "pulls"> & Partial<Pick<Octokit["rest"], "users">>
+}
+
+/** Login of the token's user, needed only when a marked review has a non-bot
+ *  author (a personal token posts as a User). The Actions GITHUB_TOKEN cannot
+ *  call this endpoint; its reviews are authored by a Bot anyway. */
+async function tokenLogin(octo: GitHubClient): Promise<string | undefined> {
+  try {
+    return (await octo.rest.users?.getAuthenticated())?.data.login
+  } catch {
+    return undefined
+  }
 }
 
 export async function postGitHubReview(
@@ -152,11 +193,16 @@ export async function postGitHubReview(
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    // Reviews are listed oldest first; only this bot's own reviews count. When
-    // the bot's login is unknown, fall back to the headline/marker match alone
-    // for dismissal, and never skip (no own-review headline to compare).
+    // Reviews are listed oldest first; only this bot's own reviews count. The
+    // summary comment's author is the token's login; when it is unknown, ask
+    // the API (only needed for a marked review by a non-bot author), match on
+    // bot authorship alone for dismissal, and never skip (no own-review
+    // headline to compare).
+    const needsLogin =
+      !botLogin && reviews.some((r) => r.user?.type !== "Bot" && BOT_REVIEW_MARKER_RE.test(r.body ?? ""))
+    const selfLogin = botLogin ?? (needsLogin ? await tokenLogin(octo) : undefined)
     const botReviews = reviews.filter(
-      (r) => isBotReview(r, projectRoot) && (!botLogin || r.user?.login === botLogin),
+      (r) => isBotReview(r, projectRoot, selfLogin) && (!botLogin || r.user?.login === botLogin),
     )
     lastBotHeadline = botLogin ? botReviews.at(-1)?.body?.replace(BOT_REVIEW_MARKER_RE, "").trim() : undefined
     staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
@@ -191,11 +237,11 @@ export async function postGitHubReview(
   // altimate review would keep the PR blocked forever. Dismiss it, pointing at
   // the new verdict. (Requires `pull-requests: write`; a failure is non-fatal.)
   // Only a run that actually completed may clear a block: when an engine call
-  // or a file failed, or a check abstained, the blocking finding may simply
-  // not have been produced. A run on an older push (its head is no longer the
-  // PR's head) never clears the block a newer push's run may have posted.
-  const headSha = env.scope?.headSha
-  const onCurrentHead = !headSha || !commitId || headSha === commitId
+  // or a file failed, a check abstained, or a model had no compiled SQL, the
+  // blocking finding may simply not have been produced. Only a run proven to
+  // have reviewed the PR's current head clears a block: a run on an older push,
+  // or one whose reviewed commit or PR head is unknown, keeps it.
+  const onCurrentHead = reviewedPrHead(env.scope, commitId)
   const dismissStale = async () => {
     if (event !== "COMMENT" || !staleBlocking.length || !runCompleted(env) || !onCurrentHead) return
     let dismissed = 0

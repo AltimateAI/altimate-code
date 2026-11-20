@@ -345,6 +345,21 @@ export async function resolveCommit(ref: string, cwd: string): Promise<string | 
   }
 }
 
+/** Parents of a commit, read from the commit object itself so a shallow
+ *  checkout (whose grafts hide them from rev-parse) still reports them. */
+export async function commitParents(sha: string, cwd: string): Promise<string[]> {
+  try {
+    const raw = await git(["cat-file", "-p", sha], cwd)
+    const header = raw.split("\n\n")[0] ?? ""
+    return header
+      .split("\n")
+      .filter((l) => l.startsWith("parent "))
+      .map((l) => l.slice("parent ".length).trim())
+  } catch {
+    return []
+  }
+}
+
 /** Compute a short hash of the manifest file for the verdict envelope. */
 export async function manifestHash(manifestPath: string, cwd: string): Promise<string | undefined> {
   try {
