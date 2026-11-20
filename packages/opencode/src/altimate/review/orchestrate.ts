@@ -34,6 +34,8 @@ import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, mod
 import { type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
+// Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
+const AI_CREDENTIAL_FILE = /(^|\/)profiles\.ya?ml$/i
 
 /**
  * The deterministic review recipe.
@@ -2211,7 +2213,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }))
     // Macros, data tests, snapshots, yml and seeds carry defects no model diff shows.
     // Seeds go as a diff only: the full CSV is data, not logic.
-    const supporting = reviewable.filter((f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted")
+    const supporting = reviewable.filter(
+      (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !AI_CREDENTIAL_FILE.test(f.path),
+    )
     const contents = await Promise.all(
       supporting.map((f) => (f.kind === "seed" ? undefined : getContent?.(f.path, "new")?.catch(() => undefined))),
     )

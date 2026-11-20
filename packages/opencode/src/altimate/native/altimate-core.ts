@@ -13,6 +13,9 @@ import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
 import { schemaOrEmpty, SchemaResolver, prepareSql } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
+// altimate_change start — dependency-free so the review runner can use it without loading the binding
+import { isExistenceError } from "./existence-error"
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -20,12 +23,7 @@ import type { AltimateCoreResult } from "./types"
 
 /** Spread a rich TypeScript object into a plain Record for the data field. */
 // altimate_change start — the engine's existence findings, which mean nothing without a schema
-const EXISTENCE_CODES = new Set(["E001", "E002"])
-const EXISTENCE_KINDS = new Set(["TableNotFound", "ColumnNotFound"])
-export function isExistenceError(err: unknown): boolean {
-  const e = err as { code?: unknown; kind?: { type?: unknown } } | null
-  return EXISTENCE_CODES.has(String(e?.code)) || EXISTENCE_KINDS.has(String(e?.kind?.type))
-}
+export { isExistenceError }
 // altimate_change end
 
 // altimate_change start — fail closed when the engine skips plan-based analysis

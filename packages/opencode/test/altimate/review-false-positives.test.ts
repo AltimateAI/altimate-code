@@ -87,6 +87,9 @@ describe("structural catalog checks", () => {
     // Jinja branches can emit a CASE per branch with one shared END: abstain.
     const jinja = "select {% if x %}case when a then 1{% else %}case when b then 2{% endif %} end from t"
     expect(fires("case-when-no-end", jinja)).toBe(false)
+    // A Jinja branch elsewhere (an incremental filter) does not switch the rule off.
+    const incremental = "select case when a > 0 then 1 as x from t\n{% if is_incremental() %}\nwhere ts > (select max(ts) from {{ this }})\n{% endif %}"
+    expect(fires("case-when-no-end", incremental)).toBe(true)
   })
 
   test("SELECT * in final projection only when it reads straight from another relation", () => {

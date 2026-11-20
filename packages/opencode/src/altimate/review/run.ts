@@ -11,6 +11,7 @@ import {
   type ResolvedBase,
   gitRepoRoot,
   listFilesAt,
+  listWorkingTreeFiles,
   grepMatchesAt,
   manifestHash,
   resolveCommit,
@@ -603,6 +604,8 @@ export async function projectResourceNames(
   if (projectRootRel === undefined) return undefined
   const files = await listFilesAt(cwd, head)
   if (!files) return undefined
+  // Working-tree review: models added but not yet committed are refable too.
+  if (head === undefined) files.push(...((await listWorkingTreeFiles(cwd)) ?? []))
   const prefix = projectRootRel ? projectRootRel + "/" : ""
   const names = new Set<string>()
   for (const f of files) if (f.startsWith(prefix) && RESOURCE_FILE.test(f)) names.add(resourceName(f))

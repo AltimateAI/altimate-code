@@ -126,4 +126,18 @@ describe("projectResourceNames", () => {
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
     expect([...(await projectResourceNames(dir, "HEAD", "p", join(dir, "p")))!].sort()).toEqual(["snapshot_rollup", "stg_a"])
   })
+
+  test("working-tree mode includes models that are added but not committed", async () => {
+    const { projectResourceNames } = await import("../../src/altimate/review/run")
+    const dir = mkdtempSync(join(tmpdir(), "names-wt-"))
+    mkdirSync(join(dir, "p/models"), { recursive: true })
+    writeFileSync(join(dir, "p/models/stg_a.sql"), "select 1")
+    const git = (...x: string[]) => execFileSync("git", x, { cwd: dir, stdio: "ignore" })
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    writeFileSync(join(dir, "p/models/stg_new.sql"), "select 2")
+    expect([...(await projectResourceNames(dir, undefined, "p", join(dir, "p")))!].sort()).toEqual(["stg_a", "stg_new"])
+    expect([...(await projectResourceNames(dir, "HEAD", "p", join(dir, "p")))!].sort()).toEqual(["stg_a"])
+  })
 })

@@ -73,6 +73,19 @@ describe("files sent to the advisory AI lane", () => {
     expect(input?.files.map((f) => f.path)).toEqual(["macros/to_cents.sql"])
   })
 
+  test("profiles.yml is never sent: it holds warehouse credentials", async () => {
+    const input = await aiInputFor([
+      mod("models/marts/m.sql"),
+      mod("dbt_project.yml"),
+      mod("profiles.yml", "+      password: hunter2\n"),
+      mod("config/profiles.yaml", "+      token: abc\n"),
+    ])
+    const paths = input!.files.map((f) => f.path)
+    expect(paths).toContain("dbt_project.yml")
+    expect(paths.some((p) => /profiles\.ya?ml$/.test(p))).toBe(false)
+    expect(JSON.stringify(input)).not.toContain("hunter2")
+  })
+
   test("deleted files are not sent", async () => {
     const input = await aiInputFor([mod("models/marts/m.sql"), { path: "macros/old.sql", status: "deleted", diff: "-x\n" }])
     expect(input?.files.some((f) => f.path === "macros/old.sql")).toBe(false)

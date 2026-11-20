@@ -543,21 +543,54 @@ export function literalNullColumns(sql: string): Set<string> {
 const testNames = (tests: unknown): string[] =>
   Array.isArray(tests) ? tests.map((t) => (typeof t === "string" ? t : t && typeof t === "object" ? Object.keys(t)[0] : "")).filter(Boolean) : []
 
-/** not_null / relationships tests, added in this diff, on a column the model always sets to NULL. */
+/** Head-side line numbers of a diff's added lines; undefined when the diff has no hunk headers. */
+function addedLineNumbers(diff: string | undefined): Set<number> | undefined {
+  const out = new Set<number>()
+  let right = 0
+  let inHunk = false
+  for (const line of (diff ?? "").split("\n")) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (h) {
+      right = Number(h[1])
+      inHunk = true
+    } else if (!inHunk || line.startsWith("-") || line.startsWith("\\")) continue
+    else if (line.startsWith("+")) out.add(right++)
+    else right++
+  }
+  return inHunk ? out : undefined
+}
+
+/** Whether this diff added a line inside the YAML node spanning `range` (character offsets into `text`). */
+function addedWithin(text: string, range: [number, number], diff: string | undefined): boolean {
+  const lines = addedLineNumbers(diff)
+  if (lines) {
+    const lineOf = (offset: number) => text.slice(0, offset).split("\n").length
+    const [from, to] = [lineOf(range[0]), lineOf(Math.max(range[0], range[1] - 1))]
+    for (const n of lines) if (n >= from && n <= to) return true
+    return false
+  }
+  // No hunk headers: match added lines against the node's own text.
+  const block = new Set(text.slice(range[0], range[1]).split("\n").map((l) => l.trim()).filter(Boolean))
+  return addedLines(diff).some((l) => block.has(l.trim()))
+}
+
+/** not_null tests, added in this diff, on a column the model always sets to NULL. `relationships`
+ *  is not flagged: dbt's relationships test skips NULL keys, so it passes on an all-NULL column. */
 export function testsOnNullColumns(file: ChangedFile, ymlContent: string | undefined, sqlByModel: Map<string, string>): Finding[] {
   const doc = parseYaml(ymlContent)
-  if (!Array.isArray(doc?.models)) return []
-  const added = addedLines(file.diff).join("\n")
+  if (!ymlContent || !Array.isArray(doc?.models)) return []
+  const ydoc = YAML.parseDocument(ymlContent)
   const out: Finding[] = []
-  for (const m of doc.models) {
+  doc.models.forEach((m: any, i: number) => {
     const sql = m?.name && sqlByModel.get(String(m.name).toLowerCase())
-    if (!sql || !Array.isArray(m.columns)) continue
+    if (!sql || !Array.isArray(m.columns)) return
     const nulls = literalNullColumns(sql)
-    for (const c of m.columns) {
+    m.columns.forEach((c: any, j: number) => {
       const col = String(c?.name ?? "").toLowerCase()
-      if (!nulls.has(col)) continue
-      const failing = [...testNames(c.data_tests), ...testNames(c.tests)].filter((t) => /(^|\.)(not_null|relationships)$/.test(t))
-      if (!failing.length || !new RegExp(`\\b${col}\\b|not_null|relationships`, "i").test(added)) continue
+      if (!nulls.has(col)) return
+      const failing = [...testNames(c.data_tests), ...testNames(c.tests)].filter((t) => /(^|\.)not_null$/.test(t))
+      const node = ydoc.getIn(["models", i, "columns", j], true) as { range?: [number, number, number] } | undefined
+      if (!failing.length || !node?.range || !addedWithin(ymlContent, [node.range[0], node.range[1]], file.diff)) return
       out.push(
         finding(
           file,
@@ -568,7 +601,7 @@ export function testsOnNullColumns(file: ChangedFile, ymlContent: string | undef
           `\`${m.name}\` selects \`${c.name}\` as a literal NULL, so its ${failing.map((t) => `\`${t}\``).join(" / ")} test fails on every row. Drop the test until the column is populated, or populate it.`,
         ),
       )
-    }
-  }
+    })
+  })
   return out
 }

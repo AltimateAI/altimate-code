@@ -71,7 +71,7 @@ export interface Rule {
    * blanked), for shapes a regex can't see: real nesting depth, CASE/END
    * balance, the final SELECT. ANDed with the other conditions.
    */
-  check?: (sql: string) => boolean
+  check?: (sql: string, added: string[]) => boolean
   /** Give `check` the string literals too (comments still blanked), for checks that compare literal text. */
   checkKeepsStrings?: boolean
   /**
@@ -141,7 +141,14 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   if (rule.absentNewSql) {
     if (rule.absentNewSql.test(stripComments(input.newSql))) return false
   }
-  if (rule.check && !rule.check(rule.checkKeepsStrings ? stripComments(input.newSql) : stripStrings(stripComments(input.newSql)))) return false
+  if (
+    rule.check &&
+    !rule.check(
+      rule.checkKeepsStrings ? stripComments(input.newSql) : stripStrings(stripComments(input.newSql)),
+      input.added.map(stripComments),
+    )
+  )
+    return false
   if (rule.onClause) {
     const changed = input.added.map((l) => stripStrings(stripComments(l)).trim()).filter((l) => /\w{2}/.test(l))
     const hit = onClauses(input.newSql).some((c) => rule.onClause!.test(c) && changed.some((l) => c.includes(l)))
@@ -314,7 +321,17 @@ export function subqueryDepth(sql: string): number {
   return max
 }
 
-const JINJA_BRANCH = /\{%-?\s*(if|for|elif|else)\b/i
+/** True when a CASE or END sits inside a Jinja `{% if %}`/`{% for %}` block, where branches can emit different counts. */
+export function caseOrEndInJinjaBranch(sql: string): boolean {
+  let depth = 0
+  let start = 0
+  for (const m of sql.matchAll(/\{%-?\s*(if|for|endif|endfor)\b/gi)) {
+    if (/^(if|for)$/i.test(m[1])) {
+      if (depth++ === 0) start = m.index!
+    } else if (depth > 0 && --depth === 0 && /\b(case|end)\b/i.test(sql.slice(start, m.index!))) return true
+  }
+  return depth > 0 && /\b(case|end)\b/i.test(sql.slice(start))
+}
 
 /** CASE…END nesting depth, or -1 when CASE and END don't balance. */
 export function caseDepth(sql: string): number {
@@ -524,8 +541,9 @@ function duplicateCaseWhen(sql: string): boolean {
   return false
 }
 
-/** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER. */
-export function leftJoinNullifiedByWhere(sql: string): boolean {
+/** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER.
+ *  With `added`, only when an added line references that right side (its columns or its join). */
+export function leftJoinNullifiedByWhere(sql: string, added?: string[]): boolean {
   const scopes = [topLevel(sql), ...[...sql.matchAll(/\(\s*select\b/gi)].map((m) => topLevel(parenBody(sql, m.index!)))]
   for (const scope of scopes) {
     for (const blk of scope.split(/\bunion(?:\s+all|\s+distinct)?\b/i)) {
@@ -541,7 +559,8 @@ export function leftJoinNullifiedByWhere(sql: string): boolean {
         if (
           conjuncts.some(
             (c) => ref.test(c) && !/\bor\b|coalesce|ifnull|nvl/i.test(c) && !new RegExp(`\\b${a}\\.\\w+\\s+is\\s+null\\b`, "i").test(c),
-          )
+          ) &&
+          (!added || added.some((l) => ref.test(l) || new RegExp(`\\bleft\\s+(?:outer\\s+)?join\\b.*\\b${a}\\b`, "i").test(l)))
         )
           return true
       }
@@ -2580,8 +2599,8 @@ const MISC: Rule[] = [
     "CASE without END",
     "The model has more `CASE` than `END` keywords, which is a syntax error.",
     // Whole-file balance, not per line: a CASE whose END sits on a later line is fine.
-    // Jinja branches can emit different CASE/END counts per branch, so they abstain.
-    { added: /\bcase\s+when\b/i, check: (s) => caseDepth(s) === -1 && !JINJA_BRANCH.test(s) },
+    // Jinja branches can emit different CASE/END counts per branch, so a CASE or END inside one abstains.
+    { added: /\bcase\s+when\b/i, check: (s) => caseDepth(s) === -1 && !caseOrEndInJinjaBranch(s) },
     { add: "case when x > 0 then 1" },
     { add: "case when x > 0\n  then 1\n  else 0\nend as flag" },
   ),
