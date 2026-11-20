@@ -218,4 +218,28 @@ describe("Databricks cancel on abort without a deadline", () => {
     expect(result.rows).toEqual([[1]])
     expect(cancels).toBe(0)
   })
+
+  test("with a signal and no `cancelAfterMs`, the close is awaited before the rows return, as on the plain path", async () => {
+    let closed = false
+    closeResult = async () => {
+      await sleep(30)
+      closed = true
+    }
+    const db = await connector()
+    await db.execute("SELECT 1", 10, [], { signal: new AbortController().signal })
+    expect(closed).toBe(true)
+  })
+
+  test("under a deadline, a slow close does not hold up rows that already returned", async () => {
+    let closed = false
+    closeResult = async () => {
+      await sleep(200)
+      closed = true
+    }
+    const db = await connector()
+    const result = await db.execute("SELECT 1", 10, [], { cancelAfterMs: 5_000 })
+    expect(result.rows).toEqual([[1]])
+    expect(closed).toBe(false)
+    expect(closes).toBe(1)
+  })
 })

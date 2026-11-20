@@ -176,7 +176,16 @@ describe("finops_databricks_savings tool", () => {
     const tool = await initTool(FinopsDatabricksSavingsTool)
     const result = await tool.execute({ confirm: true }, stubCtx())
     expect(result.output).toContain("5 SQL warehouses, 0 all-purpose clusters, 0 jobs checked")
-    expect(result.output).toContain("No savings found")
+    expect(result.output).toEndWith("No savings found.")
+  })
+
+  test("no findings with a check skipped or cut at the row limit says only what was checked found none", () => {
+    const empty = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+    const skipped = [{ check: "Jobs on all-purpose clusters", reason: "[INSUFFICIENT_PERMISSIONS] system.lakeflow" }]
+    expect(formatSavings({ ...REPORT, report: empty, skipped } as any)).toEndWith("No savings found in what could be checked.")
+    expect(formatSavings({ ...REPORT, report: empty, limited: ["job task rows"] } as any)).toEndWith(
+      "No savings found in what could be checked.",
+    )
   })
 
   test("a failure is reported with its reason, not as no savings", async () => {

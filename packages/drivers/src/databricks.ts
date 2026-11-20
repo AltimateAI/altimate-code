@@ -86,9 +86,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       throw error
     }
     if (!outcome.stopped) {
-      // Closing frees the server's result; a slow or failed close must not hold up or fail a query
-      // that already returned.
-      void closeQuietly(operation)
+      // Closing frees the server's result, and a failed close must not fail a query that already
+      // returned. Without a deadline it is awaited as on the plain path; under one it runs in the
+      // background, so a slow close cannot push the query past it.
+      if (deadlineMs === undefined) await closeQuietly(operation)
+      else void closeQuietly(operation)
       return outcome.value
     }
     const cancelled = operation ? await cancelAndClose(operation) : false

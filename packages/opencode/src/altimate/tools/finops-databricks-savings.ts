@@ -4,6 +4,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { DatabricksSavingsFinding, DatabricksSavingsReport, DatabricksSavingsResult } from "../native/types"
 import { SAVINGS_RUN_LIMIT_MINUTES } from "../native/finops/savings-run"
+import { ROW_LIMIT } from "../native/finops/databricks-savings"
 import { dollars, oneLine, range } from "./finops-formatting"
 
 /** One shape for every outcome, so a reader of the metadata never guesses which fields exist. */
@@ -85,9 +86,9 @@ export function formatSavings(result: DatabricksSavingsResult): string {
   ].join(", ")
   const lines: string[] = [`Databricks savings: ${counted} checked, the ${report.lookback_days} days to ${result.window.end}, at list price.`]
   for (const one of result.skipped ?? []) lines.push(`Not checked: ${one.check} (${one.reason})`)
-  for (const what of result.limited ?? []) lines.push(`Only the first 10,000 ${what} were read; any beyond them were not checked.`)
+  for (const what of result.limited ?? []) lines.push(`Only the first ${ROW_LIMIT.toLocaleString("en-US")} ${what} were read; any beyond them were not checked.`)
   if (report.findings.length === 0) {
-    lines.push("No savings found.")
+    lines.push(result.skipped?.length || result.limited?.length ? "No savings found in what could be checked." : "No savings found.")
     return lines.join("\n")
   }
   lines.push(

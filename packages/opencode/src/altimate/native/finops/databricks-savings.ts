@@ -26,7 +26,7 @@ const DAY_MS = 86_400_000
 const WINDOW_END_MS = 6 * 3_600_000
 
 /** Rows read per query; a query that fills it says so in the result. */
-const ROW_LIMIT = 10_000
+export const ROW_LIMIT = 10_000
 
 export { SAVINGS_RUN_LIMIT_MS } from "./savings-run"
 
@@ -476,7 +476,10 @@ export async function databricksSavings(
     }
     const warehouses = await read("SQL warehouses", DATABRICKS_WAREHOUSE_FACTS_SQL)
     if (warehouses.length === 0) {
-      return failed(`No SQL warehouses were found for warehouse ${runsOn} in system.compute.warehouses.`)
+      return failed(
+        `No SQL warehouses were found in system.compute.warehouses. The check reads every workspace's warehouses there; ` +
+          `warehouse ${runsOn} only runs the queries.`,
+      )
     }
     // A table the connection may not read stops only its own check; the rest still report.
     const skipped: { check: string; reason: string }[] = []
