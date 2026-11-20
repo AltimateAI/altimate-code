@@ -5,10 +5,10 @@ import { tmpdir } from "node:os"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
-import { isCatalogPortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { isCatalogPortability, runReview, ymlModelColumns, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
-import { extractColumnList, listMirrorsModel, loadConsumerLists } from "../../src/altimate/review/consumer-lists"
+import { extractColumnList, extractColumnLists, listMirrorsModel, loadConsumerLists } from "../../src/altimate/review/consumer-lists"
 import { detectUnitTestFixtures } from "../../src/altimate/review/unit-tests"
 import { capabilityFor } from "../../src/altimate/review/adapter-capabilities"
 
@@ -52,6 +52,12 @@ describe("integer division follows the adapter", () => {
     expect(run("select 1_000 / 3 as r")).toHaveLength(1)
     expect(run("select count(*) / nullif(count(x), 0) as r")).toHaveLength(1)
     expect(run("select count(*) * 1.0 / count(x) as r")).toHaveLength(0)
+    // Already numeric: a decimal multiplier before the ratio, or a cast on the divisor.
+    expect(run("select 100.0 * count(*) / nullif(count(x), 0) as pct")).toHaveLength(0)
+    expect(run("select 1.0 * count(*) / count(x) as r")).toHaveLength(0)
+    expect(run("select count(*) / count(x)::float as r")).toHaveLength(0)
+    expect(run("select count(*) / nullif(count(x), 0)::numeric as r")).toHaveLength(0)
+    expect(run("select 100 * count(*) / count(x) as pct")).toHaveLength(1)
     expect(run("select cast(count(*) as double) / count(x) as r")).toHaveLength(0)
     expect(run("select 7.0 / 2 as r")).toHaveLength(0)
     expect(run("select col1 / 2 as r")).toHaveLength(0)
@@ -160,6 +166,26 @@ describe("consumers outside the DAG", () => {
     expect(yml.findings.some((x) => x.title.includes("missing from the enforced contract"))).toBe(false)
   })
 
+  test("a column another model declares in a changed yml does not count for this model", async () => {
+    const consumers = { exposures: [], contractEnforced: true, contractColumns: ["id", "email", "amount"] }
+    const other = await review(consumers, {
+      ...optIn,
+      changedFiles: [...changed, { path: "models/marts/_other.yml", status: "modified", diff: "+      - name: region\n" }],
+      getContent: async (f, side) =>
+        f.endsWith(".yml") ? "models:\n  - name: dim_region\n    columns:\n      - name: region\n" : side === "old" ? OLD : NEW,
+    })
+    expect(other.findings.find((x) => x.title.includes("missing from the enforced contract"))?.body).toContain("`region`")
+  })
+
+  test("ymlModelColumns reads the model's own entry, including versions", () => {
+    const yml =
+      "models:\n  - name: fct\n    columns:\n      - name: id\n    versions:\n      - v: 2\n        columns:\n          - name: region\n" +
+      "  - name: other\n    columns:\n      - name: email\n"
+    expect([...ymlModelColumns([yml], "fct")].sort()).toEqual(["id", "region"])
+    expect([...ymlModelColumns([yml], "fct_v2")].sort()).toEqual(["id", "region"])
+    expect(ymlModelColumns([yml, "not: [valid"], "missing").size).toBe(0)
+  })
+
   test("a star select is never guessed at", async () => {
     const env = await review(
       { exposures: [{ name: "d" }], contractEnforced: false, contractColumns: [] },
@@ -177,6 +203,14 @@ describe("opt-in consumer column lists", () => {
     expect(listMirrorsModel(list, "fct")).toBe(true)
     expect(listMirrorsModel(list, "fct_orders")).toBe(false)
     expect(listMirrorsModel({ ...list, model: "other" }, "fct")).toBe(false)
+  })
+
+  test("two lists in one file are kept apart, so a stale one is not masked", () => {
+    const py = 'A = [id, amount, region]\nB = [id, amount]\n'
+    expect(extractColumnLists(py, /= \[([^\]]*)\]/)).toEqual([
+      ["id", "amount", "region"],
+      ["id", "amount"],
+    ])
   })
 
   test("a list missing the new column and keeping the removed one is reported", async () => {
