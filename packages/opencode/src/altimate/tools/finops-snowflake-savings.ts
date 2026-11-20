@@ -120,18 +120,26 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
     // `altimate-code tool run`. A refusal throws here, before any connection is opened.
     // Ask about the connection the check runs on, so a rule for one connection holds however the call names it.
     const connection = savingsConnection(args.warehouse)
-    // "Always" covers this connection only, so allowing one does not allow the others; with no connection
-    // to run on, the check fails before any query and there is nothing to keep allowing.
+    // With no connection to run on there is nothing to ask about. Stopping here also keeps the run on the
+    // connection the user was asked about: one added while the prompt is open is not picked up.
+    if ("error" in connection) {
+      return {
+        title: "Snowflake Savings: FAILED",
+        metadata: { success: false, error: connection.error } as SavingsMetadata,
+        output: `The Snowflake savings check failed: ${connection.error}`,
+      }
+    }
+    // "Always" covers this connection only, so allowing one does not allow the others.
     await ctx.ask({
       permission: "finops_snowflake_savings",
-      patterns: [connection ?? (args.warehouse?.trim() || "*")],
-      always: connection ? [connection] : [],
+      patterns: [connection.warehouse],
+      always: [connection.warehouse],
       metadata: {},
     })
     try {
       const result = await Dispatcher.call(
         "finops.snowflake_savings",
-        { warehouse: connection ?? args.warehouse },
+        { warehouse: connection.warehouse },
         { signal: ctx.abort, sessionID: ctx.sessionID },
       )
       if (!result.success || !result.report) {

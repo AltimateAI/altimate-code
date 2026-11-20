@@ -112,7 +112,12 @@ const REPORT: DatabricksSavingsResult = {
 }
 
 describe("finops_databricks_savings tool", () => {
-  beforeEach(() => Dispatcher.reset())
+  // The tool resolves the connection before it asks, so each run needs one configured.
+  beforeEach(() => {
+    Dispatcher.reset()
+    Registry.setConfigs({ dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" } } as any)
+  })
+  afterEach(() => Registry.reset())
 
   test("gives Claude the total, each finding with its evidence, and the whole report as metadata", async () => {
     Dispatcher.register("finops.databricks_savings" as any, async () => REPORT)
@@ -195,11 +200,16 @@ describe("finops_databricks_savings tool", () => {
       expect(result.output).toContain("savings check")
     })
 
-    test("with no connection to run on, \"always\" allows nothing for later connections", async () => {
+    test("with no connection to run on, nothing is asked and nothing runs", async () => {
       Registry.setConfigs({} as any)
       const tool = await initTool(FinopsDatabricksSavingsTool)
-      await tool.execute({}, ctx(true))
-      expect(asks).toEqual([expect.objectContaining({ permission: "finops_databricks_savings", patterns: ["*"], always: [] })])
+      for (const args of [{}, { warehouse: "missing" }]) {
+        const result = await tool.execute(args, ctx(true))
+        expect(result.title).toBe("Databricks Savings: FAILED")
+        expect(result.metadata).toMatchObject({ success: false })
+      }
+      expect(asks).toEqual([])
+      expect(dispatched).toBe(0)
       expect(opened).toBe(0)
     })
 
@@ -376,7 +386,11 @@ describe("databricks savings handler", () => {
 })
 
 describe("cluster and job findings", () => {
-  beforeEach(() => Dispatcher.reset())
+  beforeEach(() => {
+    Dispatcher.reset()
+    Registry.setConfigs({ dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" } } as any)
+  })
+  afterEach(() => Registry.reset())
 
   test("each kind of finding gets its own evidence lines, and a skipped check is named", async () => {
     Dispatcher.register("finops.databricks_savings" as any, async () => ({

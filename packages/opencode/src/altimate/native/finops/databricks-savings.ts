@@ -439,10 +439,10 @@ function resolveConnection(warehouse: string | undefined) {
   })
 }
 
-/** The connection a check with this `warehouse` argument runs on, or undefined when none resolves. */
-export function savingsConnection(warehouse?: string): string | undefined {
+/** The connection a check with this `warehouse` argument runs on, or why there is none. */
+export function savingsConnection(warehouse?: string): { warehouse: string } | { error: string } {
   const resolved = resolveConnection(warehouse)
-  return resolved.kind === "error" ? undefined : resolved.warehouse
+  return resolved.kind === "error" ? { error: resolved.error } : { warehouse: resolved.warehouse }
 }
 
 /** `rules` defaults to the installed core's; tests pass their own. */

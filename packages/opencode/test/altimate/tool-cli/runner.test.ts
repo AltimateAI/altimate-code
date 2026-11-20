@@ -149,6 +149,9 @@ describe("savings checks under tool run", () => {
     ["finops_snowflake_savings", "finops.snowflake_savings"],
   ])("%s runs without a prompt, with or without an older caller's confirm flag", async (tool, method) => {
     const seen: unknown[] = []
+    Registry.setConfigs({
+      w: tool === "finops_databricks_savings" ? { type: "databricks", http_path: "/sql/1.0/warehouses/abc123" } : { type: "snowflake" },
+    } as any)
     Dispatcher.register(method as any, async (params: unknown) => {
       seen.push(params)
       return { success: false, window: { start: "2026-01-05", end: "2026-01-12" }, error: "stub: no warehouse" } as any
@@ -161,6 +164,7 @@ describe("savings checks under tool run", () => {
       expect(seen).toEqual([{ warehouse: "w" }, { warehouse: "w" }])
     } finally {
       registerDefaultNativeHandlers()
+      Registry.reset()
     }
   })
 })

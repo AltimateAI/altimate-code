@@ -74,7 +74,12 @@ const REPORT = {
 } as unknown as SnowflakeSavingsResult
 
 describe("finops_snowflake_savings tool", () => {
-  beforeEach(() => Dispatcher.reset())
+  // The tool resolves the connection before it asks, so each run needs one configured.
+  beforeEach(() => {
+    Dispatcher.reset()
+    Registry.setConfigs({ sf: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" } } as any)
+  })
+  afterEach(() => Registry.reset())
 
   test("gives Claude the total, each finding with its evidence, and the whole report as metadata", async () => {
     Dispatcher.register("finops.snowflake_savings" as any, async () => REPORT)
@@ -148,11 +153,16 @@ describe("finops_snowflake_savings tool", () => {
       expect(result.output).toContain("savings check")
     })
 
-    test("with no connection to run on, \"always\" allows nothing for later connections", async () => {
+    test("with no connection to run on, nothing is asked and nothing runs", async () => {
       Registry.setConfigs({} as any)
       const tool = await initTool(FinopsSnowflakeSavingsTool)
-      await tool.execute({}, ctx(true))
-      expect(asks).toEqual([expect.objectContaining({ permission: "finops_snowflake_savings", patterns: ["*"], always: [] })])
+      for (const args of [{}, { warehouse: "missing" }]) {
+        const result = await tool.execute(args, ctx(true))
+        expect(result.title).toBe("Snowflake Savings: FAILED")
+        expect(result.metadata).toMatchObject({ success: false })
+      }
+      expect(asks).toEqual([])
+      expect(dispatched).toBe(0)
       expect(opened).toBe(0)
     })
 
