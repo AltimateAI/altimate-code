@@ -14,6 +14,7 @@ import {
   listWorkingTreeFiles,
   grepMatchesAt,
   grepFixedAt,
+  projectGrepSpecs,
   manifestHash,
   resolveCommit,
   commitParents,
@@ -457,12 +458,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiVerify: aiVerifyEnabled(),
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
-      const root = projectRootRel ? projectRootRel + "/" : ""
       const dirs = layout
         ? [...layout.dirs.model, ...layout.dirs.macro, ...layout.dirs.seed, ...layout.dirs.snapshot, ...layout.dirs.test]
         : ["models", "macros", "seeds", "snapshots", "tests"]
-      const specs = glob ? [`${root}${glob}`] : dirs.map((d) => path.posix.normalize(root + d))
-      return grepFixedAt(gitRoot, opts.head, pattern, specs.filter((d) => !d.startsWith("..")))
+      const specs = projectGrepSpecs(projectRootRel, dirs, glob)
+      return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
     prTitle: opts.prTitle,
     prBody: opts.prBody,

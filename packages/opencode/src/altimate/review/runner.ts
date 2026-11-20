@@ -1,7 +1,7 @@
 import { Dispatcher } from "../native"
 import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
-import { loadRawManifest } from "../native/dbt/helpers"
+import { findModel, loadRawManifest } from "../native/dbt/helpers"
 import { columnReach } from "../native/dbt/column-reach"
 import { isExistenceError } from "../native/existence-error"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
@@ -495,6 +495,10 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
 
     async columnReach(model: string, column: string, dialect?: string) {
       try {
+        // The model name comes from a verifier tool argument: an unknown name is an
+        // answer ("not in the manifest"), not an engine failure.
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw || !findModel(raw.nodes ?? {}, model)) return undefined
         return columnReach(opts.manifestPath, model, column, dialect)
       } catch (err) {
         fail("columnReach", err)
