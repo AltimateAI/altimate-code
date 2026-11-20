@@ -301,15 +301,27 @@ export function detectCtes(text: string): CteInfo[] {
   return ctes
 }
 
+/** A CTE name or a reference as written: its text without quotes, and whether it was quoted. */
+type Written = { name: string; quoted: boolean }
+
+function written(raw: string): Written {
+  const quote = raw[0]
+  if ((quote === '"' || quote === "`") && raw.length > 1 && raw.endsWith(quote)) return { name: raw.slice(1, -1).replaceAll(quote + quote, quote), quoted: true }
+  if (quote === "[" && raw.endsWith("]")) return { name: raw.slice(1, -1).replaceAll("]]", "]"), quoted: true }
+  return { name: raw, quoted: false }
+}
+
 /**
- * A CTE's name for matching a reference, quotes removed and in lower case: warehouses fold a bare name
- * (Snowflake to upper case, most others to lower), so `orders` and `"ORDERS"` may name the same CTE.
+ * Whether a reference names a CTE. Two bare names match in any letter case; two quoted ones only exactly. A quoted
+ * and a bare one match when the quoted text is the bare name folded to lower case (Postgres, DuckDB, Redshift) or
+ * to upper case (Snowflake), the warehouse being unknown here: so `"ORDERS"` names `orders`, and `"Foo"` does not
+ * name `foo`.
  */
-function referenceKey(name: string): string {
-  const quote = name[0]
-  if ((quote === '"' || quote === "`") && name.length > 1 && name.endsWith(quote)) return name.slice(1, -1).replaceAll(quote + quote, quote).toLowerCase()
-  if (quote === "[" && name.endsWith("]")) return name.slice(1, -1).replaceAll("]]", "]").toLowerCase()
-  return name.toLowerCase()
+function sameName(a: Written, b: Written): boolean {
+  if (!a.quoted && !b.quoted) return a.name.toLowerCase() === b.name.toLowerCase()
+  if (a.quoted && b.quoted) return a.name === b.name
+  const [quoted, bare] = a.quoted ? [a, b] : [b, a]
+  return quoted.name === bare.name.toLowerCase() || quoted.name === bare.name.toUpperCase()
 }
 
 const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
@@ -358,9 +370,14 @@ const CAPTURING = new Set(["set", "call", "macro"])
 function blankJinja(text: string): string {
   const out: string[] = []
   let kept = 0
+  // Blanked to spaces, newlines too: a Jinja comment ends no SQL line comment. Whitespace control (`{{-`, `-}}`)
+  // takes the whitespace beside the tag with it, newlines included, as rendering does.
   const blank = (from: number, to: number) => {
-    out.push(text.substring(kept, from), text.substring(from, to).replace(/[^\n]/g, " "))
+    if (text[from + 2] === "-") while (from > kept && /\s/.test(text[from - 1])) from--
+    if (text[to - 3] === "-") while (to < text.length && /\s/.test(text[to])) to++
+    out.push(text.substring(kept, from), " ".repeat(to - from))
     kept = to
+    return to
   }
   let pos = 0
   while (pos < text.length) {
@@ -403,8 +420,14 @@ function blankJinja(text: string): string {
           scan = next + 1
           continue
         }
-        const tagEnd = jinjaEnd(text, next)
+        let tagEnd = jinjaEnd(text, next)
         const tag = text[next + 1] === "%" ? /^\{%[-+]?\s*(end)?(\w+)/.exec(text.substring(next, Math.min(tagEnd, next + 200))) : null
+        if (tag && !tag[1] && tag[2] === "raw") {
+          // Text inside {% raw %} holds no tags: an `{% endset %}` there does not end the block.
+          const close = /\{%[-+]?\s*endraw\b[^%]*%\}/g
+          close.lastIndex = tagEnd
+          tagEnd = close.exec(text) ? close.lastIndex : text.length
+        }
         if (tag?.[2] === name) {
           const opensAgain = !tag[1] && !(name === "set" && /^\{%[-+]?\s*set\s+[\w.,\s()]+=(?!=)/.test(text.substring(next, tagEnd)))
           if (tag[1]) depth--
@@ -412,12 +435,10 @@ function blankJinja(text: string): string {
         }
         scan = tagEnd
       }
-      blank(at, scan)
-      pos = scan
+      pos = blank(at, scan)
       continue
     }
-    blank(at, end)
-    pos = end
+    pos = blank(at, end)
   }
   out.push(text.substring(kept))
   return out.join("")
@@ -447,8 +468,8 @@ function skipQuoted(text: string, pos: number): number {
  * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names
  * directly: a name outside strings, comments and Jinja (blanked first: `{{ }}`, `{% %}`, `{# #}`, and the SQL a
  * `{% set %}`, `{% call %}` or `{% macro %}` block captures, which is a string for dbt), not qualified by a dot
- * (`schema . orders`) or inside a longer word, equal to the CTE's in any letter case and quoting. A name its own
- * WITH defines again (`with orders as (…) select * from orders` inside the body) is that inner CTE, not a read.
+ * (`schema . orders`) or inside a longer word, that names the CTE (see `sameName`). Once a CTE the body's own
+ * WITH defines has ended, its name is that inner CTE, not a read of the outer one.
  * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not; a CTE
  * named only through Jinja is not seen, nor one shadowed in a deeper subquery, nor one after a nested block
  * comment. A client wanting a CTE's own time subtracts the CTEs it reads directly or through another (the
@@ -456,15 +477,18 @@ function skipQuoted(text: string, pos: number): number {
  */
 export function cteReads(text: string, ctes: CteInfo[]): number[][] {
   const sql = blankJinja(text)
-  // Per WITH clause, the CTEs met so far by name: built up in source order, so each body is scanned once.
-  const seen = new Map<number, Map<string, number[]>>()
+  // Per WITH clause, the CTEs met so far, by the first letters of their names folded: built up in source order,
+  // so each body is scanned once and a reference is compared with few names.
+  const seen = new Map<number, Map<string, { written: Written; position: number }[]>>()
+  const bucket = (name: string) => name.toLowerCase()
   return ctes.map((cte, position) => {
-    const earlier = seen.get(cte.withClauseStart) ?? new Map<string, number[]>()
+    const earlier = seen.get(cte.withClauseStart) ?? new Map<string, { written: Written; position: number }[]>()
     seen.set(cte.withClauseStart, earlier)
     const reads = new Set<number>()
-    // The names the body's own WITH defines shadow the outer CTEs of that name.
+    // The CTEs the body's own WITH defines: each shadows an outer CTE of its name once its definition has ended
+    // (in the later inner CTEs and the body's main query), not inside its own definition or before it.
     const body = sql.substring(cte.queryStart, cte.queryEnd)
-    const shadowed = new Set(earlier.size > 0 && /\bwith\b/i.test(body) ? detectCtes(body).map((inner) => referenceKey(stripColumnList(inner.name))) : [])
+    const inner = earlier.size > 0 && /\bwith\b/i.test(body) ? detectCtes(body).map((one) => ({ written: written(stripColumnList(one.name)), at: cte.queryStart + one.nameStart, from: cte.queryStart + one.queryEnd })) : []
     let pos = cte.queryStart
     // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
     let previous = ""
@@ -500,13 +524,17 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
         pos++
         continue
       }
-      const key = referenceKey(sql.substring(pos, end))
-      if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ") && !shadowed.has(key)) for (const i of earlier.get(key) ?? []) reads.add(i)
+      if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ")) {
+        const ref = written(sql.substring(pos, end))
+        // An inner CTE's own name where it is defined is no reference at all.
+        const shadowed = inner.some((one) => one.at === pos || (one.from < pos && sameName(one.written, ref)))
+        if (!shadowed) for (const one of earlier.get(bucket(ref.name)) ?? []) if (sameName(one.written, ref)) reads.add(one.position)
+      }
       previous = sql[end - 1]
       pos = end
     }
-    const key = referenceKey(stripColumnList(cte.name))
-    earlier.set(key, [...(earlier.get(key) ?? []), position])
+    const own = written(stripColumnList(cte.name))
+    earlier.set(bucket(own.name), [...(earlier.get(bucket(own.name)) ?? []), { written: own, position }])
     return [...reads].sort((a, b) => a - b)
   })
 }

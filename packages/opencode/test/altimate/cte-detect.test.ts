@@ -1679,10 +1679,12 @@ select * from b`
 
   it("matches a name in any letter case and quoting, brackets included, and keeps to its own WITH clause", () => {
     const sql = `with "Big" as (select 1), other as (select 2),
-q as (select * from big), r as (select * from "OTHER"), s as (select * from [Big]), t as (select * from \`other\`)
+q as (select * from "Big"), r as (select * from "OTHER"), s as (select * from [Big]), t as (select * from \`other\`), u as (select * from big)
 select * from (with inner_cte as (select * from q) select * from inner_cte)`
-    expect(readsOf(sql)).toEqual({ '"Big"': [], other: [], q: ['"Big"'], r: ["other"], s: ['"Big"'], t: ["other"] })
-    const bracketed = "with [Big Spenders] as (select 1), [we]]ird] as (select 2), b as (select * from [Big Spenders] join [WE]]IRD] on 1 = 1) select * from b"
+    // A bare name matches a quoted one only as its lower- or upper-case form: \`big\` is not "Big".
+    expect(readsOf(sql)).toEqual({ '"Big"': [], other: [], q: ['"Big"'], r: ["other"], s: ['"Big"'], t: ["other"], u: [] })
+    expect(readsOf('with "Foo" as (select 1), foo as (select 2), keep as (select * from foo) select * from keep').keep).toEqual(["foo"])
+    const bracketed = "with [Big Spenders] as (select 1), [we]]ird] as (select 2), b as (select * from [Big Spenders] join [we]]ird] on 1 = 1) select * from b"
     expect(readsOf(bracketed)).toEqual({ "[Big Spenders]": [], "[we]]ird]": [], b: ["[Big Spenders]", "[we]]ird]"] })
   })
 
@@ -1728,6 +1730,9 @@ select * from c`
       `select "{{ var("orders") }}" from raw.customers`,
       `select 'prefix {# 'orders' #} suffix' as label`,
       `{% call statement('x') %}select * from orders{% endcall %} select 1 as n`,
+      `select 2 -- {#\n#} from orders`,
+      `select 2 -- {{ var('flag', 0) -}}\n from orders`,
+      `{% set q %}{% raw %}{% endset %}{% endraw %}\nselect * from orders\n{% endset %}\nselect 2`,
     ]
     for (const body of bodies) expect(readsOf(wrap(body)).b).toEqual([])
     // Jinja output between real SQL keeps the SQL readable, and {% raw %} text is SQL as written.
@@ -1736,6 +1741,9 @@ select * from c`
   })
 
   it("a name the body's own WITH defines again is that inner CTE, not a read of the outer one", () => {
+    // Inside its own definition, or in an inner CTE before it, the name is still the outer CTE.
+    expect(readsOf("with orders as (select 1), b as (with x as (select * from orders), orders as (select 2) select * from x) select * from b").b).toEqual(["orders"])
+    expect(readsOf("with orders as (select 1), b as (with orders as (select * from orders) select * from orders) select * from b").b).toEqual(["orders"])
     const sql = "with orders as (select 1), b as (with orders as (select 2) select * from orders), c as (with x as (select 3) select * from x join orders on 1 = 1) select * from c"
     expect(readsOf(sql)).toEqual({ orders: [], b: [], c: ["orders"] })
   })
