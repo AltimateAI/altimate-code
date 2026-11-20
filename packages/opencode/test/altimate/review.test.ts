@@ -2127,6 +2127,41 @@ describe("orchestrate", () => {
     expect(env.verdict).toBe("REQUEST_CHANGES")
   })
 
+  test("without a compiled base, head PII may predate the PR: reported as a non-blocking warning", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    lower(email) as email\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii(sql: string) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
+      },
+      async columnLineage(sql) {
+        return [
+          { source: "customers.customer_id", target: "customer_id" },
+          ...(sql.includes("email") ? [{ source: "customers.email", target: "email" }] : []),
+        ]
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({ column, classification: "Email", confidence: 0.95 }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      // The base is raw Jinja with no compiled artifact: it cannot be analysed.
+      getContent: content(
+        "select customer_id, lower(email) as email from customers",
+        "select customer_id, email from {{ ref('customers') }}",
+      ),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii.length).toBeGreaterThan(0)
+    expect(pii.every((f) => f.severity !== "critical")).toBe(true)
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
+  })
+
   test("case-variant PII detector output does not duplicate core diff-scoped finding", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    Email as EMAIL\n" }]
     const runner: ReviewRunner = {

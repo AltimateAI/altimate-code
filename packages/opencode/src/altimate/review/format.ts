@@ -161,7 +161,7 @@ function ruleTitle(f: Finding): string {
 }
 
 /** Render findings of one severity as bullets; a rule repeated on GROUP_MIN or
- *  more models collapses into a single bullet listing the models. */
+ *  more distinct models collapses into a single bullet listing the models. */
 function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
   const groups = new Map<string, Finding[]>()
   for (const f of items) {
@@ -172,8 +172,10 @@ function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
   }
   const out: Array<{ text: string; count: number }> = []
   for (const g of groups.values()) {
-    if (g.length >= GROUP_MIN) {
-      const names = [...new Set(g.map((f) => f.model ?? f.file))]
+    // Group by distinct models: several findings of one rule on the SAME model
+    // (e.g. two different columns) are distinct issues and stay separate bullets.
+    const names = [...new Set(g.map((f) => f.model ?? f.file))]
+    if (names.length >= GROUP_MIN) {
       const shown = names.slice(0, 8).map((n) => `\`${n}\``).join(", ")
       const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
       out.push({

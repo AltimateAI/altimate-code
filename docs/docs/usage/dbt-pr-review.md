@@ -299,7 +299,9 @@ rubric:
   fingerprint, so a push does not repeat findings already on the PR, and a
   non-blocking rerun with nothing new only updates the summary.
 - **PII:** flagged only for PII columns the change newly exposes, not for
-  columns the base already surfaced.
+  columns the base already surfaced. That comparison needs the base version's
+  SQL; when it can't be compiled, PII columns are reported as non-blocking
+  warnings that may predate the PR.
 
 ### Risk-tier path tokens
 

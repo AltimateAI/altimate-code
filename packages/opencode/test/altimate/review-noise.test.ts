@@ -150,6 +150,15 @@ describe("summary grouping and budget", () => {
     expect(md.match(/no uniqueness\/grain test/g)?.length).toBe(2)
   })
 
+  test("several findings of one rule on the same model are not collapsed", () => {
+    const fs = ["a_id", "b_id", "c_id"].map((c) =>
+      finding({ model: "m", file: "models/m.sql", title: `m: grain column \`${c}\` lacks not_null`, category: "test_coverage" }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).not.toContain("findings across")
+    for (const c of ["a_id", "b_id", "c_id"]) expect(md).toContain(c)
+  })
+
   test("backticked column names do not split a group", () => {
     const fs = ["a", "b", "c"].map((m) =>
       finding({ model: m, file: `models/${m}.sql`, title: `${m}: grain column \`${m}_id\` lacks not_null`, category: "test_coverage" }),

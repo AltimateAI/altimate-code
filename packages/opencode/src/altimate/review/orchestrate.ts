@@ -1064,6 +1064,9 @@ async function piiClassifyLane(
   // apply (`missingGrainTestLane` also includes `intermediate`): an internal
   // intermediate model surfacing PII is a warning, not a hard block.
   const highExposureLayer = /(^|\/)(marts|reporting)\//.test(file.path)
+  // Without a compiled base, every head column counts as "introduced", so a
+  // pre-existing column can't be told apart: never escalate to critical then.
+  const baseUnknown = hasOldSide(file) && !ctx.engineOldSql
   for (const p of pii) {
     const classification = String(p.classification ?? "")
     const lowRiskClass = PII_LOW_RISK_CLASS.test(classification)
@@ -1071,7 +1074,7 @@ async function piiClassifyLane(
     if (p.confidence < minConfidence || !p.column) continue
     const col = p.column.toLowerCase()
     const highConfidence = p.confidence >= 0.9
-    const severity: Severity = highExposureLayer && highConfidence && !lowRiskClass ? "critical" : "warning"
+    const severity: Severity = highExposureLayer && highConfidence && !lowRiskClass && !baseUnknown ? "critical" : "warning"
     out.push(
       makeFinding({
         severity: clampSeverity("pii_exposure", severity, highConfidence ? "high" : "medium"),
@@ -1092,20 +1095,26 @@ async function piiClassifyLane(
   return { findings: out, classifiedColumns, completed: true }
 }
 
-function piiLane(file: ChangedFile & { kind: string }, columns: string[]): Finding[] {
+/** `baseUnknown`: the file had a previous version but its base SQL could not
+ *  be compiled, so these columns may predate the PR. Reported as a warning
+ *  (never blocking) instead of a critical "newly exposed" finding. */
+function piiLane(file: ChangedFile & { kind: string }, columns: string[], baseUnknown = false): Finding[] {
   if (file.status === "deleted" || !columns.length) return []
   const model = modelNameFromPath(file.path)
   return [
     makeFinding({
-      severity: "critical",
+      severity: baseUnknown ? "warning" : "critical",
       category: "pii_exposure",
       title: `${model}: exposes PII column${columns.length !== 1 ? "s" : ""} (${columns.join(", ")})`,
       body:
         `This model surfaces PII-classified column(s): ${columns.map((c) => `\`${c}\``).join(", ")}.` +
-        ` Confirm masking/access policy before merging to a non-restricted schema.`,
+        ` Confirm masking/access policy before merging to a non-restricted schema.` +
+        (baseUnknown
+          ? " The base version could not be compiled, so these columns may already be exposed before this PR."
+          : ""),
       file: file.path,
       model,
-      confidence: "high",
+      confidence: baseUnknown ? "medium" : "high",
       evidence: { tool: "schema.detect_pii", result: { columns } },
       ruleKey: "pii:exposure",
     }),
@@ -1303,7 +1312,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             )
             fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
           }
-          findings.push(...piiLane(currentCtx.file, fallbackPii))
+          const baseUnknown = hasOldSide(currentCtx.file) && !currentCtx.engineOldSql
+          findings.push(...piiLane(currentCtx.file, fallbackPii, baseUnknown))
         }
         return findings
       })(),
