@@ -117,6 +117,11 @@ describe("on_schema_change='fail'", () => {
   test("an unchanged column set is fine", async () => {
     expect(await rules({ oldSql: INC("select id from s", cfg), newSql: INC("select id from s", cfg) })).not.toContain("on-schema-change-fail")
   })
+  test("a filter-only change is still reported as needing a history plan", async () => {
+    const oldSql = `{{ config(${cfg}) }} select id from s {% if is_incremental() %} where ts > (select max(ts) from {{ this }}) {% endif %}`
+    const newSql = oldSql.replace("where ts >", "where ts >=")
+    expect(await rules({ oldSql, newSql })).toEqual(["incremental-history-plan"])
+  })
 })
 
 describe("per-slice runs whose unique_key lacks the slice column", () => {

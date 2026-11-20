@@ -215,12 +215,13 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
 
   if (cfg.materialized === "incremental") {
     // History diverges from new rows when the incremental filter changes or a
-    // column is added (old rows get NULL). Formatting-only edits never count,
-    // and `on_schema_change='fail'` has its own finding below.
-    if (!isNew && input.oldSql && cfg.onSchemaChange !== "fail" && bodyTokens(input.oldSql) !== bodyTokens(input.newSql) &&
+    // column is added (old rows get NULL). Formatting-only edits never count.
+    // Under `on_schema_change='fail'` column changes have their own finding
+    // below, so only a filter change is reported here.
+    if (!isNew && input.oldSql && bodyTokens(input.oldSql) !== bodyTokens(input.newSql) &&
         !PLAN_RE.test(input.prText)) {
       const filterChanged = incrementalFilter(input.oldSql) !== incrementalFilter(input.newSql)
-      const { added } = await input.columnDelta()
+      const added = cfg.onSchemaChange === "fail" ? [] : (await input.columnDelta()).added
       if (filterChanged || added.length) {
         const why = [
           added.length ? `${ticks(added)} ${added.length === 1 ? "is" : "are"} new: rows built before this change get NULL unless backfilled.` : "",
