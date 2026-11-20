@@ -78,7 +78,7 @@ describe("finops_snowflake_savings tool", () => {
   test("gives Claude the total, each finding with its evidence, and the whole report as metadata", async () => {
     Dispatcher.register("finops.snowflake_savings" as any, async () => REPORT)
     const tool = await initTool(FinopsSnowflakeSavingsTool)
-    const result = await tool.execute({ warehouse: "sf", confirm: true }, stubCtx())
+    const result = await tool.execute({ warehouse: "sf" }, stubCtx())
     expect(result.title).toBe("Snowflake Savings: $54.00–$90.00 a month on 1 warehouse")
     expect(result.metadata.report).toEqual(REPORT.report)
     expect(result.metadata.price).toEqual(REPORT.price)
@@ -92,24 +92,63 @@ describe("finops_snowflake_savings tool", () => {
     expect(result.output).toContain("Lowering the maximum from 2 to 1 cluster may add some queueing")
   })
 
-  test("without the user's go-ahead nothing runs: the agent is told to ask first", async () => {
-    let ran = false
-    Dispatcher.register("finops.snowflake_savings" as any, async () => {
-      ran = true
-      return REPORT
+  describe("asks permission before any query", () => {
+    // The real check behind the tool, so a refusal is shown to reach no connection, not only to skip a stub.
+    let dispatched: number
+    let opened: number
+    let queried: number
+    let asks: any[]
+    const ctx = (allow: boolean) => ({
+      ...stubCtx(),
+      ask: async (input: unknown) => {
+        asks.push(input)
+        if (!allow) throw new Error("The user rejected permission to use this specific tool call.")
+      },
     })
-    const tool = await initTool(FinopsSnowflakeSavingsTool)
-    for (const args of [{}, { confirm: false }, { warehouse: "sf" }]) {
-      const result = await tool.execute(args, stubCtx())
-      expect(result.title).toBe("Snowflake Savings: not run, needs the user's go-ahead")
-      expect(result.metadata).toMatchObject({ success: true, needs_confirmation: true })
-      expect(result.metadata.report).toBeUndefined()
-      expect(result.output).toContain("Snowflake resumes if it is suspended")
-      expect(result.output).toContain("It stops after 9 minutes, cancelling any query still running.")
-      expect(result.output).toContain("Ask the user whether to run it; if they agree, call this tool again with confirm: true.")
-    }
-    expect(ran).toBe(false)
-    expect(tool.description).toEndWith("Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.")
+    beforeEach(() => {
+      dispatched = 0
+      opened = 0
+      queried = 0
+      asks = []
+      Registry.setConfigs({ sf: { type: "snowflake", account: "a", user: "u", password: "p", warehouse: "BI_WH" } } as any)
+      const rules = () => ({ lookback_days: 7, price_per_credit: 3, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] })
+      Dispatcher.register("finops.snowflake_savings" as any, async (params: any) => (dispatched++, snowflakeSavings(params, rules)))
+      tracked(spyOn(Registry, "get")).mockImplementation((async () => {
+        opened++
+        return { execute: async () => (queried++, { columns: [], rows: [], truncated: false }) }
+      }) as any)
+    })
+    afterEach(() => Registry.reset())
+
+    test("a refusal runs nothing: no dispatch and no connection", async () => {
+      const tool = await initTool(FinopsSnowflakeSavingsTool)
+      // An older caller's confirm flag no longer stands in for the user's answer.
+      for (const args of [{ warehouse: "sf" }, { warehouse: "sf", confirm: true }])
+        await expect(tool.execute(args, ctx(false))).rejects.toThrow("rejected permission")
+      expect(asks).toHaveLength(2)
+      for (const ask of asks) expect(ask).toMatchObject({ permission: "finops_snowflake_savings", patterns: ["sf"], always: ["*"] })
+      expect(dispatched).toBe(0)
+      expect(opened).toBe(0)
+      expect(queried).toBe(0)
+    })
+
+    test("once allowed, the check runs on the warehouse", async () => {
+      const tool = await initTool(FinopsSnowflakeSavingsTool)
+      const result = await tool.execute({}, ctx(true))
+      expect(asks).toEqual([expect.objectContaining({ permission: "finops_snowflake_savings", patterns: ["*"] })])
+      expect(dispatched).toBe(1)
+      expect(opened).toBe(1)
+      // Empty answers fail the check later on; what matters here is that it reached the warehouse.
+      expect(queried).toBeGreaterThan(0)
+      expect(result.output).toContain("savings check")
+    })
+
+    test("the description says it bills, stops after 9 minutes and asks first", async () => {
+      const tool = await initTool(FinopsSnowflakeSavingsTool)
+      expect(tool.description).toContain("bills while the check runs; the check stops after 9 minutes, cancelling any query still running.")
+      expect(tool.description).toContain("The user is asked for permission before the first query.")
+      expect(tool.description).not.toContain("confirm")
+    })
   })
 
   test("the session's stop signal reaches the check", async () => {
@@ -120,7 +159,7 @@ describe("finops_snowflake_savings tool", () => {
     })
     const tool = await initTool(FinopsSnowflakeSavingsTool)
     const ctx = stubCtx()
-    await tool.execute({ confirm: true }, ctx)
+    await tool.execute({}, ctx)
     expect(seen).toEqual({ signal: ctx.abort, sessionID: "test" })
   })
 
@@ -131,7 +170,7 @@ describe("finops_snowflake_savings tool", () => {
       report: { ...REPORT.report, findings: only, total: { monthly_min: 0, monthly_max: 0, resources: 0 } },
     }))
     const tool = await initTool(FinopsSnowflakeSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.title).toBe("Snowflake Savings: 1 finding, no dollar estimate")
     expect(result.output).not.toContain("Total:")
   })
@@ -169,10 +208,10 @@ describe("finops_snowflake_savings tool", () => {
     const empty = { ...REPORT.report!, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 } }
     Dispatcher.register("finops.snowflake_savings" as any, async () => ({ ...REPORT, report: empty }))
     const tool = await initTool(FinopsSnowflakeSavingsTool)
-    expect((await tool.execute({ confirm: true }, stubCtx())).title).toBe("Snowflake Savings: no savings found")
+    expect((await tool.execute({}, stubCtx())).title).toBe("Snowflake Savings: no savings found")
     expect(formatSavings({ ...REPORT, limited: ["metering"], report: empty })).toEndWith("No savings found in what could be checked.")
     Dispatcher.register("finops.snowflake_savings" as any, async () => ({ ...REPORT, limited: ["metering"], report: empty }))
-    expect((await tool.execute({ confirm: true }, stubCtx())).title).toBe(
+    expect((await tool.execute({}, stubCtx())).title).toBe(
       "Snowflake Savings: no savings found in what could be checked",
     )
   })
@@ -184,7 +223,7 @@ describe("finops_snowflake_savings tool", () => {
       error: "SQL access control error: Insufficient privileges",
     }))
     const tool = await initTool(FinopsSnowflakeSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.title).toBe("Snowflake Savings: FAILED")
     expect(result.metadata.error).toContain("Insufficient privileges")
     expect(result.output).not.toContain("No savings found")

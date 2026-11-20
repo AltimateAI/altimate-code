@@ -118,7 +118,7 @@ async function run(args: string[], env: Record<string, string>, setup?: (home: s
 }
 
 const assessment = { ALTIMATE_ASSESSMENT_MODE: "true", ALTIMATE_TELEMETRY_DISABLED: "true" }
-const savings = ["tool", "run", "finops_databricks_savings", "--args", '{"confirm":true}', "--json", "--no-daemon"]
+const savings = ["tool", "run", "finops_databricks_savings", "--args", "{}", "--json", "--no-daemon"]
 
 describe("assessment mode on the packaged CLI", () => {
   posixOnly("control: without assessment mode, telemetry off still sends the opt-out event to the telemetry endpoint", async () => {
@@ -132,25 +132,22 @@ describe("assessment mode on the packaged CLI", () => {
     expect(JSON.parse(result.stdout).status).toBe("error")
   }, 120_000)
 
-  posixOnly("without the user's go-ahead the check does not run and no host is contacted", async () => {
-    const unconfirmed = ["tool", "run", "finops_databricks_savings", "--args", "{}", "--json", "--no-daemon"]
-    const result = await run(unconfirmed, assessment)
+  posixOnly("an older caller's confirm flag is accepted: the run goes ahead the same way and no host is contacted", async () => {
+    const withConfirm = ["tool", "run", "finops_databricks_savings", "--args", '{"confirm":true}', "--json", "--no-daemon"]
+    const result = await run(withConfirm, assessment)
     expect(result.hosts).toEqual([])
-    expect(JSON.parse(result.stdout).output).toContain("call this tool again with confirm: true")
+    expect(JSON.parse(result.stdout).status).toBe("error")
+    expect(JSON.parse(result.stdout).output).not.toContain("invalid arguments")
   }, 120_000)
 
-  posixOnly("the Snowflake check: unconfirmed, with no warehouse, and with an unreachable one, no other host is contacted", async () => {
+  posixOnly("the Snowflake check: with no warehouse, and with an unreachable one, no other host is contacted", async () => {
     const snowflake = (args: string) => ["tool", "run", "finops_snowflake_savings", "--args", args, "--json", "--no-daemon"]
-    const unconfirmed = await run(snowflake("{}"), assessment)
-    expect(unconfirmed.hosts).toEqual([])
-    expect(JSON.parse(unconfirmed.stdout).output).toContain("call this tool again with confirm: true")
-
-    const noWarehouse = await run(snowflake('{"confirm":true}'), assessment)
+    const noWarehouse = await run(snowflake("{}"), assessment)
     expect(noWarehouse.hosts).toEqual([])
     expect(JSON.parse(noWarehouse.stdout).status).toBe("error")
 
     const account = "egress-test.invalid"
-    const unreachable = await run(snowflake('{"confirm":true}'), assessment, async (_home, project) => {
+    const unreachable = await run(snowflake("{}"), assessment, async (_home, project) => {
       await mkdir(path.join(project, ".altimate-code"), { recursive: true })
       await writeFile(
         path.join(project, ".altimate-code", "connections.json"),

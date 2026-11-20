@@ -3,12 +3,18 @@ import type { Tool } from "../../tool/tool"
 import { classifyAndCheck } from "../tools/sql-classify"
 import * as Registry from "../native/connections/registry"
 
-/** Permission kinds the data tools raise for reads; anything else is a write and needs `--allow-write`. */
+/**
+ * Permission kinds the data tools raise for reads; anything else is a write and needs `--allow-write`.
+ * The savings checks are read-only but bill the warehouse. Nothing here can prompt, so a CLI caller's own
+ * `tool run` is their go-ahead, and over MCP the client's own tool permissions decide.
+ */
 export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
   "sql_execute",
   "sql_execute_read",
   "schema_inspect",
   "answer_commit",
+  "finops_databricks_savings",
+  "finops_snowflake_savings",
 ])
 
 // Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts), found by the SQL

@@ -96,6 +96,8 @@ Rules are evaluated in order and the last matching rule wins, so put a `"*"` rul
 | `list` | Yes | List directories |
 | `bash` | Yes | Shell commands |
 | `sql_execute_write` | Yes | SQL write operations (INSERT, UPDATE, DELETE, etc.) |
+| `finops_databricks_savings` | Yes | Databricks savings check; asks by default, since it can start a stopped warehouse. Patterns match its `warehouse` argument (`*` when omitted) |
+| `finops_snowflake_savings` | Yes | Snowflake savings check; asks by default, since it can resume a suspended warehouse. Patterns match its `warehouse` argument (`*` when omitted) |
 | `task` | Yes | Spawn subagents |
 | `lsp` | Yes | LSP operations |
 | `skill` | Yes | Execute skills |

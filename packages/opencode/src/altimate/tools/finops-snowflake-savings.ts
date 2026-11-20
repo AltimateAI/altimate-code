@@ -19,8 +19,6 @@ type SavingsMetadata = {
   warehouses?: SnowflakeSavingsResult["warehouses"]
   report?: SnowflakeSavingsReport
   error?: string
-  /** True when the check did not run because `confirm` was not set. */
-  needs_confirmation?: boolean
 }
 
 const count = (value: unknown) => Number(value).toLocaleString("en-US")
@@ -108,31 +106,23 @@ export function formatSavings(result: SnowflakeSavingsResult): string {
 
 export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings", {
   description:
-    "Check a Snowflake account for savings with Altimate's rules: warehouses that sit idle, could run one size smaller, keep an unneeded extra cluster, or restart so often they are billed twice. Read-only: SHOW WAREHOUSES plus five queries on the connection's warehouse: four read up to eleven days of SNOWFLAKE.ACCOUNT_USAGE, to report on seven, and one reads the rate sheet. Snowflake resumes that warehouse if it is suspended and auto-resume is on. Returns each finding with its monthly dollar range and evidence. Ask the user before running it, and pass confirm: true once they agree; without it nothing runs.",
+    `Check a Snowflake account for savings with Altimate's rules: warehouses that sit idle, could run one size smaller, keep an unneeded extra cluster, or restart so often they are billed twice. Read-only: SHOW WAREHOUSES plus five queries on the connection's warehouse: four read up to eleven days of SNOWFLAKE.ACCOUNT_USAGE, to report on seven, and one reads the rate sheet. Snowflake resumes that warehouse if it is suspended and auto-resume is on, and it bills while the check runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. The user is asked for permission before the first query. Returns each finding with its monthly dollar range and evidence.`,
   parameters: z.object({
     warehouse: z
       .string()
       .optional()
       .describe("Snowflake connection name. Optional — omit to use the first configured Snowflake connection."),
-    confirm: z
-      .boolean()
-      .optional()
-      .describe(
-        `Set to true only after the user has agreed to run the check. It runs six queries on their Snowflake account; five use the connection's warehouse, which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs; the check stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running.`,
-      ),
   }),
   async execute(args, ctx) {
-    if (args.confirm !== true) {
-      // Asking first is the expected first step, not a failed run.
-      return {
-        title: "Snowflake Savings: not run, needs the user's go-ahead",
-        metadata: { success: true, needs_confirmation: true } as SavingsMetadata,
-        output:
-          "Not run. The Snowflake savings check runs six queries that read up to eleven days of account usage, to report on seven; five use the connection's warehouse, " +
-          `which Snowflake resumes if it is suspended and auto-resume is on, and which bills while it runs. It stops after ${SAVINGS_RUN_LIMIT_MINUTES} minutes, cancelling any query still running. ` +
-          "Ask the user whether to run it; if they agree, call this tool again with confirm: true.",
-      }
-    }
+    // The check can resume a suspended warehouse that then bills, so nothing reaches Snowflake until the
+    // permission system says yes: a prompt in a session, a rule in the user's config, or the user's own
+    // `altimate-code tool run`. A refusal throws here, before any connection is opened.
+    await ctx.ask({
+      permission: "finops_snowflake_savings",
+      patterns: [args.warehouse ?? "*"],
+      always: ["*"],
+      metadata: {},
+    })
     try {
       const result = await Dispatcher.call(
         "finops.snowflake_savings",

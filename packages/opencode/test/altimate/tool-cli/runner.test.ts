@@ -143,6 +143,28 @@ describe("tool run", () => {
   })
 })
 
+describe("savings checks under tool run", () => {
+  test.each([
+    ["finops_databricks_savings", "finops.databricks_savings"],
+    ["finops_snowflake_savings", "finops.snowflake_savings"],
+  ])("%s runs without a prompt, with or without an older caller's confirm flag", async (tool, method) => {
+    const seen: unknown[] = []
+    Dispatcher.register(method as any, async (params: unknown) => {
+      seen.push(params)
+      return { success: false, window: { start: "2026-01-05", end: "2026-01-12" }, error: "stub: no warehouse" } as any
+    })
+    try {
+      for (const args of [{ warehouse: "w" }, { warehouse: "w", confirm: true }]) {
+        const result = await runner.run(tool, args)
+        expect(result.output).toContain("stub: no warehouse")
+      }
+      expect(seen).toEqual([{ warehouse: "w" }, { warehouse: "w" }])
+    } finally {
+      registerDefaultNativeHandlers()
+    }
+  })
+})
+
 describe("ask handler", () => {
   const ask = (allowWrite: boolean, permission: string, patterns: string[] = ["*"]) =>
     Effect.runSyncExit(askFor(allowWrite)({ permission, patterns, always: [], metadata: {} }))
@@ -150,6 +172,9 @@ describe("ask handler", () => {
   test("reads pass, everything else is denied by default", () => {
     for (const kind of ["sql_execute", "sql_execute_read", "schema_inspect", "answer_commit"])
       expect(Exit.isSuccess(ask(false, kind))).toBe(true)
+    // The savings checks are reads that bill the warehouse; calling `tool run` is the user's go-ahead.
+    for (const kind of ["finops_databricks_savings", "finops_snowflake_savings"])
+      expect(Exit.isSuccess(ask(false, kind, ["dbx"]))).toBe(true)
     for (const kind of ["sql_execute_write", "bash", "external_directory", "edit", "warehouse_add"])
       expect(Exit.isFailure(ask(false, kind))).toBe(true)
   })

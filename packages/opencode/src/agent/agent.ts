@@ -149,6 +149,11 @@ export const layer = Layer.effect(
           // "*": "deny", so this only affects write-capable agents.
           sensitive_write: "ask",
           // altimate_change end
+          // altimate_change start — the savings checks query the user's warehouse, which can start
+          // it and bill, so they prompt unless the user allows them in config.
+          finops_databricks_savings: "ask",
+          finops_snowflake_savings: "ask",
+          // altimate_change end
           // mirrors github.com/github/gitignore Node.gitignore pattern for .env files
           read: {
             "*": "allow",
@@ -267,8 +272,10 @@ export const layer = Layer.effect(
           finops_analyze_credits: "allow",
           finops_expensive_queries: "allow",
           finops_warehouse_advice: "allow",
-          finops_databricks_savings: "allow",
-          finops_snowflake_savings: "allow",
+          // Prompt rather than allow: each run queries the warehouse, which can start it and bill. Not
+          // "allow", so the data-explorer subagent, which replays only allowed entries, cannot run them.
+          finops_databricks_savings: "ask",
+          finops_snowflake_savings: "ask",
           finops_unused_resources: "allow",
           finops_role_grants: "allow",
           finops_role_hierarchy: "allow",

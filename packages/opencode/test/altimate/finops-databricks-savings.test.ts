@@ -116,7 +116,7 @@ describe("finops_databricks_savings tool", () => {
   test("gives Claude the total, each finding with its evidence, and the whole report as metadata", async () => {
     Dispatcher.register("finops.databricks_savings" as any, async () => REPORT)
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
 
     expect(result.title).toBe("Databricks Savings: $53.20–$66.50 a month on 1 resource(s)")
     expect(result.output).toContain("Total: $53.20–$66.50 a month on 1 resource, each counted once at its largest saving.")
@@ -133,28 +133,69 @@ describe("finops_databricks_savings tool", () => {
   test("the number of workspaces checked reaches the metadata", async () => {
     Dispatcher.register("finops.databricks_savings" as any, async () => ({ ...REPORT, workspaces_checked: 3 }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.metadata.workspaces_checked).toBe(3)
   })
 
-  test("without the user's go-ahead nothing runs: the agent is told to ask first", async () => {
-    let ran = 0
-    Dispatcher.register("finops.databricks_savings" as any, async () => {
-      ran++
-      return REPORT
+  describe("asks permission before any query", () => {
+    // The real check behind the tool, so a refusal is shown to reach no connection, not only to skip a stub.
+    let dispatched: number
+    let opened: number
+    let queried: number
+    let asks: any[]
+    const ctx = (allow: boolean) => ({
+      ...stubCtx(),
+      ask: async (input: unknown) => {
+        asks.push(input)
+        if (!allow) throw new Error("The user rejected permission to use this specific tool call.")
+      },
     })
-    const tool = await initTool(FinopsDatabricksSavingsTool)
-    for (const args of [{}, { confirm: false }, { warehouse: "dbx" }]) {
-      const result = await tool.execute(args as any, stubCtx())
-      expect(result.title).toBe("Databricks Savings: not run, needs the user's go-ahead")
-      // Asking first is the expected step, so it is not recorded as a failed run.
-      expect(result.metadata).toMatchObject({ success: true, needs_confirmation: true })
-      expect(result.metadata.report).toBeUndefined()
-      expect(result.output).toContain("Ask the user whether to run it; if they agree, call this tool again with confirm: true.")
-      expect(result.output).toContain("runs three queries")
-      expect(result.output).toContain("It stops after 9 minutes, cancelling any query still running.")
-    }
-    expect(ran).toBe(0)
+    beforeEach(() => {
+      dispatched = 0
+      opened = 0
+      queried = 0
+      asks = []
+      Registry.setConfigs({
+        dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" },
+      })
+      const rules = () => ({ lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] })
+      Dispatcher.register("finops.databricks_savings" as any, async (params: any) => (dispatched++, databricksSavings(params, rules)))
+      tracked(spyOn(Registry, "get")).mockImplementation((async () => {
+        opened++
+        return { execute: async () => (queried++, { columns: [], rows: [], truncated: false }) }
+      }) as any)
+    })
+    afterEach(() => Registry.reset())
+
+    test("a refusal runs nothing: no dispatch and no connection", async () => {
+      const tool = await initTool(FinopsDatabricksSavingsTool)
+      // An older caller's confirm flag no longer stands in for the user's answer.
+      for (const args of [{ warehouse: "dbx" }, { warehouse: "dbx", confirm: true }])
+        await expect(tool.execute(args, ctx(false))).rejects.toThrow("rejected permission")
+      expect(asks).toHaveLength(2)
+      for (const ask of asks) expect(ask).toMatchObject({ permission: "finops_databricks_savings", patterns: ["dbx"], always: ["*"] })
+      expect(dispatched).toBe(0)
+      expect(opened).toBe(0)
+      expect(queried).toBe(0)
+    })
+
+    test("once allowed, the check runs on the warehouse", async () => {
+      const tool = await initTool(FinopsDatabricksSavingsTool)
+      const result = await tool.execute({}, ctx(true))
+      expect(asks).toEqual([expect.objectContaining({ permission: "finops_databricks_savings", patterns: ["*"] })])
+      expect(dispatched).toBe(1)
+      expect(opened).toBe(1)
+      // Empty answers fail the check later on; what matters here is that it reached the warehouse.
+      expect(queried).toBeGreaterThan(0)
+      expect(result.output).toContain("savings check")
+    })
+
+    test("the description says it bills, stops after 9 minutes and asks first", async () => {
+      const tool = await initTool(FinopsDatabricksSavingsTool)
+      expect(tool.description).toContain("bills while the check runs; the check stops after 9 minutes, cancelling any query still running.")
+      expect(tool.description).toContain("The user is asked for permission before the first query.")
+      expect(tool.description).not.toContain("confirm")
+    })
   })
 
   test("the session's stop signal reaches the check", async () => {
@@ -165,7 +206,7 @@ describe("finops_databricks_savings tool", () => {
     })
     const tool = await initTool(FinopsDatabricksSavingsTool)
     const ctx = stubCtx()
-    await tool.execute({ confirm: true }, ctx)
+    await tool.execute({}, ctx)
     expect(seen).toEqual({ signal: ctx.abort, sessionID: "test" })
   })
 
@@ -175,7 +216,7 @@ describe("finops_databricks_savings tool", () => {
       report: { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] },
     }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.output).toContain("5 SQL warehouses, 0 all-purpose clusters, 0 jobs checked")
     expect(result.output).toEndWith("No savings found.")
   })
@@ -196,7 +237,7 @@ describe("finops_databricks_savings tool", () => {
       error: "[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`compute`.`warehouse_events` cannot be found.",
     }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.title).toBe("Databricks Savings: FAILED")
     expect(result.metadata.error).toContain("TABLE_OR_VIEW_NOT_FOUND")
     expect(result.output).not.toContain("No savings found")
@@ -342,7 +383,7 @@ describe("cluster and job findings", () => {
       },
     }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.output).toContain("5 SQL warehouses, 3 all-purpose clusters, 4 jobs checked")
     expect(result.output).toContain("Not checked: Job Running on All-Purpose Compute ([INSUFFICIENT_PERMISSIONS] system.lakeflow.jobs)")
     expect(result.output).toContain("shared-analytics (cluster) · Idle Cluster Detection · $765–$1,530 a month (critical)")
@@ -361,7 +402,7 @@ describe("cluster and job findings", () => {
     }
     Dispatcher.register("finops.databricks_savings" as any, async () => ({ ...REPORT, report: { lookback_days: 7, findings: [finding], total: { monthly_min: 30, monthly_max: 60, resources: 1 }, what_if: [] } }))
     const tool = await initTool(FinopsDatabricksSavingsTool)
-    const result = await tool.execute({ confirm: true }, stubCtx())
+    const result = await tool.execute({}, stubCtx())
     expect(result.output).toContain('1 task run (periodic), under 0.1 hours on all-purpose compute, under 0.1 DBUs, most on cluster "a [2Jb"')
     expect(result.output).toContain("nightly Total: $0 (job)")
     // A name with nothing printable falls back to the id, for the job and for its cluster.
@@ -374,7 +415,7 @@ describe("cluster and job findings", () => {
         what_if: [{ resource_id: "wh1", resource_name: "BI\nTotal: $0", current_label: "SMALL (PRO)", current_monthly_cost: 10, choices: [] }],
       },
     }))
-    const unnamed = await (await initTool(FinopsDatabricksSavingsTool)).execute({ confirm: true }, stubCtx())
+    const unnamed = await (await initTool(FinopsDatabricksSavingsTool)).execute({}, stubCtx())
     expect(unnamed.output).toContain("42 (job)")
     expect(unnamed.output).toContain('most on cluster "c"')
     expect(unnamed.output).toContain("What BI Total: $0 (now")
