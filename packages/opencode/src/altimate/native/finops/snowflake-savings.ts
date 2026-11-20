@@ -297,8 +297,8 @@ const HOUR_MS = 3_600_000
 const CLOCK_SKEW_MS = 60_000
 
 /**
- * When a fact row's usage began, in milliseconds: its `first_start` (epoch seconds), or the start of its
- * UTC day when that is missing, the earliest it could have begun.
+ * When a fact row's usage began, in milliseconds: its `first_start` (epoch seconds). A row without one (only
+ * hand-built rows) falls back to the start of its UTC day.
  */
 function startOf(row: Row): number {
   if (row.first_start != null && row.first_start !== "") return num(row.first_start) * 1000
@@ -310,80 +310,93 @@ function startOf(row: Row): number {
 const active = (row: Row) =>
   num(row.credits_used) > 0 || whole(row.periods) > 0 || whole(row.bounces) > 0 || whole(row.query_count) > 0
 
+/** Orders larger values first; an unreadable time sorts last. */
+const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
+
 /**
  * The input core reads, one entry per warehouse `SHOW WAREHOUSES` lists, which gives names and no ids.
- * Usage belongs to a warehouse id: a renamed warehouse keeps its id, so an id's usage goes to the name
- * its latest usage was under. A dropped warehouse's name can come back on a new one, so a listed warehouse's
- * id is the newest of its name's ids with no usage from before the warehouse was created; a metered hour
- * counts from its start, which can be up to an hour before the creation inside it, and other times may
- * read up to a minute early. Usage under that name from any other id is its predecessor's and is left out.
+ * Usage belongs to a warehouse id, and each id belongs to at most one listed warehouse:
+ * - the name its latest usage was under, unless some of its usage began before the warehouse now holding
+ *   that name was created (a dropped warehouse whose name was reused);
+ * - otherwise another listed name it was seen under, created before all of its usage (a warehouse renamed
+ *   away from a name that was then reused).
+ * A metered hour counts from its start, which can be up to an hour before the creation inside it, and other
+ * times may read up to a minute early. A name that several ids belong to keeps the one used last.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
- * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits, periods,
- * restarts or queries): that earlier usage is left out.
+ * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits,
+ * periods, restarts or queries): that earlier usage is left out.
  */
 export function buildFacts(rows: FactRows) {
   const listed = new Set(rows.warehouses.map((row) => String(row.name ?? "")))
   const createdAt = new Map(rows.warehouses.map((row) => [String(row.name ?? ""), timeOf(row.created_on)]))
-  // On a tie, a listed name beats an unlisted one, and a warehouse that existed by then beats one created later.
-  const rank = (name: string, at: number) => (listed.has(name) ? 2 : 0) + (at < (createdAt.get(name) ?? Number.NaN) ? 0 : 1)
-  const lastSeen = new Map<number, { at: number; name: string }>()
-  for (const row of [...rows.metering, ...rows.periods, ...rows.restarts, ...rows.queries]) {
-    const id = num(row.warehouse_id)
-    const name = String(row.warehouse_name ?? "")
-    const start = startOf(row)
-    const at = Number.isFinite(start) ? start : -Infinity
-    const known = lastSeen.get(id)
-    if (!known || at > known.at || (at === known.at && rank(name, at) > rank(known.name, at))) lastSeen.set(id, { at, name })
-  }
-
-  const nameOf = (row: Row) => lastSeen.get(num(row.warehouse_id))?.name ?? ""
-  // Every id's rows from every source, each with whether its time is hourly (metering).
+  // Each id's rows from every source, with whether a row's time is a metered hour, and when each of its names was last seen.
   const sources = [
     { list: rows.metering, hourly: true },
     { list: rows.periods, hourly: false },
     { list: rows.restarts, hourly: false },
     { list: rows.queries, hourly: false },
   ]
-  const idsByName = new Map<string, Set<number>>()
-  // Keyed by the id as text, so `entry` can create each list.
-  const rowsById = new Map<string, { row: Row; hourly: boolean }[]>()
+  const rowsById = new Map<number, { row: Row; hourly: boolean }[]>()
+  const namesById = new Map<number, Map<string, number>>()
   for (const { list, hourly } of sources) {
     for (const row of list) {
       const id = num(row.warehouse_id)
-      entry(idsByName, nameOf(row), () => new Set()).add(id)
-      entry(rowsById, String(id), () => []).push({ row, hourly })
+      const name = String(row.warehouse_name ?? "")
+      const start = startOf(row)
+      const at = Number.isFinite(start) ? start : -Infinity
+      rowsById.set(id, [...(rowsById.get(id) ?? []), { row, hourly }])
+      const names = namesById.get(id) ?? new Map<string, number>()
+      names.set(name, Math.max(names.get(name) ?? -Infinity, at))
+      namesById.set(id, names)
     }
   }
-  /**
-   * Whether none of an id's usage began before `created`. An unreadable creation time proves nothing either way;
-   * an unreadable start compares false, so that usage is not attributed.
-   */
+  /** An id's names, latest first; on a tie a listed name comes first. */
+  const namesOf = (id: number) =>
+    [...(namesById.get(id) ?? [])]
+      .sort(([a, at], [b, bt]) => later(at, bt) || Number(listed.has(b)) - Number(listed.has(a)))
+      .map(([name]) => name)
+  const lastSeen = (id: number) => Math.max(...(namesById.get(id)?.values() ?? []))
+  /** Whether none of an id's usage began before `created`. An unreadable start compares false. */
   const startedAfter = (id: number, created: number) =>
-    !Number.isFinite(created) ||
-    (rowsById.get(String(id)) ?? []).every(({ row, hourly }) => {
+    (rowsById.get(id) ?? []).every(({ row, hourly }) => {
       const start = startOf(row)
       return hourly ? start + HOUR_MS > created : start + CLOCK_SKEW_MS >= created
     })
-  const replaced = new Set<string>()
-
-  /** The listed warehouse's id, or undefined when every id under its name predates it. */
-  const idFor = (row: Row): number | undefined => {
-    const name = String(row.name ?? "")
-    const created = timeOf(row.created_on)
-    const ids = [...(idsByName.get(name) ?? [])]
-    const own = ids.filter((id) => startedAfter(id, created))
-    const id = own.length ? Math.max(...own) : undefined
-    for (const other of ids) {
-      if (other === id) continue
-      if (rowsById.get(String(other))?.some(({ row: one }) => active(one))) replaced.add(name)
+  /** The listed warehouse an id belongs to, if any. An unreadable creation time proves nothing either way. */
+  const ownerOf = (id: number): string | undefined => {
+    const [last, ...earlier] = namesOf(id)
+    if (last !== undefined && listed.has(last)) {
+      const created = createdAt.get(last) ?? Number.NaN
+      if (!Number.isFinite(created) || startedAfter(id, created)) return last
     }
-    return id
+    // Moving an id to another of its names needs that warehouse's creation time to show the id fits it: an
+    // unreadable one compares false.
+    return earlier.find((name) => listed.has(name) && startedAfter(id, createdAt.get(name) ?? Number.NaN))
+  }
+  const replaced = new Set<string>()
+  const unlisted = new Set<string>()
+  const idsByOwner = new Map<string, number[]>()
+  for (const [id, list] of rowsById) {
+    const owner = ownerOf(id)
+    if (owner !== undefined) {
+      idsByOwner.set(owner, [...(idsByOwner.get(owner) ?? []), id])
+      continue
+    }
+    const last = namesOf(id)[0] ?? ""
+    if (listed.has(last) && list.some(({ row }) => active(row))) replaced.add(last)
+    if (!listed.has(last) && list.some(({ hourly }) => hourly)) unlisted.add(last)
+  }
+  const idOf = new Map<string, number>()
+  for (const [owner, ids] of idsByOwner) {
+    const [id, ...others] = ids.sort((a, b) => later(lastSeen(a), lastSeen(b)) || b - a)
+    idOf.set(owner, id!)
+    if (others.some((other) => rowsById.get(other)?.some(({ row }) => active(row)))) replaced.add(owner)
   }
   const of = (list: Row[], id: number | undefined) => (id === undefined ? [] : list.filter((one) => num(one.warehouse_id) === id))
 
   const facts = rows.warehouses.map((row) => {
     const name = String(row.name ?? "")
-    const id = idFor(row)
+    const id = idOf.get(name)
     const usage = new Map<string, { day: string; credits_used: number | null; active_periods: number; short_periods: number }>()
     const idle = new Map<string, { day: string; active_seconds: number; idle_seconds: number; credits_used: number }>()
     const clusters = new Map<string, Map<string, { cluster_number: number; idle_seconds: number; busy_seconds: number }>>()
@@ -451,8 +464,7 @@ export function buildFacts(rows: FactRows) {
       restart_days: [...gaps].map(([day, byGap]) => ({ day, gaps: [...byGap.values()] })),
     }
   })
-  const unlisted = [...new Set(rows.metering.map(nameOf))].filter((name) => !listed.has(name)).sort()
-  return { facts, unlisted, replaced: [...replaced].sort() }
+  return { facts, unlisted: [...unlisted].sort(), replaced: [...replaced].sort() }
 }
 
 /** The price of a credit: the account's rate when it can be read in dollars, otherwise list price. */

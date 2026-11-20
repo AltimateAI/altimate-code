@@ -632,6 +632,60 @@ describe("building the facts", () => {
       expect(replaced).toEqual([])
     })
 
+    test("a warehouse renamed within a metered hour keeps its usage when its old name is reused", () => {
+      // Id 5 resumed as BI_WH at 12:10 and was renamed ETL_WH at 12:30; the 12:00 hour was metered under ETL_WH.
+      const { facts, replaced } = buildFacts({
+        warehouses: [...listed, show({ name: "ETL_WH", created_on: new Date("2026-10-01T00:00:00Z") })],
+        metering: [
+          { warehouse_id: 5, warehouse_name: "ETL_WH", usage_day: day, idle_day: day, credits_used: 2, first_start: at("2026-11-12T12:00:00Z") },
+          { warehouse_id: 9, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 1, first_start: at("2026-11-12T18:00:00Z") },
+        ],
+        periods: [{ ...predecessor.periods[0]!, warehouse_id: 5, first_start: at("2026-11-12T12:10:00Z") }],
+        restarts: [],
+        queries: [],
+      })
+      expect(facts.map((one) => [one.warehouse_name, one.warehouse_id])).toEqual([
+        ["BI_WH", "9"],
+        ["ETL_WH", "5"],
+      ])
+      expect(facts[1]!.usage_days).toEqual([{ day, credits_used: 2, active_periods: 3, short_periods: 1 }])
+      expect(replaced).toEqual([])
+    })
+
+    test("a name reused by renaming an older warehouse into it keeps that warehouse, not the dropped one", () => {
+      // X_WH (id 9) billed on 10 Nov and was dropped; OLD_WH (id 5, created 2025) was then renamed X_WH.
+      const { facts, replaced } = buildFacts({
+        warehouses: [show({ name: "X_WH", created_on: new Date("2025-06-01T00:00:00Z") })],
+        metering: [
+          { warehouse_id: 9, warehouse_name: "X_WH", usage_day: "2026-11-10", idle_day: "2026-11-10", credits_used: 50, first_start: at("2026-11-10T08:00:00Z") },
+          { warehouse_id: 5, warehouse_name: "OLD_WH", usage_day: "2026-11-09", idle_day: "2026-11-09", credits_used: 3, first_start: at("2026-11-09T08:00:00Z") },
+          { warehouse_id: 5, warehouse_name: "X_WH", usage_day: day, idle_day: day, credits_used: 2, first_start: at("2026-11-12T08:00:00Z") },
+        ],
+        periods: [],
+        restarts: [],
+        queries: [],
+      })
+      expect(facts[0]!.warehouse_id).toBe("5")
+      expect(facts[0]!.usage_days.map((one) => one.credits_used)).toEqual([3, 2])
+      expect(replaced).toEqual(["X_WH"])
+    })
+
+    test("an id is moved to another of its names only when that warehouse's creation time shows it fits", () => {
+      // Id 5 was last seen as BI_WH, which was created after it ran; ETL_WH, its other name, has no creation time.
+      const { facts, replaced } = buildFacts({
+        warehouses: [...listed, show({ name: "ETL_WH" })],
+        metering: [
+          { warehouse_id: 5, warehouse_name: "ETL_WH", usage_day: day, idle_day: day, credits_used: 2, first_start: at("2026-11-12T09:00:00Z") },
+          { warehouse_id: 5, warehouse_name: "BI_WH", usage_day: day, idle_day: day, credits_used: 1, first_start: at("2026-11-12T10:00:00Z") },
+        ],
+        periods: [],
+        restarts: [],
+        queries: [],
+      })
+      expect(facts.map((one) => one.warehouse_id)).toEqual(["unused:BI_WH", "unused:ETL_WH"])
+      expect(replaced).toEqual(["BI_WH"])
+    })
+
     test("a predecessor from the day before is still left out, with or without new usage", () => {
       const yesterday = {
         ...predecessor,
