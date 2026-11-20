@@ -213,6 +213,19 @@ describe("finops_databricks_savings tool", () => {
       expect(opened).toBe(0)
     })
 
+    test("a connection that does not go through a SQL warehouse fails before the ask", async () => {
+      Registry.setConfigs({
+        dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/protocolv1/o/1/0101-cluster", access_token: "x" },
+      } as any)
+      const tool = await initTool(FinopsDatabricksSavingsTool)
+      const result = await tool.execute({ warehouse: "dbx" }, ctx(true))
+      expect(result.title).toBe("Databricks Savings: FAILED")
+      expect(result.output).toContain("does not go through a SQL warehouse")
+      expect(asks).toEqual([])
+      expect(dispatched).toBe(0)
+      expect(opened).toBe(0)
+    })
+
     test("a rule for one connection holds however the call names it", async () => {
       Registry.setConfigs({ dbx: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" }, other: { type: "databricks", server_hostname: "dbc-0.cloud.databricks.com", http_path: "/sql/1.0/warehouses/abc123", access_token: "x" } } as any)
       const rules = Permission.fromConfig({ finops_databricks_savings: { "*": "allow", dbx: "deny" } })

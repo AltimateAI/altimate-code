@@ -13,6 +13,7 @@ describe("savings check permission prompt", () => {
   })
 
   test("leaves every other permission to the generic prompt", () => {
-    for (const permission of ["bash", "sql_execute", "finops_query_history"]) expect(savingsPermissionPrompt(permission, ["x"])).toBeUndefined()
+    for (const permission of ["bash", "sql_execute", "finops_query_history", "constructor", "toString", "__proto__"])
+      expect(savingsPermissionPrompt(permission, ["x"])).toBeUndefined()
   })
 })

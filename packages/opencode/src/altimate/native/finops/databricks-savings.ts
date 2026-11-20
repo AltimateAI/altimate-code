@@ -439,10 +439,21 @@ function resolveConnection(warehouse: string | undefined) {
   })
 }
 
-/** The connection a check with this `warehouse` argument runs on, or why there is none. */
+/** The SQL warehouse a connection's queries run on, from its http_path; undefined when it names none. */
+function sqlWarehouseOf(connection: string): string | undefined {
+  const config = Registry.getConfig(connection) as Record<string, unknown> | undefined
+  return WAREHOUSE_PATH.exec(String(config?.http_path ?? config?.httpPath ?? ""))?.[1]
+}
+
+const notOnWarehouse = (connection: string) =>
+  `Connection ${JSON.stringify(connection)} does not go through a SQL warehouse. ` +
+  "Its http_path must name one (/sql/1.0/warehouses/<id>): the check's queries run on that warehouse."
+
+/** The connection a check with this `warehouse` argument runs on, or why it cannot run on one. */
 export function savingsConnection(warehouse?: string): { warehouse: string } | { error: string } {
   const resolved = resolveConnection(warehouse)
-  return resolved.kind === "error" ? { error: resolved.error } : { warehouse: resolved.warehouse }
+  if (resolved.kind === "error") return { error: resolved.error }
+  return sqlWarehouseOf(resolved.warehouse) ? { warehouse: resolved.warehouse } : { error: notOnWarehouse(resolved.warehouse) }
 }
 
 /** `rules` defaults to the installed core's; tests pass their own. */
@@ -457,15 +468,8 @@ export async function databricksSavings(
   const resolved = resolveConnection(params.warehouse)
   if (resolved.kind === "error") return failed(resolved.error)
 
-  const config = Registry.getConfig(resolved.warehouse) as Record<string, unknown> | undefined
-  const path = String(config?.http_path ?? config?.httpPath ?? "")
-  const runsOn = WAREHOUSE_PATH.exec(path)?.[1]
-  if (!runsOn) {
-    return failed(
-      `Connection ${JSON.stringify(resolved.warehouse)} does not go through a SQL warehouse. ` +
-        "Its http_path must name one (/sql/1.0/warehouses/<id>): the check's queries run on that warehouse.",
-    )
-  }
+  const runsOn = sqlWarehouseOf(resolved.warehouse)
+  if (!runsOn) return failed(notOnWarehouse(resolved.warehouse))
 
   if (!rules) {
     return failed("This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.")
