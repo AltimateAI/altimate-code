@@ -55,6 +55,11 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
     const n = Number(v)
     return v && Number.isFinite(n) && n > 0 ? n : d
   }
+  // A quota of 0 disables that bucket.
+  const quota = (v: string | undefined, d: number) => {
+    const n = Number(v)
+    return v && Number.isInteger(n) && n >= 0 ? n : d
+  }
   const coverageOn = env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
   return {
     maxFiles: num(env.ALTIMATE_REVIEW_AI_MAX_FILES, MAX_FILES),
@@ -65,10 +70,10 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
         ? {
             diffChars: num(env.ALTIMATE_REVIEW_AI_COVERAGE_DIFF_CHARS, COVERAGE_DIFF_CHARS),
             quotas: {
-              model: num(env.ALTIMATE_REVIEW_AI_QUOTA_MODEL, COVERAGE_QUOTAS.model),
-              macro: num(env.ALTIMATE_REVIEW_AI_QUOTA_MACRO, COVERAGE_QUOTAS.macro),
-              test: num(env.ALTIMATE_REVIEW_AI_QUOTA_TEST, COVERAGE_QUOTAS.test),
-              yml: num(env.ALTIMATE_REVIEW_AI_QUOTA_YML, COVERAGE_QUOTAS.yml),
+              model: quota(env.ALTIMATE_REVIEW_AI_QUOTA_MODEL, COVERAGE_QUOTAS.model),
+              macro: quota(env.ALTIMATE_REVIEW_AI_QUOTA_MACRO, COVERAGE_QUOTAS.macro),
+              test: quota(env.ALTIMATE_REVIEW_AI_QUOTA_TEST, COVERAGE_QUOTAS.test),
+              yml: quota(env.ALTIMATE_REVIEW_AI_QUOTA_YML, COVERAGE_QUOTAS.yml),
             },
           }
         : undefined,
@@ -172,7 +177,9 @@ export function selectAiFilesByQuota(
     .forEach(({ f }) => byBucket.get(BUCKET_OF[f.kind ?? "model_sql"] ?? "model")!.push(f))
   const take = new Map(BUCKET_ORDER.map((b) => [b, Math.min(quotas[b], byBucket.get(b)!.length)]))
   let spare = BUCKET_ORDER.reduce((n, b) => n + quotas[b], 0) - [...take.values()].reduce((n, t) => n + t, 0)
+  // Unused quota flows to other kinds, but never into a bucket disabled with quota 0.
   for (const b of BUCKET_ORDER) {
+    if (quotas[b] <= 0) continue
     const extra = Math.min(spare, byBucket.get(b)!.length - take.get(b)!)
     take.set(b, take.get(b)! + extra)
     spare -= extra
@@ -267,10 +274,18 @@ const JINJA = /\{\{|\{%/
  * Returns undefined when the raw line numbers already match (or nothing can be
  * checked), the found line numbers when at least half of the eligible added
  * lines (8+ non-space chars, no Jinja) are found by text, and "unlocated" otherwise.
+ * With no eligible added line (Jinja-only or very short changes), the context
+ * lines decide: raw line numbers are trusted only when those match.
  */
 function locateAddedLines(lines: string[], rows: Array<{ line: number; text: string; kind: string }>): number[] | "unlocated" | undefined {
-  const eligible = rows.filter((r) => r.kind === "+" && !JINJA.test(r.text) && r.text.replace(/\s/g, "").length >= 8)
-  if (!eligible.length || eligible.every((r) => lines[r.line - 1]?.trim() === r.text.trim())) return undefined
+  const isEligible = (r: { text: string }) => !JINJA.test(r.text) && r.text.replace(/\s/g, "").length >= 8
+  const matchesRaw = (r: { line: number; text: string }) => lines[r.line - 1]?.trim() === r.text.trim()
+  const eligible = rows.filter((r) => r.kind === "+" && isEligible(r))
+  if (!eligible.length) {
+    const context = rows.filter((r) => r.kind !== "+" && isEligible(r))
+    return context.length && !context.every(matchesRaw) ? "unlocated" : undefined
+  }
+  if (eligible.every(matchesRaw)) return undefined
   const found: number[] = []
   const used = new Set<number>()
   let from = 0
@@ -396,7 +411,7 @@ function renderFile(f: AiReviewFile, maxChars: number, coverageArg: CoverageArg,
     if (coverage && f.diff.length > maxChars) {
       const { text: excerpt, ...ex } = excerptDiff(f.diff, coverage.diffChars)
       stats = ex
-      if (ex.hunksSent === ex.hunksTotal && !ex.truncated) fileChars = COVERAGE_FULL_DIFF_FILE_CHARS
+      if (ex.hunksSent === ex.hunksTotal && !ex.truncated) fileChars = Math.min(COVERAGE_FULL_DIFF_FILE_CHARS, maxChars)
       parts.push("Diff:\n```diff\n" + excerpt + "\n```")
     } else parts.push("Diff:\n```diff\n" + truncate(f.diff, maxChars) + "\n```")
   }
@@ -485,7 +500,7 @@ export interface AiLaneStatus {
   replayIncomplete?: boolean
   /** What each file sent carried; recorded under coverage, context cards or dry run. */
   input?: AiInputRecord[]
-  /** Sendable files left out by the coverage quotas; the orchestrator lists them as not reviewed. */
+  /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes). */
   unsent?: string[]
 }
 /** One file as sent to the model. */
@@ -567,8 +582,9 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
   return buildBatchMessage(input, maxFileChars, coverage).message
 }
 
-/** The user message for one call and a record of each file it carries. Context
- *  cards stop once a call holds 6,000 characters of them. */
+/** The user message for one call and a record of each file it carries. A context
+ *  card is added only while the call's cards total at most 6,000 characters; a card
+ *  that would pass that is skipped and later, smaller ones may still fit. */
 function buildBatchMessage(input: AiReviewInput, maxFileChars: number, coverage: CoverageArg): { message: string; records: AiInputRecord[] } {
   const records: AiInputRecord[] = []
   const parts: string[] = []
@@ -625,8 +641,8 @@ export interface AiInputPlan {
 
 /**
  * Plan the lane's input without calling a model: selection, batching, the exact
- * user messages and what each file carries. Pure apart from reading `env`;
- * `runAiReview` sends exactly these messages.
+ * user messages and what each file carries. Pure: the budget comes from the
+ * `env` argument; `runAiReview` sends exactly these messages.
  */
 export function planAiInput(input: AiReviewInput, env: Record<string, string | undefined> = process.env): AiInputPlan {
   const budget = aiInputBudget(env)
@@ -652,7 +668,6 @@ export function planAiInput(input: AiReviewInput, env: Record<string, string | u
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
   const replay = aiReplayPath()
-  if (replay) return runAiReplay(input, replay)
   const startedAt = Date.now()
   const plan = planAiInput(input)
   const { files, budget } = plan
@@ -666,8 +681,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     findings,
     status: { ...status, ...recorded, durationMs: Date.now() - startedAt },
   })
-  if (!files.length) return done([], { state: "skipped", reason: "no changed dbt files to review" })
+  if (!files.length && (dryRun || !replay)) return done([], { state: "skipped", reason: "no changed dbt files to review" })
+  // Dry run wins over replay: a replayed envelope would still reach the verifier, a model call.
   if (dryRun) return done([], { state: "skipped", reason: "dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call" })
+  if (replay) return runAiReplay(input, replay)
 
   let modelLabel: string | undefined
   try {

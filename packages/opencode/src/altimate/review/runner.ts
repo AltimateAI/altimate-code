@@ -40,6 +40,11 @@ function asArray<T = any>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : []
 }
 
+/** A repo-relative changed path names the manifest's project-relative `file` (same path, or under a project subdirectory). */
+function pathMatches(path: string, file: unknown): boolean {
+  return typeof file === "string" && !!file && (path === file || path.endsWith("/" + file))
+}
+
 /**
  * Copy `primary_key` from `source` (manifest, which has dbt contract PKs) onto
  * matching tables in `target` (catalog, which has complete columns but no PK).
@@ -565,15 +570,43 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
     },
 
-    async modelCard(name: string): Promise<ModelCard | undefined> {
+    async patchedModels(path: string): Promise<string[]> {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw) return []
+        const project = raw.metadata?.project_name
+        const out: string[] = []
+        for (const [id, n] of Object.entries<any>(raw.nodes ?? {})) {
+          if (!/^(model|snapshot|seed)\./.test(id) || typeof n?.patch_path !== "string") continue
+          if (project && n.package_name !== project) continue
+          if (pathMatches(path, n.patch_path.replace(/^[^:/]+:\/\//, ""))) out.push(String(n.name))
+        }
+        return out
+      } catch (err) {
+        fail("patchedModels", err)
+        return []
+      }
+    },
+
+    async modelCard(name: string, cardOpts?: { path?: string }): Promise<ModelCard | undefined> {
       try {
         const raw = loadRawManifest(opts.manifestPath)
         if (!raw) return undefined
+        const project = raw.metadata?.project_name
         const nodes = Object.entries<any>(raw.nodes ?? {})
         const isModel = (id: string) => id.startsWith("model.")
+        const isOther = (id: string) => id.startsWith("snapshot.") || id.startsWith("seed.")
+        const own = (n: any) => !project || n?.package_name === project
+        const path = cardOpts?.path
+        // The changed file itself, then same-named nodes in this project, then any package.
         const hit =
+          (path
+            ? nodes.find(([id, n]) => (isModel(id) || isOther(id)) && own(n) && pathMatches(path, n?.original_file_path))
+            : undefined) ??
+          nodes.find(([id, n]) => isModel(id) && own(n) && n?.name === name) ??
+          nodes.find(([id, n]) => isOther(id) && own(n) && n?.name === name) ??
           nodes.find(([id, n]) => isModel(id) && n?.name === name) ??
-          nodes.find(([id, n]) => (id.startsWith("snapshot.") || id.startsWith("seed.")) && n?.name === name)
+          nodes.find(([id, n]) => isOther(id) && n?.name === name)
         if (!hit) return undefined
         const [uid, node] = hit
         const config = node.config ?? {}
@@ -654,14 +687,14 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         if (!raw) return undefined
         const project = raw.metadata?.project_name
         const macros = Object.entries<any>(raw.macros ?? {})
-        const byName = macros.filter(([, m]) => m?.name === name)
+        const own = (m: any) => !project || m?.package_name === project
         const path = cardOpts?.path
+        // Macros defined in the changed file within this project (the one named
+        // like the file first), then by name in this project, then any package.
+        const inFile = path ? macros.filter(([, m]) => own(m) && pathMatches(path, m?.original_file_path)) : []
+        const byName = macros.filter(([, m]) => m?.name === name)
         const hit =
-          byName.find(([, m]) => m.package_name === project) ??
-          byName[0] ??
-          (path
-            ? macros.find(([, m]) => typeof m?.original_file_path === "string" && (path === m.original_file_path || path.endsWith("/" + m.original_file_path)))
-            : undefined)
+          inFile.find(([, m]) => m.name === name) ?? inFile[0] ?? byName.find(([, m]) => own(m)) ?? byName[0]
         if (!hit) return undefined
         const [uid, macro] = hit
         const changed = new Set(cardOpts?.changedModels ?? [])

@@ -58,7 +58,7 @@ import {
   testsOnNullColumns,
   yamlParseFindings,
 } from "./project-rules"
-import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
+import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles, selectAiFilesByQuota } from "./ai-review"
 import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
@@ -205,9 +205,13 @@ export interface ReviewRunner {
   >
   /** A model's or snapshot's merged dbt `config` from the manifest (project + yml + inline). */
   modelConfig?(name: string): Promise<Record<string, unknown> | undefined>
-  /** Manifest facts about a model, snapshot or seed for the AI lane's context card. Never throws. */
-  modelCard?(name: string): Promise<ModelCard | undefined>
-  /** A macro's callers and adapter variants (by name, else the first macro defined in `path`). Never throws. */
+  /** Manifest facts about a model, snapshot or seed for the AI lane's context card: the
+   *  node defined in `path` in this project, else by name (this project first). Never throws. */
+  modelCard?(name: string, opts?: { path?: string }): Promise<ModelCard | undefined>
+  /** Models, snapshots and seeds of this project whose yml (`patch_path`) is `path`. Never throws. */
+  patchedModels?(path: string): Promise<string[]>
+  /** A macro's callers and adapter variants: a macro defined in `path` in this project
+   *  (the one named `name` first), else by name (this project first). Never throws. */
   macroCard?(name: string, opts?: { path?: string; changedModels?: string[] }): Promise<MacroCard | undefined>
   /** Column sets the model's `unique` / `unique_combination_of_columns` tests declare unique. */
   declaredUniqueKeys?(model: string): Promise<string[][]>
@@ -2566,7 +2570,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
   let aiStatus: AiLaneStatus | undefined
-  let aiUnsent: string[] = []
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2591,8 +2594,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     supporting.forEach((f, i) =>
       aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
     )
-    // Only the files within the AI lane's file cap are reached; the rest stay in the ledger.
-    touch(selectAiFiles(aiFiles, aiInputBudget().maxFiles))
+    // Only the files the AI lane will send are reached (its file cap, or the
+    // per-kind quotas in coverage mode); the rest stay in the ledger.
+    const aiBudget = aiInputBudget()
+    touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
@@ -2626,11 +2631,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }
-      else {
-        const { unsent, ...status } = res.status
-        aiStatus = status
-        aiUnsent = unsent ?? []
-      }
+      else aiStatus = res.status
       // Defense in depth: the AI never blocks, regardless of what it returns.
       for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
     } catch (err) {
@@ -2667,7 +2668,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ...(manifestMissing && !anyManifest
       ? modelFiles.map((f) => ({ path: f.path, reason: "no dbt manifest: lineage, config and graph checks skipped" }))
       : []),
-    ...aiUnsent.map((p) => ({ path: p, reason: "not sent to the AI (file quota)" })),
   ]
   const seen = new Set<string>()
   const notReviewed = ledger.filter((e) => !seen.has(e.path) && !!seen.add(e.path))

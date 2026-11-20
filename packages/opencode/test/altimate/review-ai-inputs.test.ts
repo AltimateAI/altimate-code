@@ -165,6 +165,29 @@ describe("files sent to the advisory AI lane", () => {
     expect(renderSummary(env)).toContain("Not reviewed: 1 file(s)")
   })
 
+  test("coverage mode marks every quota-selected file reviewed, past the default file cap", async () => {
+    const seeds = Array.from({ length: 21 }, (_, i) => mod(`seeds/s${String(i).padStart(2, "0")}.csv`, "+a,b\n"))
+    const prev = process.env.ALTIMATE_REVIEW_AI_COVERAGE
+    process.env.ALTIMATE_REVIEW_AI_COVERAGE = "1"
+    try {
+      const env = await runReview({
+        changedFiles: seeds,
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        getContent: async () => undefined,
+        generatedAt: "2026-11-14T00:00:00Z",
+        forceTier: "full",
+        aiReview: async () => ({ findings: [], status: { state: "ok" } }),
+      })
+      expect(env.scope?.notReviewed ?? []).toEqual([])
+    } finally {
+      if (prev === undefined) delete process.env.ALTIMATE_REVIEW_AI_COVERAGE
+      else process.env.ALTIMATE_REVIEW_AI_COVERAGE = prev
+    }
+  })
+
   test("a partial AI failure is shown even when the lane state is ok", async () => {
     const env = await runReview({
       changedFiles: [mod("models/marts/m.sql")],
@@ -650,7 +673,7 @@ describe("input coverage (opt-in ALTIMATE_REVIEW_AI_COVERAGE=1)", () => {
     }
   })
 
-  test("files over quota reach scope.notReviewed; the default lane records nothing new", async () => {
+  test("files over quota are an AI-lane note, not 'Not reviewed'; the default lane records nothing new", async () => {
     const saved = { ...process.env }
     // Quotas of 1 each make a total of 4: one macro and three of the six models (most changed first).
     const changed = [
@@ -674,14 +697,17 @@ describe("input coverage (opt-in ALTIMATE_REVIEW_AI_COVERAGE=1)", () => {
       Object.assign(process.env, { ALTIMATE_REVIEW_AI_DRYRUN: "1" })
       const plain = await run()
       expect(plain.ai?.input?.length).toBe(7)
-      expect(plain.scope?.notReviewed?.some((e) => e.reason.includes("file quota")) ?? false).toBe(false)
+      expect(plain.ai?.unsent).toBeUndefined()
       const one = { ALTIMATE_REVIEW_AI_QUOTA_MODEL: "1", ALTIMATE_REVIEW_AI_QUOTA_MACRO: "1", ALTIMATE_REVIEW_AI_QUOTA_TEST: "1", ALTIMATE_REVIEW_AI_QUOTA_YML: "1" }
       Object.assign(process.env, COVERAGE, one)
       const env = await run()
       expect(env.ai?.input?.map((r) => r.path)).toEqual(["models/marts/m.sql", "models/marts/n.sql", "models/marts/o.sql", "macros/to_cents.sql"])
-      const quota = env.scope?.notReviewed?.filter((e) => e.reason === "not sent to the AI (file quota)").map((e) => e.path)
-      expect(quota).toEqual(["models/marts/p.sql", "models/marts/q.sql", "models/marts/r.sql"])
-      expect("unsent" in (env.ai ?? {})).toBe(false)
+      // The deterministic lanes checked these files, so the ledger does not list them.
+      expect(env.ai?.unsent).toEqual(["models/marts/p.sql", "models/marts/q.sql", "models/marts/r.sql"])
+      expect(env.scope?.notReviewed?.some((e) => /file quota/.test(e.reason)) ?? false).toBe(false)
+      const summary = renderSummary(env, { allowSilent: false })
+      expect(summary).toContain("3 file(s) were not sent to the advisory AI review (file quota); the deterministic checks still ran on them")
+      expect(summary).not.toMatch(/Not reviewed[^\n]*\n[\s\S]*models\/marts\/p\.sql/)
     } finally {
       for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
       Object.assign(process.env, saved)
@@ -847,5 +873,97 @@ describe("dbt manifest context card (opt-in ALTIMATE_REVIEW_AI_CONTEXT_CARD=1)",
     const broken = createDispatcherRunner({ manifestPath: path.join(tmp.path, "nope.json") })
     expect(await broken.modelCard!("fct")).toBeUndefined()
     expect(await broken.macroCard!("hash")).toBeUndefined()
+  })
+})
+
+describe("review feedback: input planning and card resolution", () => {
+  const COVERAGE = { ALTIMATE_REVIEW_AI_COVERAGE: "1" }
+
+  test("a quota of 0 disables that bucket; invalid values keep the default", () => {
+    const q = aiInputBudget({ ...COVERAGE, ALTIMATE_REVIEW_AI_QUOTA_TEST: "0", ALTIMATE_REVIEW_AI_QUOTA_YML: "-1" }).coverage!.quotas
+    expect(q.test).toBe(0)
+    expect(q.yml).toBe(aiInputBudget(COVERAGE).coverage!.quotas.yml)
+    const t: AiReviewFile = { path: "tests/a.sql", status: "modified", kind: "test", model: "a", diff: "+x\n" }
+    expect(selectAiFilesByQuota([t], q).sent).toHaveLength(0)
+  })
+
+  test("compiled SQL with only Jinja or short added lines: context decides, else the head is marked approximate", () => {
+    const raw = ["select", ...Array.from({ length: 9 }, (_, i) => `  , column_number_${i}`), "  {{ dbt_utils.star(ref('x')) }}", "  , amount_total_value", "from t"]
+    // The added line is Jinja-only; context lines 10 and 12 sit at those raw line numbers.
+    const diff = "@@ -10,3 +10,3 @@\n " + raw[9] + "\n-  {{ star(ref('x')) }}\n+" + raw[10] + "\n " + raw[11] + "\n"
+    const expanded = Array.from({ length: 300 }, (_, i) => `  , expanded_column_${String(i).padStart(3, "0")} -- generated by the macro`)
+    const compiled = [...raw.slice(0, 10), ...expanded, ...raw.slice(11)].join("\n")
+    expect(excerptFile(compiled, diff, 6_000).text).toContain("windows would be approximate")
+    // Raw content: the context matches, so raw line numbers are used for the window.
+    const rawBig = [...raw, ...Array.from({ length: 300 }, (_, i) => `  -- trailing filler line ${i} with padding text`)].join("\n")
+    const ex = excerptFile(rawBig, diff, 6_000).text
+    expect(ex).not.toContain("approximate")
+    expect(ex).toContain(raw[10])
+  })
+
+  test("truncated is true when MAX_FILE_CHARS is below the full-diff file budget", () => {
+    const diff = "@@ -1,30 +1,30 @@\n" + Array.from({ length: 30 }, (_, i) => `+  , col_${i} as alias_${i}`).join("\n") + "\n"
+    expect(diff.length).toBeGreaterThan(500)
+    const file: AiReviewFile = { path: "models/m.sql", status: "modified", model: "m", diff, sql: "select\n" + "  , padded_column_name_x\n".repeat(60) }
+    expect(file.sql!.length).toBeGreaterThan(1_000)
+    const plan = planAiInput({ grounding: [], files: [file] }, { ...COVERAGE, ALTIMATE_REVIEW_AI_MAX_FILE_CHARS: "500" })
+    expect(plan.messages[0]).toContain("(truncated)")
+    expect(plan.input[0].truncated).toBe(true)
+  })
+
+  test("dry run is honoured before replay: no verifier call, ai.input recorded", async () => {
+    const saved = { ...process.env }
+    try {
+      Object.assign(process.env, { ALTIMATE_REVIEW_AI_DRYRUN: "1", ALTIMATE_REVIEW_AI_REPLAY: "/nonexistent/envelope.json", ALTIMATE_REVIEW_AI_VERIFY: "1" })
+      const res = await runAiReview({ grounding: [], files: [{ path: "models/m.sql", status: "modified", model: "m", diff: "+select 1\n", sql: "select 1" }] })
+      expect(res.findings).toEqual([])
+      expect(res.status.state).toBe("skipped")
+      expect(res.status.reason).toContain("dry run")
+      expect(res.status.replayed).toBeUndefined()
+      expect(res.status.input?.map((r) => r.path)).toEqual(["models/m.sql"])
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
+      Object.assign(process.env, saved)
+    }
+  })
+
+  test("cards resolve by path and project before name; yml cards come from patch_path", async () => {
+    await using tmp = await tmpdir()
+    const manifestPath = path.join(tmp.path, "manifest.json")
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        metadata: { project_name: "shop" },
+        nodes: {
+          // A package model with the same name, listed first.
+          "model.pkg.orders": { resource_type: "model", name: "orders", package_name: "pkg", original_file_path: "models/orders.sql", config: { materialized: "view" } },
+          "model.shop.orders": { resource_type: "model", name: "orders", package_name: "shop", original_file_path: "models/marts/orders.sql", patch_path: "shop://models/marts/_marts.yml", config: { materialized: "table" } },
+          "seed.shop.countries": { resource_type: "seed", name: "countries", package_name: "shop", original_file_path: "seeds/countries.csv", patch_path: "shop://seeds/_seeds.yml" },
+        },
+        macros: {
+          "macro.pkg.helpers": { name: "helpers", package_name: "pkg", original_file_path: "macros/helpers.sql" },
+          "macro.shop.foo": { name: "foo", package_name: "shop", original_file_path: "macros/helpers.sql" },
+          "macro.dbt_utils.date_spine": { name: "date_spine", package_name: "dbt_utils", original_file_path: "macros/date_spine.sql" },
+          "macro.shop.date_spine": { name: "date_spine", package_name: "shop", original_file_path: "macros/spine.sql" },
+        },
+      }),
+    )
+    const r = createDispatcherRunner({ manifestPath })
+    expect((await r.modelCard!("orders"))?.materialized).toBe("table")
+    expect((await r.modelCard!("orders", { path: "dbt/models/marts/orders.sql" }))?.materialized).toBe("table")
+    expect((await r.macroCard!("helpers", { path: "macros/helpers.sql" }))?.name).toBe("foo")
+    expect((await r.macroCard!("date_spine", { path: "macros/date_spine.sql" }))?.name).toBe("date_spine")
+    expect(await r.patchedModels!("dbt/models/marts/_marts.yml")).toEqual(["orders"])
+    expect(await r.patchedModels!("models/other.yml")).toEqual([])
+
+    // A schema yml with no generic tests still gets its model's card; a seed gets its own.
+    const files: AiReviewFile[] = [
+      { path: "models/marts/_marts.yml", status: "modified", kind: "schema_yml", model: "_marts", diff: "+x\n" },
+      { path: "seeds/countries.csv", status: "modified", kind: "seed", model: "countries", diff: "+x\n" },
+    ]
+    const { attachContextCards } = await import("../../src/altimate/review/ai-context-card")
+    await attachContextCards(files, { ...r, graphParents: async () => [] })
+    expect(files[0].card).toContain("model `orders`: materialized: table")
+    expect(files[1].card).toContain("seed `countries`")
   })
 })
