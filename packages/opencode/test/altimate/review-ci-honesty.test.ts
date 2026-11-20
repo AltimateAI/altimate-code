@@ -6,7 +6,7 @@ import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestr
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { makeFinding } from "../../src/altimate/review/finding"
-import { aiTimeoutMs } from "../../src/altimate/review/ai-review"
+import { aiTimeoutMs, safeReason } from "../../src/altimate/review/ai-review"
 import { coverageNotes, renderSummary } from "../../src/altimate/review/format"
 import { prContextFromEnv } from "../../src/altimate/review/run"
 import { verifyEnvelope } from "../../src/altimate/review/verdict"
@@ -184,5 +184,26 @@ describe("PR title and description reach the intent check", () => {
       },
     })
     expect(seen).toEqual({ prTitle: "Add fct_orders", prBody: "grain: order_id" })
+  })
+})
+
+describe("safeReason: AI-lane errors reach a public PR comment with credentials masked", () => {
+  test("Basic auth, URL userinfo, key=value and bearer values are masked", () => {
+    const err = new Error(
+      "request to https://alice:s3cretPass@proxy.example.com/v1 failed\n" +
+        "Authorization: Basic YWxpY2U6czNjcmV0UGFzcw==\n" +
+        "api_key=abcd1234efgh and Bearer eyJhbGciOiJIUzI1NiJ9.payload",
+    )
+    const out = safeReason(err)
+    expect(out).not.toContain("s3cretPass")
+    expect(out).not.toContain("YWxpY2U6czNjcmV0UGFzcw")
+    expect(out).not.toContain("abcd1234efgh")
+    expect(out).not.toContain("eyJhbGciOiJIUzI1NiJ9")
+    expect(out).toContain("proxy.example.com")
+    expect(out).not.toContain("\n")
+  })
+
+  test("an ordinary error message survives intact", () => {
+    expect(safeReason(new Error("model not found: openai/gpt-x"))).toBe("model not found: openai/gpt-x")
   })
 })

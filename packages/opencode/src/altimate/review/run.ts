@@ -362,6 +362,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     ? undefined
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
+  let aiDisabledReason: string | undefined
+  if (opts.noAi) aiDisabledReason = "disabled by --no-ai"
+  else if (config.ai === false) aiDisabledReason = "disabled by `ai: false` in .altimate/review.yml"
+
   return runReview({
     changedFiles,
     config,
@@ -381,7 +385,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     // path verdicts (cubic-review PR #1041).
     cliVersion: opts.cliVersion ?? Installation.VERSION,
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
-    aiDisabledReason: opts.noAi ? "disabled by --no-ai" : config.ai === false ? "disabled by `ai: false` in .altimate/review.yml" : undefined,
+    aiDisabledReason,
     aiModel: opts.aiModel,
     prTitle: opts.prTitle,
     prBody: opts.prBody,

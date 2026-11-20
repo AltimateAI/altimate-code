@@ -5,6 +5,7 @@ import { Agent } from "@/agent/agent"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
+import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
 import { readStreamText } from "../llm/stream-text"
@@ -56,11 +57,14 @@ export function aiTimeoutMs(promptChars: number): number {
   return Math.min(AI_TIMEOUT_MAX_MS, AI_TIMEOUT_BASE_MS + Math.ceil(promptChars / 2_000) * 1_000)
 }
 
-/** Error text safe to show in a PR comment: one line, bounded, with anything
- *  that looks like a key or bearer token masked. */
-function safeReason(err: unknown): string {
+/** Error text safe to show in a PR comment: one line, bounded, with
+ *  credentials masked (authorization headers, `Basic`/`Bearer` values,
+ *  `key=value` secrets, `user:pass@` URL userinfo, provider-prefixed tokens).
+ *  Redaction runs before whitespace is collapsed so a header match stops at
+ *  its own line. */
+export function safeReason(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err)
-  return raw
+  return redactSecrets(raw)
     .replace(/\s+/g, " ")
     .replace(/(bearer\s+)[^\s]+/gi, "$1***")
     .replace(/\b(sk|pk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, "***")
@@ -121,12 +125,14 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
   if (!files.length) return done([], { state: "skipped", reason: "no changed model SQL to review" })
 
-  const message = buildUserMessage({ ...input, files })
   const controller = new AbortController()
-  const timeoutMs = aiTimeoutMs(message.length)
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  let timeoutMs = AI_TIMEOUT_BASE_MS
+  let timeout: ReturnType<typeof setTimeout> | undefined
   let modelLabel: string | undefined
   try {
+    const message = buildUserMessage({ ...input, files })
+    timeoutMs = aiTimeoutMs(message.length)
+    timeout = setTimeout(() => controller.abort(), timeoutMs)
     // Prompt comes from the compiled core, not this file.
     const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
     const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
