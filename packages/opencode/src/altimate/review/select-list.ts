@@ -33,12 +33,17 @@ function flatten(sql: string): string {
 const IDENT = /^[A-Za-z_][A-Za-z0-9_$]*$/
 const unquote = (s: string) => s.replace(/^["`\[]|["`\]]$/g, "")
 
-/** Output names of the final top-level SELECT, or null when unknown (`*`, unparseable). */
+/** A top-level set operator (parenthesized groups are already blanked). */
+const SET_OP = /\b(union|intersect|except|minus)\b(\s+(all|distinct))?\s*(\bselect\b|\()/i
+
+/** Output names of the final top-level SELECT, or null when unknown (`*`, unparseable).
+ *  A set operation (`UNION` …) takes its names from its first branch. */
 export function selectListNames(sql: string): string[] | null {
   const flat = flatten(sql)
   const selects = [...flat.matchAll(/\bselect\b/gi)]
   if (!selects.length) return null
-  const start = selects[selects.length - 1].index! + "select".length
+  const head = SET_OP.test(flat) ? selects[0] : selects[selects.length - 1]
+  const start = head.index! + "select".length
   const fromRel = flat.slice(start).search(/\bfrom\b/i)
   const listFlat = flat.slice(start, fromRel < 0 ? undefined : start + fromRel)
   const listRaw = blankComments(sql).slice(start, fromRel < 0 ? undefined : start + fromRel)

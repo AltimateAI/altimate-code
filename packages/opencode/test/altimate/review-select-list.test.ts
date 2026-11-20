@@ -10,6 +10,10 @@ describe("final SELECT output names", () => {
   test("the last top-level SELECT wins over CTEs and subqueries", () => {
     expect(selectListNames("with a as (select x, y from t) select a.x, (select max(z) from u) as mz from a")).toEqual(["x", "mz"])
   })
+  test("a set operation takes its names from the first branch", () => {
+    expect(selectListNames("select id, a as kind from t union all select id, b as other from u")).toEqual(["id", "kind"])
+    expect(selectListNames("with c as (select x from t) select x as y from c except select z from d")).toEqual(["y"])
+  })
   test("ambiguous items contribute nothing; operators are not aliases", () => {
     expect(selectListNames("select a + b, c - 1 as d, case when e then 1 end from t")).toEqual(["d"])
   })
