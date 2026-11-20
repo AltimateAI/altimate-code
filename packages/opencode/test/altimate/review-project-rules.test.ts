@@ -16,6 +16,7 @@ import {
   testWindowFindings,
   testsOnNullColumns,
   yamlParseFindings,
+  yamlError,
 } from "../../src/altimate/review/project-rules"
 import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
 import { inlineConfigSplats, isSuppressiblePortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
@@ -586,6 +587,24 @@ describe("YAML that stops parsing", () => {
     expect(fs).toHaveLength(1)
     expect(fs[0].startLine).toBe(5)
     expect((fs[0].evidence!.result as { line?: string }).line).toBe('        description: "Total in USD.')
+  })
+  test("a deletion-only break anchors on the error line the hunk shows", () => {
+    const b = "models:\n  - name: a\n    columns:\n      - name: id\n"
+    const h = "models:\n  - name: a\n      - name: id\n"
+    const file: ChangedFile = { path: "models/a.yml", status: "modified", diff: "@@ -1,4 +1,3 @@\n models:\n   - name: a\n-    columns:\n       - name: id\n" }
+    const fs = yamlParseFindings(file, b, h)
+    expect(fs).toHaveLength(1)
+    // The parser's error line is a context line of the hunk (no line is added).
+    expect(yamlError(h)!.line).toBeGreaterThan(0)
+    expect(fs[0].startLine).toBe(yamlError(h)!.line!)
+  })
+  test("an error before every added line and outside the hunks stays on the file, not an unrelated added line", () => {
+    const b = "models:\n  - name: a\n    columns:\n      - name: id\n"
+    const h = "models:\n  - name: a\n      - name: id\n"
+    const file: ChangedFile = { path: "models/a.yml", status: "modified", diff: "@@ -9,0 +9,1 @@\n+# trailing\n" }
+    const fs = yamlParseFindings(file, b, h)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine ?? null).toBeNull()
   })
   test("runs on a quickstart file the review otherwise doesn't classify, and lists it as reviewed", async () => {
     const env = await prReview([{ path: ".quickstart/quickstart.yml", head: bad, base }])

@@ -63,12 +63,10 @@ import {
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles, selectAiFilesByQuota } from "./ai-review"
 import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
-import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
+import { type AiVerifyEvidence, isCredentialPath, numberedSlice } from "./ai-verify"
 import type { ColumnReach } from "../native/dbt/column-reach"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
-// Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
-const AI_CREDENTIAL_FILE = /(^|\/)profiles\.ya?ml$/i
 
 /**
  * The deterministic review recipe.
@@ -2644,7 +2642,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // Macros, data tests, snapshots, yml and seeds carry defects no model diff shows.
     // Seeds go as a diff only: the full CSV is data, not logic.
     const supporting = reviewable.filter(
-      (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !AI_CREDENTIAL_FILE.test(f.path),
+      (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !isCredentialPath(f.path),
     )
     const contents = await Promise.all(
       supporting.map((f) => (f.kind === "seed" ? undefined : getContent?.(f.path, "new")?.catch(() => undefined))),
@@ -2658,9 +2656,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
-    // Files the PR changes that the AI may list and the verifier may read; never the user's exclusions.
+    // Files the PR changes that the AI may list and the verifier may read; never the user's exclusions or credentials.
     const prFiles = (input.prFiles ?? input.changedFiles.map((f) => f.path)).filter(
-      (p) => !isExcludedPath(p, input.rubric.exclusions.excludeGlobs),
+      (p) => !isExcludedPath(p, input.rubric.exclusions.excludeGlobs) && !isCredentialPath(p),
     )
     // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
     const evidence: AiVerifyEvidence | undefined = input.aiVerify

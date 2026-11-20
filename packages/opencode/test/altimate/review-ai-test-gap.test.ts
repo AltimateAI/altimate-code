@@ -1,5 +1,5 @@
 import { describe, test, expect, spyOn, mock, afterEach } from "bun:test"
-import { testGapFileList, TEST_GAP_INSTRUCTION, runAiReview, type AiReviewFile } from "../../src/altimate/review/ai-review"
+import { listedFiles, testGapFileList, TEST_GAP_INSTRUCTION, runAiReview, type AiReviewFile } from "../../src/altimate/review/ai-review"
 import { LLM } from "../../src/session/llm"
 import { Provider } from "../../src/provider/provider"
 
@@ -20,6 +20,16 @@ describe("test-gap instruction (ALTIMATE_REVIEW_AI_TEST_GAP=1)", () => {
       "BODY\n\n## OTHER FILES THIS PR CHANGES (paths only, not shown; use them to judge test coverage)\n- tests/unit/test_x.py\n- .github/workflows/ci.yml",
     )
     expect(testGapFileList("BODY", [file("models/fct.sql")], ["models/fct.sql"])).toBe("BODY")
+  })
+
+  test("under focused batching the test-gap list skips files the focused list already names", () => {
+    const files = Array.from({ length: 8 }, (_, i) => file(`models/d${i}/m${i}.sql`))
+    const batch = files.slice(0, 5)
+    const listed = listedFiles({ files, focused: true }, batch)
+    expect(listed).toEqual(files)
+    const msg = testGapFileList("BODY", listed, [...files.map((f) => f.path), "tests/unit/test_x.py"])
+    expect(msg).toBe("BODY\n\n## OTHER FILES THIS PR CHANGES (paths only, not shown; use them to judge test coverage)\n- tests/unit/test_x.py")
+    expect(listedFiles({ files, focused: false }, batch)).toBe(batch)
   })
 
   test("on: the system prompt gains the instruction and the message the file list; off: neither", async () => {
