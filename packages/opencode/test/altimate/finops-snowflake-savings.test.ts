@@ -129,7 +129,7 @@ describe("finops_snowflake_savings tool", () => {
       for (const args of [{ warehouse: "sf" }, { warehouse: "sf", confirm: true }])
         await expect(tool.execute(args, ctx(false))).rejects.toThrow("rejected permission")
       expect(asks).toHaveLength(2)
-      for (const ask of asks) expect(ask).toMatchObject({ permission: "finops_snowflake_savings", patterns: ["sf"], always: ["*"] })
+      for (const ask of asks) expect(ask).toMatchObject({ permission: "finops_snowflake_savings", patterns: ["sf"], always: ["sf"] })
       expect(dispatched).toBe(0)
       expect(opened).toBe(0)
       expect(queried).toBe(0)

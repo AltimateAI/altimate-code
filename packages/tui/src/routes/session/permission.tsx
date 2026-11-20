@@ -371,6 +371,27 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               }
             }
 
+            // altimate_change start — the savings checks bill the warehouse they run on, so the prompt names it
+            const savings = (
+              { finops_databricks_savings: "Databricks", finops_snowflake_savings: "Snowflake" } as Record<string, string>
+            )[permission]
+            if (savings) {
+              const connection = props.request.patterns?.[0]
+              return {
+                icon: "$",
+                title: `Run the ${savings} savings check on ${typeof connection === "string" && connection !== "*" ? connection : "the default connection"}`,
+                body: (
+                  <box paddingLeft={1}>
+                    <text fg={theme.textMuted}>
+                      Read-only queries that can start this connection's warehouse and bill while they run (at most
+                      9 minutes).
+                    </text>
+                  </box>
+                ),
+              }
+            }
+            // altimate_change end
+
             return {
               icon: "⚙",
               title: `Call tool ${permission}`,

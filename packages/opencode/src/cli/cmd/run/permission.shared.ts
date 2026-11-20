@@ -89,6 +89,15 @@ export function permissionOptions(stage: PermissionStage): PermissionOption[] {
   return []
 }
 
+// altimate_change start — savings check prompts
+const SAVINGS_CHECKS: Record<string, string> = {
+  finops_databricks_savings: "Databricks",
+  finops_snowflake_savings: "Snowflake",
+}
+const SAVINGS_BILLING_LINE =
+  "Read-only queries that can start this connection's warehouse and bill while they run (at most 9 minutes)."
+// altimate_change end
+
 export function permissionInfo(request: PermissionRequest): PermissionInfo {
   const pats = patterns(request)
   const input = data(request)
@@ -115,6 +124,17 @@ export function permissionInfo(request: PermissionRequest): PermissionInfo {
       lines: ["This keeps the session running despite repeated failures."],
     }
   }
+
+  // altimate_change start — the savings checks bill the warehouse they run on, so the prompt names it
+  const savings = SAVINGS_CHECKS[request.permission]
+  if (savings) {
+    return {
+      icon: "$",
+      title: `Run the ${savings} savings check on ${pats[0] && pats[0] !== "*" ? pats[0] : "the default connection"}`,
+      lines: [SAVINGS_BILLING_LINE],
+    }
+  }
+  // altimate_change end
 
   return {
     icon: "⚙",

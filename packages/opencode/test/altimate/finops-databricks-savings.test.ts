@@ -176,7 +176,7 @@ describe("finops_databricks_savings tool", () => {
       for (const args of [{ warehouse: "dbx" }, { warehouse: "dbx", confirm: true }])
         await expect(tool.execute(args, ctx(false))).rejects.toThrow("rejected permission")
       expect(asks).toHaveLength(2)
-      for (const ask of asks) expect(ask).toMatchObject({ permission: "finops_databricks_savings", patterns: ["dbx"], always: ["*"] })
+      for (const ask of asks) expect(ask).toMatchObject({ permission: "finops_databricks_savings", patterns: ["dbx"], always: ["dbx"] })
       expect(dispatched).toBe(0)
       expect(opened).toBe(0)
       expect(queried).toBe(0)

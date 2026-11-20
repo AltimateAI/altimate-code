@@ -120,10 +120,12 @@ export const FinopsSnowflakeSavingsTool = Tool.define("finops_snowflake_savings"
     // `altimate-code tool run`. A refusal throws here, before any connection is opened.
     // Ask about the connection the check runs on, so a rule for one connection holds however the call names it.
     const connection = savingsConnection(args.warehouse)
+    const pattern = connection ?? (args.warehouse?.trim() || "*")
+    // "Always" covers this connection only, so allowing one does not allow the others.
     await ctx.ask({
       permission: "finops_snowflake_savings",
-      patterns: [connection ?? (args.warehouse?.trim() || "*")],
-      always: ["*"],
+      patterns: [pattern],
+      always: [pattern],
       metadata: {},
     })
     try {
