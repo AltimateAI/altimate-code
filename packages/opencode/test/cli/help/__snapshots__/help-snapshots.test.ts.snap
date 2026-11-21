@@ -136,8 +136,9 @@ Options:
       --trace                         enable session tracing (default: true, disable with
                                       --no-trace)                          [boolean] [default: true]
       --max-turns                     maximum completed assistant work turns (a failed or retried
-                                      attempt is not counted); allows one committed-answer echo, or
-                                      one best-effort reply after a budget abort            [number]
+                                      attempt is not counted, but the run also stops after N x 6
+                                      step attempts); allows one committed-answer echo, or one
+                                      best-effort reply after a budget abort                [number]
       --time-budget                   maximum time in seconds including startup (env:
                                       ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow
                                                                                             [number]

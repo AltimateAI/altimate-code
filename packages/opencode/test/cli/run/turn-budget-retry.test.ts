@@ -51,7 +51,12 @@ describe("opencode run: --max-turns charges completed steps only", () => {
   // Attached-session fake: the CLI sees exactly the events the session publishes for
   // a step whose attempts start and fail, without waiting out real retry backoff.
   const attached = (
-    behavior: "all-attempts-fail" | "endless-attempts" | "compaction-after-budget" | "overflow-before-step",
+    behavior:
+      | "all-attempts-fail"
+      | "endless-attempts"
+      | "compaction-after-budget"
+      | "overflow-before-step"
+      | "complete-then-overflow",
   ) =>
     Effect.gen(function* () {
       const sessionID = "ses_turn_budget_retry"
@@ -146,7 +151,14 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                   publish("session.status", { sessionID, status: { type: "idle" } })
                   return Response.json({ info: { finish: "stop" } })
                 }
-                if (behavior === "overflow-before-step") {
+                if (behavior === "overflow-before-step" || behavior === "complete-then-overflow") {
+                  if (behavior === "complete-then-overflow") {
+                    // One work step completes, using the whole one-turn budget.
+                    startAttempt(messageID)
+                    publish("message.part.updated", {
+                      part: { id: `${messageID}_finish`, messageID, sessionID, type: "step-finish", reason: "tool-calls" },
+                    })
+                  }
                   // Every request overflows before streaming a step; each overflow hands
                   // off to a (never charged) compaction step, then the cycle repeats.
                   let cycle = 0
@@ -278,6 +290,27 @@ describe("opencode run: --max-turns charges completed steps only", () => {
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
           { why_harness_stopped: "error" },
         ])
+      }),
+    30_000,
+  )
+
+  cliIt.concurrent(
+    "an overflow before any step starts, after the budget is used, stops the run",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const { server, sessionID, counts } = yield* attached("complete-then-overflow")
+        const result = yield* opencode.run("Answer once.", {
+          format: "json",
+          extraArgs: ["--attach", server.url.toString(), "--session", sessionID, "--max-turns", "1", "--no-trace"],
+          timeoutMs: 20_000,
+          bunRun: true,
+        })
+        opencode.expectExit(result, 1)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toEqual([
+          expect.objectContaining({ limit: 1, reason: "completed" }),
+        ])
+        expect(counts.aborts).toBe(1)
       }),
     30_000,
   )

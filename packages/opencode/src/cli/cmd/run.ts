@@ -417,7 +417,7 @@ export const RunCommand = cmd({
         .option("max-turns", {
           type: "number",
           describe:
-            "maximum completed assistant work turns (a failed or retried attempt is not counted); allows one committed-answer echo, or one best-effort reply after a budget abort",
+            "maximum completed assistant work turns (a failed or retried attempt is not counted, but the run also stops after N x 6 step attempts); allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
@@ -988,6 +988,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = options?.turnLimit ?? args.maxTurns
         let budgetAborted = false
+        // One abort sequence for the step-start and overflow budget checks.
+        const abortForTurnBudget = async (limit: number, stop: RunAccounting.TurnBudgetStop, id: string) => {
+          stopTimeBudget()
+          budgetAborted = true
+          accounting.onBudgetExhausted()
+          error = RunAccounting.turnBudgetMessage(limit, stop)
+          if (!emit("budget_exhausted", { limit, reason: stop })) {
+            UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
+          }
+          await sdk.session.abort({ sessionID: id }, { signal: options?.signal })
+        }
         // altimate_change end
 
         // altimate_change start — parameterized stream
@@ -1166,15 +1177,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 maxTurns && budgetStop && (budgetStop === "attempts" || !committedAnswer) && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
-                stopTimeBudget()
                 // altimate_change end
-                budgetAborted = true
-                accounting.onBudgetExhausted()
-                error = RunAccounting.turnBudgetMessage(maxTurns, budgetStop)
-                if (!emit("budget_exhausted", { limit: maxTurns, reason: budgetStop })) {
-                  UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
-                }
-                await sdk.session.abort({ sessionID }, { signal: options?.signal })
+                await abortForTurnBudget(maxTurns, budgetStop, part.sessionID)
                 // Drain the ordered abort/error/idle tail before starting another phase.
                 continue
               }
@@ -1301,22 +1305,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
               continue
             }
             // altimate_change end
-            // altimate_change start — overflows rejected before a step starts still hit the attempt backstop
+            // altimate_change start — overflows rejected before a step starts still hit the turn budget
             // Such an overflow hands off to compaction (never charged) without a
-            // step-start, so the step-start budget check never sees the cycle.
-            if (
-              props.error.name === "ContextOverflowError" && sessionID && maxTurns && !budgetAborted &&
-              options?.turnLimit === undefined && !timeExhausted() &&
-              accounting.turnBudgetStop(maxTurns) === "attempts"
-            ) {
-              stopTimeBudget()
-              budgetAborted = true
-              accounting.onBudgetExhausted()
-              error = RunAccounting.turnBudgetMessage(maxTurns, "attempts")
-              if (!emit("budget_exhausted", { limit: maxTurns, reason: "attempts" })) {
-                UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
-              }
-              await sdk.session.abort({ sessionID }, { signal: options?.signal })
+            // step-start, so the step-start budget check never sees the cycle. A
+            // committed answer's echo keeps its completed-turn allowance here too.
+            const overflowStop =
+              props.error.name === "ContextOverflowError" && maxTurns && !budgetAborted &&
+              options?.turnLimit === undefined && !timeExhausted()
+                ? accounting.turnBudgetStop(maxTurns)
+                : undefined
+            const activeRequest = requestOwnership.activeRequestID
+            const echoAllowed = activeRequest !== undefined && committedRequests.has(activeRequest)
+            if (sessionID && maxTurns && overflowStop && (overflowStop === "attempts" || !echoAllowed)) {
+              await abortForTurnBudget(maxTurns, overflowStop, sessionID)
             }
             // altimate_change end
             // altimate_change end
