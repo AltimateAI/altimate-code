@@ -313,7 +313,9 @@ for (const scenario of [
             : "Empty model value",
         )
         expect(mounted.toast.currentToast?.message).toContain("/models")
-        expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
+        if ((scenario.args as { model?: string }).model === undefined)
+          expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
+        else expect(mounted.toast.currentToast?.message).not.toContain("~/.config/altimate-code/")
         if (!scenario.expected.providerID && !scenario.expected.modelID && (scenario.args as { model?: string }).model === undefined)
           expect(mounted.toast.currentToast?.message).toContain("check that the variable is set")
         const args = scenario.args as { model?: string; configModel?: string; agentModel?: unknown }

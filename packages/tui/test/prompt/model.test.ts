@@ -171,8 +171,9 @@ test("an unavailable configured model shows the error with its source and opens 
       model: "missing/model",
       source: "project or global config (model)",
       pickerCanOverride: canOverride,
-      validate: (model, source) => {
+      validate: (model, source, pickable) => {
         calls.validated.push([model, source])
+        expect(pickable).toBe(canOverride)
         return valid
       },
       openPicker: () => calls.picker++,

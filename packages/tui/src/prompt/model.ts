@@ -106,17 +106,17 @@ export function isServerReportedModelError(error: unknown): boolean {
 }
 
 // Submit-time check for the selected model. `validate` shows the error toast for an unavailable
-// model; the picker then opens so the user can choose an available model for this conversation.
-// Returns whether submission continues.
+// model; when a conversation pick can replace that model, the picker then opens. Returns whether
+// submission continues.
 export function acceptSubmissionModel<Model>(input: {
   model: Model | undefined
   source?: string
   // A command or command-agent model outranks the chat model, so a pick cannot replace it.
   pickerCanOverride: boolean
-  validate: (model: Model, source?: string) => boolean
+  validate: (model: Model, source?: string, pickable?: boolean) => boolean
   openPicker: () => void
 }) {
-  if (input.model === undefined || input.validate(input.model, input.source)) return true
+  if (input.model === undefined || input.validate(input.model, input.source, input.pickerCanOverride)) return true
   if (input.pickerCanOverride) input.openPicker()
   return false
 }

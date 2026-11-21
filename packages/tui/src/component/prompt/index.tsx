@@ -1222,7 +1222,7 @@ export function Prompt(props: PromptProps) {
         model: selection.model,
         source: origin.source,
         pickerCanOverride: origin.pickerCanOverride,
-        validate: (model, source) => local.model.validate(model, source),
+        validate: (model, source, pickable) => local.model.validate(model, source, pickable),
         openPicker: () => {
           // Readiness is unknown while kv hydrates; retry once it settles instead of guessing.
           if (readyPending()) {

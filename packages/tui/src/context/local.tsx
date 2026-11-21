@@ -367,7 +367,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     // altimate_change start — upstream_fix: keep unavailable explicit selections visible and recoverable.
     let reportedInvalidModel: string | undefined
-    function validateModel(model: ModelRef, passive = false, source?: string) {
+    function validateModel(model: ModelRef, passive = false, source?: string, pickable = true) {
       if (sync.status === "loading") return false
       if (isModelValid(model)) {
         reportedInvalidModel = undefined
@@ -384,10 +384,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             ? `${empty}: the model key is incomplete. If it references an environment variable, check that the variable is set, or remove the key`
             : empty
           : `Model ${model.providerID}/${model.modelID} is not available${from}`
-      const advice = fromConfig
-        ? "Choose an available model with /models for this conversation; picking one does not change your config, so update that setting to make it permanent"
-        : "Choose an available model with /models"
-      const message = `${problem}. ${advice}. Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).`
+      const advice = !pickable
+        ? "A /models pick does not override this setting; change it to an available model"
+        : fromConfig
+          ? "Choose an available model with /models for this conversation; picking one does not change your config, so update that setting to make it permanent"
+          : "Choose an available model with /models"
+      const locations = fromConfig
+        ? " Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/)."
+        : ""
+      const message = `${problem}. ${advice}.${locations}`
       reportedInvalidModel = key
       if (toast.currentToast?.message !== message) toast.show({ variant: "error", message, duration: 10000 })
       return false
@@ -922,11 +927,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         current: currentModel,
         // altimate_change start — upstream_fix: callers can reject submission without losing the draft.
         source: currentSource,
-        validate(value = currentModel(), source?: string) {
+        validate(value = currentModel(), source?: string, pickable = true) {
           if (!value) return false
           const current = currentModel()
           const same = current && current.providerID === value.providerID && current.modelID === value.modelID
-          return validateModel(value, false, source ?? (same ? currentSource() : undefined))
+          return validateModel(value, false, source ?? (same ? currentSource() : undefined), pickable)
         },
         // altimate_change end
         get ready() {
