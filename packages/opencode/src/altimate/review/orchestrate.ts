@@ -58,7 +58,8 @@ import {
   testsOnNullColumns,
   yamlParseFindings,
 } from "./project-rules"
-import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
+import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles, selectAiFilesByQuota } from "./ai-review"
+import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -204,6 +205,14 @@ export interface ReviewRunner {
   >
   /** A model's or snapshot's merged dbt `config` from the manifest (project + yml + inline). */
   modelConfig?(name: string): Promise<Record<string, unknown> | undefined>
+  /** Manifest facts about a model, snapshot or seed for the AI lane's context card: the
+   *  node defined in `path` in this project, else by name (this project first). Never throws. */
+  modelCard?(name: string, opts?: { path?: string }): Promise<ModelCard | undefined>
+  /** Models, snapshots and seeds of this project whose yml (`patch_path`) is `path`. Never throws. */
+  patchedModels?(path: string): Promise<string[]>
+  /** A macro's callers and adapter variants: a macro defined in `path` in this project
+   *  (the one named `name` first), else by name (this project first). Never throws. */
+  macroCard?(name: string, opts?: { path?: string; changedModels?: string[] }): Promise<MacroCard | undefined>
   /** Column sets the model's `unique` / `unique_combination_of_columns` tests declare unique. */
   declaredUniqueKeys?(model: string): Promise<string[][]>
   /** Column-lineage edges for a query: source `"table"."col"` → target output column. */
@@ -274,6 +283,8 @@ export interface OrchestrateInput {
   aiModel?: string
   /** Send the changed files' unchanged dbt parents to the AI lane as context. */
   aiGraphContext?: boolean
+  /** Attach a dbt manifest context card to each AI file (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`; needs a manifest). */
+  aiContextCard?: boolean
   /** Give the AI lane what the dbt-grounded verifier reads (`ALTIMATE_REVIEW_AI_VERIFY=1`). */
   aiVerify?: boolean
   /** Fixed-string search over the dbt project at head, for the verifier. */
@@ -2583,8 +2594,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     supporting.forEach((f, i) =>
       aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
     )
-    // Only the files within the AI lane's file cap are reached; the rest stay in the ledger.
-    touch(selectAiFiles(aiFiles, aiInputBudget().maxFiles))
+    // Only the files the AI lane will send are reached (its file cap, or the
+    // per-kind quotas in coverage mode); the rest stay in the ledger.
+    const aiBudget = aiInputBudget()
+    touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
+    if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
     const evidence: AiVerifyEvidence | undefined = input.aiVerify
@@ -2616,7 +2630,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(evidence ? { evidence } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
-      aiStatus = Array.isArray(res) ? { state: "ok" } : res.status
+      if (Array.isArray(res)) aiStatus = { state: "ok" }
+      else aiStatus = res.status
       // Defense in depth: the AI never blocks, regardless of what it returns.
       for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
     } catch (err) {

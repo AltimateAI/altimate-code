@@ -455,6 +455,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiDisabledReason,
     aiModel: opts.aiModel,
     aiGraphContext: process.env.ALTIMATE_REVIEW_AI_GRAPH === "1",
+    aiContextCard: process.env.ALTIMATE_REVIEW_AI_CONTEXT_CARD === "1",
     aiVerify: aiVerifyEnabled(),
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.

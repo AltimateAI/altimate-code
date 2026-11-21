@@ -11,6 +11,8 @@ import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId }
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
 import { aiReplayPath, runAiReplay } from "./ai-replay"
+import { walkDiffLines } from "./diff-filter"
+import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -21,6 +23,17 @@ const MAX_FILES = 20
 const CONTEXT_FILE_CHARS = 8_000
 const CONTEXT_TOTAL_CHARS = 40_000
 const BATCH_CONCURRENCY = 2
+/** Per-kind file quotas under `ALTIMATE_REVIEW_AI_COVERAGE=1`. */
+const COVERAGE_QUOTAS = { model: 12, macro: 8, test: 4, yml: 6 }
+/** Head-side lines of context kept around each changed line in a file excerpt. */
+const EXCERPT_CONTEXT_LINES = 20
+/** Characters of a file's diff section under coverage (hunks beyond it are listed as omitted). */
+const COVERAGE_DIFF_CHARS = 16_000
+/** Current-file head kept under coverage when the diff section already carries every hunk of a long diff. */
+const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
+/** Default per-call size under coverage (~30k tokens): 30 quota files at up to ~22k chars each would
+ *  otherwise make one ~660k-char call that overruns common context windows. */
+const COVERAGE_BATCH_CHARS = 120_000
 
 /**
  * How much of the PR the lane sends. Defaults keep one bounded call; the
@@ -31,19 +44,46 @@ const BATCH_CONCURRENCY = 2
 export interface AiInputBudget {
   maxFiles: number
   maxFileChars: number
-  /** Characters of file sections per call; Infinity keeps a single call. */
+  /** Characters of file sections per call; Infinity keeps a single call (the default without coverage). */
   batchChars: number
+  /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
+   *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
+  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number> }
 }
 export function aiInputBudget(env: Record<string, string | undefined> = process.env): AiInputBudget {
   const num = (v: string | undefined, d: number) => {
     const n = Number(v)
     return v && Number.isFinite(n) && n > 0 ? n : d
   }
+  // A quota of 0 disables that bucket.
+  const quota = (v: string | undefined, d: number) => {
+    const n = Number(v)
+    return v && Number.isInteger(n) && n >= 0 ? n : d
+  }
+  const coverageOn = env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
   return {
     maxFiles: num(env.ALTIMATE_REVIEW_AI_MAX_FILES, MAX_FILES),
     maxFileChars: num(env.ALTIMATE_REVIEW_AI_MAX_FILE_CHARS, MAX_DIFF_CHARS),
-    batchChars: num(env.ALTIMATE_REVIEW_AI_BATCH_CHARS, Infinity),
+    batchChars: num(env.ALTIMATE_REVIEW_AI_BATCH_CHARS, coverageOn ? COVERAGE_BATCH_CHARS : Infinity),
+    coverage:
+      coverageOn
+        ? {
+            diffChars: num(env.ALTIMATE_REVIEW_AI_COVERAGE_DIFF_CHARS, COVERAGE_DIFF_CHARS),
+            quotas: {
+              model: quota(env.ALTIMATE_REVIEW_AI_QUOTA_MODEL, COVERAGE_QUOTAS.model),
+              macro: quota(env.ALTIMATE_REVIEW_AI_QUOTA_MACRO, COVERAGE_QUOTAS.macro),
+              test: quota(env.ALTIMATE_REVIEW_AI_QUOTA_TEST, COVERAGE_QUOTAS.test),
+              yml: quota(env.ALTIMATE_REVIEW_AI_QUOTA_YML, COVERAGE_QUOTAS.yml),
+            },
+          }
+        : undefined,
   }
+}
+
+/** `ALTIMATE_REVIEW_AI_DRYRUN=1`: plan the lane's input and record it on the
+ *  status without calling a model (state `skipped`), for free coverage counts. */
+export function aiDryRunEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env.ALTIMATE_REVIEW_AI_DRYRUN === "1"
 }
 
 export interface AiReviewFile {
@@ -57,6 +97,8 @@ export interface AiReviewFile {
   diff?: string
   /** Current content: dbt-compiled (preferred) or raw SQL for a model, the file itself otherwise. */
   sql?: string
+  /** Rendered dbt manifest context card (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`). */
+  card?: string
 }
 
 /** Order under the file cap: models first, then the files whose defects reach the most models. */
@@ -78,26 +120,316 @@ function kindRank(kind: string | undefined): number {
   return i < 0 ? KIND_ORDER.length : i
 }
 
+function sendable(f: AiReviewFile): boolean {
+  return f.status !== "deleted" && !!(f.diff || f.sql)
+}
+
 /** Files the lane sends, in priority order, capped at `maxFiles`. */
 export function selectAiFiles(files: AiReviewFile[], maxFiles = MAX_FILES): AiReviewFile[] {
   return files
-    .filter((f) => f.status !== "deleted" && (f.diff || f.sql))
+    .filter(sendable)
     .map((f, i) => ({ f, i }))
     .sort((a, b) => kindRank(a.f.kind) - kindRank(b.f.kind) || a.i - b.i)
     .map(({ f }) => f)
     .slice(0, maxFiles)
 }
 
-/** One changed file as it appears in the prompt. */
-function fileSection(f: AiReviewFile, maxChars: number): string {
+/** Quota buckets for `ALTIMATE_REVIEW_AI_COVERAGE`. */
+export type AiFileBucket = keyof typeof COVERAGE_QUOTAS
+const BUCKET_OF: Record<string, AiFileBucket> = {
+  model_sql: "model",
+  python_model: "model",
+  snapshot: "model",
+  macro: "macro",
+  test: "test",
+  schema_yml: "yml",
+  source_yml: "yml",
+  project_config: "yml",
+  seed: "yml",
+}
+/** Buckets in the order their kinds first appear in KIND_ORDER (model, macro, test, yml). */
+const BUCKET_ORDER = [...new Set(KIND_ORDER.map((k) => BUCKET_OF[k]))]
+
+/** Added and removed lines of a unified diff (file headers before the first hunk excluded). */
+export function changedLineCount(diff: string | undefined): number {
+  if (!diff) return 0
+  const lines = diff.split("\n")
+  const first = lines.findIndex((l) => l.startsWith("@@"))
+  return lines.slice(Math.max(first, 0)).filter((l) => l.startsWith("+") || l.startsWith("-")).length
+}
+
+/**
+ * Files the lane sends under per-kind quotas, so models cannot crowd out the
+ * macros, tests and yml whose defects no model diff shows. Each bucket keeps its
+ * most-changed files (ties by input order); quota a bucket leaves unused goes to
+ * the other buckets in KIND_ORDER order, up to the sum of the quotas. `unsent`
+ * lists the sendable files left out, in input order.
+ */
+export function selectAiFilesByQuota(
+  files: AiReviewFile[],
+  quotas: Record<AiFileBucket, number> = COVERAGE_QUOTAS,
+): { sent: AiReviewFile[]; unsent: AiReviewFile[] } {
+  const eligible = files.filter(sendable)
+  const byBucket = new Map<AiFileBucket, AiReviewFile[]>(BUCKET_ORDER.map((b) => [b, []]))
+  eligible
+    .map((f, i) => ({ f, i, n: changedLineCount(f.diff) }))
+    .sort((a, b) => b.n - a.n || a.i - b.i)
+    .forEach(({ f }) => byBucket.get(BUCKET_OF[f.kind ?? "model_sql"] ?? "model")!.push(f))
+  const take = new Map(BUCKET_ORDER.map((b) => [b, Math.min(quotas[b], byBucket.get(b)!.length)]))
+  let spare = BUCKET_ORDER.reduce((n, b) => n + quotas[b], 0) - [...take.values()].reduce((n, t) => n + t, 0)
+  // Unused quota flows to other kinds, but never into a bucket disabled with quota 0.
+  for (const b of BUCKET_ORDER) {
+    if (quotas[b] <= 0) continue
+    const extra = Math.min(spare, byBucket.get(b)!.length - take.get(b)!)
+    take.set(b, take.get(b)! + extra)
+    spare -= extra
+  }
+  const sent = BUCKET_ORDER.flatMap((b) => byBucket.get(b)!.slice(0, take.get(b)!))
+  const chosen = new Set(sent)
+  return { sent, unsent: eligible.filter((f) => !chosen.has(f)) }
+}
+
+interface DiffHunk {
+  text: string
+  /** Head-side line range from the `@@` header; absent for a diff without headers. */
+  start?: number
+  end?: number
+}
+
+/** A unified diff split into the text before its first hunk and its hunks. */
+function splitHunks(diff: string): { preamble: string; hunks: DiffHunk[] } {
+  const lines = diff.replace(/\n$/, "").split("\n")
+  const first = lines.findIndex((l) => l.startsWith("@@"))
+  if (first < 0) return { preamble: "", hunks: lines.length && diff ? [{ text: lines.join("\n") }] : [] }
+  const hunks: DiffHunk[] = []
+  let cur: string[] = []
+  const flush = () => {
+    if (!cur.length) return
+    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(cur[0])
+    const start = m ? Number(m[1]) : undefined
+    const count = m ? (m[2] === undefined ? 1 : Number(m[2])) : 0
+    hunks.push({ text: cur.join("\n"), start, end: start === undefined ? undefined : start + Math.max(count, 1) - 1 })
+    cur = []
+  }
+  for (const l of lines.slice(first)) {
+    if (l.startsWith("@@")) flush()
+    cur.push(l)
+  }
+  flush()
+  return { preamble: lines.slice(0, first).join("\n"), hunks }
+}
+
+function lineRange(a: number, b: number): string {
+  return a === b ? `line ${a}` : `lines ${a}–${b}`
+}
+
+/** What a file section carries of the file's diff and content. */
+interface SectionStats {
+  truncated: boolean
+  hunksSent: number
+  hunksTotal: number
+}
+
+/**
+ * Whole hunks, in order, up to `maxChars`; a hunk is never cut unless it is the
+ * first and alone exceeds the budget (its head is kept, marked). Omitted hunks
+ * are listed by their head-side line ranges.
+ */
+export function excerptDiff(diff: string, maxChars: number): { text: string } & SectionStats {
+  const { preamble, hunks } = splitHunks(diff)
+  const out = preamble ? [preamble] : []
+  let used = preamble.length
+  let sent = 0
+  let cut = false
+  for (const h of hunks) {
+    if (used + h.text.length + 1 <= maxChars) {
+      out.push(h.text)
+      used += h.text.length + 1
+      sent++
+      continue
+    }
+    if (sent === 0) {
+      const head = h.text.slice(0, Math.max(0, maxChars - used))
+      const nl = head.lastIndexOf("\n")
+      out.push((nl > 0 ? head.slice(0, nl) : head) + "\n… (hunk truncated)")
+      sent = 1
+      cut = true
+    }
+    break
+  }
+  const omitted = hunks.slice(sent)
+  if (omitted.length) {
+    const ranges = omitted.map((h) => (h.start === undefined ? "?" : lineRange(h.start, h.end!).replace(/^lines? /, "")))
+    out.push(`… (${omitted.length} more hunk${omitted.length === 1 ? "" : "s"} omitted, at lines ${ranges.join(", ")})`)
+  }
+  return { text: out.join("\n"), truncated: cut || omitted.length > 0, hunksSent: sent, hunksTotal: hunks.length }
+}
+
+const COMPILED_UNLOCATED_MARKER = "\n… (compiled file: changed lines not located, head shown; windows would be approximate)"
+const JINJA = /\{\{|\{%/
+
+/**
+ * Where the diff's added lines sit in `lines` when the content is not the raw
+ * file (e.g. dbt-compiled SQL, whose line numbers drift once Jinja expands).
+ * Returns undefined when the raw line numbers already match (or nothing can be
+ * checked), the found line numbers when at least half of the eligible added
+ * lines (8+ non-space chars, no Jinja) are found by text, and "unlocated" otherwise.
+ * With no eligible added line (Jinja-only or very short changes), the context
+ * lines decide: raw line numbers are trusted only when those match.
+ */
+function locateAddedLines(lines: string[], rows: Array<{ line: number; text: string; kind: string }>): number[] | "unlocated" | undefined {
+  const isEligible = (r: { text: string }) => !JINJA.test(r.text) && r.text.replace(/\s/g, "").length >= 8
+  const matchesRaw = (r: { line: number; text: string }) => lines[r.line - 1]?.trim() === r.text.trim()
+  const eligible = rows.filter((r) => r.kind === "+" && isEligible(r))
+  if (!eligible.length) {
+    const context = rows.filter((r) => r.kind !== "+" && isEligible(r))
+    return context.length && !context.every(matchesRaw) ? "unlocated" : undefined
+  }
+  if (eligible.every(matchesRaw)) return undefined
+  const found: number[] = []
+  const used = new Set<number>()
+  let from = 0
+  for (const r of eligible) {
+    const want = r.text.trim()
+    let at = -1
+    for (let i = from; i < lines.length; i++)
+      if (!used.has(i) && lines[i].trim() === want) {
+        at = i
+        break
+      }
+    if (at < 0) continue
+    used.add(at)
+    found.push(at + 1)
+    from = at + 1
+  }
+  return found.length * 2 >= eligible.length ? found : "unlocated"
+}
+
+/**
+ * The parts of a file around its changed lines (±20 head-side lines each,
+ * merged), up to `maxChars`, then as much of the file head as still fits.
+ * Gaps are marked with their real line numbers. Without changed lines the file
+ * head is kept, as before. When the content is not the raw file (compiled SQL),
+ * windows are anchored on the added lines' text instead of raw line numbers.
+ */
+export function excerptFile(content: string, diff: string | undefined, maxChars: number): { text: string; truncated: boolean } {
+  if (content.length <= maxChars) return { text: content, truncated: false }
+  const lines = content.split("\n")
+  const n = lines.length
+  const rows = [...walkDiffLines(diff)]
+  const located = locateAddedLines(lines, rows)
+  if (located === "unlocated") return { text: truncate(content, maxChars) + COMPILED_UNLOCATED_MARKER, truncated: true }
+  const added = located ?? rows.filter((r) => r.kind === "+").map((r) => r.line)
+  const anchors = (added.length ? added : rows.map((r) => r.line)).filter((l) => l >= 1 && l <= n).sort((a, b) => a - b)
+  if (!anchors.length) return { text: truncate(content, maxChars), truncated: true }
+  const windows: Array<[number, number]> = []
+  for (const a of anchors) {
+    const s = Math.max(1, a - EXCERPT_CONTEXT_LINES)
+    const e = Math.min(n, a + EXCERPT_CONTEXT_LINES)
+    const last = windows[windows.length - 1]
+    if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
+    else windows.push([s, e])
+  }
+  const MARKER = 40 // room reserved per omission marker
+  const size = (s: number, e: number) => lines.slice(s - 1, e).reduce((t, l) => t + l.length + 1, 0)
+  const kept: Array<[number, number]> = []
+  let used = 0
+  for (const [s, e] of windows) {
+    const sz = size(s, e) + MARKER
+    if (used + sz <= maxChars) {
+      kept.push([s, e])
+      used += sz
+      continue
+    }
+    if (!kept.length) {
+      // The first window alone is over budget: keep as many of its lines as fit.
+      let end = s - 1
+      while (end < e && used + size(s, end + 1) + MARKER <= maxChars) end++
+      if (end >= s) {
+        kept.push([s, end])
+        used += size(s, end) + MARKER
+      }
+    }
+    break
+  }
+  if (!kept.length) return { text: truncate(content, maxChars), truncated: true }
+  // Fill what is left with the file head, before the first window.
+  let head = 0
+  while (head + 1 < kept[0][0] && used + size(1, head + 1) + MARKER <= maxChars) head++
+  if (head) {
+    if (head + 1 >= kept[0][0]) kept[0][0] = 1
+    else kept.unshift([1, head])
+  }
+  const out: string[] = []
+  let next = 1
+  for (const [s, e] of kept) {
+    if (s > next) out.push(`… (${lineRange(next, s - 1)} omitted)`)
+    out.push(lines.slice(s - 1, e).join("\n"))
+    next = e + 1
+  }
+  if (next <= n) out.push(`… (${lineRange(next, n)} omitted)`)
+  return { text: out.join("\n"), truncated: true }
+}
+
+/** Hunks of `diff` whose text lies wholly within its first `maxChars` characters. */
+function headHunkStats(diff: string | undefined, maxChars: number): Omit<SectionStats, "truncated"> {
+  if (!diff) return { hunksSent: 0, hunksTotal: 0 }
+  const { preamble, hunks } = splitHunks(diff)
+  let end = preamble ? preamble.length + 1 : 0
+  let sent = 0
+  for (const h of hunks) {
+    end += h.text.length
+    if (end > maxChars) break
+    sent++
+    end += 1
+  }
+  return { hunksSent: sent, hunksTotal: hunks.length }
+}
+
+/** How coverage mode renders a file: the diff section's own character budget. */
+export interface AiCoverageRender {
+  diffChars: number
+}
+/** `true` means coverage with the default diff budget; `false` keeps today's rendering. */
+type CoverageArg = boolean | AiCoverageRender | undefined
+
+function coverageRender(c: CoverageArg): AiCoverageRender | undefined {
+  if (!c) return undefined
+  return c === true ? { diffChars: COVERAGE_DIFF_CHARS } : c
+}
+
+/** One changed file as it appears in the prompt, with what it carries. */
+function renderFile(f: AiReviewFile, maxChars: number, coverageArg: CoverageArg, withCard: boolean): { text: string } & SectionStats {
+  const coverage = coverageRender(coverageArg)
   const label = f.kind && KIND_LABEL[f.kind]
   const parts = [`\n### ${f.path} (${f.status}${label ? `, ${label}` : ""})`]
-  if (f.diff) parts.push("Diff:\n```diff\n" + truncate(f.diff, maxChars) + "\n```")
+  if (withCard && f.card) parts.push(`dbt context (from manifest):\n${f.card}`)
+  let stats: SectionStats = { ...headHunkStats(f.diff, maxChars), truncated: (f.diff?.length ?? 0) > maxChars }
+  // Under coverage a long diff sent whole makes the file windows redundant: keep a short head instead.
+  let fileChars = maxChars
+  if (f.diff) {
+    if (coverage && f.diff.length > maxChars) {
+      const { text: excerpt, ...ex } = excerptDiff(f.diff, coverage.diffChars)
+      stats = ex
+      if (ex.hunksSent === ex.hunksTotal && !ex.truncated) fileChars = Math.min(COVERAGE_FULL_DIFF_FILE_CHARS, maxChars)
+      parts.push("Diff:\n```diff\n" + excerpt + "\n```")
+    } else parts.push("Diff:\n```diff\n" + truncate(f.diff, maxChars) + "\n```")
+  }
   if (f.sql) {
     const isModel = !f.kind || f.kind === "model_sql"
-    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + truncate(f.sql, maxChars) + "\n```")
+    const body = !coverage
+      ? truncate(f.sql, maxChars)
+      : fileChars < maxChars
+        ? truncate(f.sql, fileChars)
+        : excerptFile(f.sql, f.diff, maxChars).text
+    if (f.sql.length > fileChars) stats = { ...stats, truncated: true }
+    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + body + "\n```")
   }
-  return parts.join("\n")
+  return { text: parts.join("\n"), ...stats }
+}
+
+function fileSection(f: AiReviewFile, maxChars: number, coverage: CoverageArg = false): string {
+  return renderFile(f, maxChars, coverage, true).text
 }
 
 /** Split files, in order, into groups whose sections fit `batchChars` (an oversized file goes alone). */
@@ -106,7 +438,7 @@ export function batchAiFiles(files: AiReviewFile[], budget: AiInputBudget): AiRe
   let cur: AiReviewFile[] = []
   let size = 0
   for (const f of files) {
-    const n = fileSection(f, budget.maxFileChars).length
+    const n = fileSection(f, budget.maxFileChars, budget.coverage).length
     if (cur.length && size + n > budget.batchChars) {
       batches.push(cur)
       cur = []
@@ -166,6 +498,23 @@ export interface AiLaneStatus {
   replayed?: boolean
   /** The replayed envelope did not list every generator finding. */
   replayIncomplete?: boolean
+  /** What each file sent carried; recorded under coverage, context cards or dry run. */
+  input?: AiInputRecord[]
+  /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes). */
+  unsent?: string[]
+}
+/** One file as sent to the model. */
+export interface AiInputRecord {
+  path: string
+  kind: string
+  /** Characters of the file's prompt section. */
+  chars: number
+  /** Some of the diff or file content was left out. */
+  truncated: boolean
+  hunksSent: number
+  hunksTotal: number
+  /** A manifest context card went with the file. */
+  card: boolean
 }
 /** Token counts as `Session.getUsage` reports them: `input` excludes cached
  *  tokens, `inputTotal` includes them. */
@@ -229,7 +578,15 @@ function relatedContext(input: AiReviewInput): string[] {
 }
 
 /** Assemble the user message (mechanical formatting — not IP). */
-export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_CHARS): string {
+export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_CHARS, coverage: CoverageArg = false): string {
+  return buildBatchMessage(input, maxFileChars, coverage).message
+}
+
+/** The user message for one call and a record of each file it carries. A context
+ *  card is added only while the call's cards total at most 6,000 characters; a card
+ *  that would pass that is skipped and later, smaller ones may still fit. */
+function buildBatchMessage(input: AiReviewInput, maxFileChars: number, coverage: CoverageArg): { message: string; records: AiInputRecord[] } {
+  const records: AiInputRecord[] = []
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
   if (input.prBody) parts.push(`PR description:\n${truncate(input.prBody, 1500)}`)
@@ -244,7 +601,22 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
   }
 
   parts.push("\n## CHANGED FILES (review for what the engine missed):")
-  for (const f of input.files) parts.push(fileSection(f, maxFileChars))
+  let cardChars = 0
+  for (const f of input.files) {
+    const withCard = !!f.card && cardChars + f.card.length <= CARD_BATCH_MAX_CHARS
+    if (withCard) cardChars += f.card!.length
+    const r = renderFile(f, maxFileChars, coverage, withCard)
+    parts.push(r.text)
+    records.push({
+      path: f.path,
+      kind: f.kind ?? "model_sql",
+      chars: r.text.length,
+      truncated: r.truncated,
+      hunksSent: r.hunksSent,
+      hunksTotal: r.hunksTotal,
+      card: withCard,
+    })
+  }
   const context = relatedContext(input)
   if (context.length) {
     parts.push(
@@ -253,7 +625,38 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
     )
   }
   parts.push("\nReturn ONLY the JSON array per the output contract.")
-  return parts.join("\n")
+  return { message: parts.join("\n"), records }
+}
+
+/** What the lane would send: files, the unsent rest, one message per call, and a record per file. */
+export interface AiInputPlan {
+  budget: AiInputBudget
+  files: AiReviewFile[]
+  /** Sendable files left out (by the quotas under coverage, by `maxFiles` otherwise). */
+  unsent: AiReviewFile[]
+  batches: AiReviewFile[][]
+  messages: string[]
+  input: AiInputRecord[]
+}
+
+/**
+ * Plan the lane's input without calling a model: selection, batching, the exact
+ * user messages and what each file carries. Pure: the budget comes from the
+ * `env` argument; `runAiReview` sends exactly these messages.
+ */
+export function planAiInput(input: AiReviewInput, env: Record<string, string | undefined> = process.env): AiInputPlan {
+  const budget = aiInputBudget(env)
+  let files: AiReviewFile[]
+  let unsent: AiReviewFile[]
+  if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas))
+  else {
+    files = selectAiFiles(input.files, budget.maxFiles)
+    const chosen = new Set(files)
+    unsent = input.files.filter((f) => sendable(f) && !chosen.has(f))
+  }
+  const batches = files.length ? batchAiFiles(files, budget) : []
+  const built = batches.map((b) => buildBatchMessage({ ...input, files: b }, budget.maxFileChars, budget.coverage))
+  return { budget, files, unsent, batches, messages: built.map((b) => b.message), input: built.flatMap((b) => b.records) }
 }
 
 /**
@@ -265,15 +668,23 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
   const replay = aiReplayPath()
-  if (replay) return runAiReplay(input, replay)
   const startedAt = Date.now()
+  const plan = planAiInput(input)
+  const { files, budget } = plan
+  const dryRun = aiDryRunEnabled()
+  // Recorded only when an opt-in switch changed or inspects the input, so the default envelope is unchanged.
+  const recorded: Pick<AiLaneStatus, "input" | "unsent"> = {
+    ...(budget.coverage || dryRun || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
+    ...(budget.coverage && plan.unsent.length ? { unsent: plan.unsent.map((f) => f.path) } : {}),
+  }
   const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
     findings,
-    status: { ...status, durationMs: Date.now() - startedAt },
+    status: { ...status, ...recorded, durationMs: Date.now() - startedAt },
   })
-  const budget = aiInputBudget()
-  const files = selectAiFiles(input.files, budget.maxFiles)
-  if (!files.length) return done([], { state: "skipped", reason: "no changed dbt files to review" })
+  if (!files.length && (dryRun || !replay)) return done([], { state: "skipped", reason: "no changed dbt files to review" })
+  // Dry run wins over replay: a replayed envelope would still reach the verifier, a model call.
+  if (dryRun) return done([], { state: "skipped", reason: "dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call" })
+  if (replay) return runAiReplay(input, replay)
 
   let modelLabel: string | undefined
   try {
@@ -298,11 +709,11 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     modelLabel = `${model.providerID}/${model.id}`
 
     // One call per batch; a PR that fits the budget is a single call, as before.
-    const batches = batchAiFiles(files, budget)
+    const batches = plan.batches
     const results: BatchResult[] = []
     for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
       const slice = batches.slice(i, i + BATCH_CONCURRENCY)
-      results.push(...(await Promise.all(slice.map((b) => reviewBatch(input, b, budget, system, model)))))
+      results.push(...(await Promise.all(slice.map((b, j) => reviewBatch(plan.messages[i + j], b, system, model)))))
     }
     let findings = results.flatMap((r) => r.findings)
     const failed = results.filter((r) => r.state !== "ok")
@@ -395,13 +806,11 @@ export async function streamUsage(
 
 /** One model call over a group of files: send, wait (bounded), parse and clamp in core. */
 async function reviewBatch(
-  input: AiReviewInput,
+  message: string,
   files: AiReviewFile[],
-  budget: AiInputBudget,
   system: string,
   model: Awaited<ReturnType<typeof Provider.getModel>>,
 ): Promise<BatchResult> {
-  const message = buildUserMessage({ ...input, files }, budget.maxFileChars)
   const controller = new AbortController()
   const timeoutMs = aiTimeoutMs(message.length)
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
