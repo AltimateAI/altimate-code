@@ -25,7 +25,9 @@ export const projectCopyHandlers = HttpApiBuilder.group(InstanceHttpApi, "projec
     const generateName = Effect.fn("ProjectCopyHttpApi.generateName")(function* (context: string | undefined) {
       const text = context?.trim()
       if (!text) return Slug.create()
-      const fallback = yield* provider.defaultModel().pipe(Effect.catch(() => Effect.succeed(undefined)))
+      // altimate_change start — an unavailable configured model only costs the generated name, not the copy
+      const fallback = yield* provider.defaultModel().pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+      // altimate_change end
       if (!fallback) return Slug.create()
       const model =
         (yield* provider.getSmallModel(fallback.providerID)) ??
