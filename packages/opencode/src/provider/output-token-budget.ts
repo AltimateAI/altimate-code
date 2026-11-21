@@ -20,6 +20,13 @@ const VIDEO_TOKEN_ALLOWANCE = 8_192
 const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
+/**
+ * Lowest share of the character estimate that provider-reported usage is trusted at; below it the
+ * full estimate decides.
+ * The estimate runs ~15-20% high on SQL/JSON and higher on tool schemas; the floor bounds an
+ * undercount from usage that missed inputs changed since (per-step tool selection, refreshed rules).
+ */
+const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.6
 const EMOJI = /\p{Extended_Pictographic}/u
 const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
 const DENSE_ASCII_MIN_LENGTH = 32
@@ -172,7 +179,7 @@ function denseAsciiCharacters(input: string): number {
 }
 
 /** Estimate heterogeneous text in small chunks and conservatively count dense or non-ASCII text. */
-function estimateTextTokens(input: string): number {
+export function estimateTextTokens(input: string): number {
   let total = 0
   for (let offset = 0; offset < input.length; offset += ESTIMATE_CHUNK_SIZE) {
     const chunk = input.slice(offset, offset + ESTIMATE_CHUNK_SIZE)
@@ -274,6 +281,11 @@ function mediaTokenAllowance(part: JsonRecord): number {
     return Math.max(FILE_TOKEN_ALLOWANCE, inlinePayloadSize(payload) ?? 0)
   }
   return MEDIA_TOKEN_ALLOWANCE
+}
+
+/** The allowance the guard charges for one attachment, for callers sizing unmeasured attachments. */
+export function attachmentTokenAllowance(mime: string, url: string): number {
+  return mediaTokenAllowance({ type: "file", mediaType: mime, data: url })
 }
 
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
@@ -390,6 +402,49 @@ export function estimateInputTokens(input: {
     total += estimateTextTokens(serialized.text) + serialized.mediaTokens
   }
   return total
+}
+
+/** Provider-reported token usage of one finished assistant turn. */
+export type ReportedUsage = {
+  readonly total?: number
+  readonly input: number
+  readonly output: number
+  readonly cache: { readonly read: number; readonly write: number }
+}
+
+/**
+ * The context size the compaction trigger compares against its threshold: provider-reported usage
+ * (exact) plus an estimated uncounted tail inflated by 1/fraction. The pre-send guard builds on the
+ * same measure (with a more conservative tail estimator) instead of the bare character estimate.
+ */
+export function reportedContextTokens(input: {
+  readonly tokens: ReportedUsage
+  readonly estimatedTokens?: number
+  readonly fraction: number
+}): number {
+  const count =
+    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
+  const estimated = input.estimatedTokens ?? 0
+  return estimated > 0 ? count + Math.ceil(estimated / input.fraction) : count
+}
+
+/**
+ * Prefer the provider-reported size of the same conversation when it is smaller than the character
+ * estimate, which runs high on SQL- and JSON-heavy context. Never raises the estimate, and distrusts
+ * usage below MIN_CALIBRATED_ESTIMATE_FRACTION of it; in those cases the estimate decides, so the
+ * guard can still refuse (and the session compact) below the compaction trigger.
+ */
+export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
+  if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
+  // Usage far below the estimate more likely missed inputs (partial reporting, a changed request)
+  // than measured them: the estimate decides, so the response reservation is clamped as before.
+  if (reported < estimate * MIN_CALIBRATED_ESTIMATE_FRACTION) return estimate
+  return Math.min(estimate, reported)
+}
+
+/** True for the pre-send refusals that compacting the conversation can resolve. */
+export function isContextBudgetError(error: unknown): error is OutputTokenBudgetError | InputTokenBudgetError {
+  return error instanceof OutputTokenBudgetError || error instanceof InputTokenBudgetError
 }
 
 /** Resolve a direct or lazy input estimate after cheap no-op checks have passed. */

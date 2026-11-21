@@ -30,6 +30,9 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+// altimate_change start — the context measure shared by compaction and the pre-send budget guard
+import { attachmentTokenAllowance, estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
+// altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
@@ -203,6 +206,18 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+// altimate_change start — assistant-message metadata key marking a request sent without tools
+const SENT_WITHOUT_TOOLS = "sent_without_tools"
+
+/** Whether a deadline has disabled tools for this session, inherited from a live ancestor run (as llm.ts applies it). */
+async function runToolsDisabled(sessionID: string): Promise<boolean> {
+  const run = await RunBudgetEffort.inheritedRun(
+    sessionID,
+    async (id) => (await Session.get(SessionID.make(id)).catch(() => undefined))?.parentID,
+  )
+  return run !== undefined && RunBudgetEffort.toolsDisabled(run)
+}
+// altimate_change end
 // altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
 const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
 // altimate_change end
@@ -1585,7 +1600,14 @@ export namespace SessionPrompt {
       // counted, and one oversized output can jump the session past the window
       // between checks (a common failure mode for long headless runs). Estimate the
       // uncounted tail and include it.
-      const uncountedTail = estimateUncountedTail(msgs, lastFinished?.id)
+      // Messages after the last finished turn by stored order (caller-supplied IDs carry no chronology).
+      const measuredID = lastFinished?.id
+      const isAfterMeasured = (id: MessageID) => {
+        if (!measuredID) return false
+        const order = compareMessageOrder(messageOrder, id, measuredID)
+        return order !== 0 ? order > 0 : id > measuredID
+      }
+      const uncountedTail = estimateUncountedTail(msgs, measuredID, isAfterMeasured)
       if (
         lastFinished &&
         lastFinished.summary !== true &&
@@ -2230,7 +2252,70 @@ export namespace SessionPrompt {
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
       // altimate_change end
+      // altimate_change start — the pre-send guard measures this request the way isOverflow does
+      // (provider-reported usage of the last turn on this model plus the estimated tail), and a
+      // guard refusal compacts whenever the proactive check above could have compacted.
+      // The reported usage applies only to a tool-calling step of the same model and agent (same
+      // tokenizer, system prompt and tools), and only when it counts input: a provider reporting none,
+      // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
+      const loopConfig = await Config.get()
+      const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
+      // One pass over what the provider has not counted yet (the last measured step and later):
+      // attachments are added to the reported measure at the guard's own allowance. Compaction drops
+      // images and PDFs (replay swaps them for a placeholder, summaries strip them), so one the model
+      // has not seen yet (a user attachment or tool result since the last measured step) keeps a
+      // refusal the budget error rather than continue without it. Media already seen does not.
+      let attachmentTokens = 0
+      let unseenMedia = false
+      for (const msg of msgs) {
+        if (msg.info.id !== measuredID && !isAfterMeasured(msg.info.id)) continue
+        for (const part of msg.parts) {
+          // text/plain files and directories arrive as text parts, already in the tail estimate.
+          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
+            attachmentTokens += attachmentTokenAllowance(part.mime, part.url)
+            if (MessageV2.isMedia(part.mime)) unseenMedia = true
+          }
+          if (part.type !== "tool" || part.state.status !== "completed") continue
+          for (const attachment of part.state.attachments ?? []) {
+            attachmentTokens += attachmentTokenAllowance(attachment.mime, attachment.url)
+            if (MessageV2.isMedia(attachment.mime)) unseenMedia = true
+          }
+        }
+      }
+      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
+      // A step sent without tools (an echo or final step, tagged below) reported usage that can
+      // undercount this request by the tool schemas; every other step carried the full tool set.
+      const reportedInputTokens =
+        measured &&
+        measured.metadata?.[SENT_WITHOUT_TOOLS] !== true &&
+        measured.providerID === model.providerID &&
+        measured.modelID === model.id &&
+        measured.agent === lastUser.agent &&
+        (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
+          ? (() => {
+              // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
+              // estimator, so the discount applies only to what the provider has counted.
+              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens, true)
+              return (
+                reportedContextTokens({
+                  tokens: measured.tokens,
+                  estimatedTokens: guardTail,
+                  fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
+                }) + attachmentTokens
+              )
+            })()
+          : undefined
+      // altimate_change end
+      // altimate_change start — record a request sent without tools; its usage cannot calibrate the guard
+      // (an answer echo, the final step, or a deadline finalization)
+      if (echoCommittedAnswer || textFinalStep || (await runToolsDisabled(sessionID)))
+        processor.message.metadata = { ...processor.message.metadata, [SENT_WITHOUT_TOOLS]: true }
+      // altimate_change end
       const result = await processor.process({
+        // altimate_change start — see reportedInputTokens above
+        compactable,
+        reportedInputTokens,
+        // altimate_change end
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
         messageID: processor.message.id,
@@ -2284,6 +2369,9 @@ export namespace SessionPrompt {
         // altimate_change end
       })
 
+      // altimate_change start — a pre-send refusal sent nothing: it does not consume the agent's step cap
+      if (processor.refusedBeforeSend) modelSteps--
+      // altimate_change end
       // altimate_change start - finalize buffered echoes before publishing any text to clients
       const stepParts = MessageV2.parts(processor.message.id)
       // Capture before post-processing can fail or request compaction.
@@ -2642,7 +2730,21 @@ export namespace SessionPrompt {
           agent: lastUser.agent,
           model: lastUser.model,
           auto: true,
-          overflow: !processor.message.finish,
+          // altimate_change start — a pre-send refusal mid-turn compacts the whole conversation, as the
+          // proactive check does, so this turn's steps are kept; on the turn's first request the user's
+          // prompt is replayed verbatim, as for a provider overflow
+          overflow:
+            !processor.message.finish &&
+            (!processor.refusedBeforeSend ||
+              // the turn's first request: no earlier step of this turn, finished or interrupted
+              !msgs.some(
+                (msg) =>
+                  msg.info.role === "assistant" &&
+                  msg.info.parentID === lastUser.id &&
+                  msg.info.id !== processor.message.id &&
+                  msg.parts.length > 0,
+              )),
+          // altimate_change end
         })
       }
       continue
@@ -3750,7 +3852,14 @@ export namespace SessionPrompt {
    * figure); its own text is not (already inside `tokens.output`).
    * Everything after it is counted in full.
    */
-  export function estimateUncountedTail(msgs: MessageV2.WithParts[], lastFinishedID: MessageID | undefined): number {
+  export function estimateUncountedTail(
+    msgs: MessageV2.WithParts[],
+    lastFinishedID: MessageID | undefined,
+    isAfter: (id: MessageID) => boolean = (id) => id > lastFinishedID!,
+    estimate: (text: string) => number = Token.estimate,
+    // Also count the tool-call inputs of later steps (sent back with the history); the pre-send guard does.
+    countToolInput = false,
+  ): number {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
     if (!lastFinished) return 0
@@ -3768,16 +3877,17 @@ export namespace SessionPrompt {
     }
     let tokens = 0
     for (const part of lastFinished.parts) {
-      if (part.type === "tool") tokens += Token.estimate(toolText(part))
+      if (part.type === "tool") tokens += estimate(toolText(part))
     }
     // filterCompacted deliberately reorders retained-tail and summary messages,
-    // so array position is not chronology. IDs are monotonic; select genuinely
-    // newer messages by ID regardless of their rendered position.
+    // so array position is not chronology. Select genuinely newer messages by
+    // the caller's stored order (default: monotonic IDs), not rendered position.
     for (const m of msgs) {
-      if (m.info.id <= lastFinishedID) continue
+      if (m.info.id === lastFinishedID || !isAfter(m.info.id)) continue
       for (const part of m.parts) {
-        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
-        if (part.type === "tool") tokens += Token.estimate(toolText(part))
+        if (part.type === "text") tokens += estimate(part.text ?? "")
+        if (part.type === "tool") tokens += estimate(toolText(part))
+        if (part.type === "tool" && countToolInput) tokens += estimate(JSON.stringify(part.state.input ?? {}))
       }
     }
     return tokens
