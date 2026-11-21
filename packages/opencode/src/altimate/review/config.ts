@@ -27,6 +27,14 @@ export const ReviewConfig = z.object({
   /** Enable the advisory LLM reviewer lane (needs a configured model). */
   ai: z.boolean().default(true),
   /**
+   * Report cross-engine portability advice ("isn't portable across
+   * warehouses"). Off by default once the engine is known (from the manifest's
+   * adapter or `dialect`), because a project that runs on one engine gains
+   * nothing from it. Turn on for packages that support several adapters.
+   * Functions missing on the project's own engine are always reported.
+   */
+  portability: z.boolean().optional(),
+  /**
    * Data-diff: actually run base-vs-head against the warehouse (core DataParity)
    * and report row/value deltas. OPT-IN — it costs warehouse compute and needs a
    * configured warehouse connection, so it is OFF by default. Configure

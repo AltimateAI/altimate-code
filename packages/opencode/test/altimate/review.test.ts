@@ -1967,8 +1967,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["email", "ssn"] }
+      async detectPii(sql: string) {
+        return { columns: ["email", "ssn"].filter((c) => sql.includes(c)) }
       },
     }
     const env = await runReview({
@@ -1977,7 +1977,7 @@ describe("orchestrate", () => {
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
-      getContent: content("select email, ssn from x"),
+      getContent: content("select email, ssn from x", "select id from x"),
     })
     const pii = env.findings.find((f) => f.category === "pii_exposure")
     expect(pii).toBeDefined()
@@ -2024,7 +2024,7 @@ describe("orchestrate", () => {
     expect(env.verdict).toBe("REQUEST_CHANGES")
   })
 
-  test("broad PII detector remains fallback for existing output columns", async () => {
+  test("a PII column the base already exposed is not re-flagged when the PR only touches it", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    lower(email) as email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -2056,18 +2056,18 @@ describe("orchestrate", () => {
       runner,
       getContent: content("select customer_id, lower(email) as email from customers", "select customer_id, email from customers"),
     })
+    // `email` was already in the base's output: this PR does not newly expose it.
     const pii = env.findings.filter((f) => f.category === "pii_exposure")
-    expect(pii).toHaveLength(1)
-    expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
-    expect(env.verdict).toBe("REQUEST_CHANGES")
+    expect(pii).toHaveLength(0)
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
   test("PII fallback survives core lineage failure instead of aborting review", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["email"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
       },
       async columnLineage() {
         throw new Error("lineage parser crashed")
@@ -2098,8 +2098,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["email"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
       },
       async columnLineage(sql) {
         return sql.includes("email")
@@ -2125,6 +2125,41 @@ describe("orchestrate", () => {
     expect(pii).toHaveLength(1)
     expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
     expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("without a compiled base, head PII may predate the PR: reported as a non-blocking warning", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    lower(email) as email\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii(sql: string) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
+      },
+      async columnLineage(sql) {
+        return [
+          { source: "customers.customer_id", target: "customer_id" },
+          ...(sql.includes("email") ? [{ source: "customers.email", target: "email" }] : []),
+        ]
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({ column, classification: "Email", confidence: 0.95 }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      // The base is raw Jinja with no compiled artifact: it cannot be analysed.
+      getContent: content(
+        "select customer_id, lower(email) as email from customers",
+        "select customer_id, email from {{ ref('customers') }}",
+      ),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii.length).toBeGreaterThan(0)
+    expect(pii.every((f) => f.severity !== "critical")).toBe(true)
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
   test("case-variant PII detector output does not duplicate core diff-scoped finding", async () => {
@@ -2205,8 +2240,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["ssn"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("ssn") ? ["ssn"] : [] }
       },
       async columnLineage(sql) {
         return sql.includes("ssn")
