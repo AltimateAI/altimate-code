@@ -10,7 +10,19 @@ import {
   mergeRepeats,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide } from "./diff-filter"
+import {
+  type ChangedFile,
+  type DbtProjectLayout,
+  type DiffLine,
+  type DiffRow,
+  type NotReviewed,
+  partitionChangedFiles,
+  hasOldSide,
+  walkDiffLines,
+  walkDiffRows,
+} from "./diff-filter"
+
+export { type DiffLine, walkDiffLines } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
@@ -26,11 +38,12 @@ import {
 import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
-import { selectListNames } from "./select-list"
+import { finalSelectNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
-import { type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
+import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
+import { ruleTier } from "./rule-tiers"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
 // Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
@@ -153,6 +166,13 @@ export interface ReviewRunner {
   /** Direct downstream models (name + file path) of a model, from the manifest DAG. */
   downstreamModels?(model: string): Promise<Array<{ name: string; path: string }>>
   /**
+   * Direct dbt parents of the nodes defined in these files (project-relative
+   * paths): models, seeds and snapshots by file, sources with their declared
+   * columns, and the project's own macros. A changed yml maps to the models its
+   * tests cover. Paths of parents are project-relative too.
+   */
+  graphParents?(paths: string[]): Promise<Array<{ path: string; kind: string; name: string; forPaths: string[]; columns?: string[] }>>
+  /**
    * Consumers of a model that dbt refs don't show: exposures that depend on it,
    * and whether it has an enforced contract (with the declared columns).
    * Undefined when the model is not in the manifest.
@@ -232,6 +252,8 @@ export interface OrchestrateInput {
   aiDisabledReason?: string
   /** Explicit `provider/model` for the AI lane. */
   aiModel?: string
+  /** Send the changed files' unchanged dbt parents to the AI lane as context. */
+  aiGraphContext?: boolean
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -246,7 +268,7 @@ export interface OrchestrateInput {
   /** Names `ref()` can resolve to at head (repo resources + installed packages); undefined = unknown. */
   resourceNames?: () => Promise<Set<string> | undefined>
   /** What the review covered: base resolution and files left out of scope. */
-  scope?: Omit<ReviewScope, "unverified">
+  scope?: Omit<ReviewScope, "unverified" | "notReviewed"> & { notReviewed?: NotReviewed[] }
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
   suppressPortability?: boolean
   /** Other adapters the project supports (from its adapter-specific macros); portability advice is kept when any of them lacks the construct. */
@@ -275,42 +297,168 @@ export function isSuppressiblePortability(f: Finding, dialect: string, targets: 
   return !worksOn || [dialect.toLowerCase(), ...targets].every((d) => worksOn.includes(d))
 }
 
+/** Head-side line numbers of a unified diff: `commentable` holds the lines
+ *  GitHub accepts for an inline comment (added and context lines inside a
+ *  hunk); `added` holds only the `+` lines the PR introduced. */
+export function scanDiffLines(diff: string | undefined): { commentable: Set<number>; added: Set<number> } {
+  const commentable = new Set<number>()
+  const added = new Set<number>()
+  for (const { line, kind } of walkDiffLines(diff)) {
+    commentable.add(line)
+    if (kind === "+") added.add(line)
+  }
+  return { commentable, added }
+}
+
 /** Line numbers on the head side of a unified diff that GitHub accepts for an
  *  inline comment: added lines and context lines inside a hunk. */
 export function commentableLines(diff: string | undefined): Set<number> {
-  const out = new Set<number>()
-  if (!diff) return out
-  let right = 0
-  let inHunk = false
-  const rows = diff.split("\n")
-  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
-  for (const line of rows) {
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (h) {
-      right = Number(h[1])
-      inHunk = true
-      continue
-    }
-    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
-    if (!inHunk || line.startsWith("\\")) continue
-    // A blank context line may have lost its leading space in transit.
-    if (line.startsWith("+") || line.startsWith(" ") || line === "") out.add(right++)
-    else if (!line.startsWith("-")) inHunk = false
+  return scanDiffLines(diff).commentable
+}
+
+/** Head-side line numbers each changed file's diff adds. A newly added file
+ *  counts every line of its diff as added. */
+export function addedLinesByFile(files: ChangedFile[]): Map<string, Set<number>> {
+  return new Map(
+    files.map((f) => {
+      const { commentable, added } = scanDiffLines(f.diff)
+      return [f.path, f.status === "added" ? commentable : added]
+    }),
+  )
+}
+
+/**
+ * Keep a finding's `suggestion` only when GitHub can apply it as written: every
+ * line of the range was added by the PR, the head file has those lines, and
+ * the replacement changes them. Otherwise the replacement moves into the body
+ * as a plain "Suggested fix" block.
+ */
+export async function validateSuggestions(
+  findings: Finding[],
+  getContent: OrchestrateInput["getContent"],
+  added: Map<string, Set<number>>,
+): Promise<Finding[]> {
+  const heads = new Map<string, Promise<string | undefined>>()
+  const head = (file: string) => {
+    if (!heads.has(file)) heads.set(file, getContent?.(file, "new").catch(() => undefined) ?? Promise.resolve(undefined))
+    return heads.get(file)!
   }
-  return out
+  return Promise.all(
+    findings.map(async (f) => {
+      const s = f.suggestion
+      if (!s) return f
+      const lines = added.get(f.file)
+      const range = Array.from({ length: s.endLine - s.startLine + 1 }, (_, i) => s.startLine + i)
+      const inDiff = s.startLine <= s.endLine && !!lines && range.every((n) => lines.has(n))
+      const text = inDiff ? await head(f.file) : undefined
+      const rows = text?.split("\n")
+      const current = rows && rows.length >= s.endLine ? rows.slice(s.startLine - 1, s.endLine).join("\n") : undefined
+      if (current !== undefined && current !== s.replacement) return f
+      const { suggestion: _drop, ...rest } = f
+      return { ...rest, body: `${f.body}\n\nSuggested fix:\n\`\`\`sql\n${s.replacement}\n\`\`\`` } as Finding
+    }),
+  )
+}
+
+/** Shortest evidence text matched as a substring of an added line. */
+const EVIDENCE_SUBSTRING_MIN = 12
+
+/**
+ * Give a line-less finding the diff line its rule matched. The rule records
+ * the matched source text in `evidence.result.line`; this finds it in the
+ * file's diff: the first added line with the same trimmed text, else the first
+ * context line with it (which `anchorToDiff` then marks pre-existing), else the
+ * first added line containing it when it is long enough to be specific. A
+ * finding whose text isn't in the diff keeps no line and stays in the summary.
+ */
+export function anchorByEvidence(findings: Finding[], files: ChangedFile[]): Finding[] {
+  const diffs = new Map(files.map((f) => [f.path, f.diff]))
+  const walked = new Map<string, DiffLine[]>()
+  return findings.map((f) => {
+    if (typeof f.startLine === "number") return f
+    const raw = (f.evidence?.result as { line?: unknown } | undefined)?.line
+    const want = typeof raw === "string" ? raw.trim() : ""
+    if (!want || !diffs.has(f.file)) return f
+    if (!walked.has(f.file)) walked.set(f.file, [...walkDiffLines(diffs.get(f.file))])
+    const rows = walked.get(f.file)!
+    const hit =
+      rows.find((r) => r.kind === "+" && r.text.trim() === want) ??
+      rows.find((r) => r.kind === " " && r.text.trim() === want) ??
+      (want.length >= EVIDENCE_SUBSTRING_MIN ? rows.find((r) => r.kind === "+" && r.text.includes(want)) : undefined)
+    return hit ? { ...f, startLine: hit.line, endLine: hit.line } : f
+  })
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+/** The head line nearest a removed row: the `+` row at the same position in
+ *  its change block, else the nearest `+` row in its hunk, else (a pure
+ *  deletion) the context row after it, else the one before it. */
+function headSiteOfRemoved(rows: DiffRow[], i: number): number | undefined {
+  const hunk = rows[i].hunk
+  let lo = i
+  let hi = i
+  while (lo > 0 && rows[lo - 1].hunk === hunk && rows[lo - 1].kind !== " ") lo--
+  while (hi < rows.length - 1 && rows[hi + 1].hunk === hunk && rows[hi + 1].kind !== " ") hi++
+  const block = rows.slice(lo, hi + 1)
+  const plus = block.filter((r) => r.kind === "+")
+  if (plus.length) {
+    const k = block.filter((r) => r.kind === "-").indexOf(rows[i])
+    return plus[Math.min(k, plus.length - 1)].line
+  }
+  const inHunk = rows.map((r, j) => ({ r, j })).filter(({ r }) => r.hunk === hunk)
+  const nearest = (kind: DiffRow["kind"]) =>
+    inHunk.filter(({ r }) => r.kind === kind).sort((a, b) => Math.abs(a.j - i) - Math.abs(b.j - i))[0]?.r
+  const added = nearest("+")
+  if (added) return added.line
+  return (
+    inHunk.find(({ r, j }) => j > i && r.kind === " ")?.r.line ??
+    inHunk.filter(({ r, j }) => j < i && r.kind === " ").at(-1)?.r.line
+  )
+}
+
+/**
+ * Anchor for a finding about removed output columns: the head-side site of
+ * the base line that defined the first removed column the diff shows. The
+ * defining line is the last removed line whose select item ends in the column
+ * (`x.col`, `expr as col`), else the first removed line naming it. The site is
+ * a `deletionSite`: the finding is about the PR's removal, not pre-existing
+ * code. No removed line names a column → no anchor (the finding stays in the
+ * summary).
+ */
+export function removedColumnAnchor(
+  diff: string | undefined,
+  columns: string[],
+): Pick<Finding, "startLine" | "endLine" | "deletionSite"> {
+  const rows = [...walkDiffRows(diff)]
+  const removed = rows.map((r, i) => ({ r, i, code: r.text.replace(/--.*$/, "").trim() })).filter((x) => x.r.kind === "-")
+  for (const col of columns) {
+    const id = `["\`\\[]?${escapeRe(col)}["\`\\]]?`
+    const defines = new RegExp(`^,?\\s*(?:.*\\s+as\\s+|(?:[\\w"\`\\[\\]]+\\.)*)${id}\\s*,?$`, "i")
+    const names = new RegExp(`(^|[^\\w])${escapeRe(col)}([^\\w]|$)`, "i")
+    const def = removed.filter((x) => defines.test(x.code)).at(-1) ?? removed.find((x) => names.test(x.code))
+    const line = def && headSiteOfRemoved(rows, def.i)
+    if (line !== undefined) return { startLine: line, endLine: line, deletionSite: true }
+  }
+  return {}
 }
 
 /**
  * Keep a finding's line only when it can be commented on: inside the file's
  * diff hunks on the head side. Anything else (a line from compiled SQL, an
  * unchanged region) moves to the summary instead of making GitHub reject the
- * whole batch of inline comments.
+ * whole batch of inline comments. A finding anchored on a context line (one
+ * the PR did not add) keeps its line and is marked `preExisting`, unless the
+ * line is a `deletionSite` standing in for code the PR removed.
  */
 export function anchorToDiff(findings: Finding[], files: ChangedFile[]): Finding[] {
-  const lines = new Map(files.map((f) => [f.path, commentableLines(f.diff)]))
+  const lines = new Map(files.map((f) => [f.path, { ...scanDiffLines(f.diff), isNew: f.status === "added" }]))
   return findings.map((f) => {
     if (typeof f.startLine !== "number") return f
-    if (lines.get(f.file)?.has(f.startLine)) return f
+    const file = lines.get(f.file)
+    if (file?.commentable.has(f.startLine)) {
+      return file.isNew || file.added.has(f.startLine) || f.deletionSite ? f : { ...f, preExisting: true }
+    }
     const { startLine: _s, endLine: _e, ...rest } = f
     return rest as Finding
   })
@@ -381,6 +529,7 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
         degraded,
         evidence: { tool: "impact_analysis", result: impact },
         ruleKey: `lineage_breakage:${file.status}`,
+        rule: "impact-analysis:downstream-consumers",
       }),
     ]
   }
@@ -399,6 +548,7 @@ async function semanticChangeLane(
   dialect: string,
   impact: ImpactResult,
   rubric: Rubric,
+  unverified: Array<{ path: string; reason: string }>,
 ): Promise<Finding[]> {
   if (!hasOldSide(file)) return []
   if (!oldSql || !newSql || oldSql.trim() === newSql.trim()) return []
@@ -411,24 +561,14 @@ async function semanticChangeLane(
   if (eq.decided && eq.equivalent) return []
 
   if (!eq.decided) {
-    // Undecidable / no schema → a suggestion to data-diff: the engine not knowing is
-    // not evidence of a change (1 of 426 such findings matched a real defect on replay).
-    return [
-      makeFinding({
-        severity: "suggestion",
-        category: "semantic_change",
-        title: `${model}: refactor could not be proven equivalent`,
-        body:
-          `The logic of \`${model}\` changed and equivalence could not be decided` +
-          ` (no schema, or unsupported SQL). Treat as a potential behavior change and verify with a data-diff.`,
-        file: file.path,
-        model,
-        confidence: "unknown",
-        degraded: true,
-        evidence: { tool: "altimate_core.equivalence", result: { decided: false } },
-        ruleKey: "semantic_change:undecidable",
-      }),
-    ]
+    // Undecidable / no schema: the engine not knowing is not evidence of a change
+    // (1 of 426 such findings matched a real defect on replay), so it goes to the
+    // coverage ledger instead of the findings.
+    unverified.push({
+      path: file.path,
+      reason: "equivalence could not be proven (no schema or unsupported SQL); verify with a data-diff",
+    })
+    return []
   }
 
   // Decided NOT equivalent. THE FUSION: a proven behavior change to a model with
@@ -456,8 +596,41 @@ async function semanticChangeLane(
       confidence: eq.confidence ?? "medium",
       evidence: { tool: "altimate_core.equivalence", result: { equivalent: false, differences: diffs } },
       ruleKey: "semantic_change:not-equivalent",
+      rule: "altimate-core.equivalence:not-equivalent",
     }),
   ]
+}
+
+/**
+ * A check issue as evidence. On compiled SQL its line number doesn't exist in
+ * the PR's file, so the compiled line's text goes in `line` (the number moves
+ * to `compiledLine`) for `anchorByEvidence` to find among the added lines;
+ * only text that is specific and unique in the compiled SQL.
+ */
+function checkEvidence(issue: { line?: number }, sql: string, linesMatchFile: boolean): object {
+  if (linesMatchFile || typeof issue.line !== "number") return issue
+  const rows = sql.split("\n")
+  const text = rows[issue.line - 1]?.trim() ?? ""
+  if (text.length < EVIDENCE_SUBSTRING_MIN || rows.filter((r) => r.trim() === text).length !== 1) return issue
+  return { ...issue, line: text, compiledLine: issue.line }
+}
+
+/**
+ * Fallback line for a non-deterministic-dedup issue on compiled SQL whose
+ * compiled text is not in the raw diff (the window came from a macro, or a
+ * Jinja-built line): the added line that opens a `row_number()` over the
+ * named time column, else the added line ordering by it (`order by col`,
+ * a macro's `order_by='col'`). No added line names the column → no line.
+ */
+function anchorDedupIssue(f: Finding, file: ChangedFile): Finding {
+  if (typeof anchorByEvidence([f], [file])[0].startLine === "number") return f
+  const cols = (/\[([^\]]+)\]/.exec(f.body)?.[1] ?? "").split(",").map((c) => c.trim()).filter(Boolean)
+  const names = (t: string) => cols.some((c) => new RegExp(`(^|[^\\w])${escapeRe(c)}([^\\w]|$)`, "i").test(t))
+  const added = [...walkDiffLines(file.diff)].filter((r) => r.kind === "+")
+  const hit =
+    added.find((r) => /\brow_number\s*\(/i.test(r.text) && names(r.text)) ??
+    added.find((r) => /\border(\s+by|_by)\b/i.test(r.text) && names(r.text))
+  return hit ? { ...f, startLine: hit.line, endLine: hit.line } : f
 }
 
 async function qualityLane(
@@ -510,23 +683,22 @@ async function qualityLane(
     let sev: Severity = isError ? "warning" : "suggestion"
     if (isError && (cat === "contract_violation" || cat === "pii_exposure")) sev = "critical"
     sev = syntax ? "suggestion" : clampSeverity(cat, sev, "high")
-    findings.push(
-      makeFinding({
-        severity: sev,
-        category: cat,
-        title: `${model}: ${issue.rule}`,
-        body: issue.message,
-        file: file.path,
-        model,
-        startLine: linesMatchFile ? issue.line : undefined,
-        endLine: linesMatchFile ? issue.line : undefined,
-        ...(syntax ? { confidence: "unknown" as const } : {}),
-        evidence: { tool: "altimate_core.check", result: issue },
-        // Include the message so distinct instances of the same rule (e.g. two
-        // different non-portable functions) don't collapse under one fingerprint.
-        ruleKey: `quality:${issue.rule}:${(issue.message ?? "").slice(0, 60)}`,
-      }),
-    )
+    const f = makeFinding({
+      severity: sev,
+      category: cat,
+      title: `${model}: ${issue.rule}`,
+      body: issue.message,
+      file: file.path,
+      model,
+      startLine: linesMatchFile ? issue.line : undefined,
+      endLine: linesMatchFile ? issue.line : undefined,
+      ...(syntax ? { confidence: "unknown" as const } : {}),
+      evidence: { tool: "altimate_core.check", result: checkEvidence(issue, sql, linesMatchFile) },
+      // Include the message so distinct instances of the same rule (e.g. two
+      // different non-portable functions) don't collapse under one fingerprint.
+      ruleKey: `quality:${issue.rule}:${(issue.message ?? "").slice(0, 60)}`,
+    })
+    findings.push(!linesMatchFile && rule === "non_deterministic_dedup" ? anchorDedupIssue(f, file) : f)
   }
   return findings
 }
@@ -624,6 +796,7 @@ async function columnBreakageLane(
       confidence: "high",
       evidence: { tool: "altimate_core.column_lineage", result: { removed, brokenBy: Object.fromEntries([...brokenBy].map(([k, v]) => [k, [...v]])) } },
       ruleKey: `lineage_breakage:column-removed`,
+      rule: "altimate-core.column-lineage:removed-columns",
     }),
   ]
 }
@@ -642,8 +815,9 @@ async function outputColumns(runner: ReviewRunner, sql: string, dialect: string)
   // set is unknown. Filling it from the select list alone would make every
   // unaliased expression look removed when only one side's lineage failed.
   if (!cols.length) return new Set()
-  // `*` in the final SELECT makes `named` null: keep lineage's own answer.
-  const named = selectListNames(sql)
+  // `*` in the final SELECT: keep lineage's own answer (it expands stars it can resolve),
+  // plus the CTE's own list when the star reads a CTE of this query.
+  const named = finalSelectNames(sql)
   return new Set([...cols, ...(named ?? [])])
 }
 
@@ -690,7 +864,7 @@ function rawSelectList(sql: string): Set<string> {
     // it becomes its own `__jinja__` item, which marks the list unknown.
     .replace(/\{%[\s\S]*?%\}/g, " , __jinja__ , ")
     .replace(/\{\{[\s\S]*?\}\}/g, " __jinja__ ")
-  const names = selectListNames(plain, { complete: true })
+  const names = finalSelectNames(plain, { complete: true })
   // A Jinja expression inside an item (e.g. `{{ col }} as x`) leaves its alias
   // intact; only a Jinja item standing alone is unknown.
   if (!names || names.includes("__jinja__")) return new Set()
@@ -767,7 +941,7 @@ async function consumerContractLane(
   if (removed.length && !declared) {
     out.push(
       makeFinding({
-        severity: "suggestion",
+        severity: "warning",
         category: "lineage_breakage",
         title: `${model}: removed column(s) on a final-layer model`,
         body:
@@ -778,6 +952,8 @@ async function consumerContractLane(
         confidence: "medium",
         evidence: { tool: "dbt.manifest", result: { removed, finalLayer: true } },
         ruleKey: "lineage_breakage:final-layer-column-removed",
+        rule: "dbt.manifest:removed-final-layer-columns",
+        ...removedColumnAnchor(ctx.file.diff, removed),
       }),
     )
   }
@@ -803,6 +979,8 @@ async function consumerContractLane(
           result: { removed, exposures: consumers.exposures.map((e) => e.name), contractEnforced: consumers.contractEnforced },
         },
         ruleKey: "lineage_breakage:consumer-column-removed",
+        rule: "dbt.manifest:removed-columns-declared-consumers",
+        ...removedColumnAnchor(ctx.file.diff, removed),
       }),
     )
   }
@@ -827,6 +1005,7 @@ async function consumerContractLane(
           confidence: "high",
           evidence: { tool: "contract-check", result: { missing } },
           ruleKey: "contract_violation:contract-missing-column",
+          rule: "contract-check:missing-columns",
         }),
       )
   }
@@ -872,6 +1051,7 @@ async function consumerListLane(
         confidence: "high",
         evidence: { tool: "consumer-column-list", result: { list: list.path, missing, stale } },
         ruleKey: `lineage_breakage:consumer-list:${list.path}`,
+        rule: "consumer-column-list:stale",
       }),
     )
   }
@@ -950,6 +1130,7 @@ async function dataDiffLane(
       confidence: "high",
       evidence: { tool: "data.diff", result: diff },
       ruleKey: "semantic_change:data-diff",
+      rule: "data.diff:row-delta",
     }),
   ]
 }
@@ -1058,6 +1239,7 @@ async function topologyEquivalenceLane(
           },
         },
         ruleKey: `semantic_change:topology-merge:${wName}`,
+        rule: "altimate-core.equivalence:not-equivalent",
       }),
     )
   }
@@ -1103,6 +1285,7 @@ async function grainMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promi
       confidence: "medium",
       evidence: { tool: "altimate_core.grain", result: { grain: actual, declared: pk, extra } },
       ruleKey: "sql_correctness:grain-mismatch",
+      rule: "altimate-core.grain:conflicts-declared-uniqueness",
     }),
   ]
 }
@@ -1140,6 +1323,7 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
       confidence: "medium",
       evidence: { tool: "dbt.manifest", result: { hasGrainTest: false } },
       ruleKey: "test_coverage:missing-grain-test",
+      rule: "dbt.manifest:new-model-no-grain-test",
     }),
   ]
 }
@@ -1240,6 +1424,37 @@ function changesMergeGrain(message: string, newSql: string, oldSql: string | und
 }
 
 /**
+ * The changed files' unchanged dbt parents, read at head, for the AI lane's
+ * cross-file checks: an upstream model's columns, a seed's rows, a macro's
+ * signature. Manifest paths are project-relative; changed paths may carry a
+ * prefix (review run from the repo root), which is reapplied to the parents.
+ */
+async function aiGraphContext(
+  paths: string[],
+  runner: ReviewRunner,
+  getContent: OrchestrateInput["getContent"],
+): Promise<AiContextFile[] | undefined> {
+  if (!runner.graphParents || !getContent || !paths.length) return undefined
+  try {
+    const parents = await runner.graphParents(paths)
+    const out: AiContextFile[] = []
+    for (const p of parents) {
+      if (p.kind === "source") {
+        if (!p.columns?.length) continue
+        out.push({ path: p.path, kind: p.kind, name: p.name, forPaths: p.forPaths, content: `columns: ${p.columns.join(", ")}` })
+        continue
+      }
+      const content = await getContent(p.path, "new").catch(() => undefined)
+      if (content) out.push({ path: p.path, kind: p.kind, name: p.name, forPaths: p.forPaths, content })
+    }
+    return out
+  } catch {
+    // Context is an enrichment: without it the lane reviews the changed files alone.
+    return undefined
+  }
+}
+
+/**
  * dbt CONFIG lint — runs the core dbt-config parser (minijinja) over the RAW model
  * (the `{{ config() }}` block + body) and emits the config/Jinja findings: incremental
  * guard / unique_key, microbatch lookback, enforced-contract on_table_exists,
@@ -1320,6 +1535,7 @@ async function joinKeyUniquenessLane(ctx: ModelContext, runner: ReviewRunner): P
         confidence: "medium",
         evidence: { tool: "dbt.manifest", result: { joined: t.model, keys: t.keys, declared } },
         ruleKey: `fanout:join-key-untested:${t.model}`,
+        rule: "dbt.manifest:left-join-key-not-unique",
       }),
     )
   }
@@ -1376,6 +1592,7 @@ async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner, un
       confidence: "high",
       evidence: { tool: "dbt.manifest", result: { unique_key: uk, declared } },
       ruleKey: "materialization:unique-key-test-mismatch",
+      rule: "dbt.manifest:unique-key-differs-from-test",
     }),
   ]
 }
@@ -1506,6 +1723,7 @@ async function siblingConsistencyLane(ctxs: ModelContext[], runner: ReviewRunner
           confidence: "medium",
           evidence: { tool: "altimate_core.source_filters", result: { upstream: u, missing } },
           ruleKey: `sql_correctness:sibling-filter:${u}`,
+          rule: "altimate-core.source-filters:sibling-mismatch",
         }),
       )
     }
@@ -1592,6 +1810,7 @@ async function piiClassifyLane(
         confidence: highConfidence ? "high" : "medium",
         evidence: { tool: "altimate_core.classify_pii", result: p },
         ruleKey: `pii_exposure:${col}`,
+        rule: "altimate-core.classify-pii:exposes",
       }),
     )
   }
@@ -1620,6 +1839,7 @@ function piiLane(file: ChangedFile & { kind: string }, columns: string[], baseUn
       confidence: baseUnknown ? "medium" : "high",
       evidence: { tool: "schema.detect_pii", result: { columns } },
       ruleKey: "pii:exposure",
+      rule: "schema.detect-pii:exposes",
     }),
   ]
 }
@@ -1642,7 +1862,16 @@ interface ModelContext {
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
-  const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs, input.layout)
+  const { reviewable, dropped } = partitionChangedFiles(
+    input.changedFiles,
+    input.rubric.exclusions.excludeGlobs,
+    input.layout,
+  )
+  // Files some lane received (the coverage ledger lists the rest).
+  const touched = new Set<string>()
+  const touch = (files: Array<{ path: string }>) => {
+    for (const f of files) touched.add(f.path)
+  }
   const dialect = input.config.dialect
   const getContent = input.getContent
   const getCompiled = input.getCompiled
@@ -1651,11 +1880,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // tiering + lineage), PII columns (hard-floor → must precede tiering), and
   // both SQL sides. This avoids duplicate engine calls and lets tiering see PII.
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
+  // Every model gets at least the PII check; one that fails is recorded as unverified.
+  touch(modelFiles)
   const ctxByPath = new Map<string, ModelContext>()
   const unverified: NonNullable<ReviewScope["unverified"]> = []
   let anyManifest = false
+  let manifestMissing = false
   if (input.runner.manifestAvailable) {
     anyManifest = await input.runner.manifestAvailable().catch(() => false)
+    manifestMissing = !anyManifest
   }
   // PR-level lanes (across files) that threw: reported with the engine errors.
   const laneErrors: Array<{ method: string; reason: string; count: number }> = []
@@ -1821,6 +2054,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           dialect,
           ctx.impact,
           input.rubric,
+          unverified,
         ),
       )
     }
@@ -1908,7 +2142,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           .catch(() => undefined)
           .then((mc) => [
             ...jinjaFindings(ctx.file, ctx.oldSql, ctx.newSql),
-            ...modelConfigFindings(ctx.file, ctx.newSql && inlineConfigSplats(ctx.newSql), dialect, mc),
+            ...modelConfigFindings(ctx.file, ctx.newSql && inlineConfigSplats(ctx.newSql), dialect, mc, !!input.dialectKnown),
           ]),
       )
     }
@@ -1949,6 +2183,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Snapshot definitions: a changed `check_cols`/strategy or query on an existing snapshot.
   if (lanes.has("dbt_patterns") || lanes.has("materialization")) {
     const snapshots = reviewable.filter((f) => f.kind === "snapshot" && f.status !== "deleted" && f.status !== "added")
+    touch(snapshots)
     const sets = await Promise.all(
       snapshots.map(async (file) => {
         try {
@@ -1969,6 +2204,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Macros: the catalog rules that hold in a SQL template, and vars with no default.
   if (lanes.has("dbt_patterns")) {
     const macros = reviewable.filter((f) => f.kind === "macro" && f.status !== "deleted")
+    touch(macros)
     const sets = await Promise.all(
       macros.map(async (file) => {
         try {
@@ -2002,6 +2238,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const others = reviewable.filter(
       (f) => f.status !== "deleted" && ((f.kind === "test" || f.kind === "snapshot") || f.kind === "project_config"),
     )
+    touch(others)
     const sets = await Promise.all(
       others.map(async (file) => {
         try {
@@ -2042,6 +2279,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  touch(schemaFiles)
   const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
@@ -2071,6 +2309,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A dbt_project.yml change that loosens test thresholds for a whole path.
   for (const file of reviewable.filter((f) => f.kind === "project_config" && /(^|\/)dbt_project\.ya?ml$/.test(f.path))) {
     if (file.status !== "modified") continue
+    touch([file])
     const [oldContent, newContent] = await Promise.all([getContent?.(file.path, "old"), getContent?.(file.path, "new")])
     all.push(detectThresholdLoosening(file, oldContent, newContent))
   }
@@ -2186,12 +2425,26 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // severe first. The AI lane is grounded in this list (its prompt keeps the
   // top 40), so dropped or repeated findings don't crowd out real ones.
   const cleanFindings = (list: Finding[], merge = true): Finding[] => {
-    let out = dedupe(list).filter((f) => !exclusionReason(f, input.rubric))
+    let out = dedupe(list)
+      .filter((f) => !exclusionReason(f, input.rubric))
+      .map((f) => {
+        // The matched source text some lanes record, quoted as evidence.
+        const line = (f.evidence?.result as { line?: unknown } | undefined)?.line
+        return typeof line === "string" && line.trim() && !f.evidenceLine
+          ? { ...f, evidenceLine: line.trim().slice(0, 200) }
+          : f
+      })
+    // Per-rule posting policy: `off` rules are dropped (and so never ground the
+    // AI lane); the rest are marked for inline or summary-only posting.
+    out = out
+      .map((f) => ({ f, tier: ruleTier(f.rule, input.config.rules) }))
+      .filter(({ tier }) => tier !== "off")
+      .map(({ f, tier }) => ({ ...f, tier: tier === "inline" ? ("inline" as const) : ("summary" as const) }))
     // Cross-engine portability advice from the regex catalog is noise for a
     // project that runs on one known engine. Core's dialect-aware check (a
     // function missing on THIS engine) is a real error and is kept.
     if (input.suppressPortability) out = out.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
-    out = anchorToDiff(out, input.changedFiles)
+    out = anchorToDiff(anchorByEvidence(out, input.changedFiles), input.changedFiles)
     if (merge) out = mergeRepeats(out)
     return out.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
   }
@@ -2226,9 +2479,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     supporting.forEach((f, i) =>
       aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
     )
+    // Only the files within the AI lane's file cap are reached; the rest stay in the ledger.
+    touch(selectAiFiles(aiFiles, aiInputBudget().maxFiles))
+    const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     try {
       const res = await input.aiReview({
         files: aiFiles,
+        context,
         grounding: cleanFindings(merged),
         prTitle: input.prTitle,
         prBody: input.prBody,
@@ -2245,16 +2502,37 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   }
 
   // Flatten, drop excluded, dedupe, threshold-filter.
+  const validated = await validateSuggestions(merged, getContent, addedLinesByFile(input.changedFiles))
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
-  const findings = cleanFindings(merged).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  const findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // The verdict counts every instance; merging repeats is presentation only.
-  const verdictFindings = cleanFindings(merged, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  const verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
   // carry their own `degraded` flag and are counted separately in the summary.
   const degraded = runDegraded
   const engineErrors = [...(input.runner.failures?.() ?? []), ...laneErrors]
+
+  // Coverage ledger: every changed file the review did not look at, and why.
+  // First reason per path wins; `unverified` entries are always kept.
+  const sortedUnverified = unverified.sort((a, b) => a.path.localeCompare(b.path))
+  const ledger: NotReviewed[] = [
+    ...(input.scope?.notReviewed ?? []),
+    ...dropped,
+    ...reviewable
+      .filter((f) => f.kind === "other" || f.kind === "analysis")
+      .map((f) => ({ path: f.path, reason: "not a dbt model/macro/test/yml/seed file" })),
+    ...reviewable
+      .filter((f) => !touched.has(f.path))
+      .map((f) => ({ path: f.path, reason: `no checks run for ${f.kind} files at the ${tier} tier` })),
+    ...(manifestMissing && !anyManifest
+      ? modelFiles.map((f) => ({ path: f.path, reason: "no dbt manifest: lineage, config and graph checks skipped" }))
+      : []),
+  ]
+  const seen = new Set<string>()
+  const notReviewed = ledger.filter((e) => !seen.has(e.path) && !!seen.add(e.path))
+  notReviewed.push(...sortedUnverified)
   const envelope = buildEnvelope({
     engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
@@ -2270,8 +2548,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     generatedAt: input.generatedAt,
     degraded,
     scope:
-      input.scope || unverified.length
-        ? { ...input.scope, unverified: unverified.length ? unverified.sort((a, b) => a.path.localeCompare(b.path)) : undefined }
+      input.scope || notReviewed.length
+        ? { ...input.scope, unverified: sortedUnverified.length ? sortedUnverified : undefined, notReviewed }
         : undefined,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
     // when a riskTierPathTokens config error was caught above, OR when the

@@ -36,6 +36,10 @@ import {
   DEFAULT_REVIEW_CONFIG,
 } from "../../src/altimate/review"
 
+/** Detection tests below exercise rules the default posting policy turns off;
+ *  report every rule so they still see the lane's output. */
+const SHOW_ALL_RULES = { "*": "summary" } as const
+
 // ---------------------------------------------------------------------------
 // finding.ts
 // ---------------------------------------------------------------------------
@@ -1126,7 +1130,7 @@ describe("orchestrate", () => {
     }
     const envCore = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality", "dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["sql_quality", "dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner: withCore,
@@ -1145,7 +1149,7 @@ describe("orchestrate", () => {
     // Control: core lint NOT available (ran:false) → regex twin is kept (fallback).
     const noCore = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality", "dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["sql_quality", "dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner: { ...fakeRunner({}), async check() { return { issues: [], ran: false } } },
@@ -1208,7 +1212,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+group by" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
@@ -1261,7 +1265,7 @@ describe("orchestrate", () => {
           diff: "+on orders.order_id = customers.customer_id\n-on orders.customer_id = customers.customer_id\n",
         },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -1360,7 +1364,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality", "dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["sql_quality", "dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
@@ -1626,7 +1630,7 @@ describe("orchestrate", () => {
         { path: "models/staging/stg_a.sql", status: "modified", diff: "+x\n" },
         { path: "models/staging/stg_b.sql", status: "modified", diff: "+y\n" },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
@@ -1664,7 +1668,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "models/intermediate/int_roles.sql", status: "modified", diff: "+x\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -1943,7 +1947,7 @@ describe("orchestrate", () => {
     expect(env.findings.find((f) => f.category === "semantic_change")).toBeUndefined()
   })
 
-  test("undecidable equivalence → unknown-confidence warning, never critical", async () => {
+  test("undecidable equivalence → coverage ledger entry, no finding", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/fct_revenue.sql", status: "modified", diff: "+x\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -1959,10 +1963,11 @@ describe("orchestrate", () => {
       runner,
       getContent: content("select 2", "select 1"),
     })
-    const sem = env.findings.find((f) => f.category === "semantic_change")
-    expect(sem).toBeDefined()
-    expect(sem!.confidence).toBe("unknown")
-    expect(sem!.severity).not.toBe("critical")
+    expect(env.findings.find((f) => f.category === "semantic_change")).toBeUndefined()
+    expect(env.scope?.notReviewed).toContainEqual({
+      path: "models/marts/fct_revenue.sql",
+      reason: "equivalence could not be proven (no schema or unsupported SQL); verify with a data-diff",
+    })
   })
 
   test("PII exposure → critical pii_exposure finding", async () => {
@@ -2295,7 +2300,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2331,7 +2336,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: files,
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2402,7 +2407,7 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "models/marts/fct_orders.sql", status: "modified", diff: "+group by g, h\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2435,7 +2440,7 @@ describe("orchestrate", () => {
           diff: "+on orders.order_id = customers.customer_id\n",
         },
       ],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      config: { ...DEFAULT_REVIEW_CONFIG, rules: SHOW_ALL_RULES, reviewers: ["semantic_change"], ai: false },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
@@ -2534,7 +2539,8 @@ describe("orchestrate", () => {
         "`both-ends`", // both leading + trailing backticks — symmetric padding
       ],
     })
-    const summary = renderSummary(env)
+    // A clean run is silent by default; render it to check the tier line.
+    const summary = renderSummary(env, { allowSilent: false })
     // Sanity: the tier line exists
     expect(summary).toContain("Tier: full")
     // A path with `single` inside must be wrapped by a fence longer than the
@@ -2562,6 +2568,7 @@ describe("orchestrate", () => {
           file: "models/x.sql",
           startLine: 5,
           ruleKey: "r",
+          tier: "inline",
         }),
       ],
       tier: "lite",
@@ -2571,7 +2578,7 @@ describe("orchestrate", () => {
     const summary = renderSummary(env)
     expect(summary).toContain("altimate-code-review")
     expect(summary).toContain("Reviewed with comments")
-    const inline = inlineComments(env)
+    const inline = inlineComments(env).comments
     expect(inline.length).toBe(1)
     expect(inline[0]).toMatchObject({ path: "models/x.sql", line: 5, side: "RIGHT" })
   })

@@ -1,6 +1,6 @@
 import z from "zod"
 import { createHmac, createHash } from "node:crypto"
-import { Finding, type Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
+import { Finding, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
 
 /**
@@ -43,8 +43,10 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
 
 /** Whether a finding may influence the verdict: deterministic engine
  *  findings always; catalog (pattern) findings only when the rubric names the
- *  rule in `blockingRules`; advisory AI findings never. */
+ *  rule in `blockingRules`; advisory AI findings never. A finding on a line the
+ *  PR did not add (`preExisting`) never does: the PR did not introduce it. */
 export function verdictEligible(f: Finding, rubric: Rubric = DEFAULT_RUBRIC): boolean {
+  if (f.preExisting) return false
   const origin = findingOrigin(f)
   if (origin === "engine") return true
   if (origin === "ai") return false
@@ -101,6 +103,22 @@ export const EngineVersions = z.object({
 })
 export type EngineVersions = z.infer<typeof EngineVersions>
 
+/** How findings reach the PR: at most `inlineBudget` new inline comments per
+ *  run, none below `inlineSeverityFloor`, and no comment at all on a clean run
+ *  when `silentWhenClean` is set. */
+export const PostingPolicy = z.object({
+  inlineBudget: z.number().int().min(0),
+  inlineSeverityFloor: Severity,
+  silentWhenClean: z.boolean(),
+})
+export type PostingPolicy = z.infer<typeof PostingPolicy>
+
+export const DEFAULT_POSTING_POLICY: PostingPolicy = {
+  inlineBudget: 10,
+  inlineSeverityFloor: "warning",
+  silentWhenClean: true,
+}
+
 /** What the review looked at: the resolved base, and files it deliberately
  *  did not review. Signed with the rest of the envelope so a verdict computed
  *  against the wrong base, or with models left unverified, is auditable. */
@@ -137,6 +155,10 @@ export const ReviewScope = z.object({
       }),
     )
     .optional(),
+  /** Every changed file the review did not look at (excluded, outside the
+   *  project, moved, not a dbt file, no check at this tier, no manifest), with
+   *  the reason; also repeats the `unverified` entries. */
+  notReviewed: z.array(z.object({ path: z.string(), reason: z.string() })).default([]),
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
@@ -185,6 +207,9 @@ export const VerdictEnvelope = z.object({
       source: z.enum(["base", "working_tree", "default"]),
       hash: z.string(),
       changedInPr: z.array(z.string()).optional(),
+      /** Posting policy applied to this run (see PostingPolicy). Absent on
+       *  envelopes from older releases; renderers then use the defaults. */
+      posting: PostingPolicy.optional(),
     })
     .optional(),
   /** Advisory AI lane outcome: ran, skipped, timed out or failed, and why. */
@@ -194,6 +219,19 @@ export const VerdictEnvelope = z.object({
       reason: z.string().optional(),
       model: z.string().optional(),
       durationMs: z.number().int().nonnegative().optional(),
+      /** Tokens spent by the lane's model calls (`input` excludes cached tokens). */
+      tokens: z
+        .object({
+          input: z.number().nonnegative(),
+          inputTotal: z.number().nonnegative(),
+          output: z.number().nonnegative(),
+          reasoning: z.number().nonnegative(),
+          cacheRead: z.number().nonnegative(),
+        })
+        .optional(),
+      /** Estimated USD cost from the model's price table. */
+      cost: z.number().nonnegative().optional(),
+      calls: z.number().int().nonnegative().optional(),
     })
     .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
@@ -257,7 +295,7 @@ export interface BuildEnvelopeInput {
   tierClassified?: RiskTier
   /** True when mtime signals the manifest predates a change-affecting file. */
   staleManifest?: boolean
-  scope?: ReviewScope
+  scope?: z.input<typeof ReviewScope>
   ai?: VerdictEnvelope["ai"]
   policy?: VerdictEnvelope["policy"]
   engineErrors?: VerdictEnvelope["engineErrors"]

@@ -1,16 +1,22 @@
 import { describe, test, expect } from "bun:test"
 import {
+  anchorByEvidence,
   anchorToDiff,
   commentableLines,
+  scanDiffLines,
+  walkDiffLines,
   isCatalogPortability,
   isSuppressiblePortability,
   runReview,
+  validateSuggestions,
   type ReviewRunner,
 } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { makeFinding, mergeRepeats, type Finding } from "../../src/altimate/review/finding"
 import {
+  BODY_MAX_CHARS,
+  clampBody,
   findingMarker,
   inlineComments,
   postedFindingIds,
@@ -19,7 +25,9 @@ import {
 } from "../../src/altimate/review/format"
 import { buildEnvelope } from "../../src/altimate/review/verdict"
 import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
+import { detectModelPatterns } from "../../src/altimate/review/dbt-patterns"
 import { classifyPostOutcome } from "../../src/altimate/review/telemetry"
+import { DEFAULT_RULE_TIERS, ruleTier, type RuleTier } from "../../src/altimate/review/rule-tiers"
 
 /**
  * The PR comment must stay readable: inline comments land on real lines of the
@@ -112,20 +120,20 @@ describe("inline anchors", () => {
 
 describe("inline dedup across pushes", () => {
   test("inline bodies carry the finding fingerprint, which ignores the line", () => {
-    const a = finding({ startLine: 3 })
-    const moved = finding({ startLine: 9 })
+    const a = finding({ startLine: 3, severity: "warning", tier: "inline" })
+    const moved = finding({ startLine: 9, severity: "warning", tier: "inline" })
     expect(a.id).toBe(moved.id)
     const env = buildEnvelope({ findings: [a], tier: "lite", mode: "comment" })
-    expect(inlineComments(env)[0].body).toContain(findingMarker(a.id))
+    expect(inlineComments(env).comments[0].body).toContain(findingMarker(a.id))
   })
 
   test("findings already commented on the PR are not posted again", () => {
-    const a = finding({ startLine: 3, title: "m: a" })
-    const b = finding({ startLine: 4, title: "m: b" })
+    const a = finding({ startLine: 3, title: "m: a", severity: "warning", tier: "inline" })
+    const b = finding({ startLine: 4, title: "m: b", severity: "warning", tier: "inline" })
     const env = buildEnvelope({ findings: [a, b], tier: "lite", mode: "comment" })
     const posted = postedFindingIds(["🛑 old\n\n" + findingMarker(a.id), null, "human comment"])
     expect([...posted]).toEqual([a.id])
-    expect(inlineComments(env, posted).map((c) => c.line)).toEqual([4])
+    expect(inlineComments(env, posted).comments.map((c) => c.line)).toEqual([4])
   })
 
   test("a skipped repeat review counts as a full post in telemetry", () => {
@@ -341,5 +349,568 @@ describe("repeats of one rule within a file", () => {
     const [rest] = mergeRepeats([grain("tx_hash"), grain("evt_index")])
     expect(all.id).toBe(rest.id)
     expect(all.id).not.toBe(grain("block_month").id)
+  })
+})
+
+describe("per-rule tiers", () => {
+  const sql = [
+    "select o.id, o.amount, case when o.amount > 0 then 'pos' end as sign",
+    "from {{ ref('orders') }} o, {{ ref('customers') }} c",
+    "where 1=1 and o.id = c.id",
+    "group by 1, 2",
+  ].join("\n")
+  const runner: ReviewRunner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: false, differences: ["row count differs"], confidence: "high" } as any
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  }
+  const review = (rules: Record<string, RuleTier>, aiReview?: (input: { grounding: Finding[] }) => Promise<Finding[]>) =>
+    runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: sql.split("\n").map((l) => `+${l}`).join("\n") }],
+      config: {
+        ...DEFAULT_REVIEW_CONFIG,
+        reviewers: aiReview ? ["dbt_patterns", "semantic_change", "ai_review"] : ["dbt_patterns", "semantic_change"],
+        rules,
+      },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      aiReview: aiReview as any,
+      getContent: async (_p, side) => (side === "old" ? "select id from {{ ref('orders') }}" : sql),
+      getCompiled: async (_p, side) =>
+        side === "old" ? "select id from db.orders" : sql.replace(/\{\{ ref\('(\w+)'\) \}\}/g, "db.$1"),
+    })
+  const rules = (fs: Finding[]) => fs.map((f) => f.rule).sort()
+
+  test("an off rule is dropped from the findings and from the AI's grounding", async () => {
+    let grounding: Finding[] | undefined
+    const env = await review({}, async (input) => {
+      grounding = input.grounding
+      return []
+    })
+    expect(DEFAULT_RULE_TIERS["dbt-patterns:comma-join"]).toBe("off")
+    expect(rules(env.findings)).toEqual([
+      "altimate-core.equivalence:not-equivalent",
+      "rule-catalog:group-by-positional",
+      "rule-catalog:self-equality",
+      "rule-catalog:where-1-eq-1",
+    ])
+    expect(grounding).toBeDefined()
+    expect(rules(grounding!)).toEqual(rules(env.findings))
+    expect(env.findings.every((f) => f.tier === "summary")).toBe(true)
+  })
+
+  test("the same rules surface when the policy reports everything", async () => {
+    const env = await review({ "*": "summary" })
+    // These five ids are emitted by real detectors and are keys of the default table.
+    for (const id of [
+      "dbt-patterns:comma-join",
+      "dbt-patterns:case-no-else",
+      "rule-catalog:where-1-eq-1",
+      "rule-catalog:self-equality",
+      "rule-catalog:group-by-positional",
+    ]) {
+      expect(rules(env.findings)).toContain(id)
+      expect(DEFAULT_RULE_TIERS[id]).toBeDefined()
+    }
+  })
+
+  test("a glob turns off catalog rules but not engine equivalence", async () => {
+    const env = await review({ "rule-catalog:*": "off", "*": "off" })
+    expect(rules(env.findings)).toEqual(["altimate-core.equivalence:not-equivalent"])
+  })
+
+  test("an exact override can turn off an engine rule, and can promote a rule inline", async () => {
+    const env = await review({ "altimate-core.equivalence:not-equivalent": "off", "rule-catalog:group-by-positional": "inline" })
+    expect(rules(env.findings)).toEqual(["rule-catalog:group-by-positional", "rule-catalog:self-equality", "rule-catalog:where-1-eq-1"])
+    expect(env.findings.find((f) => f.rule === "rule-catalog:group-by-positional")?.tier).toBe("inline")
+  })
+
+  test("resolution order: exact, longest glob, default table, summary", () => {
+    expect(ruleTier(undefined)).toBe("summary")
+    expect(ruleTier("some-new-tool:unknown-rule")).toBe("summary")
+    expect(ruleTier("dbt-project-rules:temporary-code-marker")).toBe("inline")
+    expect(ruleTier("rule-catalog:join-no-on")).toBe("off")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule-catalog:*": "summary" })).toBe("summary")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule-catalog:*": "summary", "rule-catalog:join-*": "inline" })).toBe("inline")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule-catalog:*": "inline", "rule-catalog:join-no-on": "off" })).toBe("off")
+    expect(ruleTier("impact-analysis:downstream-consumers", { "impact-analysis:*": "off" })).toBe("summary")
+    expect(ruleTier("impact-analysis:downstream-consumers", { "impact-analysis:*": "inline" })).toBe("inline")
+  })
+
+  test("AI findings default to inline, and an explicit override wins", () => {
+    expect(ruleTier("ai-review:sql-quality")).toBe("inline")
+    expect(ruleTier("ai-review:sql-quality", { "ai-review:*": "summary" })).toBe("summary")
+    expect(ruleTier("ai-review:sql-quality", { "ai-review:sql_quality": "off" })).toBe("off")
+  })
+
+  test("override keys match in any spelling a finding id normalises from", () => {
+    expect(ruleTier("dbt-patterns:self-join", { "dbt_patterns:self_join": "off" })).toBe("off")
+    expect(ruleTier("dbt-patterns:self-join", { "DBT_Patterns:*": "inline" })).toBe("inline")
+    expect(ruleTier("rule-catalog:join-no-on", { "rule_catalog:join_*": "summary" })).toBe("summary")
+  })
+
+  test("default table keys are well-formed ids, and verdict-relevant engine rules are never off", () => {
+    const keys = Object.keys(DEFAULT_RULE_TIERS)
+    expect(keys.filter((k) => DEFAULT_RULE_TIERS[k] === "inline")).toHaveLength(14)
+    for (const k of keys) expect(k.endsWith(":*") || /^[a-z0-9.-]+:[a-z0-9.-]+$/.test(k)).toBe(true)
+    // Rules kept at summary because they produced a real benchmark catch.
+    for (const k of [
+      "altimate-core.structural-diff:removed-predicate",
+      "dbt-project-rules:partition-not-in-merge-key",
+      "dbt-project-rules:models-disabled",
+      "rule-catalog:greatest-least-null",
+      "rule-catalog:hardcoded-year-filter",
+      "dbt-patterns:hardcoded-date",
+      "altimate-core.dbt-config:incremental-no-guard",
+      "altimate-core.dbt-config:unique-key-change",
+      "dbt-patterns:fanout-join",
+    ])
+      expect(ruleTier(k)).toBe("summary")
+    for (const p of ["altimate-core.equivalence:", "impact-analysis:", "schema.detect-pii:", "contract-check:", "data.diff:"])
+      expect(keys.filter((k) => k.startsWith(p) && DEFAULT_RULE_TIERS[k] === "off")).toEqual([])
+  })
+})
+
+describe("inline posting policy", () => {
+  const inlineAt = (i: number, over: Partial<Parameters<typeof makeFinding>[0]> = {}) =>
+    finding({
+      severity: "warning",
+      category: "sql_quality",
+      tier: "inline",
+      model: `m${i}`,
+      file: `models/m${i}.sql`,
+      startLine: 3,
+      title: `m${i}: inline issue ${i}`,
+      ...over,
+    })
+
+  test("at most inlineBudget new comments; the rest are deferred and stay in the summary", () => {
+    const env = buildEnvelope({ findings: Array.from({ length: 12 }, (_, i) => inlineAt(i)), tier: "lite", mode: "comment" })
+    const { comments, deferred } = inlineComments(env)
+    expect(comments).toHaveLength(10)
+    expect(deferred).toHaveLength(2)
+    const md = renderSummary(env)
+    expect(md).toContain("### Inline (10)")
+    for (const f of deferred) expect(md).toContain(`**${f.title}**`)
+  })
+
+  test("the budget counts only comments new this run", () => {
+    const fs = Array.from({ length: 12 }, (_, i) => inlineAt(i))
+    const env = buildEnvelope({ findings: fs, tier: "lite", mode: "comment" })
+    const posted = new Set(fs.slice(0, 5).map((f) => f.id))
+    const { comments, deferred } = inlineComments(env, posted)
+    expect(comments).toHaveLength(7)
+    expect(deferred).toHaveLength(0)
+  })
+
+  test("findings below the severity floor, summary-tier rules and pre-existing lines are never inline", () => {
+    const env = buildEnvelope({
+      findings: [
+        inlineAt(1, { severity: "suggestion" }),
+        inlineAt(2, { tier: "summary" }),
+        inlineAt(3, { preExisting: true }),
+        inlineAt(4, { startLine: undefined }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    expect(inlineComments(env).comments).toHaveLength(0)
+    const md = renderSummary(env)
+    expect(md).not.toContain("### Inline")
+    expect(md).toContain("<details><summary>Pre-existing (1)</summary>")
+    expect(md).toContain("m3: inline issue 3")
+  })
+
+  test("AI-lane findings follow their tier like any other rule", () => {
+    const ai = (tier?: "inline" | "summary") =>
+      finding({
+        severity: "warning",
+        category: "sql_quality",
+        startLine: 3,
+        title: "m: ai finding",
+        evidence: { tool: "ai-review", result: {} },
+        ...(tier ? { tier } : {}),
+      })
+    expect(inlineComments(buildEnvelope({ findings: [ai("inline")], tier: "lite", mode: "comment" })).comments).toHaveLength(1)
+    expect(inlineComments(buildEnvelope({ findings: [ai("summary")], tier: "lite", mode: "comment" })).comments).toHaveLength(0)
+  })
+
+  test("most severe, then most confident, then file and line first", () => {
+    const env = buildEnvelope({
+      findings: [
+        inlineAt(1, { confidence: "low", file: "models/a.sql" }),
+        inlineAt(2, { file: "models/b.sql", startLine: 9 }),
+        inlineAt(3, { file: "models/b.sql", startLine: 2 }),
+        inlineAt(4, { severity: "critical", category: "lineage_breakage", file: "models/z.sql" }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    expect(inlineComments(env).comments.map((c) => `${c.path}:${c.line}`)).toEqual([
+      "models/z.sql:3",
+      "models/b.sql:2",
+      "models/b.sql:9",
+      "models/a.sql:3",
+    ])
+  })
+
+  test("the envelope's posting policy sets the budget and floor", () => {
+    const env = buildEnvelope({
+      findings: [inlineAt(1), inlineAt(2), inlineAt(3, { severity: "suggestion" })],
+      tier: "lite",
+      mode: "comment",
+      policy: { source: "base", hash: "h", posting: { inlineBudget: 1, inlineSeverityFloor: "suggestion", silentWhenClean: true } },
+    })
+    const { comments, deferred } = inlineComments(env)
+    expect(comments).toHaveLength(1)
+    expect(deferred).toHaveLength(2)
+  })
+
+  test("local output renders every finding in full", () => {
+    const env = buildEnvelope({ findings: [inlineAt(1, { body: "the detail" })], tier: "lite", mode: "comment" })
+    expect(renderSummary(env)).not.toContain("the detail")
+    expect(renderSummary(env, { inline: false })).toContain("the detail")
+  })
+})
+
+describe("output form", () => {
+  const head = "select\n  id\n  , new_col\n  , other_col\n\nfrom src"
+  const added = new Map([["models/m.sql", new Set([3, 4])]])
+  const getContent = async () => head
+  const withSuggestion = (startLine: number, endLine: number, replacement: string) =>
+    finding({
+      severity: "warning",
+      category: "sql_quality",
+      title: "m: ai finding",
+      startLine,
+      evidence: { tool: "ai-review", result: {} },
+      tier: "inline",
+      suggestion: { startLine, endLine, replacement },
+    })
+
+  test("a valid suggestion renders a suggestion fence over its line range", async () => {
+    const [f] = await validateSuggestions([withSuggestion(3, 4, "  , new_col\n  , other_col_v2")], getContent, added)
+    expect(f.suggestion).toBeDefined()
+    const [c] = inlineComments(buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })).comments
+    expect(c.body).toContain("```suggestion\n  , new_col\n  , other_col_v2\n```")
+    expect({ start_line: c.start_line, start_side: c.start_side, line: c.line, side: c.side }).toEqual({
+      start_line: 3,
+      start_side: "RIGHT",
+      line: 4,
+      side: "RIGHT",
+    })
+  })
+
+  test("a one-line suggestion sets only `line`", async () => {
+    const [f] = await validateSuggestions([withSuggestion(3, 3, "  , new_col_v2")], getContent, added)
+    const [c] = inlineComments(buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })).comments
+    expect(c.line).toBe(3)
+    expect(c.start_line).toBeUndefined()
+  })
+
+  test("a range outside the added lines, past the file end, or unchanged degrades to a text block", async () => {
+    const cases = [
+      withSuggestion(2, 3, "  id\n  , x"), // line 2 is context, not added
+      withSuggestion(3, 3, "  , new_col"), // replacement equals the current line
+    ]
+    const out = await validateSuggestions(cases, getContent, added)
+    const past = await validateSuggestions(
+      [withSuggestion(3, 4, "x")],
+      async () => "select\n  id\n  , new_col",
+      added,
+    )
+    for (const f of [...out, ...past]) {
+      expect(f.suggestion).toBeUndefined()
+      expect(f.body).toContain("Suggested fix:\n```sql\n")
+      const [c] = inlineComments(buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })).comments
+      expect(c.body).not.toContain("```suggestion")
+      expect(c.start_line).toBeUndefined()
+    }
+  })
+
+  test("long bodies are clamped when rendered; the envelope keeps the full text", () => {
+    const body = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} explains the problem.`).join(" ")
+    const f = finding({ severity: "warning", category: "sql_quality", tier: "inline", startLine: 3, body })
+    const env = buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })
+    expect(env.findings[0].body).toBe(body)
+    const [c] = inlineComments(env).comments
+    expect(c.body).not.toContain(body)
+    expect(c.body).toContain("explains the problem.…")
+    const clamped = clampBody(body)
+    expect(clamped.length).toBeLessThanOrEqual(BODY_MAX_CHARS)
+    expect(clamped.endsWith("problem.…")).toBe(true)
+    expect(renderSummary(env, { inline: false })).toContain(clamped)
+    expect(clampBody("short")).toBe("short")
+  })
+
+  test("a clamp inside a code fence closes the fence", () => {
+    const body = "Use this instead:\n```sql\n" + "select a, b from t\n".repeat(60) + "```"
+    const out = clampBody(body, 200)
+    expect((out.match(/^```/gm) ?? []).length % 2).toBe(0)
+  })
+
+  test("the matched source line is quoted in inline comments and summary bullets", async () => {
+    const sql = "select id from a\nwhere id not in (select id from b)"
+    const env = await runReview({
+      changedFiles: [{ path: "models/m.sql", status: "added", diff: `@@ -0,0 +1,2 @@\n+select id from a\n+where id not in (select id from b)\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return { grade: "B" }
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: true, equivalent: true }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+      } as ReviewRunner,
+      getContent: async () => sql,
+      forceTier: "full",
+    })
+    const f = env.findings.find((x) => x.evidenceLine === "where id not in (select id from b)")
+    expect(f).toBeDefined()
+    const md = renderSummary(env, { inline: false })
+    expect(md).toContain(`\`${f!.file}${f!.startLine ? `:${f!.startLine}` : ""}\` — \`where id not in (select id from b)\``)
+
+    const g = finding({ severity: "warning", category: "sql_quality", tier: "inline", startLine: 3, evidenceLine: "  , new_col" })
+    const [c] = inlineComments(buildEnvelope({ findings: [g], tier: "lite", mode: "comment" })).comments
+    expect(c.body).toContain("`models/m.sql:3` — `, new_col`")
+  })
+})
+
+describe("anchoring rule findings by their matched line", () => {
+  const runner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true }
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  } as ReviewRunner
+
+  // Head lines: 1 select id, 2 from t, 3 qualify (context), 4 qualify (added), 5 where x = 1, 6 qualify (added again)
+  const QDIFF = [
+    "@@ -1,3 +1,6 @@",
+    " select id",
+    " from t",
+    " qualify row_number() over (partition by id order by d) = 1",
+    "+  qualify row_number() over (partition by k order by d) = 1 -- latest",
+    "+where x = 1",
+    "+  qualify row_number() over (partition by k order by d) = 1 -- latest",
+  ].join("\n")
+  const file = { path: "models/m.sql", status: "modified" as const, diff: QDIFF }
+  const withLine = (line: string) => finding({ evidence: { tool: "rule-catalog", result: { rule: "x", line } } })
+
+  test("the hunk walker yields head-side lines that agree with scanDiffLines", () => {
+    const rows = [...walkDiffLines(DIFF)]
+    expect(rows.map((r) => `${r.kind}${r.line}`)).toEqual([" 1", " 2", "+3", "+4", " 5", " 6"])
+    expect(rows[2].text).toBe("  , new_col")
+    const { commentable, added } = scanDiffLines(DIFF)
+    expect([...commentable]).toEqual(rows.map((r) => r.line))
+    expect([...added]).toEqual(rows.filter((r) => r.kind === "+").map((r) => r.line))
+  })
+
+  test("a catalog rule records the raw added line, not the comment-stripped one", () => {
+    const added = ["select id from t", "  qualify row_number() over (partition by k order by d) = 1 -- latest"]
+    const f = evaluateCatalog(file, added.join("\n"), added, [], DEFAULT_RUBRIC).find(
+      (x) => (x.evidence?.result as { rule?: string }).rule === "qualify-unsupported",
+    )
+    expect((f!.evidence!.result as { line?: string }).line).toBe(added[1])
+  })
+
+  test("a finding whose text is on an added line gets that line, and it posts inline when its rule is inline-tier", () => {
+    const [f] = anchorByEvidence([withLine("  qualify row_number() over (partition by k order by d) = 1 -- latest")], [file])
+    expect(f.startLine).toBe(4)
+    expect(f.endLine).toBe(4)
+    const [g] = anchorToDiff([{ ...f, severity: "warning", tier: "inline" }], [file])
+    expect(g.preExisting).toBeUndefined()
+    const { comments } = inlineComments(buildEnvelope({ findings: [g], tier: "lite", mode: "comment" }))
+    expect(comments.map((c) => c.line)).toEqual([4])
+  })
+
+  test("text only on a context line anchors there and is marked pre-existing", () => {
+    const [f] = anchorToDiff(anchorByEvidence([withLine("qualify row_number() over (partition by id order by d) = 1")], [file]), [file])
+    expect(f.startLine).toBe(3)
+    expect(f.preExisting).toBe(true)
+  })
+
+  test("text absent from the diff leaves the finding without a line", () => {
+    const [f] = anchorByEvidence([withLine("select something_else from nowhere")], [file])
+    expect(f.startLine).toBeUndefined()
+    const [g] = anchorByEvidence([withLine("where x = 1")], [{ ...file, path: "models/other.sql" }])
+    expect(g.startLine).toBeUndefined()
+  })
+
+  test("duplicate added lines anchor to the first; surrounding whitespace is ignored", () => {
+    const [f] = anchorByEvidence([withLine("\tqualify row_number() over (partition by k order by d) = 1 -- latest   ")], [file])
+    expect(f.startLine).toBe(4)
+  })
+
+  test("a long fragment matches inside an added line; a short one does not", () => {
+    const [long] = anchorByEvidence([withLine("over (partition by k order by d)")], [file])
+    expect(long.startLine).toBe(4)
+    const [short] = anchorByEvidence([withLine("x = 1 --")], [file])
+    expect(short.startLine).toBeUndefined()
+  })
+
+  test("a finding that already has a line keeps it", () => {
+    const [f] = anchorByEvidence([{ ...withLine("where x = 1"), startLine: 1, endLine: 1 }], [file])
+    expect(f.startLine).toBe(1)
+  })
+
+  test("a dbt-patterns detector's recorded line anchors", () => {
+    const diff = "@@ -1,2 +1,3 @@\n select id from a\n+where id not in (select id from b)\n from_here\n"
+    const changed = { path: "models/m.sql", status: "modified" as const, diff }
+    const found = detectModelPatterns(changed, "select id from a\nwhere id not in (select id from b)\n", DEFAULT_RUBRIC)
+    const notIn = found.find((f) => (f.evidence?.result as { rule?: string }).rule === "not_in_nullable")
+    expect(notIn).toBeDefined()
+    expect(anchorByEvidence([notIn!], [changed])[0].startLine).toBe(2)
+  })
+
+  test("the dedup detector records the added line that opens the window", () => {
+    const sql = "select *\nfrom (\n  select *, row_number() over (\n    partition by id\n  ) as rn\n  from t\n)\nwhere rn = 1\n"
+    const diff = "@@ -0,0 +1,8 @@\n" + sql.trimEnd().split("\n").map((l) => `+${l}`).join("\n") + "\n"
+    const changed = { path: "models/m.sql", status: "added" as const, diff }
+    const f = detectModelPatterns(changed, sql, DEFAULT_RUBRIC).find(
+      (x) => (x.evidence?.result as { rule?: string }).rule === "dedup_no_tiebreaker",
+    )
+    expect((f!.evidence!.result as { line?: string }).line).toBe("  select *, row_number() over (")
+    expect(anchorByEvidence([f!], [changed])[0].startLine).toBe(3)
+  })
+
+  test("end to end: an inline-tier catalog rule becomes an inline comment on its line", async () => {
+    const sql = "select id\nfrom t\nqualify row_number() over (partition by id order by d desc) = 1\n"
+    const env = await runReview({
+      changedFiles: [
+        {
+          path: "models/m.sql",
+          status: "modified",
+          diff: "@@ -1,2 +1,3 @@\n select id\n from t\n+qualify row_number() over (partition by id order by d desc) = 1\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"], dialect: "postgres" },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => sql,
+      forceTier: "full",
+    })
+    const f = env.findings.find((x) => x.rule === "rule-catalog:qualify-unsupported")
+    expect(f).toBeDefined()
+    expect(f!.tier).toBe("inline")
+    expect(f!.startLine).toBe(3)
+    expect(f!.preExisting).toBeUndefined()
+    const { comments } = inlineComments(env)
+    expect(comments.find((c) => c.body.includes(findingMarker(f!.id)))?.line).toBe(3)
+  })
+
+  test("a core check issue on a Jinja model anchors by its compiled line's text", async () => {
+    const raw = "with o as (\n  select * from {{ ref('orders') }}\n)\nselect *,\n  row_number() over (partition by order_id order by ordered_at desc) as rn\nfrom o\n"
+    const compiled = "with o as (\n\n  select * from \"db\".\"main\".\"orders\"\n\n)\nselect *,\n  row_number() over (partition by order_id order by ordered_at desc) as rn\nfrom o\n"
+    const diff = "@@ -1,4 +1,6 @@\n with o as (\n   select * from {{ ref('orders') }}\n )\n-select * from o\n+select *,\n+  row_number() over (partition by order_id order by ordered_at desc) as rn\n+from o\n"
+    const review = (line: number) =>
+      runReview({
+        changedFiles: [{ path: "models/m.sql", status: "modified", diff }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          ...runner,
+          async check() {
+            return { issues: [{ rule: "non_deterministic_dedup", message: "ROW_NUMBER() orders only by time", line, severity: "warning" }], ran: true }
+          },
+        } as ReviewRunner,
+        getContent: async () => raw,
+        getCompiled: async () => compiled,
+        forceTier: "full",
+      })
+    const dedup = (env: Awaited<ReturnType<typeof review>>) => env.findings.find((x) => x.rule === "altimate-core.check:non-deterministic-dedup")
+    // Compiled line 7 is the window: found on head line 5 of the raw file.
+    expect(dedup(await review(7))?.startLine).toBe(5)
+    // Compiled line 3 (the expanded ref) is not in the raw file; line 5 (`)`) is too short to be specific.
+    for (const line of [3, 5]) {
+      const f = dedup(await review(line))
+      expect(f).toBeDefined()
+      expect(f!.startLine).toBeUndefined()
+    }
+  })
+
+  describe("non-deterministic-dedup whose compiled text is not in the raw diff", () => {
+    const MSG = "ROW_NUMBER() orders only by time/date column(s) [_airbyte_extracted_at] with no unique tiebreaker."
+    const review = (raw: string, diff: string, compiled: string, line: number, message = MSG) =>
+      runReview({
+        changedFiles: [{ path: "models/m.sql", status: "added", diff }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          ...runner,
+          async check() {
+            return { issues: [{ rule: "non_deterministic_dedup", message, line, severity: "warning" }], ran: true }
+          },
+        } as ReviewRunner,
+        getContent: async () => raw,
+        getCompiled: async () => compiled,
+        forceTier: "full",
+      }).then((env) => env.findings.find((x) => x.rule === "altimate-core.check:non-deterministic-dedup")!)
+    const added = (raw: string) => {
+      const rows = raw.trimEnd().split("\n")
+      return `@@ -0,0 +1,${rows.length} @@\n` + rows.map((l) => `+${l}`).join("\n") + "\n"
+    }
+    const compiled =
+      "with source as (\n  select * from raw.t\n)\n, most_recent_source as (\n  select *\n  , row_number() over ( partition by id order by _airbyte_extracted_at desc) as row_num\n  from source\n)\nselect * from most_recent_source where row_num = 1\n"
+
+    test("a dedup macro call: the added line that orders by the named column", async () => {
+      const raw =
+        "with source as (\n  select * from {{ source('raw', 't') }}\n)\n\n-- dedupe the raw table\n{{ deduplicate_raw_table(order_by='_airbyte_extracted_at' , partition_columns = 'id') }}\n\nselect * from most_recent_source\n"
+      const f = await review(raw, added(raw), compiled, 6)
+      expect(f.startLine).toBe(6)
+    })
+
+    test("a Jinja-built window: the added row_number line naming the column wins over a later order by", async () => {
+      const raw =
+        "select *,\n  row_number() over (partition by {{ key }} order by _airbyte_extracted_at desc) as rn\nfrom t\norder by _airbyte_extracted_at\n"
+      const f = await review(raw, added(raw), compiled, 6)
+      expect(f.startLine).toBe(2)
+    })
+
+    test("no added line names the column: no line", async () => {
+      const raw = "{{ deduplicate_raw_table(partition_columns = 'id') }}\nselect * from most_recent_source\n"
+      expect((await review(raw, added(raw), compiled, 6)).startLine).toBeUndefined()
+      const named = "{{ deduplicate_raw_table(order_by='_airbyte_extracted_at') }}\n"
+      expect((await review(named, added(named), compiled, 6, "ROW_NUMBER() orders only by time")).startLine).toBeUndefined()
+    })
   })
 })

@@ -264,7 +264,16 @@ export interface IncrementalInput {
   columnDelta: () => Promise<{ added: string[]; removed: string[] }>
 }
 
-function finding(input: { file: ChangedFile; model: string }, rule: string, severity: Finding["severity"], category: Finding["category"], title: string, body: string): Finding {
+function finding(
+  input: { file: ChangedFile; model: string },
+  rule: string,
+  severity: Finding["severity"],
+  category: Finding["category"],
+  title: string,
+  body: string,
+  /** The raw added line the rule matched, when it matches one. */
+  line?: string,
+): Finding {
   return makeFinding({
     severity,
     category,
@@ -273,7 +282,7 @@ function finding(input: { file: ChangedFile; model: string }, rule: string, seve
     file: input.file.path,
     model: input.model,
     confidence: "high",
-    evidence: { tool: "dbt-semantics", result: { rule } },
+    evidence: { tool: "dbt-semantics", result: line === undefined ? { rule } : { rule, line } },
     ruleKey: `${category}:${rule}`,
   })
 }
@@ -286,6 +295,7 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
   const cfg = modelSemantics(inlineNew, input.manifestConfig)
   const isNew = input.file.status === "added"
   const addedText = input.added.join("\n")
+  const addedLine = (re: RegExp) => input.added.find((l) => re.test(l))
   const out: Finding[] = []
   const cap = input.dialectKnown ? capabilityFor(input.dialect) : undefined
 
@@ -313,7 +323,10 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
     if (!isNew && inlineConfigChanged("partition_by", inlineOld, inlineNew, input.manifestConfig))
       out.push(
         finding(input, "incremental-partition-change", "warning", "materialization", "`partition_by` changed on an incremental model",
-          "Incremental runs don't rebuild the existing table: depending on the adapter, the next incremental run fails or the table keeps its old partitioning. Run `--full-refresh` on deploy."),
+          "Incremental runs don't rebuild the existing table: depending on the adapter, the next incremental run fails or the table keeps its old partitioning. Run `--full-refresh` on deploy.",
+          // The `partition_by` key, else an added line inside its value.
+          addedLine(/\bpartition_by\b/) ??
+            input.added.find((l) => /\w{2}/.test(l) && (inlineNew.partition_by ?? "").includes(l.trim()))),
       )
 
     if (cfg.onSchemaChange === "fail" && !isNew) {
@@ -339,7 +352,8 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
               (cfg.strategy === "delete+insert"
                 ? "A run for one slice deletes other slices' rows that share a key. "
                 : "A run for one slice overwrites other slices' rows that share a key. ") +
-              `Add ${ticks(missing)} to \`unique_key\`.`),
+              `Add ${ticks(missing)} to \`unique_key\`.`,
+            addedLine(/\bunique_key\b/)),
         )
     }
   }
@@ -358,7 +372,8 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
       finding(input, "non-atomic-table-replace", "suggestion", "materialization", "table is unavailable while it rebuilds",
         `On ${input.dialect}, \`on_table_exists='${cfg.onTableExists}'\` ${gap}. ` +
           `Readers outside dbt${input.hasExposures ? " (this model has exposures)" : ""} can hit that window; ` +
-          "`on_table_exists='rename'` swaps the table in at the end."),
+          "`on_table_exists='rename'` swaps the table in at the end.",
+        addedLine(/on_table_exists|contract|materialized/i)),
     )
 
   return out

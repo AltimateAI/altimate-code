@@ -9,7 +9,7 @@ import { makeFinding } from "../../src/altimate/review/finding"
 import { aiTimeoutMs, safeReason } from "../../src/altimate/review/ai-review"
 import { coverageNotes, renderSummary } from "../../src/altimate/review/format"
 import { prContextFromEnv } from "../../src/altimate/review/run"
-import { verifyEnvelope } from "../../src/altimate/review/verdict"
+import { buildEnvelope, signEnvelope, verifyEnvelope, VerdictEnvelope } from "../../src/altimate/review/verdict"
 
 /**
  * The PR comment must be honest about what was checked: a manifest-backed run
@@ -54,13 +54,12 @@ function review(extra: Partial<Parameters<typeof runReview>[0]> = {}) {
 }
 
 describe("lint-only banner", () => {
-  test("an undecidable finding on a manifest-backed run does not flip the run to lint-only", async () => {
+  test("undecidable equivalence on a manifest-backed run goes to the ledger, not lint-only", async () => {
     const env = await review()
-    expect(env.findings.some((f) => f.degraded)).toBe(true)
+    expect(env.findings.some((f) => f.rule === "altimate-core.equivalence:undecided")).toBe(false)
     expect(env.summary.degraded).toBe(false)
-    const md = renderSummary(env)
-    expect(md).not.toContain("Lint-only run")
-    expect(md).toContain("could not be decided by the engine")
+    expect(env.scope?.notReviewed?.some((n) => n.reason.startsWith("equivalence could not be proven"))).toBe(true)
+    expect(renderSummary(env)).not.toContain("Lint-only run")
   })
 
   test("no manifest for the changed models is still lint-only", async () => {
@@ -238,5 +237,149 @@ describe("unverified models are listed per reason", () => {
     expect(notes.find((n) => n.includes("models/a.sql"))).toContain("for the base")
     expect(notes.find((n) => n.includes("models/b.sql"))).toContain("for the head")
     expect(notes.find((n) => n.includes("models/a.sql"))).not.toContain("models/b.sql")
+  })
+})
+
+describe("silent clean runs", () => {
+  const clean = (silentWhenClean?: boolean) =>
+    buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      policy:
+        silentWhenClean === undefined
+          ? undefined
+          : { source: "base", hash: "h", posting: { inlineBudget: 10, inlineSeverityFloor: "warning", silentWhenClean } },
+    })
+
+  test("a clean run renders nothing by default and under silentWhenClean", () => {
+    expect(renderSummary(clean())).toBe("")
+    expect(renderSummary(clean(true))).toBe("")
+  })
+
+  test("without silentWhenClean a clean run keeps the old text", () => {
+    expect(renderSummary(clean(false))).toContain("No issues found in the changed dbt models.")
+  })
+
+  test("a clean run with something to report about coverage is not silent", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      ai: { state: "timeout", reason: "no answer within 75 s" },
+    })
+    expect(renderSummary(env)).toContain("Advisory AI review timed out")
+  })
+
+  test("the posting policy is part of the signed envelope", () => {
+    const quiet = signEnvelope(clean(true), "k")
+    expect(quiet.policy?.posting?.silentWhenClean).toBe(true)
+    expect(verifyEnvelope(quiet, "k")).toBe(true)
+    const tampered = { ...quiet, policy: { ...quiet.policy!, posting: { ...quiet.policy!.posting!, inlineBudget: 50 } } }
+    expect(verifyEnvelope(tampered, "k")).toBe(false)
+  })
+
+  test("rendering does not change the envelope", () => {
+    const env = clean(true)
+    const before = JSON.stringify(env)
+    renderSummary(env)
+    expect(JSON.stringify(env)).toBe(before)
+  })
+})
+
+describe("coverage ledger: what the review did not look at", () => {
+  const seedRunner = { ...runner, async manifestAvailable() { return true } } as ReviewRunner
+
+  test("excluded, non-dbt, out-of-root and untouched files are listed with their reasons", async () => {
+    const env = await runReview({
+      changedFiles: [
+        { path: "models/legacy/old.sql", status: "modified", diff: "+select 1\n" },
+        { path: "README.md", status: "modified", diff: "+docs\n" },
+        { path: "seeds/countries.csv", status: "modified", diff: "+fr,France\n" },
+        { path: "analyses/explore.sql", status: "modified", diff: "+select 1\n" },
+      ],
+      config: DEFAULT_REVIEW_CONFIG,
+      rubric: { ...DEFAULT_RUBRIC, exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/legacy/**"] } },
+      mode: "comment",
+      runner: seedRunner,
+      getContent: content,
+      forceTier: "trivial",
+      scope: { notReviewed: [{ path: "other_project/models/x.sql", reason: "outside the dbt project (analytics)" }] },
+    })
+    const reasons = Object.fromEntries(env.scope!.notReviewed.map((e) => [e.path, e.reason]))
+    expect(reasons).toEqual({
+      "other_project/models/x.sql": "outside the dbt project (analytics)",
+      "models/legacy/old.sql": "excluded by glob models/legacy/**",
+      "README.md": "not a dbt file (extension or generated path)",
+      "analyses/explore.sql": "not a dbt model/macro/test/yml/seed file",
+      "seeds/countries.csv": "no checks run for seed files at the trivial tier",
+    })
+    const md = renderSummary(env)
+    expect(md).toContain("<details><summary>Not reviewed: 5 file(s)</summary>")
+    expect(md).toContain("excluded by glob models/legacy/\\*\\* (1):")
+    expect(md).toContain("- `README.md`")
+  })
+
+  test("a run without a manifest says so for each model", async () => {
+    const env = await review({
+      runner: {
+        ...runner,
+        async manifestAvailable() {
+          return false
+        },
+        async impact() {
+          return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+      } as ReviewRunner,
+    })
+    expect(env.scope!.notReviewed).toContainEqual({
+      path: "models/marts/m.sql",
+      reason: "no dbt manifest: lineage, config and graph checks skipped",
+    })
+  })
+
+  test("no manifest note when the runner cannot tell", async () => {
+    const env = await review()
+    expect((env.scope?.notReviewed ?? []).filter((n) => n.reason.includes("manifest"))).toEqual([])
+  })
+
+  test("the ledger replaces the count lines and caps the list", () => {
+    const paths = Array.from({ length: 40 }, (_, i) => `other/f${i}.sql`)
+    const env = {
+      ...signEnvelope(buildEnvelope({ findings: [], tier: "lite", mode: "comment" })),
+      scope: {
+        outOfScopeFiles: 40,
+        notReviewed: paths.map((path) => ({ path, reason: "outside the dbt project (.)" })),
+      },
+    }
+    const notes = coverageNotes(env).join("\n")
+    expect(notes).not.toContain("changed file(s) outside the dbt project were not reviewed")
+    expect(notes).toContain("Not reviewed: 40 file(s)")
+    expect(notes).toContain("- `other/f29.sql`")
+    expect(notes).not.toContain("- `other/f30.sql`")
+    expect(notes).toContain("… and 10 more")
+  })
+
+  test("moved files in the ledger keep the folder-level config hint", () => {
+    const env = {
+      ...signEnvelope(buildEnvelope({ findings: [], tier: "lite", mode: "comment" })),
+      scope: {
+        movedUnchangedFiles: 1,
+        notReviewed: [{ path: "models/new_home/m.sql", reason: "moved without edits; not re-reviewed" }],
+      },
+    }
+    const notes = coverageNotes(env).join("\n")
+    expect(notes).not.toContain("their SQL was not re-reviewed")
+    expect(notes).toContain("moved without edits; not re-reviewed (1):\n- `models/new_home/m.sql`\n\nFolder-level config")
+    expect(notes).toContain("`+schema`, `+materialized`")
+  })
+
+  test("envelopes from older releases without a ledger still parse and keep the count line", () => {
+    const env = VerdictEnvelope.parse({
+      ...buildEnvelope({ findings: [], tier: "lite", mode: "comment" }),
+      scope: { outOfScopeFiles: 2 },
+    })
+    expect(env.scope!.notReviewed).toEqual([])
+    expect(coverageNotes(env).join("\n")).toContain("2 changed file(s) outside the dbt project were not reviewed")
   })
 })

@@ -276,6 +276,7 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
       startLine: line,
       evidence: { tool: "altimate_core.check", result: {} },
       ruleKey: "q:select-star",
+      tier: "inline",
     })
 
   test("a clean rerun dismisses the earlier blocking altimate review", async () => {
@@ -499,6 +500,28 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     expect(calls.dismissReview).toHaveLength(0)
   })
 
+  test("a rejected inline review rewrites the summary with every finding in full", async () => {
+    const f = { ...engineFinding(3), title: "m: code marked temporary", body: "remove the debug sample before merge" }
+    const env = buildEnvelope({ findings: [f], tier: "lite", mode: "comment" })
+    const { client, calls } = fakeClient({})
+    let attempt = 0
+    ;(client.rest.pulls as any).createReview = async (a: any) => {
+      calls.createReview.push(a)
+      if (attempt++ === 0)
+        throw Object.assign(new Error("Unprocessable Entity"), { status: 422, response: { data: { errors: ["line must be part of the diff"] } } })
+      return { data: { id: 99 } }
+    }
+    const r = await postGitHubReview(env, target, client)
+    expect(r.inlineFellBack).toBe(true)
+    expect(calls.createReview[1].comments).toBeUndefined()
+    // First post: a one-line inline pointer. After the fallback: the full body.
+    expect(calls.createComment[0].body).toContain("### Inline (1)")
+    expect(calls.createComment[0].body).not.toContain("remove the debug sample before merge")
+    expect(calls.updateComment).toHaveLength(1)
+    expect(calls.updateComment[0].body).not.toContain("### Inline")
+    expect(calls.updateComment[0].body).toContain("remove the debug sample before merge")
+  })
+
   test("a still-blocking rerun does not dismiss and posts REQUEST_CHANGES", async () => {
     const blocking = makeFinding({
       severity: "critical",
@@ -530,6 +553,14 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     expect(r.reviewSkipped).toBe(true)
     expect(calls.createReview).toHaveLength(0)
     expect(calls.createComment.length + calls.updateComment.length).toBe(1)
+  })
+
+  test("a silent clean run makes no write calls", async () => {
+    const env = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    const { client, calls } = fakeClient({})
+    const r = await postGitHubReview(env, target, client)
+    expect(r.silent).toBe(true)
+    expect(Object.values(calls).flat()).toHaveLength(0)
   })
 })
 

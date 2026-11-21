@@ -1,5 +1,5 @@
-import { type Finding, type Severity, ruleTitle } from "./finding"
-import { type VerdictEnvelope } from "./verdict"
+import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, ruleTitle } from "./finding"
+import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY } from "./verdict"
 
 /**
  * Render a verdict envelope for humans (PR summary markdown) and for the VCS
@@ -45,11 +45,32 @@ export interface RenderOptions {
   /** Character budget for the comment; findings beyond it are counted, not listed.
    *  `Infinity` renders everything (local CLI output). */
   maxChars?: number
+  /** Finding ids already commented inline on the PR (see postedFindingIds). */
+  alreadyPosted?: Set<string>
+  /** False when the summary is the only output (local CLI, agent tool): every
+   *  finding is then rendered in full instead of as an inline one-liner. */
+  inline?: boolean
+  /** False renders a clean run even under `silentWhenClean` (to replace an
+   *  earlier summary that listed findings). */
+  allowSilent?: boolean
 }
 
-/** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
+/** Full PR/MR summary comment body (markdown), prefixed with the dedup marker.
+ *  Returns `""` for a clean run under `silentWhenClean`: nothing to post. */
 export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): string {
   const maxChars = opts.maxChars ?? SUMMARY_BUDGET_CHARS
+  const notes = coverageNotes(env)
+  if (
+    !env.findings.length &&
+    !notes.length &&
+    !env.summary.degraded &&
+    !env.override &&
+    env.verdict === "APPROVE" &&
+    opts.allowSilent !== false &&
+    postingPolicy(env).silentWhenClean
+  )
+    return ""
+
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
 
   if (env.summary.degraded) {
@@ -59,8 +80,9 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       "",
     )
   }
-  lines.push(...coverageNotes(env))
+  lines.push(...notes)
 
+  const tail: string[] = []
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
   // them, so a customer can see why the review ran at this tier. Also surfaces
   // when --force-tier bypassed the classifier (tierReasons is auto-populated).
@@ -73,26 +95,13 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     // Pick an inline-code-span fence longer than any backtick run inside `r`
     // so a path like `packages/…/foo`bar`.sql` cannot terminate the span
     // (cubic-review P3).
-    const shown = env.tierReasons
-      .slice(0, RENDER_CAP)
-      .map((r) => {
-        const runs = r.match(/`+/g)
-        const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
-        const fence = "`".repeat(maxRun + 1)
-        // If the reason itself starts/ends with a backtick, pad with a space so
-        // the leading/trailing backtick isn't glued to the fence.
-        const pad = /^`|`$/.test(r) ? " " : ""
-        return `${fence}${pad}${r}${pad}${fence}`
-      })
-      .join(", ")
+    const shown = env.tierReasons.slice(0, RENDER_CAP).map(codeSpan).join(", ")
     const overflow =
       env.tierReasons.length > RENDER_CAP
         ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
         : ""
-    lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
+    tail.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
-
-  const tail: string[] = []
   if (env.override) {
     tail.push(
       `> 🔓 **Break-glass override** by @${env.override.by}: ${env.override.reason}`,
@@ -107,6 +116,7 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       (env.manifestHash ? ` · manifest \`${env.manifestHash.slice(0, 10)}\`` : "") +
       (env.scope?.baseRef ? ` · base \`${env.scope.baseRef}\`` : "") +
       (env.ai?.state === "ok" && env.ai.model ? ` · AI \`${env.ai.model}\`` : "") +
+      (env.ai?.tokens ? ` · tokens ${(env.ai.tokens.inputTotal + env.ai.tokens.output).toLocaleString("en-US")}` : "") +
       "</sub>",
   )
 
@@ -115,21 +125,34 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     return [...lines, ...tail].join("\n")
   }
 
+  // Findings posted inline get a one-line pointer here; the comment on the
+  // diff carries the detail. Pre-existing findings sit in a collapsed list.
+  const deferredIds = new Set(inlineComments(env, opts.alreadyPosted).deferred.map((f) => f.id))
+  const posting = postingPolicy(env)
+  const inline =
+    opts.inline === false ? [] : env.findings.filter((f) => inlineEligible(f, posting) && !deferredIds.has(f.id))
+  const inlineIds = new Set(inline.map((f) => f.id))
+  const preExisting = env.findings.filter((f) => f.preExisting && !inlineIds.has(f.id))
+  const rest = env.findings.filter((f) => !f.preExisting && !inlineIds.has(f.id))
+  if (inline.length) {
+    lines.push(
+      `### Inline (${inline.length})`,
+      "",
+      ...inline.map((f) => `- \`${f.file}:${f.startLine}\` — ${f.title}`),
+      "",
+    )
+  }
+
   // Findings fill the budget left after the fixed parts, most severe first.
   // What does not fit is counted, never silently dropped: the envelope keeps
   // every finding.
   const overflowReserve = 220
   let used = [...lines, ...tail].join("\n").length + overflowReserve
   let hidden = 0
-  const grouped = groupBySeverity(env.findings)
-  for (const sev of ["critical", "warning", "suggestion"] as const) {
-    const items = grouped[sev]
-    if (!items.length) continue
-    const heading = [`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""]
-    const bullets = bulletsFor(items)
+  const fit = (heading: string[], bullets: Array<{ text: string; count: number }>, close: string[]) => {
     let headed = false
     for (const b of bullets) {
-      const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + 2)
+      const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + close.join("\n").length + 2)
       if (used + cost > maxChars) {
         hidden += b.count
         continue
@@ -141,7 +164,20 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       lines.push(b.text)
       used += cost
     }
-    if (headed) lines.push("")
+    if (headed) lines.push(...close, "")
+  }
+  const grouped = groupBySeverity(rest)
+  for (const sev of ["critical", "warning", "suggestion"] as const) {
+    const items = grouped[sev]
+    if (!items.length) continue
+    fit([`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""], bulletsFor(items), [])
+  }
+  if (preExisting.length) {
+    fit(
+      [`<details><summary>Pre-existing (${preExisting.length})</summary>`, ""],
+      bulletsFor(preExisting),
+      ["", "</details>"],
+    )
   }
   if (hidden) {
     lines.push(
@@ -174,7 +210,7 @@ function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
       out.push({
         text:
           `- **${ruleTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
-          `  ${oneLine(g[0].body)}  \n  <sub>${g[0].category}</sub>`,
+          `  ${oneLine(clampBody(g[0].body))}  \n  <sub>${g[0].category}</sub>`,
         count: g.length,
       })
       continue
@@ -182,7 +218,10 @@ function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
     for (const f of g) {
       const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
       out.push({
-        text: `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+        text:
+          `- **${f.title}**  \n` +
+          (f.evidenceLine ? `  ${evidenceText(f)}  \n` : "") +
+          `  ${oneLine(clampBody(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
         count: 1,
       })
     }
@@ -219,12 +258,16 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     const list = env.engineErrors.map((e) => `${e.method} ×${e.count} (${e.reason})`).join("; ")
     notes.push(`Some engine checks failed and did not run: ${list}. This verdict is not a clean approval.`)
   }
-  if (env.scope?.outOfScopeFiles)
+  // The ledger lists out-of-scope and moved files by path; the count lines are
+  // for envelopes that carry only the counts.
+  const ledger = notReviewedLedger(env)
+  const listed = new Set(ledger.map((e) => e.path))
+  const scopePaths = env.scope?.notReviewed ?? []
+  if (env.scope?.outOfScopeFiles && !scopePaths.some((e) => /^outside the dbt project/.test(e.reason) && listed.has(e.path)))
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
-  if (env.scope?.movedUnchangedFiles)
+  if (env.scope?.movedUnchangedFiles && !scopePaths.some((e) => /^moved without edits/.test(e.reason) && listed.has(e.path)))
     notes.push(
-      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
-        "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
+      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ${MOVED_HINT}`,
     )
   if (env.policy?.changedInPr?.length) {
     notes.push(
@@ -235,16 +278,96 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
     notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
+  } else if (env.ai?.reason) {
+    // Some calls answered and some failed: the files in the failed calls were not reviewed by the AI.
+    notes.push(`Advisory AI review partly failed: ${env.ai.reason}.`)
   }
-  return notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
+  const out = notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
+  return [...out, ...ledgerBlock(ledger)]
 }
 
-/** GitHub `pulls.createReview` inline comments — only findings with a line. */
+/** Paths shown in the "Not reviewed" block at most; the rest are counted. */
+export const LEDGER_MAX_PATHS = 30
+
+/** The coverage ledger minus the `unverified` entries, which have their own
+ *  note above it. */
+function notReviewedLedger(env: VerdictEnvelope): Array<{ path: string; reason: string }> {
+  const unverified = new Set((env.scope?.unverified ?? []).map((u) => `${u.path}\0${u.reason}`))
+  return (env.scope?.notReviewed ?? []).filter((e) => !unverified.has(`${e.path}\0${e.reason}`))
+}
+
+const MOVED_HINT =
+  "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds."
+
+/** Collapsed "Not reviewed: n file(s)" block, grouped by reason. */
+function ledgerBlock(ledger: Array<{ path: string; reason: string }>): string[] {
+  if (!ledger.length) return []
+  const byReason = new Map<string, string[]>()
+  for (const e of ledger) byReason.set(e.reason, [...(byReason.get(e.reason) ?? []), e.path])
+  const lines = [`<details><summary>Not reviewed: ${ledger.length} file(s)</summary>`, ""]
+  let shown = 0
+  for (const [reason, paths] of byReason) {
+    if (shown >= LEDGER_MAX_PATHS) break
+    const take = paths.slice(0, LEDGER_MAX_PATHS - shown)
+    shown += take.length
+    // Escape Markdown emphasis so a glob like `**/*.md` in a reason renders literally.
+    lines.push(`${reason.replace(/([*_])/g, "\\$1")} (${paths.length}):`, ...take.map((p) => `- ${codeSpan(p)}`))
+    if (/^moved without edits/.test(reason)) lines.push("", MOVED_HINT)
+    lines.push("")
+  }
+  if (ledger.length > shown) lines.push(`… and ${ledger.length - shown} more`, "")
+  lines.push("</details>", "")
+  return lines
+}
+
+/** GitHub `pulls.createReview` inline comments — only findings with a line.
+ *  A multi-line range (a suggestion block) sets `start_line`/`start_side`. */
 export interface InlineComment {
   path: string
   line: number
   side: "RIGHT"
+  start_line?: number
+  start_side?: "RIGHT"
   body: string
+}
+
+/** Rendered length cap for a finding body; the envelope keeps the full text. */
+export const BODY_MAX_CHARS = 600
+
+/** Cut `body` to at most `max` characters at a sentence boundary (a word
+ *  boundary when no sentence ends late enough) and append "…". A code fence
+ *  left open by the cut is closed. */
+export function clampBody(body: string, max = BODY_MAX_CHARS): string {
+  if (body.length <= max) return body
+  const head = body.slice(0, max - 1)
+  const sentence = Math.max(...[". ", "! ", "? ", ".\n", "\n\n"].map((t) => head.lastIndexOf(t)))
+  const word = head.search(/\s\S*$/)
+  const cut = sentence >= max / 2 ? sentence + 1 : word > 0 ? word : head.length
+  let out = head.slice(0, cut).trimEnd() + "…"
+  if ((out.match(/^```/gm) ?? []).length % 2) out += "\n```"
+  return out
+}
+
+/** Inline code span for `s`, fenced longer than any backtick run inside it. */
+function codeSpan(s: string): string {
+  const runs = s.match(/`+/g)
+  const fence = "`".repeat((runs ? Math.max(...runs.map((r) => r.length)) : 0) + 1)
+  // A leading/trailing backtick needs a space so it isn't glued to the fence.
+  const pad = /^`|`$/.test(s) ? " " : ""
+  return `${fence}${pad}${s}${pad}${fence}`
+}
+
+/** `` `file:line` — `<source line>` ``: the line a finding quotes as evidence. */
+function evidenceText(f: Finding): string {
+  const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
+  return `\`${loc}\` — ${codeSpan(oneLine(f.evidenceLine ?? ""))}`
+}
+
+/** A GitHub suggestion block replacing the comment's line range. */
+function suggestionBlock(replacement: string): string {
+  const runs = replacement.match(/`{3,}/g)
+  const fence = "`".repeat(Math.max(3, ...(runs ?? []).map((r) => r.length + 1)))
+  return `${fence}suggestion\n${replacement}\n${fence}`
 }
 
 /** Hidden per-finding marker on inline comments, keyed by the finding's stable
@@ -261,15 +384,62 @@ export function postedFindingIds(bodies: Array<string | null | undefined>): Set<
   return out
 }
 
-export function inlineComments(env: VerdictEnvelope, alreadyPosted: Set<string> = new Set()): InlineComment[] {
-  return env.findings
-    .filter((f) => typeof f.startLine === "number" && !alreadyPosted.has(f.id))
-    .map((f) => ({
+/** The posting policy an envelope was produced under (defaults for envelopes
+ *  from releases that did not record one). */
+export function postingPolicy(env: VerdictEnvelope): PostingPolicy {
+  return env.policy?.posting ?? DEFAULT_POSTING_POLICY
+}
+
+const CONFIDENCE_ORDER: Record<Confidence, number> = { high: 3, medium: 2, low: 1, unknown: 0 }
+
+/** Whether a finding may be posted as an inline comment: an inline-tier rule
+ *  (AI findings default to inline in `ruleTier`), on a line the PR added, at or
+ *  above the severity floor. */
+export function inlineEligible(f: Finding, posting: PostingPolicy): boolean {
+  if (f.tier !== "inline") return false
+  if (f.preExisting || typeof f.startLine !== "number") return false
+  return SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[posting.inlineSeverityFloor]
+}
+
+/**
+ * Inline comments for this run: eligible findings not already on the PR, most
+ * severe and most confident first, capped at the posting budget. Findings over
+ * the budget are `deferred` and stay in the summary.
+ */
+export function inlineComments(
+  env: VerdictEnvelope,
+  alreadyPosted: Set<string> = new Set(),
+): { comments: InlineComment[]; deferred: Finding[] } {
+  const posting = postingPolicy(env)
+  const fresh = env.findings
+    .filter((f) => inlineEligible(f, posting) && !alreadyPosted.has(f.id))
+    .sort(
+      (a, b) =>
+        SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] ||
+        CONFIDENCE_ORDER[b.confidence] - CONFIDENCE_ORDER[a.confidence] ||
+        a.file.localeCompare(b.file) ||
+        a.startLine! - b.startLine!,
+    )
+  const comments = fresh.slice(0, posting.inlineBudget).map((f): InlineComment => {
+    const parts = [`${SEVERITY_EMOJI[f.severity]} **${f.title}**`]
+    if (f.evidenceLine) parts.push(evidenceText(f))
+    parts.push(clampBody(f.body))
+    const s = f.suggestion
+    if (s) parts.push(suggestionBlock(s.replacement))
+    parts.push(findingMarker(f.id))
+    const body = parts.join("\n\n")
+    // GitHub applies a suggestion to the comment's line range, so the
+    // comment spans exactly the replaced lines.
+    if (!s) return { path: f.file, line: f.startLine!, side: "RIGHT", body }
+    return {
       path: f.file,
-      line: f.startLine!,
-      side: "RIGHT" as const,
-      body: `${SEVERITY_EMOJI[f.severity]} **${f.title}**\n\n${f.body}\n\n${findingMarker(f.id)}`,
-    }))
+      line: s.endLine,
+      side: "RIGHT",
+      ...(s.startLine !== s.endLine ? { start_line: s.startLine, start_side: "RIGHT" as const } : {}),
+      body,
+    }
+  })
+  return { comments, deferred: fresh.slice(posting.inlineBudget) }
 }
 
 function groupBySeverity(findings: Finding[]): Record<Severity, Finding[]> {

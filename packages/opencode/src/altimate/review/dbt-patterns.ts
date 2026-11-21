@@ -135,7 +135,7 @@ const detectClock: Detector = (c) => {
     file: c.file.path,
     model: c.model,
     confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "clock_in_transform", lines: hits.slice(0, 3) } },
+    evidence: { tool: "dbt-patterns", result: { rule: "clock_in_transform", line: hits[0], lines: hits.slice(0, 3) } },
     ruleKey: "idempotency:clock",
   })
 }
@@ -240,7 +240,7 @@ const detectFanout: Detector = (c) => {
     confidence: "high",
     evidence: {
       tool: "dbt-patterns",
-      result: { rule: "fanout_join", joins: newJoins.map((j) => j.trim()).slice(0, 2) },
+      result: { rule: "fanout_join", line: newJoins[0], joins: newJoins.map((j) => j.trim()).slice(0, 2) },
     },
     ruleKey: "fanout:join-before-agg",
   })
@@ -293,18 +293,19 @@ function addedLineNumbers(diff: string | undefined): Set<number> | undefined {
  * only when the diff carries no hunk headers, and then only for added lines
  * that themselves hold window syntax).
  */
-function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
+function dedupWindows(c: Ctx): Array<{ spec: string; text: string; line: string }> {
   // Comments blanked with newlines kept, so offsets map to head line numbers.
   const sql = c.newSql.replace(/\/\*[\s\S]*?\*\/|--[^\n]*|\{#[\s\S]*?#\}/g, (m) => m.replace(/[^\n]/g, " "))
   const lineAt = (offset: number) => sql.slice(0, offset).split("\n").length
+  const headLines = c.newSql.split("\n")
   const addedLines = addedLineNumbers(c.file.diff)
   // Text fallback (diff without hunk headers): only added lines that are part
   // of a window spec can touch one; a bare identifier elsewhere never does.
   const squash = (t: string) => t.replace(/\s+/g, " ").trim()
   const added = c.added
-    .map((l) => squash(stripComments(l)))
-    .filter((l) => l.length >= 3 && /\b(row_number|over|partition\s+by|order\s+by)\b/i.test(l))
-  const out: Array<{ spec: string; text: string }> = []
+    .map((raw) => ({ raw, l: squash(stripComments(raw)) }))
+    .filter(({ l }) => l.length >= 3 && /\b(row_number|over|partition\s+by|order\s+by)\b/i.test(l))
+  const out: Array<{ spec: string; text: string; line: string }> = []
   for (const m of sql.matchAll(/row_number\s*\(\s*\)\s*over\s*\(/gi)) {
     const open = m.index! + m[0].length - 1
     let depth = 0
@@ -318,11 +319,22 @@ function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
     }
     if (close < 0) continue
     const text = sql.slice(m.index!, close + 1)
-    const touched = addedLines
-      ? [...addedLines].some((n) => n >= lineAt(m.index!) && n <= lineAt(close))
-      : added.some((l) => squash(text).includes(l) || l.includes(squash(text)))
-    if (!touched) continue
-    out.push({ spec: sql.slice(open + 1, close).replace(/\s+/g, " ").trim(), text: text.replace(/\s+/g, " ") })
+    let line: string | undefined
+    if (addedLines) {
+      // The added line that opens the window, else the first added line inside it.
+      const first = lineAt(m.index!)
+      const last = lineAt(close)
+      const touched = [...addedLines].filter((n) => n >= first && n <= last).sort((a, b) => a - b)
+      if (!touched.length) continue
+      line = headLines[(touched.includes(first) ? first : touched[0]) - 1] ?? ""
+    } else {
+      const inside = added.filter(({ l }) => squash(text).includes(l) || l.includes(squash(text)))
+      if (!inside.length) continue
+      const end = sql.indexOf("\n", m.index!)
+      const opener = sql.slice(sql.lastIndexOf("\n", m.index!) + 1, end < 0 ? undefined : end).trim()
+      line = (added.find(({ l }) => l === squash(opener)) ?? inside[0]).raw
+    }
+    out.push({ spec: sql.slice(open + 1, close).replace(/\s+/g, " ").trim(), text: text.replace(/\s+/g, " "), line })
   }
   return out
 }
@@ -345,7 +357,7 @@ const detectDedupTie: Detector = (c) => {
     file: c.file.path,
     model: c.model,
     confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "dedup_no_tiebreaker", line: hit.text } },
+    evidence: { tool: "dbt-patterns", result: { rule: "dedup_no_tiebreaker", line: hit.line, window: hit.text } },
     ruleKey: "dedup:no-tiebreaker",
   })
 }
@@ -375,7 +387,7 @@ const detectDedupLoadTimestamp: Detector = (c) => {
       file: c.file.path,
       model: c.model,
       confidence: "high",
-      evidence: { tool: "dbt-patterns", result: { rule: "dedup_load_timestamp_only", line: w.text } },
+      evidence: { tool: "dbt-patterns", result: { rule: "dedup_load_timestamp_only", line: w.line, window: w.text } },
       ruleKey: "dedup:load-timestamp-only",
     })
   }
@@ -443,6 +455,7 @@ const detectCountDistinct: Detector = (c) => {
   const addedDistinct = c.added.some(hasCountDistinct)
   const removedPlain = c.removed.some(hasPlainCount)
   if (!((removedDistinct && addedPlain) || (addedDistinct && removedPlain))) return null
+  const line = c.added.find(removedDistinct && addedPlain ? hasPlainCount : hasCountDistinct)
   return makeFinding({
     severity: "warning",
     category: "sql_correctness",
@@ -453,7 +466,7 @@ const detectCountDistinct: Detector = (c) => {
     file: c.file.path,
     model: c.model,
     confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "count_distinct_change" } },
+    evidence: { tool: "dbt-patterns", result: { rule: "count_distinct_change", line } },
     ruleKey: "sql_correctness:count-distinct",
   })
 }
@@ -722,6 +735,7 @@ const detectCaseNoElse: Detector = (c) => {
     (m) => !/\belse\b/i.test(m[0]) && !NULL_CONSUMING_CALL.test(joined.slice(0, m.index)),
   )
   if (!bare) return null
+  const head = bare[0].split("\n")[0].trim()
   return pattern(
     c,
     "sql_correctness",
@@ -729,6 +743,7 @@ const detectCaseNoElse: Detector = (c) => {
     "case-no-else",
     "CASE without ELSE returns NULL for unmatched rows",
     "A `CASE` expression with no `ELSE` silently yields NULL for any unmatched row, which can skew downstream metrics. Add an explicit `ELSE`.",
+    c.added.find((l) => stripComments(l).includes(head)),
   )
 }
 
@@ -764,7 +779,8 @@ const detectNaturalJoin: Detector = (c) => {
 
 // 38. Self-join: same ref()/source() appears 2+ times.
 const detectSelfJoin: Detector = (c) => {
-  if (!addedHit(c, /\bjoin\b/i)) return null
+  const hit = addedHit(c, /\bjoin\b/i)
+  if (!hit) return null
   // A self-join reads one relation twice in the same FROM … JOIN chain. The same ref in two
   // CTEs, or in two UNION branches, is two separate reads, not a self-join.
   const sql = stripComments(c.newSql).replace(/\{\{\s*(ref|source)\s*\(([^)]*)\)\s*\}\}/gi, (_, kind, args) =>
@@ -778,6 +794,7 @@ const detectSelfJoin: Detector = (c) => {
     "self-join",
     "self-join detected — verify it can't fan out",
     "The same relation is joined to itself. Self-joins are easy to get wrong (missing grain predicate → fan-out). Confirm the join keys keep it one-to-one.",
+    hit,
   )
 }
 
@@ -802,7 +819,7 @@ const detectWindowNoPartition: Detector = (c) => {
     const head = sql.slice(lineStart, open + 1).trim()
     return changed.some((l) => l.includes(head)) && !/partition\s+by/i.test(sql.slice(open, end))
   })
-  const hit = unpartitioned ? changed[0] : undefined
+  const hit = unpartitioned ? c.added.find((l) => stripComments(l).trim() === changed[0]) : undefined
   if (!hit) return null
   return pattern(
     c,
@@ -903,6 +920,7 @@ const detectOffsetNoOrder: Detector = (c) => {
 const detectMultiCountDistinct: Detector = (c) => {
   const count = (stripComments(c.added.join("\n")).match(/count\s*\(\s*distinct/gi) || []).length
   if (count < 2) return null
+  const hit = addedHit(c, /count\s*\(\s*distinct/i)
   return pattern(
     c,
     "warehouse_cost",
@@ -910,6 +928,7 @@ const detectMultiCountDistinct: Detector = (c) => {
     "multi-count-distinct",
     `${count} COUNT(DISTINCT …) in one query is expensive`,
     "Multiple `COUNT(DISTINCT …)` each need their own sort/hash; on large tables this is a major cost. Consider APPROX_COUNT_DISTINCT or pre-aggregation where exactness isn't required.",
+    hit,
   )
 }
 
@@ -998,7 +1017,7 @@ export function detectMacroPatterns(
           file: file.path,
           model,
           confidence: "high",
-          evidence: { tool: "dbt-patterns", result: { rule: "macro-var-no-default", var: name } },
+          evidence: { tool: "dbt-patterns", result: { rule: "macro-var-no-default", var: name, line } },
           ruleKey: `materialization:macro-var-no-default`,
         }),
       )
