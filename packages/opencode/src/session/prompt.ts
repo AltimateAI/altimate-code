@@ -2243,7 +2243,10 @@ export namespace SessionPrompt {
       }
       const validatorAdvisories = pendingValidatorAdvisories?.metadata?.validatorAdvisories
       const advisoryContext =
-        Array.isArray(validatorAdvisories) && validatorAdvisories.length > 0
+        Array.isArray(validatorAdvisories) &&
+        validatorAdvisories.length > 0 &&
+        !echoCommittedAnswer &&
+        msgs.some((message) => message.info.id === lastUser.id && UserRequest.requestID(message) !== undefined)
           ? ["Completion checks that could not be verified (advisory only):", ...validatorAdvisories].join("\n")
           : undefined
       // altimate_change end
@@ -2585,7 +2588,9 @@ export namespace SessionPrompt {
           }
 
           if (advisories.length > 0) {
-            const pending = advisories.filter((advisory) => !seenValidatorAdvisories.has(advisory))
+            const previous = pendingValidatorAdvisories?.metadata?.validatorAdvisories
+            const pending = [...new Set([...(Array.isArray(previous) ? previous : []), ...advisories])]
+              .filter((advisory) => !seenValidatorAdvisories.has(advisory))
             processor.message.metadata = {
               ...processor.message.metadata,
               validatorAdvisories: pending,

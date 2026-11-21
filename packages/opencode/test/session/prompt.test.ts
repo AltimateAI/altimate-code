@@ -576,7 +576,7 @@ for (const downgrade of [true, false]) {
 // altimate_change end
 
 // altimate_change start — completion validator enforcement through the real prompt loop
-for (const mode of ["advisory", "advisory-after-error", "finding", "strict"] as const) {
+for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "strict"] as const) {
   noLLMServer.instance(
     `completion validators use the ${mode} policy`,
     () => Effect.gen(function* () {
@@ -587,16 +587,24 @@ for (const mode of ["advisory", "advisory-after-error", "finding", "strict"] as 
       delete process.env.ALTIMATE_VALIDATORS_MAX_RETRIES
       const requests: string[] = []
       const note = "Could not verify orders because the schema tool failed."
+      const retryNote = "Could not verify customers because the test tool failed."
       let checkCount = 0
       const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async () => {
         checkCount++
         if (mode === "advisory" && checkCount === 2) return []
-        return [{
-          validator: ValidatorRegistry.list()[0]!,
-          result: mode === "finding"
-            ? { ok: false, classification: "finding", reason: "Confirmed failure." }
-            : { ok: false, classification: "unverifiable", reason: note, advisory: note },
-        }]
+        const validator = ValidatorRegistry.list()[0]!
+        const finding = { validator, result: { ok: false, classification: "finding" as const, reason: "Confirmed failure." } }
+        const advisory = (text: string) => ({
+          validator,
+          result: { ok: false, classification: "unverifiable" as const, reason: text, advisory: text },
+        })
+        if (mode === "finding") return [finding]
+        if (mode === "mixed") {
+          if (checkCount === 1) return [finding, advisory(note)]
+          if (checkCount === 2) return [advisory(retryNote)]
+          return []
+        }
+        return [advisory(note)]
       })
       const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
         requests.push(input.uncachedTurnContext ?? "")
@@ -634,6 +642,15 @@ for (const mode of ["advisory", "advisory-after-error", "finding", "strict"] as 
           expect(requests[1]).toContain(note)
           expect(requests[2]).not.toContain(note)
           expect(requests[3]).not.toContain(note)
+        } else if (mode === "mixed") {
+          expect(retries).toEqual([0, 1])
+          expect(requests).toEqual(["", ""])
+          yield* reply("Follow-up on invoice totals.")
+          expect(requests).toHaveLength(3)
+          expect(requests[2]).toContain(note)
+          expect(requests[2]).toContain(retryNote)
+          yield* reply("A final invoice question.")
+          expect(requests[3]).toBe("")
         } else if (mode === "advisory-after-error") {
           expect(requests).toHaveLength(1)
           const failed = yield* reply("Follow-up while the provider is unavailable.")
