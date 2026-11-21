@@ -14,6 +14,7 @@ type AdapterOverrides = {
   columnTests?: Record<string, string[]>
   /** Describe the tests as an older manifest does: no attached_node, the model is in depends_on. */
   legacyTests?: boolean
+  legacyRelationship?: { dependencies: string[]; model?: string }
   patchPath?: string
   packageName?: string
 }
@@ -49,6 +50,13 @@ function makeAdapter(o: AdapterOverrides = {}): DBTProjectIntegrationAdapter {
           ? { depends_on: { nodes: ["macro.x", "model.proj.target"] }, column_name: column }
           : { attached_node: "model.proj.target", column_name: column },
       )
+  if (o.legacyRelationship) {
+    testMetaMap.set("relationships_orders_customer_id", {
+      column_name: "customer_id",
+      depends_on: { nodes: o.legacyRelationship.dependencies },
+      test_metadata: { name: "relationships", kwargs: { model: o.legacyRelationship.model } },
+    })
+  }
   // A test attached to some other model must never count.
   testMetaMap.set("not_null_other_email", { attached_node: "model.proj.other", column_name: "email" })
 
@@ -179,6 +187,24 @@ describe("schema-verify command", () => {
     const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
     expect(result.findings).toHaveLength(1)
     expect(result.findings[0].kind).toBe("tested-column-missing")
+  })
+
+  test.each([
+    ["{{ ref('target') }}", "mismatch", "tested-column-missing"],
+    ["{{ ref('proj', 'customers') }}", "match", undefined],
+    [undefined, "mismatch", "test-attachment-unverified"],
+  ] as const)("a legacy relationship test with two dependencies and model %s", async (model, verdict, kind) => {
+    const adapter = makeAdapter({
+      expectedColumns: { id: col("id"), customer_id: col("customer_id") },
+      actualColumns: [db("id")],
+      legacyRelationship: { dependencies: ["model.proj.customers", "model.proj.target"], model },
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"])
+    expect(result).toMatchObject({
+      verdict,
+      columns_missing: ["customer_id"],
+      findings: kind ? [expect.objectContaining({ kind, columns: ["customer_id"] })] : [],
+    })
   })
 
   test("a declared column the model does not produce, with nothing attached, is only a note", async () => {

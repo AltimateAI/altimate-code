@@ -147,7 +147,7 @@ async function verify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const { file: declaredIn, pkg: declaredPackage } = splitPatchPath(node.patch_path)
   const where = describeSource(declaredIn, declaredPackage, node.package_name)
   // Scanning every test of the project is only needed when a declared column is missing.
-  const testsByColumn = !contractEnforced && columns_missing.length > 0 ? columnTests(parsed?.testMetaMap, node.unique_id) : new Map<string, string[]>()
+  const tests = !contractEnforced && columns_missing.length > 0 ? columnTests(parsed?.testMetaMap, node.unique_id) : undefined
 
   const findings: Finding[] = []
   const notes: string[] = []
@@ -168,16 +168,31 @@ async function verify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
         evidence: `${where} declares an enforced contract that does not list ${listed(columns_extra)}, but the built table has ${columns_extra.length === 1 ? "it" : "them"}. dbt rejects a contract-enforced model whose columns differ from the contract.`,
       })
   } else {
-    const missingWithTests = columns_missing.filter((c) => (testsByColumn.get(c.toLowerCase()) ?? []).length > 0)
-    const missingUntested = columns_missing.filter((c) => !missingWithTests.includes(c))
+    const missingWithTests = columns_missing.filter((c) => tests?.attached.has(c.toLowerCase()))
+    const missingWithUnverifiedTests = columns_missing.filter(
+      (c) => !tests?.attached.has(c.toLowerCase()) && tests?.unverified.has(c.toLowerCase()),
+    )
+    const missingUntested = columns_missing.filter(
+      (c) => !missingWithTests.includes(c) && !missingWithUnverifiedTests.includes(c),
+    )
     if (missingWithTests.length > 0) {
       const detail = missingWithTests
-        .map((c) => `\`${c}\` (tests: ${(testsByColumn.get(c.toLowerCase()) ?? []).join(", ")})`)
+        .map((c) => `\`${c}\` (tests: ${(tests?.attached.get(c.toLowerCase()) ?? []).join(", ")})`)
         .join("; ")
       findings.push({
         kind: "tested-column-missing",
         columns: missingWithTests,
         evidence: `${where} declares column(s) with tests attached that the built table does not have: ${detail}. Those tests read a column that does not exist.`,
+      })
+    }
+    if (missingWithUnverifiedTests.length > 0) {
+      const detail = missingWithUnverifiedTests
+        .map((c) => `\`${c}\` (tests: ${tests?.unverified.get(c.toLowerCase())?.join(", ")})`)
+        .join("; ")
+      findings.push({
+        kind: "test-attachment-unverified",
+        columns: missingWithUnverifiedTests,
+        evidence: `${where} declares column(s) the built table does not have: ${detail}. The legacy manifest cannot establish which dependency each test reads.`,
       })
     }
     if (missingUntested.length > 0)
@@ -212,7 +227,7 @@ async function verify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
 }
 
 export interface Finding {
-  kind: "contract-missing-columns" | "contract-extra-columns" | "tested-column-missing"
+  kind: "contract-missing-columns" | "contract-extra-columns" | "tested-column-missing" | "test-attachment-unverified"
   columns: string[]
   /** Which YAML declares what, and why this is a problem. */
   evidence: string
@@ -238,20 +253,49 @@ function describeSource(file: string | undefined, declaringPackage: string | und
   return f
 }
 
-/** Lower-cased column name -> names of tests attached to that column of the model. */
-function columnTests(testMetaMap: Map<string, TestMetaData> | undefined, modelUniqueId: string): Map<string, string[]> {
-  const out = new Map<string, string[]>()
-  if (!testMetaMap || typeof testMetaMap.entries !== "function") return out
-  for (const [name, t] of testMetaMap.entries()) {
-    // Manifests before dbt 1.5 have no `attached_node`; the tested model is then a model dependency.
-    const attached =
-      t.attached_node ??
-      (t as TestMetaData & { depends_on?: { nodes?: string[] } }).depends_on?.nodes?.find((id) => id.startsWith("model."))
-    if (attached !== modelUniqueId || !t.column_name) continue
-    const key = t.column_name.toLowerCase()
-    out.set(key, [...(out.get(key) ?? []), name])
+// Older manifests lack attached_node. In a generic test's metadata, model is
+// the relation under test and other kwargs (e.g. relationships.to) may add refs.
+function legacyTestModel(model: unknown, dependencies: string[]): string | undefined {
+  if (typeof model === "string") {
+    const ref = /^\s*{{\s*ref\(\s*(['"])([\w-]+)\1(?:\s*,\s*(['"])([\w-]+)\3)?(?:\s*,\s*(?:v|version)\s*=\s*(\d+))?\s*\)\s*}}\s*$/.exec(model)
+    if (ref) {
+      const [, , first, , second, version] = ref
+      const candidates = dependencies.filter((id) => {
+        const [resource, pkg, name, modelVersion] = id.split(".")
+        if (resource !== "model" && resource !== "seed" && resource !== "snapshot") return false
+        return (second ? pkg === first && name === second : name === first) &&
+          (version === undefined || modelVersion === `v${version}`)
+      })
+      return candidates.length === 1 ? candidates[0] : undefined
+    }
+    // A source or opaque expression cannot establish which model the test reads.
+    return undefined
   }
-  return out
+  return dependencies.length === 1 ? dependencies[0] : undefined
+}
+
+function columnTests(testMetaMap: Map<string, TestMetaData> | undefined, modelUniqueId: string) {
+  const attached = new Map<string, string[]>()
+  const unverified = new Map<string, string[]>()
+  for (const [name, test] of testMetaMap?.entries?.() ?? []) {
+    if (!test.column_name) continue
+    let destination: Map<string, string[]>
+    if (test.attached_node) {
+      if (test.attached_node !== modelUniqueId) continue
+      destination = attached
+    } else {
+      const dependencies = test.depends_on?.nodes ?? []
+      if (!dependencies.includes(modelUniqueId)) continue
+      const kwargs = test.test_metadata?.kwargs as { model?: unknown } | undefined
+      const relations = dependencies.filter((id) => !id.startsWith("macro."))
+      const model = legacyTestModel(kwargs?.model, relations)
+      if (model && model !== modelUniqueId) continue
+      destination = model ? attached : unverified
+    }
+    const column = test.column_name.toLowerCase()
+    destination.set(column, [...(destination.get(column) ?? []), name])
+  }
+  return { attached, unverified }
 }
 
 function flag(args: string[], name: string): string | undefined {

@@ -27,6 +27,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -42,7 +43,7 @@ const STATE_DIR = join("target", ".altimate-dbt")
 const DECLARATION_FILES = ["packages.yml", "dependencies.yml", "package-lock.yml"] as const
 const DEFAULT_INSTALL_PATH = "dbt_packages"
 
-/** A lock whose heartbeat is older than this (or whose owner process is gone) may be broken. */
+/** Fall back to the heartbeat for locks whose process lifetime cannot be checked locally. */
 export const DEFAULT_STALE_MS = 30_000
 const DEFAULT_HEARTBEAT_MS = 2_000
 /** Upper bound on waiting for another process's install before giving up on the lock. */
@@ -124,8 +125,7 @@ function declaredPackages(root: string): Declared[] {
 /** Directories under the install path that look like a complete package. */
 function completePackageDirs(installPath: string): Map<string, string | undefined> {
   const out = new Map<string, string | undefined>()
-  if (!existsSync(installPath)) return out
-  for (const name of readdirSync(installPath)) {
+  for (const name of packageEntries(installPath)) {
     if (name.startsWith(".")) continue
     const dir = join(installPath, name)
     try {
@@ -146,8 +146,7 @@ function completePackageDirs(installPath: string): Map<string, string | undefine
 
 /** Every directory directly under the install path, complete or not. Plain files and dangling links are not packages. */
 function allPackageDirs(installPath: string): string[] {
-  if (!existsSync(installPath)) return []
-  return readdirSync(installPath).filter((n) => {
+  return packageEntries(installPath).filter((n) => {
     if (n.startsWith(".")) return false
     try {
       return statSync(join(installPath, n)).isDirectory()
@@ -155,6 +154,25 @@ function allPackageDirs(installPath: string): string[] {
       return false
     }
   })
+}
+
+function packageEntries(installPath: string): string[] {
+  try {
+    return readdirSync(installPath)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw e
+  }
+}
+
+function inspectPackages(installPath: string) {
+  try {
+    const complete = completePackageDirs(installPath)
+    const incomplete = allPackageDirs(installPath).filter((name) => !complete.has(name))
+    return { complete, incomplete }
+  } catch (e) {
+    bufferLog(`[dbt-tools] could not inspect the package directory: ${String(e)}`)
+  }
 }
 
 const PACKAGE_ENV_VAR = /\benv_var\s*\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1/g
@@ -221,8 +239,9 @@ export function packagesSatisfied(root: string): SatisfiedResult {
 
   const installPath = projectInstallPath(root)
   if (!installPath) return { ok: false, reason: "packages-install-path cannot be determined before dbt runs" }
-  const installed = completePackageDirs(installPath)
-  const incomplete = allPackageDirs(installPath).filter((n) => !installed.has(n))
+  const inspection = inspectPackages(installPath)
+  if (!inspection) return { ok: false, reason: "packages-install-path cannot be inspected" }
+  const { complete: installed, incomplete } = inspection
   if (incomplete.length > 0) return { ok: false, reason: `incomplete package directory: ${incomplete.join(", ")}` }
 
   const declarations = declarationContents(root)
@@ -277,7 +296,11 @@ interface Owner {
   host: string
   token: string
   startedAt: number
+  /** Null means the installer is starting or its process is managed by the adapter. */
+  installerPid?: number | null
 }
+
+type TrackInstaller = (pid: number | null) => void
 
 function pidAlive(pid: number): boolean {
   try {
@@ -304,7 +327,10 @@ function lockIsStale(lockDir: string, staleMs: number): boolean {
     return false // already gone
   }
   const owner = readOwner(lockDir)
-  if (owner && owner.host === hostname() && owner.pid !== process.pid && !pidAlive(owner.pid)) return true
+  if (owner?.host === hostname()) {
+    if (pidAlive(owner.pid) || owner.installerPid === null) return false
+    return owner.installerPid === undefined || !pidAlive(owner.installerPid)
+  }
   return Date.now() - mtime > staleMs
 }
 
@@ -331,7 +357,7 @@ function breakStaleLock(lockDir: string, staleMs: number, observedToken: string 
   }
 }
 
-async function acquire(root: string, opts: Required<LockOptions>): Promise<() => void> {
+async function acquire(root: string, opts: Required<LockOptions>): Promise<{ release: () => void; trackInstaller: TrackInstaller }> {
   const dir = stateDir(root)
   const lockDir = join(dir, "packages.lock")
   mkdirSync(dir, { recursive: true })
@@ -343,7 +369,12 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<() =>
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e
       if (lockIsStale(lockDir, opts.staleMs)) breakStaleLock(lockDir, opts.staleMs, readOwner(lockDir)?.token)
-      if (Date.now() > deadline) throw new PackageLockTimeoutError(`timed out after ${opts.maxWaitMs}ms waiting for the package install lock at ${lockDir}`)
+      if (Date.now() > deadline) {
+        const owner = readOwner(lockDir)
+        const unknownInstaller = owner?.host === hostname() && owner.installerPid === null && !pidAlive(owner.pid)
+        const recovery = unknownInstaller ? " Verify the previous dbt install has stopped before removing this lock." : ""
+        throw new PackageLockTimeoutError(`timed out after ${opts.maxWaitMs}ms waiting for the package install lock at ${lockDir}.${recovery}`)
+      }
       await sleep(jitter(50))
     }
   }
@@ -361,7 +392,14 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<() =>
     } catch {}
   }, opts.heartbeatMs)
   beat.unref()
-  return () => {
+  const trackInstaller: TrackInstaller = (pid) => {
+    if (readOwner(lockDir)?.token !== owner.token) throw new Error("Lost the package install lock")
+    // Publish each update atomically so readers always see the owner or its installer.
+    const temp = join(lockDir, `owner.${owner.token}.tmp`)
+    writeFileSync(temp, JSON.stringify({ ...owner, installerPid: pid }))
+    renameSync(temp, join(lockDir, "owner.json"))
+  }
+  const release = () => {
     clearInterval(beat)
     // Only remove the lock if it is still ours. Releasing is best-effort: a failure to delete
     // must not replace the result of the install that already finished.
@@ -371,6 +409,7 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<() =>
       bufferLog(`[dbt-tools] could not release the package lock: ${String(e)}`)
     }
   }
+  return { release, trackInstaller }
 }
 
 function withDefaults(o?: LockOptions): Required<LockOptions> {
@@ -383,7 +422,7 @@ function withDefaults(o?: LockOptions): Required<LockOptions> {
 
 /** Run `fn` while holding the project's package lock. */
 export async function withPackagesLock<T>(root: string, fn: () => Promise<T>, opts?: LockOptions): Promise<T> {
-  const release = await acquire(root, withDefaults(opts))
+  const { release } = await acquire(root, withDefaults(opts))
   try {
     return await fn()
   } finally {
@@ -416,8 +455,9 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
   const result = await install()
   const installPath = projectInstallPath(root)
   const stampFile = join(dir, "packages.stamp.json")
-  if (!installPath) {
-    // An explicit deps command can resolve Jinja itself. Its output is authoritative
+  const inspection = installPath ? inspectPackages(installPath) : undefined
+  if (!installPath || !inspection) {
+    // dbt can resolve Jinja itself. Its output is authoritative
     // when we cannot inspect the resulting directory.
     rmSync(stampFile, { force: true })
     if (!failedCommand(result)) rmSync(dirty, { force: true })
@@ -430,8 +470,8 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     rmSync(stampFile, { force: true })
     return result
   }
-  const complete = [...completePackageDirs(installPath).keys()]
-  const broken = allPackageDirs(installPath).filter((n) => !complete.includes(n))
+  const complete = [...inspection.complete.keys()]
+  const broken = inspection.incomplete
   // An explicit install (record = false) returns dbt's own failure result instead, so the
   // caller can show dbt's message rather than this one; the dirty marker stays for the next check.
   const incomplete = declaredPackages(root).length > 0 && (complete.length === 0 || broken.length > 0)
@@ -473,30 +513,24 @@ function failedCommand(result: unknown): boolean {
  */
 export async function ensurePackages(
   root: string,
-  install: () => Promise<unknown>,
+  install: (trackInstaller: TrackInstaller) => Promise<unknown>,
   opts?: LockOptions,
 ): Promise<EnsureResult> {
   if (declaredPackages(root).length === 0) return { action: "none", reason: "no packages declared" }
-  if (!projectInstallPath(root)) {
-    const reason = "Could not resolve packages-install-path before dbt runs. Use altimate-dbt deps to install packages for this project."
-    bufferLog(`[dbt-tools] ${reason}`)
-    return { action: "none", reason }
-  }
   const fast = packagesSatisfied(root)
   if (fast.ok) return { action: "skipped", reason: fast.reason }
 
   const waitedFor = existsSync(join(stateDir(root), "packages.lock"))
-  return withPackagesLock(
-    root,
-    async () => {
-      // Another process may have finished the install while we waited.
-      const again = packagesSatisfied(root)
-      if (again.ok) return { action: "skipped-after-wait" as const, reason: waitedFor ? `${again.reason} (after waiting for the lock)` : again.reason }
-      await installUnderLock(root, install, true)
-      return { action: "installed" as const, reason: again.reason }
-    },
-    opts,
-  )
+  const { release, trackInstaller } = await acquire(root, withDefaults(opts))
+  try {
+    // Another process may have finished the install while we waited.
+    const again = packagesSatisfied(root)
+    if (again.ok) return { action: "skipped-after-wait", reason: waitedFor ? `${again.reason} (after waiting for the lock)` : again.reason }
+    await installUnderLock(root, () => install(trackInstaller), true)
+    return { action: "installed", reason: again.reason }
+  } finally {
+    release()
+  }
 }
 
 /**
@@ -505,22 +539,43 @@ export async function ensurePackages(
  * with complete package directories.
  */
 export async function installPackagesLocked<T>(root: string, install: () => Promise<T>, opts?: LockOptions): Promise<T> {
-  return withPackagesLock(root, () => installUnderLock(root, install, false), opts)
+  const { release, trackInstaller } = await acquire(root, withDefaults(opts))
+  try {
+    return await installUnderLock(root, () => {
+      // The integration does not expose its installer PID. A dead adapter
+      // process alone cannot establish that the install has stopped.
+      trackInstaller(null)
+      return install()
+    }, false)
+  } finally {
+    release()
+  }
 }
 
 /** An installer that shells out to `dbt deps` with the project's resolved dbt binary. */
-export function dbtDepsInstaller(cfg: { pythonPath?: string; projectRoot: string }): () => Promise<void> {
-  return () =>
+export function dbtDepsInstaller(cfg: { pythonPath?: string; projectRoot: string }): (trackInstaller: TrackInstaller) => Promise<void> {
+  return (trackInstaller) =>
     new Promise<void>((res, rej) => {
       const dbt = resolveDbt(cfg.pythonPath, cfg.projectRoot)
-      execFile(
+      // A crash between spawning and publishing the PID must also block reclaim.
+      trackInstaller(null)
+      let trackingError: unknown
+      const child = execFile(
         dbt.path,
         ["deps"],
         { cwd: cfg.projectRoot, env: buildDbtEnv(dbt), timeout: DEPS_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
         (err, _stdout, stderr) => {
-          if (err) rej(new Error(`dbt deps failed: ${String(stderr || err.message).slice(-500)}`))
+          if (trackingError) rej(trackingError)
+          else if (err) rej(new Error(`dbt deps failed: ${String(stderr || err.message).slice(-500)}`))
           else res()
         },
       )
+      try {
+        if (child.pid !== undefined) trackInstaller(child.pid)
+      } catch (e) {
+        // Keep the lock until execFile confirms the child has exited.
+        trackingError = e
+        child.kill()
+      }
     })
 }

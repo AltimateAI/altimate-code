@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { spawn } from "child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
   ensurePackages,
+  PackageLockTimeoutError,
   installPackagesLocked,
   packagesSatisfied,
   withPackagesLock,
@@ -162,12 +163,30 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(calls).toBe(1)
   })
 
-  test("an unresolved Jinja package path does not reset dependencies on startup", async () => {
+  test("a compound Jinja package path falls back to installing under the lock", async () => {
     writeProject()
-    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ var('package_directory') }}"\n`)
+    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ env_var('BUILD_ROOT') }}/dbt_packages"\n`)
+    const installPath = join(root, "build", "dbt_packages", PKG)
+    const result = await ensurePackages(root, async () => {
+      expect(existsSync(join(stateDir(), "packages.lock"))).toBe(true)
+      mkdirSync(installPath, { recursive: true })
+      writeFileSync(join(installPath, "dbt_project.yml"), `name: ${PKG}\n`)
+    })
+    expect(result.action).toBe("installed")
+    expect(existsSync(join(installPath, "dbt_project.yml"))).toBe(true)
+    expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+  })
+
+  test("an unreadable install destination falls back to running dbt", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_packages"), "not a directory")
     const c = counter()
-    expect((await ensurePackages(root, c.install)).reason).toContain("altimate-dbt deps")
-    expect(c.calls).toBe(0)
+    const result = await ensurePackages(root, async () => {
+      rmSync(join(root, "dbt_packages"))
+      await c.install()
+    })
+    expect(result.action).toBe("installed")
+    expect(c.calls).toBe(1)
   })
 
   test("the version inside an installed hub package is not compared with the lock (hub packages report stale versions)", async () => {
@@ -355,6 +374,33 @@ describe("lock", () => {
     expect(Date.now() - started).toBeLessThan(2_000)
   })
 
+  test("a live installer keeps an abandoned lock until the installer exits", async () => {
+    writeProject()
+    const lockDir = join(stateDir(), "packages.lock")
+    mkdirSync(lockDir, { recursive: true })
+    const parent = spawn(process.execPath, ["-e", "0"])
+    await new Promise((resolve) => parent.once("close", resolve))
+    const installer = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"])
+    const finished = new Promise((resolve) => installer.once("close", resolve))
+    try {
+      writeFileSync(
+        join(lockDir, "owner.json"),
+        JSON.stringify({ pid: parent.pid, installerPid: installer.pid, host: require("os").hostname(), token: "x" }),
+      )
+      const old = new Date(Date.now() - 10_000)
+      utimesSync(lockDir, old, old)
+      const c = counter()
+      await expect(ensurePackages(root, c.install, { staleMs: 1, maxWaitMs: 100 })).rejects.toBeInstanceOf(PackageLockTimeoutError)
+      expect(c.calls).toBe(0)
+    } finally {
+      installer.kill()
+      await finished
+    }
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
   test("a lock whose owner is alive but has stopped heartbeating is broken after staleMs", async () => {
     writeProject()
     const lockDir = join(stateDir(), "packages.lock")
@@ -500,6 +546,49 @@ describe("concurrent callers", () => {
     expect(lines.filter((l) => l.startsWith("ready")).length).toBe(8)
     expect(lines.filter((l) => l.startsWith("BROKEN")).length).toBe(0)
   }, 30_000)
+
+  test.skipIf(process.platform === "win32")("killing the dbt deps caller does not unlock its live installer", async () => {
+    writeProject()
+    const shim = join(root, "dbt")
+    const ready = join(root, "installer.pid")
+    writeFileSync(shim, '#!/bin/sh\necho "$$" > installer.pid\nexec sleep 10\n')
+    chmodSync(shim, 0o755)
+    const parent = spawn(process.execPath, [WORKER, root, join(root, "worker.log"), PKG, "dbt"], {
+      env: { ...process.env, ALTIMATE_DBT_PATH: shim },
+      stdio: "ignore",
+    })
+    const stopped = new Promise((resolve) => parent.once("close", (_code, signal) => resolve(signal)))
+    try {
+      const lockDir = join(stateDir(), "packages.lock")
+      const deadline = Date.now() + 3_000
+      while ((!existsSync(ready) || !readFileSync(ready, "utf8").trim()) && Date.now() < deadline) {
+        await Bun.sleep(10)
+      }
+      const pid = Number(readFileSync(ready, "utf8"))
+      // Wait for the parent to finish publishing the recorded installer PID.
+      const owner = join(lockDir, "owner.json")
+      while (JSON.parse(readFileSync(owner, "utf8")).installerPid === null && Date.now() < deadline) {
+        await Bun.sleep(10)
+      }
+      expect(JSON.parse(readFileSync(owner, "utf8")).installerPid).toBe(pid)
+      parent.kill("SIGKILL")
+      expect(await stopped).toBe("SIGKILL")
+      const c = counter()
+      await expect(ensurePackages(root, c.install, { staleMs: 1, maxWaitMs: 100 })).rejects.toBeInstanceOf(PackageLockTimeoutError)
+      expect(c.calls).toBe(0)
+    } finally {
+      parent.kill("SIGKILL")
+      await stopped
+      const pid = existsSync(ready) ? Number(readFileSync(ready, "utf8")) : 0
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+    }
+  }, 10_000)
 
   test("a process killed in the middle of an install does not poison the project", async () => {
     writeProject()

@@ -30,7 +30,7 @@ function runAltimateDbt(i: number) {
     const c = spawn(
       "node",
       [DIST, "schema-verify", "--model", "m"],
-      { cwd: proj, env: { ...process.env, ...env, E2E_DB: join(proj, `db${i}.duckdb`) } },
+      { cwd: proj, env: { ...process.env, ...env, E2E_DB: join(proj, `db${i}.duckdb`), BUILD_ROOT: "build" } },
     )
     let out = ""
     c.stdout.on("data", (d) => (out += d))
@@ -134,4 +134,21 @@ suite("real dbt: concurrent altimate-dbt invocations and `dbt deps`", () => {
     expect(depsCalls()).toBe(1)
     expect(packageHealthy()).toBe(true)
   }, 120_000)
+  test("a compound Jinja package path installs deps through dbt before parsing", async () => {
+    const config = join(proj, "dbt_project.yml")
+    const original = readFileSync(config, "utf-8")
+    const buildRoot = join(proj, "build")
+    try {
+      writeFileSync(config, original + `packages-install-path: "{{ env_var('BUILD_ROOT') }}/dbt_packages"\n`)
+      writeFileSync(log, "")
+      const result = await runAltimateDbt(0)
+      expect(result.code, result.out).toBe(0)
+      expect(depsCalls()).toBe(1)
+      expect(existsSync(join(buildRoot, "dbt_packages", "localpkg", "dbt_project.yml"))).toBe(true)
+    } finally {
+      writeFileSync(config, original)
+      rmSync(buildRoot, { recursive: true, force: true })
+    }
+  }, 120_000)
+
 })
