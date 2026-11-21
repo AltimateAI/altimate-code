@@ -103,7 +103,9 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                 return Response.json(true)
               }
               if (route === `/session/${sessionID}/message` && request.method === "POST") {
-                const body = (await request.json()) as { messageID: string }
+                const body = (await request.json()) as { messageID: string; noReply?: boolean }
+                // The soft time-budget reminder is saved without a reply; it is not a prompt.
+                if (body.noReply) return Response.json({ info: { id: body.messageID, role: "user" } })
                 const ready = subscriptionReady
                 await ready.promise
                 subscriptionReady = Promise.withResolvers<void>()
