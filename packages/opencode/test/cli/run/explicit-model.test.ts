@@ -180,6 +180,35 @@ describe("run model resolution", () => {
   )
 
   cliIt.live(
+    "attached run honors the build alias when the default agent model is unavailable",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              default_agent: "analyst",
+              agent: {
+                analyst: { model: "test/missing-model" },
+                builder: { model: "test/test-model" },
+              },
+            }),
+          },
+        })
+        yield* llm.text("Attached run used the builder model")
+        const result = yield* opencode.spawn(["run", "--attach", server.url, "--agent", "build", "--no-trace", "test"], {
+          bunRun: true,
+        })
+        opencode.expectExit(result, 0)
+        expect(result.stderr).not.toContain('agent "build" not found')
+        expect(result.stdout).toContain("Attached run used the builder model")
+      }),
+    90_000,
+  )
+
+  cliIt.live(
     "attached run validates the effective migrated default agent model",
     ({ opencode, llm }) =>
       Effect.gen(function* () {

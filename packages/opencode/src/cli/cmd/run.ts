@@ -1410,9 +1410,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const { agent, agentAudience } = await (async () => {
         if (!args.agent) return { agent: undefined, agentAudience: undefined }
         // altimate_change start — use the attached server's agent definitions
+        const requestedAgent = args.agent
         const entry = args.attach
-          ? (await remoteAgents()).find((item) => item.name === args.agent)
-          : await Agent.get(args.agent)
+          ? await (async () => {
+              const agents = await remoteAgents()
+              // Match Agent.get: a custom build agent takes precedence over the legacy alias.
+              return agents.find((item) => item.name === requestedAgent)
+                ?? (requestedAgent === "build" ? agents.find((item) => item.name === "builder") : undefined)
+            })()
+          : await Agent.get(requestedAgent)
         // altimate_change end
         if (!entry) {
           UI.println(
@@ -1431,7 +1437,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
           return { agent: undefined, agentAudience: undefined }
         }
         const aud = entry.options?.audience as string | undefined
-        return { agent: args.agent, agentAudience: aud }
+        // altimate_change start — validate and send the same resolved agent
+        return { agent: entry.name, agentAudience: aud }
+        // altimate_change end
       })()
 
       // altimate_change start — validate fresh runs before creating a session
