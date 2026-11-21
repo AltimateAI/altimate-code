@@ -151,12 +151,11 @@ async function main() {
   const { create } = await import("./adapter")
   let adapter
   const buildNotes: string[] = []
+  const onPackagesInstalled = () => {
+    buildNotes.push("Build re-installed packages and reset the package directory (dbt_packages by default). Edits inside it may have been lost.")
+  }
   try {
-    adapter = await create(cfg, {
-      onPackagesInstalled: () => {
-        if (cmd === "build") buildNotes.push("Build re-installed packages and reset the package directory (dbt_packages by default). Edits inside it may have been lost.")
-      },
-    })
+    adapter = await create(cfg, cmd === "build" ? { onPackagesInstalled } : {})
   } catch (err) {
     return { ...failure(err), ...(buildNotes.length > 0 && { notes: buildNotes }) }
   }
@@ -180,7 +179,7 @@ async function main() {
           adapterDisposed = true
           const targetPath = await mkdtemp(join(tmpdir(), "altimate-dbt-verify-"))
           try {
-            const verifier = await create(cfg, { targetPath })
+            const verifier = await create(cfg, { targetPath, onPackagesInstalled })
             try {
               const answer = await verify(verifier)
               buildNotes.push("Schema verification ran after build. Its compile artifacts use a separate target directory so the build artifacts remain available.")

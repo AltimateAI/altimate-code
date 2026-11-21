@@ -72,11 +72,10 @@ counts.
 | The selector matched no enabled node | passes (`unmatched_selector_models` in telemetry) |
 | dbt aborted (connection, lock, compile or runtime error) before or while running tests | **fails**, with dbt's error text |
 
-An error from a run that happened in parallel with other `altimate-dbt`
-processes is retried once, alone, before it is reported, because several
-processes sharing a single-writer warehouse such as DuckDB can fail each
-other without anything being wrong with the model (`retried_serially` in
-telemetry). Timeouts and spawn failures are not retried.
+A run error can be retried once in isolation to recover from warehouse contention,
+including contention with another invocation. Each schema or test validator run retries
+up to four models (`retried_serially` in telemetry). Compilation and parsing errors,
+missing profiles, timeouts, and spawn failures keep their original diagnostics.
 
 ### `dbt-schema-verify`
 

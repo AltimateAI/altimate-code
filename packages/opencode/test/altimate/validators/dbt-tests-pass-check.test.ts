@@ -184,6 +184,25 @@ describe("isNothingToTest", () => {
 })
 
 describe("retryErroredSerially", () => {
+  test("skips deterministic failures and caps extra subprocesses per validator run", async () => {
+    const items = ["compile", "parse", "profile", "a", "b", "c", "d", "e"]
+    const errors = [
+      "Compilation Error in model orders",
+      "Parsing Error",
+      "Runtime Error: Could not find profile named 'local'",
+      ...Array(5).fill("Could not set lock on file"),
+    ]
+    const attempted: string[] = []
+    const first = errors.map((error) => ({ error }))
+    const { outputs, retried } = await retryErroredSerially(items, first, async (item) => {
+      attempted.push(item)
+      return null
+    }, (output) => output.error)
+    expect(attempted).toEqual(["a", "b", "c", "d"])
+    expect(retried).toBe(4)
+    expect(outputs).toEqual(first)
+  })
+
   test("a retry that cannot start keeps the original error instead of erasing it", async () => {
     const first = { model: "orders", error: "Could not set lock" }
     const { outputs, retried } = await retryErroredSerially(["orders"], [first], async () => null, (o) => o.error)
