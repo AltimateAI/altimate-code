@@ -176,17 +176,24 @@ export function create() {
     // (up to SessionRetry.RETRY_MAX_ATTEMPTS per step), and each retry streams
     // its own step-start but only the attempt that completes streams a
     // step-finish. Charging on start billed every failed attempt as a turn.
-    // A step that ends without a step-finish is free (a failed or retried
-    // attempt, a soft-deadline interrupt), except one cut short by context
-    // overflow: it hands off to compaction and is still charged, as before, so
-    // overflow-and-compact cycles stay bounded by --max-turns. The processor's
-    // retry cap bounds retried attempts.
+    // A step that ends without a step-finish is free when a retry or idle
+    // closes it (a failed or retried attempt). A step still open when compaction
+    // replaces it, or cut short by a context-overflow error, is charged as
+    // before, so overflow-and-compact cycles stay bounded by --max-turns
+    // whichever of the overflow error and the compaction start arrives first.
+    // The processor's retry cap bounds retried attempts.
     // `turnCount` is therefore the number of COMPLETED non-compaction steps;
     // harness-injected generations (idle-done challenge, continuation,
     // silent-turn reply) are real assistant steps and are charged the same way.
     /** Track the step now streaming; a compaction step closes any unfinished one. */
     onStepAttempt(messageID: string) {
-      openAttempt = !isCompactionStep(messageID)
+      if (!isCompactionStep(messageID)) {
+        openAttempt = true
+        return
+      }
+      // Compaction replacing a step that never finished: that step was cut short.
+      if (openAttempt) turnCount++
+      openAttempt = false
     },
     /** No step is streaming any more (the session went idle, or a retry began). */
     closeOpenStep() {

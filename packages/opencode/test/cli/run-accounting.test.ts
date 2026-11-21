@@ -81,14 +81,19 @@ describe("RunAccounting turn accounting", () => {
     expect(acc.turnCount).toBe(1)
   })
 
-  test("a compaction step's overflow is not charged to an earlier unfinished step", () => {
-    const acc = RunAccounting.create()
-    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
-    acc.onStepAttempt("msg_1") // interrupted, never finishes
-    acc.onStepAttempt("msg_compact")
-    acc.onSessionError("ContextOverflowError", "summary too long")
-    expect(acc.turnCount).toBe(0)
+  test("a step that compaction replaces is charged once, whichever event arrives first", () => {
+    for (const overflowFirst of [true, false]) {
+      const acc = RunAccounting.create()
+      acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+      acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
+      acc.onStepAttempt("msg_1")
+      if (overflowFirst) acc.onSessionError("ContextOverflowError", "too long")
+      acc.onStepAttempt("msg_compact")
+      if (!overflowFirst) acc.onSessionError("ContextOverflowError", "too long")
+      // The summary's own overflow is never charged.
+      acc.onSessionError("ContextOverflowError", "summary too long")
+      expect(acc.turnCount).toBe(1)
+    }
   })
 
   test("after the session goes idle, a later pre-step overflow is not charged to an interrupted step", () => {

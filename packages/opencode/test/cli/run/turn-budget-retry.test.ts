@@ -50,7 +50,7 @@ describe("opencode run: --max-turns charges completed steps only", () => {
   )
   // Attached-session fake: the CLI sees exactly the events the session publishes for
   // a step whose attempts start and fail, without waiting out real retry backoff.
-  const attached = (behavior: "all-attempts-fail" | "endless-attempts" | "compaction-after-budget" | "overflow-mid-step") =>
+  const attached = (behavior: "all-attempts-fail" | "endless-attempts" | "compaction-after-budget" | "overflow-mid-step" | "retry-then-overflow") =>
     Effect.gen(function* () {
       const sessionID = "ses_turn_budget_retry"
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
@@ -146,6 +146,69 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                   })
                   publish("message.part.updated", {
                     part: { id: `${messageID}_finish`, messageID, sessionID, type: "step-finish", reason: "stop" },
+                  })
+                  publish("session.status", { sessionID, status: { type: "idle" } })
+                  return Response.json({ info: { finish: "stop" } })
+                }
+                if (behavior === "retry-then-overflow") {
+                  // Attempt 1 fails mid-stream; the retry is rejected for overflow before it
+                  // streams; compaction runs; the continuation step answers.
+                  startAttempt(messageID)
+                  publish("session.status", {
+                    sessionID,
+                    status: { type: "retry", attempt: 1, message: "rate limit exceeded", next: Date.now() + 10 },
+                  })
+                  publish("session.error", {
+                    sessionID,
+                    error: { name: "ContextOverflowError", data: { message: "prompt is too long" } },
+                  })
+                  const summaryID = `${messageID}zz_summary`
+                  publish("message.updated", {
+                    info: {
+                      id: summaryID,
+                      sessionID,
+                      role: "assistant",
+                      parentID,
+                      agent: "compaction",
+                      summary: true,
+                      modelID: "test-model",
+                      providerID: "test",
+                      time: { created: Date.now() },
+                    },
+                  })
+                  publish("message.part.updated", {
+                    part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
+                  })
+                  publish("message.part.updated", {
+                    part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
+                  })
+                  publish("session.compacted", { sessionID })
+                  const nextID = `${messageID}zzz_next`
+                  publish("message.updated", {
+                    info: {
+                      id: nextID,
+                      sessionID,
+                      role: "assistant",
+                      parentID,
+                      agent: "build",
+                      modelID: "test-model",
+                      providerID: "test",
+                      time: { created: Date.now() },
+                    },
+                  })
+                  startAttempt(nextID)
+                  publish("message.part.updated", {
+                    part: {
+                      id: `${nextID}_text`,
+                      messageID: nextID,
+                      sessionID,
+                      type: "text",
+                      text: "The answer after compaction.",
+                      time: { start: 1, end: 2 },
+                    },
+                  })
+                  publish("message.part.updated", {
+                    part: { id: `${nextID}_finish`, messageID: nextID, sessionID, type: "step-finish", reason: "stop" },
                   })
                   publish("session.status", { sessionID, status: { type: "idle" } })
                   return Response.json({ info: { finish: "stop" } })
@@ -295,6 +358,28 @@ describe("opencode run: --max-turns charges completed steps only", () => {
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
           { why_harness_stopped: "error" },
         ])
+      }),
+    30_000,
+  )
+
+  cliIt.concurrent(
+    "a failed attempt closed by its retry is not charged for a later overflow",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const { server, sessionID, counts } = yield* attached("retry-then-overflow")
+        const result = yield* opencode.run("Answer once.", {
+          format: "json",
+          extraArgs: ["--attach", server.url.toString(), "--session", sessionID, "--max-turns", "1", "--no-trace"],
+          timeoutMs: 20_000,
+          bunRun: true,
+        })
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+        expect(counts.aborts).toBe(0)
+        expect(
+          events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text),
+        ).toEqual(["The answer after compaction."])
+        opencode.expectExit(result, 0)
       }),
     30_000,
   )
