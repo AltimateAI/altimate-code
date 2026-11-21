@@ -418,7 +418,9 @@ describe("sql_explain", () => {
     Registry.setConfigs({ pg: { type: "postgres" } as any })
     try {
       const result = await runner.run("sql_explain", { sql: "SELECT 'a\\'", warehouse: "pg" })
-      expect(JSON.stringify(result)).toContain("could not be read with certainty")
+      const text = JSON.stringify(result)
+      expect(text).toContain("backslash in a quoted string")
+      expect(text).toContain("is not explained")
     } finally {
       Registry.reset()
     }
