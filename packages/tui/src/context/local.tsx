@@ -630,6 +630,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
       // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
       const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
+      const [pickedModels, setPickedModels] = createStore<Record<string, { scope: string; model: ModelRef } | undefined>>({})
       const [restoredModels, setRestoredModels] = createStore<Record<string, { scope: string; model: ModelRef }>>({})
       const sessionScope = () => route.data.type === "session" ? route.data.sessionID : "home"
       const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
@@ -722,7 +723,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // An unavailable explicit selection outranks restored history.
         // A deliberate picker choice during this launch is the recovery path.
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
-        if (persistedAgentPick && explicitPicks[pickKey(persistedAgentPick)]) return persistedAgentPick
+        const picked = a ? pickedModels[a.name] : undefined
+        if (picked?.scope === sessionScope()) return picked.model
 
         if (args.model !== undefined) return parseModel(args.model)
         if (a?.model) return a.model
@@ -754,7 +756,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           // selections into it, so storing a caller's object (e.g. a message's recorded model from
           // the sync store) would rewrite that record on every later selection.
           setModelStore("model", a.name, { providerID: model.providerID, modelID: model.modelID })
-          if (options?.explicit) setExplicitPicks(pickKey(model), true)
+          if (options?.explicit) {
+            setExplicitPicks(pickKey(model), true)
+            setPickedModels(a.name, { scope: sessionScope(), model: { ...model } })
+          }
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
@@ -1127,6 +1132,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               : model
           const a = agent.current()
           if (!a) return undefined
+          const picked = pickedModels[a.name]
+          setPickedModels(a.name, picked && sameModel(picked.model, model)
+            ? { scope: sessionScope(), model: { ...picked.model } }
+            : undefined)
           setRestoredModels(a.name, {
             scope: sessionScope(),
             model: { providerID: resolved.providerID, modelID: resolved.modelID },

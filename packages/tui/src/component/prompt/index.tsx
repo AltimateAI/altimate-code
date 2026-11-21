@@ -1,4 +1,6 @@
+// altimate_change start — resolve the model used by a submission
 import { isModelMetadataOnly, submissionModel } from "../../prompt/model"
+// altimate_change end
 import {
   BoxRenderable,
   RGBA,
@@ -322,8 +324,9 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) return undefined
     const messages = sync.data.message[props.sessionID]
     if (!messages) return undefined
-    // altimate_change — shell and MCP admin metadata do not select a chat model
+    // altimate_change start — shell and MCP admin metadata do not select a chat model
     return messages.findLast((m): m is UserMessage => m.role === "user" && !isModelMetadataOnly(sync.data.part[m.id] ?? []))
+    // altimate_change end
   })
 
   const usage = createMemo(() => {
@@ -390,7 +393,9 @@ export function Prompt(props: PromptProps) {
     const msg = lastUserMessage()
 
     if (sessionID !== syncedSessionID) {
+      // altimate_change start — restore session models after provider and local state bootstrap
       if (!sessionID || !msg || sync.status !== "complete" || !local.model.ready) return
+      // altimate_change end
 
       syncedSessionID = sessionID
 
@@ -1193,11 +1198,13 @@ export function Prompt(props: PromptProps) {
       return false
     }
     // altimate_change end
+    // altimate_change start — require a model only for inference
     const selectedModel = selection.subtask ? local.model.current() : selection.model ?? local.model.current()
     if (selection.required && !selectedModel) {
       void promptModelWarning()
       return false
     }
+    // altimate_change end
 
     const workspaceSession = props.sessionID ? sync.session.get(props.sessionID) : undefined
     const workspaceID = workspaceSession?.workspaceID
@@ -1229,6 +1236,7 @@ export function Prompt(props: PromptProps) {
         directory,
         workspace: workspaceID,
         agent: agent.name,
+        // altimate_change start — omit inference model metadata when creating a local command session
         model: selectedModel
           ? {
               providerID: selectedModel.providerID,
@@ -1236,6 +1244,7 @@ export function Prompt(props: PromptProps) {
               variant,
             }
           : undefined,
+        // altimate_change end
       })
 
       if (res.error) {
@@ -1317,8 +1326,10 @@ export function Prompt(props: PromptProps) {
       void sdk.client.session.shell({
         sessionID,
         agent: agent.name,
+        // altimate_change start — allow local shell without a model
         model: selectedModel,
         command: inputText,
+        // altimate_change end
       })
       setStore("mode", "normal")
     } else if (
@@ -1333,13 +1344,17 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
+      // altimate_change start — use the current chat model for command subtask parents
       const chatModel = local.model.current()
+      // altimate_change end
       void sdk.client.session.command({
         sessionID,
         command: command.slice(1),
         arguments: args,
         agent: agent.name,
+        // altimate_change start — pass the chat model when available
         model: chatModel ? `${chatModel.providerID}/${chatModel.modelID}` : undefined,
+        // altimate_change end
         variant,
         parts: nonTextParts.filter((x) => x.type === "file"),
       })

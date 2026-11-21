@@ -417,3 +417,17 @@ test("restored history cannot override project model after leaving the session",
     expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
   } finally { await mounted.cleanup() }
 }))
+
+test("picker recovery follows a new session but does not overwrite a different resumed conversation", () => withIsolatedState(async () => {
+  const mounted = await mount({ model: "ollama/missing" })
+  try {
+    const base = { providerID: "altimate-free", modelID: "altimate-base" }
+    mounted.local.model.set(base)
+    mounted.route.navigate({ type: "session", sessionID: "ses_new" })
+    mounted.local.model.restoreSession(base)
+    expect(mounted.local.model.current()).toEqual(base)
+    mounted.route.navigate({ type: "session", sessionID: "ses_other" })
+    mounted.local.model.restoreSession({ providerID: "opencode", modelID: "zen-model" })
+    expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
+  } finally { await mounted.cleanup() }
+}))
