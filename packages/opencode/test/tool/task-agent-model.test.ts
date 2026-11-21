@@ -27,12 +27,6 @@ test("an unavailable subagent model names that agent's config as its source", as
     spyOn(Agent, "list").mockResolvedValue([agent]),
     spyOn(Agent, "get").mockResolvedValue(agent),
     spyOn(Config, "get").mockResolvedValue({}),
-    spyOn(Provider, "getModel").mockImplementation((async (providerID: string, modelID: string) => {
-      throw new Provider.ModelNotFoundError({
-        providerID: ProviderID.make(providerID),
-        modelID: ModelID.make(modelID),
-      })
-    }) as never),
     spyOn(Session, "get").mockImplementation(
       Object.assign(
         async (id: SessionID) =>
@@ -52,11 +46,18 @@ test("an unavailable subagent model names that agent's config as its source", as
   const promptOps: TaskPromptOps = {
     cancel: () => Effect.void,
     resolvePromptParts: (text) => Effect.succeed([{ type: "text", text }]),
+    // The child prompt rejects the agent's model the way createUserMessage does, labelled as its request.
     prompt: () =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         prompted = true
-        return { info: { role: "assistant" }, parts: [] } as unknown as MessageV2.WithParts
-      }),
+        return Effect.fail(
+          new Provider.ModelNotFoundError({
+            providerID: ProviderID.make("missing-provider"),
+            modelID: ModelID.make("missing-model"),
+            source: "session request (model)",
+          }),
+        )
+      }) as never,
   }
   try {
     const tool = await initTool(TaskTool)
@@ -72,8 +73,9 @@ test("an unavailable subagent model names that agent's config as its source", as
       },
     )
     await expect(run).rejects.toThrow('Model not found: missing-provider/missing-model (from agent "explore" config (model))')
-    expect(prompted).toBe(false)
-    expect(created).toBe(false)
+    // As upstream does for a failed subtask, the child session exists and the prompt ran.
+    expect(prompted).toBe(true)
+    expect(created).toBe(true)
   } finally {
     for (const mock of mocks) mock.mockRestore()
   }

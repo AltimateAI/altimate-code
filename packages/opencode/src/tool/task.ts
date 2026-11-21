@@ -36,7 +36,7 @@ import { AsyncLocalStorage } from "async_hooks"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
 // altimate_change start — name an agent's configured model as the source of an unavailable-model error
-import { Provider, validateModelSelection } from "@/provider/provider"
+import { Provider } from "@/provider/provider"
 import { modelSelectionErrorText } from "@/altimate/provider/model-hint"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
@@ -363,18 +363,6 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
       const agent = await Agent.get(params.subagent_type)
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
-      // altimate_change start — report an agent's unavailable model against its config, before creating a child
-      if (ctx.extra?.useRecordedModel !== true && agent.model) {
-        const source = `agent "${agent.name}" config (model)`
-        await validateModelSelection(
-          { providerID: ProviderID.make(agent.model.providerID), modelID: ModelID.make(agent.model.modelID) },
-          source,
-        ).catch((error) => {
-          if (!Provider.ModelNotFoundError.isInstance(error)) throw error
-          throw new Error(modelSelectionErrorText(error.data))
-        })
-      }
-      // altimate_change end
 
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
       const parent = await Session.get(ctx.sessionID)
@@ -506,6 +494,15 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           ? Effect.runPromise(promptOps.prompt(promptInput))
           : SessionPrompt.prompt(promptInput)
         ).catch(async (error) => {
+          // altimate_change start — an agent's unavailable model is reported against that agent's config
+          if (
+            !ctx.abort.aborted &&
+            ctx.extra?.useRecordedModel !== true &&
+            agent.model &&
+            Provider.ModelNotFoundError.isInstance(error)
+          )
+            throw new Error(modelSelectionErrorText({ ...error.data, source: `agent "${agent.name}" config (model)` }))
+          // altimate_change end
           if (!ctx.abort.aborted) throw error
           partialOutput = await interruptedTaskOutput(session.id, messageID)
           if (!partialOutput) throw error
