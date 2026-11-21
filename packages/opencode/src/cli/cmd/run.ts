@@ -1168,7 +1168,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 budgetAborted = true
                 accounting.onBudgetExhausted()
                 error = RunAccounting.turnBudgetMessage(maxTurns, budgetStop)
-                if (!emit("budget_exhausted", { limit: maxTurns })) {
+                if (!emit("budget_exhausted", { limit: maxTurns, reason: budgetStop })) {
                   UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
                 }
                 await sdk.session.abort({ sessionID }, { signal: options?.signal })
@@ -1296,6 +1296,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
               warnBudget(err)
               emit("time_budget_abort_warning", { error: props.error })
               continue
+            }
+            // altimate_change end
+            // altimate_change start — overflows rejected before a step starts still hit the attempt backstop
+            // Such an overflow hands off to compaction (never charged) without a
+            // step-start, so the step-start budget check never sees the cycle.
+            if (
+              props.error.name === "ContextOverflowError" && sessionID && maxTurns && !budgetAborted &&
+              accounting.turnBudgetStop(maxTurns) === "attempts" &&
+              (!timeExhausted() || options?.turnLimit !== undefined)
+            ) {
+              stopTimeBudget()
+              budgetAborted = true
+              accounting.onBudgetExhausted()
+              error = RunAccounting.turnBudgetMessage(maxTurns, "attempts")
+              if (!emit("budget_exhausted", { limit: maxTurns, reason: "attempts" })) {
+                UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
+              }
+              await sdk.session.abort({ sessionID }, { signal: options?.signal })
             }
             // altimate_change end
             // altimate_change end
@@ -2061,7 +2079,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       if (!answered() && assistantStarted && !accounting.fatal && args.maxTurns && finalBudgetStop) {
         accounting.onBudgetExhausted()
         error = RunAccounting.turnBudgetMessage(args.maxTurns, finalBudgetStop)
-        if (!emit("budget_exhausted", { limit: args.maxTurns })) {
+        if (!emit("budget_exhausted", { limit: args.maxTurns, reason: finalBudgetStop })) {
           UI.println(UI.Style.TEXT_WARNING_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Requesting a final reply.`)
         }
       }

@@ -205,7 +205,11 @@ export function create() {
     // use when every one exhausts its retries.
     /** Record a started non-compaction step attempt (it is charged a turn only if it finishes). */
     onStepAttempt(messageID: string) {
-      if (isCompactionStep(messageID)) return
+      // A compaction step supersedes any unfinished step; its overflow is not that step's.
+      if (isCompactionStep(messageID)) {
+        openAttempt = false
+        return
+      }
       attemptCount++
       openAttempt = true
     },
@@ -275,6 +279,10 @@ export function create() {
         if (openAttempt) {
           turnCount++
           openAttempt = false
+        } else if (source === "event") {
+          // Rejected before any step started: no step-start will ever check the
+          // budget, so the attempt is counted here and the caller enforces it.
+          attemptCount++
         }
         // altimate_change end
         return
@@ -320,8 +328,8 @@ export function create() {
     takeBudgetFinalizationAllowance(): number | undefined {
       if (!budgetExhausted || fatalError || pendingContextOverflow || budgetFinalizationSent) return undefined
       budgetFinalizationSent = true
-      // The finalization step also gets one step's worth of attempts.
-      attemptCount = Math.min(attemptCount, turnCount * ATTEMPTS_PER_TURN)
+      // The finalization step gets exactly one step's worth of attempts.
+      attemptCount = turnCount * ATTEMPTS_PER_TURN
       return turnCount + 1
     },
     // altimate_change end

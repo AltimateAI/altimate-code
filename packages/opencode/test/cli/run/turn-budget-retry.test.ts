@@ -50,7 +50,9 @@ describe("opencode run: --max-turns charges completed steps only", () => {
   )
   // Attached-session fake: the CLI sees exactly the events the session publishes for
   // a step whose attempts start and fail, without waiting out real retry backoff.
-  const attached = (behavior: "all-attempts-fail" | "endless-attempts" | "compaction-after-budget") =>
+  const attached = (
+    behavior: "all-attempts-fail" | "endless-attempts" | "compaction-after-budget" | "overflow-before-step",
+  ) =>
     Effect.gen(function* () {
       const sessionID = "ses_turn_budget_retry"
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
@@ -143,6 +145,44 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                   })
                   publish("session.status", { sessionID, status: { type: "idle" } })
                   return Response.json({ info: { finish: "stop" } })
+                }
+                if (behavior === "overflow-before-step") {
+                  // Every request overflows before streaming a step; each overflow hands
+                  // off to a (never charged) compaction step, then the cycle repeats.
+                  let cycle = 0
+                  const overflowCycle = () => {
+                    cycle++
+                    counts.attempts++
+                    publish("session.error", {
+                      sessionID,
+                      error: { name: "ContextOverflowError", data: { message: "prompt is too long" } },
+                    })
+                    const summaryID = `${messageID}zz_summary_${cycle}`
+                    publish("message.updated", {
+                      info: {
+                        id: summaryID,
+                        sessionID,
+                        role: "assistant",
+                        parentID,
+                        agent: "compaction",
+                        summary: true,
+                        modelID: "test-model",
+                        providerID: "test",
+                        time: { created: Date.now() },
+                      },
+                    })
+                    publish("message.part.updated", {
+                      part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
+                    })
+                    publish("message.part.updated", {
+                      part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
+                    })
+                    publish("session.compacted", { sessionID })
+                  }
+                  attemptTimer = setInterval(overflowCycle, 20)
+                  return new Promise<Response>((resolve) => {
+                    finishPrompt = resolve
+                  })
                 }
                 if (behavior === "compaction-after-budget") {
                   // The work step answers and completes, using the whole one-turn budget.
@@ -276,12 +316,34 @@ describe("opencode run: --max-turns charges completed steps only", () => {
         opencode.expectExit(result, 1)
         const events = opencode.parseJsonEvents(result.stdout)
         const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
-        expect(events[budgetIndex]).toMatchObject({ limit: 1 })
+        expect(events[budgetIndex]).toMatchObject({ limit: 1, reason: "attempts" })
         // Exactly one step's worth of attempts ran before the backstop stopped the next.
         expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(
           SessionRetry.RETRY_MAX_ATTEMPTS + 1,
         )
         expect(counts.aborts).toBe(1)
+      }),
+    30_000,
+  )
+
+  cliIt.concurrent(
+    "overflows rejected before any step starts are stopped by --max-turns alone",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const { server, sessionID, counts } = yield* attached("overflow-before-step")
+        const result = yield* opencode.run("Answer once.", {
+          format: "json",
+          extraArgs: ["--attach", server.url.toString(), "--session", sessionID, "--max-turns", "1", "--no-trace"],
+          timeoutMs: 20_000,
+          bunRun: true,
+        })
+        opencode.expectExit(result, 1)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toEqual([
+          expect.objectContaining({ limit: 1, reason: "attempts" }),
+        ])
+        expect(counts.aborts).toBe(1)
+        expect(counts.attempts).toBeGreaterThanOrEqual(SessionRetry.RETRY_MAX_ATTEMPTS + 1)
       }),
     30_000,
   )

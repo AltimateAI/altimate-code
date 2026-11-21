@@ -104,7 +104,7 @@ describe("RunAccounting turn accounting", () => {
   test("a step cut short by context overflow still costs its turn, once", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    // An overflow reported before any step started is not charged.
+    // An overflow reported before any step started is not charged a turn.
     acc.onSessionError("ContextOverflowError", "too long")
     expect(acc.turnCount).toBe(0)
     acc.onStepAttempt("msg_1")
@@ -113,6 +113,27 @@ describe("RunAccounting turn accounting", () => {
     acc.onPromptResult({ error: { name: "ContextOverflowError" } })
     expect(acc.turnCount).toBe(1)
     expect(acc.turnBudgetStop(1)).toBe("completed")
+  })
+
+  test("overflows rejected before any step started count toward the attempt backstop", () => {
+    const acc = RunAccounting.create()
+    for (let i = 0; i < RunAccounting.ATTEMPTS_PER_TURN - 1; i++) acc.onSessionError("ContextOverflowError", "too long")
+    // The prompt channel repeating an overflow does not count it again.
+    acc.onPromptResult({ error: { name: "ContextOverflowError" } })
+    expect(acc.turnBudgetStop(1)).toBeUndefined()
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(0)
+    expect(acc.turnBudgetStop(1)).toBe("attempts")
+  })
+
+  test("a compaction step's overflow is not charged to an earlier unfinished step", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
+    acc.onStepAttempt("msg_1") // interrupted, never finishes
+    acc.onStepAttempt("msg_compact")
+    acc.onSessionError("ContextOverflowError", "summary too long")
+    expect(acc.turnCount).toBe(0)
   })
 
   test("excludes compaction-machinery steps from turnCount", () => {
