@@ -400,6 +400,17 @@ export function describeToolError(raw: string) {
   }
 }
 
+/**
+ * True when the tool error is the user declining its permission prompt (with or without
+ * feedback). That is the user's choice, not a tool failure; rule-based denials and every
+ * other permission error still count.
+ */
+export function isUserPermissionRejection(raw: string): boolean {
+  return /^(?:[\w.]+: )?The user rejected permission to use this specific tool call(?:\.|\s+with the following feedback: )/.test(
+    raw,
+  )
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
