@@ -392,6 +392,18 @@ export function templateErrorMessage(raw: string): string {
   return out.join(" ").slice(0, MAX_MESSAGE)
 }
 
+/**
+ * True only for the exact messages of PermissionV1.RejectedError / CorrectedError (the user
+ * declining a permission prompt, with or without feedback), optionally prefixed by the
+ * error name from toString(). That is a user decision, not a tool fault; config-rule
+ * denials and real "permission denied" failures do not match and are still reported.
+ */
+export function isUserPermissionRejection(raw: string): boolean {
+  return /^(?:[A-Za-z.]*Error: )?The user rejected permission to use this specific tool call(?:\.$| with the following feedback: )/.test(
+    raw,
+  )
+}
+
 /** Hash input is unchanged from before the detail fields existed, so fingerprints stay stable. */
 export function describeToolError(raw: string) {
   return {

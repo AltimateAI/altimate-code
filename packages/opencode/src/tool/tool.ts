@@ -8,6 +8,7 @@ import { Agent } from "@/agent/agent"
 // altimate_change start — telemetry instrumentation + legacy zod-tool adapter
 import z from "zod"
 import { Telemetry } from "../altimate/telemetry"
+import { ErrorDetail } from "../altimate/telemetry/error-detail"
 // altimate_change start — debug mode tool tracing
 import { traceToolCall } from "@/altimate/debug/mode"
 // altimate_change end
@@ -186,6 +187,8 @@ function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: 
       input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
       error: maskedErrorMsg,
     })
+    // a user declining the permission prompt is a decision, not a core failure
+    if (ErrorDetail.isUserPermissionRejection(errorMsg)) return
     Telemetry.track({
       type: "core_failure",
       timestamp: Date.now(),
