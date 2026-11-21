@@ -119,6 +119,25 @@ test("the fetch guard allows loopback, refuses everything else and keeps the use
   })
 })
 
+test.each(["NO_PROXY", "no_proxy"])("offline copies the %s wildcard to both proxy exclusions", async (wildcard) => {
+  const module = path.resolve(import.meta.dir, "../../src/config/offline.ts")
+  const script = `
+    const { Offline } = await import(${JSON.stringify(module)})
+    Offline.start()
+    console.log(JSON.stringify([process.env.NO_PROXY, process.env.no_proxy]))`
+  const proc = Bun.spawn([process.execPath, "-e", script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, NO_PROXY: "corp.example", no_proxy: "lower.example", [wildcard]: "*" },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [code, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  expect({ code, stderr, exclusions: stdout.trim() }).toEqual({ code: 0, stderr: "", exclusions: '["*","*"]' })
+})
+
 test("ALTIMATE_OFFLINE accepts the usual off spellings", () => {
   const previous = process.env.ALTIMATE_OFFLINE
   try {

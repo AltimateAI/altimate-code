@@ -62,7 +62,6 @@ let dbtAdapter: any | null | undefined = undefined
 // permanent negative cache (`dbtAdapter === null`) is unchanged — a project that
 // becomes valid mid-session is still not retried.
 let dbtAdapterInflight: Promise<any | null> | undefined
-let dbtAdapterCreatedOffline = false
 /** The project root the cached attempt read from the dbt config; null when it found none. */
 let dbtProjectRoot: string | null = null
 /** The Python the cached attempt runs dbt with; null when it found no config. */
@@ -89,9 +88,6 @@ export const dbtAdapterInternals: {
  * project. Idempotent, single-flight, and permanently negative once it has failed.
  */
 async function ensureDbtAdapter(): Promise<any | null> {
-  // An adapter created online has neither a checked profile nor offline subprocess settings.
-  const disposing =
-    dbtAdapter && Offline.enabled() && !dbtAdapterCreatedOffline ? disposeDbtAdapter() : undefined
   if (dbtAdapter !== undefined) return dbtAdapter
   if (dbtAdapterInflight) return dbtAdapterInflight
 
@@ -102,10 +98,9 @@ async function ensureDbtAdapter(): Promise<any | null> {
   // Likewise the cache: a superseded attempt returns its result to the callers that
   // awaited it but must not publish it, or it would overwrite what the newer attempt
   // stored. Every write goes through here.
-  const publish = (value: any | null, root?: string, offline = false): any | null => {
+  const publish = (value: any | null, root?: string): any | null => {
     if (dbtAdapterInflight === mine) {
       dbtAdapter = value
-      dbtAdapterCreatedOffline = offline
       dbtRoute.root = value ? (root ?? null) : null
       dbtAdapterInternals.writes += 1
     }
@@ -114,7 +109,6 @@ async function ensureDbtAdapter(): Promise<any | null> {
   mine = (async () => {
     dbtAdapterInternals.attempts += 1
     try {
-      if (disposing) await disposing
       // Check if dbt config exists
       const { read: readDbtConfig } = await import(
         "../../../../../dbt-tools/src/config"
@@ -137,9 +131,9 @@ async function ensureDbtAdapter(): Promise<any | null> {
       }
 
       // The integration reads profiles.yml relative to the project, so check from there.
-      const localProfile = () =>
-        assertLocalDbt(dbtConfig.projectRoot, ["--project-dir", dbtConfig.projectRoot], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
-      let offline = Offline.enabled() ? await localProfile() : undefined
+      const offline = Offline.enabled()
+        ? await assertLocalDbt(dbtConfig.projectRoot, ["--project-dir", dbtConfig.projectRoot], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
+        : undefined
 
       // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's
       // target/manifest.json is the user's (and other tools'), and a tool's compile or show would rewrite
@@ -149,17 +143,12 @@ async function ensureDbtAdapter(): Promise<any | null> {
       const options = SEPARATE_TARGET_MODES.has(dbtConfig.dbtIntegration || "core")
         ? { targetPath: await dbtToolTargetPath(dbtConfig.projectRoot) }
         : {}
-      while (true) {
-        if (!offline && Offline.enabled()) offline = await localProfile()
-        // Offline, dbt reads exactly the profiles directory that was checked.
-        const adapter = await create(dbtConfig, {
-          ...options,
-          ...(offline ? { offline: true, profilesDir: offline.profilesDir } : {}),
-        })
-        if (offline || !Offline.enabled()) return publish(adapter, dbtConfig.projectRoot, offline !== undefined)
-        // Requests waiting on this attempt must not receive an adapter that started online.
-        await adapter?.dispose?.().catch(() => {})
-      }
+      // Offline, dbt reads exactly the profiles directory that was checked.
+      const adapter = await create(dbtConfig, {
+        ...options,
+        ...(offline ? { offline: true, profilesDir: offline.profilesDir } : {}),
+      })
+      return publish(adapter, dbtConfig.projectRoot)
     } catch (error) {
       // An offline refusal is the answer, not "dbt unavailable": falling back would run the query elsewhere.
       if (isOfflineRefusal(error)) throw error
@@ -381,7 +370,6 @@ export function resetDbtAdapter(): void {
   dbtRoute.root = undefined
   // altimate_change — drop any in-flight creation too, or a test that resets mid-flight
   // would still receive the previous adapter.
-  dbtAdapterCreatedOffline = false
   dbtAdapterInflight = undefined
   dbtAdapterInternals.attempts = 0
   dbtAdapterInternals.writes = 0

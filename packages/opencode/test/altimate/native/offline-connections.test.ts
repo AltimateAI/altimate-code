@@ -4,9 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { assertLocalConnection } from "../../../src/altimate/native/connections/offline"
-import { dbtAdapterInternals, disposeDbtAdapter, getDbtAdapter } from "../../../src/altimate/native/connections/register"
 import { assertLocalDbt } from "../../../src/altimate/native/dbt/offline"
-import { tmpdir } from "../../fixture/fixture"
 
 const envKeys = ["DBT_TARGET", "DBT_PROFILE", "DBT_PROFILES_DIR", "DBT_PROJECT_DIR", "ALTIMATE_OFFLINE"]
 let savedEnv: Record<string, string | undefined>
@@ -201,73 +199,6 @@ test("dbt finds the project from a subdirectory and reads profiles from the work
     process.env.DBT_PROFILES_DIR = "~/" + path.relative(os.homedir(), root)
     await expect(assertLocalDbt(models, [], "core", runDir)).resolves.toEqual({ profilesDir: root })
   } finally { await fs.rm(root, { recursive: true, force: true }) }
-})
-
-test.each([
-  ["remote", "cached"],
-  ["local", "cached"],
-  ["remote", "starting"],
-])("offline activation revalidates a %s dbt target while its adapter is %s", async (target, state) => {
-  await using project = await tmpdir()
-  await Bun.write(path.join(project.path, "dbt_project.yml"), "profile: test\n")
-  await Bun.write(
-    path.join(project.path, "profiles.yml"),
-    `test:\n  target: ${target}\n  outputs:\n    local:\n      type: duckdb\n      path: ':memory:'\n    remote:\n      type: postgres\n      host: example.com\n`,
-  )
-  const creations: unknown[] = []
-  let disposed = 0
-  const online = { dispose: async () => void (disposed += 1) }
-  const offline = {}
-  const starting = Promise.withResolvers<void>()
-  const finish = Promise.withResolvers<void>()
-
-  await disposeDbtAdapter()
-  dbtAdapterInternals.readConfig = async () => ({ projectRoot: project.path, dbtIntegration: "corecommand" })
-  dbtAdapterInternals.create = async (_, options) => {
-    creations.push(options)
-    if (state === "starting") {
-      starting.resolve()
-      await finish.promise
-    }
-    return options?.offline ? offline : online
-  }
-  try {
-    if (state === "starting") {
-      const first = getDbtAdapter()
-      await starting.promise
-      process.env.ALTIMATE_OFFLINE = "1"
-      const both = Promise.allSettled([first, getDbtAdapter()])
-      finish.resolve()
-      for (const result of await both) {
-        expect(result.status).toBe("rejected")
-        if (result.status === "rejected") expect(result.reason.message).toContain("Offline mode")
-      }
-      expect(creations).toHaveLength(1)
-      expect(disposed).toBe(1)
-      return
-    }
-
-    expect(await getDbtAdapter()).toBe(online)
-    expect(await getDbtAdapter()).toBe(online)
-    expect(creations).toHaveLength(1)
-    process.env.ALTIMATE_OFFLINE = "1"
-
-    if (target === "remote") {
-      await expect(getDbtAdapter()).rejects.toThrow("Offline mode")
-      expect(creations).toHaveLength(1)
-    } else {
-      expect(await Promise.all([getDbtAdapter(), getDbtAdapter()])).toEqual([offline, offline])
-      expect(await getDbtAdapter()).toBe(offline)
-      expect(creations).toHaveLength(2)
-      expect(creations[1]).toMatchObject({ offline: true, profilesDir: project.path })
-    }
-    expect(disposed).toBe(1)
-  } finally {
-    finish.resolve()
-    await disposeDbtAdapter()
-    delete dbtAdapterInternals.readConfig
-    delete dbtAdapterInternals.create
-  }
 })
 
 test("dbt checks selected target and CLI overrides", async () => {

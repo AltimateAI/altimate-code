@@ -1504,6 +1504,27 @@ it.instance("migrates legacy write tool to edit permission", () =>
 // Managed settings tests
 // Note: preload.ts sets OPENCODE_TEST_MANAGED_CONFIG which Global.Path.managedConfig uses
 
+// altimate_change start — config discovered after startup must not activate offline mode
+it.instance("refuses offline mode first discovered in managed config", () =>
+  Effect.gen(function* () {
+    const previous = process.env.ALTIMATE_OFFLINE
+    delete process.env.ALTIMATE_OFFLINE
+    try {
+      yield* writeManagedSettingsEffect({ offline: true })
+      const error = yield* Config.use.get().pipe(Effect.catchDefect(Effect.succeed))
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe(
+        "This project requests offline mode. Start Altimate Code with ALTIMATE_OFFLINE=1 or from the project directory.",
+      )
+      expect(process.env.ALTIMATE_OFFLINE).toBeUndefined()
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  }),
+)
+// altimate_change end
+
 it.instance(
   "managed settings override user settings",
   Effect.gen(function* () {

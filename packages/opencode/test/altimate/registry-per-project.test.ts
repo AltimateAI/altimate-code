@@ -261,65 +261,6 @@ describe("connectors are per project", () => {
     ])
   })
 
-  test("late offline activation closes a cached tunneled connector and keeps a local connector", async () => {
-    writeLocal(projectA, {
-      tunneled: sshStore("cached-offline", { path: "tunneled.sqlite" }),
-      local: { type: "sqlite", path: "local.sqlite", create: true },
-    })
-    await inProject(projectA, () => Registry.get("tunneled"))
-    const local = await inProject(projectA, () => Registry.get("local"))
-    const previous = process.env.ALTIMATE_OFFLINE
-    process.env.ALTIMATE_OFFLINE = "1"
-    try {
-      await expect(inProject(projectA, () => Registry.get("tunneled"))).rejects.toThrow("Offline mode")
-      expect(ended("cached-offline")).toEqual([true])
-      expect(await inProject(projectA, () => Registry.get("local"))).toBe(local)
-    } finally {
-      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-      else process.env.ALTIMATE_OFFLINE = previous
-    }
-  })
-
-  test("late offline activation reopens cached DuckDB with extension autoinstall disabled", async () => {
-    writeLocal(projectA, { store: { type: "duckdb", path: "store.duckdb", create: true } })
-    const previous = process.env.ALTIMATE_OFFLINE
-    const setting = "SELECT current_setting('autoinstall_known_extensions')"
-    delete process.env.ALTIMATE_OFFLINE
-    try {
-      const online = await inProject(projectA, () => Registry.get("store"))
-      expect((await online.execute(setting)).rows).toEqual([[true]])
-
-      process.env.ALTIMATE_OFFLINE = "1"
-      const [offline, concurrent] = await inProject(projectA, () => Promise.all([Registry.get("store"), Registry.get("store")]))
-      expect(offline).not.toBe(online)
-      expect(concurrent).toBe(offline)
-      expect((await offline.execute(setting)).rows).toEqual([[false]])
-      expect(await inProject(projectA, () => Registry.get("store"))).toBe(offline)
-    } finally {
-      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-      else process.env.ALTIMATE_OFFLINE = previous
-    }
-  })
-
-  test("a pending tunnel cannot publish a connector after offline activation", async () => {
-    writeLocal(projectA, { tunneled: sshStore("held-offline") })
-    const pending = inProject(projectA, () => Registry.get("tunneled"))
-    await sshConnected("held-offline")
-    const previous = process.env.ALTIMATE_OFFLINE
-    process.env.ALTIMATE_OFFLINE = "1"
-    try {
-      await expect(inProject(projectA, () => Registry.get("tunneled"))).rejects.toThrow("Offline mode")
-      heldReady.get("held-offline")!()
-      await expect(pending).rejects.toThrow("Offline mode")
-      expect(ended("held-offline")).toEqual([true])
-    } finally {
-      heldReady.get("held-offline")?.()
-      await pending.catch(() => {})
-      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-      else process.env.ALTIMATE_OFFLINE = previous
-    }
-  })
-
   test("a connect in flight when its project reloads is not cached over the reloaded state", async () => {
     writeLocal(projectA, { store: { type: "sqlite", path: "store.sqlite", create: true } })
     const inflight = inProject(projectA, () => Registry.get("store"))

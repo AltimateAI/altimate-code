@@ -22,11 +22,11 @@ const CONFIG_NAMES = ["altimate-code.json", "altimate-code.jsonc", "opencode.jso
 
 /**
  * Whether a config file the instance will load sets `"offline": true`. Only text that mentions the key, or could
- * produce it by substitution, is parsed. Organisation-managed config is applied when the configuration loads.
+ * produce it by substitution, is parsed. Config loaded only after this probe cannot activate offline mode.
  */
 export async function optedIn(directory: string): Promise<boolean> {
   if (process.argv.includes("--get-yargs-completions")) return false
-  // A failure to read config here must not stop a command; the instance applies the setting when it loads.
+  // Let the instance report config errors and reject any offline opt-in missed here.
   return findOptIn(directory).catch(() => false)
 }
 
@@ -87,7 +87,9 @@ export function start() {
   // local request cannot leave the machine through a proxy; model requests still use the proxy.
   // Both spellings get the same list, so programs that read either one keep the user's own exclusions.
   const lists = [process.env.NO_PROXY, process.env.no_proxy]
-  if (!lists.includes("*")) {
+  if (lists.includes("*")) {
+    process.env.NO_PROXY = process.env.no_proxy = "*"
+  } else {
     const entries = [...new Set(lists.flatMap((list) => (list ?? "").split(",").map((entry) => entry.trim()).filter(Boolean)))]
     process.env.NO_PROXY = process.env.no_proxy = [...entries, ...LOCAL_FETCH_HOSTS.filter((host) => !entries.includes(host))].join(",")
   }

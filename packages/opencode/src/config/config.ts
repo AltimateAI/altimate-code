@@ -54,6 +54,14 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
+// altimate_change start — offline mode must be active before config loading
+function requireOfflineStartup(offline: boolean | undefined) {
+  if (offline === true && !Offline.enabled()) {
+    throw new Error("This project requests offline mode. Start Altimate Code with ALTIMATE_OFFLINE=1 or from the project directory.")
+  }
+}
+// altimate_change end
+
 // altimate_change start — bootstrap can inspect config already loaded by service initialization
 // without introducing another asynchronous dependency for opted-out learning capture.
 const loadedConfig = new Map<string, Info>()
@@ -689,8 +697,8 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
-        // altimate_change — `"offline": true` in a local config turns offline mode on before the account request
-        if (result.offline === true) Offline.start()
+        // altimate_change — refuse offline config missed by the startup probe
+        requireOfflineStartup(result.offline)
         const activeAccount = Option.getOrUndefined(
           yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
         )
@@ -782,8 +790,7 @@ export const layer = Layer.effect(
         // altimate_change start — upstream_fix: decide installs only after every config source has
         // merged. Inline, account, managed, and later-directory configs can declare a file plugin
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
-        // Managed config can turn offline mode on too.
-        if (result.offline === true) Offline.start()
+        requireOfflineStartup(result.offline)
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
           if (!Offline.enabled() && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {

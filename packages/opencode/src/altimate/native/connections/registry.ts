@@ -74,8 +74,6 @@ interface State {
 interface Attempt {
   promise?: Promise<Connector>
   tunnel?: TunnelHandle
-  effectiveConfig?: ConnectionConfig
-  offline?: boolean
 }
 
 function createState(dir: string): State {
@@ -84,7 +82,6 @@ function createState(dir: string): State {
 
 /** Registry state per resolved project directory. */
 const states = new Map<string, State>()
-const connectedConfigs = new WeakMap<Connector, { config: ConnectionConfig; offline: boolean }>()
 
 /** Invalidate the in-flight connect for `name`, closing the tunnel it opened. Synchronous. */
 function dropAttempt(s: State, name: string): void {
@@ -453,8 +450,7 @@ async function createConnector(
 
   // Resolve credentials from keychain
   resolvedConfig = await resolveConfig(name, resolvedConfig)
-  // altimate_change start — keep the effective target before any tunnel rewrites it
-  attempt.effectiveConfig = resolvedConfig
+  // altimate_change start — validate the resolved target before any tunnel rewrites it
   if (Offline.enabled()) assertLocalConnection(resolvedConfig)
   // altimate_change end
 
@@ -555,10 +551,6 @@ async function createConnector(
       default:
         throw new Error(`No static import available for driver: ${driverPath}`)
     }
-    // altimate_change start — a driver import may finish after offline activation
-    attempt.offline = Offline.enabled()
-    if (attempt.offline) assertLocalConnection(attempt.effectiveConfig)
-    // altimate_change end
     connector = await mod.connect(resolvedConfig)
   } catch (e) {
     // Clean up SSH tunnel if driver creation fails
@@ -687,35 +679,17 @@ export async function get(name: string): Promise<Connector> {
   }
 
   const cached = connectors.get(name)
-  let reopenCached = false
   if (cached) {
-    // altimate_change start — a project loaded later can activate offline mode process-wide
-    if (Offline.enabled()) {
-      try {
-        const { config, offline } = connectedConfigs.get(cached)!
-        assertLocalConnection(config)
-        reopenCached = config.type.toLowerCase() === "duckdb" && !offline
-      } catch (error) {
-        await detachCached(s, name)()
-        throw error
-      }
-    }
-    // altimate_change end
     // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
-    if (!reopenCached) {
-      SignInNotice.rememberOrigin(accountOf(configs.get(name)))
-      return cached
-    }
+    SignInNotice.rememberOrigin(accountOf(configs.get(name)))
+    return cached
     // altimate_change end
   }
 
   // If a connector is already being created, await the same Promise
   // altimate_change start — the slot holds the attempt
   const inflight = pending.get(name)
-  if (inflight?.promise) {
-    if (Offline.enabled() && inflight.effectiveConfig) assertLocalConnection(inflight.effectiveConfig)
-    return inflight.promise
-  }
+  if (inflight?.promise) return inflight.promise
   // altimate_change end
 
   const config = configs.get(name)
@@ -750,17 +724,10 @@ export async function get(name: string): Promise<Connector> {
   // altimate_change end
   const promise = (async () => {
     try {
-      if (reopenCached) {
-        await detachCached(s, name)()
-        if (!current()) throw SUPERSEDED(name)
-      }
       // altimate_change start — the attempt closes only the tunnel it opened
       const connector = await createConnector(name, config, attempt, current)
-      const effectiveConfig = attempt.effectiveConfig!
       try {
-        if (Offline.enabled()) assertLocalConnection(effectiveConfig)
         await connector.connect()
-        if (Offline.enabled()) assertLocalConnection(effectiveConfig)
       } catch (connectErr) {
         // If connect() fails after tunnel was started, clean up the tunnel (first, so a hanging close cannot hold it)
         attempt.tunnel?.close()
@@ -775,7 +742,6 @@ export async function get(name: string): Promise<Connector> {
         throw SUPERSEDED(name)
       }
       connectors.set(name, connector)
-      connectedConfigs.set(connector, { config: effectiveConfig, offline: attempt.offline! })
       if (attempt.tunnel) tunnels.set(name, attempt.tunnel)
       // altimate_change end
       fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
