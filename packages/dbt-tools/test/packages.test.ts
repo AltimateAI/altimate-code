@@ -234,6 +234,25 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(1)
   })
 
+  test("a declaration changed during installation is not stamped as installed", async () => {
+    writeProject()
+    await ensurePackages(root, async () => {
+      installPackage("1.0.0")
+      writeFileSync(join(root, "packages.yml"), `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n`)
+    })
+    expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+    expect(packagesSatisfied(root).ok).toBe(false)
+
+    let repairs = 0
+    const repair = async () => {
+      repairs++
+      installPackage("2.0.0")
+    }
+    expect((await ensurePackages(root, repair)).action).toBe("installed")
+    expect((await ensurePackages(root, repair)).action).toBe("skipped")
+    expect(repairs).toBe(1)
+  })
+
   test("declarations changed since the last install: reinstalls", async () => {
     writeProject()
     const c = counter()

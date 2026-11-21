@@ -395,6 +395,12 @@ export async function withPackagesLock<T>(root: string, fn: () => Promise<T>, op
 // Install
 // ---------------------------------------------------------------------------
 
+// dbt writes package-lock.yml during deps. The project declarations and the
+// destination it read must stay stable while the installer is running.
+function installInputs(root: string, installPath: string): string {
+  return fingerprint(root, installPath, declarationContents(root).filter(({ file }) => file !== "package-lock.yml"))
+}
+
 /**
  * Run an install while holding the lock, bracketed by the `dirty` marker so a
  * crash or failure mid-install is noticed (and repaired) by the next caller.
@@ -405,6 +411,8 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
   const dirty = join(dir, "packages.dirty")
   mkdirSync(dir, { recursive: true }) // `dbt clean` may have removed target/ while we waited
   writeFileSync(dirty, JSON.stringify({ pid: process.pid, startedAt: Date.now() }))
+  const originalPath = projectInstallPath(root)
+  const inputsBefore = originalPath && installInputs(root, originalPath)
   const result = await install()
   const installPath = projectInstallPath(root)
   const stampFile = join(dir, "packages.stamp.json")
@@ -413,6 +421,12 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     // when we cannot inspect the resulting directory.
     rmSync(stampFile, { force: true })
     if (!failedCommand(result)) rmSync(dirty, { force: true })
+    return result
+  }
+  if (inputsBefore !== installInputs(root, installPath)) {
+    // The install may have consumed the earlier declarations. Leave the dirty
+    // marker so the next adapter-backed command repairs the current inputs.
+    rmSync(stampFile, { force: true })
     return result
   }
   const complete = [...completePackageDirs(installPath).keys()]
