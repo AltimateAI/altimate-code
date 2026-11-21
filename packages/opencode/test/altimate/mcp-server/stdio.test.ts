@@ -212,3 +212,30 @@ test("mcp serve skips CLI middleware before starting the agent heap service", as
   expect(starts).toBe(0)
 })
 // altimate_change end
+
+test("offline CLI announces unavailable workspace tools on stderr and preserves MCP stdio", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-offline-notice-"))
+  const connections = path.join(dir, "connections.json")
+  await Bun.write(connections, "{}")
+  const child = Bun.spawn([
+    process.execPath, "run", "--conditions=browser", CLI_ENTRY,
+    "mcp", "serve", "--workspace-tools", "--connections", connections,
+  ], {
+    cwd: dir,
+    env: { ...process.env, ALTIMATE_OFFLINE: "1", ALTIMATE_TELEMETRY_DISABLED: "1" },
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+  })
+  const stderr = new Response(child.stderr).text()
+  const client = rpcClient(child)
+  try {
+    await client.connect()
+    const listed = await client.listTools()
+    expect(Array.isArray(listed.tools)).toBe(true)
+    await client.close()
+    expect(await stderr).toContain("Workspace tools are unavailable in offline mode.")
+  } finally {
+    child.kill()
+    await child.exited
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 30000)

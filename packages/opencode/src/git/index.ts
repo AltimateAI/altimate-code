@@ -1,5 +1,7 @@
 // altimate_change start — restrict Git transport offline
 import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+import { gitCommandUsesNetwork, localGitEnv } from "@opencode-ai/core/git"
+export { localGitEnv }
 // altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
@@ -19,26 +21,6 @@ const cfg = [
   "-c",
   "core.quotepath=false",
 ] as const
-
-// altimate_change start — prevent Git from starting a transport offline
-const remoteCommands = new Set(["clone", "fetch", "pull", "push", "ls-remote", "send-pack", "fetch-pack", "submodule--helper"])
-
-export function localGitEnv(env?: Record<string, string>) {
-  return offlineModeEnabled()
-    ? { ...env, GIT_ALLOW_PROTOCOL: "", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1" }
-    : env
-}
-
-function gitCommandUsesNetwork(args: string[]) {
-  let index = 0
-  while (args[index]?.startsWith("-")) {
-    index += ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(args[index]) ? 2 : 1
-  }
-  const [command, operation, ...rest] = args.slice(index)
-  return remoteCommands.has(command) ||
-    (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n"))))
-}
-// altimate_change end
 
 const out = (result: { text(): string }) => result.text().trim()
 const nuls = (text: string) => text.split("\0").filter(Boolean)

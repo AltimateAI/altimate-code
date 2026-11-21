@@ -233,6 +233,48 @@ describe("Storage", () => {
     }),
   )
 
+  it.live("migration 1 tolerates malformed legacy records", () =>
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const tmp = yield* tmpdirScoped({ git: true })
+      const storage = path.join(tmp, "storage")
+      const legacy = path.join(tmp, "project", "legacy")
+
+      yield* fs.writeWithDirs(path.join(legacy, "storage", "session", "message", "probe", "0.json"), "[]")
+      yield* fs.writeWithDirs(
+        path.join(legacy, "storage", "session", "message", "probe", "1.json"),
+        JSON.stringify({ path: { root: tmp } }),
+      )
+      yield* fs.writeWithDirs(
+        path.join(legacy, "storage", "session", "info", "ses_legacy.json"),
+        JSON.stringify({ id: "ses_legacy", title: "legacy" }),
+      )
+      yield* fs.writeWithDirs(
+        path.join(legacy, "storage", "session", "message", "ses_legacy", "msg_legacy.json"),
+        JSON.stringify({ role: "user", text: "hello" }),
+      )
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Storage.Service
+        const projects = yield* svc.list(["project"])
+        expect(projects).toHaveLength(1)
+        const project = projects[0]![1]
+
+        expect(yield* svc.list(["session", project])).toEqual([["session", project, "ses_legacy"]])
+        expect(yield* svc.read<{ id: string; title: string }>(["session", project, "ses_legacy"])).toEqual({
+          id: "ses_legacy",
+          title: "legacy",
+        })
+        expect(yield* svc.read<{ role: string; text: string }>(["message", "ses_legacy", "msg_legacy"])).toEqual({
+          role: "user",
+          text: "hello",
+        })
+      }).pipe(Effect.provide(remappedStorage(tmp)))
+
+      expect(yield* fs.readFileString(path.join(storage, "migration"))).toBe("2")
+    }),
+  )
+
   it.live("migration 1 migrates local projects even when offline", () =>
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service

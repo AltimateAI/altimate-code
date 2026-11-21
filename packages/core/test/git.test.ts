@@ -29,6 +29,28 @@ describe("Git", () => {
     ),
   )
 
+  it.live("offline rejects clone and fetch while preserving local metadata", () =>
+    withRemote((fixture) =>
+      Effect.gen(function* () {
+        const git = yield* Git.Service
+        const target = path.join(fixture.root, "checkout")
+        expect((yield* git.clone({ remote: fixture.remote, target })).exitCode).toBe(0)
+        const previous = process.env.ALTIMATE_OFFLINE
+        process.env.ALTIMATE_OFFLINE = "1"
+        try {
+          expect(yield* git.head(target)).toBeString()
+          const rejected = path.join(fixture.root, "rejected")
+          expect((yield* git.clone({ remote: fixture.remote, target: rejected })).stderr).toContain("online run")
+          expect((yield* git.fetch(target)).stderr).toContain("online run")
+          expect((yield* git.fetchBranch(target, "main")).stderr).toContain("online run")
+        } finally {
+          if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+          else process.env.ALTIMATE_OFFLINE = previous
+        }
+      }),
+    ),
+  )
+
   it.live("fetches, checks out, and resets remote changes", () =>
     withRemote((fixture) =>
       Effect.gen(function* () {

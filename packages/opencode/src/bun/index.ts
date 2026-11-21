@@ -61,7 +61,7 @@ export namespace BunProc {
     const pkgjsonPath = path.join(Global.Path.cache, "package.json")
     const parsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(async () => {
       const result = { dependencies: {} as Record<string, string> }
-      await Filesystem.writeJson(pkgjsonPath, result)
+      if (!Offline.enabled()) await Filesystem.writeJson(pkgjsonPath, result)
       return result
     })
     if (!parsed.dependencies) parsed.dependencies = {} as Record<string, string>
@@ -72,7 +72,7 @@ export namespace BunProc {
     // altimate_change start — use the cached package without checking the registry
     if (Offline.enabled()) {
       if (modExists && cachedVersion && (version === "latest" || cachedVersion === version)) return mod
-      throw new Error("Install this package while online.")
+      throw new Error(`Install ${pkg} while online.`)
     }
     // altimate_change end
 

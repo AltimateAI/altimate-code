@@ -17,7 +17,7 @@ function localStore(value: unknown): boolean {
   if (/^file:/i.test(value)) {
     try {
       const url = new URL(value)
-      return !url.hostname || url.hostname === "localhost"
+      return (!url.hostname || url.hostname === "localhost") && !decodeURIComponent(url.pathname).startsWith("//")
     } catch { return false }
   }
   return isLocalFilePath(value)

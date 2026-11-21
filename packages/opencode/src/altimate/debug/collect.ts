@@ -94,7 +94,8 @@ function envFlags(): string[] {
 
 /** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
  * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
-async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
+export async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
+  if (Offline.enabled()) return { enabled: false, checked: false, reason: "offline mode" }
   if (/^(1|true)$/i.test(process.env["ALTIMATE_TELEMETRY_DISABLED"] ?? "")) return { enabled: false, reason: "ALTIMATE_TELEMETRY_DISABLED is set" }
   if (/^(1|true)$/i.test(process.env["OPENCODE_DISABLE_TELEMETRY"] ?? "")) return { enabled: false, reason: "OPENCODE_DISABLE_TELEMETRY is set" }
   if (!network) return { enabled: false, checked: false, reason: "not started with --no-network" }

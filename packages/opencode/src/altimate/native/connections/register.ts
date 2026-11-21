@@ -1,6 +1,6 @@
 // altimate_change start — validate offline dbt profiles before starting adapters
 import { Offline } from "@/config/offline"
-import { assertLocalDbt } from "../dbt/offline"
+import { assertLocalDbt, OfflineDbtError } from "../dbt/offline"
 // altimate_change end
 /**
  * Register native connection handlers with the Dispatcher.
@@ -139,7 +139,8 @@ async function ensureDbtAdapter(): Promise<any | null> {
         ? { targetPath: await dbtToolTargetPath(dbtConfig.projectRoot) }
         : {}
       return publish(await create(dbtConfig, { ...options, ...(Offline.enabled() ? { offline: true } : {}) }), dbtConfig.projectRoot)
-    } catch {
+    } catch (error) {
+      if (error instanceof OfflineDbtError) throw error
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
     } finally {
@@ -295,7 +296,7 @@ async function tryExecuteViaDbt(
   } catch (e) {
     // A deadline or abort is not "dbt unavailable": the query may still be running, and
     // re-running it on the native driver would double the work and the wait.
-    if (isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
+    if (e instanceof OfflineDbtError || isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
     // dbt execution failed — fall back to native driver silently
     return null
   }

@@ -1350,6 +1350,12 @@ describe("workspace skill sync", () => {
       bindTo(2)
       expect(await registryStale(project)).toBe(true)
       expect(await snapshotWorkspaceId(project)).toBeNull()
+      bindTo(1)
+      await markRegistryApplied(project)
+      expect(await snapshotWorkspaceId(project)).toBe(1)
+      writeFileSync(cachePath(), "{")
+      expect(await registryStale(project)).toBe(true)
+      expect(await snapshotWorkspaceId(project)).toBeNull()
       expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
     } finally {
       if (previous === undefined) delete process.env.ALTIMATE_OFFLINE

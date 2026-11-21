@@ -113,7 +113,7 @@ export async function connect(
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
   // altimate_change — skip automatic extension downloads in app-owned offline helpers
-  const offline = process.env.ALTIMATE_OFFLINE === "1"
+  const offline = !["", "0", "false"].includes(process.env.ALTIMATE_OFFLINE?.trim().toLowerCase() ?? "")
   const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath, cwd } as const
   // altimate_change start — preserve caller DuckDB state while keeping scratch secrets isolated
   const duckdbHome = path.join(process.env.HOME || process.env.USERPROFILE || os.homedir(), ".duckdb")

@@ -70,6 +70,7 @@ import {
   credentialDigest,
   currentScope,
   readLocalBinding,
+  readLocalBindingScopedStrict,
   resolveBindingOutcome,
   type AccountKey,
   type CachedBinding,
@@ -193,7 +194,7 @@ export async function ownManifest(directory: string): Promise<Manifest | null> {
     if (!ours) return null
     // altimate_change — hide a stale workspace snapshot offline without removing it
     if (Offline.enabled()) {
-      const local = await readLocalBinding(directory)
+      const { binding: local } = await readLocalBindingScopedStrict(directory)
       if (local && local.datamateId !== manifest.datamateId) return null
     }
     return manifest
@@ -516,8 +517,12 @@ async function registryIdentity(canon: string): Promise<string> {
     /* no credentials resolved; the empty account is the honest answer */
   }
   // altimate_change — a changed local binding can hide a snapshot without changing its files
-  const binding = Offline.enabled() ? await readLocalBinding(canon) : null
-  return `${snapshotFingerprint(canon)}\u0000${account}\u0000${binding?.datamateId ?? ""}`
+  const binding = Offline.enabled()
+    ? await readLocalBindingScopedStrict(canon)
+        .then(({ binding }) => binding?.datamateId ?? "")
+        .catch(() => "unreadable")
+    : ""
+  return `${snapshotFingerprint(canon)}\u0000${account}\u0000${binding}`
 }
 
 /** Does the skill registry still reflect a different snapshot, or a different

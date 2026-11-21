@@ -111,6 +111,12 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
   name: Schema.String,
 }) {}
 
+export class OfflinePolicyError extends Schema.TaggedErrorClass<OfflinePolicyError>()(
+  "MCP.OfflinePolicyError",
+  { message: Schema.String },
+  { httpApiStatus: 400 },
+) {}
+
 type MCPClient = Client
 
 function createClient(directory: string) {
@@ -324,8 +330,8 @@ export interface Interface {
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   // altimate_change end
-  readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
-  readonly connect: (name: string) => Effect.Effect<void, NotFoundError>
+  readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }, OfflinePolicyError>
+  readonly connect: (name: string) => Effect.Effect<void, NotFoundError | OfflinePolicyError>
   readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
   // altimate_change start — MCP.remove: full runtime teardown + ToolsChanged (merge dropped it)
   readonly remove: (name: string) => Effect.Effect<void>
@@ -1075,8 +1081,15 @@ export const layer = Layer.effect(
       // altimate_change end
     })
 
+    // altimate_change start — report policy refusals as client errors
+    const enforceOfflinePolicy = (mcp: ConfigMCPV1.Info) => Effect.try({
+      try: () => Offline.assertLocalMcp(mcp),
+      catch: (error) => new OfflinePolicyError({ message: error instanceof Error ? error.message : String(error) }),
+    })
+    // altimate_change end
+
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
-      Offline.assertLocalMcp(mcp)
+      yield* enforceOfflinePolicy(mcp)
       // altimate_change start — see claim
       const seq = ++lifecycleSeq
       // altimate_change end
@@ -1102,7 +1115,7 @@ export const layer = Layer.effect(
       // altimate_change end
       const mcp = yield* requireMcpConfig(name)
       // altimate_change — reject before persisting enabled:true for an offline remote server
-      Offline.assertLocalMcp(mcp)
+      yield* enforceOfflinePolicy(mcp)
       // altimate_change start — see createAndStore
       yield* createAndStore(name, { ...mcp, enabled: true }, token)
       // altimate_change end

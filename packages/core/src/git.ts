@@ -7,6 +7,29 @@ import { AbsolutePath } from "./schema"
 import { FSUtil } from "./fs-util"
 import { AppProcess } from "./process"
 import { LayerNode } from "./effect/layer-node"
+// altimate_change — offline transport policy
+import { offlineModeEnabled } from "./flag/flag"
+
+// altimate_change start — prevent Git from starting a transport offline
+const remoteCommands = new Set(["clone", "fetch", "pull", "push", "ls-remote", "send-pack", "fetch-pack", "submodule--helper"])
+
+export function localGitEnv(env?: Record<string, string>) {
+  return offlineModeEnabled()
+    ? { ...env, GIT_ALLOW_PROTOCOL: "", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1" }
+    : env
+}
+
+export function gitCommandUsesNetwork(args: string[]) {
+  let index = 0
+  while (args[index]?.startsWith("-")) {
+    index += ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(args[index]) ? 2 : 1
+  }
+  const [command, operation, ...rest] = args.slice(index)
+  return remoteCommands.has(command) ||
+    (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n"))))
+}
+// altimate_change end
+
 
 export interface Repo {
   /**
@@ -251,6 +274,9 @@ export const layer = Layer.effect(
         .run(
           ChildProcess.make("git", ["apply", "-"], {
             cwd: input.directory,
+            // altimate_change start — apply the offline transport policy to patch application
+            env: localGitEnv(),
+            // altimate_change end
             extendEnv: true,
             stdin: Stream.make(new TextEncoder().encode(input.patch)),
           }),
@@ -334,7 +360,9 @@ export const layer = Layer.effect(
       cwd = repo.directory,
     ) {
       const result = yield* proc
-        .run(ChildProcess.make("git", args, { cwd, extendEnv: true, stdin: "ignore" }))
+        // altimate_change start — apply offline transport policy to worktree commands
+        .run(ChildProcess.make("git", args, { cwd, env: localGitEnv(), extendEnv: true, stdin: "ignore" }))
+        // altimate_change end
         .pipe(
           Effect.mapError(
             (cause) => new WorktreeError({ operation, directory: worktreeDirectory, message: cause.message, cause }),
@@ -414,13 +442,18 @@ function run(cwd: string, proc: AppProcess.Interface) {
     execute(cwd, proc)(args).pipe(Effect.catch(() => Effect.succeed({ exitCode: 1, text: "", stderr: "" })))
 }
 
+// altimate_change start — enforce offline Git transport policy at the spawn boundary
 function execute(cwd: string, proc: AppProcess.Interface) {
-  return (args: string[]) =>
-    proc
+  return (args: string[]) => {
+    if (offlineModeEnabled() && gitCommandUsesNetwork(args)) {
+      return Effect.succeed({ exitCode: 1, text: "", stderr: "Git remote operations require an online run." })
+    }
+    return proc
       .run(
         ChildProcess.make("git", args, {
           cwd,
-          extendEnv: true,
+          env: localGitEnv(),
+                extendEnv: true,
           stdin: "ignore",
         }),
       )
@@ -434,7 +467,9 @@ function execute(cwd: string, proc: AppProcess.Interface) {
             }) satisfies Result,
         ),
       )
+  }
 }
+// altimate_change end
 
 function resolvePath(cwd: string, value: string) {
   const trimmed = value.replace(/[\r\n]+$/, "")

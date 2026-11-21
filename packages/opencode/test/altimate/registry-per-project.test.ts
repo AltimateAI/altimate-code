@@ -240,6 +240,25 @@ describe("connectors are per project", () => {
     expect(b2).not.toBe(a)
   })
 
+  test("offline rejection closes a cached connector and its SSH tunnel", async () => {
+    const offline = process.env.ALTIMATE_OFFLINE
+    delete process.env.ALTIMATE_OFFLINE
+    try {
+      writeLocal(projectA, { store: sshStore("offline-bastion") })
+      const connector = await inProject(projectA, () => Registry.get("store"))
+      const close = spyOn(connector, "close")
+      process.env.ALTIMATE_OFFLINE = "1"
+      await expect(inProject(projectA, () => Registry.get("store"))).rejects.toThrow("Offline mode")
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(ended("offline-bastion")).toEqual([true])
+      expect(openTunnelCount()).toBe(0)
+      close.mockRestore()
+    } finally {
+      if (offline === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = offline
+    }
+  })
+
   test("same-named SSH tunnels are per project; removing in B leaves A's open", async () => {
     const tunnelled = (sshHost: string) => ({
       store: { type: "sqlite", path: "store.sqlite", create: true, ssh_host: sshHost, host: "db", port: 5432 },

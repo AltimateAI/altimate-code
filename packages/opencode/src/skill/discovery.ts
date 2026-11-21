@@ -1,6 +1,7 @@
 // altimate_change start — offline mode
 import { Offline } from "@/config/offline"
 import { createHash } from "node:crypto"
+import { SkillDiscovery } from "@opencode-ai/core/skill/discovery"
 // altimate_change end
 import { NodePath } from "@effect/platform-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -65,7 +66,7 @@ export namespace Discovery {
           const sourceCache = path.join(cache, ".sources", createHash("sha256").update(index).digest("hex"))
           const indexPath = path.join(sourceCache, "index.json")
           if (Offline.enabled()) {
-            const cached = yield* fs.readJson(indexPath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+            const cached = yield* fs.readJson(indexPath).pipe(Effect.catch(() => Effect.void))
             const directories = Array.isArray(cached) ? cached : []
             const local = directories.filter((dir): dir is string =>
               typeof dir === "string" && path.dirname(dir) === sourceCache,
@@ -94,7 +95,8 @@ export namespace Discovery {
           if (!data) return []
 
           const list = data.skills.filter((skill) => {
-            if (skill.name === "." || skill.name === ".." || !skill.name || /[\\/]/.test(skill.name)) return false
+            if (skill.name.includes("/") || !SkillDiscovery.isSafeRelativePath(skill.name)) return false
+            if (!skill.files.every(SkillDiscovery.isSafeRelativePath)) return false
             if (!skill.files.includes("SKILL.md")) {
               log.warn("skill entry missing SKILL.md", { url: index, skill: skill.name })
               return false

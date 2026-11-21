@@ -168,7 +168,7 @@ Configure an explicit HTTP(S) provider `options.baseURL` and select its `provide
 
 - SQL tools can query local DuckDB and SQLite files or a warehouse listening on loopback. Use a local dbt profile for dbt commands.
 - Bash, installed language servers, and MCP servers using stdio or a loopback HTTP(S) URL remain available. Altimate Code skips automatic language server and warehouse driver installs. Install optional drivers and ripgrep ahead of time.
-- Git diffs, session snapshots and revert, and worktree creation, removal and reset operate locally. Reset uses the cached base and any locally available submodule commits. Run Git remote operations online.
-- Altimate Code skips telemetry, account and remote configuration requests, model catalog downloads, update checks, workspace and engine sync, session sharing, and web search and fetch. Remote warehouse and MCP connections require an online run. Refresh workspace skills before going offline to use an existing snapshot.
+- Git diffs, session snapshots and revert, and worktree creation, removal and reset operate locally. Reset uses the cached base and any locally available submodule commits. Git LFS files may appear as pointers until hydrated online. Run Git remote operations online.
+- Altimate Code skips telemetry, account and remote configuration requests, model catalog downloads, update checks, workspace and engine sync, session sharing, and web search and fetch. Remote warehouse and MCP connections require an online run. Run `altimate-code workspace refresh` before going offline to save a snapshot. Keep local credentials for the same workspace account to use that snapshot.
 
 The configured model endpoint is the only external endpoint Altimate Code contacts in offline mode. Shell commands and other programs you configure or invoke retain their own network access.

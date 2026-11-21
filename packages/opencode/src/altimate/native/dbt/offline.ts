@@ -15,8 +15,20 @@ function resolve(value: unknown): any {
   return value
 }
 
+export class OfflineDbtError extends Error {
+  override name = "OfflineDbtError"
+}
+
 /** Resolve exactly the selected profile/target before starting dbt-owned network work. */
 export async function assertLocalDbt(projectRoot: string, args: string[] = [], integration = "core"): Promise<void> {
+  try {
+    await checkLocalDbt(projectRoot, args, integration)
+  } catch (error) {
+    throw new OfflineDbtError(error instanceof Error ? error.message : String(error), { cause: error })
+  }
+}
+
+async function checkLocalDbt(projectRoot: string, args: string[], integration: string): Promise<void> {
   if (!["core", "corecommand", "fusion"].includes(integration)) throw new Error("Offline mode disables cloud dbt integrations.")
   const option = (...names: string[]) => {
     let result: string | undefined
@@ -34,7 +46,7 @@ export async function assertLocalDbt(projectRoot: string, args: string[] = [], i
     }
     return result
   }
-  const root = option("--project-dir") ?? projectRoot
+  const root = option("--project-dir") ?? process.env.DBT_PROJECT_DIR ?? projectRoot
   const project = resolve(parse(await fs.readFile(path.join(root, "dbt_project.yml"), "utf8")))
   const explicit = option("--profiles-dir") ?? process.env.DBT_PROFILES_DIR
   const local = path.join(root, "profiles.yml")

@@ -141,6 +141,9 @@ export const McpServeCommand = cmd({
     .option("all-tools", { type: "boolean", default: false, describe: "Expose every tool on the allow-list, not just the default set" }),
   async handler(args) {
     await Offline.start(process.cwd())
+    if (Offline.enabled() && args.workspaceTools) {
+      process.stderr.write("Workspace tools are unavailable in offline mode.\n")
+    }
     const { serveStdio } = await import("../../altimate/mcp-server/server")
     await serveStdio({
       connections: args.connections,

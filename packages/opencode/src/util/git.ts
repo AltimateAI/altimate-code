@@ -1,4 +1,8 @@
 import { Process } from "./process"
+// altimate_change start — use the same transport controls as the Git services
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+import { gitCommandUsesNetwork, localGitEnv } from "@opencode-ai/core/git"
+// altimate_change end
 
 export interface GitResult {
   exitCode: number
@@ -14,9 +18,19 @@ export interface GitResult {
  * issues in embedded/client environments.
  */
 export async function git(args: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<GitResult> {
+  // altimate_change start — reject remote commands and prevent implicit lazy fetching
+  if (offlineModeEnabled() && gitCommandUsesNetwork(args)) {
+    return {
+      exitCode: 1,
+      text: () => "",
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.from("Git remote operations require an online run."),
+    }
+  }
+  // altimate_change end
   return Process.run(["git", ...args], {
     cwd: opts.cwd,
-    env: opts.env,
+    env: localGitEnv(opts.env),
     stdin: "ignore",
     nothrow: true,
   })

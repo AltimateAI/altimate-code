@@ -112,6 +112,21 @@ beforeEach(async () => {
 })
 
 describe("ShareNext", () => {
+  test("offline share creation fails without making a fetch call", async () => {
+    const prior = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    installFetchMock(() => new Response(null, { status: 200 }))
+    try {
+      await expect(ShareNext.create(SessionID.make("ses_offline_share"))).rejects.toThrow(
+        "Sharing sessions requires an online run.",
+      )
+      expect(fetchRecords).toEqual([])
+    } finally {
+      if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = prior
+    }
+  })
+
   test("offline share revocation fails so unshare retains the local share state", async () => {
     const prior = process.env.ALTIMATE_OFFLINE
     process.env.ALTIMATE_OFFLINE = "1"
