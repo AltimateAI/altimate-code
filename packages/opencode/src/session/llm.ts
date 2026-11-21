@@ -82,8 +82,11 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
-    // altimate_change start — provider-reported size of this conversation (see reportedContextTokens)
+    // altimate_change start — calibrate from a measured step and the finalized request
+    /** Prior reported usage plus the unmeasured conversation tail and attachments. */
     reportedInputTokens?: number
+    measuredOverheadTokens?: number
+    onRequestOverhead?: (tokens: number) => void
     // altimate_change end
   }
 
@@ -347,9 +350,15 @@ export namespace LLM {
 
     // altimate_change start — clamp after every context-affecting request field is finalized.
     // Tool schemas and provider instructions consume the shared context window, while encoded
-    // media bytes do not count as literal text. The estimator runs lazily so providers that omit
-    // maxOutputTokens pay no serialization cost. Known context beta headers widen the catalog
-    // limit before the clamp. Fixed reasoning budgets are reconciled with the final reservation.
+    // media bytes do not count as literal text. The history estimate runs lazily. Known context
+    // beta headers widen the catalog limit before the clamp.
+    const overhead = estimateInputTokens({ system, messages: [], tools, instructions: params.options.instructions })
+    input.onRequestOverhead?.(overhead)
+    const measuredOverhead = input.measuredOverheadTokens
+    const reported =
+      input.reportedInputTokens !== undefined && measuredOverhead !== undefined && Number.isFinite(measuredOverhead)
+        ? input.reportedInputTokens + Math.max(0, overhead - measuredOverhead)
+        : undefined
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,
@@ -368,16 +377,16 @@ export namespace LLM {
             tools,
             instructions: params.options.instructions,
           }),
-          input.reportedInputTokens,
+          reported,
         ),
     })
-    // altimate_change start — deadline effort wins configured variants and plugin overrides
+    // Deadline effort wins configured variants and plugin overrides.
     const requestOptions = clampReasoningBudget(
       runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
       maxOutputTokens,
+      params.maxOutputTokens,
     )
     const requestMessages = budgetMessages(input.messages, input.model, requestOptions)
-    // altimate_change end
     // altimate_change end
 
     // altimate_change start — detect a toolless request once, for the message flattening below

@@ -112,6 +112,7 @@ export class ReasoningTokenBudgetError extends Error {
       readonly path: string
       readonly configured: number
       readonly maxOutputTokens: number
+      readonly contextInduced?: boolean
     },
   ) {
     super(
@@ -443,8 +444,17 @@ export function calibratedInputTokens(estimate: number, reported: number | undef
 }
 
 /** True for the pre-send refusals that compacting the conversation can resolve. */
-export function isContextBudgetError(error: unknown): error is OutputTokenBudgetError | InputTokenBudgetError {
-  return error instanceof OutputTokenBudgetError || error instanceof InputTokenBudgetError
+export function isContextBudgetError(
+  error: unknown,
+): error is
+  | OutputTokenBudgetError
+  | InputTokenBudgetError
+  | (ReasoningTokenBudgetError & { readonly info: { readonly contextInduced: true } }) {
+  return (
+    error instanceof OutputTokenBudgetError ||
+    error instanceof InputTokenBudgetError ||
+    (error instanceof ReasoningTokenBudgetError && error.info.contextInduced === true)
+  )
 }
 
 /** Resolve a direct or lazy input estimate after cheap no-op checks have passed. */
@@ -578,10 +588,25 @@ function transformReasoningBudgets(
 export function clampReasoningBudget(
   options: Record<string, any>,
   maxOutputTokens: number | undefined,
+  requested?: number,
 ): Record<string, any> {
   if (maxOutputTokens === undefined) return options
   const ceiling = Math.floor(maxOutputTokens - OUTPUT_TOKEN_FLOOR)
-  return transformReasoningBudgets(options, ceiling, maxOutputTokens)
+  try {
+    return transformReasoningBudgets(options, ceiling, maxOutputTokens)
+  } catch (error) {
+    if (
+      error instanceof ReasoningTokenBudgetError &&
+      requested !== undefined &&
+      requested > maxOutputTokens
+    ) {
+      // A small explicit budget may fit below the usual minimum. Check the original options
+      // against the original reservation so only refusals compaction can fix are flagged.
+      clampReasoningBudget(options, requested)
+      throw new ReasoningTokenBudgetError({ ...error.info, contextInduced: true })
+    }
+    throw error
+  }
 }
 
 export * as OutputTokenBudget from "./output-token-budget"

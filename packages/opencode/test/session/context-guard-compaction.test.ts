@@ -33,6 +33,7 @@ import {
   ReasoningTokenBudgetError,
   attachmentTokenAllowance,
   calibratedInputTokens,
+  clampReasoningBudget,
   estimateInputTokens,
   estimateTextTokens,
   isContextBudgetError,
@@ -113,7 +114,10 @@ const model = { providerID: "altimate-backend", modelID: "test-model" } as any
  * thousands of estimated tokens); without them each fixture's history alone decides the guard.
  */
 const providerCfg =
-  (limit: { context: number; output: number }, opts: { tools?: boolean; attachment?: boolean } = {}) =>
+  (
+    limit: { context: number; output: number },
+    opts: { tools?: boolean; attachment?: boolean; modelOptions?: Record<string, unknown> } = {},
+  ) =>
   (url: string) => ({
     ...(opts.tools ? {} : { agent: { build: { permission: { "*": "deny" as const } } } }),
     provider: {
@@ -133,7 +137,7 @@ const providerCfg =
             release_date: "2025-01-01",
             limit,
             cost: { input: 0, output: 0 },
-            options: {},
+            options: opts.modelOptions ?? {},
           },
         },
         options: { apiKey: "test-key", baseURL: url },
@@ -363,7 +367,8 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: history,
           assistantUsage: reported,
-          // The previous turn ended with a plain text answer, the usual shape at a new user turn.
+          // The preceding request included the finalized system and tool overhead of the same agent.
+          last: { requestOverheadTokens: 5_000 },
           next: "Summarize the revenue concentration.",
         })
 
@@ -398,6 +403,38 @@ it.live(
         expect(result.hits.length).toBe(2)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "growth in finalized provider instructions forces compaction and is recorded on the retried request",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Summary of the earlier turns.")
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(130_000),
+          assistantUsage: 108_000,
+          last: { requestOverheadTokens: 5_000 },
+          next: "Answer the follow-up question.",
+        })
+
+        expect(result.summaries.length).toBe(1)
+        expect(result.errors).toEqual([])
+        expect(result.hits.length).toBe(2)
+        expect(JSON.stringify(result.hits[0]!.body)).not.toContain("Answer the follow-up question.")
+        expect(JSON.stringify(result.hits[1]!.body)).toContain("Answer the follow-up question.")
+        const answer = result.messages.at(-1)?.info
+        expect(answer?.role === "assistant" ? answer.metadata?.request_overhead_tokens : undefined).toBeGreaterThan(
+          40_000,
+        )
+      }),
+      {
+        git: true,
+        config: providerCfg(LARGE_WINDOW, { modelOptions: { instructions: sqlJsonHistory(40_000) } }),
+      },
     ),
   { timeout: 120_000 },
 )
@@ -535,6 +572,36 @@ it.live(
         expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a context clamp that leaves too little room for reasoning compacts and retries",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // The reported input leaves about 1,500 output tokens, above the visible floor but
+        // below what the enabled reasoning budget needs. The original 4,096-token reservation fits.
+        yield* llm.text("Summary of the earlier turns.")
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(13_000),
+          assistantUsage: 14_500,
+          last: { requestOverheadTokens: 6_000 },
+          next: "Answer the follow-up question.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries.length).toBe(1)
+        expect(result.hits.length).toBe(2)
+        expect(JSON.stringify(result.hits[0]!.body)).not.toContain("Answer the follow-up question.")
+        expect(JSON.stringify(result.hits[1]!.body)).toContain("Answer the follow-up question.")
+      }),
+      {
+        git: true,
+        config: providerCfg(SMALL_WINDOW, { modelOptions: { thinking: { budgetTokens: 2_048 } } }),
+      },
     ),
   { timeout: 120_000 },
 )
@@ -794,6 +861,26 @@ describe("guard calibration", () => {
       ),
     ).toBe(false)
     expect(isContextBudgetError(new Error("Context budget exceeded before the request was sent."))).toBe(false)
+  })
+
+  test("reasoning budget refusals signal compaction only when the original reservation could fit", () => {
+    const smallBudget = { thinking: { budgetTokens: 512 } }
+    const largeBudget = { thinking: { budgetTokens: 2_048 } }
+    for (const [options, clamped, requested, compactable] of [
+      [largeBudget, 1_200, 4_096, true],
+      [smallBudget, 1_400, 1_700, true],
+      [largeBudget, 1_200, 1_500, false],
+      [largeBudget, 1_200, 1_200, false],
+    ] as const) {
+      let refusal: unknown
+      try {
+        clampReasoningBudget(options, clamped, requested)
+      } catch (error) {
+        refusal = error
+      }
+      expect(refusal).toBeInstanceOf(ReasoningTokenBudgetError)
+      expect(isContextBudgetError(refusal)).toBe(compactable)
+    }
   })
 })
 

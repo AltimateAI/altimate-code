@@ -33,7 +33,6 @@ import { SessionCompaction } from "./compaction"
 // altimate_change start — the context measure shared by compaction and the pre-send budget guard
 import {
   attachmentTokenAllowance,
-  estimateInputTokens,
   estimateTextTokens,
   reportedContextTokens,
 } from "@/provider/output-token-budget"
@@ -2266,17 +2265,6 @@ export namespace SessionPrompt {
       // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
-      // Estimate-only copy of the tools this request sends, with the removal rules LLM.stream applies.
-      const requestTools = echoCommittedAnswer || textFinalStep ? {} : { ...tools }
-      for (const name of LLM.removedTools(Object.keys(requestTools), { agent, user: lastUser })) {
-        delete requestTools[name]
-      }
-      const requestOverheadTokens = estimateInputTokens({
-        // LLM.stream appends the per-user system prompt to the supplied system instructions.
-        system: lastUser.system ? [...system, lastUser.system] : system,
-        messages: [],
-        tools: requestTools,
-      })
       const measuredOverheadTokens = measured?.metadata?.[REQUEST_OVERHEAD_TOKENS]
       // One pass over what the provider has not counted yet (the last measured step and later):
       // attachments are added to the reported measure at the guard's own allowance. Compaction drops
@@ -2321,17 +2309,15 @@ export namespace SessionPrompt {
                   estimatedTokens: guardTail,
                   fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
                 }) +
-                attachmentTokens +
-                Math.max(0, requestOverheadTokens - measuredOverheadTokens)
+                attachmentTokens
               )
             })()
           : undefined
       // altimate_change end
-      // altimate_change start — record request overhead and mark echo, final, and deadline steps sent without tools
+      // altimate_change start — mark echo, final, and deadline steps sent without tools
       const sentWithoutTools = echoCommittedAnswer || textFinalStep || (await runToolsDisabled(sessionID))
       processor.message.metadata = {
         ...processor.message.metadata,
-        [REQUEST_OVERHEAD_TOKENS]: requestOverheadTokens,
         ...(sentWithoutTools ? { [SENT_WITHOUT_TOOLS]: true } : {}),
       }
       // altimate_change end
@@ -2339,6 +2325,7 @@ export namespace SessionPrompt {
         // altimate_change start — see reportedInputTokens above
         compactable,
         reportedInputTokens,
+        measuredOverheadTokens: typeof measuredOverheadTokens === "number" ? measuredOverheadTokens : undefined,
         // altimate_change end
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message

@@ -536,7 +536,19 @@ export namespace SessionProcessor {
             // upstream_fix: cancellation must also end a stalled stream open or read
             const signal = AbortSignal.any([input.abort, effectiveStreamInput.abort, requestController.signal])
             const stream = abortableStream(
-              async () => (await LLM.stream({ ...effectiveStreamInput, abort: signal })).fullStream,
+              async () =>
+                (
+                  await LLM.stream({
+                    ...effectiveStreamInput,
+                    abort: signal,
+                    onRequestOverhead: (tokens) => {
+                      input.assistantMessage.metadata = {
+                        ...input.assistantMessage.metadata,
+                        request_overhead_tokens: tokens,
+                      }
+                    },
+                  })
+                ).fullStream,
               signal,
             )
 
