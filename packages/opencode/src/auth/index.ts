@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import path from "path"
-import { existsSync, readFileSync } from "fs" // altimate_change — tell a missing auth store from an unreadable one
+import { statSync } from "fs" // altimate_change — tell a missing or empty auth store from an unreadable one
 import { Effect, Layer, Record, Result, Schema, Context } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
@@ -76,9 +76,9 @@ export function readFailed(store: object): boolean {
 }
 function storeFileHasContent(): boolean {
   try {
-    return existsSync(file) && readFileSync(file, "utf8").trim() !== ""
-  } catch {
-    return true
+    return statSync(file).size > 0 // a stat, not a second read of the file the read just failed on
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ENOENT"
   }
 }
 // altimate_change end
