@@ -477,6 +477,8 @@ describe("telemetry opt-out", () => {
     // An event that names no session of its own (an MCP or stall event) takes the process's.
     const { session_id: _omitted, ...sessionless } = errorEvent("Held")
     Telemetry.track(sessionless as unknown as Telemetry.Event)
+    // Stamped on the held copy: the caller's object is left as it passed it.
+    expect("session_id" in sessionless).toBe(false)
     await Telemetry.shutdown()
 
     Telemetry.setContext({ sessionId: "session-b", projectId: "project-b" })
@@ -860,6 +862,13 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
     writeFileSync(Auth.filepath(), " \n")
     expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+  })
+
+  test("auth content that parses to something other than an object holds no well-known entry, as Auth reads it", async () => {
+    for (const content of ["[]", '"x"', "1", "null"]) {
+      process.env.OPENCODE_AUTH_CONTENT = content
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+    }
   })
 
   test("auth content that does not parse falls back to the auth file, as Auth does", async () => {

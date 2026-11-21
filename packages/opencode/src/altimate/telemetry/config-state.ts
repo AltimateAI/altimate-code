@@ -68,6 +68,8 @@ async function hasWellKnownAuth(): Promise<boolean> {
   // As Auth reads it: OPENCODE_AUTH_CONTENT when it parses, otherwise the auth file.
   const inline = process.env.OPENCODE_AUTH_CONTENT
   let parsed: unknown = inline ? parseJson(inline) : undefined
+  // Auth uses parsed inline content as is, so content that is not an object holds no entry.
+  if (parsed !== undefined && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) return false
   if (parsed === undefined) {
     let contents: string
     try {
