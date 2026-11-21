@@ -176,13 +176,6 @@ export function create() {
     // `turnCount` is therefore the number of COMPLETED non-compaction steps;
     // harness-injected generations (idle-done challenge, continuation,
     // silent-turn reply) are real assistant steps and are charged the same way.
-    /**
-     * Whether a starting step is subject to the turn budget (false for
-     * compaction machinery). The step is charged only when it finishes.
-     */
-    onStepStart(messageID: string): boolean {
-      return !isCompactionStep(messageID)
-    },
     /** Completed non-compaction assistant steps. */
     get turnCount() {
       return turnCount

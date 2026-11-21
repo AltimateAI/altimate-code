@@ -1137,14 +1137,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "step-start") {
+              // altimate_change start — one compaction lookup serves output, `step` and the turn budget
+              const compactionStep = accounting.isCompactionStep(part.messageID)
+              // altimate_change end
               // altimate_change start — `--output` keeps only the last step's text (see run-output.ts)
-              outputParts.stepStart(accounting.isCompactionStep(part.messageID))
+              outputParts.stepStart(compactionStep)
               // altimate_change end
               // altimate_change start — see `step` (#1334). Compaction steps do not count,
               // as for the turn budget below: one running after the final answer would
               // otherwise move `step` past `lastTextStep` and ask for a reply the model
               // already gave. (release review)
-              if (!accounting.isCompactionStep(part.messageID)) step++
+              if (!compactionStep) step++
               // altimate_change end
               // altimate_change start — enforce max-turns budget
               // compaction-machinery steps are excluded from turn accounting —
@@ -1152,12 +1155,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // above, so compacting models are not differentially charged turns.
               // Turns are charged on step-finish: a step may start only while fewer
               // than maxTurns steps have completed, so a retried attempt is free.
-              const counted = accounting.onStepStart(part.messageID)
               const requestID = requestOwnership.ownerOf(part.messageID)
               const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && accounting.turnBudgetReached(maxTurns) && !committedAnswer && !budgetAborted &&
+                !compactionStep && accounting.turnBudgetReached(maxTurns) && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
