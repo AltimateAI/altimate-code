@@ -183,15 +183,26 @@ const HARD_DENY_PATTERN = /^\s*(DROP\s+((EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEM
  * Fail closed when the parser is unavailable or rejects the input. Lexical
  * statement boundaries still enforce hard denies without reading quoted text.
  */
-function classifyFallback(sql: string, dialect?: string, write = true): { queryType: "read" | "write"; blocked: boolean } {
+// The label of a hard-deny match (DROP DATABASE, DROP SCHEMA, ..., TRUNCATE), from the matched text only.
+function hardDenyLabel(match: string): string {
+  const drop = /\bDROP\s+(?:(?:EXTERNAL|PLUGGABLE)\s+)?(\w+)/i.exec(match)
+  return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
+}
+
+function classifyFallback(
+  sql: string,
+  dialect?: string,
+  write = true,
+): { queryType: "read" | "write"; blocked: boolean; cause?: string } {
   const statements = statementsOf(sql, dialect)
+  // The first rule that blocks names the cause (a fixed label, no SQL text).
+  let cause: string | undefined
   // Executable comments can contain entire statements or fragments of a hard
   // deny. Reject them outright because generic parsers discard their bodies.
-  let blocked = tokenizeSql(sql, dialect).tokens.some(
-    ({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text),
-  )
+  if (hasExecutableComment(sql, dialect)) cause = "an executable comment"
   for (const stmt of statements) {
-    if (HARD_DENY_PATTERN.test(stmt)) blocked = true
+    const match = HARD_DENY_PATTERN.exec(stmt)
+    if (match) cause ??= hardDenyLabel(match[0])
   }
   // When quoting or comments cannot be read with certainty, no reading of the literals or comments
   // can be trusted to hide a hard deny (a misread literal can make a real statement look like a
@@ -199,7 +210,7 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     // Escapes decoded too: dynamic SQL may run a literal such as '\x44ROP SCHEMA s'.
-    if (mentionsHardDenyAnywhere(sql)) blocked = true
+    if (mentionsHardDenyAnywhere(sql)) cause ??= "DROP DATABASE, DROP SCHEMA or TRUNCATE words in text that cannot be fully read"
   } else {
     // Read with certainty: the statement words in code (literals and comments masked, each quoted
     // identifier a placeholder name, so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
@@ -210,17 +221,19 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
     const chained =
       (/^snowflake$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
       /(->>|\bASYNC\s*\(|:=\s*\(|\bDEFAULT\s*\()\s*TRUNCATE\b(?!\s*\()/i.test(names)
-    if (CODE_HARD_DENY.test(names) || handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names)))
-      blocked = true
+    const code = CODE_HARD_DENY.exec(names)
+    if (code) cause ??= hardDenyLabel(code[0])
+    else if (handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names))) cause ??= "TRUNCATE"
     // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
     // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write. This runs at
     // every nesting depth, as on main. Both readings count: quoted names masked to spaces, as on main, so
     // EXEC[sp_executesql] and PREPARE`p`FROM keep their word boundaries, and quoted names unwrapped, so
     // "exec"('...') and [exec]('...') count as calls.
     const dynamic = DYNAMIC_SQL.test(maskSql(lexical.tokens)) || DYNAMIC_SQL.test(maskSql(lexical.tokens, true))
-    if (dynamic && mentionsHardDenyAnywhere(sql)) blocked = true
+    if (dynamic && mentionsHardDenyAnywhere(sql))
+      cause ??= "dynamic SQL (EXEC, PREPARE or DO) with DROP DATABASE, DROP SCHEMA or TRUNCATE in its text"
   }
-  return { queryType: "write", blocked }
+  return { queryType: "write", blocked: cause !== undefined, ...(cause && { cause }) }
 }
 
 /** The statement keyword, if any. Where statements need no separator (T-SQL) or the dialect is not one the lexer models, a read
@@ -467,13 +480,16 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   queryType: "read" | "write"
   blocked: boolean
   parseError?: string
+  /** Which hard-block rule matched, as a fixed label with no SQL text; set when blocked. */
+  cause?: string
 } {
   const result = classifySql(sql, dialect, 0)
   if (result.queryType !== "write" || result.blocked) return result
   // A write may also run the SQL in its literals: a routine body created and called in the same call. Only
   // SQL read with certainty; otherwise the word scan of the whole text already covered its literals.
   const lexical = tokenizeSql(sql, dialect)
-  if (lexical.complete && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
+  if (lexical.complete && quotedHardDeny(lexical.tokens, dialect))
+    return { ...result, blocked: true, cause: "a string literal this write may run, holding a hard-blocked statement or a Unicode escape" }
   return result
 }
 
@@ -488,6 +504,7 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
   queryType: "read" | "write"
   blocked: boolean
   parseError?: string
+  cause?: string
 } {
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
   const lexical = tokenizeSql(sql, dialect)
@@ -505,12 +522,14 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     // trailing statements. Keep dialect-aware lexical hard denies authoritative.
     const functions = functionSafety(sql, dialect, depth)
     const masked = maskSql(lexical.tokens)
-    const blocked =
-      functions.blocked ||
-      classifyFallback(sql, dialect, false).blocked ||
-      result.statements.some(
-        (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
-      )
+    const hardType = result.statements.find(
+      (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
+    )?.statement_type
+    const cause =
+      (functions.blocked ? "SQL run from a string literal" : undefined) ??
+      classifyFallback(sql, dialect, false).cause ??
+      (hardType ? hardDenyLabel(hardType) : undefined)
+    const blocked = cause !== undefined
 
     const queryType =
       !functions.write &&
@@ -527,7 +546,9 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
       otherIsReadOnly(sql, result.statements, dialect)
       ? "read"
       : "write"
-    return { queryType, blocked: blocked || (queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))) }
+    const writeTruncate = queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))
+    const finalCause = cause ?? (writeTruncate ? "TRUNCATE" : undefined)
+    return { queryType, blocked: finalCause !== undefined, ...(finalCause && { cause: finalCause }) }
   } catch (error) {
     return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }
@@ -594,16 +615,9 @@ export function hasExecutableComment(sql: string, dialect?: string): boolean {
   return tokenizeSql(sql, dialect).tokens.some(({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text))
 }
 
-// Which hard-block rule a blocked statement matched, as a fixed label (no SQL text): DROP DATABASE, SCHEMA,
-// CATALOG or NAMESPACE, TRUNCATE, an executable comment, or else SQL run from a string literal.
+// Which hard-block rule a blocked statement matched, as the classifier recorded it (no SQL text).
 export function hardBlockCause(sql: string, dialect?: string): string {
-  const lexical = tokenizeSql(sql, dialect)
-  const code = lexical.complete ? namesKept(lexical.tokens) : ""
-  const drop = /\bDROP\s+(?:(?:EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b/i.exec(code)
-  if (drop) return `DROP ${drop[1].toUpperCase()}`
-  if (/\bTRUNCATE\b(?!\s*\()/i.test(code)) return "TRUNCATE"
-  if (hasExecutableComment(sql, dialect)) return "an executable comment"
-  return "SQL run from a string literal"
+  return classifyAndCheck(sql, dialect).cause ?? "a hard-blocked statement"
 }
 
 // Statement keywords that may name an UNKNOWN statement in a refusal.
@@ -675,8 +689,8 @@ export function explainWrite(
     }
     // A SELECT ... INTO the parser cannot read (MySQL INTO OUTFILE or @var) is still a write: say so, not "fix the syntax".
     const code = maskSql(tokenizeSql(statement, dialect).tokens)
-    if (result.parseError && /^\s*(SELECT|WITH)\b/i.test(code) && /(?<![\w$.]\.?)\bINTO\b/i.test(code) && hasQueryWriteClause(statement, dialect)) {
-      return writes(`${where} has an INTO clause (SELECT ... INTO a table, file or variable), which writes; drop INTO to read`)
+    if (result.parseError && /^\s*(SELECT|WITH)\b/i.test(code) && /\bINTO\b/i.test(code) && hasQueryWriteClause(statement, dialect)) {
+      return writes(`${where} has a write clause, such as SELECT ... INTO a table, file or variable; remove it to read`)
     }
     if (result.parseError) {
       return unreadable(

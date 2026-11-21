@@ -3,7 +3,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck } from "./sql-classify"
-import { writeReason } from "./read-only-sql"
+import { hardBlockRefusal } from "./read-only-sql"
 
 export const DataDiffTool = Tool.define("data_diff", {
   description: [
@@ -105,9 +105,7 @@ export const DataDiffTool = Tool.define("data_diff", {
     const dialectOf = (warehouse?: string) => Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? undefined
     for (const [sql, warehouse] of [[args.source, sourceWarehouse], [args.target, targetWarehouse]] as const)
       if (classifyAndCheck(sql, dialectOf(warehouse)).blocked)
-        throw new Error(
-          `DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety. This cannot be overridden.${writeReason(sql, dialectOf(warehouse))}`,
-        )
+        throw new Error(hardBlockRefusal("DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety.", sql, dialectOf(warehouse)))
     for (const side of sides)
       await ctx.ask({
         permission: "sql_execute_read",

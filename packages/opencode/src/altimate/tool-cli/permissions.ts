@@ -25,8 +25,12 @@ function dialectOf(metadata: unknown): string | undefined {
     : undefined
 }
 
+/** A write refused because writes were not enabled; sql_execute adds why the query counts as a write. */
+export class WriteDeniedError extends Error {}
+
 export function denied(permission: string, retry = "Re-run"): Error {
-  return new Error(`Permission denied: ${permission}. ${retry} with --allow-write to enable writes.`)
+  const message = `Permission denied: ${permission}. ${retry} with --allow-write to enable writes.`
+  return permission === "sql_execute_write" ? new WriteDeniedError(message) : new Error(message)
 }
 
 /**

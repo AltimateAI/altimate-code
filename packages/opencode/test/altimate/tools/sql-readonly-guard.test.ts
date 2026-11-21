@@ -9,6 +9,7 @@ import { readSql } from "../../../src/altimate/tools/read-only-sql"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { initTool } from "../tool-fixture"
+import { askFor } from "../../../src/altimate/tool-cli/permissions"
 
 // A read-only agent denies `sql_execute_write`. Reads must never reach that rule, and when a query does,
 // the agent must learn why and what to change instead of a raw permission-rule dump it tends to retry.
@@ -218,6 +219,17 @@ describe("sql_execute on a read-only agent", () => {
     await expect(
       tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
     ).rejects.toThrow("it is not a read (DELETE)")
+  })
+
+  test("the MCP server and tool CLI write denial is explained, with the --allow-write hint", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const cli = askFor(false)
+    const ctx = { ...deniedCtx([]), ask: (request: any) => Effect.runPromise(cli(request)) }
+    const error = await tool
+      .execute({ query: "SELECT a FROM t 2>/dev/null", warehouse: "guard_db", limit: 10 }, ctx as any)
+      .then(() => "", (e: Error) => e.message)
+    expect(error).toContain("`2>/dev/null`")
+    expect(error).toContain("--allow-write")
   })
 
   test("errors other than a rule denial pass through unchanged", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { classifyAndCheck, explainWrite, shellResidue } from "../../../src/altimate/tools/sql-classify"
-import { readSql, writeReason } from "../../../src/altimate/tools/read-only-sql"
+import { hardBlockRefusal, readSql, writeReason } from "../../../src/altimate/tools/read-only-sql"
 
 describe("shellResidue", () => {
   const cases: Record<string, string> = {
@@ -137,6 +137,11 @@ describe("other read-only refusals carry the reason", () => {
     const nested = writeReason("SELECT * FROM query('DROP SCHEMA secret_s')", "duckdb")
     expect(nested).toContain("(SQL run from a string literal)")
     expect(nested).not.toContain("secret_s")
+    // The label is the rule the classifier blocked on: a qualified column named truncate is not TRUNCATE,
+    // a Unicode-escaped literal holds no hard-deny word, and dynamic SQL is named as such.
+    expect(writeReason("SELECT q.truncate FROM query('DROP SCHEMA s') q", "duckdb")).toContain("(SQL run from a string literal)")
+    expect(writeReason("INSERT INTO t VALUES (U&'d!0061t' UESCAPE '!')", "postgres")).toContain("Unicode escape")
+    expect(writeReason("EXEC sp_x /* drop schema s */", "sqlserver")).toContain("(dynamic SQL")
     // An unclosed quote holding a blocked word names the quote first.
     const reason = writeReason("SELECT a FROM t WHERE n = 'do not truncate", "postgres")
     expect(reason.indexOf("unterminated")).toBeGreaterThan(-1)
@@ -147,14 +152,22 @@ describe("other read-only refusals carry the reason", () => {
   })
 
   test("a SELECT ... INTO the parser cannot read is a write, not a syntax error", () => {
-    for (const sql of ["SELECT a FROM t INTO OUTFILE '/tmp/x'", "SELECT a FROM t LIMIT 1 INTO @v"]) {
+    for (const sql of ["SELECT a FROM t INTO OUTFILE '/tmp/x'", "SELECT a FROM t LIMIT 1 INTO @v", "SELECT 0x1.INTO t FROM"]) {
       const reason = explainWrite(sql, "mysql").reason
-      expect(reason).toContain("INTO clause")
+      expect(reason).toContain("write clause")
       expect(reason).not.toContain("could not read")
     }
     // INTO inside a literal or after a dot is not an INTO clause.
     expect(explainWrite("SELECT 'into' FROM WHERE", "postgres").reason).toContain("could not read")
     expect(explainWrite("SELECT t.into FROM WHERE", "postgres").reason).toContain("could not read")
+  })
+
+  test("a hard-block refusal claims it cannot be overridden only for a real hard block", () => {
+    const head = "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
+    expect(hardBlockRefusal(head, "SELECT 1; DROP DATABASE p", "postgres")).toContain("cannot be overridden")
+    const open = hardBlockRefusal(head, "SELECT * FROM t WHERE note = 'don't truncate'", "postgres")
+    expect(open).not.toContain("cannot be overridden")
+    expect(open).toContain("write a single quote as ''")
   })
 
   test("a refusal that is not about writing stays as it was", () => {

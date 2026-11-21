@@ -45,7 +45,8 @@ import * as Precedence from "../workspace/precedence"
 import { normalizeError } from "./response-normalization"
 // altimate_change end
 import { readSql } from "./sql-check"
-import { writeReason } from "./read-only-sql"
+import { hardBlockRefusal, writeReason } from "./read-only-sql"
+import { WriteDeniedError } from "../tool-cli/permissions"
 import { MaterializeError, storeRows } from "./sql-materialize"
 import { firstTime } from "./session-hints"
 
@@ -252,12 +253,16 @@ export const SqlExecuteTool = Tool.define(
             const blocked = classification.blocked || (jinja && mentionsHardDenyAnywhere(sql))
             const query = mongo?.normalized ?? sql
             if (blocked) {
+              const head = "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety."
               // Name the matched rule, or the unreadable quote that made a word count, for the dialect that blocked it.
-              const blockedIn = mongo ? -1 : dialects.findIndex((d) => classifyAndCheck(sql, d).blocked)
-              const why = blockedIn >= 0 ? writeReason(sql, dialects[blockedIn]) : ""
-              throw new Error(
-                `DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.${why}`,
-              )
+              const blockedIn = "blockedIndex" in classification ? classification.blockedIndex : -1
+              if (blockedIn >= 0) throw new Error(hardBlockRefusal(head, sql, dialects[blockedIn]))
+              if (jinja)
+                throw new Error(
+                  `${head} It contains Jinja, which dbt renders before the SQL runs, so DROP DATABASE, DROP SCHEMA or ` +
+                    "TRUNCATE words count wherever they sit, even in a literal or comment. Remove those words, or send plain SQL without Jinja.",
+                )
+              throw new Error(`${head} This cannot be overridden.`)
             }
             if (budget && queryType !== "read") {
               throw new Error("Batched queries must be read-only; run a write as its own sql_execute call.")
@@ -298,6 +303,18 @@ export const SqlExecuteTool = Tool.define(
                   },
                 })
               } catch (error) {
+                const explain = (readOnly: boolean) =>
+                  deniedWriteMessage({
+                    sql,
+                    dialects,
+                    jinja,
+                    mongo: mongo !== null,
+                    scratch: isScratch(args.warehouse),
+                    warehouseGiven: !!args.warehouse,
+                    readOnly,
+                  })
+                // The MCP server and `altimate tool` refuse writes unless --allow-write was given.
+                if (error instanceof WriteDeniedError) throw new Error(`${explain(true)} ${error.message}`)
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
                 const rules: Array<{ pattern?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
                 // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
@@ -306,17 +323,9 @@ export const SqlExecuteTool = Tool.define(
                 rules.forEach((rule, index) => {
                   if (rule.pattern === "*" && rule.action === "deny") lastCatchAllDeny = index
                 })
+                // With no catch-all deny, writes the rules do not name fall to the default ("ask").
                 throw new Error(
-                  deniedWriteMessage({
-                    sql,
-                    dialects,
-                    jinja,
-                    mongo: mongo !== null,
-                    scratch: isScratch(args.warehouse),
-                    warehouseGiven: !!args.warehouse,
-                    // With no catch-all deny, writes the rules do not name fall to the default ("ask").
-                    readOnly: lastCatchAllDeny >= 0 && !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny"),
-                  }),
+                  explain(lastCatchAllDeny >= 0 && !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny")),
                 )
               }
             }
@@ -751,6 +760,7 @@ function classifyEvery(sql: string, dialects: (string | undefined)[]) {
   return {
     queryType: results.some((result) => result.queryType === "write") ? ("write" as const) : ("read" as const),
     blocked: results.some((result) => result.blocked),
+    blockedIndex: results.findIndex((result) => result.blocked),
     ...(parseError && { parseError }),
   }
 }

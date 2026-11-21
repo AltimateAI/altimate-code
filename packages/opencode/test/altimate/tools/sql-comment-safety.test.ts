@@ -265,6 +265,8 @@ test("on the dbt route, Jinja in a comment or literal is a write, and a hard-den
     expect(write.asked).toEqual(["sql_execute_write"])
     const drop = await run("SELECT 1 AS x -- {% do run_query('DROP SCHEMA prod CASCADE') %}")
     await expect(drop.result).rejects.toThrow("blocked for safety")
+    // Blocked by the Jinja word scan alone (the SQL reads the words as a comment): the error says why.
+    await expect((await run("SELECT 1 AS x -- {% do run_query('DROP SCHEMA prod CASCADE') %}")).result).rejects.toThrow("dbt renders")
     // A Jinja comment removes text, which can expose a statement the SQL lexing reads as a literal.
     const hidden = await run("SELECT 'x' /* {# */ || ' #} */) AS q ; DROP SCHEMA s CASCADE ; SELECT 1 -- '")
     await expect(hidden.result).rejects.toThrow("blocked for safety")
