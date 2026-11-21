@@ -2712,11 +2712,11 @@ export namespace Telemetry {
    * Does nothing while telemetry is disabled. */
   export async function refreshIdentity(): Promise<void> {
     // Opted out (or not initialised): no lookup; an enabled init resolves from the stored credential.
-    if (!enabled || shutdownPromise) return
+    if (!isEnabled() || shutdownPromise) return
     // A refresh queued behind a flush belongs to the init that started it.
     const startedUnder = initPromise
     await flush()
-    if (!enabled || shutdownPromise || initPromise !== startedUnder) return
+    if (!isEnabled() || shutdownPromise || initPromise !== startedUnder) return
     identity = undefined
     await resolveIdentity({ refresh: true })
   }
@@ -2748,9 +2748,10 @@ export namespace Telemetry {
     return { sessionId, projectId }
   }
 
-  /** Returns true only after init() has completed and telemetry is enabled. */
+  /** Returns true once telemetry is enabled for the calling project's config. */
   export function isEnabled(): boolean {
-    return initDone && enabled
+    if (!initDone || !enabled) return false
+    return configScope === (TelemetryConfig.instanceDirectory() ?? configDirectory ?? process.cwd())
   }
 
   // altimate_change start — first-run health instrumentation (see the startup_ready, event_loop_stall

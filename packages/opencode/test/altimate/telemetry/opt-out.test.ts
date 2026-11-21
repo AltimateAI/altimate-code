@@ -1,6 +1,6 @@
 import { Database as SQLite } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
 import { Database } from "@opencode-ai/core/database/database"
@@ -286,7 +286,9 @@ describe("telemetry opt-out", () => {
     await Telemetry.shutdown({ preserveUnresolved: true })
     expect(fetchSpy).not.toHaveBeenCalled()
 
-    rmSync(path.join(home, ".altimate", "altimate.json"))
+    const credentialsPath = path.join(home, ".altimate", "altimate.json")
+    const credentials = readFileSync(credentialsPath)
+    rmSync(credentialsPath)
     const other = path.join(home, "other")
     mkdirSync(other)
     Telemetry.setConfigDirectory(other)
@@ -302,9 +304,17 @@ describe("telemetry opt-out", () => {
     await Telemetry.init()
     await Telemetry.flush()
     expect(names).toEqual(["error"])
-    await Telemetry.shutdown({ preserveUnresolved: true })
+    await Telemetry.refreshIdentity()
+    const callsBeforeSwitch = fetchSpy.mock.calls.length
 
     Telemetry.setConfigDirectory(home)
+    writeFileSync(credentialsPath, credentials)
+    expect(Telemetry.isEnabled()).toBe(false)
+    await Telemetry.refreshIdentity()
+    expect(fetchSpy).toHaveBeenCalledTimes(callsBeforeSwitch)
+    rmSync(credentialsPath)
+    await Telemetry.shutdown({ preserveUnresolved: true })
+
     await Telemetry.init()
     await Telemetry.flush()
     expect(names).toEqual(["error", "startup_ready"])
