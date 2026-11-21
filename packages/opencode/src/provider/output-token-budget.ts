@@ -182,7 +182,7 @@ function denseAsciiCharacters(input: string): number {
 }
 
 /** Estimate heterogeneous text in small chunks and conservatively count dense or non-ASCII text. */
-export function estimateTextTokens(input: string): number {
+function estimateTextTokens(input: string): number {
   let total = 0
   for (let offset = 0; offset < input.length; offset += ESTIMATE_CHUNK_SIZE) {
     const chunk = input.slice(offset, offset + ESTIMATE_CHUNK_SIZE)
@@ -403,7 +403,7 @@ export function estimateInputTokens(input: {
 }
 
 /** Provider-reported token usage of one finished assistant turn. */
-export type ReportedUsage = {
+type ReportedUsage = {
   readonly total?: number
   readonly input: number
   readonly output: number

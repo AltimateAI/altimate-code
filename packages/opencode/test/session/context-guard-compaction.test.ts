@@ -7,12 +7,13 @@
  * so a session below the compaction threshold used to be refused by the guard and end with
  * "Context budget exceeded before the request was sent" without compaction ever running.
  */
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { MessageV2 } from "../../src/session/message-v2"
 import path from "node:path"
 import { Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
+import { NudgeArbiter } from "../../src/session/nudge"
 import { SessionPrompt } from "../../src/session/prompt"
 import { Token } from "../../src/util/token"
 import { SessionSummary } from "../../src/session/summary"
@@ -25,6 +26,7 @@ import { provideTmpdirServerLegacy } from "./legacy-instance"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Provider } from "../../src/provider/provider"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import {
   InputTokenBudgetError,
@@ -34,7 +36,6 @@ import {
   calibratedInputTokens,
   clampReasoningBudget,
   estimateInputTokens,
-  estimateTextTokens,
   isContextBudgetError,
   reportedContextTokens,
 } from "../../src/provider/output-token-budget"
@@ -207,6 +208,7 @@ type Seeded = {
     finish?: string
     text?: string
     toolOutput?: string
+    tool?: "answer_commit"
     /** Attach an image to the step's tool result. */
     toolImage?: boolean
     /** Override the seeded request estimate. Null represents a message without one. */
@@ -233,7 +235,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         id: MessageID.ascending(),
         role: "user",
         sessionID,
-        agent: "build",
+        agent: seeded.last?.tool === "answer_commit" ? "analyst" : "build",
         model,
         system,
         time: { created: Date.now() },
@@ -279,7 +281,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
           sessionID,
           type: "tool",
           callID: "call_revenue_query",
-          tool: "bash",
+          tool: last.tool ?? "bash",
           state: {
             status: "completed",
             input: { command: "run the revenue query" },
@@ -633,6 +635,105 @@ it.live(
         git: true,
         config: providerCfg(SMALL_WINDOW, { modelOptions: { thinking: { budgetTokens: 2_048 } } }),
       },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a separate input limit makes the guard compact and retry",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // The input limit is below the proactive reserve. The history fits the context
+        // window, so only the pre-send input limit can trigger this compaction.
+        // The config-to-provider conversion does not carry a declared input limit.
+        const getModel = Provider.getModel
+        const modelSpy = spyOn(Provider, "getModel").mockImplementation(async (...args) => {
+          const resolved = await getModel(...args)
+          return { ...resolved, limit: { ...resolved.limit, input: 16_384 } }
+        })
+        try {
+          yield* llm.text("Summary of the earlier turns.")
+          yield* llm.text("Here is the answer.")
+          const result = yield* runSession(dir, llm, {
+            user: sqlJsonTurns(24_000),
+            assistantUsage: 0,
+            next: "Answer the follow-up question.",
+          })
+
+          expect(result.errors).toEqual([])
+          expect(result.summaries).toHaveLength(1)
+          expect(result.hits).toHaveLength(2)
+          expect(JSON.stringify(result.hits[0]!.body)).not.toContain("Answer the follow-up question.")
+          expect(JSON.stringify(result.hits[1]!.body)).toContain("Answer the follow-up question.")
+        } finally {
+          modelSpy.mockRestore()
+        }
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a refused echo delivers the committed answer through overflow recovery",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const committed = "This is the committed answer."
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonHistory(135_000),
+          assistantUsage: 0,
+          last: { agent: "analyst", finish: "tool-calls", tool: "answer_commit", toolOutput: committed },
+        })
+
+        expect(result.hits).toHaveLength(0)
+        expect(result.summaries).toHaveLength(0)
+        expect(result.errors).toEqual([])
+        const echo = result.messages.at(-1)
+        expect(echo?.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+        expect(echo?.parts).toContainEqual(expect.objectContaining({ type: "text", text: committed }))
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a refused request hands its directive back to the retry",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const directive = "Keep this directive for the next working request."
+        const begin = NudgeArbiter.begin
+        const beginSpy = spyOn(NudgeArbiter, "begin").mockImplementation((sessionID) => {
+          const generation = begin(sessionID)
+          NudgeArbiter.register(sessionID, { source: "budget_reminder", kind: "budget", text: directive }, generation)
+          return generation
+        })
+        const runMode = process.env.ALTIMATE_RUN_MODE
+        process.env.ALTIMATE_RUN_MODE = "1"
+        try {
+          yield* llm.text("Summary of the earlier turns.")
+          yield* llm.text("Here is the answer.")
+          const result = yield* runSession(dir, llm, {
+            user: sqlJsonTurns(135_000),
+            assistantUsage: 0,
+            next: "Answer the follow-up question.",
+          })
+
+          expect(result.errors).toEqual([])
+          expect(result.summaries).toHaveLength(1)
+          expect(result.hits).toHaveLength(2)
+          expect(JSON.stringify(result.hits[0]!.body)).not.toContain(directive)
+          expect(JSON.stringify(result.hits[1]!.body)).toContain(directive)
+        } finally {
+          beginSpy.mockRestore()
+          if (runMode === undefined) delete process.env.ALTIMATE_RUN_MODE
+          else process.env.ALTIMATE_RUN_MODE = runMode
+        }
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
   { timeout: 120_000 },
 )
