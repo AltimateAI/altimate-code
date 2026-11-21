@@ -8,6 +8,7 @@ import { Auth } from "../../../src/auth"
 import { Config } from "../../../src/config/config"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
+import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
 
 const CS = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
 const ENV = [
@@ -310,8 +311,14 @@ describe("telemetry opt-out", () => {
     Telemetry.setConfigDirectory(home)
     writeFileSync(credentialsPath, credentials)
     expect(Telemetry.isEnabled()).toBe(false)
-    await Telemetry.refreshIdentity()
-    expect(fetchSpy).toHaveBeenCalledTimes(callsBeforeSwitch)
+    const lookup = spyOn(TelemetryIdentity, "resolveWithOutcome").mockResolvedValue({ outcome: "none" })
+    try {
+      await Telemetry.refreshIdentity()
+      expect(lookup).not.toHaveBeenCalled()
+      expect(fetchSpy).toHaveBeenCalledTimes(callsBeforeSwitch)
+    } finally {
+      lookup.mockRestore()
+    }
     rmSync(credentialsPath)
     await Telemetry.shutdown({ preservePending: true })
 
