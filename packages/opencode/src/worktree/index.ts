@@ -606,13 +606,14 @@ export const layer: Layer.Layer<
         })
       }
 
-      // altimate_change start — offline mode moves only checked-out submodules, from objects already on disk
-      // (`submodule update` would clone the others). `submodule status` marks a not-checked-out one with "-".
+      // altimate_change start — offline mode moves only checked-out top-level submodules, from objects already on
+      // disk (`submodule update` would clone the others); nested ones stay at their commits. `submodule status`
+      // prints "<state><sha> <path>[ (<describe>)]" and marks a not-checked-out submodule with "-".
       const checkedOut = offlineModeEnabled()
-        ? (yield* git(["submodule", "status", "--recursive"], { cwd: worktreePath })).text
+        ? (yield* git(["submodule", "status"], { cwd: worktreePath })).text
             .split("\n")
             .filter((line) => line.length > 1 && !line.startsWith("-"))
-            .map((line) => line.slice(1).split(" ")[1])
+            .map((line) => /^.[0-9a-f]+ (.+?)(?: \([^)]*\))?$/.exec(line)?.[1])
             .filter((entry): entry is string => Boolean(entry))
         : undefined
       if (!checkedOut || checkedOut.length > 0)

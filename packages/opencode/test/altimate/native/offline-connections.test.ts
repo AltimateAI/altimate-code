@@ -36,6 +36,7 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "sqlserver", host: "localhost\\SQLEXPRESS" },
     { type: "redshift" },
     { type: "clickhouse", host: "127.0.0.1", protocol: "HTTPS" },
+    { type: "sqlserver", host: "localhost", authentication: "sql" },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -68,6 +69,8 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "mongodb", connection_string: "mongodb://localhost/db?replicaSet=rs0" },
     { type: "sqlserver", host: "db.example.com\\SQLEXPRESS" },
     { type: "sqlserver", host: "localhost", authentication: "azure-active-directory-default" },
+    { type: "sqlserver", host: "localhost", authentication: "cli" },
+    { type: "sqlserver", host: "localhost", authentication: "ActiveDirectoryPassword" },
     { type: "mongodb", connection_string: "mongodb://localhost/db?authMechanism=MONGODB-AWS" },
     { type: "sqlite", path: "store.sqlite", ssh_host: "bastion.example.com" },
     { type: "clickhouse", host: "127.0.0.1", protocol: "http://evil.example/#" },

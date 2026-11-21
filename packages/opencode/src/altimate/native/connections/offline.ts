@@ -31,8 +31,13 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   // Trino and ClickHouse build `${protocol}://${host}`, so a protocol value could carry its own authority.
   if (config.protocol !== undefined && !["http", "https"].includes(String(config.protocol).trim().toLowerCase()))
     throw new Error(DENIED)
-  // Cloud sign-in contacts an identity provider even for a loopback host.
-  if (typeof config.authentication === "string" && /^azure-active-directory/i.test(config.authentication))
+  // Cloud sign-in contacts an identity provider even for a loopback host. SQL Server's driver and dbt map many
+  // values (cli, default, msi, ActiveDirectory*, ServicePrincipal) to Azure AD, so only local methods pass.
+  if (
+    ["sqlserver", "mssql"].includes(type) &&
+    config.authentication !== undefined &&
+    !["", "sql", "sqlpassword", "sql-password", "ntlm", "windows"].includes(String(config.authentication).trim().toLowerCase())
+  )
     throw new Error(DENIED)
   // A Unix socket is a local file.
   if (config.socketPath !== undefined && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/")))

@@ -186,7 +186,7 @@ While still online:
 - dbt commands whose selected profile and target are local. Values written as Jinja templates (for example `{{ env_var('DBT_HOST') }}`) cannot be checked and are refused; write them literally to use them offline. dbt-duckdb profiles can use extensions, local attachments and plugins; settings that point at remote storage, a remote server or a remote extension repository (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused. Named extensions and plugins are not checked: install extensions while online, and do not configure plugins that call remote services.
 - DuckDB loads extensions that are already installed and does not install new ones automatically.
 - The shell tool, installed language servers, stdio MCP servers and MCP servers at `localhost`, `127.0.0.1`, `[::1]` or `0.0.0.0`, including `tool run --daemon`.
-- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and leaves submodules at their current commits. Worktree create and reset leave Git LFS files as pointer files.
+- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and updates checked-out submodules from local objects; nested and not-checked-out submodules stay as they are. Worktree create and reset leave Git LFS files as pointer files.
 - `attach` and `run --attach` to a server on this machine. The attached server applies its own policy, so start it with offline mode too.
 
 ### What is blocked
@@ -200,7 +200,7 @@ Each of these fails with a one-line message or is skipped:
 - MCP servers at other URLs, and MCP sign-in;
 - skills from remote skill URLs (`skills.urls`), including copies already cached;
 - automatic installs of warehouse drivers, language servers, plugins and ripgrep;
-- warehouse connections to other hosts, SSH tunnels, MongoDB SRV and replica-set discovery, and cloud sign-in (SQL Server Azure AD, MongoDB AWS/OIDC/Kerberos, dbt cloud methods);
+- warehouse connections to other hosts, SSH tunnels, MongoDB SRV and replica-set discovery, and cloud sign-in (SQL Server methods other than SQL or Windows login, MongoDB AWS/OIDC/Kerberos, dbt cloud methods);
 - `dbt deps` and dbt's usage reporting and version check;
 - `git clone`, `fetch`, `pull`, `push` and other Git commands that use a remote;
 - commands that need a remote service, such as `github`, `pr`, `web`, `upgrade`, `review --post` and `attach` to another machine.
