@@ -851,6 +851,31 @@ for (const [format, body] of [
   )
 }
 
+{
+  let requests = 0
+  const account = Layer.mock(Account.Service)({
+    active: () => Effect.succeed(Option.some({
+      id: AccountID.make("invalid-config-account"),
+      email: "user@example.com",
+      url: "https://control.example.invalid",
+      active_org_id: OrgID.make("org"),
+    })),
+    config: () => Effect.sync(() => {
+      requests++
+      return Option.some({ telemetry: { disabled: "invalid" } })
+    }),
+    token: () => Effect.succeed(Option.none()),
+  })
+  configIt({ account }).instance("invalid organization config schema backs off on repeated telemetry retries", () =>
+    Effect.gen(function* () {
+      expect(Exit.isFailure(yield* Config.use.get().pipe(Effect.exit))).toBe(true)
+      expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
+      expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
+      expect(requests).toBe(2)
+    }),
+  )
+}
+
 it.instance("a telemetry retry reloads a repaired config after a cached load failure", () =>
   Effect.gen(function* () {
     const { directory } = yield* TestInstance

@@ -337,8 +337,13 @@ export const layer = Layer.effect(
     const env = yield* Env.Service
     const npmSvc = yield* Npm.Service
     const http = yield* HttpClient.HttpClient
-    // altimate_change — preserve the source of any remote load failure without changing its public error.
+    // altimate_change start — preserve remote failure origin without changing the public error.
     const remoteLoadFailures = new WeakSet<object>()
+    const recordRemoteFailure = (cause: Cause.Cause<unknown>) => Effect.sync(() => {
+      const failure = Cause.squash(cause)
+      if (failure && typeof failure === "object") remoteLoadFailures.add(failure)
+    })
+    // altimate_change end
 
     const readConfigFile = (filepath: string) => fs.readFileStringSafe(filepath).pipe(Effect.orDie)
 
@@ -637,10 +642,7 @@ export const layer = Layer.effect(
             yield* merge(source, next, "global")
             yield* Effect.logDebug("loaded remote config from well-known", { url })
             // altimate_change start — retain the original error for other config consumers.
-          }).pipe(Effect.tapCause((cause) => Effect.sync(() => {
-            const failure = Cause.squash(cause)
-            if (failure && typeof failure === "object") remoteLoadFailures.add(failure)
-          })))
+          }).pipe(Effect.tapCause(recordRemoteFailure))
           // altimate_change end
         }
 
@@ -768,6 +770,7 @@ export const layer = Layer.effect(
                 error: err instanceof Error ? err.message : String(err),
               })
             }),
+            Effect.tapCause(recordRemoteFailure),
             // altimate_change end
           )
         }
