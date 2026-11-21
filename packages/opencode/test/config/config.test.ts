@@ -810,6 +810,21 @@ for (const failure of ["account", "organization"] as const) {
   )
 }
 
+it.effect("a global config that fails validation fails the load instead of dropping its opt-out", () =>
+  withGlobalConfig({}, ({ dir }) =>
+    Effect.gen(function* () {
+      yield* FSUtil.use.writeWithDirs(
+        path.join(dir, "altimate-code.json"),
+        JSON.stringify({ telemetry: { disabled: true }, notARealKey: 1 }),
+      )
+      // The load fails outright (it does not fall back to defaults that drop the opt-out), which telemetry
+      // reads as unresolved inside a project.
+      const exit = yield* Config.use.get().pipe(provideInstanceEffect(dir), Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  ),
+)
+
 it.effect("a legacy global config that fails to load leaves the telemetry opt-out unresolved", () =>
   withGlobalConfig({}, ({ dir }) =>
     Effect.gen(function* () {

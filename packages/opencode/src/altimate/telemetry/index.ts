@@ -3024,8 +3024,12 @@ export namespace Telemetry {
     // project it was tracked under instead of taking the next one's at flush.
     if (!initDone) {
       const held = event as { session_id?: unknown; project_id?: unknown }
-      if (held.session_id === undefined && sessionId) held.session_id = sessionId
-      if (held.project_id === undefined && projectId) held.project_id = projectId
+      const stamp = {
+        ...(held.session_id === undefined && sessionId ? { session_id: sessionId } : {}),
+        ...(held.project_id === undefined && projectId ? { project_id: projectId } : {}),
+      }
+      // Stamped on a copy, so a caller's object is left as it passed it.
+      if (Object.keys(stamp).length > 0) event = { ...event, ...stamp } as Event
     }
     // altimate_change end
     // altimate_change — no ambient workspace stamping: a row names its workspace itself (the prompt
