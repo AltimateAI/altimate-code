@@ -199,14 +199,15 @@ test("unavailable", async () => {
 `,
     )
     try {
-      const run = Bun.spawnSync(["bun", "test", "./unavailable.test.ts"], {
+      const run = Bun.spawnSync([process.execPath, "test", "./unavailable.test.ts"], {
         cwd: dir,
         stdout: "pipe",
         stderr: "pipe",
       })
       const output = run.stdout.toString() + run.stderr.toString()
-      expect(output).toContain("1 pass")
-      expect(run.exitCode).toBe(0)
+      // Bun can crash during cleanup after printing a complete test summary.
+      expect(output).toMatch(/^\s*[1-9]\d* pass\s*$/m)
+      expect(output).toMatch(/^\s*0 fail\s*$/m)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

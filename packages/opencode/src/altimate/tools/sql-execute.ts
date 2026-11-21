@@ -798,11 +798,17 @@ export function deniedWriteMessage(input: {
   // Classify once per dialect. Prefer a dialect that reads the text and names a concrete write over one that
   // cannot parse it.
   const results = input.dialects.map((d) => ({ dialect: d, ...classifyAndCheck(input.sql, d) }))
-  const writing = results
-    .filter((result) => result.queryType === "write")
-    .map((result) => ({ dialect: result.dialect, explained: explainWrite(input.sql, result.dialect) }))
-  const chosen = writing.find((entry) => !entry.explained.unreadable) ?? writing[0]
-  const { reason, unreadable, unavailable } = chosen?.explained ?? explainWrite(input.sql, undefined)
+  let chosen: ReturnType<typeof explainWrite> | undefined
+  for (const result of results) {
+    if (result.queryType !== "write") continue
+    const explanation = explainWrite(input.sql, result.dialect)
+    if (!explanation.unreadable) {
+      chosen = explanation
+      break
+    }
+    chosen ??= explanation
+  }
+  const { reason, unreadable, unavailable } = chosen ?? explainWrite(input.sql, undefined)
   // Without a warehouse (and off the dbt route, where a warehouse also moves the query off dbt), a query the
   // reachable dialects disagree on, or cannot read, may be fine in the real warehouse's dialect.
   const disagree = results.some((result) => result.queryType === "read" && !result.blocked)
