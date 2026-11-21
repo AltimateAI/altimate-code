@@ -15,6 +15,7 @@ import {
   computeSqlFingerprint,
   explainWrite,
   isScratchSafeWrite,
+  UNAVAILABLE_NEXT_STEP,
   mentionsHardDenyAnywhere,
 } from "./sql-classify"
 import { statementsOf } from "./sql-tokenize"
@@ -776,7 +777,7 @@ export function deniedWriteMessage(input: {
   const dialect = input.dialects.find((d) => classifyAndCheck(input.sql, d).queryType === "write")
   const { reason, unreadable, unavailable } = explainWrite(input.sql, dialect)
   const next = unavailable
-    ? "Changing the SQL will not help; ask the user to check the installation."
+    ? UNAVAILABLE_NEXT_STEP
     : unreadable
     ? "Fix the query and call sql_execute again; the same text will be refused again." +
       (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +

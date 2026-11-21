@@ -586,6 +586,9 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
   return result.queryType === "read" && !result.blocked ? labels.join("`, `") : undefined
 }
 
+/** What to do when the SQL classifier itself is unavailable: no rewrite of the SQL can help. */
+export const UNAVAILABLE_NEXT_STEP = "Changing the SQL will not help; ask the user to check the installation."
+
 // Statement keywords that may name an UNKNOWN statement in a refusal.
 const STATEMENT_KEYWORDS = new Set([
   "ATTACH", "DETACH", "INSTALL", "LOAD", "SET", "RESET", "PRAGMA", "COPY", "CALL", "EXEC", "EXECUTE", "GRANT", "REVOKE",

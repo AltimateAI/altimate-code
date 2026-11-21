@@ -1,4 +1,4 @@
-import { classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
+import { UNAVAILABLE_NEXT_STEP, classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
 import { maskSql, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls } from "./sql-functions"
 import { hasSideEffectFunction } from "./sql-function-policy"
@@ -84,7 +84,7 @@ export function writeReason(sql: string, dialect?: string): string {
   if (blocked) return ""
   if (queryType === "write") {
     const { reason, unavailable } = explainWrite(sql, dialect)
-    return ` It counts as a write because ${reason}.${unavailable ? " Changing the SQL will not help; ask the user to check the installation." : ""}`
+    return ` It counts as a write because ${reason}.${unavailable ? ` ${UNAVAILABLE_NEXT_STEP}` : ""}`
   }
   // Name the word only when it is the sole reason: the body is otherwise one SELECT or WITH query.
   const body = readOnlyBody(sql, dialect)?.body
