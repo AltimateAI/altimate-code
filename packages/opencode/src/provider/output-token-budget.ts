@@ -283,6 +283,11 @@ function mediaTokenAllowance(part: JsonRecord): number {
   return MEDIA_TOKEN_ALLOWANCE
 }
 
+/** The allowance the guard charges for one attachment, for callers sizing unmeasured attachments. */
+export function attachmentTokenAllowance(mime: string, url: string): number {
+  return mediaTokenAllowance({ type: "file", mediaType: mime, data: url })
+}
+
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
 function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
   const result = new WeakMap<object, number>()

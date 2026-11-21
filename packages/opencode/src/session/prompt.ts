@@ -31,7 +31,7 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 // altimate_change start — the context measure shared by compaction and the pre-send budget guard
-import { estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
+import { attachmentTokenAllowance, estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
 // altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
@@ -2252,24 +2252,25 @@ export namespace SessionPrompt {
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
       // One pass over what the provider has not counted yet (the last measured step and later):
-      // any attachment keeps the estimate in charge. Compaction drops images and PDFs (replay swaps
-      // them for a placeholder, summaries strip them), so one the model has not seen yet (a user
-      // attachment or tool result since the last measured step) keeps a refusal the budget error
-      // rather than continue without it. Media the model already saw does not block compaction.
-      let unmeasuredMedia = false
+      // attachments are added to the reported measure at the guard's own allowance. Compaction drops
+      // images and PDFs (replay swaps them for a placeholder, summaries strip them), so one the model
+      // has not seen yet (a user attachment or tool result since the last measured step) keeps a
+      // refusal the budget error rather than continue without it. Media already seen does not.
+      let attachmentTokens = 0
       let unseenMedia = false
       for (const msg of msgs) {
         if (msg.info.id !== measuredID && !isAfterMeasured(msg.info.id)) continue
         for (const part of msg.parts) {
           // text/plain files and directories arrive as text parts, already in the tail estimate.
           if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
-            unmeasuredMedia = true
+            attachmentTokens += attachmentTokenAllowance(part.mime, part.url)
             if (MessageV2.isMedia(part.mime)) unseenMedia = true
           }
           if (part.type !== "tool" || part.state.status !== "completed") continue
-          const attachments = part.state.attachments ?? []
-          if (attachments.length > 0) unmeasuredMedia = true
-          if (attachments.some((attachment) => MessageV2.isMedia(attachment.mime))) unseenMedia = true
+          for (const attachment of part.state.attachments ?? []) {
+            attachmentTokens += attachmentTokenAllowance(attachment.mime, attachment.url)
+            if (MessageV2.isMedia(attachment.mime)) unseenMedia = true
+          }
         }
       }
       const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
@@ -2278,7 +2279,6 @@ export namespace SessionPrompt {
       const reportedInputTokens =
         measured &&
         measured.metadata?.[SENT_WITHOUT_TOOLS] !== true &&
-        !unmeasuredMedia &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
@@ -2287,11 +2287,13 @@ export namespace SessionPrompt {
               // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
               // estimator, so the discount applies only to what the provider has counted.
               const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens)
-              return reportedContextTokens({
-                tokens: measured.tokens,
-                estimatedTokens: guardTail,
-                fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
-              })
+              return (
+                reportedContextTokens({
+                  tokens: measured.tokens,
+                  estimatedTokens: guardTail,
+                  fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
+                }) + attachmentTokens
+              )
             })()
           : undefined
       // altimate_change end

@@ -599,25 +599,23 @@ it.live(
 )
 
 it.live(
-  "a new image keeps the estimate in charge, and a turn carrying it is not compacted away",
+  "a new image in a near-full session is sent: calibration adds its allowance instead of dropping",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        // Same as the regression above, but the new turn attaches an image the tail estimate cannot
-        // see, so the estimate decides and refuses. Compacting would drop the image, so the refusal
-        // is the budget error rather than an answer without it.
+        // Same as the regression above, plus an image on the new turn. The estimate alone would refuse
+        // (and the unseen image makes the refusal fatal); reported usage plus the image's allowance fits.
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
         const result = yield* runSession(dir, llm, {
           user: sqlJsonTurns(130_000),
           assistantUsage: 108_000,
-          last: TOOL_STEP,
           next: "Summarize the revenue concentration.",
           nextFile: true,
         })
 
-        expect(result.hits.length).toBe(0)
+        expect(result.errors).toEqual([])
         expect(result.compactions.length).toBe(0)
-        expect(result.errors.length).toBe(1)
-        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+        expect(result.hits.length).toBe(1)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
     ),
