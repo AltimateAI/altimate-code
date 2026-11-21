@@ -589,7 +589,10 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
 /** What to do when the SQL classifier itself is unavailable: no rewrite of the SQL can help. */
 export const UNAVAILABLE_NEXT_STEP = "Changing the SQL will not help; ask the user to check the installation."
 
-export const EXECUTABLE_COMMENT = /\/\*(?:!|[mM]!)/
+// Whether the SQL holds an executable comment (a /*! comment) as a comment token, not inside a literal.
+export function hasExecutableComment(sql: string, dialect?: string): boolean {
+  return tokenizeSql(sql, dialect).tokens.some(({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text))
+}
 
 // Statement keywords that may name an UNKNOWN statement in a refusal.
 const STATEMENT_KEYWORDS = new Set([
@@ -626,7 +629,7 @@ export function explainWrite(
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     // An executable comment (/*! ... */) is closed but runs as SQL on some engines, so it is never read as one.
-    if (EXECUTABLE_COMMENT.test(sql)) {
+    if (hasExecutableComment(sql, dialect)) {
       return unreadable("it contains an executable comment (/*! ... */), which some engines run as SQL; remove it or use a plain comment")
     }
     return unreadable(

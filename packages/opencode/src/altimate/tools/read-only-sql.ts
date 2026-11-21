@@ -1,4 +1,4 @@
-import { EXECUTABLE_COMMENT, UNAVAILABLE_NEXT_STEP, classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
+import { UNAVAILABLE_NEXT_STEP, hasExecutableComment, classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
 import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls } from "./sql-functions"
 import { hasSideEffectFunction } from "./sql-function-policy"
@@ -94,7 +94,7 @@ export function writeReason(sql: string, dialect?: string): string {
     const untilClosed =
       " Until that quoted text or comment can be read, words inside it such as DROP DATABASE or TRUNCATE count as a" +
       " hard-blocked statement, which never runs."
-    return tokenizeSql(sql, dialect).complete || EXECUTABLE_COMMENT.test(sql)
+    return tokenizeSql(sql, dialect).complete || hasExecutableComment(sql, dialect)
       ? hard
       : ` It counts as a write because ${explainWrite(sql, dialect).reason}.${untilClosed}`
   }

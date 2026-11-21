@@ -118,7 +118,12 @@ describe("other read-only refusals carry the reason", () => {
     const reason = explainWrite("SELECT 1 /*! + 1 */", "mysql").reason
     expect(reason).toContain("executable comment")
     expect(reason).not.toContain("unterminated")
-    expect(writeReason("SELECT 1 /*! + 1 */", "mysql")).not.toContain("Until that quoted text")
+    const refusal = writeReason("SELECT 1 /*! + 1 */", "mysql")
+    expect(refusal).toContain("hard-blocked statement")
+    expect(refusal).toContain("executable comment")
+    expect(refusal).not.toContain("Until that quoted text")
+    // The marker inside a literal is not a comment.
+    expect(explainWrite("SELECT '/*! x' AS a, 'unclosed", "mysql").reason).not.toContain("executable comment")
   })
 
   test("a hard-blocked statement is named as such", () => {
