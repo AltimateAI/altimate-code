@@ -610,7 +610,11 @@ export const layer: Layer.Layer<
       // disk (`submodule update` would clone the others); nested ones stay at their commits. `submodule status`
       // prints "<state><sha> <path>[ (<describe>)]" and marks a not-checked-out submodule with "-".
       const checkedOut = offlineModeEnabled()
-        ? (yield* git(["submodule", "status"], { cwd: worktreePath })).text
+        ? (yield* gitExpect(
+            ["submodule", "status"],
+            { cwd: worktreePath },
+            (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to read submodules" }),
+          )).text
             .split("\n")
             .filter((line) => line.length > 1 && !line.startsWith("-"))
             .map((line) => /^.[0-9a-f]+ (.+?)(?: \([^)]*\))?$/.exec(line)?.[1])

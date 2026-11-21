@@ -115,11 +115,10 @@ async function probe(): Promise<DbtRuntime> {
   // candidate that exists.
   const resolved = resolveDbt()
   // altimate_change start — `dbt --version` asks PyPI for the latest release, so offline mode does not run it
-  if (offlineModeEnabled())
-    return {
-      hasDbt: !resolved.source.startsWith("fallback") || Bun.which("dbt", { PATH: process.env.PATH ?? "" }) !== null,
-      hasDbtDuckdb: hasDuckdbAdapter(resolved.path),
-    }
+  if (offlineModeEnabled()) {
+    const dbt = resolved.source.startsWith("fallback") ? Bun.which("dbt", { PATH: process.env.PATH ?? "" }) : resolved.path
+    return { hasDbt: dbt !== null, hasDbtDuckdb: dbt !== null && hasDuckdbAdapter(dbt) }
+  }
   // altimate_change end
   const env = buildDbtEnv(resolved)
 

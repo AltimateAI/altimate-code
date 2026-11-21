@@ -1387,9 +1387,7 @@ export const layer = Layer.effect(
     })
 
     const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
-      // altimate_change start — offline mode refuses before starting an OAuth flow
       if (Offline.enabled()) throw new Error("Authenticate MCP servers while online.")
-      // altimate_change end
       const lifecycle = yield* InstanceState.get(state)
       // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)

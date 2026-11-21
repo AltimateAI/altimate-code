@@ -209,6 +209,7 @@ Plugins:
 test.skipIf(process.platform === "win32")("offline detection finds dbt without running it", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "offline-dbt-detect-"))
   const previous = { offline: process.env.ALTIMATE_OFFLINE, dbt: process.env.ALTIMATE_DBT_PATH }
+  const previousPath = process.env.PATH
   try {
     const ran = path.join(dir, "ran")
     // The stub sits in its own bin directory so the adapter lookup stays inside this fixture.
@@ -228,7 +229,15 @@ test.skipIf(process.platform === "win32")("offline detection finds dbt without r
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true })
     expect(fs.existsSync(ran)).toBe(false)
+
+    // Only the fixture binary is on PATH, so the resolver cannot launch external `which`.
+    delete process.env.ALTIMATE_DBT_PATH
+    process.env.PATH = path.join(dir, "bin")
+    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true })
+    expect(fs.existsSync(ran)).toBe(false)
   } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
     for (const [key, value] of [["ALTIMATE_OFFLINE", previous.offline], ["ALTIMATE_DBT_PATH", previous.dbt]] as const) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

@@ -38,6 +38,9 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "clickhouse", host: "127.0.0.1", protocol: "HTTPS" },
     { type: "sqlserver", host: "localhost", authentication: "sql" },
     { type: "oracle", host: "localhost", protocol: "tcp" },
+    { type: "mongo", host: "localhost", directConnection: true },
+    { type: "mongodb", url: "mongodb://localhost/db?DIRECTCONNECTION=true" },
+    { type: "mongodb", connection_string: "mongodb://localhost/db", direct_connection: true },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -64,6 +67,8 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "postgres", connection_string: "postgresql://localhost/db?hostaddr=10.0.0.5" },
     { type: "postgres", connection_string: "postgresql:///analytics" },
     { type: "sqlite", path: "file:////server/share/db.sqlite" },
+    { type: "sqlite", path: "file:///%5Cserver/share/db.sqlite" },
+    { type: "duckdb", path: "file:///tmp/%zz.duckdb" },
     { type: "postgres", host: "/tmp,db.example.com" },
     { type: "mysql", host: "/tmp/mysql" },
     { type: "mongodb", connection_string: "mongodb+srv://localhost/db" },
@@ -77,9 +82,24 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "clickhouse", host: "127.0.0.1", protocol: "http://evil.example/#" },
     { type: "trino", host: "localhost", protocol: "https://evil.example" },
     { type: "mongodb", host: "localhost", direct_connection: false },
+    { type: "mongodb", host: "localhost" },
+    { type: "mongo", connection_string: "mongodb://localhost/db" },
+    { type: "mongodb", url: "mongodb://localhost/db?directConnection=true", direct_connection: false },
+    { type: "mongodb", url: "mongodb://localhost/db?directConnection=true&proxyHost=proxy.example.com" },
     { type: "oracle", tns_name: "PROD_DB" },
     { type: "oracle" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
+})
+
+test("offline MongoDB errors show how to enable direct connections", () => {
+  for (const config of [
+    { type: "mongodb", host: "localhost" },
+    { type: "mongo", host: "localhost", direct_connection: false },
+    { type: "mongodb", url: "mongodb://localhost/db?directConnection=false" },
+  ])
+    expect(() => assertLocalConnection(config)).toThrow(
+      "Set direct_connection to true or directConnection=true in the connection URI.",
+    )
 })
 
 test("dbt-duckdb settings are refused only when they point at something remote", async () => {

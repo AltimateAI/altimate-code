@@ -3,6 +3,17 @@ import { expect, test } from "bun:test"
 import path from "node:path"
 import { Offline } from "../../src/config/offline"
 
+test("the offline OAuth guard is covered by the existing lifecycle marker", async () => {
+  const source = await Bun.file(new URL("../../src/mcp/index.ts", import.meta.url)).text()
+  const start = source.indexOf("// altimate_change start — a flow belongs to a lifecycle call")
+  const end = source.indexOf("// altimate_change end", start)
+  expect(start).toBeGreaterThan(-1)
+  const block = source.slice(start, end)
+  expect(block).toContain('if (Offline.enabled()) throw new Error("Authenticate MCP servers while online.")')
+  expect(block.match(/\/\/ altimate_change start/g)).toHaveLength(1)
+  expect(block).toContain("const lifecycle = yield* InstanceState.get(state)")
+})
+
 test("loopback checks accept only literal local addresses", () => {
   for (const url of ["http://localhost:3000/mcp", "https://127.0.0.1/mcp", "http://[::1]:3000/mcp"])
     expect(Offline.isLocalURL(url)).toBe(true)
