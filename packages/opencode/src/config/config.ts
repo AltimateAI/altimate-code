@@ -337,6 +337,8 @@ export const layer = Layer.effect(
     const env = yield* Env.Service
     const npmSvc = yield* Npm.Service
     const http = yield* HttpClient.HttpClient
+    // altimate_change — preserve the source of any remote load failure without changing its public error.
+    const remoteLoadFailures = new WeakSet<object>()
 
     const readConfigFile = (filepath: string) => fs.readFileStringSafe(filepath).pipe(Effect.orDie)
 
@@ -586,7 +588,10 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(auth)) {
-          if (value.type === "wellknown") {
+          // altimate_change start — classify fetch, decode, and schema failures as remote for retry backoff.
+          if (value.type !== "wellknown") continue
+          yield* Effect.gen(function* () {
+            // altimate_change end
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
             const wellknownURL = `${url}/.well-known/opencode`
@@ -631,7 +636,12 @@ export const layer = Layer.effect(
             )
             yield* merge(source, next, "global")
             yield* Effect.logDebug("loaded remote config from well-known", { url })
-          }
+            // altimate_change start — retain the original error for other config consumers.
+          }).pipe(Effect.tapCause((cause) => Effect.sync(() => {
+            const failure = Cause.squash(cause)
+            if (failure && typeof failure === "object") remoteLoadFailures.add(failure)
+          })))
+          // altimate_change end
         }
 
         const global = Object.keys(authEnv).length ? yield* loadGlobal(authEnv) : yield* getGlobal()
@@ -980,7 +990,7 @@ export const layer = Layer.effect(
         return configsWithUnresolvedOrg.has(result.value) ? result.value : undefined
       }
       const failure = Cause.squash(result.cause)
-      if (failure instanceof RemoteUnavailableError || failure instanceof RemoteAuthError) return failure
+      if (failure && typeof failure === "object" && remoteLoadFailures.has(failure)) return failure
     }
 
     const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {

@@ -828,6 +828,29 @@ test("telemetry sends held events after an organization config fetch recovers", 
   )
 }
 
+for (const [format, body] of [
+  ["JSON", "{"],
+  ["schema", JSON.stringify({ config: { telemetry: { disabled: "invalid" } } })],
+]) {
+  let requests = 0
+  const client = HttpClient.make((request) => {
+    requests++
+    return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(body, {
+      headers: { "content-type": "application/json" },
+    })))
+  })
+  configIt({ auth: wellKnownAuth("https://config.example.invalid"), client }).instance(
+    `invalid well-known config ${format} backs off on repeated telemetry retries`,
+    () =>
+      Effect.gen(function* () {
+        expect(Exit.isFailure(yield* Config.use.get().pipe(Effect.exit))).toBe(true)
+        expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
+        expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
+        expect(requests).toBe(2)
+      }),
+  )
+}
+
 it.instance("a telemetry retry reloads a repaired config after a cached load failure", () =>
   Effect.gen(function* () {
     const { directory } = yield* TestInstance
