@@ -603,15 +603,16 @@ export const layer = Layer.effect(
               options: {},
               native: false,
             }
-          if (value.model) {
-            // altimate_change start — re-brand fork ProviderID/ModelID to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+          // altimate_change start — retain an empty explicit model so resolution can reject it
+          if (value.model !== undefined) {
+            // Re-brand fork ProviderID/ModelID to core ProviderV2.ID/ModelV2.ID (identity at runtime).
             const parsed = Provider.parseModel(value.model)
             item.model = {
               providerID: ProviderV2.ID.make(parsed.providerID),
               modelID: ModelV2.ID.make(parsed.modelID),
             }
-            // altimate_change end
           }
+          // altimate_change end
           item.variant = value.variant ?? item.variant
           item.prompt = value.prompt ?? item.prompt
           item.description = value.description ?? item.description
