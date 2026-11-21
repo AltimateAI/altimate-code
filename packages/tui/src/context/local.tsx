@@ -367,20 +367,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     // altimate_change start — upstream_fix: keep unavailable explicit selections visible and recoverable.
     let reportedInvalidModel: string | undefined
-    function validateModel(model: ModelRef) {
-      if (sync.status !== "complete") return false
+    function validateModel(model: ModelRef, passive = false) {
+      if (sync.status === "loading") return false
       if (isModelValid(model)) {
         reportedInvalidModel = undefined
         return true
       }
       const key = JSON.stringify([model.providerID, model.modelID])
-      if (reportedInvalidModel === key) return false
+      if (passive && reportedInvalidModel === key) return false
+      const message = `${!model.providerID && !model.modelID ? "Empty model value" : `Model ${model.providerID}/${model.modelID} is not available`}. Choose an available model with /models or correct --model. Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).`
       reportedInvalidModel = key
-      toast.show({
-        variant: "error",
-        message: `${!model.providerID && !model.modelID ? "Empty model value" : `Model ${model.providerID}/${model.modelID} is not available`}. Choose an available model with /models or correct --model. Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).`,
-        duration: 10000,
-      })
+      if (toast.currentToast?.message !== message) toast.show({ variant: "error", message, duration: 10000 })
       return false
     }
     // altimate_change end
@@ -1036,7 +1033,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a || route.data.type !== "home") return
           const picked = pickedModels[pickerKey(a.name, "home")]
-          if (picked) setPickedModels(pickerKey(a.name, sessionID), { ...picked })
+          if (!picked) return
+          batch(() => {
+            setPickedModels(pickerKey(a.name, sessionID), { ...picked })
+            setPickedModels(pickerKey(a.name, "home"), undefined)
+          })
         },
         // altimate_change end
         // altimate_change start — migrate Big Pickle defaults after managed-model consent
@@ -1339,9 +1340,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     createEffect(() => {
       // altimate_change start — upstream_fix: explain invalid explicit choices without substituting a model.
-      if (sync.status !== "complete" || !model.ready) return
+      if (sync.status === "loading" || !model.ready) return
       const value = model.current()
-      if (value) validateModel(value)
+      if (value) validateModel(value, true)
       // altimate_change end
     })
 

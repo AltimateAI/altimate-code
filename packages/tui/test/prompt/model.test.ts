@@ -1,4 +1,4 @@
-import { expandTrackedPastedText } from "../../src/prompt/part"
+import { expandEnhancedPrompt, expandTrackedPastedText } from "../../src/prompt/part"
 import { expect, test } from "bun:test"
 import { captureDraftRevision, isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../src/prompt/model"
 
@@ -96,4 +96,14 @@ test("the production session-setup guard detects an edit made while creation is 
 
   expect(await pending).toEqual({ result: "ses_created", changed: true })
   expect(draft).toEqual({ input: "Edited draft", mode: "shell", parts: [] })
+})
+
+
+test("expands pasted placeholders after enhancement and preserves originals if the rewriter drops one", () => {
+  const placeholder = "[Pasted ~10 lines]"
+  const parts = [{ type: "text", text: "original pasted text", source: { text: { value: placeholder } } }]
+  const originalExpanded = "Review original pasted text"
+  expect(expandEnhancedPrompt(`Please review ${placeholder} carefully.`, parts, originalExpanded))
+    .toBe("Please review original pasted text carefully.")
+  expect(expandEnhancedPrompt("Please review it carefully.", parts, originalExpanded)).toBe(originalExpanded)
 })

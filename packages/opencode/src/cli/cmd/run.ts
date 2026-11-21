@@ -733,6 +733,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
         model: { providerID: user.model.providerID, modelID: user.model.modelID },
         variant: "variant" in user && typeof user.variant === "string" ? user.variant : user.model.variant,
       })
+      const readCommandSelection = async (sessionID: string, signal: AbortSignal) => {
+        if (commandSelection) return commandSelection
+        const { data } = await sdk.session.message({ sessionID, messageID: sendMessageID }, { signal })
+        if (data?.info.role === "user") commandSelection = selectionFromUser(data.info)
+        return commandSelection
+      }
       const beginRequest = (messageID: string) => {
         // The persisted request boundary includes requests from other attached clients.
         // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
@@ -871,6 +877,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
         })
         // altimate_change end
       }
+      let nextCommandSelectionLookup = 0
+      let lookingUpCommandSelection = false
       const checkTimeBudget = () => {
         if (!sessionID || !workActive || timeExhausted()) return
         const deadline = RunTimeBudget.deadline(elapsedSeconds(), timeBudget)
@@ -892,8 +900,20 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
         // altimate_change start — partial emitted text is not proof that an active request finished
         if (deadline !== "soft" || timeBudgetDeadline !== "none") return
-        // Wait for the command's accepted model before saving its synthetic reminder.
-        if (args.command && !commandSelection) return
+        if (args.command && !commandSelection) {
+          // The persisted request also covers a missed message.updated event. Keep
+          // the periodic budget check responsive while the lookup is in flight.
+          if (!lookingUpCommandSelection && Date.now() >= nextCommandSelectionLookup) {
+            lookingUpCommandSelection = true
+            void readCommandSelection(sessionID, AbortSignal.timeout(1000))
+              .catch(() => undefined)
+              .finally(() => {
+                lookingUpCommandSelection = false
+                nextCommandSelectionLookup = Date.now() + 250
+              })
+          }
+          return
+        }
         // altimate_change end
         timeBudgetDeadline = "soft"
         tracer?.setRunBudget(budgetMetadata())
@@ -1823,10 +1843,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
           beginRequest(messageID)
           const promptPromise = (async (): Promise<SendResult | undefined> => {
             // Commands may override the CLI model. Read the original request when SSE missed it.
-            if (args.command && !commandSelection) {
-              const { data } = await sdk.session.message({ sessionID, messageID: sendMessageID }, { signal: turnAbort.signal })
-              if (data?.info.role !== "user") throw new Error("The command did not record a model for its follow-up")
-              commandSelection = selectionFromUser(data.info)
+            if (args.command && !(await readCommandSelection(sessionID, turnAbort.signal))) {
+              throw new Error("The command did not record a model for its follow-up")
             }
             // The previous turn may have published idle just before releasing its
             // session lock. Retry that narrow race, but only after definitive

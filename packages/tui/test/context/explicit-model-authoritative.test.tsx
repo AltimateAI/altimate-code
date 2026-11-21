@@ -68,6 +68,7 @@ const AGENT = {
 
 async function mount(args: {
   providersReady?: Promise<void>
+  mcpReady?: Promise<void>
   model?: string
   configModel?: string
   agentModel?: { providerID: string; modelID: string }
@@ -109,8 +110,11 @@ async function mount(args: {
 
   const inner = createFetch((url) => {
     if (url.pathname === "/instance/dispose") return json({})
-    if (url.pathname === "/mcp" && args.providersReady) return args.providersReady.then(() => json({}))
-    if (url.pathname === "/config/providers") return json({ providers: [ZEN_PROVIDER, BASE_PROVIDER], default: {} })
+    if (url.pathname === "/mcp" && args.mcpReady) return args.mcpReady.then(() => json({}))
+    if (url.pathname === "/config/providers") {
+      const data = { providers: [ZEN_PROVIDER, BASE_PROVIDER], default: {} }
+      return args.providersReady ? args.providersReady.then(() => json(data)) : json(data)
+    }
     if (url.pathname === "/provider")
       return json({ all: [ZEN_PROVIDER, BASE_PROVIDER], default: {}, connected: ["opencode", "altimate-free"] })
     if (url.pathname === "/config") return json(args.configModel === undefined ? {} : { model: args.configModel })
@@ -135,7 +139,11 @@ async function mount(args: {
   }
 
   const app = await testRender(() => (
-    <TestTuiContexts directory={tmp.path} paths={{ home: tmp.path, state, worktree: tmp.path }}>
+    <TestTuiContexts
+      directory={tmp.path}
+      paths={{ home: tmp.path, state, worktree: tmp.path }}
+      skipInitialLoading={args.providersReady !== undefined}
+    >
       <ExitProvider exit={() => {}}>
         <ArgsProvider model={args.model}>
           <KVProvider>
@@ -166,7 +174,8 @@ async function mount(args: {
     () =>
       localAccessor !== undefined &&
       localAccessor.model.ready &&
-      (args.providersReady !== undefined || syncAccessor?.status === "complete"),
+      (args.providersReady !== undefined ||
+        (args.mcpReady !== undefined ? syncAccessor?.status === "partial" : syncAccessor?.status === "complete")),
   )
   const local = localAccessor!
 
@@ -352,15 +361,16 @@ test("unavailable restored session stays selected instead of falling back", () =
     }
   }))
 
-test("provider refresh does not repeat the same invalid-model toast", () =>
+test("provider refresh stays quiet and a new invalid submission reports the error again", () =>
   withIsolatedState(async () => {
     const mounted = await mount({ model: "ollama/missing" })
     try {
       await waitUntil(() => mounted.toast.currentToast?.variant === "error")
       mounted.toast.show({ variant: "info", message: "Another notification" })
       await mounted.sync.bootstrap()
-      expect(mounted.local.model.validate()).toBe(false)
       expect(mounted.toast.currentToast?.message).toBe("Another notification")
+      expect(mounted.local.model.validate()).toBe(false)
+      expect(mounted.toast.currentToast?.message).toContain("ollama/missing")
       mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
       expect(mounted.local.model.validate()).toBe(true)
       expect(mounted.local.model.validate({ providerID: "ollama", modelID: "missing" })).toBe(false)
@@ -384,6 +394,19 @@ test("incomplete bootstrap defers validation without an unavailable-model toast"
       expect(mounted.toast.currentToast).toBeNull()
     } finally {
       ready.resolve()
+      await mounted.cleanup()
+    }
+  }))
+
+test("validates loaded models without waiting for ancillary MCP bootstrap", () =>
+  withIsolatedState(async () => {
+    const mcp = Promise.withResolvers<void>()
+    const mounted = await mount({ model: "opencode/zen-model", mcpReady: mcp.promise })
+    try {
+      expect(mounted.sync.status).toBe("partial")
+      expect(mounted.local.model.validate()).toBe(true)
+    } finally {
+      mcp.resolve()
       await mounted.cleanup()
     }
   }))
@@ -499,6 +522,23 @@ test("picking a model in another conversation preserves both choices for the sam
       expect(mounted.local.model.current()).toEqual(first)
       mounted.route.navigate({ type: "session", sessionID: "ses_second" })
       expect(mounted.local.model.current()).toEqual(second)
+    } finally {
+      await mounted.cleanup()
+    }
+  }))
+
+
+test("a home picker correction moves to its new session without changing later home drafts", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({ model: "ollama/missing" })
+    try {
+      const chosen = { providerID: "altimate-free", modelID: "altimate-base" }
+      mounted.local.model.set(chosen)
+      mounted.local.model.adoptSession("ses_chosen")
+      mounted.route.navigate({ type: "session", sessionID: "ses_chosen" })
+      expect(mounted.local.model.current()).toEqual(chosen)
+      mounted.route.navigate({ type: "home" })
+      expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
     } finally {
       await mounted.cleanup()
     }

@@ -39,7 +39,7 @@ import { promptOffsetWidth } from "../../prompt/display"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { usePromptHistory, type PromptInfo } from "../../prompt/history"
 import { computePromptTraits } from "../../prompt/traits"
-import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
+import { expandEnhancedPrompt, expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
@@ -398,7 +398,7 @@ export function Prompt(props: PromptProps) {
 
     if (sessionID !== syncedSessionID) {
       // altimate_change start — restore session models after provider and local state bootstrap
-      if (!sessionID || !msg || sync.status !== "complete" || !local.model.ready) return
+      if (!sessionID || !msg || sync.status === "loading" || !local.model.ready) return
       // altimate_change end
 
       syncedSessionID = sessionID
@@ -1087,11 +1087,13 @@ export function Prompt(props: PromptProps) {
   // `submitInner`, not this snapshot, so the two can never drift apart when nothing changed;
   // `unwrap` matches the same store-to-plain-object pattern already used elsewhere in this file,
   // e.g. the prompt stash below.)
+  const [waitForCommands, setWaitForCommands] = createSignal(false)
+  const modelPending = () => sync.status === "loading" || !local.model.ready
   const deferredSubmit = createDeferredRetry(
-    () => readyPending() || sync.status !== "complete" || !local.model.ready,
+    () => readyPending() || modelPending() || (waitForCommands() && !sync.data.commandsReady),
     () => void submit(),
     {
-      getRevision: () => unwrap(store.prompt),
+      getRevision: () => ({ ...unwrap(store.prompt), mode: store.mode }),
     },
   )
   // altimate_change end
@@ -1125,15 +1127,13 @@ export function Prompt(props: PromptProps) {
     if (workspace.creating() || move.creating()) return false
     if (auto()?.visible) return false
     if (!store.prompt.input) return false
-    const agent = local.agent.current()
-    if (!agent) return false
+    // altimate_change start — wait for the required bootstrap data before resolving the agent
     const trimmed = store.prompt.input.trim()
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       void exit()
       return true
     }
-    // altimate_change start — upstream_fix: reject unavailable explicit models before onboarding or session
-    // creation; preserve the draft so choosing an available model is enough to retry.
+    // Validate the model before session creation so a rejected draft stays editable.
     const currentMode = store.mode
     const draftText = store.prompt.input
     const draft = captureDraftRevision(() => ({
@@ -1151,6 +1151,14 @@ export function Prompt(props: PromptProps) {
       }),
     )
     const commandName = promptText.startsWith("/") ? promptText.split("\n")[0].split(" ")[0].slice(1) : undefined
+    const needsCommands = currentMode !== "shell" && commandName !== undefined
+    setWaitForCommands(needsCommands)
+    if (modelPending() || (needsCommands && !sync.data.commandsReady)) {
+      deferredSubmit.defer()
+      return false
+    }
+    const agent = local.agent.current()
+    if (!agent) return false
     const command = sync.data.command.find((item) => item.name === commandName)
     const commandAgent = resolveCommandAgent(sync.data.agent, command?.agent)
     const chatModel = local.model.current()
@@ -1163,10 +1171,6 @@ export function Prompt(props: PromptProps) {
       current: chatModel,
     })
     if (selection.required) {
-      if (sync.status !== "complete" || !local.model.ready) {
-        deferredSubmit.defer()
-        return false
-      }
       if (selection.model && !local.model.validate(selection.model)) return false
       if (selection.subtask) {
         if (!selection.parent) {
@@ -1266,12 +1270,11 @@ export function Prompt(props: PromptProps) {
       }
       // altimate_change end
 
-      // altimate_change start — check the submitted revision when creation returns
+      // altimate_change start — check the submitted revision and omit model metadata for local commands
       const { result: res, changed } = await draft.after(sdk.client.session.create({
         directory,
         workspace: workspaceID,
         agent: agent.name,
-        // altimate_change start — omit inference model metadata when creating a local command session
         model: selectedModel
           ? {
               providerID: selectedModel.providerID,
@@ -1279,7 +1282,6 @@ export function Prompt(props: PromptProps) {
               variant,
             }
           : undefined,
-        // altimate_change end
       }))
       changedDuringCreation = changed
       // altimate_change end
@@ -1334,14 +1336,13 @@ export function Prompt(props: PromptProps) {
     // enhancement. The server endpoint owns the fork LLM/config code and returns the original text
     // on failure, so sending remains best-effort.
     const experimental = sync.data.config.experimental as { auto_enhance_prompt?: boolean } | undefined
-    if (experimental?.auto_enhance_prompt === true && currentMode === "normal" && !inputText.startsWith("/")) {
-      const original = inputText
+    if (experimental?.auto_enhance_prompt === true && currentMode === "normal" && !promptText.startsWith("/")) {
+      const original = draftText
       toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
       const enhanced = await requestAutoEnhancedPrompt(sdk, original)
       if (draft.changed() || input.isDestroyed) return keepEditedDraft()
       if (enhanced !== original) {
-        inputText = enhanced
-        setStore("prompt", "input", enhanced)
+        inputText = expandEnhancedPrompt(enhanced, store.prompt.parts, promptText)
       }
     }
 

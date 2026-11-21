@@ -75,6 +75,8 @@ export const {
       provider_auth: Record<string, ProviderAuthMethod[]>
       agent: Agent[]
       command: Command[]
+      // altimate_change — commands finish loading independently of ancillary startup work
+      commandsReady: boolean
       permission: {
         [sessionID: string]: PermissionRequest[]
       }
@@ -148,6 +150,8 @@ export const {
       // altimate_change end
       question: {},
       command: [],
+      // altimate_change — do not guess whether an unknown slash command uses a model
+      commandsReady: false,
       provider: [],
       provider_default: {},
       session: [],
@@ -778,7 +782,14 @@ export const {
           void Promise.all([
             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
+            // altimate_change start — slash commands depend on this list, ordinary chat does not
+            sdk.client.command.list({ workspace }).then((x) => {
+              batch(() => {
+                setStore("command", reconcile(x.data ?? []))
+                setStore("commandsReady", true)
+              })
+            }),
+            // altimate_change end
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
             sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
             sdk.client.experimental.resource

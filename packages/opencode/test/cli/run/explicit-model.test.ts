@@ -2,6 +2,8 @@ import { describe, expect } from "bun:test"
 import path from "node:path"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { Effect } from "effect"
+import { SessionTermination } from "../../../src/session/termination"
+import { reply } from "../../lib/llm-server"
 import { testProviderConfig } from "../../lib/test-provider"
 import { cliIt } from "../../lib/cli-process"
 
@@ -96,6 +98,86 @@ describe("run model resolution", () => {
         expect((yield* llm.inputs).map((body) => body.model)).toEqual(["test-model", "test-model"])
       }),
     90_000,
+  )
+
+  cliIt.live(
+    "sends the command soft-budget reminder when its user event is missing",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              command: { local: { model: "test/test-model", template: "Give the best available answer" } },
+            }),
+          },
+        })
+        let dropped = 0
+        let lookups = 0
+        const proxy = Bun.serve({
+          port: 0,
+          hostname: "127.0.0.1",
+          idleTimeout: 0,
+          async fetch(request) {
+            const url = new URL(request.url)
+            if (request.method === "GET" && /\/session\/[^/]+\/message\/[^/]+$/.test(url.pathname)) lookups++
+            const response = await fetch(new Request(new URL(url.pathname + url.search, server.url), request))
+            if (url.pathname !== "/event" || !response.body) return response
+            let pending = ""
+            const events = new TransformStream<string, string>({
+              transform(chunk, controller) {
+                pending += chunk.replaceAll("\r", "")
+                const frames = pending.split("\n\n")
+                pending = frames.pop() ?? ""
+                for (const frame of frames) {
+                  if (frame.includes('"type":"message.updated"') && frame.includes('"role":"user"')) dropped++
+                  else controller.enqueue(frame + "\n\n")
+                }
+              },
+            })
+            return new Response(
+              response.body.pipeThrough(new TextDecoderStream()).pipeThrough(events).pipeThrough(new TextEncoderStream()),
+              { headers: response.headers, status: response.status },
+            )
+          },
+        })
+        try {
+          const sdk = createOpencodeClient({ baseUrl: server.url, throwOnError: true })
+          const { data: session } = yield* Effect.promise(() => sdk.session.create({ title: "Budgeted command" }))
+          if (!session) throw new Error("Session creation returned no data")
+          yield* llm.push(reply().text("Work in progress.").hang())
+          yield* llm.textMatch(
+            ({ body }) => JSON.stringify(body).includes(SessionTermination.REPLY_BEFORE_TIME_BUDGET),
+            "Answered on the command model",
+          )
+          const result = yield* opencode.spawn(
+            [
+              "run",
+              "--attach", proxy.url.origin,
+              "--session", session.id,
+              "--command", "local",
+              "--model", "unused/model",
+              "--time-budget", "18",
+              "--no-trace",
+              "--format", "json",
+            ],
+            { bunRun: true, timeoutMs: 35_000 },
+          )
+          opencode.expectExit(result, 0)
+          const events = opencode.parseJsonEvents(result.stdout)
+          expect(dropped).toBeGreaterThan(0)
+          expect(lookups).toBeGreaterThan(0)
+          expect(events.filter((event) => event.type === "time_budget_warning")).toHaveLength(1)
+          expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+          expect(result.stdout).toContain("Answered on the command model")
+          expect((yield* llm.inputs).map((body) => body.model)).toEqual(["test-model", "test-model"])
+        } finally {
+          proxy.stop(true)
+        }
+      }),
+    60_000,
   )
 
   cliIt.live(

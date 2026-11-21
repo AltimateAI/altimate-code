@@ -62,7 +62,7 @@ function DeferThenRetryHarness(props: {
   setPromptText: (value: string) => void
   /** The SAME object on every call, mutated in place by `setPromptText` — exactly what
    *  `unwrap(store.prompt)` hands component/prompt/index.tsx (cursor 3987286236). */
-  livePrompt: () => { input: string }
+  livePrompt: () => { input: string; mode: "normal" | "shell" }
   onSend: (value: string) => void
   onDiscard: () => void
   exposeSubmit: (fn: () => boolean) => void
@@ -100,7 +100,10 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
   const ready = () => !pending() && options.willBeReady
   const [promptText, setPromptTextSignal] = createSignal(options.promptText ?? "hello from before kv.ready")
   // One object, mutated in place — see `livePrompt` on the harness props.
-  const livePrompt = { input: promptText() }
+  const livePrompt: { input: string; mode: "normal" | "shell" } = {
+    input: promptText(),
+    mode: "normal",
+  }
   const setPromptText = (value: string) => {
     livePrompt.input = value
     setPromptTextSignal(value)
@@ -133,6 +136,9 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
     setPending,
     promptText,
     setPromptText,
+    setMode(mode: "normal" | "shell") {
+      livePrompt.mode = mode
+    },
     submitSpy,
     discarded: () => discarded,
     cleanup() {
@@ -248,3 +254,19 @@ test.serial("defer-then-retry: a submit issued once already ready sends immediat
   }
 })
 // altimate_change end
+
+
+test.serial("a mode change cancels an unchanged deferred draft until Enter is pressed again", async () => {
+  const h = await mountHarness({ initialPending: true, willBeReady: true })
+  try {
+    expect(h.attemptSubmit()).toBe(false)
+    h.setMode("shell")
+    h.setPending(false)
+    await Bun.sleep(20)
+    expect(h.submitSpy).toEqual([])
+    expect(h.attemptSubmit()).toBe(true)
+    expect(h.submitSpy).toEqual(["hello from before kv.ready"])
+  } finally {
+    h.cleanup()
+  }
+})

@@ -12,6 +12,19 @@ export function expandPastedTextPlaceholders(text: string, parts: readonly unkno
   }, text)
 }
 
+// altimate_change start — retain pasted content if enhancement removes its placeholder
+export function expandEnhancedPrompt(enhanced: string, parts: readonly unknown[], originalExpanded: string) {
+  const pasted = parts.filter(isPastedTextPart)
+  const placeholders = pasted.map((part) => part.source.text.value)
+  let remaining = enhanced
+  for (const placeholder of placeholders) {
+    if (!remaining.includes(placeholder)) return originalExpanded
+    remaining = remaining.replace(placeholder, "")
+  }
+  return expandPastedTextPlaceholders(enhanced, pasted)
+}
+// altimate_change end
+
 function isPastedTextPart(part: unknown): part is { type: "text"; text: string; source: { text: { value: string } } } {
   if (!part || typeof part !== "object" || !("type" in part) || part.type !== "text") return false
   if (!("text" in part) || typeof part.text !== "string" || !("source" in part)) return false
