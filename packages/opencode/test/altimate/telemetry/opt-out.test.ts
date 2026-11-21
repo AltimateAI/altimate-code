@@ -522,7 +522,10 @@ describe("telemetry opt-out", () => {
     expect(Telemetry.optOutState()).toBe("enabled")
     await Telemetry.shutdown()
 
-    // Between sessions, outside any project.
+    // Between sessions, outside any project: the full config cannot load here, and the files alone
+    // read as unreadable (a well-known login), so only the earlier enabled decision keeps it on.
+    configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+    expect(await TelemetryConfig.resolve(home)).toBe("unreadable")
     trackStartup()
     await Telemetry.init()
     expect(Telemetry.isEnabled()).toBe(true)
