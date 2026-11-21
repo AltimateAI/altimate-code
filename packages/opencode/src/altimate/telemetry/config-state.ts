@@ -131,8 +131,9 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
   if (local === undefined && wellKnown) return true
 
   const dbPath = Database.path()
-  // An in-memory database starts empty each process: no organization was selected before this read.
-  if (dbPath === ":memory:") return false
+  // An in-memory database belongs to the connection that opened it: this probe cannot see whether an
+  // organization was selected there, so the answer is unknown.
+  if (dbPath === ":memory:") return true
 
   // Only read a WAL database. In rollback-journal mode even a short SELECT
   // takes a shared lock that can block a writer's commit.
