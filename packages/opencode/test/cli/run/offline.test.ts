@@ -278,7 +278,7 @@ test("offline model can execute a local bash command", async () => {
     ])
     expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
     const marker = await Bun.file(path.join(f.project, "shell-marker")).text().catch(() => "")
-    expect({ marker, stdout, stderr }).toMatchObject({ marker: `shell-ran:corp.example,localhost,127.0.0.1,[::1]|${PROXY}|1` })
+    expect({ marker, stdout, stderr }).toMatchObject({ marker: `shell-ran:corp.example,localhost,127.0.0.1,[::1],0.0.0.0|${PROXY}|1` })
     expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })

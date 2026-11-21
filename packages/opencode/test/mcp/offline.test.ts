@@ -17,12 +17,19 @@ test("the fetch guard allows loopback, refuses everything else and keeps the use
   const module = path.resolve(import.meta.dir, "../../src/config/offline.ts")
   const script = `
     const { Offline } = await import(${JSON.stringify(module)})
-    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("local") })
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => {
+      const path = new URL(request.url).pathname
+      if (path === "/local-redirect") return Response.redirect(new URL("/", request.url).href, 307)
+      if (path === "/remote-redirect") return Response.redirect("https://example.com/", 302)
+      return new Response("local")
+    } })
     Offline.start()
     const local = await (await fetch(server.url)).text()
+    const followed = await (await fetch(new URL("/local-redirect", server.url))).text()
+    const away = await fetch(new URL("/remote-redirect", server.url)).then(() => "sent", (error) => error.message)
     const remote = await fetch("https://example.com/").then(() => "sent", (error) => error.message)
     server.stop(true)
-    console.log(JSON.stringify({ local, remote, env: [process.env.ALTIMATE_OFFLINE, process.env.HTTPS_PROXY, process.env.NO_PROXY] }))`
+    console.log(JSON.stringify({ local, followed, away, remote, env: [process.env.ALTIMATE_OFFLINE, process.env.HTTPS_PROXY, process.env.NO_PROXY] }))`
   const proc = Bun.spawn([process.execPath, "-e", script], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, HTTPS_PROXY: "http://proxy.example:3128", NO_PROXY: "corp.example" },
     stdout: "pipe",
@@ -32,8 +39,10 @@ test("the fetch guard allows loopback, refuses everything else and keeps the use
   expect({ code: await proc.exited, stderr }).toMatchObject({ code: 0 })
   expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({
     local: "local",
+    followed: "local",
+    away: "Offline mode blocked a redirect away from this machine.",
     remote: "Offline mode allows network requests only to the configured model endpoint.",
-    env: ["1", "http://proxy.example:3128", "corp.example,localhost,127.0.0.1,[::1]"],
+    env: ["1", "http://proxy.example:3128", "corp.example,localhost,127.0.0.1,[::1],0.0.0.0"],
   })
 })
 

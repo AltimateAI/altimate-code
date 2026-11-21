@@ -66,7 +66,8 @@ async function findOptIn(directory: string): Promise<boolean> {
 }
 
 /** Hosts the fetch guard accepts as this machine. Bun matches only these exact names in NO_PROXY. */
-const LOCAL_FETCH_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
+const LOCAL_FETCH_HOSTS = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]
+const MAX_LOCAL_REDIRECTS = 5
 
 let networkFetch: typeof fetch | undefined
 
@@ -90,10 +91,18 @@ export function start() {
   networkFetch = globalThis.fetch
   globalThis.fetch = Object.assign(
     async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-      if (!isLocalURL(input instanceof Request ? input.url : input.toString()))
-        throw new Error("Offline mode allows network requests only to the configured model endpoint.")
-      // A local endpoint must not redirect to a remote host.
-      return networkFetch!(input, { ...init, redirect: "error" })
+      let url = input instanceof Request ? input.url : input.toString()
+      if (!isLocalURL(url)) throw new Error("Offline mode allows network requests only to the configured model endpoint.")
+      // Follow redirects only while they stay on this machine.
+      let response = await networkFetch!(input, { ...init, redirect: "manual" })
+      for (let hop = 0; hop < MAX_LOCAL_REDIRECTS && response.status >= 300 && response.status < 400; hop++) {
+        const location = response.headers.get("location")
+        if (!location) return response
+        url = new URL(location, url).href
+        if (!isLocalURL(url)) throw new Error("Offline mode blocked a redirect away from this machine.")
+        response = await networkFetch!(url, { ...init, redirect: "manual" })
+      }
+      return response
     },
     { preconnect: () => {} },
   )
@@ -151,7 +160,7 @@ export function isLocalURL(value: string | URL) {
 
 export function assertLocalMcp(config: { type: string; url?: string }) {
   if (enabled() && config.type === "remote" && !isLocalURL(config.url ?? ""))
-    throw new Error("Offline mode allows only stdio MCP servers or ones at localhost, 127.0.0.1 or [::1].")
+    throw new Error("Offline mode allows only stdio MCP servers or ones on this machine (localhost, 127.0.0.1, [::1] or 0.0.0.0).")
 }
 
 export * as Offline from "./offline"

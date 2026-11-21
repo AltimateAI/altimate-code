@@ -427,7 +427,7 @@ export const layer = Layer.effect(
       if (Offline.enabled() && !Offline.isLocalURL(mcp.url)) {
         return {
           client: undefined as MCPClient | undefined,
-          status: { status: "failed" as const, error: "Offline mode allows only stdio MCP servers or ones at localhost, 127.0.0.1 or [::1]." },
+          status: { status: "failed" as const, error: "Offline mode allows only stdio MCP servers or ones on this machine (localhost, 127.0.0.1, [::1] or 0.0.0.0)." },
           transport: undefined as TransportLabel | undefined,
         }
       }

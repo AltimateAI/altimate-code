@@ -21,7 +21,9 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
     if (!isLocalPath(config.path)) throw new Error(DENIED)
     return
   }
-  if (config.ssh_host) throw new Error(DENIED)
+  // Only types whose driver connects to the configured host can be judged; account- or project-addressed
+  // warehouses (Snowflake, BigQuery, Databricks and others) are refused.
+  if (!HOST_ADDRESSED.has(type) || config.ssh_host) throw new Error(DENIED)
   // A Unix socket is a local file.
   if (config.socketPath !== undefined && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/")))
     throw new Error(DENIED)
@@ -49,5 +51,9 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   if (hosts.length === 0 && url === undefined && config.socketPath === undefined && !LOCALHOST_BY_DEFAULT.has(type))
     throw new Error(DENIED)
 }
+
+const HOST_ADDRESSED = new Set([
+  "postgres", "postgresql", "redshift", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "trino", "oracle", "mongodb", "mongo",
+])
 
 const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo"])

@@ -95,7 +95,9 @@ function hasDuckdbAdapter(dbtPath: string): boolean {
   }
   const lib = path.join(binDir, "..", process.platform === "win32" ? "Lib" : "lib")
   const pythons = process.platform === "win32" ? [""] : readdirSafe(lib).filter((name) => name.startsWith("python"))
-  return pythons.some((python) => existsSync(path.join(lib, python, "site-packages", "dbt", "adapters", "duckdb")))
+  return pythons.some((python) =>
+    ["site-packages", "dist-packages"].some((dir) => existsSync(path.join(lib, python, dir, "dbt", "adapters", "duckdb"))),
+  )
 }
 
 function readdirSafe(dir: string): string[] {

@@ -42,6 +42,9 @@ function remoteDuckdbSetting(output: Record<string, any>) {
   return (
     values.some((value) => value !== undefined && !isLocalPath(value)) ||
     output.remote !== undefined ||
+    // Only DuckDB and SQLite files can be judged; other attachment types name a database server.
+    (Array.isArray(output.attach) &&
+      output.attach.some((item: any) => item?.type !== undefined && !["duckdb", "sqlite"].includes(item.type))) ||
     (Array.isArray(output.filesystems) && output.filesystems.length > 0) ||
     (Array.isArray(output.secrets) && output.secrets.length > 0)
   )

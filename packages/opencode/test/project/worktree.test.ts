@@ -96,6 +96,14 @@ describe("Worktree", () => {
       run(["remote", "add", "origin", path.join(directory, "missing-remote.git")])
       run(["update-ref", `refs/remotes/origin/${branch}`, "HEAD"])
       run(["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${branch}`])
+      // A submodule the new worktree has not cloned, whose source is gone: online, reset would try to clone it.
+      const lib = path.join(directory, "..", `${path.basename(directory)}-lib`)
+      Bun.spawnSync(["git", "init", "-q", lib])
+      Bun.spawnSync(["git", "-C", lib, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "lib"])
+      run(["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "lib"])
+      run(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "add submodule"])
+      run(["update-ref", `refs/remotes/origin/${branch}`, "HEAD"])
+      Bun.spawnSync(["rm", "-rf", lib])
       const previous = process.env.ALTIMATE_OFFLINE
       process.env.ALTIMATE_OFFLINE = "1"
       try {
