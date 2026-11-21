@@ -400,6 +400,18 @@ export function describeToolError(raw: string) {
   }
 }
 
+// Messages of PermissionNext.RejectedError and CorrectedError, which the processor stores as `error.toString()`.
+const USER_REJECTED = "Error: The user rejected permission to use this specific tool call."
+const USER_CORRECTED = "Error: The user rejected permission to use this specific tool call with the following feedback: "
+
+/**
+ * True only when the user answered a permission prompt with "reject": an expected decision, not a tool failure.
+ * Config-rule denials and every other permission failure still return false and keep being reported.
+ */
+export function isUserRejection(raw: string): boolean {
+  return raw === USER_REJECTED || raw.startsWith(USER_CORRECTED)
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
