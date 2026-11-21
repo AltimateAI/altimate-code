@@ -52,7 +52,7 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
 // altimate_change start — loaded configs in which a source that may set `telemetry.disabled` (the
-// organization remote config, a global config the loader replaced with defaults) could not be read.
+// organization remote config, a legacy global config that failed to import) could not be read.
 const configsWithUnresolvedTelemetry = new WeakSet<Info>()
 const incompleteGlobals = new WeakSet<Info>()
 export function telemetryConfigUnresolved(config: Info): boolean {
@@ -484,13 +484,7 @@ export const layer = Layer.effect(
         Effect.tapError((error) =>
           Effect.logError("failed to load global config, using defaults", { error: String(error) }),
         ),
-        // altimate_change start — the defaults stand in for a global config that may opt out
-        Effect.orElseSucceed((): Info => {
-          const fallback: Info = {}
-          incompleteGlobals.add(fallback)
-          return fallback
-        }),
-        // altimate_change end
+        Effect.orElseSucceed((): Info => ({})),
       ),
       Duration.infinity,
     )

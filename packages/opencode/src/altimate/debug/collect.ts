@@ -92,13 +92,19 @@ function envFlags(): string[] {
 
 /** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
  * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
+function optOutReason(state: "pending" | "enabled" | "disabled") {
+  if (state === "pending") return "config not readable yet"
+  if (state === "disabled") return "disabled in config"
+  return "no telemetry sink (test runner or invalid connection string)"
+}
+
 async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
   const optOut = TelemetryConfig.disablingEnvironmentVariable()
   if (optOut) return { enabled: false, reason: `${optOut} is set` }
   if (!network) return { enabled: false, checked: false, reason: "not started with --no-network" }
   try {
     await Telemetry.init()
-    return Telemetry.isEnabled() ? { enabled: true } : { enabled: false, reason: Telemetry.optOutState() === "pending" ? "config not readable yet" : "disabled in config" }
+    return Telemetry.isEnabled() ? { enabled: true } : { enabled: false, reason: optOutReason(Telemetry.optOutState()) }
   } catch {
     return { enabled: false, checked: false, reason: "could not be determined" }
   }

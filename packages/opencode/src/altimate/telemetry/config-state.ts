@@ -93,6 +93,8 @@ export function instanceDirectory(): string | undefined {
 // Loaded configs built while the auth store could not be read: they lack its well-known remote
 // configs even after the store is repaired, until the app reloads its config.
 const loadedWithoutAuth = new WeakSet<object>()
+// Loaded configs already read alongside a readable auth store: a later failed read is transient.
+const readWithAuth = new WeakSet<object>()
 const AUTH_REREAD_MS = 100
 
 export async function loadedState(): Promise<State> {
@@ -107,9 +109,10 @@ export async function loadedState(): Promise<State> {
       return hasWellKnownAuth()
     })
   } catch (error) {
-    loadedWithoutAuth.add(config)
+    if (!readWithAuth.has(config)) loadedWithoutAuth.add(config)
     throw error
   }
+  readWithAuth.add(config)
   return config.telemetry?.disabled ? "disabled" : "enabled"
 }
 

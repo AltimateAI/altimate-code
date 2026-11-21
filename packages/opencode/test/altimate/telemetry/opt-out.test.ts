@@ -495,7 +495,9 @@ describe("telemetry opt-out", () => {
   test("a listener that throws does not stop this thread's telemetry", async () => {
     const names = recordIngestion()
     signOut()
+    let listenerCalled = false
     const stop = Telemetry.onOptOutDecided(() => {
+      listenerCalled = true
       throw new Error("port closed")
     })
     try {
@@ -503,6 +505,7 @@ describe("telemetry opt-out", () => {
       await Telemetry.init()
       trackStartup()
       await Telemetry.flush()
+      expect(listenerCalled).toBe(true)
       expect(names).toEqual(["startup_ready"])
     } finally {
       stop()
@@ -593,7 +596,8 @@ describe("telemetry opt-out", () => {
     // A caller arriving now joins the re-init instead of starting a second one.
     expect(Telemetry.init()).toBe(reinit)
     await reinit
-    expect(Telemetry.optOutState()).toBe("enabled")
+    // The re-init is throttled like any instance-less retry, so the opt-out stays undecided.
+    expect(Telemetry.optOutState()).toBe("pending")
   })
 
   test("one project's unreadable config never holds up an opted-in project's next session", async () => {

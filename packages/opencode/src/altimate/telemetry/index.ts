@@ -2600,7 +2600,7 @@ export namespace Telemetry {
       if (!reinitPromise) {
         const chained: Promise<void> = shutdownPromise
           .catch(() => {})
-          .then(doInit)
+          .then(() => (retryThrottled() ? undefined : doInit())) // altimate_change — the throttle applies here too
           .then(() => releaseUnresolved(chained)) // altimate_change — see releaseUnresolved
           .finally(() => {
             reinitPromise = undefined
@@ -2624,15 +2624,18 @@ export namespace Telemetry {
     // CONFIG_RETRY_MS. Inside an Instance a read is the Instance's cached config (its own reloads keep
     // it current), so every init reads it: one project's unreadable config never holds up another's.
     // An opt-out adopted from another thread needs no read.
-    if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at && !TelemetryConfig.instanceDirectory()) {
-      return Promise.resolve()
-    }
+    if (!initPromise && retryThrottled()) return Promise.resolve()
     if (!initPromise) {
       const started: Promise<void> = doInit().then(() => releaseUnresolved(started))
       initPromise = started
     }
     return initPromise
     // altimate_change end
+  }
+
+  // altimate_change — an unreadable config is re-read outside an Instance at most every CONFIG_RETRY_MS
+  function retryThrottled() {
+    return !adopted && configRetry !== undefined && Date.now() < configRetry.at && !TelemetryConfig.instanceDirectory()
   }
 
   // altimate_change start — an init left unresolved stays pre-init so the next init() retries; only
