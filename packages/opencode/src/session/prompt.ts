@@ -237,6 +237,19 @@ function reportModelSelectionError(sessionID: SessionID, error: unknown) {
     }).toObject(),
   })
 }
+
+// Validate a selected model, publishing guided text once and rethrowing the same error instance
+// so the async prompt route can recognize it as reported.
+async function validateOrReport(
+  sessionID: SessionID,
+  model: { providerID: ProviderID; modelID: ModelID },
+  source: string,
+) {
+  return validateModelSelection(model, source).catch((error) => {
+    reportModelSelectionError(sessionID, error)
+    throw error
+  })
+}
 // altimate_change end
 
 export namespace SessionPrompt {
@@ -1349,10 +1362,7 @@ export namespace SessionPrompt {
         // altimate_change end
         // altimate_change start — an explicit subtask model reports its source like other selections
         const taskModel = task.model
-          ? await validateModelSelection(task.model, `subtask "${task.agent}" request (model)`).catch((error) => {
-              reportModelSelectionError(sessionID, error)
-              throw error
-            })
+          ? await validateOrReport(sessionID, task.model, `subtask "${task.agent}" request (model)`)
           : model
         // altimate_change end
         const assistantMessage = (await Session.updateMessage({
@@ -3318,10 +3328,7 @@ export namespace SessionPrompt {
       modelID: ModelID.make(selection.model.modelID),
     }
     if (validateModel && !input.noReply) {
-      await validateModelSelection(model, selection.source).catch((error) => {
-        reportModelSelectionError(input.sessionID, error)
-        throw error
-      })
+      await validateOrReport(input.sessionID, model, selection.source)
     }
     // altimate_change end
     // Use agent.variant only when the user did not provide an explicit model
@@ -4880,13 +4887,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         ? { model: Provider.parseModel(input.model), source: "command request (model)" }
         : await lastModel(input.sessionID)
       : { model: taskModel, source: selection.source }
-    try {
-      await validateModelSelection(taskModel, selection.source)
-      if (isSubtask) await validateModelSelection(userSelection.model, userSelection.source)
-    } catch (error) {
-      reportModelSelectionError(input.sessionID, error)
-      throw error
-    }
+    await validateOrReport(input.sessionID, taskModel, selection.source)
+    if (isSubtask) await validateOrReport(input.sessionID, userSelection.model, userSelection.source)
     // altimate_change end
 
     const raw = input.arguments.match(argsRegex) ?? []

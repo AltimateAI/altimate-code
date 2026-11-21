@@ -12,7 +12,9 @@ import EXIT_DESCRIPTION from "./plan-exit.txt"
 import { ModelMetadata } from "../altimate/session/model-metadata"
 // altimate_change end
 
-async function getLastModel(sessionID: SessionID) {
+// altimate_change start — exported so the display-only row skip is tested on stored messages
+export async function getLastModel(sessionID: SessionID) {
+// altimate_change end
   for await (const item of MessageV2.stream(sessionID)) {
     // altimate_change start — shell and direct MCP rows record model metadata without selecting a model
     if (item.info.role === "user" && ModelMetadata.isModelMetadataOnly(item.parts)) continue

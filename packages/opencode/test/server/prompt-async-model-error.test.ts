@@ -9,39 +9,50 @@ import { Server } from "../../src/server/server"
 import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { ModelMetadata } from "../../src/altimate/session/model-metadata"
+import { TraceContext } from "../../src/altimate/observability/trace-context"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { tmpdir } from "../fixture/fixture"
 
 describe("prompt_async model errors", () => {
-  let restore: (() => void) | undefined
-  afterEach(() => restore?.())
+  const restores: (() => void)[] = []
+  afterEach(() => {
+    while (restores.length) restores.pop()!()
+  })
 
   async function errorsFor(error: unknown) {
     const prompt = spyOn(SessionPrompt, "prompt").mockImplementation((async () => {
       throw error
     }) as unknown as typeof SessionPrompt.prompt)
-    restore = () => prompt.mockRestore()
-    const published: unknown[] = []
+    // The route's catch releases the trace first, then decides and publishes synchronously.
+    let handled!: () => void
+    const done = new Promise<void>((resolve) => {
+      handled = resolve
+    })
+    const release = TraceContext.release
+    const releaseSpy = spyOn(TraceContext, "release").mockImplementation(((...args: Parameters<typeof release>) => {
+      const result = release(...args)
+      queueMicrotask(handled)
+      return result
+    }) as typeof release)
+    const publish = spyOn(Bus, "publish")
+    restores.push(() => prompt.mockRestore(), () => releaseSpy.mockRestore(), () => publish.mockRestore())
+
     await using tmp = await tmpdir({ git: true })
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const session = await Session.create({ title: "async model error" })
-        // Subscribe once the instance is initialized; Bus.subscribe runs synchronously.
-        const unsubscribe = Bus.subscribe(Session.Event.Error, (event) => {
-          published.push(event.properties.error)
-        })
+        publish.mockClear()
         const response = await Server.Default().request(`/session/${session.id}/prompt_async`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-opencode-directory": tmp.path },
           body: JSON.stringify({ parts: [{ type: "text", text: "hello" }] }),
         })
         await response.text()
-        await new Promise((resolve) => setTimeout(resolve, 100))
-        unsubscribe()
+        await done
       },
     })
-    return published
+    return publish.mock.calls.filter(([definition]) => definition === Session.Event.Error)
   }
 
   const notFound = () =>

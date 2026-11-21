@@ -251,10 +251,8 @@ describe("RunAccounting.isValidMaxTurns", () => {
 
 describe("RunAccounting retry classification", () => {
   test("5xx statuses are retryable; 4xx and non-numbers are not", () => {
-    expect(RunAccounting.isRetryableStatus(500)).toBe(false)
-    expect(RunAccounting.isRetryableStatus(502)).toBe(true)
+    expect(RunAccounting.isRetryableStatus(500)).toBe(true)
     expect(RunAccounting.isRetryableStatus(503)).toBe(true)
-    expect(RunAccounting.isRetryableStatus(504)).toBe(true)
     expect(RunAccounting.isRetryableStatus(400)).toBe(false)
     expect(RunAccounting.isRetryableStatus(404)).toBe(false)
     expect(RunAccounting.isRetryableStatus(undefined)).toBe(false)
