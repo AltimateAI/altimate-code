@@ -19,6 +19,8 @@ async function localOptIn(directory: string) {
   // key so remote credentials and unrelated substitutions cannot affect it.
   const optedIn = async (text: string | undefined, source: string | { source: string; dir: string }) => {
     if (!text) return false
+    // Skip the substitution pass for text that can neither name nor produce the key.
+    if (!text.includes("offline") && !/\{env:|\$\{|\{file:/.test(text)) return false
     if (parse(text)?.offline === true) return true
     const config = await ConfigPaths.parseText(text, source, "empty", { track: false, expandFiles: false }).catch(() => undefined)
     return config?.offline === true
@@ -173,7 +175,9 @@ export function modelFetch(baseURL: string | undefined): typeof fetch {
 export function isLoopbackHost(value: unknown): boolean {
   if (typeof value !== "string") return false
   const host = value.toLowerCase().replace(/^\[|\]$/g, "")
-  return host === "localhost" || host === "localhost." || host === "::1" || (isIP(host) === 4 && host.startsWith("127."))
+  // Wildcard bind addresses (0.0.0.0, ::) are reached on this machine when used as a destination.
+  return host === "localhost" || host === "localhost." || host === "::1" || host === "::" || host === "0.0.0.0" ||
+    (isIP(host) === 4 && host.startsWith("127."))
 }
 
 // Validate the URL before any offline loopback HTTP request.

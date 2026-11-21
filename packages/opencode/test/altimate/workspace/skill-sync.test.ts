@@ -1383,6 +1383,9 @@ describe("workspace skill sync", () => {
       expect(await snapshotWorkspaceId(project)).toBeNull()
       pin("1")
       expect(await snapshotWorkspaceId(project)).toBe(1)
+      // A matching pin outranks a project link that names another workspace.
+      bindTo(2)
+      expect(await snapshotWorkspaceId(project)).toBe(1)
       expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
     } finally {
       for (const key of keys) {

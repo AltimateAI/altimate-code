@@ -177,6 +177,37 @@ test("dbt policy failure surfaces on repeated SQL calls without a registry fallb
   }
 })
 
+test("the dbt adapter is checked against the project it will run, not DBT_PROJECT_DIR", async () => {
+  const adapter = await import("../../../src/altimate/native/connections/register")
+  const Dispatcher = await import("../../../src/altimate/native/dispatcher")
+  const Registry = await import("../../../src/altimate/native/connections/registry")
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "offline-dbt-projectdir-"))
+  const create = mock(async () => ({}))
+  try {
+    const other = path.join(root, "other")
+    await fs.mkdir(other)
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "profile: remote\n")
+    await fs.writeFile(path.join(other, "dbt_project.yml"), "profile: local\n")
+    await fs.writeFile(path.join(root, "profiles.yml"), "local:\n  outputs:\n    default:\n      type: duckdb\n      path: ':memory:'\nremote:\n  outputs:\n    default:\n      type: postgres\n      host: db.example.com\n")
+    process.env.ALTIMATE_OFFLINE = "1"
+    process.env.DBT_PROJECT_DIR = other
+    adapter.resetDbtAdapter()
+    adapter.dbtAdapterInternals.readConfig = async () => ({ projectRoot: root })
+    adapter.dbtAdapterInternals.create = create
+    adapter.registerAll()
+    const result = await Dispatcher.call("sql.execute", { sql: "SELECT 1" })
+    expect((result as { error?: string }).error).toContain("Offline mode")
+    expect(create).not.toHaveBeenCalled()
+  } finally {
+    delete adapter.dbtAdapterInternals.readConfig
+    delete adapter.dbtAdapterInternals.create
+    adapter.resetDbtAdapter()
+    Registry.reset()
+    Dispatcher.reset()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test("cached local connections never reread credentials offline", async () => {
   const Registry = await import("../../../src/altimate/native/connections/registry")
   const Credentials = await import("../../../src/altimate/native/connections/credential-store")

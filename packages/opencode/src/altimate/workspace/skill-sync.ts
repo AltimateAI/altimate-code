@@ -197,6 +197,8 @@ export async function ownManifest(directory: string): Promise<Manifest | null> {
       // A serve pin outranks the project's link, as in resolveBindingOutcome; a broken pin fails closed.
       const pin = readPin()
       if (pin.kind === "invalid" || (pin.kind === "valid" && pin.datamateId !== manifest.datamateId)) return null
+      // A matching pin decides on its own; the project's link is consulted only without one.
+      if (pin.kind === "valid") return manifest
       const { binding: local } = await readLocalBindingScopedStrict(directory)
       if (local && local.datamateId !== manifest.datamateId) return null
     }

@@ -168,7 +168,7 @@ Offline mode is for running Altimate Code against a local or self-hosted model w
 
 Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file. The setting covers the process and its workers. A project that requests offline mode is refused by a shared server started without it; start Altimate Code from that project instead.
 
-Configure a provider with an explicit HTTP(S) `options.baseURL` and select one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Requests to that endpoint are the only requests Altimate Code sends off the machine. A `small_model` is used only if it belongs to the same provider; otherwise the main model handles those tasks.
+Configure a provider with an explicit HTTP(S) `options.baseURL` and select one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Requests to that endpoint are the only requests Altimate Code sends off the machine. They go directly to the endpoint, not through `HTTP_PROXY` or `HTTPS_PROXY`, so the endpoint must be reachable without a proxy. A `small_model` is used only if it belongs to the same provider; otherwise the main model handles those tasks.
 
 ### Before going offline
 

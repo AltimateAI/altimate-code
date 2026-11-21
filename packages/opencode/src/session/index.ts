@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 // altimate_change start — release session-owned scratch stores on deletion
 import { closeScratch } from "@/altimate/native/connections/scratch"
 // altimate_change end
@@ -749,6 +752,10 @@ export namespace Session {
     const project = Instance.project
     try {
       const session = await get(sessionID)
+      // altimate_change start — offline mode cannot revoke a public share, so it keeps the session that holds it
+      if (Offline.enabled() && session.share?.url)
+        throw new Error("This session is shared. Delete it while online so its share can be revoked.")
+      // altimate_change end
       for (const child of await children(sessionID)) {
         await remove(child.id)
       }

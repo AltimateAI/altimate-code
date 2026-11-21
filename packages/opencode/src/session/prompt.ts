@@ -485,7 +485,7 @@ export namespace SessionPrompt {
         const { ownManifest, snapshotKnownEmpty } = await import("../altimate/workspace/skill-sync")
         const snapshot = await ownManifest(dir)
         // A withheld snapshot (rebound project, other account) must not stay visible through .claude/skills copies.
-        if (!snapshot) {
+        if (!snapshot && existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) {
           const { mirrorClaudeSkills } = await import("../altimate/workspace/claude-skill-mirror")
           await mirrorClaudeSkills(dir, { withdraw: true })
         }

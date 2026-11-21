@@ -130,7 +130,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
 
       // The integration reads profiles.yml relative to the project, so check from there.
       const offline = Offline.enabled()
-        ? await assertLocalDbt(dbtConfig.projectRoot, [], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
+        ? await assertLocalDbt(dbtConfig.projectRoot, ["--project-dir", dbtConfig.projectRoot], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
         : undefined
 
       // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's

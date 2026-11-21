@@ -3,7 +3,7 @@ import { expect, test } from "bun:test"
 import { Offline } from "../../src/config/offline"
 
 test("offline MCP URL policy accepts only HTTP(S) localhost and loopback", () => {
-  for (const url of ["http://localhost:3000/mcp", "https://localhost./mcp", "http://127.2.3.4/mcp", "http://[::1]:3000/mcp"])
+  for (const url of ["http://localhost:3000/mcp", "https://localhost./mcp", "http://127.2.3.4/mcp", "http://[::1]:3000/mcp", "http://0.0.0.0:4096", "http://[::]:4096"])
     expect(Offline.isLocalURL(url)).toBe(true)
   for (const url of ["https://example.com/mcp", "http://localhost.example.com", "http://192.168.0.1/mcp", "file://localhost/mcp", "http://localhost@evil.test/mcp", "invalid"])
     expect(Offline.isLocalURL(url)).toBe(false)
