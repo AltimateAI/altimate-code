@@ -48,14 +48,15 @@ import { ConfigVariable } from "./variable"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 // altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
-import { makeRuntime } from "@/effect/run-service"
+import { attach, makeRuntime } from "@/effect/run-service"
+import { InstanceRef } from "@/effect/instance-ref"
 // altimate_change end
 
-// altimate_change start — keep telemetry off when an organization config was unavailable
-const configsWithUnresolvedOrg = new WeakSet<Info>()
+// altimate_change start — defer telemetry when any config layer was unavailable
+const configsWithUnresolvedTelemetry = new WeakSet<Info>()
 
 export function telemetryConfigUnresolved(config: Info): boolean {
-  return configsWithUnresolvedOrg.has(config)
+  return configsWithUnresolvedTelemetry.has(config)
 }
 // altimate_change end
 
@@ -270,7 +271,7 @@ type State = {
 }
 
 export interface Interface {
-  readonly get: () => Effect.Effect<Info>
+  readonly get: (retryTelemetry?: boolean) => Effect.Effect<Info> // altimate_change — retry partial telemetry config
   readonly getGlobal: () => Effect.Effect<Info>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
@@ -430,6 +431,8 @@ export const layer = Layer.effect(
       return yield* loadConfig(text, { path: filepath }, env)
     })
 
+    // altimate_change — the legacy loader can return partial config after an unreadable TOML file.
+    const incompleteGlobals = new WeakSet<Info>()
     const loadGlobal = Effect.fnUntraced(function* (env?: Record<string, string>) {
       let result: Info = {}
       // Seed the default global config with the schema for editor completion, but avoid writing when the user
@@ -466,7 +469,11 @@ export const layer = Layer.effect(
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
-            .catch(() => {}),
+            // altimate_change start — preserve the failure for the telemetry gate
+            .catch(() => {
+              incompleteGlobals.add(result)
+            }),
+            // altimate_change end
         )
       }
 
@@ -478,7 +485,13 @@ export const layer = Layer.effect(
         Effect.tapError((error) =>
           Effect.logError("failed to load global config, using defaults", { error: String(error) }),
         ),
-        Effect.orElseSucceed((): Info => ({})),
+        // altimate_change start — a global fallback can hide an opt-out
+        Effect.orElseSucceed((): Info => {
+          const fallback: Info = {}
+          incompleteGlobals.add(fallback)
+          return fallback
+        }),
+        // altimate_change end
       ),
       Duration.infinity,
     )
@@ -913,7 +926,9 @@ export const layer = Layer.effect(
         // altimate_change end
 
         // altimate_change start — associate the status with this resolved config object
-        if (orgConfigUnresolved) configsWithUnresolvedOrg.add(result)
+        if (orgConfigUnresolved || incompleteGlobals.has(global) || Auth.configSourcesUnresolved(auth)) {
+          configsWithUnresolvedTelemetry.add(result)
+        }
         // altimate_change end
 
         return {
@@ -947,9 +962,16 @@ export const layer = Layer.effect(
       }),
     )
 
-    const get = Effect.fn("Config.get")(function* () {
+    // altimate_change start — reload partial config for the current instance on telemetry retry
+    const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {
+      const cached = retryTelemetry && (yield* InstanceState.has(state))
+      const config = yield* InstanceState.use(state, (s) => s.config)
+      if (!cached || !telemetryConfigUnresolved(config)) return config
+      yield* invalidateGlobal
+      yield* InstanceState.invalidate(state)
       return yield* InstanceState.use(state, (s) => s.config)
     })
+    // altimate_change end
 
     const directories = Effect.fn("Config.directories")(function* () {
       return yield* InstanceState.use(state, (s) => s.directories)
@@ -1057,8 +1079,10 @@ export const node = LayerNode.make(layer, () => [FSUtil.node, Auth.node, Account
 // call `await Config.get()` etc. The makeRuntime bridge's `attach()` reads WorkspaceContext +
 // the current fiber's InstanceRef, so these reads stay bound to the active workspace/instance.
 const { runPromise: runConfig } = makeRuntime(Service, defaultLayer)
-export async function get() {
-  return runConfig((svc) => svc.get())
+export async function get(retryTelemetry = false) {
+  // Reject before building the runtime and opening its database without an instance.
+  if (!Effect.runSync(attach(InstanceRef))) throw new Error("InstanceRef not provided")
+  return runConfig((svc) => svc.get(retryTelemetry))
 }
 export async function getGlobal() {
   return runConfig((svc) => svc.getGlobal())

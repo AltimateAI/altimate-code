@@ -5,6 +5,7 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { Config } from "@/config/config"
+import { Telemetry } from "@/altimate/telemetry"
 import { ConfigManaged } from "@/config/managed"
 import { ConfigParse } from "../../src/config/parse"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
@@ -717,6 +718,82 @@ for (const failure of ["account", "organization"] as const) {
     }),
   )
 }
+
+test("telemetry sends held events after an organization config fetch recovers", async () => {
+  const directory = await tmpdir()
+  const savedSink = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+  const savedOptOut = process.env.ALTIMATE_TELEMETRY_DISABLED
+  process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+    "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/"
+  delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  let recovered = false
+  let orgLoads = 0
+  const account = Layer.mock(Account.Service)({
+    active: () => Effect.succeed(Option.some({
+      id: AccountID.make("telemetry-account"),
+      email: "user@example.com",
+      url: "https://control.example.invalid",
+      active_org_id: OrgID.make("telemetry-org"),
+    })),
+    config: () => Effect.suspend(() => {
+      orgLoads++
+      return recovered
+        ? Effect.succeed(Option.some({ telemetry: { disabled: false } }))
+        : Effect.fail(new AccountServiceError({ message: "Temporary organization config failure" }))
+    }),
+    token: () => Effect.succeed(Option.none()),
+  })
+  const events: string[] = []
+  await Telemetry.shutdown()
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+    if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
+    for (const envelope of JSON.parse(String(request?.body))) events.push(envelope.data.baseData.name)
+    return new Response(null, { status: 204 })
+  }, { preconnect: fetch.preconnect }))
+  // Exercise the real per-instance config cache with only its account service replaced.
+  const context = { directory: directory.path, worktree: directory.path } as InstanceContext
+  const program = Config.Service.use((service) => Effect.promise(async () => {
+    const config = spyOn(Config, "get").mockImplementation((retry?: boolean) =>
+      Effect.runPromise(provideCurrentInstance(
+        service.get(retry),
+        context,
+      )),
+    )
+    try {
+      const track = () => Telemetry.track({
+        type: "startup_ready", timestamp: Date.now(), session_id: "",
+        command: "run", surface: "run", duration_ms: 1, fresh_install: false,
+      })
+      track()
+      await Telemetry.init()
+      track()
+      await Telemetry.refreshIdentity()
+      await Telemetry.flush()
+      const telemetryCalls = fetchSpy.mock.calls.filter(([url]) => /\/(v2\/track|users\/me)$/.test(String(url)))
+      expect(telemetryCalls).toEqual([])
+      expect(orgLoads).toBe(1)
+
+      recovered = true
+      await Telemetry.init()
+      await Telemetry.flush()
+      expect(events).toEqual(["startup_ready", "startup_ready"])
+      expect(orgLoads).toBe(2)
+    } finally {
+      await Telemetry.shutdown()
+      config.mockRestore()
+    }
+  }))
+  try {
+    await Effect.runPromise(program.pipe(Effect.scoped, Effect.provide(configLayer({ account }))))
+  } finally {
+    fetchSpy.mockRestore()
+    if (savedSink === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedSink
+    if (savedOptOut === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedOptOut
+    await directory[Symbol.asyncDispose]()
+  }
+})
 
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {

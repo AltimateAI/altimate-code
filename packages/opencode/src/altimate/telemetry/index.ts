@@ -1,4 +1,3 @@
-import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
@@ -2327,8 +2326,8 @@ export namespace Telemetry {
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
-  // altimate_change — a pre-instance config read can defer this lifecycle until the next init call.
-  let startupConfigUnresolved = false
+  // altimate_change — unresolved config holds events for the next init call.
+  let configUnresolved = false
   let initDone = false
   // altimate_change — shutdown needs to cancel a flush already in flight, not just stop waiting
   // for it: `flush()` chains through inFlightFlush, so a timed-out drain still had its final
@@ -2523,10 +2522,18 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
-    if (startupConfigUnresolved) {
-      startupConfigUnresolved = false
+    if (!initDone && initPromise && TelemetryConfig.instanceDirectory()) {
+      // A session can join the middleware init while its local probe is still running.
+      // Retry once from the session's context when the probe could not resolve config.
+      const pending = initPromise
+      return pending.then(() => {
+        if (initPromise !== pending) return initPromise
+        if (!shutdownPromise && configUnresolved) return init()
+      })
+    }
+    if (initDone && configUnresolved) {
+      initPromise = undefined
       initDone = false
-      return (initPromise = doInit())
     }
     return (initPromise ??= doInit())
     // altimate_change end
@@ -2534,26 +2541,22 @@ export namespace Telemetry {
 
   async function doInit() {
     try {
-      // altimate_change — ALTIMATE_TELEMETRY_DISABLED and either spelling of the legacy opt-out
-      // act independently, so a false alias cannot override a truthy opt-out.
+      // altimate_change start — hold bounded startup events until the opt-out is resolved.
+      const retry = configUnresolved
+      configUnresolved = false
       if (TelemetryConfig.disablingEnvironmentVariable()) {
         buffer = []
+        droppedEvents = 0
         return
       }
-      // altimate_change start — verify the opt-out before initializing either telemetry transport.
-      // CLI middleware can run before Instance.provide(), so fall back to the local config files.
-      // Suppress telemetry when the config state is unknown, since it may contain an opt-out.
-      let disabled: boolean
-      try {
-        const userConfig = (await Config.get())
-        disabled = userConfig.telemetry?.disabled === true || Config.telemetryConfigUnresolved(userConfig)
-      } catch {
-        const state = await TelemetryConfig.disabledState(configDirectory)
-        startupConfigUnresolved = state === "unreadable"
-        disabled = state !== "enabled"
+      const state = await TelemetryConfig.resolve(configDirectory, retry)
+      if (state === "unreadable") {
+        configUnresolved = true
+        return
       }
-      if (disabled) {
+      if (state === "disabled") {
         buffer = []
+        droppedEvents = 0
         return
       }
       // altimate_change end
@@ -2599,7 +2602,7 @@ export namespace Telemetry {
       // altimate_change start — first-run health: drain anchor events that were tracked before init
       // finished (first_launch always is) instead of leaving them to the 5 s interval a startup freeze
       // would block. The stall watcher starts in `finally`, telemetry or not.
-      if (buffer.some((event) => ANCHOR_EVENTS.has(event.type))) void Telemetry.flush().catch(() => {})
+      if (retry || buffer.some((event) => ANCHOR_EVENTS.has(event.type))) void Telemetry.flush().catch(() => {})
       // altimate_change end
     } catch {
       buffer = []
@@ -2662,7 +2665,10 @@ export namespace Telemetry {
     const generation = ++identityGeneration
     identityStamp = TelemetryIdentity.credentialStamp()
     identityRetryAt = 0
-    return TelemetryIdentity.resolveWithOutcome(opts)
+    return TelemetryIdentity.resolveWithOutcome({
+      ...opts,
+      canSend: () => generation === identityGeneration && !shutdownPromise,
+    })
       .then(({ identity: resolved, outcome }) => {
         if (generation !== identityGeneration) return
         identity = resolved
@@ -2869,9 +2875,8 @@ export namespace Telemetry {
   // altimate_change end
 
   export function track(event: Event) {
-    // Before init completes: buffer (flushed once init enables, or cleared if disabled).
-    // After init completed and disabled telemetry: drop silently.
-    if (initDone && !enabled) return
+    // Buffer during init and while config is unresolved. A resolved opt-out drops events.
+    if (initDone && !enabled && !configUnresolved) return
     // altimate_change start — stamp the client trace of the turn the event's own session is
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
     // explicit per-event `session_id` is used — the process-global session can be another one.
@@ -2924,7 +2929,7 @@ export namespace Telemetry {
     // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
     const who = identity
     const mid = machineId
-    if (enabled) {
+    if (enabled && !shuttingDown) {
       const stamp = TelemetryIdentity.credentialStamp()
       const retryDue = identityRetryAt !== 0 && Date.now() >= identityRetryAt
       if (stamp !== identityStamp || retryDue) {
@@ -3021,7 +3026,7 @@ export namespace Telemetry {
   // `timeoutMs` bounds the flush from the inside. Racing shutdown() against an external timer
   // does NOT cancel it: the losing promise keeps running and resets module state after the
   // caller has already moved on. Exit paths pass a budget so the fetch itself is aborted.
-  export async function shutdown(opts?: { timeoutMs?: number }) {
+  export async function shutdown(opts?: { timeoutMs?: number; preserveUnresolved?: boolean }) {
     if (shutdownPromise) {
       // An earlier caller is mid-flush, possibly on the default 10s budget. Returning its promise
       // unchanged would silently ignore this caller's deadline and make the exit path wait past
@@ -3039,13 +3044,13 @@ export namespace Telemetry {
       if (timer) clearTimeout(timer)
       return
     }
-    shutdownPromise = doShutdown(opts?.timeoutMs).finally(() => {
+    shutdownPromise = doShutdown(opts?.timeoutMs, opts?.preserveUnresolved).finally(() => {
       shutdownPromise = undefined
     })
     return shutdownPromise
   }
 
-  async function doShutdown(timeoutMs?: number) {
+  async function doShutdown(timeoutMs?: number, preserveUnresolved?: boolean) {
     const initPromiseAtShutdown = initPromise
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
@@ -3102,10 +3107,12 @@ export namespace Telemetry {
     inFlightFlush = undefined
     shuttingDown = false
     enabled = false
-    startupConfigUnresolved = false
     appInsights = undefined
-    buffer = []
-    droppedEvents = 0
+    if (!preserveUnresolved || !configUnresolved) {
+      configUnresolved = false
+      buffer = []
+      droppedEvents = 0
+    }
     sessionId = ""
     projectId = ""
     machineId = ""

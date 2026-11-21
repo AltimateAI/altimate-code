@@ -7,6 +7,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Auth } from "../../../src/auth"
 import { Config } from "../../../src/config/config"
 import { Telemetry } from "../../../src/altimate/telemetry"
+import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
 
 const CS = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
 const ENV = [
@@ -17,7 +18,6 @@ const ENV = [
   "ALTIMATE_TELEMETRY_FORCE",
   "OPENCODE_CONFIG_CONTENT",
   "ALTIMATE_CLI_CONFIG_CONTENT",
-  "ALTIMATE_CLI_DISABLE_TELEMETRY",
   "OPENCODE_AUTH_CONTENT",
 ] as const
 
@@ -27,6 +27,7 @@ describe("telemetry opt-out", () => {
   let configSpy: ReturnType<typeof spyOn<typeof Config, "get">>
   let homedirSpy: ReturnType<typeof spyOn<typeof os, "homedir">>
   let authFileSpy: ReturnType<typeof spyOn<typeof Auth, "filepath">>
+  let databaseSpy: ReturnType<typeof spyOn<typeof Database, "path">>
   let authSpy: ReturnType<typeof spyOn<typeof Auth, "get">>
   const saved: Record<string, string | undefined> = {}
 
@@ -34,7 +35,7 @@ describe("telemetry opt-out", () => {
     await Telemetry.shutdown()
     home = mkdtempSync(path.join(os.tmpdir(), "telemetry-opt-out-"))
     mkdirSync(path.join(home, ".altimate"))
-    // Simulate a previously signed-in installation with an ID and no opt-out marker.
+    // Simulate a previously signed-in installation with a machine ID.
     writeFileSync(path.join(home, ".altimate", "machine-id"), "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
     writeFileSync(
       path.join(home, ".altimate", "altimate.json"),
@@ -53,6 +54,7 @@ describe("telemetry opt-out", () => {
     Telemetry.setConfigDirectory(home)
     homedirSpy = spyOn(os, "homedir").mockReturnValue(home)
     authFileSpy = spyOn(Auth, "filepath").mockReturnValue(path.join(home, "auth.json"))
+    databaseSpy = spyOn(Database, "path").mockReturnValue(path.join(home, "missing.db"))
     authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
     configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
     fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(new Error("Telemetry must not invoke the transport"))
@@ -66,6 +68,7 @@ describe("telemetry opt-out", () => {
     homedirSpy.mockRestore()
     authFileSpy.mockRestore()
     authSpy.mockRestore()
+    databaseSpy.mockRestore()
     for (const key of ENV) {
       if (saved[key] === undefined) delete process.env[key]
       else process.env[key] = saved[key]
@@ -120,7 +123,7 @@ describe("telemetry opt-out", () => {
     expect(enabled).toBe(false)
   }
 
-  test.each(["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY", "ALTIMATE_CLI_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
+  test.each(["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
     process.env[key] = "1"
     await expectSilentLifecycle()
     // A later launch must also stay silent with the same existing machine ID.
@@ -128,7 +131,7 @@ describe("telemetry opt-out", () => {
   })
 
   test("a false canonical alias cannot override the legacy opt-out", async () => {
-    process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = "false"
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "false"
     process.env.OPENCODE_DISABLE_TELEMETRY = "1"
     await expectSilentLifecycle()
   })
@@ -176,29 +179,39 @@ describe("telemetry opt-out", () => {
     const dbPath = path.join(home, "account.db")
     const db = new SQLite(dbPath)
     db.exec(`
+      PRAGMA journal_mode = WAL;
       CREATE TABLE account (id TEXT PRIMARY KEY);
       CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
       INSERT INTO account VALUES ('account');
       INSERT INTO account_state VALUES (1, 'account', 'org');
     `)
     db.close()
-    const database = spyOn(Database, "path").mockReturnValue(dbPath)
+    databaseSpy.mockReturnValue(dbPath)
+    await expectSilentLifecycle()
+  })
+
+  test("the startup probe can read while an account writer holds a WAL transaction", async () => {
+    const dbPath = path.join(home, "account.db")
+    const writer = new SQLite(dbPath)
     try {
-      await expectSilentLifecycle()
+      writer.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE account (id TEXT PRIMARY KEY);
+        CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+        INSERT INTO account VALUES ('account');
+        BEGIN IMMEDIATE;
+        INSERT INTO account_state VALUES (1, 'account', 'org');
+      `)
+      databaseSpy.mockReturnValue(dbPath)
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+      writer.exec("COMMIT")
+      expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
     } finally {
-      database.mockRestore()
+      writer.close()
     }
   })
 
-  test("a later init can enable telemetry after the startup config resolves", async () => {
-    process.env.OPENCODE_CONFIG_CONTENT = "{"
-    await Telemetry.init()
-    expect(Telemetry.isEnabled()).toBe(false)
-    expect(fetchSpy).not.toHaveBeenCalled()
-
-    configSpy.mockResolvedValue({ telemetry: { disabled: false } } as Awaited<ReturnType<typeof Config.get>>)
-    await Telemetry.init()
-    expect(Telemetry.isEnabled()).toBe(true)
+  function trackStartup() {
     Telemetry.track({
       type: "startup_ready",
       timestamp: Date.now(),
@@ -208,9 +221,74 @@ describe("telemetry opt-out", () => {
       duration_ms: 1,
       fresh_install: false,
     })
-    await Telemetry.flush()
-    expect(fetchSpy.mock.calls.some(([url]) => url === "https://ingest.example.invalid/v2/track")).toBe(true)
+  }
+
+  function recordIngestion() {
+    const names: string[] = []
+    fetchSpy.mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+      if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
+      for (const envelope of JSON.parse(String(request?.body))) names.push(envelope.data.baseData.name)
+      return new Response(null, { status: 204 })
+    }, { preconnect: fetch.preconnect }))
+    return names
+  }
+
+  test("a later init sends held startup events exactly once", async () => {
+    const names = recordIngestion()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
     await Telemetry.refreshIdentity()
+    await Telemetry.flush()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    configSpy.mockResolvedValue({ telemetry: { disabled: false } })
+    await Telemetry.init()
+    await Telemetry.flush()
+    await Telemetry.shutdown()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("resolution to disabled discards held startup events", async () => {
+    const names = recordIngestion()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
+    await Telemetry.init()
+    await Telemetry.flush()
+    await Telemetry.refreshIdentity()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    await Telemetry.shutdown()
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual([])
+  })
+
+  test("exit while unresolved never sends and clears held events", async () => {
+    const names = recordIngestion()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    trackStartup()
+    await Telemetry.shutdown()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual([])
+  })
+
+  test("malformed auth prevents an otherwise loaded config from enabling telemetry", async () => {
+    writeFileSync(Auth.filepath(), "null")
+    configSpy.mockResolvedValue({})
+    await expectSilentLifecycle()
   })
 
   test("an unreadable config suppresses all requests", async () => {

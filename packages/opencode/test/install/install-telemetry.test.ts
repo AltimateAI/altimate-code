@@ -27,6 +27,7 @@ import { join } from "node:path"
 import os from "os"
 import path from "path"
 import { Telemetry } from "@/altimate/telemetry"
+import { Config } from "@/config/config"
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..", "..")
 const INSTALL_SH = readFileSync(join(REPO_ROOT, "install"), "utf-8")
@@ -303,6 +304,7 @@ describe("is_upgrade ordering", () => {
     const origOpencodeDisabled = process.env.OPENCODE_DISABLE_TELEMETRY
     const tmpHome = mkdtempSync(join(os.tmpdir(), "install-telemetry-home-"))
     spyOn(os, "homedir").mockImplementation(() => tmpHome)
+    spyOn(Config, "get").mockResolvedValue({})
     spyOn(global, "fetch").mockImplementation((async () => new Response("", { status: 200 })) as any)
 
     try {

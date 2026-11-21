@@ -3,6 +3,8 @@ import path from "path"
 import fs from "fs/promises"
 import { existsSync } from "fs"
 import * as Effect from "effect/Effect"
+import { InstanceRef } from "@/effect/instance-ref"
+import { attach } from "@/effect/run-service"
 import { Flag, env as flagEnv } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Database } from "@opencode-ai/core/database/database"
@@ -10,7 +12,7 @@ import { Auth } from "@/auth"
 import { Global } from "../../global"
 import { ConfigPaths } from "@/config/paths"
 import { ConfigManaged } from "@/config/managed"
-import { validateLoaded } from "@/config/config"
+import { Config, validateLoaded } from "@/config/config"
 
 /**
  * Whether the user config turns telemetry off, read without an Instance.
@@ -48,42 +50,94 @@ function worktreeOf(directory: string): string | undefined {
 }
 
 export function disablingEnvironmentVariable(): string | undefined {
-  return ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY", "ALTIMATE_CLI_DISABLE_TELEMETRY"].find((key) =>
+  return ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"].find((key) =>
     /^(true|1)$/i.test(process.env[key] ?? ""),
   )
 }
 
-async function hasWellKnownSource(): Promise<boolean> {
+async function authEntries(): Promise<Record<string, unknown>> {
   let contents = process.env.OPENCODE_AUTH_CONTENT
   if (!contents) {
     try {
       contents = await fs.readFile(Auth.filepath(), "utf8")
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {}
       throw error
     }
   }
-  const entries = JSON.parse(contents) as Record<string, { type?: string } | null>
-  return Object.values(entries).some((entry) => entry?.type === "wellknown")
+  const entries: unknown = JSON.parse(contents)
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+    throw new Error("Invalid auth store")
+  }
+  const values = Object.values(entries)
+  for (const entry of values) {
+    if (!entry || typeof entry !== "object" || !("type" in entry) || entry.type !== "wellknown") continue
+    if (!("key" in entry && typeof entry.key === "string" && "token" in entry && typeof entry.token === "string")) {
+      throw new Error("Invalid well-known auth entry")
+    }
+  }
+  return entries as Record<string, unknown>
 }
 
-// The well-known config merges before local files, while an active organization's config can
-// override them. Inspect only local credentials and account state; never fetch config here.
-async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
-  if (local === undefined && (await hasWellKnownSource())) return true
+export function instanceDirectory(): string | undefined {
+  return Effect.runSync(attach(InstanceRef))?.directory
+}
 
-  // No on-disk account state to inspect. Avoid opening or creating a database on a fresh install.
-  const dbPath = Database.path()
-  if (dbPath === ":memory:") return false
+export async function loadedState(retry = false): Promise<State> {
+  const config = await Config.get(retry)
+  if (Config.telemetryConfigUnresolved(config)) return "unreadable"
+  // Auth.all() can return an empty store when its read or parse fails.
   try {
-    await fs.stat(dbPath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
-    throw error
+    await authEntries()
+  } catch {
+    return "unreadable"
   }
-  // Use a read-only connection so this check cannot run migrations or initialize account storage.
+  return config.telemetry?.disabled ? "disabled" : "enabled"
+}
+
+export async function resolve(directory?: string, retry = false): Promise<State> {
+  try {
+    return await loadedState(retry)
+  } catch {
+    // A failed full load can hide remote settings. The local probe is only for
+    // commands that have no instance to load yet.
+    return instanceDirectory() ? "unreadable" : disabledState(directory)
+  }
+}
+
+async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
+  const auth = await authEntries()
+  if (local === undefined && Object.values(auth).some((entry) =>
+    entry && typeof entry === "object" && "type" in entry && entry.type === "wellknown"
+  )) return true
+
+  const dbPath = Database.path()
+  if (dbPath === ":memory:") return true
+
+  // Only read a WAL database. In rollback-journal mode even a short SELECT
+  // takes a shared lock that can block a writer's commit.
+  const header = await fs.open(dbPath, "r").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined
+    throw error
+  })
+  if (!header) return false
+  try {
+    const versions = Buffer.alloc(2)
+    const { bytesRead } = await header.read(versions, 0, 2, 18)
+    if (bytesRead !== 2 || versions[0] !== 2 || versions[1] !== 2) return true
+  } finally {
+    await header.close()
+  }
+
   const db = new SQLite(dbPath, { readonly: true })
   try {
+    db.exec("PRAGMA busy_timeout = 0")
+    // If the journal mode changed since the header read, defer to the full loader.
+    if (db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode !== "wal") return true
+    const tables = db.query<{ count: number }, []>(
+      "SELECT count(*) AS count FROM sqlite_schema WHERE name IN ('account', 'account_state') AND type = 'table'",
+    ).get()
+    if (tables?.count !== 2) return false // A pre-migration database cannot select an organization.
     return db.query(`SELECT 1 FROM account_state
       JOIN account ON account.id = account_state.active_account_id
       WHERE account_state.id = 1 AND account_state.active_org_id IS NOT NULL`).get() !== null
@@ -166,8 +220,8 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     if (managed) await readText(managed.text, managed.source, path.dirname(managed.source))
 
     if (unknown) return "unreadable"
-    if (value === true) return "disabled"
-    return (await remoteMayDisable(value)) ? "unreadable" : "enabled"
+    if (await remoteMayDisable(value)) return "unreadable"
+    return value === true ? "disabled" : "enabled"
   } catch {
     return "unreadable"
   }

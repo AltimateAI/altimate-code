@@ -1,6 +1,7 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
 import { randomBytes } from "crypto"
+import path from "path"
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
@@ -8,7 +9,6 @@ import * as OnboardingTelemetry from "../telemetry/onboarding"
 import { Telemetry } from "../telemetry"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
-import { Config } from "@/config/config"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
 // altimate_change — reads the config telemetry opt-out without an Instance
@@ -82,31 +82,17 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
   // altimate_change start — apply the same opt-out to the auth URL’s machine ID
   let disabled = Boolean(TelemetryConfig.disablingEnvironmentVariable())
   if (!disabled) {
-    try {
-      const userConfig = await Config.get()
-      disabled = userConfig.telemetry?.disabled === true || Config.telemetryConfigUnresolved(userConfig)
-    } catch (err) {
-      // Config was unreadable — NOT the normal path. Server routes run inside
-      // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
-      // Config.get() resolves during an ordinary browser authorize(). It fires on
-      // the paths that skip instance bootstrap: `altimate auth login <url>` and the
-      // create-and-link hand-off of `altimate-code link`. Read `telemetry.disabled`
-      // from the config files directly: an opt-out there, or files that cannot be
-      // read (an opt-out may be behind them), omit the id. Only a config that
-      // readably leaves telemetry on defers to the telemetry module's own state
-      // (opted out by env, no sink, test runner).
-      const state = await TelemetryConfig.disabledState(directory)
-      if (state === "enabled") {
-        await Telemetry.init().catch(() => {})
-        disabled = !Telemetry.isEnabled()
-      } else {
-        disabled = true
-      }
-      log.info("cli_context: config unavailable, read the opt-out from the files", {
-        code: (err as NodeJS.ErrnoException)?.code,
-        state,
-        enabled: !disabled,
-      })
+    const instance = TelemetryConfig.instanceDirectory()
+    const differentProject = instance && directory && path.resolve(directory) !== instance
+    const state = differentProject
+      ? undefined
+      : await TelemetryConfig.loadedState().catch(() => instance ? "unreadable" : undefined)
+    if (state) {
+      disabled = state !== "enabled"
+    } else {
+      const local = await TelemetryConfig.disabledState(directory)
+      if (local === "enabled") await Telemetry.init().catch(() => {})
+      disabled = local !== "enabled" || !Telemetry.isEnabled()
     }
   }
   let machineId = ""
