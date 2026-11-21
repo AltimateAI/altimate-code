@@ -1324,12 +1324,13 @@ export namespace SessionPrompt {
       // altimate_change end
 
       step++
+      // altimate_change start — resolve the chat model, reporting where an unavailable one came from,
+      // before sending any context for titling
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
-        // altimate_change — identify the unavailable model and where to correct it
         reportModelSelectionError(sessionID, e)
         throw e
       })
-      // altimate_change start — resolve the chat model before sending any context for titling
+      // altimate_change end
       if (step === 1)
         // altimate_change — fire-and-forget, but never an unhandled rejection
         void ensureTitle({
@@ -1338,7 +1339,6 @@ export namespace SessionPrompt {
           providerID: lastUser.model.providerID,
           history: msgs,
         }).catch((error) => log.error("failed to generate title", { error: String(error) }))
-      // altimate_change end
       const task = tasks.pop()
 
       // pending subtask
@@ -1347,7 +1347,14 @@ export namespace SessionPrompt {
         // altimate_change start — v1.17.9: TaskTool is an Effect of Info; init() yields the executable def
         const taskTool = await AppRuntime.runPromise(Effect.flatMap(TaskTool, (info) => info.init()))
         // altimate_change end
-        const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
+        // altimate_change start — an explicit subtask model reports its source like other selections
+        const taskModel = task.model
+          ? await validateModelSelection(task.model, `subtask "${task.agent}" request (model)`).catch((error) => {
+              reportModelSelectionError(sessionID, error)
+              throw error
+            })
+          : model
+        // altimate_change end
         const assistantMessage = (await Session.updateMessage({
           id: MessageID.ascending(),
           role: "assistant",

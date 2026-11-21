@@ -401,8 +401,10 @@ export function serializeSessionError(error: unknown): string {
 }
 
 /** Provider 5xx responses are retryable at the enqueue boundary. */
+// Only gateway statuses are transient. The prompt route returns other 5xx codes for request
+// errors that would fail the same way on every retry.
 export function isRetryableStatus(status: unknown): boolean {
-  return typeof status === "number" && status >= 500 && status <= 599
+  return status === 502 || status === 503 || status === 504
 }
 
 /** setTimeout's signed 32-bit ceiling; a larger delay is clamped by the runtime to ~1ms. */

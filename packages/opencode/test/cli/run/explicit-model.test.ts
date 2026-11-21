@@ -349,9 +349,38 @@ describe("run model resolution", () => {
         controller.abort()
         yield* Effect.promise(() => collect)
 
-        const errors = received.split("\n").filter((line) => line.includes('"session.error"'))
-        expect(errors).toHaveLength(1)
-        expect(errors[0]).toContain("missing-provider/missing-model (from project or global config (model))")
+        const errors = () => received.split("\n").filter((line) => line.includes('"session.error"'))
+        expect(errors()).toHaveLength(1)
+        expect(errors()[0]).toContain("missing-provider/missing-model (from project or global config (model))")
+
+        // An explicit subtask model is validated with its own source before the subtask runs.
+        received = ""
+        const subtaskEvents = new AbortController()
+        const subtaskStream = yield* Effect.promise(() => fetch(`${server.url}/event`, { signal: subtaskEvents.signal }))
+        const subtaskReader = subtaskStream.body!.getReader()
+        const subtaskCollect = (async () => {
+          const decoder = new TextDecoder()
+          while (true) {
+            const chunk = await subtaskReader.read().catch(() => ({ done: true, value: undefined }))
+            if (chunk.done) return
+            received += decoder.decode(chunk.value, { stream: true })
+          }
+        })()
+        yield* Effect.promise(() => sdk.session.promptAsync({
+          sessionID,
+          model: { providerID: "test", modelID: "test-model" },
+          parts: [
+            { type: "text", text: "delegate" },
+            { type: "subtask", prompt: "inspect", description: "inspect", agent: "general", model: { providerID: "missing-provider", modelID: "subtask-model" } },
+          ],
+        }))
+        const subtaskDeadline = Date.now() + 10_000
+        while (!received.includes("subtask-model") && Date.now() < subtaskDeadline) yield* Effect.promise(() => Bun.sleep(50))
+        yield* Effect.promise(() => Bun.sleep(500))
+        subtaskEvents.abort()
+        yield* Effect.promise(() => subtaskCollect)
+        expect(errors()).toHaveLength(1)
+        expect(errors()[0]).toContain('missing-provider/subtask-model (from subtask \\"general\\" request (model))')
         expect(yield* llm.calls).toBe(0)
       }),
     60_000,

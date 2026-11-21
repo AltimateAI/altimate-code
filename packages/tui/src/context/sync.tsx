@@ -733,7 +733,9 @@ export const {
           setStore("agentCatalog", { workspace, status: "ready" })
         })
       } catch (error) {
-        if (isCurrent()) setStore("agentCatalog", { workspace, status: retained ? "ready" : "failed" })
+        // A request superseded by a newer one or a workspace change no longer affects this workspace.
+        if (!isCurrent()) return
+        setStore("agentCatalog", { workspace, status: retained ? "ready" : "failed" })
         throw error
       }
     }
@@ -741,6 +743,8 @@ export const {
       const workspace = project.workspace.current()
       const request = ++commandRequest
       const isCurrent = () => request === commandRequest && workspace === project.workspace.current()
+      const previous = store.commandCatalog
+      const retained = previous.workspace === workspace && previous.status === "ready"
       setStore("commandCatalog", { workspace, status: "loading" })
       try {
         const response = await sdk.client.command.list({ workspace }, { throwOnError: true })
@@ -751,7 +755,7 @@ export const {
           setStore("commandCatalog", { workspace, status: "ready" })
         })
       } catch {
-        if (isCurrent()) setStore("commandCatalog", { workspace, status: "failed" })
+        if (isCurrent()) setStore("commandCatalog", { workspace, status: retained ? "ready" : "failed" })
       }
     }
     // altimate_change end
