@@ -706,7 +706,9 @@ export const layer: Layer.Layer<
         if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
         const kids = yield* children(sessionID)
         for (const child of kids) {
+          // altimate_change start — recurse without repeating the offline tree check
           yield* removeTree(child.id)
+          // altimate_change end
         }
 
         // altimate_change start — release only the deleted session's scratch store
