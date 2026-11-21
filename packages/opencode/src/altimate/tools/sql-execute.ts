@@ -313,6 +313,7 @@ export const SqlExecuteTool = Tool.define(
                     warehouseGiven: !!args.warehouse,
                     readOnly,
                     cli,
+                    dbt: target?.dbt === true,
                   })
                 // The MCP server and `altimate tool` refuse writes unless --allow-write was given.
                 if (error instanceof WriteDeniedError) throw new Error(`${explain(true, true)} ${error.message}`)
@@ -779,6 +780,8 @@ export function deniedWriteMessage(input: {
   readOnly?: boolean
   /** Refused because this MCP server or tool CLI run was started without --allow-write. */
   cli?: boolean
+  /** The default route is dbt: passing a warehouse would also move the query off dbt, so no hint names it. */
+  dbt?: boolean
 }): string {
   const readOnly = input.readOnly !== false
   const head = input.cli
@@ -792,22 +795,31 @@ export function deniedWriteMessage(input: {
   if (input.mongo) {
     return `${head} it is a MongoDB write (a write command, or an aggregate with a $out or $merge stage). Use a read command (find, aggregate, countDocuments, distinct) instead.`
   }
-  const dialect = input.dialects.find((d) => classifyAndCheck(input.sql, d).queryType === "write")
+  // Prefer a dialect that reads the text and names a concrete write over one that cannot parse it.
+  const writing = input.dialects.filter((d) => classifyAndCheck(input.sql, d).queryType === "write")
+  const dialect = writing.find((d) => !explainWrite(input.sql, d).unreadable) ?? writing[0]
   const { reason, unreadable, unavailable } = explainWrite(input.sql, dialect)
+  // Without a warehouse, a query that only some reachable dialects call a write may be a read in the real one.
+  const someRead = input.dialects.some((d) => {
+    const result = classifyAndCheck(input.sql, d)
+    return result.queryType === "read" && !result.blocked
+  })
+  const dialectHint =
+    !input.warehouseGiven && !input.dbt && input.dialects.length > 1 && (unreadable || someRead)
+      ? " No warehouse was given, so the query was read in every dialect it could reach; pass warehouse to read it in that warehouse's dialect only."
+      : ""
   const next = unavailable
     ? UNAVAILABLE_NEXT_STEP
     : unreadable
     ? "Fix the query and call sql_execute again; the same text will be refused again." +
       (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
-      (input.warehouseGiven || input.dialects.length < 2
-        ? ""
-        : " No warehouse was given, so the query was read in every dialect it could reach; pass warehouse to read it in that warehouse's dialect only.")
+      dialectHint
     : !readOnly
       ? "Change it to a statement the configured sql_execute_write rules allow, or ask the user to change the rules."
       : input.scratch
       ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."
       : "Rewrite it as a single read (SELECT, or WITH ... SELECT). To keep an intermediate result, store it in scratch with sql_materialize if that tool is available."
-  return `${head} ${reason}. ${next}`
+  return `${head} ${reason}. ${next}${unreadable ? "" : dialectHint}`
 }
 // altimate_change end
 

@@ -169,6 +169,7 @@ describe("sql_execute on a read-only agent", () => {
     const { error } = await run("SELECT Order Date FROM orders WHERE Order Date > '2020-01-01'")
     expect(error).toMatch(/sqlite SQL parser could not read it \(.*line 1, column \d+/)
     expect(error).toContain("Fix the query")
+    expect(error).not.toContain("....")
   })
 
   test("a hard block names its rule, or the open quote that made a word count", async () => {
@@ -311,5 +312,20 @@ describe("denied write message branches", () => {
     expect(message).toContain("pass warehouse")
     expect(deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((" })).not.toContain("pass warehouse")
     expect(deniedWriteMessage({ ...base, sql: "DELETE FROM t WHERE ((", readOnly: false })).toContain("may still deny it")
+  })
+
+  test("a write in only one reachable dialect suggests passing a warehouse", () => {
+    const split = { ...base, sql: "SELECT t.update FROM t", dialects: ["postgres", "clickhouse"], warehouseGiven: false }
+    expect(deniedWriteMessage(split)).toContain("pass warehouse")
+    expect(deniedWriteMessage({ ...split, warehouseGiven: true })).not.toContain("pass warehouse")
+    // A write in every dialect gets no hint, and on the dbt route a warehouse would also move the query off dbt.
+    expect(deniedWriteMessage({ ...split, sql: "DELETE FROM t" })).not.toContain("pass warehouse")
+    expect(deniedWriteMessage({ ...split, dbt: true })).not.toContain("pass warehouse")
+  })
+
+  test("the reason comes from a dialect that reads the text when one does", () => {
+    const message = deniedWriteMessage({ ...base, sql: "SELECT 1 DELETE FROM t", dialects: ["postgres", "sqlserver"], warehouseGiven: false })
+    expect(message).toContain("DELETE")
+    expect(message).not.toContain("could not read")
   })
 })

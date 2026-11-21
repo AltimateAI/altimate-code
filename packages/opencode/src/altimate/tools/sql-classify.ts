@@ -698,7 +698,7 @@ export function explainWrite(
         `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
         "The position is approximate: it counts within that statement, with each comment read as one space. " +
         'Fix the syntax there: quote identifiers that contain spaces or are keywords ("order date"), ' +
-        "check the clause order, and replace any placeholder text such as ..."
+        "check the clause order, and replace any placeholder text (...)"
       )
     }
     // The checks below follow classifySql's conditions.
