@@ -183,10 +183,10 @@ While still online:
 ### What keeps working
 
 - Local warehouses: DuckDB and SQLite files, and warehouses reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. A host that is not one of these, or a connection string that cannot be parsed, is refused.
-- dbt commands whose selected profile and target are local. dbt-duckdb profiles can use extensions, local attachments and plugins; settings that point at remote storage, a remote server or a remote extension repository (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused. Named extensions and plugins are not checked: install extensions while online, and do not configure plugins that call remote services.
-- DuckDB loads extensions that are already installed; it does not download new ones.
+- dbt commands whose selected profile and target are local. Values written as Jinja templates (for example `{{ env_var('DBT_HOST') }}`) cannot be checked and are refused; write them literally to use them offline. dbt-duckdb profiles can use extensions, local attachments and plugins; settings that point at remote storage, a remote server or a remote extension repository (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused. Named extensions and plugins are not checked: install extensions while online, and do not configure plugins that call remote services.
+- DuckDB loads extensions that are already installed and does not install new ones automatically.
 - The shell tool, installed language servers, stdio MCP servers and MCP servers at `localhost`, `127.0.0.1` or `[::1]`, including `tool run --daemon`.
-- Git diffs, session snapshots and revert, and worktree create, remove and reset (reset uses the locally cached base branch).
+- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and leaves submodules at their current commits. Git LFS files that are not cached stay as pointer files.
 - `attach` and `run --attach` to a server on this machine. The attached server applies its own policy, so start it with offline mode too.
 
 ### What is blocked
@@ -208,4 +208,4 @@ Each of these fails with a one-line message or is skipped:
 
 Programs you run or configure yourself keep their own network access and proxy settings: shell commands, language servers, local MCP servers and their child processes. Offline mode does not sandbox them. They inherit `ALTIMATE_OFFLINE=1`, so an `altimate-code` started from the shell is offline too, and `NO_PROXY` gains `localhost,127.0.0.1,[::1]` so that local requests do not go through a proxy.
 
-SQL that loads an installed network extension (such as `httpfs`) and reads a remote path is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs and usage reporting.
+SQL that runs an explicit `INSTALL`, or loads an installed network extension (such as `httpfs`) and reads a remote path, is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs and usage reporting.

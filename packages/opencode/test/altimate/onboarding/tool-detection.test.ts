@@ -217,6 +217,15 @@ test.skipIf(process.platform === "win32")("offline detection finds dbt without r
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: false })
     expect(fs.existsSync(ran)).toBe(false)
+    // dbt linked from a virtual environment (as pipx and uv install it) whose site-packages has dbt-duckdb.
+    const venvBin = path.join(dir, "venv", "bin")
+    fs.mkdirSync(venvBin, { recursive: true })
+    fs.mkdirSync(path.join(dir, "venv", "lib", "python3.12", "site-packages", "dbt", "adapters", "duckdb"), { recursive: true })
+    fs.renameSync(path.join(dir, "dbt"), path.join(venvBin, "dbt"))
+    fs.symlinkSync(path.join(venvBin, "dbt"), path.join(dir, "dbt"))
+    _resetDbtRuntimeCacheForTests()
+    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true })
+    expect(fs.existsSync(ran)).toBe(false)
   } finally {
     for (const [key, value] of [["ALTIMATE_OFFLINE", previous.offline], ["ALTIMATE_DBT_PATH", previous.dbt]] as const) {
       if (value === undefined) delete process.env[key]

@@ -69,9 +69,9 @@ describe("git() utility", () => {
   })
 
   test("offline treats submodule clones, LFS transfers and remote archives as network commands", () => {
-    for (const args of [["submodule", "update", "--init"], ["submodule", "update"], ["lfs", "fetch"], ["lfs", "pull"], ["archive", "--remote=origin", "HEAD"], ["-C", "x", "fetch"]])
+    for (const args of [["submodule", "update", "--init"], ["submodule", "update", "--recursive", "--no-fetch"], ["submodule", "add", "url"], ["remote", "add", "-f", "o", "url"], ["lfs", "fetch"], ["lfs", "pull"], ["archive", "--remote=origin", "HEAD"], ["-C", "x", "fetch"]])
       expect(gitCommandUsesNetwork(args)).toBe(true)
-    for (const args of [["submodule", "update", "--recursive", "--no-fetch"], ["lfs", "ls-files"], ["archive", "HEAD"], ["status"], ["remote", "show", "-n", "origin"]])
+    for (const args of [["submodule", "foreach", "git", "status"], ["remote", "add", "o", "url"], ["lfs", "ls-files"], ["archive", "HEAD"], ["status"], ["remote", "show", "-n", "origin"]])
       expect(gitCommandUsesNetwork(args)).toBe(false)
   })
   // altimate_change end

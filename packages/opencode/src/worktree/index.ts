@@ -176,7 +176,13 @@ export const layer: Layer.Layer<
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
         const result = yield* appProcess.run(
-          ChildProcess.make("git", args, { cwd: opts?.cwd, extendEnv: true, stdin: "ignore" }),
+          // altimate_change — offline mode keeps Git LFS from downloading objects during checkout and reset
+          ChildProcess.make("git", args, {
+            cwd: opts?.cwd,
+            ...(offlineModeEnabled() ? { env: { GIT_LFS_SKIP_SMUDGE: "1" } } : {}),
+            extendEnv: true,
+            stdin: "ignore",
+          }),
         )
         return {
           code: result.exitCode,
@@ -600,14 +606,13 @@ export const layer: Layer.Layer<
         })
       }
 
-      yield* gitExpect(
-        // altimate_change — offline mode updates checked-out submodules from objects on disk and clones none
-        offlineModeEnabled()
-          ? ["submodule", "update", "--recursive", "--force", "--no-fetch"]
-          : ["submodule", "update", "--init", "--recursive", "--force"],
-        { cwd: worktreePath },
-        (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
-      )
+      // altimate_change — `submodule update` can clone or fetch, so offline mode leaves submodules at their commits
+      if (!offlineModeEnabled())
+        yield* gitExpect(
+          ["submodule", "update", "--init", "--recursive", "--force"],
+          { cwd: worktreePath },
+          (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
+        )
 
       yield* gitExpect(
         ["submodule", "foreach", "--recursive", "git", "reset", "--hard"],
