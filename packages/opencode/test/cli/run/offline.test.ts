@@ -429,3 +429,30 @@ test.skipIf(process.platform === "win32")(
   },
   25_000,
 )
+
+test("standalone MCP rejects offline config before opening stdio", async () => {
+  const f = await fixture(false, true, false)
+  try {
+    const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "mcp", "serve"], {
+      cwd: f.project,
+      env: f.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(30_000),
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    expect({ code, stdout, stderr }).toMatchObject({
+      code: 1,
+      stdout: "",
+      stderr: expect.stringContaining("Run the standalone MCP server while online."),
+    })
+    expect(await fs.readFile(f.calls, "utf8").catch(() => "")).toBe("")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 35_000)

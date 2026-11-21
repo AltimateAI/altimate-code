@@ -168,6 +168,10 @@ let cli = yargs(args)
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
+    // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
+    if (opts._[0] === "mcp" && opts._[1] === "serve") return
+    // altimate_change end
+
     // altimate_change start — skip network work in offline mode
     const command = String(opts._[0] ?? "")
     const args = opts as {
@@ -186,14 +190,11 @@ let cli = yargs(args)
     if (Offline.enabled() && (
       ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web", "integrations"].includes(command) ||
       (command === "run" && args.attach) ||
-      (command === "mcp" && opts._[1] === "serve") ||
       (command === "tool" && opts._[1] === "daemon") ||
       (command === "learn" && opts._[1] === "import-reviews") ||
+      (command === "console" && opts._[1] === "open") ||
       (["providers", "auth", "mcp", "console"].includes(command) && opts._.some((arg) => arg === "login" || arg === "auth"))
     )) throw new Error("This command requires network access. Run it while online.")
-    // altimate_change end
-    // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
-    if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end
 
     Heap.start()

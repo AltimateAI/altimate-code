@@ -1,3 +1,6 @@
+// altimate_change start — check offline policy before starting the standalone MCP server
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { cmd } from "./cmd"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { effectCmd } from "../effect-cmd"
@@ -137,6 +140,8 @@ export const McpServeCommand = cmd({
     .option("workspace-tools", { type: "boolean", default: false, describe: "Expose linked workspace context, skills and read tools" })
     .option("all-tools", { type: "boolean", default: false, describe: "Expose every tool on the allow-list, not just the default set" }),
   async handler(args) {
+    await Offline.start(process.cwd())
+    if (Offline.enabled()) throw new Error("Run the standalone MCP server while online.")
     const { serveStdio } = await import("../../altimate/mcp-server/server")
     await serveStdio({ connections: args.connections, allowWrite: args.allowWrite, allTools: args.allTools, workspaceTools: args.workspaceTools })
   },
