@@ -179,6 +179,16 @@ describe("telemetry opt-out", () => {
     await expectSilentLifecycle()
   })
 
+  test("an opt-out in the readable config stands even when an organization config load failed", async () => {
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } } as Awaited<ReturnType<typeof Config.get>>)
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+    try {
+      expect(await TelemetryConfig.loadedState()).toBe("disabled")
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
   test("a partial config cannot enable telemetry after an organization config load failed", async () => {
     configSpy.mockResolvedValue({} as Awaited<ReturnType<typeof Config.get>>)
     const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
