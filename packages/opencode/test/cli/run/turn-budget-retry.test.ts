@@ -61,6 +61,44 @@ describe("opencode run: --max-turns charges completed steps only", () => {
       const encoder = new TextEncoder()
       const publish = (type: string, properties: object) =>
         stream?.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`))
+      const assistantMessage = (id: string, parentID: string) => {
+        publish("message.updated", {
+          info: {
+            id,
+            sessionID,
+            role: "assistant",
+            parentID,
+            agent: "build",
+            modelID: "test-model",
+            providerID: "test",
+            time: { created: Date.now() },
+          },
+        })
+        return id
+      }
+      // A compaction summary message runs one completed step of its own.
+      const compactionStep = (messageID: string, parentID: string) => {
+        const summaryID = `${messageID}zz_summary`
+        publish("message.updated", {
+          info: {
+            id: summaryID,
+            sessionID,
+            role: "assistant",
+            parentID,
+            agent: "compaction",
+            summary: true,
+            modelID: "test-model",
+            providerID: "test",
+            time: { created: Date.now() },
+          },
+        })
+        publish("message.part.updated", {
+          part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
+        })
+        publish("message.part.updated", {
+          part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
+        })
+      }
       // The processor counts retries per assistant step, so the fake does too.
       const stepAttempts = new Map<string, number>()
       const startAttempt = (messageID: string) => {
@@ -162,40 +200,9 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                     sessionID,
                     error: { name: "ContextOverflowError", data: { message: "prompt is too long" } },
                   })
-                  const summaryID = `${messageID}zz_summary`
-                  publish("message.updated", {
-                    info: {
-                      id: summaryID,
-                      sessionID,
-                      role: "assistant",
-                      parentID,
-                      agent: "compaction",
-                      summary: true,
-                      modelID: "test-model",
-                      providerID: "test",
-                      time: { created: Date.now() },
-                    },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
-                  })
+                  compactionStep(messageID, parentID)
                   publish("session.compacted", { sessionID })
-                  const nextID = `${messageID}zzz_next`
-                  publish("message.updated", {
-                    info: {
-                      id: nextID,
-                      sessionID,
-                      role: "assistant",
-                      parentID,
-                      agent: "build",
-                      modelID: "test-model",
-                      providerID: "test",
-                      time: { created: Date.now() },
-                    },
-                  })
+                  const nextID = assistantMessage(`${messageID}zzz_next`, parentID)
                   startAttempt(nextID)
                   publish("message.part.updated", {
                     part: {
@@ -220,43 +227,10 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                     sessionID,
                     error: { name: "ContextOverflowError", data: { message: "prompt is too long" } },
                   })
-                  const summaryID = `${messageID}zz_summary`
-                  publish("message.updated", {
-                    info: {
-                      id: summaryID,
-                      sessionID,
-                      role: "assistant",
-                      parentID,
-                      agent: "compaction",
-                      summary: true,
-                      modelID: "test-model",
-                      providerID: "test",
-                      time: { created: Date.now() },
-                    },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
-                  })
+                  compactionStep(messageID, parentID)
                   publish("session.compacted", { sessionID })
-                  const nextID = `${messageID}zzz_next`
-                  publish("message.updated", {
-                    info: {
-                      id: nextID,
-                      sessionID,
-                      role: "assistant",
-                      parentID,
-                      agent: "build",
-                      modelID: "test-model",
-                      providerID: "test",
-                      time: { created: Date.now() },
-                    },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${nextID}_start`, messageID: nextID, sessionID, type: "step-start" },
-                  })
+                  const nextID = assistantMessage(`${messageID}zzz_next`, parentID)
+                  startAttempt(nextID)
                   return new Promise<Response>((resolve) => {
                     finishPrompt = resolve
                   })
@@ -278,26 +252,7 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                     part: { id: `${messageID}_finish`, messageID, sessionID, type: "step-finish", reason: "stop" },
                   })
                   // Compaction machinery then runs a step of its own; it is never charged or stopped.
-                  const summaryID = `${messageID}zz_summary`
-                  publish("message.updated", {
-                    info: {
-                      id: summaryID,
-                      sessionID,
-                      role: "assistant",
-                      parentID,
-                      agent: "compaction",
-                      summary: true,
-                      modelID: "test-model",
-                      providerID: "test",
-                      time: { created: Date.now() },
-                    },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
-                  })
-                  publish("message.part.updated", {
-                    part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
-                  })
+                  compactionStep(messageID, parentID)
                   publish("session.status", { sessionID, status: { type: "idle" } })
                   return Response.json({ info: { finish: "stop" } })
                 }
