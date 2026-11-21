@@ -234,6 +234,18 @@ describe("denied write message branches", () => {
     ).rejects.toThrow("may only read")
   })
 
+  test("a catch-all deny followed by an allow is a rule, not read-only", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ruleset = [
+      { permission: "sql_execute_write", pattern: "*", action: "deny" },
+      { permission: "sql_execute_write", pattern: "INSERT INTO audit*", action: "allow" },
+    ]
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
+    await expect(
+      tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
+    ).rejects.toThrow("A sql_execute_write rule denies it")
+  })
+
   test("a pattern-only deny leaves other writes to the default ask, so it is not read-only", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ruleset = [{ permission: "sql_execute_write", pattern: "DROP*", action: "deny" }]

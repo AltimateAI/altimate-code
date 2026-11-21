@@ -61,25 +61,24 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
     STATEMENT_WORD.test(body) ||
     REPLACE_WORD.test(body)
   ) {
-    let reason = ""
-    if (options.explain !== false) {
-      reason = writeReason(sql, dialect)
-      // The classifier reads it as a read; only this stricter word list refused it. Name the word only.
-      const word = checked === undefined ? undefined : (STATEMENT_WORD.exec(body) ?? REPLACE_WORD.exec(body))?.[0]
-      if (!reason && word) {
-        reason = ` It contains the statement word ${word.toUpperCase()} outside a literal or comment; quote it if it is a column name.`
-      }
-    }
     throw new Error(
-      "This operation only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data." + reason,
+      "This operation only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data." +
+        (options.explain === false ? "" : writeReason(sql, dialect)),
     )
   }
   const semicolon = checked.masked.indexOf(";")
   return semicolon < 0 ? sql : sql.slice(0, semicolon) + sql.slice(semicolon + 1)
 }
 
-/** Why the classifier reads sql as a write, as a sentence to append to a refusal; empty for a read. */
+/** Why sql is refused as a read, as a sentence to append to a refusal: the classifier's reason for a write,
+ * or, for a read that only the stricter statement-word list refuses, that word (no SQL text). Empty otherwise. */
 export function writeReason(sql: string, dialect?: string): string {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
-  return queryType === "write" && !blocked ? ` It counts as a write because ${explainWrite(sql, dialect).reason}.` : ""
+  if (blocked) return ""
+  if (queryType === "write") return ` It counts as a write because ${explainWrite(sql, dialect).reason}.`
+  // Name the word only when it is the sole reason: the body is otherwise one SELECT or WITH query.
+  const body = readOnlyBody(sql, dialect)?.body
+  if (!body || !/^(SELECT|WITH)\b/i.test(body)) return ""
+  const word = (STATEMENT_WORD.exec(body) ?? REPLACE_WORD.exec(body))?.[0]
+  return word ? ` It contains the statement word ${word.toUpperCase()} outside a literal or comment; quote it if it is a column name.` : ""
 }

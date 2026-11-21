@@ -85,6 +85,9 @@ describe("other read-only refusals carry the reason", () => {
 
   test("a word only the stricter sql_check list refuses is named", () => {
     expect(() => readSql("SELECT x AS load FROM t", "postgres")).toThrow("statement word LOAD")
+    // Not named when something else also refuses it (the leading parenthesis).
+    expect(() => readSql("(SELECT x AS load FROM t)", "postgres")).not.toThrow("statement word")
+    expect(writeReason("SELECT x AS load FROM t", "postgres")).toContain("statement word LOAD")
   })
 
   test("parser details end without stray punctuation", () => {
