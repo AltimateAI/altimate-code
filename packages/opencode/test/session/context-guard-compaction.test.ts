@@ -429,12 +429,13 @@ it.live(
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        // Compacting the earlier history cannot make room for a message bigger than the window.
+        // 16k window, where the proactive compaction trigger never fires: compacting the earlier
+        // history cannot make room for a message bigger than the window, so the guard refuses at once.
         const result = yield* runSession(dir, llm, {
           user: "List the top customers by paid revenue.",
-          assistantUsage: 5_000,
+          assistantUsage: 1_000,
           last: TOOL_STEP,
-          next: sqlJsonHistory(140_000),
+          next: sqlJsonHistory(18_000),
         })
 
         expect(result.hits.length).toBe(0)
@@ -442,7 +443,7 @@ it.live(
         expect(result.errors.length).toBe(1)
         expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
       }),
-      { git: true, config: providerCfg(LARGE_WINDOW) },
+      { git: true, config: providerCfg(SMALL_WINDOW) },
     ),
   { timeout: 120_000 },
 )

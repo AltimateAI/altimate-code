@@ -31,7 +31,7 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 // altimate_change start — the context measure shared by compaction and the pre-send budget guard
-import { estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
+import { OUTPUT_TOKEN_FLOOR, estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
 // altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
@@ -2268,10 +2268,11 @@ export namespace SessionPrompt {
           if (attachments.some((attachment) => MessageV2.isMedia(attachment.mime))) unseenMedia = true
         }
       }
-      // Unmeasured content (sized like the guard sizes it) that alone fills the window cannot be helped
-      // by compacting the history before it: that refusal stays immediate and the history untouched.
+      // Unmeasured content (sized like the guard sizes it) that alone leaves no room for a minimal
+      // response cannot be helped by compacting the history before it: that refusal stays immediate
+      // and the history untouched.
       const guardTail = measured ? estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens) : 0
-      const tailFillsWindow = guardTail >= (model.limit.input || model.limit.context || Infinity)
+      const tailFillsWindow = guardTail + OUTPUT_TOKEN_FLOOR >= (model.limit.input || model.limit.context || Infinity)
       const compactable =
         measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia && !tailFillsWindow
       // A step that made tool calls was sent with the full tool set; a text-only step may have been
