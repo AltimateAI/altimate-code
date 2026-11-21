@@ -136,7 +136,14 @@ export async function create(cfg: Config, options: CreateOptions = {}): Promise<
   exec.createCommandProcessExecution = (options) => {
     const execution = createExecution(options)
     const install = trackedExplicitInstaller(options)
-    if (install) execution.complete = install
+    if (install) {
+      execution.complete = () => install()
+      execution.completeWithTerminalOutput = () => install((text) => {
+        const formatted = execution.formatText(text)
+        term.log(formatted)
+        return formatted
+      })
+    }
     return execution
   }
   const infra = new DBTCommandExecutionInfrastructure(runtime, term)

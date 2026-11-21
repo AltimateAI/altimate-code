@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { spawn } from "child_process"
+import { spawn, spawnSync } from "child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -305,14 +305,26 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(2)
   })
 
-  test("non-hub (local/git) packages: verified by count without a stamp, by stamp afterwards", async () => {
+  test("non-hub packages are verified by count before an install and by name from the stamp afterwards", async () => {
     writeProject({ packages: "packages:\n  - local: ../elsewhere\n" })
-    const c = counter()
-    expect(packagesSatisfied(root).ok).toBe(false) // nothing installed
+    const pkg = join(root, "dbt_packages", "elsewhere")
+    const stamp = join(stateDir(), "packages.stamp.json")
+    expect(packagesSatisfied(root).ok).toBe(false)
     installPackage("0.1.0", "elsewhere")
     expect(packagesSatisfied(root).ok).toBe(true)
-    await ensurePackages(root, c.install)
-    expect(c.calls).toBe(0)
+    expect(existsSync(stamp)).toBe(false)
+
+    const install = async () => installPackage("0.1.0", "elsewhere")
+    rmSync(pkg, { recursive: true })
+    expect((await ensurePackages(root, install)).action).toBe("installed")
+    expect(existsSync(stamp)).toBe(true)
+    expect((await ensurePackages(root, install)).action).toBe("skipped")
+
+    rmSync(pkg, { recursive: true })
+    installPackage("0.1.0", "another_package")
+    expect(packagesSatisfied(root).reason).toContain("installed package missing: elsewhere")
+    expect((await ensurePackages(root, install)).action).toBe("installed")
+    expect(existsSync(join(pkg, "dbt_project.yml"))).toBe(true)
   })
 
   test("honours packages-install-path from dbt_project.yml", async () => {
@@ -425,7 +437,10 @@ describe("lock", () => {
     expect(c.calls).toBe(1)
   })
 
-  test.skipIf(process.platform !== "darwin" && process.platform !== "linux")("reclaims a lock when the installer PID belongs to a different process", async () => {
+  const canReadProcessIdentity = process.platform === "linux" || (
+    process.platform === "darwin" && spawnSync("/bin/ps", ["-p", String(process.pid)]).status === 0
+  )
+  test.skipIf(!canReadProcessIdentity)("reclaims a lock when the installer PID belongs to a different process", async () => {
     writeProject()
     const lockDir = join(stateDir(), "packages.lock")
     mkdirSync(lockDir, { recursive: true })

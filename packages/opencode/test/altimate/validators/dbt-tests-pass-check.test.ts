@@ -201,11 +201,17 @@ describe("retryErroredSerially", () => {
       ...Array(5).fill("Could not set lock on file"),
     ]
     const attempted: string[] = []
+    let active = 0
+    let maxActive = 0
     const first = errors.map((error) => ({ error }))
     const { outputs, retried } = await retryErroredSerially(items, first, async (item) => {
       attempted.push(item)
+      maxActive = Math.max(maxActive, ++active)
+      await Promise.resolve()
+      active--
       return null
     }, (output) => output.error)
+    expect(maxActive).toBe(1)
     expect(attempted).toEqual(["a", "b", "c", "d"])
     expect(retried).toBe(4)
     expect(outputs).toEqual(first)

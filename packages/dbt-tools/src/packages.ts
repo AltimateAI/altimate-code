@@ -587,10 +587,10 @@ type InstallProcess = {
 // engine. Only its explicit package installs need our process tracker.
 export function trackedExplicitInstaller(options: InstallProcess) {
   const track = explicitInstaller.getStore()
-  if (track) return () => runInstallProcess(options, track)
+  if (track) return (formatOutput?: (text: string) => string) => runInstallProcess(options, track, formatOutput)
 }
 
-function runInstallProcess(options: InstallProcess, track: TrackInstaller) {
+function runInstallProcess(options: InstallProcess, track: TrackInstaller, formatOutput?: (text: string) => string) {
   return new Promise<{ exitCode: number | null; stdout: string; stderr: string; fullOutput: string }>((resolve, reject) => {
     let stdout = ""
     let stderr = ""
@@ -627,7 +627,8 @@ function runInstallProcess(options: InstallProcess, track: TrackInstaller) {
         abort()
         return
       }
-      const text = chunk.toString()
+      const raw = chunk.toString()
+      const text = formatOutput ? formatOutput(raw) : raw
       if (stream === "stdout") stdout += text
       else stderr += text
       fullOutput += text

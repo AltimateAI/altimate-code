@@ -25,12 +25,12 @@ function dbtSync(args: string[]) {
   return spawnSync(REAL_DBT!, args, { cwd: proj, encoding: "utf-8", env: { ...process.env, ...env }, timeout: 120_000 })
 }
 
-function runAltimateDbt(i: number, args = ["schema-verify", "--model", "m"]) {
+function runAltimateDbt(i: number, args = ["schema-verify", "--model", "m"], overrides: Record<string, string> = {}) {
   return new Promise<{ code: number | null; out: string }>((resolve) => {
     const c = spawn(
       "node",
       [DIST, ...args],
-      { cwd: proj, env: { ...process.env, ...env, E2E_DB: join(proj, `db${i}.duckdb`), BUILD_ROOT: "build" } },
+      { cwd: proj, env: { ...process.env, ...env, E2E_DB: join(proj, `db${i}.duckdb`), BUILD_ROOT: "build", ...overrides } },
     )
     let out = ""
     c.stdout.on("data", (d) => (out += d))
@@ -139,6 +139,50 @@ suite("real dbt: concurrent altimate-dbt invocations and `dbt deps`", () => {
     expect(result.code, result.out).toBe(0)
     expect(packageHealthy()).toBe(true)
     expect(existsSync(join(proj, "target", ".altimate-dbt", "packages.lock"))).toBe(false)
+  }, 120_000)
+
+  test("Python Core explicit deps publishes the PID of the selected installer", async () => {
+    const home = join(work, "core-home")
+    const cfg = join(home, ".altimate-code")
+    mkdirSync(cfg, { recursive: true })
+    const ready = join(work, "explicit-installer.pid")
+    const proceed = join(work, "continue-explicit-install")
+    const python = join(work, "tracked-python")
+    const interpreter = join(work, "venv", "bin", "python3")
+    writeFileSync(python, `#!/bin/sh
+case "$2" in
+  *'dbt_cli.invoke([r"""deps"""'*)
+    echo "$$" > "${ready}"
+    i=0
+    while [ ! -f "${proceed}" ] && [ "$i" -lt 400 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    ;;
+esac
+exec "${interpreter}" "$@"
+`)
+    chmodSync(python, 0o755)
+    writeFileSync(join(cfg, "dbt.json"), JSON.stringify({ projectRoot: proj, pythonPath: python, dbtIntegration: "core" }))
+    const ownerFile = join(proj, "target", ".altimate-dbt", "packages.lock", "owner.json")
+    const run = runAltimateDbt(0, ["deps"], { HOME: home, XDG_CONFIG_HOME: join(home, ".config") })
+    try {
+      const deadline = Date.now() + 15_000
+      let tracked = false
+      while (!tracked && Date.now() < deadline) {
+        if (existsSync(ready) && existsSync(ownerFile)) {
+          const pid = Number(readFileSync(ready, "utf-8"))
+          tracked = pid > 0 && JSON.parse(readFileSync(ownerFile, "utf-8")).installerPid === pid
+        }
+        if (!tracked) await Bun.sleep(25)
+      }
+      expect(tracked).toBe(true)
+    } finally {
+      writeFileSync(proceed, "")
+      const result = await run
+      expect(result.code, result.out).toBe(0)
+    }
+    expect(packageHealthy()).toBe(true)
   }, 120_000)
 
   test("concurrent commands install and read a compound Jinja package path without overlap", async () => {
