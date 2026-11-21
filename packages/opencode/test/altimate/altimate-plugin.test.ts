@@ -176,7 +176,11 @@ describe("buildCliContext", () => {
       // the omission below comes from the other-project branch.
       const link = path.join(dir.path, "current-link")
       fs.symlinkSync(current.path, link)
-      const own = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, link) })
+      // The files-only read is made inconclusive, so treating the alias as another project would omit the id.
+      const filesOnly = spyOn(TelemetryConfig, "disabledState").mockResolvedValue("unreadable")
+      const own = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, link) }).finally(
+        () => filesOnly.mockRestore(),
+      )
       expect(Object.prototype.hasOwnProperty.call(JSON.parse(Buffer.from(own, "base64url").toString("utf8")), "machine_id")).toBe(true)
       const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) })
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>

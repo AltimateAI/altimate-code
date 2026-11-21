@@ -820,6 +820,29 @@ it.effect("a legacy global config that fails to load leaves the telemetry opt-ou
   ),
 )
 
+for (const [label, contents] of [["a missing", undefined], ["an empty", ""]] as const) {
+  configIt({ auth: Auth.defaultLayer }).instance(`${label} auth store leaves the telemetry opt-out resolved`, () =>
+    withProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      undefined,
+      Effect.gen(function* () {
+        const authFile = Auth.filepath()
+        const previous = yield* Effect.promise(() => fs.readFile(authFile, "utf8").catch(() => undefined))
+        yield* Effect.promise(async () => {
+          await fs.mkdir(path.dirname(authFile), { recursive: true })
+          if (contents === undefined) await fs.rm(authFile, { force: true })
+          else await fs.writeFile(authFile, contents)
+        })
+        try {
+          expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(false)
+        } finally {
+          yield* Effect.promise(() => (previous === undefined ? fs.rm(authFile, { force: true }) : fs.writeFile(authFile, previous)))
+        }
+      }),
+    ),
+  )
+}
+
 configIt({ auth: Auth.defaultLayer }).instance("a config loaded while the auth store is unreadable leaves the telemetry opt-out unresolved", () =>
   withProcessEnv(
     "OPENCODE_AUTH_CONTENT",

@@ -76,7 +76,10 @@ export function readFailed(store: object): boolean {
 }
 function storeFileHasContent(): boolean {
   try {
-    return statSync(file).size > 0 // a stat, not a second read of the file the read just failed on
+    // A stat, not a second read of the file the read just failed on. Only an empty regular file is
+    // "no store"; anything else that failed to read counts as unreadable.
+    const stat = statSync(file)
+    return !stat.isFile() || stat.size > 0
   } catch (error) {
     return (error as NodeJS.ErrnoException)?.code !== "ENOENT"
   }
