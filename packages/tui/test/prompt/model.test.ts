@@ -205,7 +205,7 @@ test("each submission model source is named, and only chat-model sources let a p
   const current = { providerID: "chat", modelID: "model" }
   expect(resolveSubmissionModel({ command: { name: "review", model: "x/y" }, current, currentSource: "CLI --model" })).toEqual({
     model: { providerID: "x", modelID: "y" },
-    source: 'command "/review" config (model)',
+    source: 'command "review" config (model)',
     pickerCanOverride: false,
   })
   expect(

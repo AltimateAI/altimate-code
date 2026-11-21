@@ -11,7 +11,7 @@ export function resolveSubmissionModel(input: {
   if (input.command?.model !== undefined)
     return {
       model: parseModel(input.command.model),
-      source: `command "/${input.command.name}" config (model)`,
+      source: `command "${input.command.name}" config (model)`,
       pickerCanOverride: false,
     }
   if (input.commandAgent?.model)

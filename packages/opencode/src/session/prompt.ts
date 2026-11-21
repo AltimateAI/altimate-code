@@ -4835,10 +4835,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const available = await Agent.list().then((agents) => agents.filter((a) => !a.hidden).map((a) => a.name))
       const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
       const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
-      Bus.publish(Session.Event.Error, {
+      ModelMetadata.markReported(error)
+      void Bus.publish(Session.Event.Error, {
         sessionID: input.sessionID,
         error: error.toObject(),
-      })
+      }).catch(() => undefined)
       throw error
     }
 
