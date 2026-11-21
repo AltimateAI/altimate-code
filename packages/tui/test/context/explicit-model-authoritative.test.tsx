@@ -222,6 +222,11 @@ function local_model_is(mounted: Awaited<ReturnType<typeof mount>>, providerID: 
 
 // upstream_fix start — real-provider regressions for unavailable explicit references.
 for (const scenario of [
+  {
+    name: "CLI overrides configured agent",
+    args: { model: "ollama/local", agentModel: { providerID: "opencode", modelID: "zen-model" } },
+    expected: { providerID: "ollama", modelID: "local" },
+  },
   { name: "CLI missing provider", args: { model: "ollama/local" }, expected: { providerID: "ollama", modelID: "local" } },
   { name: "CLI missing model", args: { model: "opencode/missing" }, expected: { providerID: "opencode", modelID: "missing" } },
   { name: "empty CLI", args: { model: "" }, expected: { providerID: "", modelID: "" } },
