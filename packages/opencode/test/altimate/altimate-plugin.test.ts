@@ -191,7 +191,7 @@ describe("buildCliContext", () => {
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
     })
 
-    test("inside a project, keeps machine_id for another project without an opt-out when the account database cannot be read", async () => {
+    test("inside a project, keeps machine_id for another project without an opt-out, without consulting the account database", async () => {
       if (TelemetryConfig.disablingEnvironmentVariable()) return
       await using current = await tmpdir({ git: true })
       await using other = await tmpdir({ git: true })

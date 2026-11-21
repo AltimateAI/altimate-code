@@ -166,9 +166,9 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 - **Signed-in users:** Events carry your Altimate user ID and tenant, so they are not anonymous. No email address, hashed or not, is sent. See [User identification](telemetry.md) for how the ID is looked up and cached.
 - **Users who are not signed in:** A random UUID (`crypto.randomUUID()`) is generated on first run and stored at `~/.altimate/machine-id`. This is NOT tied to your hardware, OS, or identity — it's purely random.
-- **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option.
+- **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED`, `ALTIMATE_CLI_DISABLE_TELEMETRY` or `OPENCODE_DISABLE_TELEMETRY` set to `1` or `true`, or the `telemetry.disabled` config option.
 - **No fingerprinting:** We do not use browser fingerprinting, hardware IDs, MAC addresses, or IP-based tracking.
-- **CLI auth flow:** When you sign in via `altimate auth login`, the anonymous machine ID is included in the authorization URL and associated with your account in product analytics for funnel analysis. The machine ID is omitted from the URL entirely when you disable telemetry (any of the three environment variables below, or the `telemetry.disabled` config option), and also while that setting cannot be resolved.
+- **CLI auth flow:** When you sign in via `altimate auth login`, the anonymous machine ID is included in the authorization URL and associated with your account in product analytics for funnel analysis. The machine ID is omitted from the URL entirely when you disable telemetry (any of those three environment variables, or the `telemetry.disabled` config option), and also while that setting cannot be resolved.
 
 ### What happens on first launch?
 

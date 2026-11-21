@@ -876,6 +876,13 @@ describe("telemetry opt-out", () => {
     }
   })
 
+  test("an explicit local telemetry setting outranks a well-known remote config, which Config merges first", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ "https://config.example.invalid": { type: "wellknown" } })
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: false } })
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+  })
+
   test("auth content that does not parse falls back to the auth file, as Auth does", async () => {
     process.env.OPENCODE_AUTH_CONTENT = "{"
     expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
