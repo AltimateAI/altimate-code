@@ -3,6 +3,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
+import { Offline } from "@/config/offline"
 import { Telemetry } from "@/telemetry"
 // altimate_change — onboarding funnel: environment_scan_completed
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
@@ -484,6 +485,8 @@ export async function detectDataTools(skip: boolean): Promise<DataToolInfo[]> {
   // non-zero" (binary present but the version check failed).
   const results = await Promise.all(
     DATA_TOOL_NAMES.map(async (tool): Promise<DataToolInfo> => {
+      // `dbt --version` asks PyPI for the latest release, so offline mode only checks that dbt is installed.
+      if (tool === "dbt" && Offline.enabled()) return { name: tool, installed: Bun.which(tool) !== null }
       const result = safeSpawnSync([tool, "--version"], { timeout: 5000 })
       if (result && result.exitCode === 0) {
         return {

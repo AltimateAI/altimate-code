@@ -125,7 +125,8 @@ describe("Worktree", () => {
           run(lib, args)
         run(directory, ["submodule", "add", "-q", lib, "vendor lib"])
         run(directory, ["commit", "-q", "-m", "add submodule"])
-        // A second lib commit, recorded in the main repo: the worktree's checkout starts at the older one.
+        // A second lib commit, recorded in the main repo as the newer submodule commit; the test rewinds the
+        // worktree's submodule to the older one below.
         const older = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: lib, stdout: "pipe" }).stdout.toString().trim()
         run(lib, ["commit", "-q", "--allow-empty", "-m", "lib 2"])
         run(path.join(directory, "vendor lib"), ["fetch", "-q", "origin"])

@@ -1,5 +1,5 @@
 import type { Config } from "./config"
-import { LIBPQ_DESTINATION_VARS } from "./offline-env"
+import { dropLibpqDestinationVars } from "./offline-env"
 import { bufferLog } from "./log-buffer"
 import { recordManifest } from "./stale-manifest"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
@@ -105,9 +105,7 @@ function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
     vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
     vars.DO_NOT_TRACK = "1"
     vars.DBT_VERSION_CHECK = "false"
-    // Environment names are case-insensitive on Windows.
-    for (const key of Object.keys(vars))
-      if ((LIBPQ_DESTINATION_VARS as readonly string[]).includes(key.toUpperCase())) delete vars[key]
+    dropLibpqDestinationVars(vars)
   }
   if (options.profilesDir) vars.DBT_PROFILES_DIR = options.profilesDir
   if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
