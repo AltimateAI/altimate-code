@@ -532,6 +532,11 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     // trailing statements. Keep dialect-aware lexical hard denies authoritative.
     const functions = functionSafety(sql, dialect, depth)
     const masked = maskSql(lexical.tokens)
+    // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
+    // (never SQL) would pass as a read. Treat it as unreadable so the residue is named, as on other dialects.
+    if (dialect?.toLowerCase() === "clickhouse" && masked.search(SHELL_REDIRECT) >= 0) {
+      return { ...classifyFallback(sql, dialect), parseError: "shell redirect after the SQL" }
+    }
     const hardType = result.statements.find(
       (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
     )?.statement_type
@@ -740,13 +745,15 @@ export function explainWrite(
     if (parsed && parsed.category !== "query") return writes(`${where} is not a read (${type})`)
     if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
       // Quoted names keep their case; engines that store unquoted names in uppercase need it written so.
-      const stored = /^(snowflake|oracle)$/i.test(dialect ?? "") ? ', in the case the engine stores, such as "UPDATE"' : ""
+      const quoted = /^(snowflake|oracle)$/i.test(dialect ?? "")
+        ? '"T"."UPDATE" (this engine stores unquoted names in uppercase)'
+        : '"t"."update"'
       return writes(
         dialect?.toLowerCase() === "clickhouse"
           ? `${where} contains a write clause (SELECT ... INTO or a modifying CTE), or a write keyword that on ClickHouse ` +
               'counts even after a dot: quote the column, t."update"'
           : `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
-              `or a write keyword after a quoted name such as "t".update: quote the column too, "t"."update"${stored})`,
+              `or a write keyword after a quoted name such as "t".update: quote the column too, ${quoted})`,
       )
     }
     const keyword = batchedStatement(masked, dialect)

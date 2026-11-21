@@ -12,6 +12,16 @@ import { resolveQueryTimeout } from "./query-timeout"
 import { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
+/** The statement after any leading whitespace, `--` line comments and block comments. */
+function withoutLeadingComments(sql: string): string {
+  let s = sql
+  for (;;) {
+    const next = s.replace(/^\s+/, "").replace(/^--[^\n]*(\n|$)/, "").replace(/^\/\*[\s\S]*?\*\//, "")
+    if (next === s) return s
+    s = next
+  }
+}
+
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   // altimate_change start — a missing path must fail loudly, not become :memory:
   const cwd = process.cwd()
@@ -52,8 +62,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const timeoutMs = resolveQueryTimeout(config, options).ms
       const effectiveLimit = options?.noLimit ? 0 : (limit ?? 1000)
 
-      // Determine if this is a SELECT-like statement
-      const trimmed = sql.trim().toLowerCase()
+      // Determine if this is a SELECT-like statement. Leading comments are skipped, so a commented read
+      // still returns rows instead of a change count.
+      const trimmed = withoutLeadingComments(sql).toLowerCase()
       const isPragma = trimmed.startsWith("pragma")
       const isSelect =
         trimmed.startsWith("select") ||

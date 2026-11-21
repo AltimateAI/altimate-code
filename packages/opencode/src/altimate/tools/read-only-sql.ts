@@ -86,11 +86,14 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
   return semicolon < 0 ? sql : sql.slice(0, semicolon) + sql.slice(semicolon + 1)
 }
 
+/** Every hard-block refusal says this; its "permission" keyword sets the telemetry error class. */
+export const NOT_OVERRIDABLE = "This cannot be overridden by any permission rule."
+
 /** A hard-block refusal: head, then "cannot be overridden" unless only unreadable text (an open quote or comment)
  * made a word count, then the reason. */
 export function hardBlockRefusal(head: string, sql: string, dialect?: string): string {
   const unreadable = !tokenizeSql(sql, dialect).complete && !hasExecutableComment(sql, dialect)
-  return `${head}${unreadable ? "" : " This cannot be overridden by any permission rule."}${writeReason(sql, dialect)}`
+  return `${head}${unreadable ? "" : ` ${NOT_OVERRIDABLE}`}${writeReason(sql, dialect)}`
 }
 
 /** Why sql is refused as a read, as a sentence to append to a refusal: a hard block, the classifier's reason for a write,

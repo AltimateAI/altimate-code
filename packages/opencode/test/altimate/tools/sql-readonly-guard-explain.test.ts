@@ -27,6 +27,16 @@ describe("shellResidue", () => {
     })
   }
 
+  test("on ClickHouse, whose parser accepts trailing text, a redirect is still named and not run", () => {
+    for (const [sql, residue] of [["SELECT 1 2>/dev/null", "2>/dev/null"], ["SELECT * FROM t LIMIT 5 2>&1", "2>&1"]]) {
+      expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("write")
+      expect(shellResidue(sql, "clickhouse")).toBe(residue)
+    }
+    for (const sql of ["SELECT a > 2 FROM t", "SELECT '2>/dev/null'", "SELECT 1 -- 2>/dev/null", "SELECT a || tail FROM t"]) {
+      expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("read")
+    }
+  })
+
   test("a comparison is not a redirect", () => {
     expect(shellResidue("SELECT a FROM t WHERE x > 2", "postgres")).toBeUndefined()
     expect(shellResidue("SELECT a FROM t WHERE x >= 2.5", "postgres")).toBeUndefined()
@@ -317,8 +327,10 @@ describe("explainWrite", () => {
 
   test("a quoted qualifier gets a specific hint", () => {
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).toContain('"t"."update"')
-    expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).not.toContain("stores")
-    expect(explainWrite('SELECT "T".update FROM t', "snowflake").reason).toContain('the case the engine stores, such as "UPDATE"')
+    expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).not.toContain("uppercase")
+    const upper = explainWrite('SELECT "T".update FROM t', "snowflake").reason
+    expect(upper).toContain('"T"."UPDATE"')
+    expect(upper).not.toContain('"t"."update"')
   })
 
   test("every write in the guard corpus is a write with a specific reason", () => {
