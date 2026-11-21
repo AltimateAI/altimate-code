@@ -618,7 +618,8 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     if (result.parseError) {
       return unreadable(
         `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
-        'Fix the syntax at that position: quote identifiers that contain spaces or are keywords ("order date"), ' +
+        "The position counts from the start of that statement with comments removed. " +
+        'Fix the syntax there: quote identifiers that contain spaces or are keywords ("order date"), ' +
         "check the clause order, and replace any placeholder text such as ..."
       )
     }

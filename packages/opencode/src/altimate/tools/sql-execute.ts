@@ -44,6 +44,7 @@ import * as Precedence from "../workspace/precedence"
 import { normalizeError } from "./response-normalization"
 // altimate_change end
 import { readSql } from "./sql-check"
+import { writeReason } from "./read-only-sql"
 import { MaterializeError, storeRows } from "./sql-materialize"
 import { firstTime } from "./session-hints"
 
@@ -70,10 +71,11 @@ const STEP_REF = /\{\{([A-Za-z_]\w*)(?:\.([A-Za-z_]\w*))?\}\}/g
 const MAX_BOUND_ROWS = 1000
 
 function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
+  const dialect = Registry.canonicalType(Registry.getConfig(warehouse)?.type) ?? undefined
   try {
-    return readSql(sql, Registry.canonicalType(Registry.getConfig(warehouse)?.type) ?? undefined)
+    return readSql(sql, dialect, { explain: false })
   } catch {
-    throw new Error(`query_from ${stage} must be a single read-only SELECT (or WITH ... SELECT).`)
+    throw new Error(`query_from ${stage} must be a single read-only SELECT (or WITH ... SELECT).${writeReason(sql, dialect)}`)
   }
 }
 
