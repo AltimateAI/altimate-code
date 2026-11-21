@@ -183,7 +183,9 @@ function formatEditorContext(selection: EditorSelection) {
   return `<system-reminder>${ranges.join("\n")} This may or may not be relevant to the current task.</system-reminder>\n`
 }
 
-let stashed: { prompt: PromptInfo; cursor: number } | undefined
+// altimate_change start — retain submission mode with the stashed draft across navigation
+let stashed: { prompt: PromptInfo; cursor: number; mode: "normal" | "shell" } | undefined
+// altimate_change end
 
 export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
@@ -720,18 +722,23 @@ export function Prompt(props: PromptProps) {
     const saved = stashed
     stashed = undefined
     if (store.prompt.input) return
-    if (saved && saved.prompt.input) {
+    // altimate_change start — recover the intended shell or chat mode with the draft
+    if (saved) {
       input.setText(saved.prompt.input)
       setStore("prompt", saved.prompt)
+      setStore("mode", saved.mode)
       restoreExtmarksFromParts(saved.prompt.parts)
       input.cursorOffset = saved.cursor
     }
+    // altimate_change end
   })
 
   onCleanup(() => {
-    if (store.prompt.input) {
-      stashed = { prompt: unwrap(store.prompt), cursor: input.cursorOffset }
+    // altimate_change start — the mode is part of an edited draft even before the user types
+    if (store.prompt.input || store.mode === "shell") {
+      stashed = { prompt: unwrap(store.prompt), cursor: input.cursorOffset, mode: store.mode }
     }
+    // altimate_change end
     setInputTarget(undefined)
     props.ref?.(undefined)
   })

@@ -482,3 +482,24 @@ test("a standalone command's recorded model cannot replace the picker recovery f
       await mounted.cleanup()
     }
   }))
+
+test("picking a model in another conversation preserves both choices for the same agent", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({ model: "ollama/missing" })
+    try {
+      const first = { providerID: "altimate-free", modelID: "altimate-base" }
+      const second = { providerID: "opencode", modelID: "zen-model" }
+      mounted.route.navigate({ type: "session", sessionID: "ses_first" })
+      mounted.local.model.set(first)
+      mounted.route.navigate({ type: "session", sessionID: "ses_second" })
+      mounted.local.model.set(second)
+      expect(mounted.local.model.current()).toEqual(second)
+      mounted.route.navigate({ type: "session", sessionID: "ses_first" })
+      mounted.local.model.restoreSession(first)
+      expect(mounted.local.model.current()).toEqual(first)
+      mounted.route.navigate({ type: "session", sessionID: "ses_second" })
+      expect(mounted.local.model.current()).toEqual(second)
+    } finally {
+      await mounted.cleanup()
+    }
+  }))

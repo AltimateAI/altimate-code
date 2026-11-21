@@ -630,9 +630,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
       // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
       const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
-      const [pickedModels, setPickedModels] = createStore<Record<string, { scope: string; model: ModelRef } | undefined>>({})
+      const [pickedModels, setPickedModels] = createStore<Record<string, ModelRef | undefined>>({})
       const [restoredModels, setRestoredModels] = createStore<Record<string, { scope: string; model: ModelRef }>>({})
       const sessionScope = () => route.data.type === "session" ? route.data.sessionID : "home"
+      const pickerKey = (name: string, scope = sessionScope()) => JSON.stringify([scope, name])
       const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
       // altimate_change end
 
@@ -723,8 +724,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // An unavailable explicit selection outranks restored history.
         // A deliberate picker choice during this launch is the recovery path.
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
-        const picked = a ? pickedModels[a.name] : undefined
-        if (picked?.scope === sessionScope()) return picked.model
+        const picked = a ? pickedModels[pickerKey(a.name)] : undefined
+        if (picked) return picked
 
         if (args.model !== undefined) return parseModel(args.model)
         if (a?.model) return a.model
@@ -758,7 +759,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           setModelStore("model", a.name, { providerID: model.providerID, modelID: model.modelID })
           if (options?.explicit) {
             setExplicitPicks(pickKey(model), true)
-            setPickedModels(a.name, { scope: sessionScope(), model: { ...model } })
+            setPickedModels(pickerKey(a.name), { ...model })
           }
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
@@ -1034,9 +1035,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         adoptSession(sessionID: string) {
           const a = agent.current()
           if (!a || route.data.type !== "home") return
-          const picked = pickedModels[a.name]
-          if (picked?.scope !== "home") return
-          setPickedModels(a.name, { scope: sessionID, model: { ...picked.model } })
+          const picked = pickedModels[pickerKey(a.name, "home")]
+          if (picked) setPickedModels(pickerKey(a.name, sessionID), { ...picked })
         },
         // altimate_change end
         // altimate_change start — migrate Big Pickle defaults after managed-model consent
