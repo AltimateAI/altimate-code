@@ -715,17 +715,19 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         return model
       }
 
-      const currentModel = createMemo(() => {
+      // A model picked for this conversation takes precedence over launch defaults and history.
+      const sessionOverride = createMemo(() => {
         const a = agent.current()
-
-        // An unavailable explicit selection outranks restored history.
-        // A deliberate picker choice during this launch is the recovery path.
-        const persistedAgentPick = a ? modelStore.model[a.name] : undefined
         const picked = a ? pickedModels[pickerKey(a.name)] : undefined
-        if (picked) return picked
+        return picked ?? (args.model !== undefined ? parseModel(args.model) : a?.model)
+      })
 
-        if (args.model !== undefined) return parseModel(args.model)
-        if (a?.model) return a.model
+      const currentModel = createMemo(() => {
+        const override = sessionOverride()
+        if (override) return override
+
+        const a = agent.current()
+        const persistedAgentPick = a ? modelStore.model[a.name] : undefined
         const restored = a ? restoredModels[a.name] : undefined
         if (restored?.scope === sessionScope()) return restored.model
         const configured = explicitFallbackModel()
@@ -1148,8 +1150,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             scope: sessionScope(),
             model: { providerID: resolved.providerID, modelID: resolved.modelID },
           })
-          const current = currentModel()
-          return sameModel(current, resolved) ? current : undefined
+          return sessionOverride() ? undefined : resolved
         },
         // altimate_change end
         // altimate_change end

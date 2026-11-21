@@ -456,11 +456,11 @@ test("picker recovery follows a new session but does not overwrite a different r
   } finally { await mounted.cleanup() }
 }))
 
-test("restoring history does not report application when a CLI override remains effective", () => withIsolatedState(async () => {
+test("restoring the same model leaves a CLI override's variant selected", () => withIsolatedState(async () => {
   const mounted = await mount({ model: "opencode/zen-model" })
   try {
     mounted.local.model.variant.set("saved-effort")
-    expect(mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })).toBeUndefined()
+    expect(mounted.local.model.restoreSession({ providerID: "opencode", modelID: "zen-model" })).toBeUndefined()
     expect(mounted.local.model.variant.selected()).toBe("saved-effort")
   } finally { await mounted.cleanup() }
 }))
@@ -539,6 +539,22 @@ test("a home picker correction moves to its new session without changing later h
       expect(mounted.local.model.current()).toEqual(chosen)
       mounted.route.navigate({ type: "home" })
       expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
+    } finally {
+      await mounted.cleanup()
+    }
+  }))
+
+test("matching picker model keeps its variant while ordinary history reports the restored selection", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({})
+    try {
+      const base = { providerID: "altimate-free", modelID: "altimate-base" }
+      mounted.route.navigate({ type: "session", sessionID: "ses_history" })
+      expect(mounted.local.model.restoreSession(base)).toEqual(base)
+      mounted.local.model.set(base)
+      mounted.local.model.variant.set("high")
+      expect(mounted.local.model.restoreSession(base)).toBeUndefined()
+      expect(mounted.local.model.variant.selected()).toBe("high")
     } finally {
       await mounted.cleanup()
     }
