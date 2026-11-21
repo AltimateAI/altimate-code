@@ -18,6 +18,7 @@ import type { ConnectedProviderShape } from "../util/connected"
 // altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` below needs to see the
 // same migration-decline kv key app.tsx writes.
 import { useKV } from "./kv"
+import { isConfigModelSource } from "@opencode-ai/core/altimate-model-source"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -376,7 +377,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const key = JSON.stringify([model.providerID, model.modelID])
       if (passive && reportedInvalidModel === key) return false
       const from = source ? ` (from ${source})` : ""
-      const fromConfig = source?.endsWith("config (model)") === true
+      const fromConfig = isConfigModelSource(source)
       const empty = model.providerID ? `Empty model name in "${model.providerID}/"${from}` : `Empty model value${from}`
       const problem =
         !model.modelID

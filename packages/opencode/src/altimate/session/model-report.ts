@@ -6,15 +6,22 @@ import type { ModelID, ProviderID } from "../../provider/schema"
 import type { SessionID } from "../../session/schema"
 import { modelSelectionErrorText } from "../provider/model-hint"
 import { ModelMetadata } from "./model-metadata"
+import { Log } from "../../util/log"
+
+const log = Log.create({ service: "model-report" })
+
+// The error is already marked reported, so a failed publish must leave a trace.
+export function publishReported(sessionID: SessionID, error: InstanceType<typeof NamedError.Unknown>) {
+  void Bus.publish(Session.Event.Error, { sessionID, error: error.toObject() }).catch((cause) =>
+    log.warn("session error event not published", { sessionID, cause }),
+  )
+}
 
 // Publish guided text for an unavailable model once, marking the error so routes don't repeat it.
 export function reportModelSelectionError(sessionID: SessionID, error: unknown) {
   if (!Provider.ModelNotFoundError.isInstance(error)) return
   ModelMetadata.markReported(error)
-  void Bus.publish(Session.Event.Error, {
-    sessionID,
-    error: new NamedError.Unknown({ message: modelSelectionErrorText(error.data) }).toObject(),
-  }).catch(() => undefined)
+  publishReported(sessionID, new NamedError.Unknown({ message: modelSelectionErrorText(error.data) }))
 }
 
 // Validate a selected model, publishing guided text once and rethrowing the same error instance.

@@ -3291,7 +3291,7 @@ export namespace SessionPrompt {
       // altimate_change start — publish the failure so a synchronous prompt's empty reply is not silent
       const unknown = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
       ModelMetadata.markReported(unknown)
-      void Bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: unknown.toObject() }).catch(() => undefined)
+      ModelReport.publishReported(input.sessionID, unknown)
       throw unknown
       // altimate_change end
     }
@@ -4836,10 +4836,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
       const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
       ModelMetadata.markReported(error)
-      void Bus.publish(Session.Event.Error, {
-        sessionID: input.sessionID,
-        error: error.toObject(),
-      }).catch(() => undefined)
+      ModelReport.publishReported(input.sessionID, error)
       throw error
     }
 

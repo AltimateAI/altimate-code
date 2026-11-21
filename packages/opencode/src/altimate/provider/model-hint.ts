@@ -1,4 +1,5 @@
 // altimate_change - new file
+import { isConfigModelSource } from "@opencode-ai/core/altimate-model-source"
 //
 // Extra guidance for a "Model not found" error. The Anthropic provider lost its Claude Pro/Max sign-in
 // in 0.12.11, so a saved `anthropic/...` model with only that login now fails to resolve; the bare
@@ -14,8 +15,11 @@ export function modelNotFoundHint(providerID: string | undefined, providerMissin
 
 // Sources that name a config setting end in "config (model)"; others (a flag, a request, session
 // history) have no setting to correct.
-export function isConfigSource(source: string | undefined) {
-  return source?.endsWith("config (model)") === true
+export const isConfigSource = isConfigModelSource
+
+/** Whether to point at the config files: a config setting chose the model, or the source is unknown. */
+export function showsConfigHint(source: string | undefined) {
+  return source === undefined || isConfigSource(source)
 }
 
 export function modelNotFoundMessage(providerID: string | undefined, modelID: string | undefined, source?: string) {
@@ -42,7 +46,6 @@ export function modelSelectionErrorText(data: {
   const message = modelNotFoundMessage(data.providerID, data.modelID, data.source)
   const hint = data.suggestions?.length ? ` Did you mean: ${data.suggestions.join(", ")}?` : ""
   const guidance = modelNotFoundHint(data.providerID, data.providerMissing)
-  // Where to correct the setting applies only when a config setting chose the model (or the source is unknown).
-  const where = data.source === undefined || isConfigSource(data.source) ? ` ${modelConfigHint}` : ""
+  const where = showsConfigHint(data.source) ? ` ${modelConfigHint}` : ""
   return `${message.endsWith(".") ? message : message + "."}${hint}${guidance ? ` ${guidance}` : ""}${where}`
 }

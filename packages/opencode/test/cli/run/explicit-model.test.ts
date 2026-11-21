@@ -40,7 +40,9 @@ describe("run model resolution", () => {
           expect(result.stderr + result.stdout).toContain(
             requested ? `Model not found: ${requested} (from ${sourceHint})` : `Empty model value (from ${sourceHint})`,
           )
-          expect(result.stderr + result.stdout).toContain("at the project root")
+          // Config-file advice only where a config setting chose the model; a flag value has none.
+          if (source === "CLI") expect(result.stderr + result.stdout).not.toContain("at the project root")
+          else expect(result.stderr + result.stdout).toContain("at the project root")
           if (!requested) expect(result.stderr + result.stdout).toContain("check that the variable is set")
         }),
       30_000,

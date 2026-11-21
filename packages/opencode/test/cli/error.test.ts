@@ -109,6 +109,16 @@ describe("cli.error", () => {
     ).not.toContain("Claude subscription")
   })
 
+  // altimate_change start — config-file advice only where a config setting chose the model
+  test("config-file advice follows the model source", () => {
+    const format = (source?: string) =>
+      FormatError({ name: "ProviderModelNotFoundError", data: { providerID: "p", modelID: "m", suggestions: [], source } })
+    expect(format("CLI --model")).not.toContain("altimate-code.json")
+    expect(format('agent "build" config (model)')).toContain("altimate-code.json")
+    expect(format()).toContain("altimate-code.json")
+  })
+  // altimate_change end
+
   test("formats legacy and tagged provider init errors the same way", () => {
     const data = { providerID: "anthropic" }
     const expected = 'Failed to initialize provider "anthropic". Check credentials and configuration.'
