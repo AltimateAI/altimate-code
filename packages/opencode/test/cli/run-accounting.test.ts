@@ -43,7 +43,7 @@ describe("RunAccounting turn accounting", () => {
     expect(acc.turnBudgetReached(1)).toBe(true)
   })
 
-  test("a step whose every attempt fails costs no turn and keeps its error", () => {
+  test("a session error with no completed step charges no turn and stays fatal", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
     // Every attempt the processor allows failed before finishing.
