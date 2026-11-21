@@ -234,7 +234,7 @@ function reportModelSelectionError(sessionID: SessionID, error: unknown) {
 
 // Validate a selected model, publishing guided text once and rethrowing the same error instance
 // so the async prompt route can recognize it as reported.
-async function validateOrReport(
+export async function validateOrReport(
   sessionID: SessionID,
   model: { providerID: ProviderID; modelID: ModelID },
   source: string,

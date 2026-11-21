@@ -3,7 +3,8 @@ import { Bus } from "@/bus"
 import { Session } from "."
 import { SessionID, MessageID, PartID } from "./schema"
 import { Instance } from "../project/instance"
-import { Provider } from "../provider/provider"
+// altimate_change — validateModelSelection names where an unavailable model came from
+import { Provider, validateModelSelection } from "../provider/provider"
 import { MessageV2 } from "./message-v2"
 import z from "zod"
 import { Token } from "../util/token"
@@ -1647,8 +1648,12 @@ export namespace SessionCompaction {
 
     const agent = await Agent.get("compaction")
     const model = agent.model
-      ? // altimate_change start — re-brand core ProviderV2.ID/ModelV2.ID to fork ProviderID/ModelID
-        await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
+      ? // altimate_change start — re-brand core ProviderV2.ID/ModelV2.ID to fork ProviderID/ModelID; name the
+        // compaction agent's config when its model is unavailable or empty
+        await validateModelSelection(
+          { providerID: ProviderID.make(agent.model.providerID), modelID: ModelID.make(agent.model.modelID) },
+          'agent "compaction" config (model)',
+        )
       : // altimate_change end
         await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
     // altimate_change start — upstream_fix: the compaction agent may override its

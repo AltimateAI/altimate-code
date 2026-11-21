@@ -2,6 +2,7 @@ import { expect, spyOn } from "bun:test"
 import { Effect } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { Config } from "../../src/config/config"
+import { Bus } from "../../src/bus"
 import { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
@@ -25,6 +26,7 @@ it.effect("an unavailable subagent model names that agent's config as its source
   } as unknown as Agent.Info
   let prompted = false
   let created = false
+  const published: unknown[][] = []
   const mocks = [
     spyOn(Agent, "list").mockResolvedValue([agent]),
     spyOn(Agent, "get").mockResolvedValue(agent),
@@ -36,6 +38,12 @@ it.effect("an unavailable subagent model names that agent's config as its source
         Session.get,
       ),
     ),
+    spyOn(Provider, "getModel").mockImplementation((async (providerID: string, modelID: string) => {
+      throw new Provider.ModelNotFoundError({ providerID: ProviderID.make(providerID), modelID: ModelID.make(modelID) })
+    }) as never),
+    spyOn(Bus, "publish").mockImplementation((async (...args: unknown[]) => {
+      published.push(args)
+    }) as never),
     spyOn(Session, "create").mockImplementation((async () => {
       created = true
       return { id: childID, permission: [] }
@@ -80,8 +88,11 @@ it.effect("an unavailable subagent model names that agent's config as its source
     ),
   )
   expect(String(error)).toContain('Model not found: missing-provider/missing-model (from agent "explore" config (model))')
-  // As upstream does for a failed subtask, the child session exists and the prompt ran.
-  expect(prompted).toBe(true)
+  // As upstream does for a failed subtask, the child session exists; its prompt never runs, so no
+  // event labels the model as a session request, and the event published names the agent config.
   expect(created).toBe(true)
+  expect(prompted).toBe(false)
+  expect(JSON.stringify(published)).toContain('from agent \\"explore\\" config (model)')
+  expect(JSON.stringify(published)).not.toContain("session request")
   }),
 )
