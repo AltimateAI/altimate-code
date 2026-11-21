@@ -22,7 +22,7 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect" // altimate_change — classify retryable remote failures
 // altimate_change start — upstream_fix: invalidate Config's per-instance cache after writes
 import { ScopedCache } from "effect"
 // altimate_change end
@@ -55,6 +55,7 @@ import { InstanceRef } from "@/effect/instance-ref"
 // altimate_change start — defer telemetry when any config layer was unavailable
 const configsWithUnresolvedTelemetry = new WeakSet<Info>()
 const configsWithUnresolvedGlobal = new WeakSet<Info>()
+const configsWithUnresolvedOrg = new WeakSet<Info>()
 
 export function telemetryConfigUnresolved(config: Info): boolean {
   return configsWithUnresolvedTelemetry.has(config)
@@ -933,6 +934,7 @@ export const layer = Layer.effect(
         // altimate_change start — associate the status with this resolved config object
         const globalUnresolved = incompleteGlobals.has(global)
         if (globalUnresolved) configsWithUnresolvedGlobal.add(result)
+        if (orgConfigUnresolved) configsWithUnresolvedOrg.add(result)
         if (orgConfigUnresolved || globalUnresolved || Auth.configSourcesUnresolved(auth)) {
           configsWithUnresolvedTelemetry.add(result)
         }
@@ -969,27 +971,36 @@ export const layer = Layer.effect(
       }),
     )
 
-    // altimate_change start — retry only this instance and rate-limit repeated reloads during an outage.
-    const telemetryRetryAt = new WeakMap<InstanceContext, number>()
+    // altimate_change start — back off only for the same unresolved remote-config result.
+    // A refreshed cache or a repaired local config can recover on the next call.
+    const telemetryRetryAt = new WeakMap<object, number>()
     const TELEMETRY_RETRY_MS = 30_000
+    function remoteRetryKey(result: Exit.Exit<Info>): object | undefined {
+      if (Exit.isSuccess(result)) {
+        return configsWithUnresolvedOrg.has(result.value) ? result.value : undefined
+      }
+      const failure = Cause.squash(result.cause)
+      if (failure instanceof RemoteUnavailableError || failure instanceof RemoteAuthError) return failure
+    }
+
     const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {
       const read = InstanceState.use(state, (s) => s.config)
       if (!retryTelemetry || !(yield* InstanceState.has(state))) return yield* read
       const cached = yield* Effect.exit(read)
-      const ctx = yield* InstanceState.context
-      if (Exit.isSuccess(cached) && !telemetryConfigUnresolved(cached.value)) {
-        telemetryRetryAt.delete(ctx)
-        return cached.value
-      }
-      const now = Date.now()
-      if (now < (telemetryRetryAt.get(ctx) ?? 0)) {
-        if (Exit.isFailure(cached)) return yield* Effect.failCause(cached.cause)
-        return cached.value
-      }
-      telemetryRetryAt.set(ctx, now + TELEMETRY_RETRY_MS)
-      if (Exit.isSuccess(cached) && configsWithUnresolvedGlobal.has(cached.value)) yield* invalidateGlobal
+      if (Exit.isSuccess(cached) && !telemetryConfigUnresolved(cached.value)) return cached.value
+
+      const remote = remoteRetryKey(cached)
+      if (remote && performance.now() < (telemetryRetryAt.get(remote) ?? 0)) return yield* cached
+
+      // A failed local read can have come from the global cache. A known remote
+      // failure cannot, so keep a readable global cache in that case.
+      const reloadGlobal = Exit.isFailure(cached) ? !remote : configsWithUnresolvedGlobal.has(cached.value)
+      if (reloadGlobal) yield* invalidateGlobal
       yield* InstanceState.invalidate(state)
-      return yield* read
+      const retried = yield* Effect.exit(read)
+      const retryKey = remoteRetryKey(retried)
+      if (retryKey) telemetryRetryAt.set(retryKey, performance.now() + TELEMETRY_RETRY_MS)
+      return yield* retried
     })
     // altimate_change end
 

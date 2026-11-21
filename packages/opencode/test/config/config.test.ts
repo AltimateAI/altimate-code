@@ -805,9 +805,11 @@ test("telemetry sends held events after an organization config fetch recovers", 
 
 {
   let loads = 0
+  let available = false
   const account = Layer.mock(Account.Service)({
     active: () => Effect.suspend(() => {
       loads++
+      if (available) return Effect.succeed(Option.none())
       return Effect.fail(new AccountServiceError({ message: "Organization unavailable" }))
     }),
   })
@@ -817,6 +819,11 @@ test("telemetry sends held events after an organization config fetch recovers", 
       expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
       expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
       expect(loads).toBe(2)
+
+      available = true
+      yield* Config.use.invalidate()
+      expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(false)
+      expect(loads).toBe(3)
     }),
   )
 }
@@ -828,6 +835,8 @@ it.instance("a telemetry retry reloads a repaired config after a cached load fai
     yield* FSUtil.use.writeWithDirs(configPath, "{")
     const failed = yield* Config.use.get().pipe(Effect.exit)
     expect(Exit.isFailure(failed)).toBe(true)
+    const failedRetry = yield* Config.use.get(true).pipe(Effect.exit)
+    expect(Exit.isFailure(failedRetry)).toBe(true)
 
     yield* FSUtil.use.writeWithDirs(configPath, JSON.stringify({ telemetry: { disabled: true } }))
     const recovered = yield* Config.use.get(true)
