@@ -8,7 +8,8 @@
  * Nothing is mocked. Each test spawns real subprocesses. Tests that FAIL
  * expose real E2E bugs.
  */
-import { describe, expect, test, beforeAll, afterAll, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, afterEach } from "bun:test"
+import { useDbtTestHome } from "./dbt-test-home.helper"
 import { promises as fs, existsSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
@@ -47,6 +48,7 @@ if (!ENABLE_E2E) {
 
 let dir = ""
 let originalPath = ""
+let isolateHome: (dir: string) => void
 
 async function makeProject(opts: {
   modelSql: string
@@ -54,6 +56,7 @@ async function makeProject(opts: {
 }): Promise<void> {
   dir = await fs.mkdtemp(join(tmpdir(), "e2e-real-dbt-"))
   originalPath = process.env.PATH ?? ""
+  isolateHome(dir)
   // Prepend the altimate-dbt bin dir to PATH so the validator can spawn it.
   process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
 
@@ -111,7 +114,6 @@ target-path: target
 
 async function teardown(): Promise<void> {
   process.env.PATH = originalPath
-  delete process.env.DBT_PROFILES_DIR
   if (dir) await fs.rm(dir, { recursive: true, force: true })
   dir = ""
 }
@@ -129,9 +131,7 @@ const ctx = (): ValidatorContext => ({
 const E2E_TIMEOUT = 90_000
 
 describe("E2E with real altimate-dbt + dbt-duckdb", () => {
-  beforeEach(async () => {
-    if (!ENABLE_E2E) return
-  })
+  isolateHome = useDbtTestHome()
 
   afterEach(async () => {
     if (dir) await teardown()
@@ -154,6 +154,7 @@ models:
       // Pre-build the model so schema-verify has something to compare against.
       const build = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -181,6 +182,7 @@ models:
       })
       const build = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -210,6 +212,7 @@ models:
       })
       spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -229,6 +232,7 @@ models:
       })
       spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -272,6 +276,7 @@ models:
       })
       spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -304,6 +309,7 @@ models:
 
       spawnSync(ALTIMATE_DBT_BIN, ["build"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 90_000,
       })
@@ -331,6 +337,7 @@ models:
       })
       spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -357,6 +364,7 @@ models:
       })
       spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -376,6 +384,7 @@ models:
       })
       spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
         cwd: dir,
+        env: process.env,
         encoding: "utf8",
         timeout: 60_000,
       })
@@ -391,6 +400,7 @@ models:
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-empty-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     const r = await DbtTestsPassValidator.check(ctx())
     expect(r.ok).toBe(true)
@@ -401,6 +411,7 @@ models:
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-no-models-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), "name: x\nversion: '1.0'\n")
     const r = await DbtTestsPassValidator.check(ctx())
@@ -411,6 +422,7 @@ models:
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-bad-yml-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), "name: [unclosed_array")
     await fs.mkdir(join(dir, "models"))
@@ -424,6 +436,7 @@ models:
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-no-bin-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     // Set PATH to something that doesn't have altimate-dbt
     process.env.PATH = "/usr/bin:/bin"
     await fs.writeFile(join(dir, "dbt_project.yml"), "name: x\n")
@@ -441,6 +454,7 @@ models:
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-no-profile-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), "name: x\nprofile: missing\n")
     await fs.mkdir(join(dir, "models"))
@@ -500,6 +514,7 @@ select 1 as id, 'a' as name`,
     })
     spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
       cwd: dir,
+      env: process.env,
       encoding: "utf8",
       timeout: 60_000,
     })
@@ -513,6 +528,7 @@ select 1 as id, 'a' as name`,
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-long-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), `name: e2e
 version: '1.0'
@@ -546,6 +562,7 @@ target-path: target
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-unicode-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), "name: e2e\nversion: '1.0'\n")
     await fs.mkdir(join(dir, "models"))
@@ -562,6 +579,7 @@ target-path: target
     // Build to create duckdb file
     spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
       cwd: dir,
+      env: process.env,
       encoding: "utf8",
       timeout: 60_000,
     })
@@ -580,6 +598,7 @@ target-path: target
     await makeProject({ modelSql: "select 1 as id" })
     spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
       cwd: dir,
+      env: process.env,
       encoding: "utf8",
       timeout: 60_000,
     })
@@ -598,6 +617,7 @@ target-path: target
     await makeProject({ modelSql: "-- just a comment\n-- another comment" })
     const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], {
       cwd: dir,
+      env: process.env,
       encoding: "utf8",
       timeout: 60_000,
     })
@@ -620,6 +640,7 @@ target-path: target
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-dotname-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), "name: e2e\nversion: '1.0'\n")
     await fs.mkdir(join(dir, "models"))

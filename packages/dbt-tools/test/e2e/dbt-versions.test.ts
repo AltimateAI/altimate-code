@@ -127,6 +127,8 @@ function dbt(
     timeout,
     env: {
       ...process.env,
+      HOME: workDir,
+      XDG_CONFIG_HOME: join(workDir, ".config"),
       DBT_PROFILES_DIR: workDir,
       // Ensure the venv's python is first on PATH so dbt finds it
       PATH: `${join(version.dbtPath, "..")}:${process.env.PATH}`,
@@ -162,6 +164,8 @@ function altDbt(
       ...process.env,
       // Point altimate-dbt config at our temp project
       HOME: projectRoot,
+      XDG_CONFIG_HOME: join(projectRoot, ".config"),
+      DBT_PROFILES_DIR: projectRoot,
     },
     timeout,
   })
@@ -175,8 +179,7 @@ function altDbt(
 }
 
 /** Create a temp copy of the fixture project and bootstrap it for a specific dbt version. */
-function setupProject(version: DbtVersion): string {
-  const workDir = mkdtempSync(join(tmpdir(), `dbt-e2e-${version.label}-`))
+function setupProject(version: DbtVersion, workDir: string): void {
   cpSync(FIXTURE_DIR, workDir, { recursive: true })
 
   // Write profiles.yml with absolute DuckDB path (dbt 1.7 resolves relative paths from CWD)
@@ -204,8 +207,6 @@ function setupProject(version: DbtVersion): string {
   // Seed + build so models exist in the database
   dbt(version, workDir, ["seed"])
   dbt(version, workDir, ["build"])
-
-  return workDir
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +217,19 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
   for (const version of VERSIONS) {
     describe(`dbt ${version.label} (${version.full})`, () => {
       let workDir: string
+      let savedHome: string | undefined
+      let savedConfigHome: string | undefined
+      let savedProfilesDir: string | undefined
 
       beforeAll(async () => {
         console.log(`\n→ Setting up dbt ${version.full} project...`)
-        workDir = setupProject(version)
+        savedHome = process.env.HOME
+        savedConfigHome = process.env.XDG_CONFIG_HOME
+        savedProfilesDir = process.env.DBT_PROFILES_DIR
+        workDir = mkdtempSync(join(tmpdir(), `dbt-e2e-${version.label}-`))
+        process.env.HOME = workDir
+        process.env.XDG_CONFIG_HOME = join(workDir, ".config")
+        setupProject(version, workDir)
         console.log(`  Project: ${workDir}`)
         // dbt-cli.ts caches the dbt it resolves on first use. configure()
         // clears that cache and points it at this version's venv; without it
@@ -229,6 +239,12 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
       }, DBT_TIMEOUT * 2)
 
       afterAll(() => {
+        if (savedHome === undefined) delete process.env.HOME
+        else process.env.HOME = savedHome
+        if (savedConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
+        else process.env.XDG_CONFIG_HOME = savedConfigHome
+        if (savedProfilesDir === undefined) delete process.env.DBT_PROFILES_DIR
+        else process.env.DBT_PROFILES_DIR = savedProfilesDir
         if (workDir) {
           try {
             rmSync(workDir, { recursive: true, force: true })

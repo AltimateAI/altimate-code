@@ -77,6 +77,7 @@ suite("real dbt: concurrent altimate-dbt invocations and `dbt deps`", () => {
     env = {
       HOME: home,
       XDG_CONFIG_HOME: join(home, ".config"),
+      DBT_PROFILES_DIR: proj,
       PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
       ALTIMATE_DBT_PATH: shim,
     }

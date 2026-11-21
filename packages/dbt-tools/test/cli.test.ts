@@ -1,11 +1,24 @@
-import { describe, test, expect } from "bun:test"
+import { afterEach, beforeEach, describe, test, expect } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { tmpdir } from "os"
 import { join } from "path"
 
 const entry = join(import.meta.dir, "../src/index.ts")
 
 describe("cli", () => {
+  let home: string
+  const env = () => ({ ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") })
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "dbt-tools-cli-"))
+  })
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("no args prints usage", async () => {
-    const result = Bun.spawnSync(["bun", entry], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry], { env: env() })
     const out = result.stdout.toString()
     const parsed = JSON.parse(out)
     expect(parsed.commands).toBeDefined()
@@ -14,29 +27,29 @@ describe("cli", () => {
   })
 
   test("help prints usage", async () => {
-    const result = Bun.spawnSync(["bun", entry, "help"], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry, "help"], { env: env() })
     const out = result.stdout.toString()
     const parsed = JSON.parse(out)
     expect(parsed.commands).toBeDefined()
   })
 
   test("unknown command without config produces config error", async () => {
-    const result = Bun.spawnSync(["bun", entry, "nonexistent"], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry, "nonexistent"], { env: env() })
     const out = result.stdout.toString()
     const parsed = JSON.parse(out)
     expect(parsed.error).toContain("altimate-dbt init")
   })
 
   test("missing config produces init hint", async () => {
-    const result = Bun.spawnSync(["bun", entry, "info"], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry, "info"], { env: env() })
     const out = result.stdout.toString()
     const parsed = JSON.parse(out)
     expect(parsed.error).toContain("altimate-dbt init")
   })
 
   test("init without dbt_project.yml produces error", async () => {
-    const result = Bun.spawnSync(["bun", entry, "init", "--project-root", "/tmp/nonexistent-dbt-project"], {
-      env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" },
+    const result = Bun.spawnSync(["bun", entry, "init", "--project-root", join(home, "nonexistent-dbt-project")], {
+      env: env(),
     })
     const out = result.stdout.toString()
     const parsed = JSON.parse(out)
@@ -44,30 +57,26 @@ describe("cli", () => {
   })
 
   test("usage gives children and parents' answer on a stale manifest", async () => {
-    const result = Bun.spawnSync(["bun", entry], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry], { env: env() })
     const parsed = JSON.parse(result.stdout.toString())
     expect(parsed.commands.children).toContain("{ stale_manifest, models }")
     expect(parsed.commands.parents).toContain("{ stale_manifest, models }")
   })
 
   test("usage includes doctor command", async () => {
-    const result = Bun.spawnSync(["bun", entry], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry], { env: env() })
     const parsed = JSON.parse(result.stdout.toString())
     expect(parsed.commands.doctor).toBeDefined()
   })
 
   test("doctor without config produces init hint", async () => {
-    const result = Bun.spawnSync(["bun", entry, "doctor"], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const result = Bun.spawnSync(["bun", entry, "doctor"], { env: env() })
     const parsed = JSON.parse(result.stdout.toString())
     expect(parsed.error).toContain("altimate-dbt init")
   })
 
   test("info with bad prerequisites shows actionable error", async () => {
-    const { mkdtempSync, writeFileSync } = await import("fs")
-    const { join } = await import("path")
-    const home = mkdtempSync("/tmp/dbt-tools-err-")
     const dir = join(home, ".altimate-code")
-    const { mkdirSync } = await import("fs")
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, "dbt.json"), JSON.stringify({
       projectRoot: "/tmp/definitely-not-a-project",
@@ -75,7 +84,7 @@ describe("cli", () => {
       dbtIntegration: "core",
       queryLimit: 500,
     }))
-    const result = Bun.spawnSync(["bun", entry, "info"], { env: { ...process.env, HOME: home } })
+    const result = Bun.spawnSync(["bun", entry, "info"], { env: env() })
     const parsed = JSON.parse(result.stdout.toString())
     expect(parsed.error).toContain("Prerequisites not met")
     expect(parsed.error).toContain("project")

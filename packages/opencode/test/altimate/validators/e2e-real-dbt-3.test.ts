@@ -7,7 +7,8 @@
  *   - Validator with different model dependencies (ref chains)
  *   - Validator with permission-restricted files
  */
-import { describe, expect, test, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, afterEach } from "bun:test"
+import { useDbtTestHome } from "./dbt-test-home.helper"
 import { promises as fs, existsSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
@@ -33,10 +34,12 @@ const E2E_TIMEOUT = 90_000
 
 let dir = ""
 let originalPath = ""
+let isolateHome: (dir: string) => void
 
 async function setupProject(): Promise<string> {
   dir = await fs.mkdtemp(join(tmpdir(), "e2e-real-3-"))
   originalPath = process.env.PATH ?? ""
+  isolateHome(dir)
   process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
 
   await fs.writeFile(join(dir, "dbt_project.yml"), `name: e2e
@@ -69,7 +72,6 @@ async function writeModel(name: string, sql: string): Promise<void> {
 
 async function teardown(): Promise<void> {
   process.env.PATH = originalPath
-  delete process.env.DBT_PROFILES_DIR
   if (dir) await fs.rm(dir, { recursive: true, force: true })
   dir = ""
 }
@@ -83,9 +85,7 @@ const ctx = (): ValidatorContext => ({
 })
 
 describe("E2E wave 3: more real dbt-duckdb scenarios", () => {
-  beforeEach(async () => {
-    if (!ENABLE_E2E) return
-  })
+  isolateHome = useDbtTestHome()
   afterEach(async () => {
     if (dir) await teardown()
   })
@@ -98,7 +98,7 @@ describe("E2E wave 3: more real dbt-duckdb scenarios", () => {
     // Only foo's mtime is "now"; bar is older
     const now = Date.now()
     await fs.utimes(join(dir, "models", "bar.sql"), (now - 60_000) / 1000, (now - 60_000) / 1000)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtTestsPassValidator.check(ctx())
     // Only foo should be in models_touched.
     expect(r.details?.models_touched).toBe(1)
@@ -109,7 +109,7 @@ describe("E2E wave 3: more real dbt-duckdb scenarios", () => {
     await setupProject()
     await writeModel("foo", "select 1 as id")
     await writeModel("bar", "select * from {{ ref('foo') }}")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtTestsPassValidator.check(ctx())
     expect(r.details?.models_touched).toBe(2)
   }, E2E_TIMEOUT)
@@ -142,8 +142,8 @@ describe("E2E wave 3: more real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     const [a, b, c] = await Promise.all([
       DbtSchemaVerifyValidator.check(ctx()),
       DbtSchemaVerifyValidator.check(ctx()),
@@ -159,8 +159,8 @@ describe("E2E wave 3: more real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     // Simulate dbt clean
     await fs.rm(join(dir, "target"), { recursive: true, force: true })
     const r = await DbtSchemaVerifyValidator.check(ctx())
@@ -176,8 +176,8 @@ select 1 as id
 {% else %}
 select 2 as id
 {% endif %}`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -185,7 +185,7 @@ select 2 as id
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select * from {{ dbt_utils.date_spine(...) }}")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // dbt_utils not installed → compile error.
     expect(r.ok).toBe(false)
@@ -196,7 +196,7 @@ select 2 as id
     await setupProject()
     await writeModel("foo", `{{ config(pre_hook="select 1/0") }}
 select 1 as id`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Pre-hook errors → build fails.
     expect(r.ok).toBe(false)
@@ -207,8 +207,8 @@ select 1 as id`)
     await setupProject()
     await writeModel("foo", `{{ config(post_hook="select 1") }}
 select 1 as id`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -216,7 +216,7 @@ select 1 as id`)
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo.bar.baz", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtTestsPassValidator.check(ctx())
     // Filename stripped of .sql becomes "foo.bar.baz". Run dbt test --model foo.bar.baz.
     // dbt may reject the name.
@@ -227,8 +227,8 @@ select 1 as id`)
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("information_schema", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "information_schema"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "information_schema"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -237,7 +237,7 @@ select 1 as id`)
     await setupProject()
     await fs.writeFile(join(dir, "packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n")
     await writeModel("foo", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // deps not installed → may fail.
     expect(typeof r.ok).toBe("boolean")
@@ -261,8 +261,8 @@ select 1 as id`)
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("dbt_utils", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "dbt_utils"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "dbt_utils"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -310,7 +310,7 @@ select 1 as id`)
       threads: 1
 `)
     await writeModel("foo", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(typeof r.ok).toBe("boolean")
   }, E2E_TIMEOUT)
@@ -321,7 +321,7 @@ select 1 as id`)
     await fs.writeFile(join(dir, "models", "foo.SQL"), "select 1 as id")
     const now = Date.now()
     await fs.utimes(join(dir, "models", "foo.SQL"), now / 1000, now / 1000)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtTestsPassValidator.check(ctx())
     // Case-insensitive .sql check should pick up foo.SQL
     expect(r.details?.models_touched).toBe(1)
@@ -336,7 +336,7 @@ select 1 as id`)
     const fromClause = Array.from({ length: 200 }, (_, i) => `c${i}`).join(", ")
     const sql = `with ${ctes}\nselect ${finalSelect} from ${fromClause}`
     await writeModel("foo", sql)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(typeof r.ok).toBe("boolean")
   }, E2E_TIMEOUT)

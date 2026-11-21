@@ -1,5 +1,6 @@
 // altimate_change start — E2E wave 7: final 5 bugs to reach 50
-import { describe, expect, test, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, afterEach } from "bun:test"
+import { useDbtTestHome } from "./dbt-test-home.helper"
 import { promises as fs, existsSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
@@ -25,10 +26,12 @@ const E2E_TIMEOUT = 90_000
 
 let dir = ""
 let originalPath = ""
+let isolateHome: (dir: string) => void
 
 async function setupProject(): Promise<string> {
   dir = await fs.mkdtemp(join(tmpdir(), "e2e-real-7-"))
   originalPath = process.env.PATH ?? ""
+  isolateHome(dir)
   process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
   await fs.writeFile(join(dir, "dbt_project.yml"), `name: e2e
 version: '1.0'
@@ -60,7 +63,6 @@ async function writeModel(name: string, sql: string): Promise<void> {
 
 async function teardown(): Promise<void> {
   process.env.PATH = originalPath
-  delete process.env.DBT_PROFILES_DIR
   if (dir) await fs.rm(dir, { recursive: true, force: true })
   dir = ""
 }
@@ -74,9 +76,7 @@ const ctx = (): ValidatorContext => ({
 })
 
 describe("E2E wave 7", () => {
-  beforeEach(async () => {
-    if (!ENABLE_E2E) return
-  })
+  isolateHome = useDbtTestHome()
   afterEach(async () => {
     if (dir) await teardown()
   })
@@ -86,8 +86,8 @@ describe("E2E wave 7", () => {
     await setupProject()
     await writeModel("foo", "select 1 as id")
     await writeModel("bar", "select 2 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // No schema.yml anywhere — all models should be `no-spec` → ok=true.
     expect(r.ok).toBe(true)
@@ -105,8 +105,8 @@ models:
   - name: nonexistent_model
     columns: [{name: x}]
 `)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Should surface that a schema entry references a model that doesn't exist.
     expect((r.details as any)?.orphan_schema_entries).toBeDefined()
@@ -136,8 +136,8 @@ models:
   e2e:
     +materialized: view
 `)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(true)
   }, E2E_TIMEOUT)
@@ -146,7 +146,7 @@ models:
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select {{ }} as id")  // empty Jinja
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Empty Jinja expression → compile error.
     expect(r.ok).toBe(false)
