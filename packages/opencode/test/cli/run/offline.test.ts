@@ -57,7 +57,7 @@ async function networkSpawns(log: string) {
 
 async function fixture(
   snapshot: boolean,
-  configMode: boolean,
+  configMode: boolean | "managed",
   disableWorkspace: boolean,
   provider = "offline-test",
 ) {
@@ -65,6 +65,7 @@ async function fixture(
   const project = path.join(root, "project")
   const config = path.join(root, "config", "altimate-code")
   const data = path.join(root, "data", "altimate-code")
+  const managed = path.join(root, "managed")
   const calls = path.join(root, "calls.jsonl")
   const preload = path.join(root, "preload.ts")
   const blocked = path.join(root, "blocked.jsonl")
@@ -86,7 +87,9 @@ async function fixture(
       mcp: { remoteFixture: { type: "remote", url: "https://mcp.test" } },
     }),
   )
-  if (configMode && !snapshot)
+  if (configMode === "managed")
+    await Bun.write(path.join(managed, "altimate-code.jsonc"), '{ // managed policy\n "offline": true }')
+  else if (configMode && !snapshot)
     await Bun.write(path.join(project, "opencode.jsonc"), '{ // local policy\n "offline": true }')
   await Bun.write(
     path.join(data, "auth.json"),
@@ -180,7 +183,7 @@ async function fixture(
     ),
     HOME: root,
     OPENCODE_TEST_HOME: root,
-    OPENCODE_TEST_MANAGED_CONFIG_DIR: path.join(root, "managed"),
+    OPENCODE_TEST_MANAGED_CONFIG_DIR: managed,
     XDG_CONFIG_HOME: path.join(root, "config"),
     XDG_DATA_HOME: path.join(root, "data"),
     XDG_CACHE_HOME: path.join(root, "cache"),
@@ -216,7 +219,8 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
     disableWorkspace: false,
   },
   { scenario: "config switch without a snapshot", snapshot: false, configMode: true, disableWorkspace: false },
-]) {
+  { scenario: "managed config switch", snapshot: false, configMode: "managed", disableWorkspace: false },
+] as const) {
   test(`offline ${scenario} keeps network traffic on the model endpoint`, async () => {
     const f = await fixture(snapshot, configMode, disableWorkspace, snapshot ? "offline-test" : "openai")
     proxyHits.length = 0

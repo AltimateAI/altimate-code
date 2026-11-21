@@ -57,7 +57,7 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change start — offline mode must be active before config loading
 function requireOfflineStartup(offline: boolean | undefined) {
   if (offline === true && !Offline.enabled()) {
-    throw new Error("This project requests offline mode. Start Altimate Code with ALTIMATE_OFFLINE=1 or from the project directory.")
+    throw new Error("Configuration requests offline mode. Restart Altimate Code with ALTIMATE_OFFLINE=1.")
   }
 }
 // altimate_change end

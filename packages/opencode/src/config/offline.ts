@@ -14,6 +14,7 @@ import { Flag, env, offlineModeEnabled as enabled } from "@opencode-ai/core/flag
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Global } from "@/global"
+import { ConfigManaged } from "./managed"
 import { ConfigPaths } from "./paths"
 
 export { enabled }
@@ -61,6 +62,7 @@ async function findOptIn(directory: string): Promise<boolean> {
     ...dirs.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, name))),
     path.join(Global.Path.config, "config.json"),
     Flag.OPENCODE_CONFIG,
+    ...CONFIG_NAMES.map((name) => path.join(ConfigManaged.managedConfigDir(), name)),
   ]
   for (const file of files) {
     if (file && (await sets(await fs.readFile(file, "utf8").catch(() => undefined), file))) return true

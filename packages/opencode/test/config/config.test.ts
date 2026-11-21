@@ -1505,7 +1505,7 @@ it.instance("migrates legacy write tool to edit permission", () =>
 // Note: preload.ts sets OPENCODE_TEST_MANAGED_CONFIG which Global.Path.managedConfig uses
 
 // altimate_change start — config discovered after startup must not activate offline mode
-it.instance("refuses offline mode first discovered in managed config", () =>
+it.instance("refuses offline mode when managed config is loaded without the startup probe", () =>
   Effect.gen(function* () {
     const previous = process.env.ALTIMATE_OFFLINE
     delete process.env.ALTIMATE_OFFLINE
@@ -1514,7 +1514,7 @@ it.instance("refuses offline mode first discovered in managed config", () =>
       const error = yield* Config.use.get().pipe(Effect.catchDefect(Effect.succeed))
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).message).toBe(
-        "This project requests offline mode. Start Altimate Code with ALTIMATE_OFFLINE=1 or from the project directory.",
+        "Configuration requests offline mode. Restart Altimate Code with ALTIMATE_OFFLINE=1.",
       )
       expect(process.env.ALTIMATE_OFFLINE).toBeUndefined()
     } finally {
