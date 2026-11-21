@@ -344,28 +344,44 @@ describe("telemetry opt-out", () => {
     expect(names).toEqual([])
   })
 
-  test("held overflow counts stay with the owning project", async () => {
+  test("even a fully evicted project keeps its own overflow count", async () => {
     const names = recordIngestion()
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     await Telemetry.init()
-    for (let i = 0; i < 201; i++) trackStartup()
+    trackStartup()
     await Telemetry.shutdown({ preserveUnresolved: true })
 
     rmSync(path.join(home, ".altimate", "altimate.json"))
     const other = path.join(home, "other")
     mkdirSync(other)
     Telemetry.setConfigDirectory(other)
-    configSpy.mockResolvedValue({})
+    for (let i = 0; i < 200; i++) trackStartup()
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
     await Telemetry.init()
     await Telemetry.flush()
     expect(names).toEqual([])
     await Telemetry.shutdown({ preserveUnresolved: true })
 
     Telemetry.setConfigDirectory(home)
+    configSpy.mockResolvedValue({})
     await Telemetry.init()
     await Telemetry.flush()
-    expect(names.filter((name) => name === "startup_ready")).toHaveLength(200)
-    expect(names.filter((name) => name === "error")).toHaveLength(1)
+    expect(names).toEqual(["error"])
+    expect(String(fetchSpy.mock.calls.at(-1)?.[1]?.body)).toContain("TelemetryBufferOverflow")
+  })
+
+  test("a process-wide stall keeps the active scope outside its instance context", async () => {
+    const names = recordIngestion()
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+
+    Telemetry.setConfigDirectory(undefined)
+    const stall = Telemetry.loopStallFor(1500, 0, 1000, "main")
+    expect(stall).toBeDefined()
+    Telemetry.track(stall!)
+    await Telemetry.flush()
+    expect(names).toEqual(["event_loop_stall"])
   })
 
   test("resolution to disabled discards held startup events", async () => {

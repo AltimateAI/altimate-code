@@ -2339,8 +2339,8 @@ export namespace Telemetry {
   let nextTurn = 0
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
-  // Keep counters only for scopes still represented in the bounded buffer.
-  const droppedEvents = new Map<string | null | undefined, number>()
+  // Remember evicted scopes without letting overflow accounting grow unbounded.
+  const droppedEvents = new Map<string | undefined, { count: number; held?: boolean }>()
   let initPromise: Promise<void> | undefined
   // altimate_change — unresolved config holds events for the next init call.
   let configUnresolved = false
@@ -2545,7 +2545,7 @@ export namespace Telemetry {
       return reinitPromise
     }
     if (initPromise && configScope !== scope) {
-      return shutdown({ preserveUnresolved: true }).then(() => init())
+      return shutdown({ preserveUnresolved: true, timeoutMs: EXIT_FLUSH_BUDGET_MS }).then(() => init())
     }
     if (!initDone && initPromise && instance) {
       // A session can join the middleware init while its local probe is still running.
@@ -2577,10 +2577,13 @@ export namespace Telemetry {
     }
     const earlyDrops = droppedEvents.get(undefined)
     if (earlyDrops) {
-      droppedEvents.set(scope, (droppedEvents.get(scope) ?? 0) + earlyDrops)
+      const scopedDrops = droppedEvents.get(scope)
       droppedEvents.delete(undefined)
+      droppedEvents.set(scope, { count: (scopedDrops?.count ?? 0) + earlyDrops.count, held: scopedDrops?.held })
     }
-    const retry = (configUnresolved && configScope === scope) || buffer.some((entry) => entry.scope === scope && entry.held)
+    const retry = (configUnresolved && configScope === scope) ||
+      droppedEvents.get(scope)?.held ||
+      buffer.some((entry) => entry.scope === scope && entry.held)
     configScope = scope
     configUnresolved = false
     try {
@@ -2593,6 +2596,8 @@ export namespace Telemetry {
       const state = await TelemetryConfig.resolve(scope, retry)
       if (state === "unreadable") {
         configUnresolved = true
+        const drops = droppedEvents.get(scope)
+        if (drops) drops.held = true
         for (const entry of buffer) {
           if (entry.scope === scope) entry.held = true
         }
@@ -2645,7 +2650,9 @@ export namespace Telemetry {
       // altimate_change start — first-run health: drain anchor events that were tracked before init
       // finished (first_launch always is) instead of leaving them to the 5 s interval a startup freeze
       // would block. The stall watcher starts in `finally`, telemetry or not.
-      if (buffer.some(({ event, scope: owner }) => owner === scope && (retry || ANCHOR_EVENTS.has(event.type)))) void Telemetry.flush().catch(() => {})
+      if (droppedEvents.has(scope) || buffer.some(({ event, scope: owner }) =>
+        owner === scope && (retry || ANCHOR_EVENTS.has(event.type)),
+      )) void Telemetry.flush().catch(() => {})
       // altimate_change end
     } catch {
       clearScope(scope)
@@ -2921,7 +2928,8 @@ export namespace Telemetry {
   export function track(event: Event) {
     // Membership is decided when events are tracked, never by whichever
     // project happens to initialize before the next flush.
-    const directory = TelemetryConfig.instanceDirectory() ?? configDirectory
+    const directory = TelemetryConfig.instanceDirectory() ?? configDirectory ??
+      (event.type === "event_loop_stall" ? configScope : undefined)
     const cwd = directory === undefined ? telemetryWorkingDirectory() : undefined
     // Keep events from an inaccessible directory unassigned until exit.
     const scope = directory ?? (cwd === undefined ? null : configScope === undefined ? undefined : cwd)
@@ -2942,10 +2950,13 @@ export namespace Telemetry {
     if (buffer.length > MAX_BUFFER_SIZE) {
       const dropped = buffer.shift()!
       const owner = dropped.scope
-      if (owner !== null && buffer.some((entry) => entry.scope === owner)) {
-        droppedEvents.set(owner, (droppedEvents.get(owner) ?? 0) + 1)
-      } else {
+      if (owner !== null) {
+        const previous = droppedEvents.get(owner)
         droppedEvents.delete(owner)
+        droppedEvents.set(owner, { count: (previous?.count ?? 0) + 1, held: previous?.held || dropped.held })
+        if (droppedEvents.size > MAX_BUFFER_SIZE) {
+          droppedEvents.delete(droppedEvents.keys().next().value)
+        }
       }
     }
     // altimate_change start — anchor events flush immediately. A frozen-then-killed process otherwise
@@ -2992,14 +3003,14 @@ export namespace Telemetry {
       }
     }
     // altimate_change end
-    if (!enabled || buffer.length === 0 || !appInsights) return
+    if (!enabled || !appInsights) return
 
     const scope = configScope
     const events = buffer.filter((entry) => entry.scope === scope).map(({ event }) => event)
-    if (events.length === 0) return
+    const dropped = droppedEvents.get(scope)?.count
+    if (events.length === 0 && !dropped) return
     buffer = buffer.filter((entry) => entry.scope !== scope)
 
-    const dropped = droppedEvents.get(scope)
     droppedEvents.delete(scope)
     if (dropped) {
       events.push({
