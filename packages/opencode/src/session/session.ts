@@ -678,12 +678,14 @@ export const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
-        // altimate_change start — release the deleted session's scratch and advisory state
+        // altimate_change start — release the deleted session's scratch store
         yield* Effect.promise(() => closeScratch(sessionID))
-        yield* Effect.promise(() => ValidatorEnforcement.removeAdvisories(sessionID))
         // altimate_change end
         yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
         yield* events.remove(sessionID)
+        // altimate_change start — clean up only after the session row is gone
+        yield* Effect.promise(() => ValidatorEnforcement.removeAdvisories(sessionID))
+        // altimate_change end
       } catch (error) {
         yield* Effect.logError("failed to remove session", { sessionID, error })
       }

@@ -37,7 +37,7 @@ import { Bus } from "../bus"
 // altimate_change start - distinguish submitted requests from compaction-created user rows in the stream
 import { BusEvent } from "../bus/bus-event"
 import { Database, eq, sql } from "../storage/db"
-import { MessageTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 // altimate_change end
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
@@ -906,6 +906,14 @@ export namespace SessionPrompt {
       process.env.ALTIMATE_VALIDATORS_ENABLED === "1" && !validatorStrict
         ? await ValidatorEnforcement.loadAdvisories(sessionID)
         : undefined
+    const saveValidatorAdvisories = () => {
+      if (!validatorAdvisories) return
+      // The validator may have awaited a subprocess while the session was deleted.
+      const exists = Database.use((db) =>
+        db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get(),
+      )
+      if (exists) ValidatorEnforcement.saveAdvisories(sessionID, validatorAdvisories)
+    }
     // altimate_change end
     let sessionAgentName = ""
     let sessionHadError = false
@@ -2303,7 +2311,7 @@ export namespace SessionPrompt {
       if (validatorAdvisories && advisoryContext && processor.message.finish && !processor.message.error && !abort.aborted) {
         validatorAdvisories.shown.push(...validatorAdvisories.pending.map(ValidatorEnforcement.advisoryFingerprint))
         validatorAdvisories.pending = []
-        ValidatorEnforcement.saveAdvisories(sessionID, validatorAdvisories)
+        saveValidatorAdvisories()
       }
       // altimate_change end
 
@@ -2577,7 +2585,7 @@ export namespace SessionPrompt {
             )
             if (additional.length > 0) {
               validatorAdvisories.pending.push(...new Set(additional))
-              ValidatorEnforcement.saveAdvisories(sessionID, validatorAdvisories)
+              saveValidatorAdvisories()
             }
           }
 

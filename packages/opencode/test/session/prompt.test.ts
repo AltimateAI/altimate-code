@@ -44,6 +44,7 @@ import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
 import { ValidatorRegistry } from "../../src/session/validators/registry"
+import { ValidatorEnforcement } from "../../src/session/validators/enforcement"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -576,7 +577,7 @@ for (const downgrade of [true, false]) {
 // altimate_change end
 
 // altimate_change start — completion validator enforcement through the real prompt loop
-for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "strict"] as const) {
+for (const mode of ["advisory", "advisory-after-error", "deleted-session", "mixed", "finding", "strict"] as const) {
   noLLMServer.instance(
     `completion validators use the ${mode} policy`,
     () => Effect.gen(function* () {
@@ -591,8 +592,9 @@ for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "str
       const strictReason = "Previous failure summary."
       const strictFixHint = "Previous fix guidance."
       let checkCount = 0
-      const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async () => {
+      const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async (ctx) => {
         checkCount++
+        if (mode === "deleted-session") await LegacySession.remove(SessionID.make(ctx.sessionID))
         if (mode === "advisory" && checkCount === 2) return []
         const validator = ValidatorRegistry.list()[0]!
         const finding = { validator, result: { ok: false, classification: "finding" as const, reason: "Confirmed failure." } }
@@ -635,6 +637,13 @@ for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "str
           model: promptRef,
           parts: [{ type: "text", text }],
         })
+        if (mode === "deleted-session") {
+          yield* Effect.exit(reply("Review invoice totals."))
+          expect(runAll.mock.calls).toHaveLength(1)
+          const state = yield* Effect.promise(() => ValidatorEnforcement.loadAdvisories(chat.id))
+          expect(state).toEqual({ pending: [], shown: [] })
+          return
+        }
         yield* reply("Review invoice totals.")
         const retries = runAll.mock.calls.map(([ctx]) => ctx.retryCount)
         if (mode === "advisory") {
