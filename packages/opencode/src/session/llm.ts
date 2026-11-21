@@ -349,18 +349,6 @@ export namespace LLM {
     // altimate_change end
 
     // altimate_change start — clamp after every context-affecting request field is finalized.
-    const estimateNow = estimateInputTokens({
-      system,
-      messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-      tools,
-      instructions: params.options.instructions,
-    })
-    input.onRequestEstimate?.(estimateNow)
-    const measuredEstimate = input.measuredEstimateTokens
-    const calibrated =
-      input.measuredInputTokens !== undefined && measuredEstimate !== undefined && Number.isFinite(measuredEstimate)
-        ? input.measuredInputTokens + Math.max(0, estimateNow - measuredEstimate)
-        : undefined
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,
@@ -369,7 +357,24 @@ export namespace LLM {
         // Provider defaults are lower precedence than the exact case-normalized outgoing record.
         headerSources: [provider.options, requestHeaders],
       }),
-      inputTokens: calibratedInputTokens(estimateNow, calibrated),
+      inputTokens: () => {
+        const estimate = estimateInputTokens({
+          system,
+          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+          tools,
+          instructions: params.options.instructions,
+        })
+        input.onRequestEstimate?.(estimate)
+        const { measuredInputTokens, measuredEstimateTokens } = input
+        const calibrated =
+          typeof measuredInputTokens === "number" &&
+          Number.isFinite(measuredInputTokens) &&
+          typeof measuredEstimateTokens === "number" &&
+          Number.isFinite(measuredEstimateTokens)
+            ? measuredInputTokens + Math.max(0, estimate - measuredEstimateTokens)
+            : undefined
+        return calibratedInputTokens(estimate, calibrated)
+      },
     })
     // Deadline effort wins configured variants and plugin overrides.
     const requestOptions = clampReasoningBudget(

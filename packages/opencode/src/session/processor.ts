@@ -21,7 +21,7 @@ import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 // altimate_change start — recognize pre-send context budget refusals
-import { isContextBudgetError } from "@/provider/output-token-budget"
+import { isContextBudgetError, REQUEST_ESTIMATE_METADATA_KEY } from "@/provider/output-token-budget"
 // altimate_change end
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
@@ -544,7 +544,7 @@ export namespace SessionProcessor {
                     onRequestEstimate: (tokens) => {
                       input.assistantMessage.metadata = {
                         ...input.assistantMessage.metadata,
-                        request_estimate_tokens: tokens,
+                        [REQUEST_ESTIMATE_METADATA_KEY]: tokens,
                       }
                     },
                   })

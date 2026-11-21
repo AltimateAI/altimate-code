@@ -30,6 +30,9 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+// altimate_change start — read the persisted request estimate for context calibration
+import { REQUEST_ESTIMATE_METADATA_KEY } from "@/provider/output-token-budget"
+// altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
@@ -2240,7 +2243,7 @@ export namespace SessionPrompt {
       // altimate_change start — calibrate from the last measured request and protect unseen media
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
-      const recordedEstimate = measured?.metadata?.request_estimate_tokens
+      const recordedEstimate = measured?.metadata?.[REQUEST_ESTIMATE_METADATA_KEY]
       // Compaction drops images and PDFs, so keep a refusal as a budget error if the
       // current request includes media the model has not seen yet.
       const unseenMedia = msgs.some(

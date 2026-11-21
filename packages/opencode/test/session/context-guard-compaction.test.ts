@@ -30,6 +30,7 @@ import {
   InputTokenBudgetError,
   OutputTokenBudgetError,
   ReasoningTokenBudgetError,
+  REQUEST_ESTIMATE_METADATA_KEY,
   calibratedInputTokens,
   clampReasoningBudget,
   estimateInputTokens,
@@ -261,7 +262,8 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         parentID,
         finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
-        metadata: requestEstimateTokens === null ? undefined : { request_estimate_tokens: requestEstimateTokens },
+        metadata:
+          requestEstimateTokens === null ? undefined : { [REQUEST_ESTIMATE_METADATA_KEY]: requestEstimateTokens },
       } as any)
       yield* sessions.updatePart({
         id: PartID.ascending(),
@@ -537,9 +539,9 @@ it.live(
         expect(result.errors).toEqual([])
         expect(result.hits.length).toBe(1)
         const answer = result.messages.at(-1)?.info
-        expect(answer?.role === "assistant" ? answer.metadata?.request_estimate_tokens : undefined).toBeGreaterThan(
-          20_000,
-        )
+        expect(
+          answer?.role === "assistant" ? answer.metadata?.[REQUEST_ESTIMATE_METADATA_KEY] : undefined,
+        ).toBeGreaterThan(20_000)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
     ),

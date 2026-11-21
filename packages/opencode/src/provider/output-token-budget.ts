@@ -9,6 +9,8 @@ const log = Log.create({ service: "provider.output-token-budget" })
 /** Smallest completion budget worth sending for an agent turn. */
 export const OUTPUT_TOKEN_FLOOR = 1_024
 
+export const REQUEST_ESTIMATE_METADATA_KEY = "request_estimate_tokens"
+
 const CLAMP_MARGIN_FRACTION = 0.02
 const CLAMP_MARGIN_MIN = 512
 const ESTIMATE_CHUNK_SIZE = 400
