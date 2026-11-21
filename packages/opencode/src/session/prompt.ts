@@ -2299,7 +2299,7 @@ export namespace SessionPrompt {
           ? (() => {
               // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
               // estimator, so the discount applies only to what the provider has counted.
-              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens)
+              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens, true)
               return (
                 reportedContextTokens({
                   tokens: measured.tokens,
@@ -3861,6 +3861,8 @@ export namespace SessionPrompt {
     lastFinishedID: MessageID | undefined,
     isAfter: (id: MessageID) => boolean = (id) => id > lastFinishedID!,
     estimate: (text: string) => number = Token.estimate,
+    // Also count the tool-call inputs of later steps (sent back with the history); the pre-send guard does.
+    countToolInput = false,
   ): number {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
@@ -3889,6 +3891,7 @@ export namespace SessionPrompt {
       for (const part of m.parts) {
         if (part.type === "text") tokens += estimate(part.text ?? "")
         if (part.type === "tool") tokens += estimate(toolText(part))
+        if (part.type === "tool" && countToolInput) tokens += estimate(JSON.stringify(part.state.input ?? {}))
       }
     }
     return tokens

@@ -774,6 +774,34 @@ describe("calibration tail", () => {
     expect(guard).toBeGreaterThanOrEqual(cjk.length)
   })
 
+  test("the guard's tail also counts tool-call inputs of later steps", () => {
+    const step = {
+      info: { id: "m3", sessionID: "s", role: "assistant", time: { created: 1 } },
+      parts: [
+        {
+          id: "m3-t",
+          sessionID: "s",
+          messageID: "m3",
+          type: "tool",
+          tool: "bash",
+          callID: "c",
+          state: {
+            status: "completed",
+            input: { query: "q".repeat(4_000) },
+            output: "ok",
+            title: "t",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        },
+      ],
+    } as unknown as MessageV2.WithParts
+    const msgs = [text("m1", "user", "task"), text("m2", "assistant", "done"), step]
+    const plain = SessionPrompt.estimateUncountedTail(msgs, "m2" as any)
+    const withInput = SessionPrompt.estimateUncountedTail(msgs, "m2" as any, undefined, undefined, true)
+    expect(withInput - plain).toBeGreaterThanOrEqual(Token.estimate(JSON.stringify({ query: "q".repeat(4_000) })))
+  })
+
   test("follows the caller's stored order, not lexical IDs", () => {
     // A later message with a lexically smaller caller-supplied ID.
     const msgs = [text("m5", "user", "task"), text("m6", "assistant", "done"), text("a1", "user", "y".repeat(9_000))]
