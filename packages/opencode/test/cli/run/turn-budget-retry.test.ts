@@ -61,13 +61,17 @@ describe("opencode run: --max-turns charges completed steps only", () => {
       const encoder = new TextEncoder()
       const publish = (type: string, properties: object) =>
         stream?.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`))
+      // The processor counts retries per assistant step, so the fake does too.
+      const stepAttempts = new Map<string, number>()
       const startAttempt = (messageID: string) => {
         counts.attempts++
-        // As in the processor, a retry status precedes every attempt after the first.
-        if (counts.attempts > 1)
+        const attempt = (stepAttempts.get(messageID) ?? 0) + 1
+        stepAttempts.set(messageID, attempt)
+        // As in the processor, a retry status precedes every attempt of a step after its first.
+        if (attempt > 1)
           publish("session.status", {
             sessionID,
-            status: { type: "retry", attempt: counts.attempts - 1, message: "rate limit exceeded", next: Date.now() + 10 },
+            status: { type: "retry", attempt: attempt - 1, message: "rate limit exceeded", next: Date.now() + 10 },
           })
         publish("message.part.updated", {
           part: { id: `${messageID}_start_${counts.attempts}`, messageID, sessionID, type: "step-start" },
