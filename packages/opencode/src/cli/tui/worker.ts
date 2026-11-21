@@ -78,8 +78,6 @@ const traceConsumer = new TraceConsumer()
 // a trace that never persists. So the event chain starts with this promise. loadConfig reads
 // Config.get() (a facade needing an Instance on the canonical ALS the bare worker lacks at init), so
 // load the project instance for the worker's cwd first; best-effort fallback otherwise.
-// altimate_change — this thread's telemetry init inside the project instance; see rpc.telemetryOptOut
-let telemetryInit: Promise<void> | undefined
 const traceReady: Promise<void> = (async () => {
   // altimate_change start — the datamate heal writes altimate-code.json; let it finish
   // before InstanceRuntime.load/Config.get() read (and cache) the config, so the first
@@ -93,7 +91,7 @@ const traceReady: Promise<void> = (async () => {
       // context, so doInit()'s Config.get() can see a `telemetry.disabled` opt-out. init() is
       // idempotent and drains the anchor events (event_loop_stall) buffered since boot as soon as
       // it enables; if the instance fails to load, the first prompt initialises telemetry as before.
-      telemetryInit = Telemetry.init().catch(() => {})
+      Telemetry.init().catch(() => {})
       // altimate_change end
       return traceConsumer.loadConfig()
     })
@@ -142,8 +140,7 @@ export const rpc = {
   // thread, which loads no project and so cannot read a remote or organization config itself.
   async telemetryOptOut() {
     await traceReady.catch(() => {})
-    await telemetryInit
-    return Telemetry.optOutState()
+    return Telemetry.settledOptOutState()
   },
   // altimate_change end
   // altimate_change start — no consent token: an explicit picker selection always registers if needed

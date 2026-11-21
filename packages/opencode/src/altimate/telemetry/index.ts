@@ -2315,11 +2315,17 @@ export namespace Telemetry {
   let gate: "pending" | "enabled" | "disabled" = "pending"
   // While the config is unreadable, re-resolve it at most this often (each try reloads the config).
   const CONFIG_RETRY_MS = 30_000
+  const CONFIG_RETRY_TIMEOUT_MS = 5_000
   let configRetry: { at: number; instance: boolean } | undefined
   // An enabled opt-out resolved by another thread of this launch (the TUI worker), used by the next init.
   let adopted: "enabled" | undefined
   /** The opt-out as this thread has resolved it. */
   export function optOutState() {
+    return gate
+  }
+  /** The opt-out once this thread's running init has settled (for another thread to adopt). */
+  export async function settledOptOutState() {
+    await initPromise?.catch(() => {})
     return gate
   }
   /** Take the opt-out another thread of this launch resolved: the TUI main thread never loads a project,
@@ -2571,12 +2577,30 @@ export namespace Telemetry {
     // While the config stays unreadable, retry at most every CONFIG_RETRY_MS. The first init inside
     // an Instance is not throttled by an earlier one outside it: it reads the full config, which the
     // instance-less probe could not. An opt-out adopted from another thread needs no read.
-    if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at) {
-      if (configRetry.instance || !TelemetryConfig.instanceDirectory()) return Promise.resolve()
+    // A retry of an Instance read reloads the full config (remote fetches included), so it runs
+    // in the background, bounded by CONFIG_RETRY_TIMEOUT_MS: a session start never waits on it.
+    let background = false
+    if (!initPromise && !adopted && configRetry) {
+      const inInstance = Boolean(TelemetryConfig.instanceDirectory())
+      if (Date.now() < configRetry.at && (configRetry.instance || !inInstance)) return Promise.resolve()
+      background = configRetry.instance
     }
-    return (initPromise ??= doInit())
+    initPromise ??= doInit()
+    return background ? Promise.resolve() : initPromise
     // altimate_change end
   }
+
+  // altimate_change start — a retry is bounded: a remote that hangs counts as still unreadable
+  function readOptOut(): Promise<TelemetryConfig.State> {
+    const read = TelemetryConfig.resolve(configDirectory, configRetry !== undefined)
+    if (!configRetry) return read
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<TelemetryConfig.State>((resolve) => {
+      timer = setTimeout(() => resolve("unreadable"), CONFIG_RETRY_TIMEOUT_MS)
+    })
+    return Promise.race([read, timeout]).finally(() => clearTimeout(timer))
+  }
+  // altimate_change end
 
   async function doInit() {
     // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
@@ -2591,7 +2615,7 @@ export namespace Telemetry {
         return
       }
       const instance = Boolean(TelemetryConfig.instanceDirectory())
-      const state = adopted ?? (await TelemetryConfig.resolve(configDirectory, configRetry !== undefined))
+      const state = adopted ?? (await readOptOut())
       if (state === "disabled") {
         gate = "disabled"
         buffer = []

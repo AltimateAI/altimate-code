@@ -401,7 +401,7 @@ describe("altimate features: telemetry fail-safe init", () => {
   test("telemetry can resolve the opt-out before an Instance exists", async () => {
     const init = await readSrc("altimate", "telemetry", "index.ts")
     const config = await readSrc("altimate", "telemetry", "config-state.ts")
-    expect(init).toContain("await TelemetryConfig.resolve(configDirectory")
+    expect(init).toContain("TelemetryConfig.resolve(configDirectory")
     expect(config).toMatch(/try\s*\{\s*return await loadedState\(retry\)/)
     expect(config).toContain('return instanceDirectory() ? "unreadable" : disabledState(directory)')
     expect(config).toContain("ALTIMATE_TELEMETRY_DISABLED")
@@ -411,8 +411,14 @@ describe("altimate features: telemetry fail-safe init", () => {
     const tui = await readSrc("cli", "cmd", "tui.ts")
     const worker = await readSrc("cli", "tui", "worker.ts")
     expect(tui).toMatch(/\.call\("telemetryOptOut", undefined\)\s*\.then\(async \(state\) => Telemetry\.adoptOptOut\(await state\)\)/)
-    expect(worker).toMatch(/async telemetryOptOut\(\) \{[\s\S]*?await telemetryInit\s*return Telemetry\.optOutState\(\)/)
-    expect(worker).toContain("telemetryInit = Telemetry.init()")
+    expect(worker).toMatch(/async telemetryOptOut\(\) \{[\s\S]*?return Telemetry\.settledOptOutState\(\)/)
+  })
+
+  test("tool report-event resolves a pending opt-out inside its project before exit", async () => {
+    const tool = await readSrc("cli", "cmd", "tool.ts")
+    expect(tool).toMatch(
+      /if \(Telemetry\.optOutState\(\) === "pending"\) \{\s*await bootstrap\(process\.cwd\(\), \(\) => Telemetry\.init\(\)\)/,
+    )
   })
 
   test("telemetry/index.ts no longer reads the account; identity comes from the stored credential", async () => {

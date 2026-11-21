@@ -82,7 +82,8 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
   // telemetry/index.ts::doInit:
   //   1. the opt-out env vars (TelemetryConfig.disablingEnvironmentVariable)
   //   2. config.telemetry.disabled; a config that cannot be fully resolved omits the id
-  let disabled = Boolean(TelemetryConfig.disablingEnvironmentVariable())
+  // A project this process already resolved as opted out stops it for every project it serves.
+  let disabled = Boolean(TelemetryConfig.disablingEnvironmentVariable()) || Telemetry.optOutState() === "disabled"
   if (!disabled) {
     // Server routes run inside Instance.provide(), so the full config resolves during an
     // ordinary browser authorize().

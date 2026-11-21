@@ -8,6 +8,7 @@ import { Config } from "../../src/config/config"
 import { Telemetry } from "../../src/altimate/telemetry"
 import os from "os"
 import { tmpdir } from "../fixture/fixture"
+import { Instance } from "../../src/project/instance"
 
 const VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
 
@@ -99,6 +100,43 @@ describe("buildCliContext", () => {
 
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
       expect(ctx["v"]).toBe(1)
+    })
+
+    async function contextHasMachineId(directory?: string) {
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const read = () => buildCliContext(idPath)
+      const encoded = directory ? await Instance.provide({ directory, fn: read }) : await read()
+      const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+      return Object.prototype.hasOwnProperty.call(ctx, "machine_id")
+    }
+
+    test("omits machine_id once this process resolved an opt-out, even if this config is enabled", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await Telemetry.adoptOptOut("disabled")
+      expect(await contextHasMachineId()).toBe(false)
+    })
+
+    test("inside a project, omits machine_id when a remote config source could not be read", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await using project = await tmpdir({ git: true })
+      const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+      try {
+        expect(await contextHasMachineId(project.path)).toBe(false)
+      } finally {
+        unresolved.mockRestore()
+      }
+      expect(await contextHasMachineId(project.path)).toBe(true)
+    })
+
+    test("inside a project, omits machine_id when the full config fails to load", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await using project = await tmpdir({ git: true })
+      cfg.mockImplementation((async () => {
+        throw new Error("config failed to load")
+      }) as never)
+      expect(await contextHasMachineId(project.path)).toBe(false)
     })
 
     test("omits machine_id when config.telemetry.disabled is set", async () => {

@@ -402,6 +402,48 @@ describe("telemetry opt-out", () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
+  test("the state handed to another thread waits for this thread's running init", async () => {
+    signOut()
+    let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+    configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    void Telemetry.init()
+    const settled = Telemetry.settledOptOutState()
+    await Bun.sleep(10)
+    expect(Telemetry.optOutState()).toBe("pending")
+    release({ telemetry: { disabled: true } })
+    expect(await settled).toBe("disabled")
+  })
+
+  test("a retry inside a project never holds up the session that triggers it", async () => {
+    signOut()
+    await using dir = await tmpdir({ git: true })
+    configSpy.mockResolvedValue({})
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+    try {
+      await Instance.provide({
+        directory: dir.path,
+        fn: async () => {
+          await Telemetry.init()
+          expect(Telemetry.optOutState()).toBe("pending")
+
+          let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+          configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+          Telemetry.retryConfigNowForTest()
+          let returned = false
+          await Telemetry.init().then(() => (returned = true))
+          // The reload is still running, yet the caller already went on.
+          expect(returned).toBe(true)
+          expect(Telemetry.optOutState()).toBe("pending")
+          unresolved.mockReturnValue(false)
+          release({})
+          expect(await Telemetry.settledOptOutState()).toBe("enabled")
+        },
+      })
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
   test("the retry throttle still applies after an earlier session enabled telemetry", async () => {
     recordIngestion()
     signOut()
