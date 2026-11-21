@@ -322,6 +322,7 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) return undefined
     const messages = sync.data.message[props.sessionID]
     if (!messages) return undefined
+    // altimate_change — shell and MCP admin metadata do not select a chat model
     return messages.findLast((m): m is UserMessage => m.role === "user" && !isModelMetadataOnly(sync.data.part[m.id] ?? []))
   })
 
