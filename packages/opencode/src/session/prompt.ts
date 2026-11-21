@@ -2251,10 +2251,7 @@ export namespace SessionPrompt {
           (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
           msg.parts.some(
             (part) =>
-              (msg.info.role === "user" &&
-                msg.info.id !== measuredID &&
-                part.type === "file" &&
-                MessageV2.isMedia(part.mime)) ||
+              (msg.info.role === "user" && part.type === "file" && MessageV2.isMedia(part.mime)) ||
               (part.type === "tool" &&
                 part.state.status === "completed" &&
                 part.state.attachments?.some((attachment) => MessageV2.isMedia(attachment.mime))),
