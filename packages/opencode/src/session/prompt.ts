@@ -4835,7 +4835,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const available = await Agent.list().then((agents) => agents.filter((a) => !a.hidden).map((a) => a.name))
       const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
       const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
-      ModelMetadata.markReported(error)
       ModelReport.publishReported(input.sessionID, error)
       throw error
     }
