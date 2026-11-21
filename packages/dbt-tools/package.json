@@ -10,7 +10,7 @@
     "build": "bun build src/index.ts --outdir dist --target node --format esm && bun run script/copy-python.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test test/adapter-bun.test.ts --timeout 30000 && bun test test/cli.test.ts test/config.test.ts test/dbt-cli.test.ts test/dbt-resolve.test.ts test/stale-manifest.test.ts test/build-integrity.test.ts test/adapter-target-path.test.ts test/packages.test.ts test/manifest-retry.test.ts test/schema-verify.test.ts test/build.test.ts --timeout 30000",
-    "test:e2e": "bun test test/e2e/ test/packages.test.ts test/manifest-retry.test.ts test/schema-verify.test.ts test/build.test.ts --timeout 300000"
+    "test:e2e": "bun run build && bun test test/e2e/ test/build-real-dbt.test.ts test/packages-real-dbt.test.ts --timeout 300000"
   },
   "dependencies": {
     "@altimateai/dbt-integration": "^0.3.19",

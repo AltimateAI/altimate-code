@@ -218,17 +218,17 @@ export function packagesSatisfied(root: string): SatisfiedResult {
     return { ok: true, reason: "installed packages match the last install of these declarations" }
   }
 
-  // A lock older than packages.yml was not resolved from the current declarations.
-  try {
-    const lockM = statSync(join(root, "package-lock.yml")).mtimeMs
-    const declM = Math.max(
-      ...["packages.yml", "dependencies.yml"].filter((f) => existsSync(join(root, f))).map((f) => statSync(join(root, f)).mtimeMs),
-    )
-    if (declM > lockM + 1000) return { ok: false, reason: "packages.yml is newer than package-lock.yml" }
-    if (lockM > statSync(installPath).mtimeMs + 1000) {
-      return { ok: false, reason: "package-lock.yml is newer than the installed package directory" }
-    }
-  } catch {}
+  // A lock older than the declarations, or an installation older than either,
+  // may represent a different set of versions even if the directory names match.
+  const declaredAt = Math.max(
+    ...["packages.yml", "dependencies.yml"].map((file) => statSync(join(root, file), { throwIfNoEntry: false })?.mtimeMs ?? 0),
+  )
+  const lockedAt = statSync(join(root, "package-lock.yml"), { throwIfNoEntry: false })?.mtimeMs ?? 0
+  const installedAt = statSync(installPath, { throwIfNoEntry: false })?.mtimeMs
+  if (lockedAt && declaredAt > lockedAt + 1000) return { ok: false, reason: "packages.yml is newer than package-lock.yml" }
+  if (installedAt !== undefined && Math.max(declaredAt, lockedAt) > installedAt + 1000) {
+    return { ok: false, reason: "package declarations are newer than the installed package directory" }
+  }
 
   // No stamp: packages were installed by something else (image build, `dbt deps` by hand).
   // Hub packages can be verified by name. The version is not compared: the `version:` in an
@@ -391,7 +391,7 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     // An explicit deps command can resolve Jinja itself. Its output is authoritative
     // when we cannot inspect the resulting directory.
     rmSync(stampFile, { force: true })
-    rmSync(dirty, { force: true })
+    if (!failedCommand(result)) rmSync(dirty, { force: true })
     return result
   }
   const complete = [...completePackageDirs(installPath).keys()]
@@ -410,8 +410,19 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     // declarations instead of trusting this run.
     rmSync(stampFile, { force: true })
   }
-  if (!incomplete) rmSync(dirty, { force: true })
+  if (!incomplete && !failedCommand(result)) rmSync(dirty, { force: true })
   return result
+}
+
+function failedCommand(result: unknown): boolean {
+  if (!result || typeof result !== "object") return false
+  const output = result as { exitCode?: number | null; stderr?: string; stdout?: string }
+  if (typeof output.exitCode === "number") return output.exitCode !== 0
+  // Older engines can omit the status. dbt also emits progress on stderr, so
+  // that stream by itself does not establish a failure.
+  return /Encountered an error|(?:Compilation|Parsing|Runtime|Database) Error/i.test(
+    `${output.stderr ?? ""}\n${output.stdout ?? ""}`,
+  )
 }
 
 /**

@@ -6,19 +6,12 @@ import { spawn, spawnSync } from "child_process"
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
+import { findRealDbt } from "./fixture/find-real-dbt"
 
 const DIST = process.env.ALTIMATE_DBT_DIST ?? join(import.meta.dir, "..", "dist", "index.js")
 
-function findDbt(): string | undefined {
-  const r = spawnSync("dbt", ["--version"], { encoding: "utf-8", timeout: 20_000 })
-  if (r.status !== 0 || !/duckdb/i.test(`${r.stdout}${r.stderr}`)) return undefined
-  const which = spawnSync(process.platform === "win32" ? "where" : "which", ["dbt"], { encoding: "utf-8" })
-  return which.stdout.trim().split(/\r?\n/)[0] || undefined
-}
-
-const REAL_DBT = existsSync(DIST) ? findDbt() : undefined
-// The fixtures are POSIX shell scripts, so the suite does not run on Windows.
-const suite = REAL_DBT && process.platform !== "win32" ? describe : describe.skip
+const REAL_DBT = existsSync(DIST) ? findRealDbt() : undefined
+const suite = REAL_DBT ? describe : describe.skip
 
 let work = ""
 let proj = ""

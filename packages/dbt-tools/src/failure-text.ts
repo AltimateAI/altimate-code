@@ -1,3 +1,5 @@
+import type { CommandProcessResult } from "@altimateai/dbt-integration"
+
 /** What `--format text` prints on stderr for an error answer. */
 export function failureLines(failed: Record<string, unknown>): string[] {
   const lines: string[] = []
@@ -8,4 +10,13 @@ export function failureLines(failed: Record<string, unknown>): string[] {
   if ("fix" in failed) lines.push(String(failed.fix))
   if (Array.isArray(failed.logs)) lines.push(failed.logs.join("\n"))
   return lines
+}
+
+export function formatCommandResult(result?: CommandProcessResult) {
+  const stdout = result?.stdout ?? ""
+  if (result?.exitCode && result.exitCode !== 0) {
+    return { error: result.stderr || stdout || `dbt exited with code ${result.exitCode}`, stdout }
+  }
+  if (result?.stderr) return { error: result.stderr, stdout }
+  return { stdout }
 }

@@ -80,6 +80,17 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(0)
   })
 
+  test("changed declarations invalidate an older install without a lock or stamp", async () => {
+    writeProject()
+    installPackage("1.0.0")
+    const older = new Date(Date.now() - 60_000)
+    utimesSync(join(root, "dbt_packages"), older, older)
+    writeProject({ packages: `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n` })
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
   test("a recent lock does not hide a newly declared package", async () => {
     writeProject({
       lock: lockFor("1.0.0"),
@@ -339,10 +350,28 @@ describe("lock", () => {
 
   test("explicit install (altimate-dbt deps) runs under the lock, clears the dirty marker and does not claim success", async () => {
     writeProject({ lock: lockFor("1.0.0") })
+    const install = counter()
+    await withPackagesLock(root, async () => {
+      await expect(installPackagesLocked(root, install.install, { maxWaitMs: 100 })).rejects.toThrow("timed out")
+      expect(install.calls).toBe(0)
+    })
     await installPackagesLocked(root, async () => installPackage())
     expect(packagesSatisfied(root).ok).toBe(true)
     expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(false)
     expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+  })
+
+  test("a failed explicit install leaves repair pending even when package YAML looks complete", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const failed = { stdout: "dbt could not finish extraction", stderr: "", exitCode: 1 }
+    await expect(installPackagesLocked(root, async () => {
+      installPackage()
+      return failed
+    })).resolves.toBe(failed)
+    expect(packagesSatisfied(root).ok).toBe(false)
+    const repair = counter()
+    expect((await ensurePackages(root, repair.install)).action).toBe("installed")
+    expect(repair.calls).toBe(1)
   })
 
   test("an explicit install whose dbt deps failed on an empty directory returns dbt's result and leaves the dirty marker", async () => {

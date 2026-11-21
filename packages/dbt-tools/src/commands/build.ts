@@ -1,4 +1,5 @@
-import type { DBTProjectIntegrationAdapter, CommandProcessResult } from "@altimateai/dbt-integration"
+import type { DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
+import { formatCommandResult } from "../failure-text"
 import { schemaVerify } from "./schema-verify"
 
 type WithVerifier = <T>(verify: (adapter: DBTProjectIntegrationAdapter) => Promise<T>) => Promise<T>
@@ -19,7 +20,7 @@ export async function build(
     modelName: model,
     plusOperatorRight: downstream ? "+" : "",
   })
-  const formatted = format(result)
+  const formatted = formatCommandResult(result)
 
   // Auto-run schema-verify after a successful single-model build. Surfacing
   // the verdict in the same tool result the agent just received is the
@@ -40,14 +41,14 @@ export async function run(adapter: DBTProjectIntegrationAdapter, args: string[])
     modelName: model,
     plusOperatorRight: downstream ? "+" : "",
   })
-  return format(result)
+  return formatCommandResult(result)
 }
 
 export async function test(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
   const result = await adapter.unsafeRunModelTestImmediately(model)
-  const formatted = format(result)
+  const formatted = formatCommandResult(result)
   if (
     "error" in formatted ||
     /does not match any (?:enabled )?nodes?|Encountered an error|Compilation Error|Parsing Error|Runtime Error|Database Error|Could not set lock|Done\.\s+PASS=/i.test(formatted.stdout)
@@ -62,7 +63,7 @@ export async function project(
   withVerifier: WithVerifier = (verify) => verify(adapter),
 ) {
   const result = await adapter.unsafeBuildProjectImmediately()
-  const formatted = format(result)
+  const formatted = formatCommandResult(result)
   if ("error" in formatted) return formatted
 
   // After a successful project-wide build, auto-run schema-verify on every
@@ -134,14 +135,6 @@ async function safeVerify(withVerifier: WithVerifier, model: string) {
       error: `schema-verify failed: ${e instanceof Error ? e.message : String(e)}. Run \`altimate-dbt schema-verify --model ${model}\` manually to inspect.`,
     }
   }
-}
-
-// TODO: dbt writes info/progress logs to stderr even on success — checking stderr
-// alone causes false failures. CommandProcessResult has no exit_code field, so we
-// can't distinguish real errors yet. Revisit when the type is extended.
-function format(result?: CommandProcessResult) {
-  if (result?.stderr) return { error: result.stderr, stdout: result.stdout }
-  return { stdout: result?.stdout ?? "" }
 }
 
 function flag(args: string[], name: string): string | undefined {

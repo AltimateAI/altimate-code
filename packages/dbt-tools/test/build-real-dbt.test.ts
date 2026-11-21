@@ -3,12 +3,12 @@ import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { findRealDbt } from "./fixture/find-real-dbt"
 import { DbtBuildGreenValidator } from "../../opencode/src/altimate/validators/dbt-build-green"
 
 const dist = join(import.meta.dir, "../dist/index.js")
-const dbt = Bun.which("dbt")
-const version = dbt && existsSync(dist) ? spawnSync(dbt, ["--version"], { encoding: "utf8", timeout: 20_000 }) : undefined
-const realTest = version?.status === 0 && /duckdb/i.test(version.stdout) && process.platform !== "win32" ? test : test.skip
+const dbt = existsSync(dist) ? findRealDbt() : undefined
+const realTest = dbt ? test : test.skip
 
 for (const mode of ["model", "project", "red"] as const) {
   realTest(`real dbt ${mode} build retains its execution artifact`, async () => {
@@ -36,7 +36,9 @@ for (const mode of ["model", "project", "red"] as const) {
       const artifact = JSON.parse(readFileSync(join(root, "artifacts/run_results.json"), "utf8"))
       expect(artifact.args.which, output.stdout + output.stderr).toBe("build")
       expect(artifact.results.some((row: { status: string }) => row.status === (mode === "red" ? "error" : "pass"))).toBe(true)
-      if (mode !== "red") {
+      if (mode === "red") {
+        expect(output.status, output.stdout + output.stderr).toBe(1)
+      } else {
         expect(output.status, output.stdout + output.stderr).toBe(0)
         const response = JSON.parse(output.stdout)
         if (mode === "project") expect(response.schema_verify_summary.match).toBe(1)
