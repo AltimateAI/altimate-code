@@ -18,7 +18,10 @@ export function decide(
   if (options.enabled) {
     for (const check of checks) {
       const { validator, result } = check
-      if (!result.ok && (options.strict || result.classification !== "unverifiable")) failures.push(check)
+      const blocks = options.strict
+        ? result.strictFailure || !result.ok
+        : !result.ok && result.classification !== "unverifiable"
+      if (blocks) failures.push(check)
       if (!options.strict && result.advisory) {
         advisories.push(`[altimate-validator advisory: ${validator.name}] ${result.advisory}`)
       }

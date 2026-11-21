@@ -169,20 +169,13 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
       }
       const dbtLog = typeof envelope.stdout === "string" ? envelope.stdout : ""
       const summary = parseDbtTestOutput(dbtLog)
-      // The CLI can include diagnostic stderr alongside a real test summary.
-      if (summary && summary.error > 0) {
-        resolve({ model, summary })
+      // A complete summary is usable even when the wrapper reports diagnostic stderr.
+      const error = typeof envelope.error === "string" ? envelope.error.slice(0, 500) : undefined
+      if (summary) {
+        resolve({ model, summary, error: summary.error === 0 ? error : undefined })
         return
       }
-      if (typeof envelope.error === "string") {
-        resolve({ model, error: envelope.error.slice(0, 500) })
-        return
-      }
-      if (!summary) {
-        resolve({ model, error: `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
-        return
-      }
-      resolve({ model, summary })
+      resolve({ model, error: error ?? `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
     })
   })
 }
@@ -261,7 +254,8 @@ export const DbtTestsPassValidator: Validator = {
     }
 
     const failures = results.filter((r) => r.summary && r.summary.error > 0)
-    const errored = results.filter((r) => r.error && !r.summary)
+    const toolErrors = results.filter((r) => r.error)
+    const errored = toolErrors.filter((r) => !r.summary)
     const passed = results.filter((r) => r.summary && r.summary.error === 0)
     // A model with no tests at all isn't a failure — it's just nothing to verify.
     const noTests = results.filter((r) => r.summary && r.summary.total === 0)
@@ -283,7 +277,7 @@ export const DbtTestsPassValidator: Validator = {
       ? `Could not verify dbt tests for ${unverifiedNames.length} model(s) because the test tool did not return a usable result: ${unverifiedNames.slice(0, 10).map((name) => sanitizeForPrompt(name.replace(/[^\w.-]/g, "?"), 80)).join(", ")}.`
       : undefined
 
-    if (failures.length === 0 && errored.length === 0) {
+    if (failures.length === 0 && toolErrors.length === 0) {
       return {
         ok: true,
         ...(advisory && { classification: "unverifiable", advisory }),
@@ -296,16 +290,18 @@ export const DbtTestsPassValidator: Validator = {
       }
     }
 
-    const hintBlocks: TestRunOutput[] = [...failures, ...errored]
+    const hintBlocks: TestRunOutput[] = [...failures, ...toolErrors.map(({ model, error }) => ({ model, error }))]
     const failingNames = failures.map((f) => f.model).filter(Boolean)
-    const erroredNames = errored.map((f) => f.model).filter(Boolean)
+    const erroredNames = toolErrors.map((f) => f.model).filter(Boolean)
     const reason =
       failures.length > 0
         ? `${failures.length} of ${results.length} models you edited have failing dbt tests${failingNames.length ? `: ${failingNames.join(", ")}` : ""}.`
-        : `${errored.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
+        : `${toolErrors.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
+    const ok = failures.length === 0 && errored.length === 0
     return {
-      ok: false,
-      classification: failures.length > 0 ? "finding" : "unverifiable",
+      ok,
+      ...(ok && { strictFailure: true }),
+      classification: failures.length > 0 ? "finding" : advisory ? "unverifiable" : undefined,
       advisory,
       reason,
       fixHint:
@@ -318,7 +314,7 @@ export const DbtTestsPassValidator: Validator = {
         errored: errored.length,
         spawn_failures: spawnFailures,
         failing_models: failingNames,
-        errored_models: erroredNames,
+        errored_models: errored.map((r) => r.model),
       },
     }
   },

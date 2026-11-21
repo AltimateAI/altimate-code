@@ -2575,7 +2575,7 @@ export namespace SessionPrompt {
               timestamp: Date.now(),
               session_id: sessionID,
               validator_name: validator.name,
-              ok: vRes.ok,
+              ok: vRes.ok && !vRes.strictFailure,
               step,
               retry_count: validatorRetryCount,
               enforced: validatorsEnabled && (validatorStrict || vRes.classification !== "unverifiable"),

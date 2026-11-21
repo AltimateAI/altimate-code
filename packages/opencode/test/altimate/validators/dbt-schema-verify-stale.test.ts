@@ -8,6 +8,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { DbtSchemaVerifyValidator } from "../../../src/altimate/validators/dbt-schema-verify"
 import { DbtTestsPassValidator } from "../../../src/altimate/validators/dbt-tests-pass"
+import { ValidatorEnforcement } from "../../../src/session/validators/enforcement"
 import type { Validator, ValidatorContext } from "../../../src/session/validators/types"
 
 const WRITTEN_AT = "2026-11-05T08:00:00.000Z"
@@ -105,6 +106,20 @@ describe("dbt-tests-pass result classification", () => {
     const result = await check({ error: "Could not set lock on file" }, DbtTestsPassValidator)
     expect(result).toMatchObject({ ok: false, classification: "unverifiable" })
     expect(result.advisory).toContain("orders")
+  })
+
+  test("a successful summary with stderr is advisory-free and preserves the strict control", async () => {
+    const result = await check({
+      error: "Adapter diagnostic",
+      stdout: "1 of 1 PASS not_null_orders_id [PASS in 0.10s]\nDone. PASS=1 WARN=0 ERROR=0 SKIP=0 TOTAL=1",
+    }, DbtTestsPassValidator)
+    const checks = [{ validator: DbtTestsPassValidator, result }]
+    const options = { enabled: true, retryCount: 0, maxRetries: 3 }
+    expect(ValidatorEnforcement.decide(checks, { ...options, strict: false })).toMatchObject({
+      retry: false,
+      advisories: [],
+    })
+    expect(ValidatorEnforcement.decide(checks, { ...options, strict: true }).retry).toBe(true)
   })
 
   test("a real test failure is a finding even when the wrapper also reports an error", async () => {

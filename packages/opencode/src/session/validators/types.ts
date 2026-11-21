@@ -66,8 +66,11 @@ export interface ValidatorContext {
  * Result of running a validator against a session context.
  */
 export interface ValidatorResult {
-  /** Whether the previous enforcement policy accepted the result. */
+  /** Whether the validator reported a failure. */
   ok: boolean
+
+  /** A legacy failure retained solely for the strict-mode control policy. */
+  strictFailure?: true
 
   /** Set by the validator when it has a finding or could not complete the check. */
   classification?: "finding" | "unverifiable"
