@@ -25,7 +25,7 @@ import {
 export { type DiffLine, walkDiffLines } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
-import { type ReviewConfig } from "./config"
+import { type RepoInstruction, type ReviewConfig } from "./config"
 import {
   type ReviewMode,
   type ReviewScope,
@@ -262,6 +262,8 @@ export interface OrchestrateInput {
   aiVerify?: boolean
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
+  /** Review instruction files from the base branch, passed to the AI reviewer. */
+  repoInstructions?: RepoInstruction[]
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -2514,6 +2516,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         files: aiFiles,
         context,
         grounding: cleanFindings(merged),
+        ...(input.repoInstructions?.length ? { instructions: input.repoInstructions } : {}),
         prTitle: input.prTitle,
         prBody: input.prBody,
         model: input.aiModel,
