@@ -75,6 +75,7 @@ interface Attempt {
   promise?: Promise<Connector>
   tunnel?: TunnelHandle
   effectiveConfig?: ConnectionConfig
+  offline?: boolean
 }
 
 function createState(dir: string): State {
@@ -83,7 +84,7 @@ function createState(dir: string): State {
 
 /** Registry state per resolved project directory. */
 const states = new Map<string, State>()
-const connectedConfigs = new WeakMap<Connector, ConnectionConfig>()
+const connectedConfigs = new WeakMap<Connector, { config: ConnectionConfig; offline: boolean }>()
 
 /** Invalidate the in-flight connect for `name`, closing the tunnel it opened. Synchronous. */
 function dropAttempt(s: State, name: string): void {
@@ -555,7 +556,8 @@ async function createConnector(
         throw new Error(`No static import available for driver: ${driverPath}`)
     }
     // altimate_change start — a driver import may finish after offline activation
-    if (Offline.enabled()) assertLocalConnection(attempt.effectiveConfig)
+    attempt.offline = Offline.enabled()
+    if (attempt.offline) assertLocalConnection(attempt.effectiveConfig)
     // altimate_change end
     connector = await mod.connect(resolvedConfig)
   } catch (e) {
@@ -685,11 +687,14 @@ export async function get(name: string): Promise<Connector> {
   }
 
   const cached = connectors.get(name)
+  let reopenCached = false
   if (cached) {
     // altimate_change start — a project loaded later can activate offline mode process-wide
     if (Offline.enabled()) {
       try {
-        assertLocalConnection(connectedConfigs.get(cached)!)
+        const { config, offline } = connectedConfigs.get(cached)!
+        assertLocalConnection(config)
+        reopenCached = config.type.toLowerCase() === "duckdb" && !offline
       } catch (error) {
         await detachCached(s, name)()
         throw error
@@ -697,9 +702,11 @@ export async function get(name: string): Promise<Connector> {
     }
     // altimate_change end
     // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
-    SignInNotice.rememberOrigin(accountOf(configs.get(name)))
+    if (!reopenCached) {
+      SignInNotice.rememberOrigin(accountOf(configs.get(name)))
+      return cached
+    }
     // altimate_change end
-    return cached
   }
 
   // If a connector is already being created, await the same Promise
@@ -743,6 +750,10 @@ export async function get(name: string): Promise<Connector> {
   // altimate_change end
   const promise = (async () => {
     try {
+      if (reopenCached) {
+        await detachCached(s, name)()
+        if (!current()) throw SUPERSEDED(name)
+      }
       // altimate_change start — the attempt closes only the tunnel it opened
       const connector = await createConnector(name, config, attempt, current)
       const effectiveConfig = attempt.effectiveConfig!
@@ -764,7 +775,7 @@ export async function get(name: string): Promise<Connector> {
         throw SUPERSEDED(name)
       }
       connectors.set(name, connector)
-      connectedConfigs.set(connector, effectiveConfig)
+      connectedConfigs.set(connector, { config: effectiveConfig, offline: attempt.offline! })
       if (attempt.tunnel) tunnels.set(name, attempt.tunnel)
       // altimate_change end
       fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
