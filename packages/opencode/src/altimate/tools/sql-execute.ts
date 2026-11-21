@@ -310,7 +310,8 @@ export const SqlExecuteTool = Tool.define(
                     mongo: mongo !== null,
                     scratch: isScratch(args.warehouse),
                     warehouseGiven: !!args.warehouse,
-                    readOnly: !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny"),
+                    // With no catch-all deny, writes the rules do not name fall to the default ("ask").
+                    readOnly: lastCatchAllDeny >= 0 && !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny"),
                   }),
                 )
               }

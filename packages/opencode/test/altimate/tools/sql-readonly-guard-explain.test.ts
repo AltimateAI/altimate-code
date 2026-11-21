@@ -140,7 +140,7 @@ describe("explainWrite", () => {
   })
 
   test("parser messages keep no token text", () => {
-    const reason = explainWrite("SELECT set FROM t", "sqlserver").reason
+    const reason = explainWrite("SELECT set FROM t", "postgres").reason
     expect(reason).toContain("line 1, column")
     expect(reason).not.toContain("Set")
     expect(reason).not.toContain("a token")
@@ -179,6 +179,16 @@ describe("explainWrite", () => {
         expect({ dialect, sql, reason: explainWrite(sql, dialect).reason }).not.toMatchObject({ reason: expect.stringContaining("could not be proven") })
       }
     }
+  })
+
+  test("a SQL Server batch without a separator is named as such, not as a syntax error", () => {
+    const reason = explainWrite("SELECT a FROM t\nUPDATE t SET a = 1", "sqlserver").reason
+    expect(reason).toContain("statement keyword UPDATE")
+    expect(reason).not.toContain("could not read")
+  })
+
+  test("an UNKNOWN statement type is named by its first keyword", () => {
+    expect(explainWrite("ATTACH 'x.db' AS other", "duckdb").reason).not.toContain("UNKNOWN")
   })
 
   test("names a SQL Server batch keyword", () => {

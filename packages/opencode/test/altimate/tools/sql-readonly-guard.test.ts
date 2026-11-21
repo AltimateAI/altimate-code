@@ -14,6 +14,9 @@ import { initTool } from "../tool-fixture"
 
 const DIALECTS = ["postgres", "snowflake", "bigquery", "duckdb", "sqlite", "mysql", "databricks", "redshift", "sqlserver", "oracle", "clickhouse"]
 
+// What a read-only agent's denial carries: its catch-all write deny.
+const READ_ONLY_RULES = [{ permission: "sql_execute_write", pattern: "*", action: "deny" }]
+
 const isRead = (sql: string, dialect: string) => {
   const result = classifyAndCheck(sql, dialect)
   return result.queryType === "read" && !result.blocked
@@ -29,7 +32,7 @@ const deniedCtx = (asked: unknown[]) => ({
   metadata: () => {},
   ask: async (request: any) => {
     asked.push(request)
-    if (request.permission === "sql_execute_write") throw new PermissionV1.DeniedError({ ruleset: [] })
+    if (request.permission === "sql_execute_write") throw new PermissionV1.DeniedError({ ruleset: READ_ONLY_RULES })
   },
 })
 
@@ -175,7 +178,7 @@ describe("sql_execute on a read-only agent", () => {
     // Production runs permission.ask(...).pipe(Effect.orDie) through Effect.runPromise (EffectBridge.promise).
     const ctx = {
       ...deniedCtx([]),
-      ask: () => Effect.runPromise(Effect.fail(new PermissionV1.DeniedError({ ruleset: [] })).pipe(Effect.orDie)),
+      ask: () => Effect.runPromise(Effect.fail(new PermissionV1.DeniedError({ ruleset: READ_ONLY_RULES })).pipe(Effect.orDie)),
     }
     await expect(
       tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
@@ -184,7 +187,7 @@ describe("sql_execute on a read-only agent", () => {
 
   test("a denial from the subagent permission path is explained too", async () => {
     const tool = await initTool(SqlExecuteTool)
-    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionNext.DeniedError([])) }
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionNext.DeniedError(READ_ONLY_RULES as any)) }
     await expect(
       tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
     ).rejects.toThrow("it is not a read (DELETE)")
@@ -229,6 +232,15 @@ describe("denied write message branches", () => {
     await expect(
       tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
     ).rejects.toThrow("may only read")
+  })
+
+  test("a pattern-only deny leaves other writes to the default ask, so it is not read-only", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ruleset = [{ permission: "sql_execute_write", pattern: "DROP*", action: "deny" }]
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
+    await expect(
+      tool.execute({ query: "DROP TABLE stg_tmp", warehouse: "guard_db", limit: 10 }, ctx as any),
+    ).rejects.toThrow("A sql_execute_write rule denies it")
   })
 
   test("sql_execute reads the denial's rules to choose the wording", async () => {

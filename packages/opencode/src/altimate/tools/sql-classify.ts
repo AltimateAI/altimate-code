@@ -617,6 +617,15 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     // Statements are not quoted back, since telemetry records this error; the parser's own message
     // quotes at most a token, which telemetry masks as a literal.
     const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length}` : "it"
+    // Where statements need no separator, a statement keyword is the real reason, even if it breaks the parse.
+    const batchKeyword = batchedStatement(maskSql(tokenizeSql(statement, dialect).tokens), dialect)
+    if (result.parseError && batchKeyword) {
+      return writes(
+        `${where} holds the statement keyword ${batchKeyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
+          `${/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") ? "SQL Server runs a statement there even without a separator" : "this dialect is not modeled, so it may run as a statement"}` +
+          "; run each statement in its own call, or quote it if it is a column name",
+      )
+    }
     if (result.parseError) {
       return unreadable(
         `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
@@ -632,7 +641,12 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     } catch {
       parsed = undefined
     }
-    const type = String(parsed?.statement_type ?? "statement").toUpperCase()
+    const reported = String(parsed?.statement_type ?? "").toUpperCase()
+    // An UNKNOWN type is named by the statement's first keyword instead.
+    const type =
+      reported && reported !== "UNKNOWN"
+        ? reported
+        : (/^\s*([A-Za-z_]+)/.exec(maskSql(tokenizeSql(statement, dialect).tokens))?.[1] ?? "statement").toUpperCase()
     const tokens = tokenizeSql(statement, dialect).tokens
     const masked = maskSql(tokens)
     if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
