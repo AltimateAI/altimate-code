@@ -34,10 +34,8 @@ async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace:
       mcp: { remoteFixture: { type: "remote", url: "https://mcp.test" } },
     }),
   )
-  if (configMode) {
-    const value = snapshot ? "{env:OFFLINE_CONFIG_VALUE}" : "true"
-    await Bun.write(path.join(project, "opencode.jsonc"), `{ // local policy\n "offline": ${value} }`)
-  }
+  if (configMode && !snapshot)
+    await Bun.write(path.join(project, "opencode.jsonc"), '{ // local policy\n "offline": true }')
   await Bun.write(
     path.join(data, "auth.json"),
     JSON.stringify({
@@ -115,7 +113,12 @@ async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace:
     XDG_CACHE_HOME: path.join(root, "cache"),
     XDG_STATE_HOME: path.join(root, "state"),
     ALTIMATE_OFFLINE: configMode ? "" : "1",
-    OFFLINE_CONFIG_VALUE: "true",
+    ...(configMode && snapshot
+      ? {
+          OPENCODE_CONFIG_CONTENT: "{env:OFFLINE_CONFIG_VALUE}",
+          OFFLINE_CONFIG_VALUE: JSON.stringify({ offline: true }),
+        }
+      : {}),
     // The environment switch must preserve the snapshot even when a deployment
     // still has the old workspace opt-out set.
     ALTIMATE_DISABLE_WORKSPACE: disableWorkspace ? "1" : "",
@@ -387,4 +390,41 @@ test.skipIf(process.platform === "win32")(
     }
   },
   45_000,
+)
+
+test.skipIf(process.platform === "win32")(
+  "offline skill validation skips running paired tools",
+  async () => {
+    const f = await fixture(true, false, false)
+    const bin = path.join(f.root, "bin")
+    const marker = path.join(f.root, "unexpected-tool")
+    try {
+      await fs.rm(path.join(f.root, "data", "altimate-code", "auth.json"))
+      await fs.mkdir(bin)
+      const tool = path.join(bin, "fixture-tool")
+      await Bun.write(tool, '#!/bin/sh\nprintf "paired executable ran\\n" > "$OFFLINE_TEST_TOOL_MARKER"\n')
+      await fs.chmod(tool, 0o755)
+      await fs.appendFile(f.skill, "\nTools used: `fixture-tool`\n")
+      const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "skill", "test", "cached-offline"], {
+        cwd: f.project,
+        env: { ...f.env, PATH: bin, OFFLINE_TEST_TOOL_MARKER: marker },
+        stdout: "pipe",
+        stderr: "pipe",
+        signal: AbortSignal.timeout(20_000),
+      })
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      expect(await Bun.file(marker).exists()).toBe(false)
+      expect({ code, stdout, stderr }).toMatchObject({
+        code: 0,
+        stdout: expect.stringContaining("Paired tool checks require online mode."),
+      })
+    } finally {
+      await fs.rm(f.root, { recursive: true, force: true })
+    }
+  },
+  25_000,
 )

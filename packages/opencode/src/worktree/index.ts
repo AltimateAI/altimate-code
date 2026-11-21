@@ -234,6 +234,9 @@ export const layer: Layer.Layer<
     })
 
     const setup = Effect.fnUntraced(function* (info: Info) {
+      // altimate_change start — checkout filters can launch programs such as Git LFS
+      if (Offline.enabled()) return yield* new CreateFailedError({ message: "Create this worktree while online." })
+      // altimate_change end
       const ctx = yield* InstanceState.context
       const created = yield* git(
         info.branch

@@ -19,7 +19,6 @@ async function localOptIn(directory: string) {
   const optedIn = async (text: string | undefined, source: string | { source: string; dir: string }) => {
     if (!text) return false
     if (parse(text)?.offline === true) return true
-    if (!text.includes('"offline"')) return false
     const config = await ConfigPaths.parseText(text, source, "empty", { track: false }).catch(() => undefined)
     return config?.offline === true
   }

@@ -258,9 +258,10 @@ export namespace ShareNext {
   }
 
   export async function remove(sessionID: SessionID) {
-    // altimate_change start — skip session sharing in offline mode
-    if (Offline.enabled() || disabled) return
+    // altimate_change start — keep the local share state until the server revokes it
+    if (Offline.enabled()) throw new Error("Offline mode cannot revoke a share. Run unshare while online.")
     // altimate_change end
+    if (disabled) return
     log.info("removing share", { sessionID })
     const share = get(sessionID)
     if (!share) return

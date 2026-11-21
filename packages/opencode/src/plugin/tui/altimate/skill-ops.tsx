@@ -33,6 +33,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { spawn } from "child_process"
 import os from "os"
 import path from "path"
+import { Offline } from "@/config/offline"
 import fs from "fs/promises"
 
 const id = "altimate:skill-ops"
@@ -191,6 +192,7 @@ async function installSkillDirect(
   // reach the installer without going through the UI's install-preview.
   const kind = classifyInstallSource(normalized)
   if (kind === "github-url" || kind === "owner-repo") {
+    if (Offline.enabled()) return { ok: false, message: "Install remote skills while online, or install a local skill directory." }
     // Branch on the already-computed `kind`, not on a `startsWith("http")` probe of the
     // normalized string. Two bugs are avoided that way:
     //   1. An owner whose name literally starts with `http` (e.g. `httpie/httpie`,
@@ -289,6 +291,7 @@ async function testSkillDirect(
 ): Promise<{ ok: boolean; message: string }> {
   const tools = detectToolReferences(content)
   if (tools.length === 0) return { ok: true, message: `${skillName}: PASS (no CLI tools)` }
+  if (Offline.enabled()) return { ok: false, message: "Paired tool checks require online mode." }
 
   const sep = process.platform === "win32" ? ";" : ":"
   const toolPath = [
