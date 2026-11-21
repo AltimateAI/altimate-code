@@ -1311,7 +1311,9 @@ export namespace SessionPrompt {
           Bus.publish(Session.Event.Error, {
             sessionID,
             error: new NamedError.Unknown({
+              // altimate_change start — identify config locations when resolving a session model fails
               message: `Model not found: ${e.data.providerID}/${e.data.modelID}.${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
+              // altimate_change end
             }).toObject(),
           })
         }
