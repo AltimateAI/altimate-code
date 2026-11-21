@@ -157,16 +157,32 @@ function allPackageDirs(installPath: string): string[] {
   })
 }
 
-function fingerprint(root: string, installPath: string): string {
+const PACKAGE_ENV_VAR = /\benv_var\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1/g
+
+function declarationContents(root: string) {
+  return DECLARATION_FILES.flatMap((file) => {
+    const path = join(root, file)
+    return existsSync(path) ? [{ file, text: readFileSync(path, "utf8") }] : []
+  })
+}
+
+function fingerprint(
+  root: string,
+  installPath: string,
+  declarations = declarationContents(root),
+): string {
   const h = createHash("sha256")
   // The install path decides which directories hold the packages, so a change of it invalidates the stamp.
   // Relative to the project when inside it, so reaching the same project through a symlink gives
   // the same fingerprint; a path outside the project is kept as written.
   const rel = relative(root, installPath)
   h.update(rel.startsWith("..") || isAbsolute(rel) ? installPath : rel).update("\0")
-  for (const f of DECLARATION_FILES) {
-    const p = join(root, f)
-    if (existsSync(p)) h.update(f).update("\0").update(readFileSync(p)).update("\0")
+  for (const { file, text } of declarations) {
+    h.update(file).update("\0").update(text).update("\0")
+    for (const match of text.matchAll(PACKAGE_ENV_VAR)) {
+      const name = match[2]!
+      h.update(JSON.stringify([name, process.env[name]])).update("\0")
+    }
   }
   return h.digest("hex")
 }
@@ -209,13 +225,18 @@ export function packagesSatisfied(root: string): SatisfiedResult {
   const incomplete = allPackageDirs(installPath).filter((n) => !installed.has(n))
   if (incomplete.length > 0) return { ok: false, reason: `incomplete package directory: ${incomplete.join(", ")}` }
 
+  const declarations = declarationContents(root)
   const stamp = readStamp(root)
   if (stamp) {
-    if (stamp.fingerprint !== fingerprint(root, installPath))
+    if (stamp.fingerprint !== fingerprint(root, installPath, declarations))
       return { ok: false, reason: "package declarations changed since the last install" }
     const gone = stamp.packages.filter((p) => !installed.has(p))
     if (gone.length > 0) return { ok: false, reason: `installed package missing: ${gone.join(", ")}` }
     return { ok: true, reason: "installed packages match the last install of these declarations" }
+  }
+
+  if (declarations.some(({ text }) => !text.matchAll(PACKAGE_ENV_VAR).next().done)) {
+    return { ok: false, reason: "environment-dependent packages have no install stamp" }
   }
 
   // A lock older than the declarations, or an installation older than either,

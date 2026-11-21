@@ -118,6 +118,25 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(1)
   })
 
+  test("a changed environment-dependent dependency invalidates the install stamp", async () => {
+    const variable = "TEST_ALTIMATE_LOCAL_PACKAGE"
+    const saved = process.env[variable]
+    try {
+      writeProject({ packages: `packages:\n  - local: "{{ env_var('${variable}') }}"\n` })
+      process.env[variable] = "../package_v1"
+      const c = counter()
+      expect((await ensurePackages(root, c.install)).action).toBe("installed")
+      expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+      process.env[variable] = "../package_v2"
+      expect((await ensurePackages(root, c.install)).action).toBe("installed")
+      expect(c.calls).toBe(2)
+      expect(readFileSync(join(stateDir(), "packages.stamp.json"), "utf8")).not.toContain("../package_v2")
+    } finally {
+      if (saved === undefined) delete process.env[variable]
+      else process.env[variable] = saved
+    }
+  })
+
   test("an env_var package path is stamped and does not get reset on the next command", async () => {
     writeProject()
     writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ env_var('TEST_ALTIMATE_PACKAGE_PATH', 'custom_packages') }}"\n`)
