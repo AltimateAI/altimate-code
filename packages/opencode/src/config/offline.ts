@@ -84,9 +84,9 @@ export function start() {
   // Bun sends even loopback requests through HTTP(S)_PROXY. Exclude only the loopback hosts so a
   // local request cannot leave the machine through a proxy; model requests still use the proxy.
   // Both spellings get the same list, so programs that read either one keep the user's own exclusions.
-  const user = process.env.NO_PROXY ?? process.env.no_proxy
-  if (user !== "*") {
-    const entries = (user ?? "").split(",").map((entry) => entry.trim()).filter(Boolean)
+  const lists = [process.env.NO_PROXY, process.env.no_proxy]
+  if (!lists.includes("*")) {
+    const entries = [...new Set(lists.flatMap((list) => (list ?? "").split(",").map((entry) => entry.trim()).filter(Boolean)))]
     process.env.NO_PROXY = process.env.no_proxy = [...entries, ...LOCAL_FETCH_HOSTS.filter((host) => !entries.includes(host))].join(",")
   }
   networkFetch = globalThis.fetch
@@ -110,13 +110,16 @@ export function start() {
         // Like fetch, do not send credentials on to a different origin.
         if (next.origin !== new URL(url).origin) {
           const headers = new Headers(request.headers)
-          headers.delete("authorization")
+          for (const name of ["authorization", "cookie", "proxy-authorization"]) headers.delete(name)
           request = { ...request, headers }
         }
         url = next.href
         const method = (request.method ?? "GET").toUpperCase()
-        if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST"))
-          request = { ...request, method: method === "HEAD" ? "HEAD" : "GET", body: undefined }
+        if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST")) {
+          const headers = new Headers(request.headers)
+          for (const name of ["content-type", "content-length", "content-encoding", "content-language", "content-location"]) headers.delete(name)
+          request = { ...request, method: method === "HEAD" ? "HEAD" : "GET", body: undefined, headers }
+        }
         response = await networkFetch!(url, request)
       }
       return response

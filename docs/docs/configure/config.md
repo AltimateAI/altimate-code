@@ -213,6 +213,7 @@ Some network use happens inside programs Altimate Code starts and is not checked
 - Git in a partial (blobless or treeless) clone fetches missing objects on demand, even for local commands such as `diff`, and Git LFS can download missing objects during a checkout outside worktree reset.
 - dbt reads libpq environment variables such as `PGHOSTADDR` and `PGSERVICE`, which can point a Postgres profile at another host.
 - Cloud sign-in configured on a local warehouse (for example SQL Server `authentication: azure-active-directory-*` or MongoDB `authMechanism=MONGODB-AWS`) contacts its identity provider.
+- An offline TUI started with `--hostname` set to a LAN address or machine name cannot reach its own server; use the default or `0.0.0.0`.
 - When offline mode turns on after startup (organisation-managed or remote configuration, or a server started without it that then loads an offline project), internal HTTP requests made through the shared HTTP client stay unguarded for the rest of that process. Set `ALTIMATE_OFFLINE=1` before starting a server.
 
 SQL that runs an explicit `INSTALL`, or loads an installed network extension (such as `httpfs`) and reads a remote path, is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs and usage reporting.
