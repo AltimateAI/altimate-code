@@ -38,12 +38,12 @@ describe("RunAccounting turn accounting", () => {
     // budget still lets it run.
     acc.onStepAttempt("msg_1")
     expect(acc.turnCount).toBe(0)
-    expect(acc.turnBudgetReached(1)).toBe(false)
+    expect(acc.turnBudgetStop(1)).toBeUndefined()
     acc.onStepAttempt("msg_1")
-    expect(acc.turnBudgetReached(1)).toBe(false)
+    expect(acc.turnBudgetStop(1)).toBeUndefined()
     acc.onStepFinish("msg_1", "stop")
     expect(acc.turnCount).toBe(1)
-    expect(acc.turnBudgetReached(1)).toBe(true)
+    expect(acc.turnBudgetStop(1)).toBeDefined()
   })
 
   test("a session error with no completed step charges no turn and stays fatal", () => {
@@ -64,11 +64,11 @@ describe("RunAccounting turn accounting", () => {
   test("the budget is reached only after maxTurns steps complete", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    expect(acc.turnBudgetReached(1)).toBe(false)
+    expect(acc.turnBudgetStop(1)).toBeUndefined()
     acc.onStepFinish("msg_1", "tool-calls")
-    expect(acc.turnBudgetReached(1)).toBe(true)
-    expect(acc.turnBudgetReached(2)).toBe(false)
-    expect(acc.turnBudgetReached(undefined)).toBe(false)
+    expect(acc.turnBudgetStop(1)).toBeDefined()
+    expect(acc.turnBudgetStop(2)).toBeUndefined()
+    expect(acc.turnBudgetStop(undefined)).toBeUndefined()
   })
 
   test("attempts that never finish stop the budget once they exceed what N steps' retries allow", () => {
@@ -99,6 +99,20 @@ describe("RunAccounting turn accounting", () => {
     expect(RunAccounting.turnBudgetMessage(1, "attempts")).toBe(
       `Budget exceeded: ${RunAccounting.ATTEMPTS_PER_TURN} step attempts started under the 1 assistant turn limit without enough of them completing`,
     )
+  })
+
+  test("a step cut short by context overflow still costs its turn, once", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    // An overflow reported before any step started is not charged.
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(0)
+    acc.onStepAttempt("msg_1")
+    acc.onSessionError("ContextOverflowError", "too long")
+    // The same overflow reported again on the prompt channel is not charged twice.
+    acc.onPromptResult({ error: { name: "ContextOverflowError" } })
+    expect(acc.turnCount).toBe(1)
+    expect(acc.turnBudgetStop(1)).toBe("completed")
   })
 
   test("excludes compaction-machinery steps from turnCount", () => {

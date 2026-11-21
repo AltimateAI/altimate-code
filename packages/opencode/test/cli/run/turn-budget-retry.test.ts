@@ -311,7 +311,8 @@ describe("opencode run: --max-turns charges completed steps only", () => {
           expect.objectContaining({ limit_seconds: 5 }),
         ])
         expect(counts.aborts).toBeGreaterThanOrEqual(1)
-        expect(counts.attempts).toBeGreaterThan(SessionRetry.RETRY_MAX_ATTEMPTS + 1)
+        // More than the initial burst: attempts kept coming until the deadline stopped them.
+        expect(counts.attempts).toBeGreaterThan(SessionRetry.RETRY_MAX_ATTEMPTS + 2)
         expect(
           events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text),
         ).toEqual(["Best-effort answer."])

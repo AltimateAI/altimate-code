@@ -112,6 +112,8 @@ export function create() {
   let turnCount = 0
   // altimate_change start — started non-compaction step attempts, finished or not
   let attemptCount = 0
+  // A started non-compaction step that has not finished yet.
+  let openAttempt = false
   // altimate_change end
   // altimate_change start — track the active request's committed echo turn allowance
   let committedAnswer = false
@@ -195,14 +197,17 @@ export function create() {
     // `turnCount` is therefore the number of COMPLETED non-compaction steps;
     // harness-injected generations (idle-done challenge, continuation,
     // silent-turn reply) are real assistant steps and are charged the same way.
-    // Any step that ends without a step-finish is free: a failed or retried
-    // attempt, a context overflow that hands off to compaction, or a
-    // soft-deadline interrupt. So that such steps cannot repeat forever, the
-    // budget also stops a run once `maxTurns * ATTEMPTS_PER_TURN` attempts
-    // started, the most N steps can use when every one exhausts its retries.
+    // A step that ends without a step-finish is free (a failed or retried
+    // attempt, a soft-deadline interrupt), except one cut short by context
+    // overflow, which is still charged (see onSessionError). So that free
+    // steps cannot repeat forever, the budget also stops a run once
+    // `maxTurns * ATTEMPTS_PER_TURN` attempts started, the most N steps can
+    // use when every one exhausts its retries.
     /** Record a started non-compaction step attempt (it is charged a turn only if it finishes). */
     onStepAttempt(messageID: string) {
-      if (!isCompactionStep(messageID)) attemptCount++
+      if (isCompactionStep(messageID)) return
+      attemptCount++
+      openAttempt = true
     },
     /** Completed non-compaction assistant steps. */
     get turnCount() {
@@ -215,12 +220,10 @@ export function create() {
       if (attemptCount >= maxTurns * ATTEMPTS_PER_TURN) return "attempts"
       return undefined
     },
-    turnBudgetReached(maxTurns: number | undefined): boolean {
-      return this.turnBudgetStop(maxTurns) !== undefined
-    },
     onStepFinish(messageID: string, reason: string | undefined) {
       if (isCompactionStep(messageID)) return
       turnCount++
+      openAttempt = false
       lastFinishReason = reason
       lastFinishMessageID = messageID
     },
@@ -266,6 +269,14 @@ export function create() {
       }
       if (errorName === "ContextOverflowError") {
         pendingContextOverflow = true
+        // altimate_change start — a step cut short by context overflow still costs its turn
+        // The overflow hands off to compaction and a fresh step, so charging it keeps
+        // repeated overflow-and-compact cycles bounded by --max-turns, as before.
+        if (openAttempt) {
+          turnCount++
+          openAttempt = false
+        }
+        // altimate_change end
         return
       }
       // the idle-done challenge is delivered by aborting the in-flight
@@ -309,9 +320,8 @@ export function create() {
     takeBudgetFinalizationAllowance(): number | undefined {
       if (!budgetExhausted || fatalError || pendingContextOverflow || budgetFinalizationSent) return undefined
       budgetFinalizationSent = true
-      // altimate_change start — the finalization step also gets one step's worth of attempts
+      // The finalization step also gets one step's worth of attempts.
       attemptCount = Math.min(attemptCount, turnCount * ATTEMPTS_PER_TURN)
-      // altimate_change end
       return turnCount + 1
     },
     // altimate_change end
