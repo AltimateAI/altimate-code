@@ -1,3 +1,6 @@
+// altimate_change start — prevent ripgrep downloads in offline mode
+import { offlineModeEnabled } from "../flag/flag"
+// altimate_change end
 import path from "path"
 import { Context, Effect, Layer, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
@@ -168,6 +171,10 @@ export namespace RipgrepBinary {
 
             const target = path.join(Global.Path.bin, `rg${process.platform === "win32" ? ".exe" : ""}`)
             if (yield* fs.isFile(target).pipe(Effect.orDie)) return target
+            // altimate_change start — preserve installed ripgrep and skip downloads offline
+            if (offlineModeEnabled())
+              return yield* Effect.fail(new Error("Install ripgrep while online to use file search in offline mode."))
+            // altimate_change end
 
             const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
             const config = PLATFORM[platformKey]

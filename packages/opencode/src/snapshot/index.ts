@@ -1,3 +1,6 @@
+// altimate_change start — offline mode skips Git snapshot operations
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Duration, Effect, Layer, Schedule, Schema, Semaphore, Context } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -167,6 +170,9 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         const locked = <A, E, R>(fx: Effect.Effect<A, E, R>) => lock(state.gitdir).withPermits(1)(fx)
 
         const enabled = Effect.fnUntraced(function* () {
+          // altimate_change start — git add can execute a configured clean filter
+          if (offlineModeEnabled()) return false
+          // altimate_change end
           if (state.vcs !== "git") return false
           return (yield* config.get()).snapshot !== false
         })
@@ -349,6 +355,9 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         })
 
         const patch = Effect.fnUntraced(function* (hash: string) {
+          // altimate_change start — skip Git snapshot operations in offline mode
+          if (offlineModeEnabled()) return { hash, files: [] }
+          // altimate_change end
           return yield* locked(
             Effect.gen(function* () {
               yield* add()
@@ -382,6 +391,9 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         })
 
         const restore = Effect.fnUntraced(function* (snapshot: string) {
+          // altimate_change start — skip Git snapshot operations in offline mode
+          if (offlineModeEnabled()) throw new Error("Restore session snapshots while online.")
+          // altimate_change end
           return yield* locked(
             Effect.gen(function* () {
               yield* Effect.logInfo("restore", { commit: snapshot })
@@ -408,6 +420,9 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         })
 
         const revert = Effect.fnUntraced(function* (patches: Patch[]) {
+          // altimate_change start — skip Git snapshot operations in offline mode
+          if (offlineModeEnabled()) throw new Error("Revert session snapshots while online.")
+          // altimate_change end
           return yield* locked(
             Effect.gen(function* () {
               const ops: { hash: string; file: string; rel: string }[] = []
@@ -526,6 +541,9 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         })
 
         const diff = Effect.fnUntraced(function* (hash: string) {
+          // altimate_change start — skip Git snapshot operations in offline mode
+          if (offlineModeEnabled()) return ""
+          // altimate_change end
           return yield* locked(
             Effect.gen(function* () {
               yield* add()
@@ -546,6 +564,9 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         })
 
         const diffFull = Effect.fnUntraced(function* (from: string, to: string) {
+          // altimate_change start — skip Git snapshot operations in offline mode
+          if (offlineModeEnabled()) return []
+          // altimate_change end
           return yield* locked(
             Effect.gen(function* () {
               type Row = {

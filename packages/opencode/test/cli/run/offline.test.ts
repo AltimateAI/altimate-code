@@ -150,7 +150,8 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
       const before = snapshot ? await fs.readFile(f.manifest, "utf8") : undefined
       const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "Hello"], {
         cwd: f.project,
-        env: f.env,
+        // The snapshot must work on a cold host where ripgrep is absent.
+        env: snapshot ? f.env : { ...f.env, PATH: path.join(f.root, "empty-path") },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
