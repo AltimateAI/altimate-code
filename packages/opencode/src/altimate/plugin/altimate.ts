@@ -106,7 +106,8 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
     }
   }
   let machineId = ""
-  if (!disabled) {
+  // An opt-out adopted while the config was read still wins.
+  if (!disabled && Telemetry.optOutState() !== "disabled") {
     // getOrCreateMachineId returns "" on all error conditions (ENOENT excluded —
     // it mints a new UUID instead) and logs appropriately; no try/catch needed.
     machineId = getOrCreateMachineId(machineIdPath)

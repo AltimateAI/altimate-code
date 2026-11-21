@@ -742,6 +742,21 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
+  test("a config loaded while the auth store was unreadable stays unresolved after the store is repaired", async () => {
+    const loaded = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockResolvedValue(loaded)
+    writeFileSync(Auth.filepath(), "{")
+    await expect(TelemetryConfig.loadedState()).rejects.toThrow()
+    // Repaired with a well-known login: the cached config never read that login's remote config.
+    writeFileSync(Auth.filepath(), JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    }))
+    expect(await TelemetryConfig.loadedState()).toBe("unreadable")
+    // A config the app loads afresh is read as usual.
+    configSpy.mockResolvedValue({})
+    expect(await TelemetryConfig.loadedState()).toBe("enabled")
+  })
+
   test("the opt-out marker files earlier versions wrote are removed", async () => {
     const markers = ["telemetry-opted-out", "telemetry-opted-out.sending"].map((name) => path.join(home, ".altimate", name))
     for (const marker of markers) writeFileSync(marker, "")
@@ -797,17 +812,21 @@ describe("telemetry opt-out", () => {
         Telemetry.track(errorEvent("A2"))
       },
     })
-    await aStarted
-    await Instance.provide({
-      directory: b.path,
-      fn: async () => {
-        await Telemetry.init()
-        enabledDuringTurns.push(Telemetry.isEnabled())
-        Telemetry.track(errorEvent("B1"))
-      },
-    })
-    releaseA()
-    await turnA
+    // A failing turn A rejects the wait instead of leaving it hanging.
+    await Promise.race([aStarted, turnA.then(() => Promise.reject(new Error("turn A ended before starting")))])
+    try {
+      await Instance.provide({
+        directory: b.path,
+        fn: async () => {
+          await Telemetry.init()
+          enabledDuringTurns.push(Telemetry.isEnabled())
+          Telemetry.track(errorEvent("B1"))
+        },
+      })
+    } finally {
+      releaseA()
+      await turnA
+    }
     await Telemetry.flush()
 
     expect(enabledDuringTurns).toEqual([true, true])

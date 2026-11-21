@@ -90,12 +90,21 @@ export function instanceDirectory(): string | undefined {
 }
 
 /** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
+// Loaded configs built while the auth store could not be read: they lack its well-known remote
+// configs even after the store is repaired, until the app reloads its config.
+const loadedWithoutAuth = new WeakSet<object>()
+
 export async function loadedState(): Promise<State> {
   const config = await Config.get()
-  if (Config.telemetryConfigUnresolved(config)) return "unreadable"
+  if (Config.telemetryConfigUnresolved(config) || loadedWithoutAuth.has(config)) return "unreadable"
   // Auth.all() returns an empty store when its read or parse fails, hiding well-known remote config.
   // Called only for that throw (an unparseable auth file); its result does not matter here.
-  await hasWellKnownAuth()
+  try {
+    await hasWellKnownAuth()
+  } catch (error) {
+    loadedWithoutAuth.add(config)
+    throw error
+  }
   return config.telemetry?.disabled ? "disabled" : "enabled"
 }
 

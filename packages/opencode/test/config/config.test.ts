@@ -745,6 +745,7 @@ for (const failure of ["account", "organization"] as const) {
         {
           APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/",
           ALTIMATE_TELEMETRY_DISABLED: undefined,
+          OPENCODE_AUTH_CONTENT: undefined,
           ALTIMATE_CLI_DISABLE_TELEMETRY: undefined,
           OPENCODE_DISABLE_TELEMETRY: undefined,
         },

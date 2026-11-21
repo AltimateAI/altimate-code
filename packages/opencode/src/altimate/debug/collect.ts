@@ -98,7 +98,7 @@ async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
   if (!network) return { enabled: false, checked: false, reason: "not started with --no-network" }
   try {
     await Telemetry.init()
-    return Telemetry.isEnabled() ? { enabled: true } : { enabled: false, reason: "disabled in config, or config not readable" }
+    return Telemetry.isEnabled() ? { enabled: true } : { enabled: false, reason: Telemetry.optOutState() === "pending" ? "config not readable yet" : "disabled in config" }
   } catch {
     return { enabled: false, checked: false, reason: "could not be determined" }
   }
