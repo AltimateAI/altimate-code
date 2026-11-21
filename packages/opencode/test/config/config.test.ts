@@ -820,7 +820,7 @@ it.effect("a legacy global config that fails to load leaves the telemetry opt-ou
   ),
 )
 
-it.instance("a config loaded while the auth store is unreadable leaves the telemetry opt-out unresolved", () =>
+configIt({ auth: Auth.defaultLayer }).instance("a config loaded while the auth store is unreadable leaves the telemetry opt-out unresolved", () =>
   withProcessEnv(
     "OPENCODE_AUTH_CONTENT",
     undefined,
