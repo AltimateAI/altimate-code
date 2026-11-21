@@ -54,7 +54,7 @@ export async function test(adapter: DBTProjectIntegrationAdapter, args: string[]
   ) {
     return formatted
   }
-  return { stdout: formatted.stdout.replace(/\bNothing to do\b/i, "Model has no tests") }
+  return { stdout: formatted.stdout.replace(/\bNothing to do\b[^\r\n]*/i, "Model has no tests.") }
 }
 
 export async function project(

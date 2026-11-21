@@ -73,7 +73,7 @@ describe("dbt-schema-verify on a stale manifest", () => {
     const result = await check({ stale_manifest: STALE, ...MISMATCH })
     expect(result.ok).toBe(false)
     expect(result.fixHint?.startsWith(`${NOTE_START} (written «${WRITTEN_AT}»).`)).toBe(true)
-    expect(result.fixHint).toContain("Columns in your model NOT in spec — REMOVE: note")
+    expect(result.fixHint).toContain("An enforced contract in models/schema.yml excludes note.")
   })
 
   test("an error's message leads with the note too", async () => {

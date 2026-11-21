@@ -207,6 +207,10 @@ All commands provide friendly error diagnostics with actionable fix suggestions 
 
 **Packages.** If the project declares packages (`packages.yml`, `dependencies.yml`), `altimate-dbt` installs them when an adapter-backed command starts (not `doctor`), but only when they are missing or out of date (a package directory is absent or has no `dbt_project.yml`, or the declarations changed since the last install). Installation is serialised across processes with a lock under `target/.altimate-dbt/`, so several `altimate-dbt` commands started together install at most once and cannot corrupt `dbt_packages/`. A lock left by a crashed process is broken automatically (owner process gone, or no heartbeat for 30 seconds) and the interrupted install is repeated. `altimate-dbt deps` always runs `dbt deps`, under the same lock. Because every command re-parses the project and dbt rewrites `target/manifest.json` in place, a command that reads the manifest while a sibling rewrites it re-reads it (up to six times, with backoff) before reporting it missing.
 
+Automatic schema verification after `altimate-dbt build` uses a temporary target directory. Its compile artifacts leave the project's build results available for inspection. The build reports when it ran verification or reinstalled dependencies. Reinstalling dependencies resets the package directory, so changes made directly there may be lost.
+
+When `altimate-dbt test --model <name>` selects a model with no tests, it reports “Model has no tests.” Invalid selectors and failed tests retain dbt's diagnostics.
+
 ---
 
 ## dbt Skills
@@ -385,7 +389,3 @@ neither flag is set the dispatch path is completely skipped and there
 is zero overhead. See the [Validators page](../validators.md) for the
 full reference, env var catalogue, performance characteristics, and
 the phased rollout plan.
-
-Automatic schema verification after `altimate-dbt build` uses a temporary target directory. Its compile artifacts leave the project's build results available for inspection. The build reports when it ran verification or reinstalled dependencies. Reinstalling dependencies resets the package directory, so changes made directly there may be lost.
-
-When `altimate-dbt test --model <name>` selects a model with no tests, it reports “Model has no tests.” Invalid selectors and failed tests retain dbt's diagnostics.
