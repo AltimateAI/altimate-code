@@ -142,6 +142,8 @@ const providerCfg =
   })
 
 const LARGE_WINDOW = { context: 131_072, output: 16_384 }
+/** A finished step that made a tool call: its reported usage covered the full tool set. */
+const TOOL_STEP = { toolOutput: "42 customers above the revenue threshold." }
 /** A 1x1 PNG. */
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 const SMALL_WINDOW = { context: 16_384, output: 4_096 }
@@ -194,7 +196,15 @@ type Seeded = {
   user: string | string[]
   assistantUsage?: number
   next?: string
-  last?: { modelID?: string; agent?: string; finish?: string; text?: string; toolOutput?: string }
+  last?: {
+    modelID?: string
+    agent?: string
+    finish?: string
+    text?: string
+    toolOutput?: string
+    /** Attach an image to the step's tool result. */
+    toolImage?: boolean
+  }
   /** An image attached to the `next` user turn. */
   nextFile?: boolean
 }
@@ -259,6 +269,21 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
             title: "revenue query",
             metadata: {},
             time: { start: Date.now(), end: Date.now() },
+            ...(last.toolImage
+              ? {
+                  attachments: [
+                    {
+                      id: PartID.ascending(),
+                      sessionID,
+                      messageID: msg.id,
+                      type: "file",
+                      mime: "image/png",
+                      filename: "revenue-chart.png",
+                      url: `data:image/png;base64,${PNG_BASE64}`,
+                    },
+                  ],
+                }
+              : {}),
           },
         } as any)
       }
@@ -314,6 +339,7 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: history,
           assistantUsage: reported,
+          last: TOOL_STEP,
           next: "Summarize the revenue concentration.",
         })
 
@@ -447,14 +473,16 @@ it.live(
   { timeout: 120_000 },
 )
 
-// Usage counted for another model (different tokenizer) or agent (different system prompt and tools)
-// does not describe this request: the estimate decides, trips, and the session compacts.
+// Usage counted for another model (different tokenizer), another agent (different system prompt and
+// tools) or a text-only step (possibly sent without tools) does not describe this request: the estimate
+// decides, trips, and the session compacts.
 for (const [name, last] of [
-  ["another model", { modelID: "another-model" }],
-  ["another agent", { agent: "plan" }],
+  ["another model", { ...TOOL_STEP, modelID: "another-model" }],
+  ["another agent", { ...TOOL_STEP, agent: "plan" }],
+  ["a text-only step", {}],
 ] as const) {
   it.live(
-    `usage reported for ${name} is not trusted: the guard trips and the session compacts`,
+    `usage reported by ${name} is not trusted: the guard trips and the session compacts`,
     () =>
       provideTmpdirServerLegacy(
         Effect.fnUntraced(function* ({ dir, llm }) {
@@ -542,8 +570,32 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: sqlJsonTurns(130_000),
           assistantUsage: 108_000,
+          last: TOOL_STEP,
           next: "Summarize the revenue concentration.",
           nextFile: true,
+        })
+
+        expect(result.hits.length).toBe(0)
+        expect(result.compactions.length).toBe(0)
+        expect(result.errors.length).toBe(1)
+        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "an image from a tool result the model has not seen yet is not compacted away",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // A mid-turn step returned a chart image; the next request is refused. Compaction would strip
+        // the image before the model ever saw it, so the refusal stays the budget error.
+        const result = yield* runSession(dir, llm, {
+          user: [...sqlJsonTurns(135_000), "Chart the revenue by region."],
+          assistantUsage: 0,
+          last: { finish: "tool-calls", text: "Rendering the chart.", toolOutput: "Chart rendered.", toolImage: true },
         })
 
         expect(result.hits.length).toBe(0)

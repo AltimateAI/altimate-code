@@ -2243,13 +2243,14 @@ export namespace SessionPrompt {
       // altimate_change start — the pre-send guard measures this request the way isOverflow does
       // (provider-reported usage of the last turn on this model plus the estimated tail), and a
       // guard refusal compacts whenever the proactive check above could have compacted.
-      // The reported usage applies only to the same model and agent (same tokenizer, system prompt
-      // and tools), and only when it counts input: a provider reporting none, or only output tokens,
-      // leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
+      // The reported usage applies only to a tool-calling step of the same model and agent (same
+      // tokenizer, system prompt and tools), and only when it counts input: a provider reporting none,
+      // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
       // Compaction drops images and PDFs (replay swaps them for a placeholder, summaries strip them):
-      // a refusal on a turn that carries one stays the budget error rather than answer without it.
+      // a refusal while the model has not yet seen one (in this turn's user messages, or in tool
+      // results since the last measured turn) stays the budget error rather than continue without it.
       // The turn starts at its last user message with real content (synthetic follow-ups excluded).
       const turnStart = msgs.findLastIndex(
         (msg) =>
@@ -2265,7 +2266,18 @@ export namespace SessionPrompt {
               msg.info.role === "user" &&
               msg.parts.some((part) => part.type === "file" && MessageV2.isMedia(part.mime)),
           )
-      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !turnMedia
+      const unseenToolMedia = msgs.some(
+        (msg) =>
+          (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.state.status === "completed" &&
+              (part.state.attachments ?? []).some((attachment) => MessageV2.isMedia(attachment.mime)),
+          ),
+      )
+      const compactable =
+        measured !== undefined && loopConfig.compaction?.auto !== false && !turnMedia && !unseenToolMedia
       // Attachments the provider has not counted (in the last turn's tool results or later messages)
       // are not in the tail estimate: leave those requests to the estimate.
       const unmeasuredMedia = msgs.some(
@@ -2277,21 +2289,29 @@ export namespace SessionPrompt {
               (part.type === "tool" && part.state.status === "completed" && (part.state.attachments?.length ?? 0) > 0),
           ),
       )
-      const guardTail = measured ? estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens) : 0
+      // A step that made tool calls was sent with the full tool set; a text-only step may have been
+      // sent without tools (an echo or final step), so its usage can undercount this request.
+      const measuredWithTools = msgs
+        .find((msg) => msg.info.id === measuredID)
+        ?.parts.some((part) => part.type === "tool")
       const reportedInputTokens =
         measured &&
+        measuredWithTools &&
         !unmeasuredMedia &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
-          ? reportedContextTokens({
-              tokens: measured.tokens,
+          ? (() => {
               // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
               // estimator, so the discount applies only to what the provider has counted.
-              estimatedTokens: guardTail,
-              fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
-            })
+              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens)
+              return reportedContextTokens({
+                tokens: measured.tokens,
+                estimatedTokens: guardTail,
+                fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
+              })
+            })()
           : undefined
       // altimate_change end
       const result = await processor.process({
