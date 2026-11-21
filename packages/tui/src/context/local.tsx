@@ -1029,6 +1029,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           selectModel(model, { ...options, explicit: true })
         },
         // altimate_change end
+        // altimate_change start — carry a home-screen picker correction into the session just created by this prompt,
+        // including shell/MCP sessions that have no chat-model history to restore it from.
+        adoptSession(sessionID: string) {
+          const a = agent.current()
+          if (!a || route.data.type !== "home") return
+          const picked = pickedModels[a.name]
+          if (picked?.scope !== "home") return
+          setPickedModels(a.name, { scope: sessionID, model: { ...picked.model } })
+        },
+        // altimate_change end
         // altimate_change start — migrate Big Pickle defaults after managed-model consent
         usesLegacyDefault,
         hasExistingLegacySelection,
@@ -1140,7 +1150,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             scope: sessionScope(),
             model: { providerID: resolved.providerID, modelID: resolved.modelID },
           })
-          return currentModel()
+          const current = currentModel()
+          return sameModel(current, resolved) ? current : undefined
         },
         // altimate_change end
         // altimate_change end

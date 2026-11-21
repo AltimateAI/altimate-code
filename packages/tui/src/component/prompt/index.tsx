@@ -12,7 +12,9 @@ import {
   type Renderable,
 } from "@opentui/core"
 import type { CommandContext } from "@opentui/keymap"
-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+// altimate_change start — batch picker adoption with route navigation
+import { batch, createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+// altimate_change end
 import "opentui-spinner/solid"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -1125,17 +1127,28 @@ export function Prompt(props: PromptProps) {
     }
     // altimate_change start — upstream_fix: reject unavailable explicit models before onboarding or session
     // creation; preserve the draft so choosing an available model is enough to retry.
-    const promptText = store.prompt.input
+    const currentMode = store.mode
+    const draftText = store.prompt.input
+    const promptText = expandTrackedPastedText(
+      draftText,
+      input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
+        const partIndex = store.extmarkToPartIndex.get(extmark.id)
+        const part = partIndex === undefined ? undefined : store.prompt.parts[partIndex]
+        if (part?.type !== "text") return []
+        return [{ start: extmark.start, end: extmark.end, text: part.text }]
+      }),
+    )
     const commandName = promptText.startsWith("/") ? promptText.split("\n")[0].split(" ")[0].slice(1) : undefined
     const command = sync.data.command.find((item) => item.name === commandName)
     const commandAgent = command?.agent && sync.data.agent.find((item) => item.name === command.agent)
+    const chatModel = local.model.current()
     const selection = submissionModel({
-      shell: store.mode === "shell",
+      shell: currentMode === "shell",
       text: promptText,
       command,
       commandAgentModel: commandAgent ? commandAgent.model : undefined,
       commandAgentMode: commandAgent ? commandAgent.mode : undefined,
-      current: local.model.current(),
+      current: chatModel,
     })
     if (selection.required) {
       if (sync.status !== "complete" || !local.model.ready) {
@@ -1199,7 +1212,7 @@ export function Prompt(props: PromptProps) {
     }
     // altimate_change end
     // altimate_change start — require a model only for inference
-    const selectedModel = selection.subtask ? local.model.current() : selection.model ?? local.model.current()
+    const selectedModel = selection.subtask ? chatModel : selection.model ?? chatModel
     if (selection.required && !selectedModel) {
       void promptModelWarning()
       return false
@@ -1268,41 +1281,31 @@ export function Prompt(props: PromptProps) {
     }
 
     // altimate_change start — restore auto-enhance-before-submit for normal prompts
-    let inputText = store.prompt.input
+    let inputText = promptText
 
     // Keep this in the TUI submit path so internal SessionPrompt.prompt callers (tools, CLI
     // automation, background tasks) are not rewritten when the user opts into interactive prompt
     // enhancement. The server endpoint owns the fork LLM/config code and returns the original text
     // on failure, so sending remains best-effort.
     const experimental = sync.data.config.experimental as { auto_enhance_prompt?: boolean } | undefined
-    if (experimental?.auto_enhance_prompt === true && store.mode === "normal" && !inputText.startsWith("/")) {
+    if (experimental?.auto_enhance_prompt === true && currentMode === "normal" && !inputText.startsWith("/")) {
       const original = inputText
       toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
       const enhanced = await requestAutoEnhancedPrompt(sdk, original)
-      if (store.prompt.input !== original) {
-        inputText = store.prompt.input
+      if (store.prompt.input !== draftText) {
+        // A changed draft was not the text validated above; retain it for a new submit.
+        return false
       } else if (enhanced !== original) {
         inputText = enhanced
         setStore("prompt", "input", enhanced)
       }
     }
 
-    inputText = expandTrackedPastedText(
-      inputText,
-      // altimate_change end
-      input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
-        const partIndex = store.extmarkToPartIndex.get(extmark.id)
-        const part = partIndex === undefined ? undefined : store.prompt.parts[partIndex]
-        if (part?.type !== "text") return []
-        return [{ start: extmark.start, end: extmark.end, text: part.text }]
-      }),
-    )
+    // altimate_change end
 
     // Filter out text parts (pasted content) since they're now expanded inline
     const nonTextParts = store.prompt.parts.filter((part) => part.type !== "text")
 
-    // Capture mode before it gets reset
-    const currentMode = store.mode
     const editorSelection = editorContext()
     const editorParts =
       editorSelection && editor.labelState() === "pending"
@@ -1321,7 +1324,9 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
-    if (store.mode === "shell") {
+    // altimate_change start — dispatch the mode and command that passed preflight
+    if (currentMode === "shell") {
+      // altimate_change end
       move.startSubmit()
       void sdk.client.session.shell({
         sessionID,
@@ -1332,10 +1337,9 @@ export function Prompt(props: PromptProps) {
         // altimate_change end
       })
       setStore("mode", "normal")
-    } else if (
-      inputText.startsWith("/") &&
-      sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
-    ) {
+      // altimate_change start — dispatch the command that passed preflight
+    } else if (command) {
+      // altimate_change end
       move.startSubmit()
       // Parse command from first line, preserve multi-line content in arguments
       const firstLineEnd = inputText.indexOf("\n")
@@ -1344,9 +1348,6 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
-      // altimate_change start — use the current chat model for command subtask parents
-      const chatModel = local.model.current()
-      // altimate_change end
       void sdk.client.session.command({
         sessionID,
         command: command.slice(1),
@@ -1403,12 +1404,14 @@ export function Prompt(props: PromptProps) {
     // temporary hack to make sure the message is sent
     if (!props.sessionID) {
       if (editorParts.length > 0) editor.preserveSelectionFromNewSession()
+      // altimate_change start — carry home picker recovery into metadata-only sessions
       setTimeout(() => {
-        route.navigate({
-          type: "session",
-          sessionID,
+        batch(() => {
+          local.model.adoptSession(sessionID)
+          route.navigate({ type: "session", sessionID })
         })
       }, 50)
+      // altimate_change end
     }
     input.clear()
     if (finishMoveProgress) move.finishSubmit()

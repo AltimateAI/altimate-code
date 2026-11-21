@@ -431,3 +431,25 @@ test("picker recovery follows a new session but does not overwrite a different r
     expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
   } finally { await mounted.cleanup() }
 }))
+
+test("restoring history does not report application when a CLI override remains effective", () => withIsolatedState(async () => {
+  const mounted = await mount({ model: "opencode/zen-model" })
+  try {
+    mounted.local.model.variant.set("saved-effort")
+    expect(mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })).toBeUndefined()
+    expect(mounted.local.model.variant.selected()).toBe("saved-effort")
+  } finally { await mounted.cleanup() }
+}))
+
+test("picker recovery transfers to a new metadata-only session without a chat row", () => withIsolatedState(async () => {
+  const mounted = await mount({ model: "ollama/missing" })
+  try {
+    const base = { providerID: "altimate-free", modelID: "altimate-base" }
+    mounted.local.model.set(base)
+    mounted.local.model.adoptSession("ses_shell")
+    mounted.route.navigate({ type: "session", sessionID: "ses_shell" })
+    expect(mounted.local.model.current()).toEqual(base)
+    mounted.route.navigate({ type: "session", sessionID: "ses_unrelated" })
+    expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
+  } finally { await mounted.cleanup() }
+}))

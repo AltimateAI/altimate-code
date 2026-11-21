@@ -1,3 +1,4 @@
+import { expandTrackedPastedText } from "../../src/prompt/part"
 import { expect, test } from "bun:test"
 import { isModelMetadataOnly, submissionModel } from "../../src/prompt/model"
 
@@ -43,4 +44,16 @@ test("subtask commands validate the parent chat model separately from the task o
   }
   expect(submissionModel({ shell: false, text: "/task", command: { name: "task", subtask: false }, commandAgentMode: "subagent", current }))
     .toEqual({ required: true, model: current })
+})
+
+test("pasted command expansion selects its override and does not exempt indirect MCP forms", () => {
+  const placeholder = "[Pasted ~3 lines]"
+  for (const pasted of ["/task\nfirst\nsecond", "/mcps explain\nfirst\nsecond"]) {
+    const text = expandTrackedPastedText(placeholder, [{ start: 0, end: placeholder.length, text: pasted }])
+    const name = text.split("\n")[0].split(" ")[0].slice(1)
+    const command = { name, model: "missing/command" }
+    expect(submissionModel({ shell: false, text, command, current }))
+      .toEqual({ required: true, model: { providerID: "missing", modelID: "command" } })
+    expect(text).toBe(pasted)
+  }
 })
