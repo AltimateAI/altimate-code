@@ -98,8 +98,14 @@ export namespace Discovery {
 
           const list = data.skills.filter((skill) => {
             // altimate_change start — reject unsafe skill names and file paths
-            if (skill.name.includes("/") || !SkillDiscovery.isSafeRelativePath(skill.name)) return false
-            if (!skill.files.every(SkillDiscovery.isSafeRelativePath)) return false
+            if (
+              skill.name.includes("/") ||
+              !SkillDiscovery.isSafeRelativePath(skill.name) ||
+              !skill.files.every(SkillDiscovery.isSafeRelativePath)
+            ) {
+              log.warn("skill entry has an unsafe name or file path", { url: index, skill: skill.name })
+              return false
+            }
             // altimate_change end
             if (!skill.files.includes("SKILL.md")) {
               log.warn("skill entry missing SKILL.md", { url: index, skill: skill.name })

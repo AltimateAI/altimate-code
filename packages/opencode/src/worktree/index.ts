@@ -490,7 +490,13 @@ export const layer: Layer.Layer<
       function* (directory: string, cmd: string) {
         const [shell, args] = process.platform === "win32" ? ["cmd", ["/c", cmd]] : ["bash", ["-lc", cmd]]
         const result = yield* appProcess.run(
-          ChildProcess.make(shell, args as string[], { cwd: directory, extendEnv: true, stdin: "ignore" }),
+          ChildProcess.make(shell, args as string[], {
+            cwd: directory,
+            // altimate_change start — offline mode keeps the user's proxy settings for their start commands
+            ...(Offline.enabled() ? { env: Offline.userEnv({ ...process.env }) as Record<string, string>, extendEnv: false } : { extendEnv: true }),
+            // altimate_change end
+            stdin: "ignore",
+          }),
         )
         return { code: result.exitCode, stderr: result.stderr.toString("utf8") }
       },

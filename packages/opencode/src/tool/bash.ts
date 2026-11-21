@@ -456,13 +456,12 @@ export const BashTool = Tool.define("bash", async () => {
       )
 
       // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) and user tools dirs to PATH
-      const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
+      // altimate_change start — offline mode restores the user's proxy settings before plugin overrides
+      const mergedEnv: Record<string, string | undefined> = { ...Offline.userEnv({ ...process.env }), ...shellEnv.env }
+      // altimate_change end
       // Strip the markers that describe this host, not the child. See `stripHostMarkers`
       // for what each one is and why (PR #937 review, Issue #3, for the first of them).
       stripHostMarkers(mergedEnv)
-      // altimate_change start — offline mode leaves the user's own commands with their proxy settings
-      Offline.userEnv(mergedEnv)
-      // altimate_change end
       // altimate_change start — strip the run-mode markers for the same reason.
       stripRunModeMarkers(mergedEnv)
       // altimate_change end

@@ -213,6 +213,7 @@ test("mcp serve skips CLI middleware before starting the agent heap service", as
 })
 // altimate_change end
 
+// altimate_change start — offline mode keeps MCP stdio and drops workspace tools
 test("offline CLI announces unavailable workspace tools on stderr and preserves MCP stdio", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-offline-notice-"))
   const connections = path.join(dir, "connections.json")
@@ -230,7 +231,7 @@ test("offline CLI announces unavailable workspace tools on stderr and preserves 
   try {
     await client.connect()
     const listed = await client.listTools()
-    expect(Array.isArray(listed.tools)).toBe(true)
+    expect(listed.tools.map((tool: { name: string }) => tool.name).filter((name: string) => name.startsWith("workspace_"))).toEqual([])
     await client.close()
     expect(await stderr).toContain("Workspace tools are unavailable in offline mode.")
   } finally {
@@ -239,3 +240,4 @@ test("offline CLI announces unavailable workspace tools on stderr and preserves 
     await rm(dir, { recursive: true, force: true })
   }
 }, 30000)
+// altimate_change end

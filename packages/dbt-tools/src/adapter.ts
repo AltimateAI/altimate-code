@@ -102,6 +102,7 @@ function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
   const vars = { ...process.env }
   if (options.offline) {
     vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
+    vars.DO_NOT_TRACK = "1"
     vars.DBT_VERSION_CHECK = "false"
   }
   if (options.profilesDir) vars.DBT_PROFILES_DIR = options.profilesDir

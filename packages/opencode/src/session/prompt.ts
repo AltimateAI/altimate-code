@@ -491,7 +491,8 @@ export namespace SessionPrompt {
         }
         const binding = snapshot ? null : await resolveBindingOutcome(dir)
         // Only a project that uses a workspace hears about workspace skills.
-        if (snapshot || binding?.status === "bound") {
+        const { readPin } = await import("../altimate/workspace/pin")
+        if (snapshot || binding?.status === "bound" || readPin().kind === "valid") {
           const empty = binding?.status === "bound" && await snapshotKnownEmpty(dir, binding.binding.datamateId)
           await Offline.announce(snapshot !== null, empty)
         }
@@ -4515,11 +4516,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       windowsHide: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
       // altimate_change start — offline mode leaves the user's own commands with their proxy settings
-      env: Offline.userEnv({
-        ...process.env,
+      env: {
+        ...Offline.userEnv({ ...process.env }),
         ...shellEnv.env,
         TERM: "dumb",
-      }),
+      },
       // altimate_change end
     })
 

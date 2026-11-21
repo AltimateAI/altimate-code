@@ -34,15 +34,22 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
   let offlineEnv: NodeJS.ProcessEnv | undefined
   if (Offline.enabled()) {
     try {
-      if ((params.command || "run") === "deps") throw new Error("Offline mode disables dbt dependency installation.")
-      const { profilesDir } = await assertLocalDbt(params.project_dir || process.cwd(), [
-        ...(params.args ?? []),
-        ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
-      ])
+      const command = params.command || "run"
+      if (command === "deps") throw new Error("Offline mode disables dbt dependency installation.")
+      if ((params.args ?? []).some((arg) => arg === "--send-anonymous-usage-stats" || arg.startsWith("--send-anonymous-usage-stats=")))
+        throw new Error("Offline mode disables dbt usage reporting.")
+      // `dbt init` creates a project; there is no profile to check yet.
+      const checked = command === "init"
+        ? undefined
+        : await assertLocalDbt(params.project_dir || process.cwd(), [
+            ...(params.args ?? []),
+            ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
+          ])
       offlineEnv = {
         ...process.env,
-        DBT_PROFILES_DIR: profilesDir,
+        ...(checked ? { DBT_PROFILES_DIR: checked.profilesDir } : {}),
         DBT_SEND_ANONYMOUS_USAGE_STATS: "false",
+        DO_NOT_TRACK: "1",
         DBT_VERSION_CHECK: "false",
       }
     } catch (error) {

@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 // altimate_change start — release session-owned scratch stores on deletion
 import { closeScratch } from "@/altimate/native/connections/scratch"
 // altimate_change end
@@ -467,6 +470,9 @@ export class BusyError extends Schema.TaggedErrorClass<BusyError>()("SessionBusy
 }) {}
 
 export type NotFound = NotFoundError
+// altimate_change start — offline shared-session refusal
+export const OFFLINE_SHARED_SESSION = "This session is shared. Delete it while online so its share can be revoked."
+// altimate_change end
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
@@ -659,8 +665,25 @@ export const layer: Layer.Layer<
       return rows.map(fromRow)
     })
 
+    // altimate_change start — offline shared-session check
+    const sharedInTree = (sessionID: SessionID): Effect.Effect<boolean, NotFound> =>
+      Effect.gen(function* () {
+        const pending = [sessionID]
+        while (pending.length) {
+          const id = pending.pop()!
+          if ((yield* get(id)).share?.url) return true
+          pending.push(...(yield* children(id)).map((child) => child.id))
+        }
+        return false
+      })
+    // altimate_change end
+
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
       const session = yield* get(sessionID)
+      // altimate_change start — offline mode cannot revoke a public share, so a shared tree is not deleted
+      if (Offline.enabled() && (yield* sharedInTree(sessionID)))
+        return yield* Effect.die(new Error(OFFLINE_SHARED_SESSION))
+      // altimate_change end
       try {
         // `remove` needs to work in all cases, such as broken sessions that
         // run cleanup without instance state.

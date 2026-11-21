@@ -48,4 +48,23 @@ describe("git() utility", () => {
     expect(result.exitCode).not.toBe(0)
     expect(result.stdout.length).toBe(0)
   })
+
+  // altimate_change start — offline mode refuses remote Git commands and keeps local ones
+  test("offline refuses remote commands without spawning git and still runs local ones", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const previous = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      const fetched = await git(["fetch", "origin"], { cwd: tmp.path })
+      expect(fetched.exitCode).toBe(1)
+      expect(fetched.stdout.length).toBe(0)
+      expect(fetched.stderr.toString()).toContain("Git remote operations require an online run.")
+      const local = await git(["rev-parse", "--is-inside-work-tree"], { cwd: tmp.path })
+      expect(local.text().trim()).toBe("true")
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  })
+  // altimate_change end
 })

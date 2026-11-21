@@ -189,7 +189,7 @@ let cli = yargs(args)
     const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
     await Offline.start(directory, args.model)
     // Attaching to a server on this machine is local; any other server is a network peer.
-    const attachURL = command === "attach" ? args.url : command === "run" ? args.attach : undefined
+    const attachURL = command === "attach" ? args.url : command === "run" ? args.attach || undefined : undefined
     if (Offline.enabled() && (
       ["github", "gitlab", "pr", "link", "workspace-client", "web", "integrations"].includes(command) ||
       // A local review runs offline; posting it to GitHub does not.

@@ -195,7 +195,9 @@ export async function ownManifest(directory: string): Promise<Manifest | null> {
     // altimate_change — hide a stale workspace snapshot offline without removing it
     if (Offline.enabled()) {
       // A serve pin outranks the project's link, as in resolveBindingOutcome; a broken pin fails closed.
-      const pin = readPin()
+      const raw = readPin()
+      // A pin covers only the tree serve was launched for.
+      const pin = raw.kind === "valid" && resolveWithinRoot(directory, raw.root) === null ? { kind: "absent" as const } : raw
       if (pin.kind === "invalid" || (pin.kind === "valid" && pin.datamateId !== manifest.datamateId)) return null
       // A matching pin decides on its own; the project's link is consulted only without one.
       if (pin.kind === "valid") return manifest

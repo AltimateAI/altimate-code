@@ -61,10 +61,17 @@ describe("Git", () => {
         Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "offline-lfs-"))),
         (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
       )
+      // Repository-location variables inherited from a caller would redirect these commands away from tmp.
+      const base = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => !["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"].includes(key),
+        ),
+      )
       const gitIn = (args: string[], env?: Record<string, string>) =>
-        Bun.spawnSync(["git", ...args], { cwd: tmp, env: { ...process.env, ...env }, stderr: "pipe", stdout: "pipe" })
+        Bun.spawnSync(["git", ...args], { cwd: tmp, env: { ...base, ...env }, stderr: "pipe", stdout: "pipe" })
       for (const args of [
         ["init", "-q"],
+        ["config", "commit.gpgsign", "false"],
         ["config", "user.email", "t@example.com"],
         ["config", "user.name", "t"],
         ["lfs", "install", "--local"],

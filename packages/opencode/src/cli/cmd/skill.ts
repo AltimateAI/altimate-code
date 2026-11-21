@@ -424,7 +424,7 @@ const SkillTestCommand = cmd({
             try {
               const worktreeDir = Instance.worktree !== "/" ? Instance.worktree : projectDir
               const toolEnv = {
-                ...process.env,
+                ...Offline.userEnv({ ...process.env }),
                 PATH: [
                   process.env.ALTIMATE_BIN_DIR,
                   path.join(worktreeDir, ".opencode", "tools"),

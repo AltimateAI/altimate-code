@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
+import { tmpdir } from "./fixture/fixture"
 
 describe("BunProc registry configuration", () => {
   test("should not contain hardcoded registry parameters", async () => {
@@ -59,7 +60,8 @@ describe("BunProc offline cache", () => {
     const { spyOn } = await import("bun:test")
     const prior = process.env.ALTIMATE_OFFLINE
     const originalCache = Global.Path.cache
-    const cache = await fs.mkdtemp(path.join(originalCache, "offline-test-"))
+    await using tmp = await tmpdir()
+    const cache = tmp.path
     Global.Path.cache = cache
     process.env.ALTIMATE_OFFLINE = "1"
     const run = spyOn(BunProc, "run").mockImplementation(async () => {
@@ -89,7 +91,6 @@ describe("BunProc offline cache", () => {
       Global.Path.cache = originalCache
       if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
       else process.env.ALTIMATE_OFFLINE = prior
-      await fs.rm(cache, { recursive: true, force: true })
     }
   })
 })

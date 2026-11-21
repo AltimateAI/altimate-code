@@ -23,7 +23,7 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   const deny = () => { throw new Error("Offline mode allows only local file databases and loopback warehouse connections.") }
   if (config.ssh_host || config.replica_set) deny()
   // A Unix socket is a local file; a Windows named pipe or other value is not checked here.
-  if (config.socketPath !== undefined && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/"))) deny()
+  if (config.socketPath && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/"))) deny()
   if (type === "duckdb" || type === "sqlite") {
     if (!localStore(config.path)) deny()
     return
@@ -57,13 +57,16 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
       if ((type === "trino" || type === "clickhouse") && !["http:", "https:"].includes(url.protocol)) deny()
       const query = new Map([...url.searchParams].map(([key, value]) => [key.toLowerCase(), value.toLowerCase()]))
       // postgresql:///db?host=/run/postgresql connects through a local Unix socket.
-      const socketURL = postgres && !url.hostname && (query.get("host") ?? "").startsWith("/") && !query.has("hostaddr")
+      // Exactly one lowercase host parameter, naming a socket directory; drivers read only that exact key.
+      const hostParams = [...url.searchParams.keys()].filter((key) => key.toLowerCase() === "host")
+      const socketURL = postgres && !url.hostname && hostParams.length === 1 && hostParams[0] === "host" &&
+        url.searchParams.get("host")!.startsWith("/") && !query.has("hostaddr")
       if ((!socketURL && !isLoopbackHost(url.hostname)) || url.protocol === "mongodb+srv:") deny()
       if (mongo && config.direct_connection !== true && query.get("directconnection") !== "true") deny()
       if (mongo && ["mongodb-aws", "mongodb-oidc", "gssapi"].includes(query.get("authmechanism") ?? "")) deny()
       // Drivers can override the authority via URL parameters or discover replica peers.
       for (const key of url.searchParams.keys()) {
-        if (socketURL && key.toLowerCase() === "host") continue
+        if (socketURL && key === "host") continue
         if (["host", "hostaddr", "server", "replicaset", "service"].includes(key.toLowerCase())) deny()
       }
     } catch { deny() }

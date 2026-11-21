@@ -16,24 +16,25 @@ test("offline local MCP fetch rejects remote requests and redirects before remot
   for (const key of proxyKeys) delete process.env[key]
   process.env.NO_PROXY = process.env.no_proxy = "127.0.0.1,localhost"
   let calls = 0
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request) {
-      calls++
-      return new URL(request.url).pathname === "/redirect"
-        ? Response.redirect("https://example.com/mcp")
-        : new Response("local MCP")
-    },
-  })
+  let server: ReturnType<typeof Bun.serve> | undefined
   try {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        calls++
+        return new URL(request.url).pathname === "/redirect"
+          ? Response.redirect("https://example.com/mcp")
+          : new Response("local MCP")
+      },
+    })
     const fetch = Offline.localFetch()
     expect(await (await fetch(server.url)).text()).toBe("local MCP")
     await expect(fetch(new URL("/redirect", server.url))).rejects.toThrow()
     await expect(fetch("https://example.com/mcp")).rejects.toThrow("non-local request")
     expect(calls).toBe(2)
   } finally {
-    server.stop(true)
+    server?.stop(true)
     for (const key of proxyKeys) {
       if (savedProxy[key] === undefined) delete process.env[key]
       else process.env[key] = savedProxy[key]

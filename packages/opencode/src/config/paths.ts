@@ -272,7 +272,7 @@ export async function parseText(
   text: string,
   input: ParseSource,
   missing: "error" | "empty" = "error",
-  // altimate_change start — offline opt-in probe options
+  // altimate_change start — options gain expandFiles for the offline opt-in probe
   opts: { track?: boolean; expandFiles?: boolean } = {},
 ): Promise<any> {
   const configSource = source(input)

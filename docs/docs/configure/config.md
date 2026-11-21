@@ -194,7 +194,7 @@ Each of these fails with a one-line message or is skipped:
 - model catalog downloads and update checks;
 - workspace and workspace engine sync;
 - session sharing;
-- the web fetch, web search, code search, workspace manager, feedback and memory refresh tools;
+- the web fetch, web search, code search, `datamate_manager`, feedback and memory refresh tools;
 - MCP servers at non-loopback URLs, and MCP sign-in;
 - automatic installs of warehouse drivers, language servers, plugins and ripgrep;
 - warehouse connections whose host is not loopback, SSH tunnels, and cloud sign-in methods;
@@ -205,3 +205,5 @@ Each of these fails with a one-line message or is skipped:
 ### What offline mode does not police
 
 Programs you run or configure yourself keep their own network access: shell commands, language servers, local MCP servers and their child processes. They also keep your proxy settings. Offline mode does not sandbox them.
+
+DuckDB connections do not install or load extensions automatically offline. SQL that explicitly runs `INSTALL` or `LOAD` (for example for `httpfs`) and then reads a remote path is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs, usage reporting and version check.

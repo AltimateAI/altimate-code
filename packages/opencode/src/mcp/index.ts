@@ -630,10 +630,10 @@ export const layer = Layer.effect(
         command: cmd,
         args,
         cwd,
-        // altimate_change start — offline mode keeps the user's proxy settings for local servers
-        env: Offline.userEnv({
+        env: {
+          // altimate_change start — offline mode keeps the user's proxy settings; the server's own environment still wins
+          ...Offline.userEnv({ ...process.env }),
           // altimate_change end
-          ...process.env,
           // altimate_change start — brand: BUN_BE_BUN for altimate/altimate-code self-spawn
           ...(cmd === "opencode" || cmd === "altimate" || cmd === "altimate-code" ? { BUN_BE_BUN: "1" } : {}),
           // altimate_change end
@@ -644,9 +644,7 @@ export const layer = Layer.effect(
           // values and break the `$${VAR}` escape convention — see PR #666 review.
           ...mcp.environment,
           // altimate_change end
-        // altimate_change start — offline mode user environment
-        }),
-        // altimate_change end
+        },
       })
       // altimate_change start — upstream_fix: drain the local server's stderr. With `stderr: "pipe"`
       // and no consumer, a chatty MCP server fills the OS pipe buffer (~64KiB) and blocks the child,

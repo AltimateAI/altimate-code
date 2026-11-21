@@ -21,6 +21,8 @@ export function localGitEnv(env?: Record<string, string>) {
   if (!offlineModeEnabled()) return env
   const inherited = Number(env?.GIT_CONFIG_COUNT ?? process.env.GIT_CONFIG_COUNT ?? 0)
   const index = Number.isInteger(inherited) && inherited > 0 ? inherited : 0
+  // Inherited `-c` parameters are read after GIT_CONFIG_COUNT entries, so the override is appended there as well.
+  const parameters = env?.GIT_CONFIG_PARAMETERS ?? process.env.GIT_CONFIG_PARAMETERS
   return {
     ...env,
     GIT_ALLOW_PROTOCOL: "",
@@ -28,6 +30,7 @@ export function localGitEnv(env?: Record<string, string>) {
     GIT_CONFIG_COUNT: String(index + 1),
     [`GIT_CONFIG_KEY_${index}`]: "lfs.url",
     [`GIT_CONFIG_VALUE_${index}`]: OFFLINE_LFS_URL,
+    ...(parameters ? { GIT_CONFIG_PARAMETERS: `${parameters} 'lfs.url'='${OFFLINE_LFS_URL}'` } : {}),
   }
 }
 

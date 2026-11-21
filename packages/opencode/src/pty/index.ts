@@ -136,13 +136,13 @@ export namespace Pty {
     const cwd = input.cwd || Instance.directory
     const shellEnv = await Plugin.trigger("shell.env", { cwd }, { env: {} })
     // altimate_change start — offline mode leaves the user's terminal with their proxy settings
-    const env = Offline.userEnv({
-      ...process.env,
+    const env = {
+      ...Offline.userEnv({ ...process.env }),
       ...input.env,
       ...shellEnv.env,
       TERM: "xterm-256color",
       OPENCODE_TERMINAL: "1",
-    }) as Record<string, string>
+    } as Record<string, string>
     // altimate_change end
 
     // altimate_change start — prepend user tools dirs to PATH in terminal sessions

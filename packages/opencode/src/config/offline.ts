@@ -20,7 +20,7 @@ async function localOptIn(directory: string) {
   const optedIn = async (text: string | undefined, source: string | { source: string; dir: string }) => {
     if (!text) return false
     // Skip the substitution pass for text that can neither name nor produce the key.
-    if (!text.includes("offline") && !/\{env:|\$\{|\{file:/.test(text)) return false
+    if (!text.includes("offline") && !/\{env:|\$\{|\{file:|\\u/.test(text)) return false
     if (parse(text)?.offline === true) return true
     const config = await ConfigPaths.parseText(text, source, "empty", { track: false, expandFiles: false }).catch(() => undefined)
     return config?.offline === true
@@ -57,7 +57,10 @@ async function localOptIn(directory: string) {
   if (legacy !== undefined) {
     try {
       if ((Bun.TOML.parse(legacy) as { offline?: unknown }).offline === true) return true
-    } catch {}
+    } catch {
+      // An unparseable file still counts when it plainly requests offline mode.
+      if (/^\s*offline\s*=\s*true\b/m.test(legacy)) return true
+    }
   }
   const managed = await ConfigManaged.readManagedPreferences().catch(() => undefined)
   return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false

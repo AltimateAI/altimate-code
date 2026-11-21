@@ -190,17 +190,18 @@ describe("process liveness", () => {
     expect(pidAlive(2 ** 22 + 12345)).toBe(false)
   })
 })
-// altimate_change end
-
-test("offline telemetry reports the offline policy rather than --no-network", async () => {
-  const prior = process.env.ALTIMATE_OFFLINE
-  process.env.ALTIMATE_OFFLINE = "1"
-  try {
-    for (const network of [true, false]) {
-      expect(await telemetryFacts(network)).toEqual({ enabled: false, checked: false, reason: "offline mode" })
+describe("offline mode", () => {
+  test("offline telemetry reports the offline policy rather than --no-network", async () => {
+    const prior = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      for (const network of [true, false]) {
+        expect(await telemetryFacts(network)).toEqual({ enabled: false, checked: false, reason: "offline mode" })
+      }
+    } finally {
+      if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = prior
     }
-  } finally {
-    if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
-    else process.env.ALTIMATE_OFFLINE = prior
-  }
+  })
 })
+// altimate_change end

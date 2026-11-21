@@ -44,7 +44,10 @@ export async function assertLocalDbt(
   try {
     return await checkLocalDbt(projectRoot, args, integration, cwd)
   } catch (error) {
-    throw new OfflineDbtError(error instanceof Error ? error.message : String(error), { cause: error })
+    // Policy refusals are typed; a missing or unreadable project or profile keeps its own error.
+    if (error instanceof Error && error.message.startsWith("Offline mode"))
+      throw new OfflineDbtError(error.message, { cause: error })
+    throw error
   }
 }
 
@@ -75,7 +78,7 @@ async function checkLocalDbt(
   const project = resolve(parse(await fs.readFile(path.join(root, "dbt_project.yml"), "utf8")))
   // dbt's order: --profiles-dir, DBT_PROFILES_DIR, the working directory, then ~/.dbt.
   // dbt expands ~ in the profiles directory.
-  const explicit = (option("--profiles-dir") ?? process.env.DBT_PROFILES_DIR)?.replace(/^~(?=$|[\\/])/, os.homedir())
+  const explicit = (option("--profiles-dir") ?? process.env.DBT_PROFILES_DIR)?.replace(/^~(?=$|[\\/])/, () => os.homedir())
   const profilesDir = path.resolve(
     cwd,
     explicit ??
@@ -99,7 +102,8 @@ async function checkLocalDbt(
     assertLocalConnection({ ...output, path: output.path ?? (output.type === "duckdb" ? ":memory:" : undefined) })
   }
   // These profile hooks cause dbt-duckdb to install extensions or open extra connections at startup.
-  const remoteRoot = typeof output.external_root === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(output.external_root)
+  const remoteRoot = typeof output.external_root === "string" &&
+    (/^(?:\\\\|\/\/)/.test(output.external_root) || /^[a-z][a-z0-9+.-]*:\/\//i.test(output.external_root))
   if (output.extensions?.length || output.attach?.length || output.plugins?.length || output.secrets?.length ||
     output.filesystems?.length || output.remote || remoteRoot)
     throw new Error("Offline mode requires a dbt profile without extension installs, attachments, plugins, remote secrets, remote storage, or a remote server.")

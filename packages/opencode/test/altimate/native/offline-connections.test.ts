@@ -237,7 +237,7 @@ test("cached local connections never reread credentials offline", async () => {
   }
 })
 
-test("cached remote target survives lost keychain credentials and closes on rejection", async () => {
+test("cached remote target is rejected and closed offline without rereading credentials", async () => {
   const Registry = await import("../../../src/altimate/native/connections/registry")
   const Credentials = await import("../../../src/altimate/native/connections/credential-store")
   const driver = await import("@altimateai/drivers/postgres")

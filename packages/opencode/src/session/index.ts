@@ -748,18 +748,25 @@ export namespace Session {
     return rows.map(fromRow)
   })
 
+  // altimate_change start — descendants already checked by an offline removal of their ancestor
+  const offlineTreeChecked = new Set<SessionID>()
+  // altimate_change end
   export const remove = fn(SessionID.zod, async (sessionID) => {
     const project = Instance.project
     // altimate_change start — offline mode cannot revoke a public share, so it refuses to delete a shared
     // session (or one with a shared descendant) before anything is removed
-    if (Offline.enabled()) {
+    if (Offline.enabled() && !offlineTreeChecked.delete(sessionID)) {
+      const tree: SessionID[] = []
       const pending = [sessionID]
       while (pending.length) {
         const id = pending.pop()!
-        if ((await get(id).catch(() => undefined))?.share?.url)
+        tree.push(id)
+        if ((await get(id)).share?.url)
           throw new Error("This session is shared. Delete it while online so its share can be revoked.")
         pending.push(...(await children(id)).map((child) => child.id))
       }
+      // The recursive removal of each descendant skips the scan it has already passed.
+      for (const id of tree.slice(1)) offlineTreeChecked.add(id)
     }
     // altimate_change end
     try {

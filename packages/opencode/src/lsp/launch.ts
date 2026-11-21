@@ -14,7 +14,10 @@ export function spawn(cmd: string, argsOrOpts?: string[] | Process.Options, opts
   const proc = Process.spawn([cmd, ...args], {
     ...cfg,
     // altimate_change start — offline mode keeps the user's proxy settings for language servers
-    ...(Offline.enabled() && cfg?.env !== null ? { env: Offline.userEnv({ ...process.env, ...cfg?.env }) } : {}),
+    // Process.spawn merges process.env underneath, so a removed key is set to undefined (unset) instead.
+    ...(Offline.enabled() && cfg?.env !== null
+      ? { env: { NO_PROXY: undefined, no_proxy: undefined, ...Offline.userEnv({ ...process.env }), ...cfg?.env } }
+      : {}),
     // altimate_change end
     stdin: "pipe",
     stdout: "pipe",
