@@ -606,13 +606,24 @@ export const layer: Layer.Layer<
         })
       }
 
-      // altimate_change — `submodule update` can clone or fetch, so offline mode leaves submodules at their commits
-      if (!offlineModeEnabled())
+      // altimate_change start — offline mode moves only checked-out submodules, from objects already on disk
+      // (`submodule update` would clone the others). `submodule status` marks a not-checked-out one with "-".
+      const checkedOut = offlineModeEnabled()
+        ? (yield* git(["submodule", "status", "--recursive"], { cwd: worktreePath })).text
+            .split("\n")
+            .filter((line) => line.length > 1 && !line.startsWith("-"))
+            .map((line) => line.slice(1).split(" ")[1])
+            .filter((entry): entry is string => Boolean(entry))
+        : undefined
+      if (!checkedOut || checkedOut.length > 0)
         yield* gitExpect(
-          ["submodule", "update", "--init", "--recursive", "--force"],
+          checkedOut
+            ? ["submodule", "update", "--no-fetch", "--force", "--", ...checkedOut]
+            : ["submodule", "update", "--init", "--recursive", "--force"],
           { cwd: worktreePath },
           (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
         )
+      // altimate_change end
 
       yield* gitExpect(
         ["submodule", "foreach", "--recursive", "git", "reset", "--hard"],

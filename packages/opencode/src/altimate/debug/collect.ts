@@ -414,7 +414,9 @@ export async function collect(opts: { network: boolean }): Promise<Facts> {
   if (offlineModeEnabled()) opts = { ...opts, network: false }
   const ctx = redactContext()
   const mcpServers = mcpFacts()
-  const [account, connections, telemetry] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network)])
+  const [account, connections, checked] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network)])
+  // altimate_change — offline mode reports its own reason rather than --no-network
+  const telemetry: Facts["telemetry"] = offlineModeEnabled() ? { enabled: false, checked: false, reason: "offline mode" } : checked
   const proxy = PROXY_VARS.some((k) => k.toLowerCase() !== "no_proxy" && process.env[k])
   const network = opts.network
     ? await Promise.all(networkTargets(connections, account, telemetry).map((t) => probe(t.target, t.host, { proxy })))

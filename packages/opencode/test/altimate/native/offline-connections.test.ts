@@ -33,6 +33,8 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "postgres", connectionString: "postgres://localhost/test" },
     { type: "trino", server: "http://localhost:8080" },
     { type: "postgres", connection_string: "postgresql:///analytics?host=/var/run/postgresql" },
+    { type: "sqlserver", host: "localhost\\SQLEXPRESS" },
+    { type: "redshift" },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -58,6 +60,14 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "postgres", connection_string: "postgresql://localhost/db?host=db.example.com" },
     { type: "postgres", connection_string: "postgresql://localhost/db?hostaddr=10.0.0.5" },
     { type: "postgres", connection_string: "postgresql:///analytics" },
+    { type: "sqlite", path: "file:////server/share/db.sqlite" },
+    { type: "postgres", host: "/tmp,db.example.com" },
+    { type: "mysql", host: "/tmp/mysql" },
+    { type: "mongodb", connection_string: "mongodb+srv://localhost/db" },
+    { type: "mongodb", connection_string: "mongodb://localhost/db?replicaSet=rs0" },
+    { type: "sqlserver", host: "db.example.com\\SQLEXPRESS" },
+    { type: "sqlserver", host: "localhost", authentication: "azure-active-directory-default" },
+    { type: "mongodb", connection_string: "mongodb://localhost/db?authMechanism=MONGODB-AWS" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 

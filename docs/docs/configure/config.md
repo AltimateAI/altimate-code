@@ -162,9 +162,9 @@ Control how context is managed when conversations grow long:
 
 ## Offline / air-gapped mode
 
-Offline mode is for running Altimate Code against a local or self-hosted model with no other network access. Altimate Code then sends network requests only to the configured model endpoint. Local work keeps running: tools, shell commands, local databases, language servers, local MCP servers and local Git.
+Offline mode is for running Altimate Code against a local or self-hosted model with no other network access. Altimate Code then sends network requests only to the configured model endpoint and to services on this machine (loopback). Local work keeps running: tools, shell commands, local databases, language servers, local MCP servers and local Git.
 
-With offline mode off, nothing on this page applies and Altimate Code behaves exactly as before.
+With offline mode off, nothing in this section applies and Altimate Code behaves exactly as before.
 
 ### Turn it on
 
@@ -200,7 +200,7 @@ Each of these fails with a one-line message or is skipped:
 - MCP servers at other URLs, and MCP sign-in;
 - skills from remote skill URLs (`skills.urls`), including copies already cached;
 - automatic installs of warehouse drivers, language servers, plugins and ripgrep;
-- warehouse connections to other hosts, SSH tunnels, and cloud sign-in methods for dbt;
+- warehouse connections to other hosts, SSH tunnels, MongoDB SRV and replica-set discovery, and cloud sign-in (SQL Server Azure AD, MongoDB AWS/OIDC/Kerberos, dbt cloud methods);
 - `dbt deps` and dbt's usage reporting and version check;
 - `git clone`, `fetch`, `pull`, `push` and other Git commands that use a remote;
 - commands that need a remote service, such as `github`, `pr`, `web`, `upgrade`, `review --post` and `attach` to another machine.
@@ -213,7 +213,6 @@ Some network use happens inside programs Altimate Code starts and is not checked
 
 - Git in a partial (blobless or treeless) clone fetches missing objects on demand, even for local commands such as `diff`, and Git LFS can download missing objects during a checkout outside worktree reset.
 - dbt reads libpq environment variables such as `PGHOSTADDR` and `PGSERVICE`, which can point a Postgres profile at another host.
-- Cloud sign-in configured on a local warehouse (for example SQL Server `authentication: azure-active-directory-*` or MongoDB `authMechanism=MONGODB-AWS`) contacts its identity provider.
 - An offline TUI started with `--hostname` set to a LAN address or machine name cannot reach its own server; use the default or `0.0.0.0`.
 - When offline mode turns on after startup (organisation-managed or remote configuration, or a server started without it that then loads an offline project), internal HTTP requests made through the shared HTTP client stay unguarded for the rest of that process. Set `ALTIMATE_OFFLINE=1` before starting a server.
 

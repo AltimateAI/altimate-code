@@ -8,7 +8,9 @@ const DENIED = "Offline mode allows only local file databases and warehouses at 
 export function isLocalPath(value: unknown): boolean {
   if (typeof value !== "string" || /\{[{%#]/.test(value) || /^(?:\\\\|\/\/)/.test(value)) return false
   if (value === "" || value === ":memory:") return true
-  if (/^file:/i.test(value)) return URL.canParse(value) && ["", "localhost"].includes(new URL(value).hostname)
+  // file:////server/share is a UNC path written as a URL.
+  if (/^file:/i.test(value))
+    return URL.canParse(value) && ["", "localhost"].includes(new URL(value).hostname) && !decodeURIComponent(new URL(value).pathname).startsWith("//")
   // Rejects scheme:// URLs (s3, gcs, http and so on) and DuckDB's non-slash remote schemes such as md:.
   return isLocalFilePath(value)
 }
@@ -23,14 +25,21 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   }
   // Only types whose driver connects to the configured host can be judged; account- or project-addressed
   // warehouses (Snowflake, BigQuery, Databricks and others) are refused.
-  if (!HOST_ADDRESSED.has(type) || config.ssh_host) throw new Error(DENIED)
+  if (!HOST_ADDRESSED.has(type) || config.ssh_host || config.replica_set) throw new Error(DENIED)
+  // Cloud sign-in contacts an identity provider even for a loopback host.
+  if (typeof config.authentication === "string" && /^azure-active-directory/i.test(config.authentication))
+    throw new Error(DENIED)
   // A Unix socket is a local file.
   if (config.socketPath !== undefined && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/")))
     throw new Error(DENIED)
-  // Postgres accepts a socket directory as its host.
+  const postgres = ["postgres", "postgresql", "redshift"].includes(type)
+  // Postgres accepts a socket directory as its host; a comma-separated list names several hosts.
+  const socketDir = (host: string) => postgres && host.startsWith("/") && !host.includes(",")
   const hosts = [config.host, config.server].filter((value) => value !== undefined)
-  for (const host of hosts) {
-    if (typeof host === "string" && host.startsWith("/")) continue
+  for (const raw of hosts) {
+    // SQL Server names an instance as host\instance.
+    const host = typeof raw === "string" && ["sqlserver", "mssql"].includes(type) ? raw.split("\\")[0] : raw
+    if (typeof host === "string" && socketDir(host)) continue
     if (!isLoopbackHost(host)) throw new Error(DENIED)
   }
   const url = config.connection_string ?? config.url
@@ -41,11 +50,16 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
     } catch {
       throw new Error(DENIED)
     }
+    // mongodb+srv:// and replica sets discover other hosts.
+    if (parsed.protocol.endsWith("+srv:") || [...parsed.searchParams.keys()].some((key) => key.toLowerCase() === "replicaset"))
+      throw new Error(DENIED)
+    const mechanism = [...parsed.searchParams].find(([key]) => key.toLowerCase() === "authmechanism")?.[1]?.toUpperCase()
+    if (mechanism && ["MONGODB-AWS", "MONGODB-OIDC", "GSSAPI"].includes(mechanism)) throw new Error(DENIED)
     // A query parameter such as Postgres's ?host= or ?hostaddr= overrides the URL's host.
     const overrides = [...parsed.searchParams].filter(([key]) => ["host", "hostaddr", "server"].includes(key.toLowerCase()))
     if (!parsed.hostname && overrides.length === 0) throw new Error(DENIED)
     for (const host of [parsed.hostname, ...overrides.map(([, value]) => value)].filter(Boolean))
-      if (!host.startsWith("/") && !isLoopbackHost(host)) throw new Error(DENIED)
+      if (!socketDir(host) && !isLoopbackHost(host)) throw new Error(DENIED)
   }
   // Without a host these drivers connect to localhost; any other type names its server some other way.
   if (hosts.length === 0 && url === undefined && config.socketPath === undefined && !LOCALHOST_BY_DEFAULT.has(type))
@@ -56,4 +70,4 @@ const HOST_ADDRESSED = new Set([
   "postgres", "postgresql", "redshift", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "trino", "oracle", "mongodb", "mongo",
 ])
 
-const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo", "trino", "oracle"])
+const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo", "trino", "oracle", "redshift"])

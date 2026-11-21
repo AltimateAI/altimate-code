@@ -165,7 +165,7 @@ test("offline MCP add refuses remote configuration before writing it", () => {
     const result = run(["mcp", "add", "--name", "remote", "--url", "https://example.com/mcp", "--global"])
     expect(result.status).not.toBe(0)
     expect(`${result.stdout}${result.stderr}`).toContain("ones on this machine")
-    expect(readJson(configPath).mcp).toEqual({})
+    expect(readJson(configPath)).toMatchObject({ mcp: {}, username: "unchanged" })
   }, true)
 }, 30_000)
 

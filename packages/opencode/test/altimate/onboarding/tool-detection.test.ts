@@ -211,8 +211,10 @@ test.skipIf(process.platform === "win32")("offline detection finds dbt without r
   const previous = { offline: process.env.ALTIMATE_OFFLINE, dbt: process.env.ALTIMATE_DBT_PATH }
   try {
     const ran = path.join(dir, "ran")
-    fs.writeFileSync(path.join(dir, "dbt"), `#!/bin/sh\ntouch "${ran}"\n`, { mode: 0o755 })
-    process.env.ALTIMATE_DBT_PATH = path.join(dir, "dbt")
+    // The stub sits in its own bin directory so the adapter lookup stays inside this fixture.
+    fs.mkdirSync(path.join(dir, "bin"))
+    fs.writeFileSync(path.join(dir, "bin", "dbt"), `#!/bin/sh\ntouch "${ran}"\n`, { mode: 0o755 })
+    process.env.ALTIMATE_DBT_PATH = path.join(dir, "bin", "dbt")
     process.env.ALTIMATE_OFFLINE = "1"
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: false })
@@ -221,8 +223,8 @@ test.skipIf(process.platform === "win32")("offline detection finds dbt without r
     const venvBin = path.join(dir, "venv", "bin")
     fs.mkdirSync(venvBin, { recursive: true })
     fs.mkdirSync(path.join(dir, "venv", "lib", "python3.12", "site-packages", "dbt", "adapters", "duckdb"), { recursive: true })
-    fs.renameSync(path.join(dir, "dbt"), path.join(venvBin, "dbt"))
-    fs.symlinkSync(path.join(venvBin, "dbt"), path.join(dir, "dbt"))
+    fs.renameSync(path.join(dir, "bin", "dbt"), path.join(venvBin, "dbt"))
+    fs.symlinkSync(path.join(venvBin, "dbt"), path.join(dir, "bin", "dbt"))
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true })
     expect(fs.existsSync(ran)).toBe(false)

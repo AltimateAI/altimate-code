@@ -112,7 +112,7 @@ export async function connect(
   // altimate_change start — configurable open budget
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
-  // altimate_change — offline mode never downloads DuckDB extensions
+  // altimate_change — offline mode turns off automatic DuckDB extension installs (explicit INSTALL still downloads)
   const offline = !["", "0", "false", "off", "no"].includes(process.env.ALTIMATE_OFFLINE?.trim().toLowerCase() ?? "")
   const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath, cwd } as const
   // altimate_change start — preserve caller DuckDB state while keeping scratch secrets isolated

@@ -23,6 +23,7 @@ const REAL = Object.fromEntries(SHIMMED.map((name) => [name, Bun.which(name)]))
 
 beforeAll(async () => {
   denyProxy = net.createServer((socket) => {
+    socket.on("error", () => {})
     socket.once("data", (chunk) => {
       proxyHits.push(chunk.toString("latin1").split("\r\n")[0])
       socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n")

@@ -482,8 +482,9 @@ export namespace SessionPrompt {
     if (Offline.enabled()) {
       const dir = Instance.directory
       if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) await refreshSkillRegistry(dir)
-    } else if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
-      // altimate_change end
+    } else
+    // altimate_change end
+    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
       // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
       // rather than imported so the opted-out path stays free of that module.

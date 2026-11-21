@@ -174,8 +174,8 @@ let cli = yargs(args)
 
     // altimate_change start — offline mode: install the fetch guard and refuse commands that need a remote service
     const command = String(opts._[0] ?? "")
-    // `attach --dir` names a directory on the server, so attach reads the invoking project's setting.
-    const offlineTarget = command === "attach" ? undefined : (opts.dir ?? opts.cwd ?? opts.directory)
+    // `attach --dir` and `run --attach --dir` name a directory on the server, so they read the invoking project's setting.
+    const offlineTarget = command === "attach" || (command === "run" && opts.attach) ? undefined : (opts.dir ?? opts.cwd ?? opts.directory)
     const offlineDir = typeof offlineTarget === "string" ? path.resolve(offlineTarget) : resolveThreadDirectory(opts.project as string | undefined)
     if (Offline.enabled() || (await Offline.optedIn(offlineDir))) {
       Offline.start()

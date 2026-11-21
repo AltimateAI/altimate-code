@@ -26,6 +26,7 @@ export function gitCommandUsesNetwork(args: string[]) {
     remoteCommands.has(command) ||
     (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n")))) ||
     (command === "submodule" && ["update", "add"].includes(operation)) ||
+    (command === "submodule" && operation === "foreach" && rest.some((arg) => /\b(fetch|pull|push|clone|ls-remote)\b/.test(arg))) ||
     (command === "remote" && operation === "add" && rest.some((arg) => arg === "-f" || arg === "--fetch")) ||
     (command === "remote" && (operation === "prune" || (operation === "set-head" && rest.some((arg) => arg === "-a" || arg === "--auto")))) ||
     (command === "lfs" && ["fetch", "pull", "push", "clone"].includes(operation)) ||

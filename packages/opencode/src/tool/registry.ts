@@ -443,12 +443,11 @@ export namespace ToolRegistry {
       EditTool,
       WriteTool,
       TaskTool,
-      // altimate_change start — these tools contact remote services; order unchanged with offline mode off
+      // These tools contact remote services; order unchanged with offline mode off.
       ...(!offline ? [WebFetchTool] : []),
       TodoWriteTool,
       // TodoReadTool,
       ...(!offline ? [WebSearchTool, CodeSearchTool] : []),
-      // altimate_change end
       SkillTool,
       ApplyPatchTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),

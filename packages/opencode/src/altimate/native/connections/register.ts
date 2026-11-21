@@ -1,6 +1,8 @@
 // altimate_change start — validate offline dbt profiles before starting adapters
 import { Offline } from "@/config/offline"
 import { assertLocalDbt } from "../dbt/offline"
+const isOfflineRefusal = (error: unknown) =>
+  Offline.enabled() && error instanceof Error && error.message.startsWith("Offline mode")
 // altimate_change end
 /**
  * Register native connection handlers with the Dispatcher.
@@ -128,7 +130,6 @@ async function ensureDbtAdapter(): Promise<any | null> {
         return publish(null)
       }
 
-      // Offline, a profile that leaves this machine falls back to the native driver, which checks its own target.
       // The integration reads profiles.yml relative to the project, so check from there.
       const offline = Offline.enabled()
         ? await assertLocalDbt(dbtConfig.projectRoot, ["--project-dir", dbtConfig.projectRoot], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
@@ -147,7 +148,9 @@ async function ensureDbtAdapter(): Promise<any | null> {
         await create(dbtConfig, { ...options, ...(offline ? { offline: true, profilesDir: offline.profilesDir } : {}) }),
         dbtConfig.projectRoot,
       )
-    } catch {
+    } catch (error) {
+      // An offline refusal is the answer, not "dbt unavailable": falling back would run the query elsewhere.
+      if (isOfflineRefusal(error)) throw error
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
     } finally {
@@ -303,7 +306,7 @@ async function tryExecuteViaDbt(
   } catch (e) {
     // A deadline or abort is not "dbt unavailable": the query may still be running, and
     // re-running it on the native driver would double the work and the wait.
-    if (isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
+    if (isOfflineRefusal(e) || isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
     // dbt execution failed — fall back to native driver silently
     return null
   }
