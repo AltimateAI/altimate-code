@@ -85,6 +85,8 @@ function terminal(): DBTTerminal {
 export type CreateOptions = {
   /** Skip automatic dependency downloads and anonymous usage reporting. */
   offline?: boolean
+  /** The profiles directory dbt must read (given to dbt as DBT_PROFILES_DIR). */
+  profilesDir?: string
   /**
    * The folder dbt writes its artifacts to (manifest.json, partial_parse.msgpack, run_results.json) for
    * every command this adapter runs, given to dbt as DBT_TARGET_PATH. Unset, dbt writes to the project's
@@ -102,6 +104,7 @@ function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
     vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
     vars.DBT_VERSION_CHECK = "false"
   }
+  if (options.profilesDir) vars.DBT_PROFILES_DIR = options.profilesDir
   if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
   return {
     pythonPath: cfg.pythonPath,

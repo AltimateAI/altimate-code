@@ -1,5 +1,5 @@
-import { Offline } from "@/config/offline"
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Local binding cache — offline fallback for the server-authoritative
 // pre-check. Scoped to (tenant, apiUrl, account) at the top level so a

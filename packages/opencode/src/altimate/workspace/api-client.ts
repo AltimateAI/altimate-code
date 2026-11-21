@@ -1,5 +1,5 @@
-import { Offline } from "@/config/offline"
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Wire client for the workspace-binding endpoints in altimate-backend
 // (/datamate-project-bindings/*, added by AI-8398). Shared between the TUI

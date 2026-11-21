@@ -180,7 +180,7 @@ While still online:
 
 ### What keeps working
 
-- Local warehouses: DuckDB and SQLite files, and warehouses whose host is `localhost`, `::1` or `127.x.x.x`. The SQL and schema tools run against them.
+- Local warehouses: DuckDB and SQLite files, and warehouses reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. The SQL and schema tools run against them.
 - dbt commands, when the selected profile and target point at a local database.
 - The shell tool, installed language servers, and MCP servers that use stdio or a loopback HTTP(S) URL.
 - Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and submodule commits. Git LFS files check out from the local LFS cache; a file whose content is not cached fails with a clear error instead of downloading.
@@ -198,9 +198,9 @@ Each of these fails with a one-line message or is skipped:
 - MCP servers at non-loopback URLs, and MCP sign-in;
 - automatic installs of warehouse drivers, language servers, plugins and ripgrep;
 - warehouse connections whose host is not loopback, SSH tunnels, and cloud sign-in methods;
-- `dbt deps`, and dbt's own usage reporting and version check;
+- `dbt deps`, dbt's own usage reporting and version check, and dbt-duckdb profiles that use remote storage or a remote server;
 - Git fetch, pull, push, clone and other remote operations;
-- commands that need a remote service, such as `github`, `pr`, `web` and `attach` to another machine.
+- commands that need a remote service, such as `github`, `pr`, `web`, `review --post` and `attach` to another machine.
 
 ### What offline mode does not police
 

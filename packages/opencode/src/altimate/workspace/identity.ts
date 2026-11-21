@@ -1,5 +1,5 @@
-import { Offline } from "@/config/offline"
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Model-facing statement of Altimate Workspace identity: which workspace (if any) this
 // project is linked to, rendered UNCONDITIONALLY so "this/current/active workspace" has

@@ -1,5 +1,5 @@
-import { Offline } from "@/config/offline"
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Model-free access to the data tools: `tool list`, `tool run` and the optional `tool daemon`
 // that keeps warehouse connections and the schema cache warm between calls. The tool modules are

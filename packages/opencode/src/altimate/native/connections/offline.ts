@@ -21,7 +21,9 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   const config = normalizeConfig(raw)
   const type = config.type.toLowerCase()
   const deny = () => { throw new Error("Offline mode allows only local file databases and loopback warehouse connections.") }
-  if (config.ssh_host || config.replica_set || config.socketPath) deny()
+  if (config.ssh_host || config.replica_set) deny()
+  // A Unix socket is a local file; a Windows named pipe or other value is not checked here.
+  if (config.socketPath !== undefined && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/"))) deny()
   if (type === "duckdb" || type === "sqlite") {
     if (!localStore(config.path)) deny()
     return
@@ -31,7 +33,11 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   if (config.authentication && !["sql", "ntlm"].includes(String(config.authentication).toLowerCase())) deny()
   const mongo = type === "mongodb" || type === "mongo"
   if (mongo && config.direct_connection !== undefined && config.direct_connection !== true) deny()
-  if (config.host !== undefined && !isLoopbackHost(config.host)) deny()
+  // Postgres accepts a socket directory as its host.
+  const socketHost = typeof config.host === "string" && config.host.startsWith("/") && ["postgres", "postgresql", "redshift"].includes(type)
+  if (config.host !== undefined && !socketHost && !isLoopbackHost(config.host)) deny()
+  // dbt-mysql and others name the host `server`; Trino's `server` is a URL checked below.
+  if (type !== "trino" && config.server !== undefined && !isLoopbackHost(config.server)) deny()
   // Trino and ClickHouse build `${protocol}://${host}` URLs, so a protocol value can carry its own authority.
   if ((type === "trino" || type === "clickhouse") && config.protocol !== undefined &&
     !["http", "https"].includes(String(config.protocol).trim().toLowerCase())) deny()

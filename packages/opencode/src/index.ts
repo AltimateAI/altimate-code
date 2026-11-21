@@ -191,7 +191,9 @@ let cli = yargs(args)
     // Attaching to a server on this machine is local; any other server is a network peer.
     const attachURL = command === "attach" ? args.url : command === "run" ? args.attach : undefined
     if (Offline.enabled() && (
-      ["github", "gitlab", "pr", "review", "link", "workspace-client", "web", "integrations"].includes(command) ||
+      ["github", "gitlab", "pr", "link", "workspace-client", "web", "integrations"].includes(command) ||
+      // A local review runs offline; posting it to GitHub does not.
+      (command === "review" && (opts as { post?: boolean }).post === true) ||
       (attachURL !== undefined && !Offline.isLocalURL(attachURL)) ||
       (command === "learn" && opts._[1] === "import-reviews") ||
       (command === "console" && opts._[1] === "open") ||

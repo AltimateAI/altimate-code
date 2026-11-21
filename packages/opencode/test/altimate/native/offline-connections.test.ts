@@ -51,6 +51,8 @@ test("offline rejects remote targets, SSH, cloud auth, and URI host overrides", 
     { type: "oracle", connection_string: "db.example.com:1521/ORCL" },
     { type: "oracle", connection_string: "(DESCRIPTION=(ADDRESS=(HOST=db.example.com)))" },
     { type: "oracle", connection_string: "PRODTNS" },
+    { type: "mysql", server: "db.example.com" },
+    { type: "mysql", socketPath: "\\\\.\\pipe\\remote" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 
@@ -61,6 +63,9 @@ test("offline accepts plain protocols and local Oracle Easy Connect strings", ()
     { type: "oracle", connection_string: "127.0.0.1:1521/ORCL" },
     { type: "oracle", connection_string: "//localhost/XEPDB1" },
     { type: "oracle", connection_string: "[::1]:1521/ORCL" },
+    { type: "mysql", server: "127.0.0.1" },
+    { type: "mysql", socketPath: "/tmp/mysql.sock" },
+    { type: "postgres", host: "/var/run/postgresql" },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -77,6 +82,19 @@ test("dbt finds the project from a subdirectory and reads profiles from the work
     await fs.writeFile(path.join(runDir, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: postgres\n      host: example.com\n")
     await expect(assertLocalDbt(models, [], "core", root)).resolves.toEqual({ profilesDir: root })
     await expect(assertLocalDbt(models, [], "core", runDir)).rejects.toThrow("Offline mode")
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test("dbt-duckdb profiles that reach remote storage or a remote server are refused", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "offline-dbt-duckdb-"))
+  try {
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "profile: test\n")
+    for (const extra of ["external_root: s3://bucket/x", "remote:\n        host: db.example.com", "filesystems:\n        - fs: s3"]) {
+      await fs.writeFile(path.join(root, "profiles.yml"), `test:\n  outputs:\n    default:\n      type: duckdb\n      path: local.duckdb\n      ${extra}\n`)
+      await expect(assertLocalDbt(root, ["--profiles-dir", root])).rejects.toThrow("Offline mode")
+    }
+    await fs.writeFile(path.join(root, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: duckdb\n      path: local.duckdb\n      external_root: out/parquet\n")
+    await expect(assertLocalDbt(root, ["--profiles-dir", root])).resolves.toEqual({ profilesDir: root })
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 

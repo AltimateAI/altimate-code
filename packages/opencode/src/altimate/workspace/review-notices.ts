@@ -1,5 +1,5 @@
-import { Offline } from "@/config/offline"
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Notices for the person's own workspace review requests (skills and knowledge bases): when the owner approves or
 // rejects one, it is kept and shown the same way a rule review is. Like a rule review notice (`state.notices` of the

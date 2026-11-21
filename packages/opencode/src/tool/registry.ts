@@ -419,7 +419,6 @@ export namespace ToolRegistry {
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
     configInput?: RegistryConfigInput,
   ): Promise<Tool.Info[]> {
-    const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
     const custom = configInput?.matches
       ? await loadCustomTools(configInput.matches).then((x) => x.custom)
       : await state().then((x) => x.custom)
@@ -428,6 +427,7 @@ export namespace ToolRegistry {
     // altimate_change end
     const config = configInput?.config ?? (await Config.get())
     // altimate_change end
+    const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
     // built-in tool-definition effects against the AppRuntime layers (Truncate/Agent) before use.

@@ -77,7 +77,9 @@ export const McpApi = HttpApi.make("mcp")
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
           success: described(AuthStartResponse, "OAuth flow started"),
-          error: [UnsupportedOAuthError, McpServerNotFoundError],
+          // altimate_change start — offline refusal is a declared client error
+          error: [UnsupportedOAuthError, McpServerNotFoundError, MCP.OfflinePolicyError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.auth.start",
@@ -103,7 +105,9 @@ export const McpApi = HttpApi.make("mcp")
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
           success: described(MCP.Status, "OAuth authentication completed"),
-          error: [UnsupportedOAuthError, McpServerNotFoundError],
+          // altimate_change start — offline refusal is a declared client error
+          error: [UnsupportedOAuthError, McpServerNotFoundError, MCP.OfflinePolicyError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.auth.authenticate",

@@ -349,10 +349,12 @@ export interface Interface {
     clientName: string,
     resourceUri: string,
   ) => Effect.Effect<Awaited<ReturnType<MCPClient["readResource"]>> | undefined>
+  // altimate_change start — offline refusal is a typed error
   readonly startAuth: (
     mcpName: string,
-  ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError>
-  readonly authenticate: (mcpName: string) => Effect.Effect<Status, NotFoundError>
+  ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError | OfflinePolicyError>
+  readonly authenticate: (mcpName: string) => Effect.Effect<Status, NotFoundError | OfflinePolicyError>
+  // altimate_change end
   readonly finishAuth: (mcpName: string, authorizationCode: string) => Effect.Effect<Status, NotFoundError>
   readonly removeAuth: (mcpName: string) => Effect.Effect<void>
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
@@ -1415,7 +1417,9 @@ export const layer = Layer.effect(
     })
 
     const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
-      if (Offline.enabled()) throw new Error("Authenticate MCP servers while online.")
+      // altimate_change start — offline refusal is a client error, not a crash
+      if (Offline.enabled()) return yield* new OfflinePolicyError({ message: "Authenticate MCP servers while online." })
+      // altimate_change end
       const lifecycle = yield* InstanceState.get(state)
       // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)

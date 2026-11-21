@@ -196,10 +196,11 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
       expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
       expect(calls.length).toBeGreaterThan(0)
       expect(calls.some((call) => call.hasSkill)).toBe(snapshot)
-      expect(stderr.match(/Offline mode:/g)).toHaveLength(1)
       expect(stderr).not.toContain("Workspace skills not synced")
-      if (!snapshot) expect(stderr).toContain("No usable workspace skill snapshot")
+      // The fixture without a snapshot has no workspace link, so it gets no workspace notice at all.
+      if (!snapshot) expect(stderr).not.toContain("Offline mode:")
       else {
+        expect(stderr.match(/Offline mode:/g)).toHaveLength(1)
         expect(await fs.readFile(f.manifest, "utf8")).toBe(before!)
         expect(await fs.readFile(f.skill, "utf8")).toContain(SKILL)
       }

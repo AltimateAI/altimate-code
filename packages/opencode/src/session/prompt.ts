@@ -490,8 +490,11 @@ export namespace SessionPrompt {
           await mirrorClaudeSkills(dir, { withdraw: true })
         }
         const binding = snapshot ? null : await resolveBindingOutcome(dir)
-        const empty = binding?.status === "bound" && await snapshotKnownEmpty(dir, binding.binding.datamateId)
-        await Offline.announce(snapshot !== null, empty)
+        // Only a project that uses a workspace hears about workspace skills.
+        if (snapshot || binding?.status === "bound") {
+          const empty = binding?.status === "bound" && await snapshotKnownEmpty(dir, binding.binding.datamateId)
+          await Offline.announce(snapshot !== null, empty)
+        }
         await refreshSkillRegistry(dir)
       }
       const notice = writeOfflineNotice().catch((error) => log.warn("offline skill snapshot setup failed", { error }))
@@ -4511,11 +4514,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       detached: process.platform !== "win32",
       windowsHide: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
+      // altimate_change start — offline mode leaves the user's own commands with their proxy settings
+      env: Offline.userEnv({
         ...process.env,
         ...shellEnv.env,
         TERM: "dumb",
-      },
+      }),
+      // altimate_change end
     })
 
     let output = ""
@@ -4859,6 +4864,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const proc = Bun.spawn([sh, ...Shell.args(sh, cmd, Instance.directory)], {
               // altimate_change start — upstream_fix: non-bash command-template shells need an explicit cwd.
               cwd: Instance.directory,
+              // altimate_change end
+              // altimate_change start — offline mode leaves the user's own commands with their proxy settings
+              ...(Offline.enabled() ? { env: Offline.userEnv({ ...process.env }) } : {}),
               // altimate_change end
               stdout: "pipe",
               stderr: "pipe",

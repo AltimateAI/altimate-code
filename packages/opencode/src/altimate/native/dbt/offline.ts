@@ -98,7 +98,9 @@ async function checkLocalDbt(
     assertLocalConnection({ ...output, path: output.path ?? (output.type === "duckdb" ? ":memory:" : undefined) })
   }
   // These profile hooks cause dbt-duckdb to install extensions or open extra connections at startup.
-  if (output.extensions?.length || output.attach?.length || output.plugins?.length || output.secrets?.length)
-    throw new Error("Offline mode requires a dbt profile without extension installs, attachments, plugins, or remote secrets.")
+  const remoteRoot = typeof output.external_root === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(output.external_root)
+  if (output.extensions?.length || output.attach?.length || output.plugins?.length || output.secrets?.length ||
+    output.filesystems?.length || output.remote || remoteRoot)
+    throw new Error("Offline mode requires a dbt profile without extension installs, attachments, plugins, remote secrets, remote storage, or a remote server.")
   return { profilesDir }
 }
