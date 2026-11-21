@@ -71,14 +71,17 @@ test("an explicit keyless-Zen pick survives switching conversations and back", a
   const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
   await using isolatedState = await tmpdir()
   process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
-  const { local, cleanup } = await mount()
+  const { local, route, cleanup } = await mount()
   try {
     await waitUntil(() => local.model.ready)
+    route.navigate({ type: "session", sessionID: "ses_zen" })
     local.model.set({ ...STALE_ZEN }, { recent: true })
     await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
     // Open another conversation recorded on the user's own model, then return to the Zen one.
+    route.navigate({ type: "session", sessionID: "ses_own" })
     expect(local.model.restoreSession({ ...OWN })).toMatchObject(OWN)
     await waitUntil(() => local.model.current()?.modelID === OWN.modelID)
+    route.navigate({ type: "session", sessionID: "ses_zen" })
     expect(local.model.restoreSession({ ...STALE_ZEN })).toMatchObject(STALE_ZEN)
     await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
     expect(local.model.current()).toMatchObject(STALE_ZEN)

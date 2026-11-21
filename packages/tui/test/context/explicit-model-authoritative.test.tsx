@@ -465,3 +465,20 @@ test("an unrelated session with the same recorded model does not inherit a picke
     expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
   } finally { await mounted.cleanup() }
 }))
+
+test("a standalone command's recorded model cannot replace the picker recovery for its session", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({ model: "ollama/missing" })
+    try {
+      const chosen = { providerID: "opencode", modelID: "zen-model" }
+      const command = { providerID: "altimate-free", modelID: "altimate-base" }
+      expect(mounted.local.model.validate(command)).toBe(true)
+      mounted.local.model.set(chosen)
+      mounted.local.model.adoptSession("ses_command")
+      mounted.route.navigate({ type: "session", sessionID: "ses_command" })
+      expect(mounted.local.model.restoreSession(command)).toBeUndefined()
+      expect(mounted.local.model.current()).toEqual(chosen)
+    } finally {
+      await mounted.cleanup()
+    }
+  }))
