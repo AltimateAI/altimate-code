@@ -416,6 +416,25 @@ it.instance("merges legacy and branded project TUI settings with JSONC precedenc
 )
 // altimate_change end
 
+// altimate_change start — branded files inside config directories migrate like the legacy names
+it.instance("migrates TUI keys from branded files inside config directories", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const local = path.join(test.directory, ".opencode")
+      yield* fs.makeDirectory(local, { recursive: true })
+      yield* fs.writeJson(path.join(local, "altimate-code.json"), { theme: "dir-branded", keybinds: { app_exit: "ctrl+q" } })
+      yield* fs.writeJson(path.join(local, "opencode.json"), { theme: "dir-legacy" })
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.theme).toBe("dir-legacy")
+      expect(config.keybinds.get("app.exit")?.[0]?.key).toBe("ctrl+q")
+      expect(JSON.parse(yield* fs.readFileString(path.join(local, "altimate-code.json")))).toEqual({})
+    }),
+  ),
+)
+// altimate_change end
+
 it.instance("migrates project legacy tui keys even when global tui.json already exists", () =>
   withCleanState(
     Effect.gen(function* () {

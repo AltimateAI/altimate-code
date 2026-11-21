@@ -816,6 +816,24 @@ describe("ACP service sessions", () => {
     expect(select(updated, "effort")?.currentValue).toBe("default")
   })
 
+  it("resumes from the last real prompt, skipping shell and direct MCP rows", async () => {
+    const { service } = makeService([
+      { info: { role: "user", model: { providerID: "test", modelID: "test-model", variant: "high" }, agent: "plan" }, parts: [] },
+      {
+        info: { role: "user", model: { providerID: "test", modelID: "test-model", variant: "default" }, agent: "build" },
+        parts: [{ type: "text", text: "The following tool was executed by the user", synthetic: true }],
+      },
+      {
+        info: { role: "user", model: { providerID: "test", modelID: "test-model", variant: "default" }, agent: "build" },
+        parts: [{ type: "text", text: "/mcps", metadata: { modelMetadataOnly: true } }],
+      },
+    ])
+    const resumed = await Effect.runPromise(
+      service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] }),
+    )
+    expect(select(resumed, "effort")?.currentValue).toBe("high")
+  })
+
   it("closes local ACP state and aborts the backing session best-effort", async () => {
     const { service, aborts } = makeService()
     const created = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))

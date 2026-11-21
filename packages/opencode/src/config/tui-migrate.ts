@@ -139,7 +139,9 @@ async function opencodeFiles(input: { directories: string[]; cwd: string; worktr
   const files = [...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"), ...walkedUp]
   // altimate_change end
   for (const dir of unique(input.directories)) {
-    files.push(...ConfigPaths.fileInDirectory(dir, "opencode"))
+    // altimate_change start — config directories also load branded names, below the legacy names
+    files.push(...ConfigPaths.fileInDirectory(dir, "opencode"), ...ConfigPaths.fileInDirectory(dir, "altimate-code"))
+    // altimate_change end
   }
   if (Flag.OPENCODE_CONFIG) files.push(Flag.OPENCODE_CONFIG)
   // altimate_change start — upstream_fix: include managed config dir in TUI migration

@@ -44,6 +44,10 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
 import type { Command } from "@/command"
+// altimate_change start — skip display-only model rows when restoring a session
+import { ModelMetadata } from "@/altimate/session/model-metadata"
+import type { MessageV2 } from "@/session/message-v2"
+// altimate_change end
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
 // altimate_change end
@@ -226,7 +230,7 @@ export function make(input: {
       () => input.sdk.session.messages({ directory: params.cwd, sessionID: params.sessionId }, { throwOnError: true }),
       "session",
     )
-    const restored = restoreFromMessages(messages.map((item) => item.info))
+    const restored = restoreFromMessages(messages)
     // altimate_change start — fail closed when a legacy session has no usable model and do not pair a fallback with stale effort
     const restoredModel = availableModel(snapshot, restored.model)
     const model = restoredModel ?? (yield* requireDefaultModel(snapshot))
@@ -317,7 +321,7 @@ export function make(input: {
         ),
       "session",
     )
-    const restored = restoreFromMessages(messages.map((item) => item.info))
+    const restored = restoreFromMessages(messages)
     // altimate_change start — fail closed when a resumed session has no usable model and do not pair a fallback with stale effort
     const restoredModel = availableModel(snapshot, restored.model)
     const model = restoredModel ?? (yield* requireDefaultModel(snapshot))
@@ -387,7 +391,7 @@ export function make(input: {
         ),
       "session",
     )
-    const sourceRestored = restoreFromMessages(sourceMessages.map((item) => item.info))
+    const sourceRestored = restoreFromMessages(sourceMessages)
     const fallbackModel = availableModel(snapshot, sourceRestored.model) ?? (yield* requireDefaultModel(snapshot))
     // altimate_change end
     const forked = yield* request(
@@ -406,7 +410,7 @@ export function make(input: {
         input.sdk.session.messages({ directory: params.cwd, sessionID: forked.id, limit: 20 }, { throwOnError: true }),
       "session",
     )
-    const restored = restoreFromMessages(messages.map((item) => item.info))
+    const restored = restoreFromMessages(messages)
     // altimate_change start — fail closed when a fork has no usable model and do not pair a fallback with stale effort
     const restoredModel = availableModel(snapshot, restored.model)
     const model = restoredModel ?? fallbackModel
@@ -1204,10 +1208,17 @@ function stableStringify(value: unknown): string {
     .join(",")}}`
 }
 
-function restoreFromMessages(messages: readonly MessageInfo[]) {
-  const user = messages.findLast(
-    (message) => message.role === "user" && message.model?.providerID && message.model.modelID,
-  )
+// altimate_change start — shell and direct MCP rows record a display-only model; restore skips them
+function restoreFromMessages(items: readonly { info: MessageInfo; parts?: readonly unknown[] }[]) {
+  const messages = items.map((item) => item.info)
+  const user = items.findLast(
+    (item) =>
+      item.info.role === "user" &&
+      item.info.model?.providerID &&
+      item.info.model.modelID &&
+      !ModelMetadata.isModelMetadataOnly((item.parts ?? []) as MessageV2.Part[]),
+  )?.info
+  // altimate_change end
   if (user?.model?.providerID && user.model.modelID) {
     return {
       model: { providerID: user.model.providerID as ProviderV2.ID, modelID: user.model.modelID as ModelV2.ID },
