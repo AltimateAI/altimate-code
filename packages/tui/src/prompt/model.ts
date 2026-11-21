@@ -83,3 +83,17 @@ export function isServerReportedModelError(error: unknown): boolean {
 export function invalidModelOpensPicker(input: { ready: boolean; readyPending: boolean }) {
   return !input.ready && !input.readyPending
 }
+
+// Submit-time check for the selected model. `validate` shows the error toast for an unavailable
+// model; a user without a usable provider also gets the picker. Returns whether submission continues.
+export function acceptSubmissionModel<Model>(input: {
+  model: Model | undefined
+  validate: (model: Model) => boolean
+  ready: () => boolean
+  readyPending: () => boolean
+  openPicker: () => void
+}) {
+  if (input.model === undefined || input.validate(input.model)) return true
+  if (invalidModelOpensPicker({ ready: input.ready(), readyPending: input.readyPending() })) input.openPicker()
+  return false
+}

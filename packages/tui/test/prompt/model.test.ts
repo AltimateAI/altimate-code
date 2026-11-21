@@ -5,6 +5,7 @@ import {
   captureDraftRevision,
   catalogGate,
   isModelMetadataOnly,
+  acceptSubmissionModel,
   invalidModelOpensPicker,
   isServerReportedModelError,
   resolveCommandAgent,
@@ -167,4 +168,28 @@ test("an unavailable model opens the picker only for a user without a usable pro
   expect(invalidModelOpensPicker({ ready: false, readyPending: false })).toBe(true)
   expect(invalidModelOpensPicker({ ready: true, readyPending: false })).toBe(false)
   expect(invalidModelOpensPicker({ ready: false, readyPending: true })).toBe(false)
+})
+
+test("submit-time model check shows the error, opens the picker for a new user and keeps the draft", () => {
+  const run = (valid: boolean, ready: boolean, readyPending = false) => {
+    const calls = { validated: [] as string[], picker: 0 }
+    const accepted = acceptSubmissionModel({
+      model: "missing/model",
+      validate: (model) => {
+        calls.validated.push(model)
+        return valid
+      },
+      ready: () => ready,
+      readyPending: () => readyPending,
+      openPicker: () => calls.picker++,
+    })
+    return { accepted, ...calls }
+  }
+  expect(run(false, false)).toEqual({ accepted: false, validated: ["missing/model"], picker: 1 })
+  expect(run(false, true)).toEqual({ accepted: false, validated: ["missing/model"], picker: 0 })
+  expect(run(false, false, true)).toEqual({ accepted: false, validated: ["missing/model"], picker: 0 })
+  expect(run(true, false)).toEqual({ accepted: true, validated: ["missing/model"], picker: 0 })
+  expect(
+    acceptSubmissionModel({ model: undefined, validate: () => false, ready: () => false, readyPending: () => false, openPicker: () => {} }),
+  ).toBe(true)
 })
