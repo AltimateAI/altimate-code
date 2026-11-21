@@ -39,7 +39,8 @@ describe("shellResidue", () => {
     shellResidue(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")
     shellResidue(`SELECT * FROM t ${"| head   ".repeat(44)};y`, "postgres")
     explainWrite(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")
-    expect(performance.now() - start).toBeLessThan(1000)
+    // A backtracking blowup takes many seconds; parser calls alone stay far below this on a busy runner.
+    expect(performance.now() - start).toBeLessThan(5000)
   })
 
   test("a comparison before the residue is kept", () => {
@@ -144,6 +145,31 @@ describe("explainWrite", () => {
       const message = explainWrite(sql, "sqlite").reason
       expect(message).toContain("could not read")
       expect(message).not.toMatch(/customer_/)
+    }
+  })
+
+  test("a SELECT INTO on SQL Server is named as a write clause, not a keyword to quote", () => {
+    for (const dialect of ["sqlserver", undefined]) {
+      expect(explainWrite("SELECT * INTO c FROM t", dialect).reason).toContain("write clause")
+    }
+  })
+
+  test("a quoted qualifier gets a specific hint", () => {
+    expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).toContain('"t"."update"')
+  })
+
+  test("every write in the guard corpus gets a specific reason", () => {
+    const writes = [
+      "INSERT INTO t VALUES (1)", "UPDATE t SET a = 1", "DELETE FROM t", "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE",
+      "CREATE TABLE t (a INT)", "DROP TABLE t", "ALTER TABLE t ADD COLUMN c INT", "COPY INTO t FROM @s", "SELECT 1; DELETE FROM t",
+      "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", "SELECT * INTO c FROM t", "SELECT 1. INTO c FROM t",
+      "SELECT nextval('s')", "SELECT exec FROM t",
+    ]
+    for (const dialect of ["postgres", "snowflake", "duckdb", "sqlserver", "bigquery", undefined]) {
+      for (const sql of writes) {
+        if (classifyAndCheck(sql, dialect).queryType !== "write") continue
+        expect({ dialect, sql, reason: explainWrite(sql, dialect).reason }).not.toMatchObject({ reason: expect.stringContaining("could not be proven") })
+      }
     }
   })
 

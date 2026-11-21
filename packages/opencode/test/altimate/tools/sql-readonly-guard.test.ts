@@ -247,5 +247,6 @@ describe("denied write message branches", () => {
     const message = deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((", dialects: ["postgres", "snowflake"], warehouseGiven: false })
     expect(message).toContain("pass warehouse")
     expect(deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((" })).not.toContain("pass warehouse")
+    expect(deniedWriteMessage({ ...base, sql: "DELETE FROM t WHERE ((", readOnly: false })).toContain("may still deny it")
   })
 })

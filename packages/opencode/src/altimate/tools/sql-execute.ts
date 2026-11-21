@@ -774,6 +774,7 @@ export function deniedWriteMessage(input: {
   const { reason, unreadable } = explainWrite(input.sql, dialect)
   const next = unreadable
     ? "Fix the query and call sql_execute again; the same text will be refused again." +
+      (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
       (input.warehouseGiven || input.dialects.length < 2
         ? ""
         : " No warehouse was given, so the query was read in every dialect it could reach; pass warehouse to read it in that warehouse's dialect only.")

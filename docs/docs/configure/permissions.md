@@ -255,7 +255,7 @@ When prompted, you have three choices:
 
 `sql_execute` parses each query and asks for `sql_execute_write` only when a statement is not a read. Comments, string literals, and column names such as `update_ts`, `t.update` or `s.t.update` do not count; a quoted or bracketed qualifier (`"t".update`) still asks. SQL the parser cannot read is treated as a write, so it is never run without write permission.
 
-When an agent's `sql_execute_write` is `"deny"`, the tool error tells the agent why the query counted as a write and what to change: the statement that writes, the parser error and its position, or trailing shell syntax such as `2>/dev/null` to remove.
+When an agent's `sql_execute_write` is `"deny"`, the tool error tells the agent why the query counted as a write and what to change: the statement that writes, the parser error and its position, or shell syntax such as `2>/dev/null` to remove.
 
 ## Tips
 

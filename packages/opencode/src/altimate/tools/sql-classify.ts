@@ -635,6 +635,12 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
     // A statement that is itself a write is named by its type, before any batch keyword inside it.
     if (parsed && parsed.category !== "query") return writes(`${where} is not a read (${type})`)
+    if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
+      return writes(
+        `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
+          'or a write keyword after a quoted name such as "t".update: quote the column too, "t"."update")',
+      )
+    }
     const keyword = batchedStatement(masked, dialect)
     if (keyword) {
       const engine = /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
@@ -654,9 +660,6 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
       return writes(`${where} runs a command through TRANSFORM ... USING`)
     }
     if (advancesSequence(tokens, masked, dialect)) return writes(`${where} advances a sequence`)
-    if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
-      return writes(`${where} contains a write clause (SELECT ... INTO, or INSERT/UPDATE/DELETE/MERGE inside a CTE)`)
-    }
     if (parsed?.category !== "query") return writes(`${where} is not a read (${type})`)
     return writes(`${where} could not be proven read-only`)
   }
