@@ -2298,7 +2298,8 @@ export namespace SessionPrompt {
           : undefined
       // altimate_change end
       // altimate_change start — record a request sent without tools; its usage cannot calibrate the guard
-      if (echoCommittedAnswer || textFinalStep)
+      // (an answer echo, the final step, or a deadline finalization)
+      if (echoCommittedAnswer || textFinalStep || RunBudgetEffort.toolsDisabled(sessionID))
         processor.message.metadata = { ...processor.message.metadata, [SENT_WITHOUT_TOOLS]: true }
       // altimate_change end
       const result = await processor.process({

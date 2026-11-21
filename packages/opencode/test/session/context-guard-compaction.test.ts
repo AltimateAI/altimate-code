@@ -31,6 +31,7 @@ import {
   InputTokenBudgetError,
   OutputTokenBudgetError,
   ReasoningTokenBudgetError,
+  attachmentTokenAllowance,
   calibratedInputTokens,
   estimateInputTokens,
   estimateTextTokens,
@@ -739,6 +740,20 @@ describe("guard calibration", () => {
       ),
     ).toBe(false)
     expect(isContextBudgetError(new Error("Context budget exceeded before the request was sent."))).toBe(false)
+  })
+})
+
+describe("attachment allowance", () => {
+  test("charges an unmeasured attachment what the guard's own estimate charges it", () => {
+    const png = `data:image/png;base64,${PNG_BASE64}`
+    const viaEstimate =
+      estimateInputTokens({
+        system: [],
+        messages: [{ role: "user", content: [{ type: "file", mediaType: "image/png", data: png }] }],
+      }) - estimateInputTokens({ system: [], messages: [{ role: "user", content: [] }] })
+    expect(attachmentTokenAllowance("image/png", png)).toBe(2_048)
+    expect(viaEstimate).toBeGreaterThanOrEqual(2_048)
+    expect(attachmentTokenAllowance("application/pdf", "https://example.com/report.pdf")).toBeGreaterThanOrEqual(32_768)
   })
 })
 
