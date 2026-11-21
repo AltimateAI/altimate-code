@@ -2017,14 +2017,16 @@ export namespace Provider {
       // altimate_change end
       const data = database[providerID]
       // altimate_change start — skip provider discovery and OAuth-backed loaders in offline mode
-      if (Offline.enabled()) continue
+      const permittedOfflineLoader = Offline.enabled() && (id === "openai" || id === "anthropic") &&
+        Boolean(Offline.endpoint(config, providerID))
+      if (Offline.enabled() && !permittedOfflineLoader) continue
       // altimate_change end
       if (!data) {
         log.error("Provider does not exist in model list " + providerID)
         continue
       }
       const result = await fn(data)
-      if (result && (result.autoload || providers[providerID])) {
+      if (result && (result.autoload || providers[providerID] || permittedOfflineLoader)) {
         if (result.getModel) modelLoaders[providerID] = result.getModel
         if (result.vars) varsLoaders[providerID] = result.vars
         const opts = result.options ?? {}

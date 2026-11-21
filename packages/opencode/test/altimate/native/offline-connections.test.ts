@@ -42,6 +42,7 @@ test("dbt checks selected target and CLI overrides", async () => {
     await expect(assertLocalDbt(root, [...args, "--target=remote"])).rejects.toThrow("Offline mode")
     await expect(assertLocalDbt(root, [...args, "--target", "local", "-t", "remote"])).rejects.toThrow("Offline mode")
     await expect(assertLocalDbt(root, [...args, "-t", "remote", "--target", "local"])).resolves.toBeUndefined()
+    await expect(assertLocalDbt(root, [...args, "--target", "local", "-tremote"])).rejects.toThrow("Offline mode")
     await expect(assertLocalDbt(root, args, "cloud")).rejects.toThrow("Offline mode")
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })

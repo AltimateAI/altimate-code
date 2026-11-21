@@ -138,6 +138,7 @@ import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_chan
 import {
   canonicalDirectory,
   endTurnBinding,
+  resolveBindingOutcome,
   turnBinding,
   unvalidatedTurnBinding,
   type AccountKey,
@@ -481,8 +482,11 @@ export namespace SessionPrompt {
     if (Offline.enabled()) {
       const dir = Instance.directory
       const writeOfflineNotice = async () => {
-        const { ownManifest } = await import("../altimate/workspace/skill-sync")
-        await Offline.announce((await ownManifest(dir)) !== null)
+        const { ownManifest, snapshotKnownEmpty } = await import("../altimate/workspace/skill-sync")
+        const snapshot = await ownManifest(dir)
+        const binding = snapshot ? null : await resolveBindingOutcome(dir)
+        const empty = binding?.status === "bound" && await snapshotKnownEmpty(dir, binding.binding.datamateId)
+        await Offline.announce(snapshot !== null, empty)
         await refreshSkillRegistry(dir)
       }
       const notice = writeOfflineNotice().catch((error) => log.warn("offline skill snapshot setup failed", { error }))

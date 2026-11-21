@@ -22,9 +22,15 @@ export async function assertLocalDbt(projectRoot: string, args: string[] = [], i
     let result: string | undefined
     for (let i = 0; i < args.length; i++) {
       const arg = args[i]
-      const equals = arg.indexOf("=")
-      const name = equals < 0 ? arg : arg.slice(0, equals)
-      if (names.includes(name)) result = equals < 0 ? args[++i] : arg.slice(equals + 1)
+      if (arg === "--") break
+      for (const name of names) {
+        if (arg === name) {
+          result = args[++i]
+          break
+        }
+        const prefix = name.startsWith("--") ? name + "=" : name
+        if (arg.startsWith(prefix)) result = arg.slice(prefix.length)
+      }
     }
     return result
   }

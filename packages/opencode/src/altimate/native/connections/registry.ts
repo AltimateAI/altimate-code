@@ -681,7 +681,10 @@ export async function get(name: string): Promise<Connector> {
   if (cached) {
     // altimate_change — apply the offline policy before using a cached connection
     const configured = configs.get(name)
-    if (Offline.enabled() && configured) assertLocalConnection(await resolveConfig(name, normalizeConfig(configured)))
+    if (Offline.enabled() && configured) {
+      assertLocalConnection(await resolveConfig(name, normalizeConfig(configured)))
+      if (connectors.get(name) !== cached || configs.get(name) !== configured) return get(name)
+    }
     // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
     SignInNotice.rememberOrigin(accountOf(configs.get(name)))
     // altimate_change end

@@ -307,6 +307,14 @@ test("offline model transport bypasses proxy settings and refuses redirects", as
             console.log("cross-origin request refused")
           }
           try {
+            const modelScoped = Offline.modelFetch(new URL("/v1", process.env.OFFLINE_TEST_MODEL).href)
+            await modelScoped(new URL("/v10/admin", process.env.OFFLINE_TEST_MODEL))
+            throw new Error("different endpoint path was accepted")
+          } catch (error) {
+            if (!error.message.includes("outside the configured model endpoint")) throw error
+            console.log("other model host path refused")
+          }
+          try {
             await request(new URL("/redirect", process.env.OFFLINE_TEST_MODEL))
             throw new Error("redirect was accepted")
           } catch (error) {
@@ -338,7 +346,7 @@ test("offline model transport bypasses proxy settings and refuses redirects", as
     ])
     expect({ code, stdout, stderr }).toEqual({
       code: 0,
-      stdout: "direct model response\ncross-origin request refused\nredirect refused\n",
+      stdout: "direct model response\ncross-origin request refused\nother model host path refused\nredirect refused\n",
       stderr: "",
     })
     expect(proxyCalls).toBe(0)

@@ -190,7 +190,13 @@ export async function ownManifest(directory: string): Promise<Manifest | null> {
       manifest.tenant === creds.altimateInstanceName &&
       manifest.apiUrl === creds.altimateUrl &&
       manifest.account === credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
-    return ours ? manifest : null
+    if (!ours) return null
+    // altimate_change — hide a stale workspace snapshot offline without removing it
+    if (Offline.enabled()) {
+      const local = await readLocalBinding(directory)
+      if (local && local.datamateId !== manifest.datamateId) return null
+    }
+    return manifest
   } catch {
     return null
   }

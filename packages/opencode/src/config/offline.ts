@@ -119,10 +119,14 @@ export function modelFetch(baseURL: string | undefined): typeof fetch {
   const endpoint = new URL(baseURL)
   if (!["http:", "https:"].includes(endpoint.protocol))
     throw new Error("Offline mode requires an HTTP(S) model endpoint.")
+  const basePath = endpoint.pathname.replace(/\/+$/, "")
   return Object.assign(
     async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       const target = new URL(input instanceof Request ? input.url : input.toString())
-      if (target.origin !== endpoint.origin)
+      if (
+        target.origin !== endpoint.origin ||
+        (target.pathname !== basePath && !target.pathname.startsWith(basePath + "/"))
+      )
         throw new Error("Offline mode blocked a request outside the configured model endpoint.")
       return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: undefined })
     },
@@ -161,16 +165,27 @@ export function localFetch(): typeof fetch {
 
 let warned = false
 
-export async function announce(hasSnapshot: boolean) {
+export async function announce(hasSnapshot: boolean, knownEmpty = false) {
   if (warned) return
   warned = true
-  const message = hasSnapshot
-    ? "Using cached workspace skills."
-    : "No usable workspace skill snapshot. To use workspace skills, run altimate-code workspace refresh while online."
-  const { isHeadless } = await import("@/altimate/workspace/engine-seams")
-  const { notify, printLine } = await import("@/altimate/workspace/engine-probes")
-  if (isHeadless()) printLine(`Offline mode: ${message}`)
-  else await notify({ title: "Offline mode", message, variant: hasSnapshot ? "info" : "warning" })
+  let delivered = false
+  try {
+    const message = hasSnapshot
+      ? "Using cached workspace skills."
+      : knownEmpty
+        ? "This workspace has no custom skills."
+        : "No usable workspace skill snapshot. To use workspace skills, run altimate-code workspace refresh while online."
+    const { isHeadless } = await import("@/altimate/workspace/engine-seams")
+    const { notify, printLine } = await import("@/altimate/workspace/engine-probes")
+    if (isHeadless()) {
+      printLine(`Offline mode: ${message}`)
+      delivered = true
+    } else {
+      delivered = await notify({ title: "Offline mode", message, variant: hasSnapshot || knownEmpty ? "info" : "warning" })
+    }
+  } finally {
+    if (!delivered) warned = false
+  }
 }
 
 export * as Offline from "./offline"
