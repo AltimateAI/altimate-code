@@ -67,6 +67,7 @@ const AGENT = {
 }
 
 async function mount(args: {
+  providersReady?: Promise<void>
   model?: string
   configModel?: string
   agentModel?: { providerID: string; modelID: string }
@@ -80,8 +81,8 @@ async function mount(args: {
     { ToastProvider, useToast },
     { SDKProvider },
     { ProjectProvider },
-    { SyncProvider },
-    { RouteProvider },
+    { SyncProvider, useSync },
+    { RouteProvider, useRoute },
     { ExitProvider },
     { TuiConfigProvider },
   ] = await Promise.all([
@@ -108,8 +109,8 @@ async function mount(args: {
 
   const inner = createFetch((url) => {
     if (url.pathname === "/instance/dispose") return json({})
-    if (url.pathname === "/config/providers")
-      return json({ providers: [ZEN_PROVIDER, BASE_PROVIDER], default: {} })
+    if (url.pathname === "/mcp" && args.providersReady) return args.providersReady.then(() => json({}))
+    if (url.pathname === "/config/providers") return json({ providers: [ZEN_PROVIDER, BASE_PROVIDER], default: {} })
     if (url.pathname === "/provider")
       return json({ all: [ZEN_PROVIDER, BASE_PROVIDER], default: {}, connected: ["opencode", "altimate-free"] })
     if (url.pathname === "/config") return json(args.configModel === undefined ? {} : { model: args.configModel })
@@ -119,10 +120,14 @@ async function mount(args: {
   })
   const source = createEventSource()
 
+  let routeAccessor: ReturnType<typeof useRoute> | undefined
+  let syncAccessor: ReturnType<typeof useSync> | undefined
   let localAccessor: ReturnType<typeof useLocal> | undefined
   let kvAccessor: ReturnType<typeof useKV> | undefined
   let toastAccessor: ReturnType<typeof useToast> | undefined
   function Capture() {
+    routeAccessor = useRoute()
+    syncAccessor = useSync()
     kvAccessor = useKV()
     toastAccessor = useToast()
     localAccessor = useLocal()
@@ -157,11 +162,18 @@ async function mount(args: {
     </TestTuiContexts>
   ))
   await app.renderOnce()
-  await waitUntil(() => localAccessor !== undefined && localAccessor.model.ready)
+  await waitUntil(
+    () =>
+      localAccessor !== undefined &&
+      localAccessor.model.ready &&
+      (args.providersReady !== undefined || syncAccessor?.status === "complete"),
+  )
   const local = localAccessor!
 
   return {
     local,
+    sync: syncAccessor!,
+    route: routeAccessor!,
     toast: toastAccessor!,
     async cleanup() {
       app.renderer.destroy()
@@ -239,16 +251,44 @@ for (const scenario of [
     args: { model: "ollama/local", agentModel: { providerID: "opencode", modelID: "zen-model" } },
     expected: { providerID: "ollama", modelID: "local" },
   },
-  { name: "CLI missing provider", args: { model: "ollama/local" }, expected: { providerID: "ollama", modelID: "local" } },
-  { name: "CLI missing model", args: { model: "opencode/missing" }, expected: { providerID: "opencode", modelID: "missing" } },
+  {
+    name: "CLI missing provider",
+    args: { model: "ollama/local" },
+    expected: { providerID: "ollama", modelID: "local" },
+  },
+  {
+    name: "CLI missing model",
+    args: { model: "opencode/missing" },
+    expected: { providerID: "opencode", modelID: "missing" },
+  },
   { name: "empty CLI", args: { model: "" }, expected: { providerID: "", modelID: "" } },
   { name: "empty config", args: { configModel: "" }, expected: { providerID: "", modelID: "" } },
   { name: "malformed CLI", args: { model: "local" }, expected: { providerID: "local", modelID: "" } },
-  { name: "config missing provider", args: { configModel: "ollama/local" }, expected: { providerID: "ollama", modelID: "local" } },
-  { name: "config missing model", args: { configModel: "opencode/missing" }, expected: { providerID: "opencode", modelID: "missing" } },
-  { name: "agent missing provider", args: { agentModel: { providerID: "ollama", modelID: "local" } }, expected: { providerID: "ollama", modelID: "local" } },
-  { name: "agent missing model", args: { agentModel: { providerID: "opencode", modelID: "missing" } }, expected: { providerID: "opencode", modelID: "missing" } },
-  { name: "CLI overrides valid config", args: { model: "ollama/local", configModel: "opencode/zen-model" }, expected: { providerID: "ollama", modelID: "local" } },
+  {
+    name: "config missing provider",
+    args: { configModel: "ollama/local" },
+    expected: { providerID: "ollama", modelID: "local" },
+  },
+  {
+    name: "config missing model",
+    args: { configModel: "opencode/missing" },
+    expected: { providerID: "opencode", modelID: "missing" },
+  },
+  {
+    name: "agent missing provider",
+    args: { agentModel: { providerID: "ollama", modelID: "local" } },
+    expected: { providerID: "ollama", modelID: "local" },
+  },
+  {
+    name: "agent missing model",
+    args: { agentModel: { providerID: "opencode", modelID: "missing" } },
+    expected: { providerID: "opencode", modelID: "missing" },
+  },
+  {
+    name: "CLI overrides valid config",
+    args: { model: "ollama/local", configModel: "opencode/zen-model" },
+    expected: { providerID: "ollama", modelID: "local" },
+  },
 ]) {
   test(`unavailable explicit ${scenario.name} cannot silently select registered cloud Base`, () =>
     withIsolatedState(async () => {
@@ -256,11 +296,13 @@ for (const scenario of [
       try {
         await waitUntil(() => local_model_is(mounted, scenario.expected.providerID, scenario.expected.modelID))
         expect(mounted.local.model.current()).toEqual(scenario.expected)
-        mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
-        expect(mounted.local.model.current()).toEqual(scenario.expected)
         expect(mounted.local.model.validate()).toBe(false)
         await waitUntil(() => mounted.toast.currentToast?.variant === "error")
-        expect(mounted.toast.currentToast?.message).toContain(`${scenario.expected.providerID}/${scenario.expected.modelID}`)
+        expect(mounted.toast.currentToast?.message).toContain(
+          scenario.expected.providerID || scenario.expected.modelID
+            ? `${scenario.expected.providerID}/${scenario.expected.modelID}`
+            : "Empty model value",
+        )
         expect(mounted.toast.currentToast?.message).toContain("/models")
         expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
         mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
@@ -269,8 +311,7 @@ for (const scenario of [
       } finally {
         await mounted.cleanup()
       }
-    }),
-  )
+    }))
 }
 
 test("stale implicit recent model still falls back to registered Base", () =>
@@ -282,6 +323,97 @@ test("stale implicit recent model still falls back to registered Base", () =>
     } finally {
       await mounted.cleanup()
     }
-  }),
-)
+  }))
 // upstream_fix end
+
+for (const configModel of ["ollama/missing", "opencode/zen-model"]) {
+  test(`restored session outranks global default ${configModel}`, () =>
+    withIsolatedState(async () => {
+      const mounted = await mount({ configModel })
+      try {
+        mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
+        expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
+        expect(mounted.local.model.validate()).toBe(true)
+      } finally {
+        await mounted.cleanup()
+      }
+    }))
+}
+
+test("unavailable restored session stays selected instead of falling back", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({})
+    try {
+      mounted.local.model.restoreSession({ providerID: "ollama", modelID: "missing" })
+      expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
+      expect(mounted.local.model.validate()).toBe(false)
+    } finally {
+      await mounted.cleanup()
+    }
+  }))
+
+test("provider refresh does not repeat the same invalid-model toast", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({ model: "ollama/missing" })
+    try {
+      await waitUntil(() => mounted.toast.currentToast?.variant === "error")
+      mounted.toast.show({ variant: "info", message: "Another notification" })
+      await mounted.sync.bootstrap()
+      expect(mounted.local.model.validate()).toBe(false)
+      expect(mounted.toast.currentToast?.message).toBe("Another notification")
+      mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
+      expect(mounted.local.model.validate()).toBe(true)
+      expect(mounted.local.model.validate({ providerID: "ollama", modelID: "missing" })).toBe(false)
+      expect(mounted.toast.currentToast?.variant).toBe("error")
+    } finally {
+      await mounted.cleanup()
+    }
+  }))
+
+test("incomplete bootstrap defers validation without an unavailable-model toast", () =>
+  withIsolatedState(async () => {
+    const ready = Promise.withResolvers<void>()
+    const mounted = await mount({ model: "opencode/zen-model", providersReady: ready.promise })
+    try {
+      expect(mounted.sync.status).not.toBe("complete")
+      expect(mounted.local.model.validate()).toBe(false)
+      expect(mounted.toast.currentToast).toBeNull()
+      ready.resolve()
+      await waitUntil(() => mounted.sync.status === "complete")
+      expect(mounted.local.model.validate()).toBe(true)
+      expect(mounted.toast.currentToast).toBeNull()
+    } finally {
+      ready.resolve()
+      await mounted.cleanup()
+    }
+  }))
+
+for (const args of [
+  { model: "ollama/missing" },
+  { model: "opencode/zen-model" },
+  { agentModel: { providerID: "ollama", modelID: "missing" } },
+  { agentModel: { providerID: "opencode", modelID: "zen-model" } },
+]) {
+  test(`session restoration respects explicit CLI or agent override ${JSON.stringify(args)}`, () =>
+    withIsolatedState(async () => {
+      const mounted = await mount(args)
+      try {
+        const requested = mounted.local.model.current()
+        mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
+        expect(mounted.local.model.current()).toEqual(requested)
+      } finally {
+        await mounted.cleanup()
+      }
+    }))
+}
+
+test("restored history cannot override project model after leaving the session", () => withIsolatedState(async () => {
+  const mounted = await mount({ configModel: "ollama/missing" })
+  try {
+    mounted.route.navigate({ type: "session", sessionID: "ses_restored" })
+    mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
+    expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
+    mounted.route.navigate({ type: "home" })
+    expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
+  } finally { await mounted.cleanup() }
+}))

@@ -1,3 +1,4 @@
+import { isModelMetadataOnly, submissionModel } from "../../prompt/model"
 import {
   BoxRenderable,
   RGBA,
@@ -321,7 +322,7 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) return undefined
     const messages = sync.data.message[props.sessionID]
     if (!messages) return undefined
-    return messages.findLast((m): m is UserMessage => m.role === "user")
+    return messages.findLast((m): m is UserMessage => m.role === "user" && !isModelMetadataOnly(sync.data.part[m.id] ?? []))
   })
 
   const usage = createMemo(() => {
@@ -388,7 +389,7 @@ export function Prompt(props: PromptProps) {
     const msg = lastUserMessage()
 
     if (sessionID !== syncedSessionID) {
-      if (!sessionID || !msg) return
+      if (!sessionID || !msg || sync.status !== "complete" || !local.model.ready) return
 
       syncedSessionID = sessionID
 
@@ -1071,9 +1072,13 @@ export function Prompt(props: PromptProps) {
   // `submitInner`, not this snapshot, so the two can never drift apart when nothing changed;
   // `unwrap` matches the same store-to-plain-object pattern already used elsewhere in this file,
   // e.g. the prompt stash below.)
-  const deferredSubmit = createDeferredRetry(readyPending, () => void submit(), {
-    getRevision: () => unwrap(store.prompt),
-  })
+  const deferredSubmit = createDeferredRetry(
+    () => readyPending() || sync.status !== "complete" || !local.model.ready,
+    () => void submit(),
+    {
+      getRevision: () => unwrap(store.prompt),
+    },
+  )
   // altimate_change end
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
@@ -1118,14 +1123,33 @@ export function Prompt(props: PromptProps) {
     const commandName = promptText.startsWith("/") ? promptText.split("\n")[0].split(" ")[0].slice(1) : undefined
     const command = sync.data.command.find((item) => item.name === commandName)
     const commandAgent = command?.agent && sync.data.agent.find((item) => item.name === command.agent)
-    const hasCommandModel = command?.model !== undefined || Boolean(commandAgent && commandAgent.model)
-    const usesChatModel = store.mode !== "shell" && command?.name !== "mcps" && !hasCommandModel
-    if (usesChatModel && local.model.current() && !local.model.validate()) return false
+    const selection = submissionModel({
+      shell: store.mode === "shell",
+      text: promptText,
+      command,
+      commandAgentModel: commandAgent ? commandAgent.model : undefined,
+      commandAgentMode: commandAgent ? commandAgent.mode : undefined,
+      current: local.model.current(),
+    })
+    if (selection.required) {
+      if (sync.status !== "complete" || !local.model.ready) {
+        deferredSubmit.defer()
+        return false
+      }
+      if (selection.model && !local.model.validate(selection.model)) return false
+      if (selection.subtask) {
+        if (!selection.parent) {
+          void promptModelWarning()
+          return false
+        }
+        if (!local.model.validate(selection.parent)) return false
+      }
+    }
     // altimate_change end
     // altimate_change start — first-run gate without dead chat / error copy: a normal
     // message with no provider ready opens the welcome picker (the message is
     // discarded) with a friendly line, rather than erroring.
-    if (!ready()) {
+    if (selection.required && !ready()) {
       // altimate_change — Codex HOLD finding 1: `readyPending()` (see its declaration above)
       // means readiness genuinely cannot be decided yet — kv is still hydrating, and none of
       // `connected()`/`setupComplete()` are already true either. Discarding the prompt and
@@ -1168,8 +1192,8 @@ export function Prompt(props: PromptProps) {
       return false
     }
     // altimate_change end
-    const selectedModel = local.model.current()
-    if (!selectedModel) {
+    const selectedModel = selection.subtask ? local.model.current() : selection.model ?? local.model.current()
+    if (selection.required && !selectedModel) {
       void promptModelWarning()
       return false
     }
@@ -1204,11 +1228,13 @@ export function Prompt(props: PromptProps) {
         directory,
         workspace: workspaceID,
         agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          id: selectedModel.modelID,
-          variant,
-        },
+        model: selectedModel
+          ? {
+              providerID: selectedModel.providerID,
+              id: selectedModel.modelID,
+              variant,
+            }
+          : undefined,
       })
 
       if (res.error) {
@@ -1290,10 +1316,7 @@ export function Prompt(props: PromptProps) {
       void sdk.client.session.shell({
         sessionID,
         agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          modelID: selectedModel.modelID,
-        },
+        model: selectedModel,
         command: inputText,
       })
       setStore("mode", "normal")
@@ -1309,12 +1332,13 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
+      const chatModel = local.model.current()
       void sdk.client.session.command({
         sessionID,
         command: command.slice(1),
         arguments: args,
         agent: agent.name,
-        model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+        model: chatModel ? `${chatModel.providerID}/${chatModel.modelID}` : undefined,
         variant,
         parts: nonTextParts.filter((x) => x.type === "file"),
       })
