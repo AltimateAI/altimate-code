@@ -124,6 +124,10 @@ export function create() {
   // An overflow is recoverable only after compaction actually completes. In
   // particular, compaction can be disabled or its own summarizer can fail.
   let pendingContextOverflow = false
+  // Counted (non-compaction) steps since the last completed compaction. A
+  // recovery that closes an overflow with none of these is an unproductive
+  // overflow-and-compact cycle.
+  let countedStepsSinceRecovery = 0
   // State for the one-shot confirm-DONE prompt. Attribution follows the
   // actual challenge request lifetime, not step counts: one reply may use
   // several tool-call steps before its final DONE assertion.
@@ -173,6 +177,7 @@ export function create() {
     onStepStart(messageID: string): boolean {
       if (isCompactionStep(messageID)) return false
       turnCount++
+      countedStepsSinceRecovery++
       return true
     },
     get turnCount() {
@@ -248,7 +253,17 @@ export function create() {
     // altimate_change end
     /** Confirm that a previously reported context overflow recovered. */
     onCompactionRecovered() {
+      // A recovery that closes an overflow without a single counted step since
+      // the last one is an unproductive overflow-and-compact cycle: the next
+      // request starts without ever streaming a counted step-start (a pre-step
+      // overflow publishes nothing), so the step-start budget check never sees
+      // the cycle and `--max-turns` cannot bound it. Charge one turn per
+      // unproductive cycle. Recoveries that follow real work steps stay free —
+      // a step cut short mid-stream already cost its turn — and so does a
+      // compaction that completes without a pending overflow.
+      if (pendingContextOverflow && countedStepsSinceRecovery === 0) turnCount++
       pendingContextOverflow = false
+      countedStepsSinceRecovery = 0
     },
     // altimate_change start — retain turn-limit behavior while allowing an answered time-limit finalization
     onBudgetExhausted(kind: "turn" | "time" = "turn") {

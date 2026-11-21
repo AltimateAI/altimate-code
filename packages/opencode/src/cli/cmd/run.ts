@@ -1307,6 +1307,30 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "session.compacted" && event.properties.sessionID === sessionID) {
             accounting.onCompactionRecovered()
             recoverableOverflowTraceErrors.recover()
+            // altimate_change start — enforce the turn budget at the recovery boundary
+            // A pre-step overflow recovered by compaction starts the next request
+            // without streaming any counted step-start, so an every-request-
+            // overflows run never reaches the step-start budget check and loops
+            // overflow -> compaction forever. Each unproductive cycle is charged
+            // a turn (see onCompactionRecovered); abort here, where the cycle is
+            // visible, instead of waiting for a step that never comes.
+            if (
+              !budgetAborted &&
+              maxTurns &&
+              accounting.turnCount > maxTurns &&
+              (!timeExhausted() || options?.turnLimit !== undefined)
+            ) {
+              stopTimeBudget()
+              budgetAborted = true
+              accounting.onBudgetExhausted()
+              error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
+              if (!emit("budget_exhausted", { limit: maxTurns })) {
+                UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
+              }
+              await sdk.session.abort({ sessionID }, { signal: options?.signal })
+              continue
+            }
+            // altimate_change end
           }
           // altimate_change end
 

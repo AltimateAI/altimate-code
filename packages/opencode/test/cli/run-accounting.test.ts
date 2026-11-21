@@ -64,6 +64,49 @@ describe("RunAccounting turn accounting", () => {
     acc.onText("msg_compact", "summary text\nDONE")
     expect(acc.termination().why_model_stopped).toBe("stop")
   })
+
+  test("an overflow recovered with no counted step since the last recovery costs one turn per cycle", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
+    // every request overflows before any step starts; only compaction machinery streams
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onStepStart("msg_compact")
+    acc.onCompactionRecovered()
+    expect(acc.turnCount).toBe(1)
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onCompactionRecovered()
+    expect(acc.turnCount).toBe(2)
+  })
+
+  test("a recovery that follows counted work steps is free", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_work", agent: "build" })
+    acc.onStepStart("msg_work")
+    acc.onStepStart("msg_work")
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onCompactionRecovered()
+    expect(acc.turnCount).toBe(2)
+  })
+
+  test("a compaction without a pending overflow is free", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_work", agent: "build" })
+    acc.onCompactionRecovered()
+    expect(acc.turnCount).toBe(0)
+  })
+
+  test("work steps after a charged cycle make the next recovery free again", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
+    acc.onAssistantMessage({ id: "msg_work", agent: "build" })
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onCompactionRecovered() // unproductive cycle: charged
+    expect(acc.turnCount).toBe(1)
+    acc.onStepStart("msg_work")
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onCompactionRecovered() // a counted step ran since the last recovery
+    expect(acc.turnCount).toBe(2)
+  })
 })
 
 describe("RunAccounting termination attribution (E4)", () => {
