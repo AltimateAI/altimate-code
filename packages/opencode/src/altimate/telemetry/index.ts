@@ -2352,6 +2352,7 @@ export namespace Telemetry {
   // cleared and ship them under the NEXT lifecycle.
   let activeFlushAbort: AbortController | undefined
   let shuttingDown = false
+  let retainPendingOnShutdown = false
   // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
   // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
   let shutdownPromise: Promise<void> | undefined
@@ -2500,11 +2501,16 @@ export namespace Telemetry {
   const DEFAULT_CONNECTION_STRING =
     "InstrumentationKey=5095f5e6-477e-4262-b7ae-2118de18550d;IngestionEndpoint=https://eastus-8.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus.livediagnostics.monitor.azure.com/;ApplicationId=6564474f-329b-4b7d-849e-e70cb4181294"
 
+  function resolveScope(processWide = false) {
+    const instance = TelemetryConfig.instanceDirectory()
+    const directory = instance ?? (processWide ? configScope : undefined) ?? configDirectory
+    return { instance, directory, scope: directory ?? telemetryWorkingDirectory() }
+  }
+
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
-    const instance = TelemetryConfig.instanceDirectory()
-    const scope = instance ?? configDirectory ?? telemetryWorkingDirectory()
+    const { instance, scope } = resolveScope()
     if (scope === undefined) return Promise.resolve()
     // altimate_change start — never re-init across an in-flight shutdown.
     //
@@ -2545,7 +2551,7 @@ export namespace Telemetry {
       return reinitPromise
     }
     if (initPromise && configScope !== scope) {
-      return shutdown({ preserveUnresolved: true, timeoutMs: EXIT_FLUSH_BUDGET_MS }).then(() => init())
+      return shutdown({ preservePending: true, timeoutMs: EXIT_FLUSH_BUDGET_MS }).then(() => init())
     }
     if (!initDone && initPromise && instance) {
       // A session can join the middleware init while its local probe is still running.
@@ -2579,7 +2585,7 @@ export namespace Telemetry {
     if (earlyDrops) {
       const scopedDrops = droppedEvents.get(scope)
       droppedEvents.delete(undefined)
-      droppedEvents.set(scope, { count: (scopedDrops?.count ?? 0) + earlyDrops.count, held: scopedDrops?.held })
+      droppedEvents.set(scope, { count: (scopedDrops?.count ?? 0) + earlyDrops.count, held: scopedDrops?.held || earlyDrops.held })
     }
     const retry = (configUnresolved && configScope === scope) ||
       droppedEvents.get(scope)?.held ||
@@ -2774,7 +2780,7 @@ export namespace Telemetry {
   /** Returns true once telemetry is enabled for the calling project's config. */
   export function isEnabled(): boolean {
     if (!initDone || !enabled) return false
-    return configScope === (TelemetryConfig.instanceDirectory() ?? configDirectory ?? telemetryWorkingDirectory())
+    return configScope === resolveScope().scope
   }
 
   // altimate_change start — first-run health instrumentation (see the startup_ready, event_loop_stall
@@ -2928,11 +2934,9 @@ export namespace Telemetry {
   export function track(event: Event) {
     // Membership is decided when events are tracked, never by whichever
     // project happens to initialize before the next flush.
-    const directory = TelemetryConfig.instanceDirectory() ?? configDirectory ??
-      (event.type === "event_loop_stall" ? configScope : undefined)
-    const cwd = directory === undefined ? telemetryWorkingDirectory() : undefined
+    const caller = resolveScope(event.type === "event_loop_stall")
     // Keep events from an inaccessible directory unassigned until exit.
-    const scope = directory ?? (cwd === undefined ? null : configScope === undefined ? undefined : cwd)
+    const scope = caller.directory ?? (caller.scope === undefined ? null : configScope === undefined ? undefined : caller.scope)
     if (scope === configScope && initDone && !enabled && !configUnresolved) return
     // altimate_change start — stamp the client trace of the turn the event's own session is
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
@@ -3049,10 +3053,9 @@ export namespace Telemetry {
         }
       }
     } catch {
-      // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
-      // regardless, so re-inserting here does not save these events; it only leaves them to be
-      // shipped by whatever lifecycle comes next, under a different launch id.
-      if (shuttingDown) return
+      // altimate_change — only process exit drops unsent retries. A project handoff
+      // can retain them for the same scope without extending the transport deadline.
+      if (shuttingDown && !retainPendingOnShutdown) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
       // altimate_change — a batch never attempted (an earlier one failed) keeps its retry.
@@ -3095,7 +3098,7 @@ export namespace Telemetry {
   // `timeoutMs` bounds the flush from the inside. Racing shutdown() against an external timer
   // does NOT cancel it: the losing promise keeps running and resets module state after the
   // caller has already moved on. Exit paths pass a budget so the fetch itself is aborted.
-  export async function shutdown(opts?: { timeoutMs?: number; preserveUnresolved?: boolean }) {
+  export async function shutdown(opts?: { timeoutMs?: number; preservePending?: boolean }) {
     if (shutdownPromise) {
       // An earlier caller is mid-flush, possibly on the default 10s budget. Returning its promise
       // unchanged would silently ignore this caller's deadline and make the exit path wait past
@@ -3113,13 +3116,13 @@ export namespace Telemetry {
       if (timer) clearTimeout(timer)
       return
     }
-    shutdownPromise = doShutdown(opts?.timeoutMs, opts?.preserveUnresolved).finally(() => {
+    shutdownPromise = doShutdown(opts?.timeoutMs, opts?.preservePending).finally(() => {
       shutdownPromise = undefined
     })
     return shutdownPromise
   }
 
-  async function doShutdown(timeoutMs?: number, preserveUnresolved?: boolean) {
+  async function doShutdown(timeoutMs?: number, preservePending?: boolean) {
     const initPromiseAtShutdown = initPromise
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
@@ -3142,6 +3145,7 @@ export namespace Telemetry {
     // in mid-request is not abandoned and cannot write back into a buffer we are about to clear.
     const deadline = Date.now() + (timeoutMs ?? REQUEST_TIMEOUT_MS)
     shuttingDown = true
+    retainPendingOnShutdown = Boolean(preservePending)
     if (inFlightFlush) {
       // Bounded: a flush already in flight uses the DEFAULT request timeout, so awaiting it
       // unbounded could burn 10s before the bounded flush below even starts — well past the 5s
@@ -3170,20 +3174,21 @@ export namespace Telemetry {
         await inFlightFlush.catch(() => {})
       }
     }
-    // Whatever the drain left of the shared deadline, never below a floor that lets the request
-    // actually be made.
-    await flush(Math.max(250, deadline - Date.now()))
+    // Spend the remaining budget on a final flush if there is time. At process exit, reserve
+    // a small floor for the last attempt because there is no later lifecycle to retry it.
+    const remaining = deadline - Date.now()
+    if (!preservePending || remaining >= 250) await flush(Math.max(250, remaining))
     inFlightFlush = undefined
     shuttingDown = false
+    retainPendingOnShutdown = false
     enabled = false
     appInsights = undefined
-    if (!preserveUnresolved) {
+    if (!preservePending) {
       configUnresolved = false
       configScope = undefined
       buffer = []
       droppedEvents.clear()
     } else if (!configUnresolved) {
-      clearScope(configScope)
       configScope = undefined
     }
     sessionId = ""

@@ -2796,7 +2796,7 @@ export namespace SessionPrompt {
       })
       Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only
     }
-    await Telemetry.shutdown({ preserveUnresolved: true })
+    await Telemetry.shutdown({ preservePending: true })
     // altimate_change end
     // altimate_change start — resolve callbacks from this prompt generation only
     for (const item of orderedMessageStream(readMessageOrder())) {

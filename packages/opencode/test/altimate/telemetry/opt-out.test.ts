@@ -283,7 +283,7 @@ describe("telemetry opt-out", () => {
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     trackStartup()
     await Telemetry.init()
-    await Telemetry.shutdown({ preserveUnresolved: true })
+    await Telemetry.shutdown({ preservePending: true })
     expect(fetchSpy).not.toHaveBeenCalled()
 
     const credentialsPath = path.join(home, ".altimate", "altimate.json")
@@ -313,11 +313,60 @@ describe("telemetry opt-out", () => {
     await Telemetry.refreshIdentity()
     expect(fetchSpy).toHaveBeenCalledTimes(callsBeforeSwitch)
     rmSync(credentialsPath)
-    await Telemetry.shutdown({ preserveUnresolved: true })
+    await Telemetry.shutdown({ preservePending: true })
 
     await Telemetry.init()
     await Telemetry.flush()
     expect(names).toEqual(["error", "startup_ready"])
+  })
+
+  test.each(["queued", "in-flight"] as const)("a timed-out handoff keeps the %s batch for its own project", async (state) => {
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    const names = recordIngestion()
+    const ingest = fetchSpy.getMockImplementation()!
+    let timedOut = false
+    let notifyStarted!: () => void
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve })
+    fetchSpy.mockImplementation(Object.assign(
+      (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+        if (timedOut) return ingest(url, request)
+        notifyStarted()
+        return new Promise<Response>((_, reject) => {
+          request?.signal?.addEventListener("abort", () => {
+            timedOut = true
+            reject(new Error("ingestion timed out"))
+          }, { once: true })
+        })
+      },
+      { preconnect: fetch.preconnect },
+    ))
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    Telemetry.track({
+      type: "error",
+      timestamp: Date.now(),
+      error_name: "OutgoingProject",
+      error_message: "test",
+      context: "test",
+      session_id: "",
+    })
+
+    if (state === "in-flight") {
+      void Telemetry.flush()
+      await started
+    }
+    const other = path.join(home, "other")
+    mkdirSync(other)
+    Telemetry.setConfigDirectory(other)
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(timedOut).toBe(true)
+    expect(names).toEqual([])
+
+    Telemetry.setConfigDirectory(home)
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual(["error"])
   })
 
   test("a missing working directory leaves telemetry unresolved without throwing", async () => {
@@ -349,7 +398,7 @@ describe("telemetry opt-out", () => {
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     await Telemetry.init()
     trackStartup()
-    await Telemetry.shutdown({ preserveUnresolved: true })
+    await Telemetry.shutdown({ preservePending: true })
 
     rmSync(path.join(home, ".altimate", "altimate.json"))
     const other = path.join(home, "other")
@@ -360,7 +409,7 @@ describe("telemetry opt-out", () => {
     await Telemetry.init()
     await Telemetry.flush()
     expect(names).toEqual([])
-    await Telemetry.shutdown({ preserveUnresolved: true })
+    await Telemetry.shutdown({ preservePending: true })
 
     Telemetry.setConfigDirectory(home)
     configSpy.mockResolvedValue({})
