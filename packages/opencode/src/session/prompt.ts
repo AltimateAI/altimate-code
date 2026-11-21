@@ -4331,6 +4331,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   })
   export type ShellInput = z.infer<typeof ShellInput>
   export async function shell(input: ShellInput) {
+    // altimate_change start — prevent direct shell execution in offline sessions
+    if (offline()) throw new Error("Shell commands are disabled in offline mode.")
+    // altimate_change end
     const abort = start(input.sessionID)
     if (!abort) {
       throw new Session.BusyError(input.sessionID)
@@ -4838,6 +4841,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const shell = ConfigMarkdown.shell(template)
     if (shell.length > 0) {
+      // altimate_change start — template expansion can invoke an arbitrary program
+      if (offline()) throw new Error("Shell commands are disabled in offline mode.")
+      // altimate_change end
       // altimate_change start — upstream_fix: command template shell
       // expansion must honor configured shell instead of Bun's default parser.
       const sh = Shell.preferred((await Config.get()).shell)

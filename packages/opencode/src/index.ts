@@ -176,7 +176,7 @@ let cli = yargs(args)
       : args.project ? resolveThreadDirectory(args.project) : process.cwd()
     await startOfflineMode(directory, args.model)
     if (offline() && (
-      ["attach", "github", "gitlab", "pr", "review", "workspace-client", "workspace-serve", "web"].includes(command) ||
+      ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web"].includes(command) ||
       (command === "run" && args.attach) ||
       (command === "mcp" && opts._[1] === "serve") ||
       (["providers", "auth", "mcp", "console"].includes(command) && opts._.some((arg) => arg === "login" || arg === "auth"))

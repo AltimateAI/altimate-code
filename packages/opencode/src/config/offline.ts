@@ -96,7 +96,7 @@ export function offlineModelFetch(baseURL: string | undefined): typeof fetch {
       const target = new URL(input instanceof Request ? input.url : input.toString())
       if (target.origin !== endpoint.origin)
         throw new Error("Offline mode blocked a request outside the configured model endpoint.")
-      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error" })
+      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: undefined })
     },
     { preconnect: () => {} },
   )
