@@ -94,7 +94,7 @@ function projectInstallPath(root: string): string | undefined {
   if (!raw.includes("{{") && !raw.includes("{%")) return resolve(root, raw)
 
   // Resolve dbt's common env_var form without guessing the result of other Jinja.
-  const envVar = /^\s*{{\s*env_var\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*(?:,\s*(['"])(.*?)\3\s*)?\)\s*}}\s*$/.exec(raw)
+  const envVar = /^\s*{{\s*env_var\s*\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*(?:,\s*(['"])(.*?)\3\s*)?\)\s*}}\s*$/.exec(raw)
   if (!envVar) return
   const value = process.env[envVar[2]!] ?? envVar[4]
   if (value) return resolve(root, value)
@@ -157,7 +157,7 @@ function allPackageDirs(installPath: string): string[] {
   })
 }
 
-const PACKAGE_ENV_VAR = /\benv_var\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1/g
+const PACKAGE_ENV_VAR = /\benv_var\s*\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1/g
 
 function declarationContents(root: string) {
   return DECLARATION_FILES.flatMap((file) => {
@@ -423,22 +423,28 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
   if (incomplete && record) {
     throw new Error(`dbt deps finished but the package directory is incomplete${broken.length ? `: ${broken.join(", ")}` : ""}`)
   }
-  if (record) {
+  if (record || (!incomplete && commandExitCode(result) === 0)) {
     writeFileSync(stampFile, JSON.stringify({ fingerprint: fingerprint(root, installPath), packages: complete } satisfies Stamp))
   } else {
-    // The caller's installer reports failure as a result, not a throw, so success is not
-    // known. Drop the old stamp: the next check verifies the directories against the
-    // declarations instead of trusting this run.
+    // An explicit install may return no exit status. The next call verifies
+    // the directories rather than trusting the old stamp.
     rmSync(stampFile, { force: true })
   }
   if (!incomplete && !failedCommand(result)) rmSync(dirty, { force: true })
   return result
 }
 
+function commandExitCode(result: unknown): number | undefined {
+  if (result && typeof result === "object" && "exitCode" in result && typeof result.exitCode === "number") {
+    return result.exitCode
+  }
+}
+
 function failedCommand(result: unknown): boolean {
   if (!result || typeof result !== "object") return false
-  const output = result as { exitCode?: number | null; stderr?: string; stdout?: string }
-  if (typeof output.exitCode === "number") return output.exitCode !== 0
+  const exitCode = commandExitCode(result)
+  if (exitCode !== undefined) return exitCode !== 0
+  const output = result as { stderr?: string; stdout?: string }
   // Older engines can omit the status. dbt also emits progress on stderr, so
   // that stream by itself does not establish a failure.
   return /Encountered an error|(?:Compilation|Parsing|Runtime|Database) Error/i.test(
@@ -480,8 +486,8 @@ export async function ensurePackages(
 
 /**
  * Run an explicit install request (`altimate-dbt deps`, `add-packages`) under the lock. The
- * library reports a failed `dbt deps` as a result rather than throwing, so this does not
- * claim success (no stamp); later checks verify the directories themselves.
+ * library can report failure as a result. Stamp only a reported exit status of 0
+ * with complete package directories.
  */
 export async function installPackagesLocked<T>(root: string, install: () => Promise<T>, opts?: LockOptions): Promise<T> {
   return withPackagesLock(root, () => installUnderLock(root, install, false), opts)

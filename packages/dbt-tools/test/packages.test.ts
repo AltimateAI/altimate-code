@@ -122,7 +122,7 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     const variable = "TEST_ALTIMATE_LOCAL_PACKAGE"
     const saved = process.env[variable]
     try {
-      writeProject({ packages: `packages:\n  - local: "{{ env_var('${variable}') }}"\n` })
+      writeProject({ packages: `packages:\n  - local: "{{ env_var ('${variable}') }}"\n` })
       process.env[variable] = "../package_v1"
       const c = counter()
       expect((await ensurePackages(root, c.install)).action).toBe("installed")
@@ -378,6 +378,18 @@ describe("lock", () => {
     expect(packagesSatisfied(root).ok).toBe(true)
     expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(false)
     expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+  })
+
+  test("successful explicit deps stamps an environment-dependent installation", async () => {
+    writeProject({ packages: `packages:\n  - local: "{{ env_var('TEST_ALTIMATE_EXPLICIT_PACKAGE', '../local_pkg') }}"\n` })
+    const setup = counter()
+    await installPackagesLocked(root, async () => {
+      await setup.install()
+      return { exitCode: 0, stdout: "Installed package", stderr: "Progress logged to stderr" }
+    })
+    const unexpected = counter()
+    expect((await ensurePackages(root, unexpected.install)).action).toBe("skipped")
+    expect(unexpected.calls).toBe(0)
   })
 
   test("a failed explicit install leaves repair pending even when package YAML looks complete", async () => {
