@@ -1,3 +1,4 @@
+import { offline } from "@/config/offline"
 // altimate_change - new file
 //
 // Model-free access to the data tools: `tool list`, `tool run` and the optional `tool daemon`
@@ -215,9 +216,11 @@ const ToolRunCommand = cmd({
     try {
       const toolArgs = await readArgs(args)
       const directory = process.cwd()
-      const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], directory)
+      if (offline() && name !== "warehouse_install_driver")
+        throw new Error("This tool is disabled in offline mode.")
+      const workspaceTools = !offline() && (await resolveWorkspaceTools(args["workspace-tools"], directory))
       const daemon = await import("../../altimate/tool-cli/daemon")
-      const reply = args.daemon && !daemon.daemonDisabled()
+      const reply = !offline() && args.daemon && !daemon.daemonDisabled()
         ? await daemon.runViaDaemon(directory, InstallationVersion, {
             id: randomUUID(),
             name,

@@ -179,6 +179,7 @@ let cli = yargs(args)
       ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web"].includes(command) ||
       (command === "run" && args.attach) ||
       (command === "mcp" && opts._[1] === "serve") ||
+      (command === "tool" && opts._[1] === "daemon") ||
       (["providers", "auth", "mcp", "console"].includes(command) && opts._.some((arg) => arg === "login" || arg === "auth"))
     )) throw new Error("This command requires network access. Run it while online.")
     // altimate_change end
