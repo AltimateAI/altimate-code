@@ -82,11 +82,11 @@ export function start() {
   if (networkFetch) return
   // Bun sends even loopback requests through HTTP(S)_PROXY. Exclude only the loopback hosts so a
   // local request cannot leave the machine through a proxy; model requests still use the proxy.
-  for (const key of ["NO_PROXY", "no_proxy"]) {
-    const current = process.env[key]
-    if (current === "*") continue
-    const entries = (current ?? "").split(",").map((entry) => entry.trim()).filter(Boolean)
-    process.env[key] = [...entries, ...LOCAL_FETCH_HOSTS.filter((host) => !entries.includes(host))].join(",")
+  // Both spellings get the same list, so programs that read either one keep the user's own exclusions.
+  const user = process.env.NO_PROXY ?? process.env.no_proxy
+  if (user !== "*") {
+    const entries = (user ?? "").split(",").map((entry) => entry.trim()).filter(Boolean)
+    process.env.NO_PROXY = process.env.no_proxy = [...entries, ...LOCAL_FETCH_HOSTS.filter((host) => !entries.includes(host))].join(",")
   }
   networkFetch = globalThis.fetch
   globalThis.fetch = Object.assign(
@@ -100,12 +100,19 @@ export function start() {
       // Otherwise follow redirects only while they stay on this machine, as fetch would.
       let request: RequestInit = { ...init, redirect: "manual" }
       let response = await networkFetch!(input, request)
-      for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
+      for (let hop = 0; [301, 302, 303, 307, 308].includes(response.status); hop++) {
         const location = response.headers.get("location")
         if (!location) return response
         if (hop === MAX_LOCAL_REDIRECTS) throw new Error("Offline mode stopped after too many local redirects.")
-        url = new URL(location, url).href
-        if (!isLocalURL(url)) throw new Error("Offline mode blocked a redirect away from this machine.")
+        const next = new URL(location, url)
+        if (!isLocalURL(next)) throw new Error("Offline mode blocked a redirect away from this machine.")
+        // Like fetch, do not send credentials on to a different origin.
+        if (next.origin !== new URL(url).origin) {
+          const headers = new Headers(request.headers)
+          headers.delete("authorization")
+          request = { ...request, headers }
+        }
+        url = next.href
         const method = (request.method ?? "GET").toUpperCase()
         if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST"))
           request = { ...request, method: method === "HEAD" ? "HEAD" : "GET", body: undefined }
