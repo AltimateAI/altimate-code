@@ -71,10 +71,11 @@ describe("RunAccounting turn accounting", () => {
     // every request overflows before any step starts; only compaction machinery streams
     acc.onSessionError("ContextOverflowError", "too long")
     acc.onStepStart("msg_compact")
-    acc.onCompactionRecovered()
+    // the charge is reported so the run loop can enforce the budget at this boundary
+    expect(acc.onCompactionRecovered()).toBe(true)
     expect(acc.turnCount).toBe(1)
     acc.onSessionError("ContextOverflowError", "too long")
-    acc.onCompactionRecovered()
+    expect(acc.onCompactionRecovered()).toBe(true)
     expect(acc.turnCount).toBe(2)
   })
 
@@ -84,14 +85,14 @@ describe("RunAccounting turn accounting", () => {
     acc.onStepStart("msg_work")
     acc.onStepStart("msg_work")
     acc.onSessionError("ContextOverflowError", "too long")
-    acc.onCompactionRecovered()
+    expect(acc.onCompactionRecovered()).toBe(false)
     expect(acc.turnCount).toBe(2)
   })
 
   test("a compaction without a pending overflow is free", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })
-    acc.onCompactionRecovered()
+    expect(acc.onCompactionRecovered()).toBe(false)
     expect(acc.turnCount).toBe(0)
   })
 
@@ -100,11 +101,11 @@ describe("RunAccounting turn accounting", () => {
     acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })
     acc.onSessionError("ContextOverflowError", "too long")
-    acc.onCompactionRecovered() // unproductive cycle: charged
+    expect(acc.onCompactionRecovered()).toBe(true) // unproductive cycle: charged
     expect(acc.turnCount).toBe(1)
     acc.onStepStart("msg_work")
     acc.onSessionError("ContextOverflowError", "too long")
-    acc.onCompactionRecovered() // a counted step ran since the last recovery
+    expect(acc.onCompactionRecovered()).toBe(false) // a counted step ran since the last recovery
     expect(acc.turnCount).toBe(2)
   })
 })

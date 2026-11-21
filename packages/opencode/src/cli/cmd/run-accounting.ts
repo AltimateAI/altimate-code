@@ -260,10 +260,14 @@ export function create() {
       // the cycle and `--max-turns` cannot bound it. Charge one turn per
       // unproductive cycle. Recoveries that follow real work steps stay free —
       // a step cut short mid-stream already cost its turn — and so does a
-      // compaction that completes without a pending overflow.
-      if (pendingContextOverflow && countedStepsSinceRecovery === 0) turnCount++
+      // compaction that completes without a pending overflow. Returns whether
+      // the unproductive charge fired, so the caller can enforce the turn
+      // budget at the exact recovery where the cycle became visible.
+      const unproductive = pendingContextOverflow && countedStepsSinceRecovery === 0
+      if (unproductive) turnCount++
       pendingContextOverflow = false
       countedStepsSinceRecovery = 0
+      return unproductive
     },
     // altimate_change start — retain turn-limit behavior while allowing an answered time-limit finalization
     onBudgetExhausted(kind: "turn" | "time" = "turn") {
