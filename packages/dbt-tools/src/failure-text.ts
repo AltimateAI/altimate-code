@@ -17,6 +17,6 @@ export function formatCommandResult(result?: CommandProcessResult) {
   if (result?.exitCode && result.exitCode !== 0) {
     return { error: result.stderr || stdout || `dbt exited with code ${result.exitCode}`, stdout }
   }
-  if (result?.stderr) return { error: result.stderr, stdout }
+  if (result?.exitCode !== 0 && result?.stderr) return { error: result.stderr, stdout }
   return { stdout }
 }

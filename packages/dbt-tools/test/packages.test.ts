@@ -118,6 +118,15 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(1)
   })
 
+  test("a preinstalled environment-dependent package is refreshed once to record its inputs", async () => {
+    writeProject({ packages: `packages:\n  - local: "{{ env_var('TEST_ALTIMATE_PREINSTALLED_PACKAGE', '../local_pkg') }}"\n` })
+    installPackage()
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect(c.calls).toBe(1)
+  })
+
   test("a changed environment-dependent dependency invalidates the install stamp", async () => {
     const variable = "TEST_ALTIMATE_LOCAL_PACKAGE"
     const saved = process.env[variable]

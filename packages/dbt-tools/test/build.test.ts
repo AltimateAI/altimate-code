@@ -1,3 +1,7 @@
+import { add, deps } from "../src/commands/deps"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, test, expect, mock } from "bun:test"
 import { build } from "../src/commands/build"
 import type { DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
@@ -151,4 +155,19 @@ describe("build command", () => {
     const result = await build(adapter, [])
     expect(result).toEqual({ error: "compilation error", stdout: "partial output" })
   })
+})
+
+test("deps and add-packages keep successful stderr output from becoming an error", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dbt-deps-output-"))
+  try {
+    const success = { stdout: "Installed package", stderr: "Progress logged to stderr", exitCode: 0 }
+    const adapter = {
+      installDeps: async () => success,
+      installDbtPackages: async () => success,
+    } as unknown as DBTProjectIntegrationAdapter
+    expect(await deps(adapter, root)).toEqual({ stdout: success.stdout })
+    expect(await add(adapter, ["--packages", "example/util"], root)).toEqual({ stdout: success.stdout })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
