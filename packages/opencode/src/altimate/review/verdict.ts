@@ -159,6 +159,25 @@ export const ReviewScope = z.object({
    *  project, moved, not a dbt file, no check at this tier, no manifest), with
    *  the reason; also repeats the `unverified` entries. */
   notReviewed: z.array(z.object({ path: z.string(), reason: z.string() })).default([]),
+  /** Multi-project review (`--all-projects`): every dbt project root the review
+   *  speaks for (the projects the PR does not touch have nothing to flag). The
+   *  poster treats earlier bot reviews of these projects as this review's own. */
+  coveredProjects: z.array(z.string()).optional(),
+  /** Multi-project review (`--all-projects`): each dbt project reviewed, its
+   *  changed-file count and its own verdict. */
+  projects: z
+    .array(
+      z.object({
+        root: z.string(),
+        files: z.number().int().nonnegative(),
+        verdict: Verdict,
+        mode: ReviewMode.optional(),
+        /** The project's own manifest and policy (the top level keeps one only when all agree). */
+        manifestHash: z.string().optional(),
+        policyHash: z.string().optional(),
+      }),
+    )
+    .optional(),
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
@@ -233,6 +252,17 @@ export const VerdictEnvelope = z.object({
       /** Estimated USD cost from the model's price table. */
       cost: z.number().nonnegative().optional(),
       calls: z.number().int().nonnegative().optional(),
+      /** Multi-project review (`--all-projects`): each project's AI lane state. */
+      projects: z
+        .array(
+          z.object({
+            root: z.string(),
+            state: z.string(),
+            reason: z.string().optional(),
+            calls: z.number().int().nonnegative().optional(),
+          }),
+        )
+        .optional(),
       /** Generator findings replayed from an earlier envelope: tokens, cost and calls are that run's. */
       replayed: z.boolean().optional(),
       /** The replayed envelope did not list every generator finding. */
@@ -390,7 +420,8 @@ export interface BuildEnvelopeInput {
   engineErrors?: VerdictEnvelope["engineErrors"]
 }
 
-function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
+/** Severity tally of `findings` for the envelope summary. */
+export function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
   const tally: Record<Severity, number> = { critical: 0, warning: 0, suggestion: 0 }
   for (const f of findings) tally[f.severity]++
   return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
