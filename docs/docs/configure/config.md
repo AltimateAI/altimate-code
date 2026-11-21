@@ -198,6 +198,7 @@ Each of these fails with a one-line message or is skipped:
 - workspace and workspace engine sync, and session sharing;
 - the web fetch, web search, code search, `datamate_manager`, feedback and memory refresh tools;
 - MCP servers at other URLs, and MCP sign-in;
+- skills from remote skill URLs (`skills.urls`), including copies already cached;
 - automatic installs of warehouse drivers, language servers, plugins and ripgrep;
 - warehouse connections to other hosts, SSH tunnels, and cloud sign-in methods for dbt;
 - `dbt deps` and dbt's usage reporting and version check;

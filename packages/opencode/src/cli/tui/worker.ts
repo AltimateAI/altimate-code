@@ -45,7 +45,7 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // (NOT here: at module top level Config.get() throws and doInit() proceeds as enabled, which
 // silently bypassed a `telemetry.disabled` config opt-out for the whole first session).
 Telemetry.startLoopMonitor()
-// altimate_change — the worker inherits offline mode from its parent; install the fetch guard here too
+// The worker inherits offline mode from its parent; install the fetch guard here too.
 if (Offline.enabled()) Offline.start()
 // altimate_change end
 // altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
