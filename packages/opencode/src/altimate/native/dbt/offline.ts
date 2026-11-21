@@ -74,7 +74,8 @@ async function checkLocalDbt(
   const root = option("--project-dir") ?? process.env.DBT_PROJECT_DIR ?? (await findProjectRoot(projectRoot))
   const project = resolve(parse(await fs.readFile(path.join(root, "dbt_project.yml"), "utf8")))
   // dbt's order: --profiles-dir, DBT_PROFILES_DIR, the working directory, then ~/.dbt.
-  const explicit = option("--profiles-dir") ?? process.env.DBT_PROFILES_DIR
+  // dbt expands ~ in the profiles directory.
+  const explicit = (option("--profiles-dir") ?? process.env.DBT_PROFILES_DIR)?.replace(/^~(?=$|[\\/])/, os.homedir())
   const profilesDir = path.resolve(
     cwd,
     explicit ??

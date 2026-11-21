@@ -34,8 +34,11 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   const mongo = type === "mongodb" || type === "mongo"
   if (mongo && config.direct_connection !== undefined && config.direct_connection !== true) deny()
   // Postgres accepts a socket directory as its host.
-  const socketHost = typeof config.host === "string" && config.host.startsWith("/") && ["postgres", "postgresql", "redshift"].includes(type)
-  if (config.host !== undefined && !socketHost && !isLoopbackHost(config.host)) deny()
+  const postgres = ["postgres", "postgresql", "redshift"].includes(type)
+  const socketHost = typeof config.host === "string" && config.host.startsWith("/") && postgres
+  // SQL Server names an instance as host\instance.
+  const host = typeof config.host === "string" && ["sqlserver", "mssql"].includes(type) ? config.host.split("\\")[0] : config.host
+  if (host !== undefined && !socketHost && !isLoopbackHost(host)) deny()
   // dbt-mysql and others name the host `server`; Trino's `server` is a URL checked below.
   if (type !== "trino" && config.server !== undefined && !isLoopbackHost(config.server)) deny()
   // Trino and ClickHouse build `${protocol}://${host}` URLs, so a protocol value can carry its own authority.
@@ -52,12 +55,15 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
     try {
       const url = new URL(String(connectionString))
       if ((type === "trino" || type === "clickhouse") && !["http:", "https:"].includes(url.protocol)) deny()
-      if (!isLoopbackHost(url.hostname) || url.protocol === "mongodb+srv:") deny()
       const query = new Map([...url.searchParams].map(([key, value]) => [key.toLowerCase(), value.toLowerCase()]))
+      // postgresql:///db?host=/run/postgresql connects through a local Unix socket.
+      const socketURL = postgres && !url.hostname && (query.get("host") ?? "").startsWith("/") && !query.has("hostaddr")
+      if ((!socketURL && !isLoopbackHost(url.hostname)) || url.protocol === "mongodb+srv:") deny()
       if (mongo && config.direct_connection !== true && query.get("directconnection") !== "true") deny()
       if (mongo && ["mongodb-aws", "mongodb-oidc", "gssapi"].includes(query.get("authmechanism") ?? "")) deny()
       // Drivers can override the authority via URL parameters or discover replica peers.
       for (const key of url.searchParams.keys()) {
+        if (socketURL && key.toLowerCase() === "host") continue
         if (["host", "hostaddr", "server", "replicaset", "service"].includes(key.toLowerCase())) deny()
       }
     } catch { deny() }

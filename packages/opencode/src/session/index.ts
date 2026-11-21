@@ -750,12 +750,20 @@ export namespace Session {
 
   export const remove = fn(SessionID.zod, async (sessionID) => {
     const project = Instance.project
+    // altimate_change start — offline mode cannot revoke a public share, so it refuses to delete a shared
+    // session (or one with a shared descendant) before anything is removed
+    if (Offline.enabled()) {
+      const pending = [sessionID]
+      while (pending.length) {
+        const id = pending.pop()!
+        if ((await get(id).catch(() => undefined))?.share?.url)
+          throw new Error("This session is shared. Delete it while online so its share can be revoked.")
+        pending.push(...(await children(id)).map((child) => child.id))
+      }
+    }
+    // altimate_change end
     try {
       const session = await get(sessionID)
-      // altimate_change start — offline mode cannot revoke a public share, so it keeps the session that holds it
-      if (Offline.enabled() && session.share?.url)
-        throw new Error("This session is shared. Delete it while online so its share can be revoked.")
-      // altimate_change end
       for (const child of await children(sessionID)) {
         await remove(child.id)
       }

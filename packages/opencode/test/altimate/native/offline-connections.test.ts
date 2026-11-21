@@ -52,6 +52,8 @@ test("offline rejects remote targets, SSH, cloud auth, and URI host overrides", 
     { type: "oracle", connection_string: "(DESCRIPTION=(ADDRESS=(HOST=db.example.com)))" },
     { type: "oracle", connection_string: "PRODTNS" },
     { type: "mysql", server: "db.example.com" },
+    { type: "postgres", connection_string: "postgresql:///analytics?host=/var/run/postgresql&hostaddr=10.0.0.5" },
+    { type: "sqlserver", host: "db.example.com\\SQLEXPRESS" },
     { type: "mysql", socketPath: "\\\\.\\pipe\\remote" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
@@ -66,6 +68,8 @@ test("offline accepts plain protocols and local Oracle Easy Connect strings", ()
     { type: "mysql", server: "127.0.0.1" },
     { type: "mysql", socketPath: "/tmp/mysql.sock" },
     { type: "postgres", host: "/var/run/postgresql" },
+    { type: "postgres", connection_string: "postgresql:///analytics?host=/var/run/postgresql" },
+    { type: "sqlserver", host: "localhost\\SQLEXPRESS" },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -82,6 +86,9 @@ test("dbt finds the project from a subdirectory and reads profiles from the work
     await fs.writeFile(path.join(runDir, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: postgres\n      host: example.com\n")
     await expect(assertLocalDbt(models, [], "core", root)).resolves.toEqual({ profilesDir: root })
     await expect(assertLocalDbt(models, [], "core", runDir)).rejects.toThrow("Offline mode")
+    // dbt expands ~ in DBT_PROFILES_DIR.
+    process.env.DBT_PROFILES_DIR = "~/" + path.relative(os.homedir(), root)
+    await expect(assertLocalDbt(models, [], "core", runDir)).resolves.toEqual({ profilesDir: root })
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 

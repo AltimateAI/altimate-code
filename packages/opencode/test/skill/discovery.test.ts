@@ -163,6 +163,8 @@ describe("Discovery.pull", () => {
         const online = yield* discovery.pull(url)
         expect(online.map((dir) => path.basename(dir)).sort()).toEqual(["index.json", "plain"])
         process.env.ALTIMATE_OFFLINE = "1"
+        // The source is gone: offline results can only come from the cache.
+        void source.stop(true)
         const offline = yield* discovery.pull(url)
         expect(offline.sort()).toEqual(online.sort())
       } finally {
