@@ -104,8 +104,9 @@ export function userEnv<T extends Record<string, string | undefined>>(env: T): T
   try {
     const original = JSON.parse(saved) as Record<string, unknown>
     for (const key of ["NO_PROXY", "no_proxy"] as const) {
-      // Only the inherited bypass is replaced; a value the program's own config set stays.
-      if (env[key] !== process.env[key]) continue
+      // Only the inherited bypass is replaced; a value the program's own config set stays. An absent key is
+      // inherited too: Bun leaves variables assigned after startup out of a `{ ...process.env }` copy.
+      if (env[key] !== undefined && env[key] !== process.env[key]) continue
       const value = original[key]
       if (typeof value === "string") (env as Record<string, string | undefined>)[key] = value
       else delete env[key]

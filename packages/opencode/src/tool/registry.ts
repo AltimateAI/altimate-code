@@ -431,9 +431,8 @@ export namespace ToolRegistry {
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
     // built-in tool-definition effects against the AppRuntime layers (Truncate/Agent) before use.
-    // altimate_change start — keep local tools available in offline sessions
+    // Offline sessions drop only the tools that contact remote services.
     const offline = Offline.enabled()
-    // altimate_change end
     const builtins = [
       InvalidTool,
       ...(question ? [QuestionTool] : []),

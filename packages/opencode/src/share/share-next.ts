@@ -129,7 +129,7 @@ export namespace ShareNext {
 
   export async function create(sessionID: SessionID) {
     // altimate_change start — skip session sharing in offline mode
-    if (Offline.enabled()) throw new Error("Sharing sessions requires an online run.")
+    if (Offline.enabled()) throw new Offline.OfflinePolicyError("Sharing sessions requires an online run.")
     if (disabled) return { id: "", url: "", secret: "" }
     // altimate_change end
     log.info("creating share", { sessionID })
@@ -260,7 +260,7 @@ export namespace ShareNext {
 
   export async function remove(sessionID: SessionID) {
     // altimate_change start — keep the local share state until the server revokes it
-    if (Offline.enabled()) throw new Error("Offline mode cannot revoke a share. Run unshare while online.")
+    if (Offline.enabled()) throw new Offline.OfflinePolicyError("Offline mode cannot revoke a share. Run unshare while online.")
     // altimate_change end
     if (disabled) return
     log.info("removing share", { sessionID })

@@ -81,3 +81,27 @@ test("a server started online refuses a project that requests offline mode, with
     if (previous !== undefined) process.env.ALTIMATE_OFFLINE = previous
   }
 })
+
+test("the HTTP API reports offline share and unshare refusals as a 400 with the message", async () => {
+  await using tmp = await tmpdir({ git: true })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const session = await Session.create({ title: "share" })
+      const previous = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        for (const method of ["POST", "DELETE"]) {
+          const res = await Server.Default().request(`/session/${session.id}/share`, { method })
+          const body = await res.text()
+          expect({ method, status: res.status, body }).toMatchObject({ status: 400 })
+          expect(body).toContain("online")
+        }
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+      }
+      await Session.remove(session.id).catch(() => {})
+    },
+  })
+})

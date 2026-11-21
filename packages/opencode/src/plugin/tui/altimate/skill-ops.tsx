@@ -307,7 +307,7 @@ async function testSkillDirect(
       const proc = Bun.spawn([tool, "--help"], {
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...process.env, PATH: toolPath },
+        env: { ...Offline.userEnv({ ...process.env }), PATH: toolPath },
       })
       const timeout = setTimeout(() => proc.kill(), 5000)
       const exitCode = await proc.exited

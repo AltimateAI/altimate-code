@@ -1,7 +1,5 @@
-// altimate_change start — offline mode
-import { Offline } from "@/config/offline"
-// altimate_change end
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // The workspace engine overlay.
 //

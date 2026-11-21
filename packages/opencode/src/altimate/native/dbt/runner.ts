@@ -38,8 +38,8 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
       if (command === "deps") throw new Error("Offline mode disables dbt dependency installation.")
       if ((params.args ?? []).some((arg) => arg === "--send-anonymous-usage-stats" || arg.startsWith("--send-anonymous-usage-stats=")))
         throw new Error("Offline mode disables dbt usage reporting.")
-      // `dbt init` creates a project; there is no profile to check yet.
-      const checked = command === "init"
+      // `dbt init` creates a project and `dbt clean` deletes local folders; neither opens a connection.
+      const checked = command === "init" || command === "clean"
         ? undefined
         : await assertLocalDbt(params.project_dir || process.cwd(), [
             ...(params.args ?? []),
