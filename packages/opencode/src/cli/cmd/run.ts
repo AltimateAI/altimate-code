@@ -1443,13 +1443,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const requested = args.model ?? (await (async () => {
         if (args.command) return undefined
         const config = (await sdk.config.get(undefined, { throwOnError: true })).data
-        const selected = args.attach
-          ? (await remoteAgents()).find((item) =>
-              agent || config?.default_agent
-                ? item.name === (agent ?? config?.default_agent)
-                : item.mode !== "subagent" && !item.hidden,
-            )
-          : await Agent.get(agent ?? (await Agent.defaultAgent()))
+        const selected = await (async () => {
+          if (!args.attach) return Agent.get(agent ?? (await Agent.defaultAgent()))
+          const agents = await remoteAgents()
+          const name = agent ?? config?.default_agent
+          if (!name) return agents.find((item) => item.mode !== "subagent" && !item.hidden)
+          // Match the server's migration when the old default name has no custom definition.
+          return agents.find((item) => item.name === name)
+            ?? (name === "data-qa" ? agents.find((item) => item.name === "analyst") : undefined)
+        })()
         return selected?.model ? `${selected.model.providerID}/${selected.model.modelID}` : config?.model
       })())
       if (requested !== undefined) {

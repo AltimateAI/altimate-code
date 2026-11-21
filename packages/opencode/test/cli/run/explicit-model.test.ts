@@ -61,4 +61,28 @@ describe("run model resolution", () => {
       }),
     30_000,
   )
+
+  cliIt.live(
+    "attached run validates the effective migrated default agent model",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              model: "missing-provider/missing-model",
+              default_agent: "data-qa",
+              agent: { analyst: { model: "test/test-model" } },
+            }),
+          },
+        })
+        yield* llm.text("Attached run used the analyst model")
+        const result = yield* opencode.spawn(["run", "--attach", server.url, "--no-trace", "test"], { bunRun: true })
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toContain("Attached run used the analyst model")
+      }),
+    90_000,
+  )
 })
