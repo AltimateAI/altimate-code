@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import { PlanExitTool } from "./plan"
 import { QuestionTool } from "./question"
 import { BashTool } from "./bash"
@@ -416,6 +419,14 @@ export namespace ToolRegistry {
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
     configInput?: RegistryConfigInput,
   ): Promise<Tool.Info[]> {
+    // altimate_change start — offer only local tools in offline mode
+    if (offline()) {
+      return AppRuntime.runPromise(Effect.scoped(Effect.all([
+        InvalidTool, QuestionTool, ReadTool, GlobTool, GrepTool, EditTool, WriteTool,
+        TaskTool, TodoWriteTool, SkillTool, ApplyPatchTool, WarehouseInstallDriverTool,
+      ])))
+    }
+    // altimate_change end
     const custom = configInput?.matches
       ? await loadCustomTools(configInput.matches).then((x) => x.custom)
       : await state().then((x) => x.custom)

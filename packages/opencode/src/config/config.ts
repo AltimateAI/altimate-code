@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline, startOfflineMode } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -499,6 +502,9 @@ export const layer = Layer.effect(
 
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
+        // altimate_change start — skip network work in offline mode
+        yield* Effect.promise(() => startOfflineMode(ctx.directory))
+        // altimate_change end
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
         let result: Info = {}
@@ -559,6 +565,9 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(auth)) {
+          // altimate_change start — skip well-known network config in offline mode
+          if (offline()) continue
+          // altimate_change end
           if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
@@ -683,9 +692,11 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
-        const activeAccount = Option.getOrUndefined(
-          yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
-        )
+        // altimate_change start — skip account network config in offline mode
+        const activeAccount = offline()
+          ? undefined
+          : Option.getOrUndefined(yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))))
+        // altimate_change end
         if (activeAccount?.active_org_id) {
           const accountID = activeAccount.id
           const orgID = activeAccount.active_org_id
@@ -773,7 +784,7 @@ export const layer = Layer.effect(
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
-          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+          if (!offline() && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
             const dep = yield* npmSvc
               .install(dir, {
                 add: [
@@ -835,6 +846,13 @@ export const layer = Layer.effect(
           }
         }
 
+        // altimate_change start — disable runtime sharing in offline mode
+        if (offline()) {
+          result.offline = true
+          result.share = "disabled"
+          result.formatter = false
+        }
+        // altimate_change end
         if (result.autoshare === true && !result.share) {
           result.share = "auto"
         }
@@ -851,7 +869,7 @@ export const layer = Layer.effect(
         // may not yet be declared in the ConfigV1 experimental schema.
         const autoMcpDiscovery = (result.experimental as { auto_mcp_discovery?: boolean } | undefined)
           ?.auto_mcp_discovery
-        if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
+        if (!offline() && !Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
           const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift, discoveredSource } =
             yield* Effect.promise(
             () => import("../mcp/discover"),
@@ -885,7 +903,7 @@ export const layer = Layer.effect(
         // workspace's pinned local engine — derived here, after discovery, so it has
         // the last word over IDE-written, hosted and stale entries, and never written
         // to any file. See altimate/workspace/engine-overlay.ts.
-        if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
+        if (!offline() && !Flag.ALTIMATE_DISABLE_WORKSPACE) {
           const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
           yield* Effect.promise(() =>
             overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),

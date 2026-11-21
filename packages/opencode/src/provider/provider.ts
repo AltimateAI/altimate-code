@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline, offlineModelFetch, offlineProvider } from "@/config/offline"
+// altimate_change end
 import z from "zod"
 import { Schema } from "effect"
 // altimate_change start — Effect Context.Service facade deps (added to existing namespace)
@@ -102,6 +105,10 @@ const FREE_TIER_HEADER_TIMEOUT_DEFAULT = 300_000
 // typo like ALTIMATE_BASE_HEADER_TIMEOUT_MS=1.5 — or =10 read as seconds — would be a footgun
 // worse than the bug this fixes. Anything below the floor falls back to the default.
 const FREE_TIER_HEADER_TIMEOUT_MIN = 1_000
+// altimate_change end
+
+// altimate_change start — HTTP-only SDKs supported without network credential discovery
+const OFFLINE_SDKS = new Set(["@ai-sdk/openai-compatible", "@ai-sdk/openai", "@ai-sdk/anthropic"])
 // altimate_change end
 
 export namespace Provider {
@@ -1392,7 +1399,21 @@ export namespace Provider {
     const disabled = new Set(config.disabled_providers ?? [])
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : null
 
+    // altimate_change start — offline provider selection is independent of online fallback rules
+    const offlineProviderID = offline() ? offlineProvider(config) : undefined
+    // altimate_change end
     function isProviderAllowed(providerID: ProviderID): boolean {
+      // altimate_change start — require a locally configured model endpoint in offline mode
+      if (offline()) {
+        const options = config.provider?.[providerID]?.options
+        if (
+          providerID !== offlineProviderID ||
+          typeof options?.baseURL !== "string" ||
+          providerID === FreeTier.PROVIDER_ID ||
+          providerID === ClaudeAgent.ID
+        ) return false
+      }
+      // altimate_change end
       if (enabled && !enabled.has(providerID)) return false
       if (disabled.has(providerID)) return false
       return true
@@ -2004,6 +2025,9 @@ export namespace Provider {
       if (!isProviderAllowed(providerID)) continue
       // altimate_change end
       const data = database[providerID]
+      // altimate_change start — skip provider discovery and OAuth-backed loaders in offline mode
+      if (offline()) continue
+      // altimate_change end
       if (!data) {
         log.error("Provider does not exist in model list " + providerID)
         continue
@@ -2146,11 +2170,23 @@ export namespace Provider {
       }
       // altimate_change end
 
-      const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options }))
+      // altimate_change start — constrain offline model transport to its configured origin
+      const offlineMode = offline()
+      if (offlineMode) {
+        const config = await Config.get()
+        if (offlineProvider(config) !== model.providerID || typeof config.provider?.[model.providerID]?.options?.baseURL !== "string")
+          throw new Error("Offline mode requires a locally configured model endpoint.")
+        if (!OFFLINE_SDKS.has(model.api.npm))
+          throw new Error("Offline mode requires a bundled HTTP model provider such as @ai-sdk/openai-compatible.")
+      }
+      const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options, offlineMode }))
+      // altimate_change end
       const existing = s.sdk.get(key)
       if (existing) return existing
 
-      const customFetch = options["fetch"]
+      // altimate_change start — constrain offline model transport to its configured origin
+      const customFetch = offlineMode ? offlineModelFetch(baseURL) : options["fetch"]
+      // altimate_change end
       // altimate_change start — environment override controls the single stream watchdog (0 disables)
       // Precedence: valid ALTIMATE_STREAM_IDLE_TIMEOUT_MS (0 disables), provider chunkTimeout, then 300000ms.
       const idleOverride = Env.get("ALTIMATE_STREAM_IDLE_TIMEOUT_MS")?.trim()

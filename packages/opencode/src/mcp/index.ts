@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -670,6 +673,9 @@ export const layer = Layer.effect(
 
     const create = Effect.fn("MCP.create")(
       function* (key: string, mcp: ConfigMCPV1.Info) {
+        // altimate_change start — skip external MCP processes and servers in offline mode
+        if (offline()) return DISABLED_RESULT
+        // altimate_change end
         if (mcp.enabled === false) {
           return DISABLED_RESULT
         }

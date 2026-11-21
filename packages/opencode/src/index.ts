@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline, startOfflineMode } from "@/config/offline"
+// altimate_change end
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 // altimate_change start - stdin tool arguments
@@ -165,6 +168,20 @@ let cli = yargs(args)
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
+    // altimate_change start — skip network work in offline mode
+    const command = String(opts._[0] ?? "")
+    const args = opts as { dir?: string; project?: string; attach?: string; model?: string }
+    const directory = command === "run" && !args.attach && args.dir
+      ? path.resolve(args.dir)
+      : args.project ? resolveThreadDirectory(args.project) : process.cwd()
+    await startOfflineMode(directory, args.model)
+    if (offline() && (
+      ["attach", "github", "gitlab", "pr", "review", "workspace-client", "workspace-serve", "web"].includes(command) ||
+      (command === "run" && args.attach) ||
+      (command === "mcp" && opts._[1] === "serve") ||
+      (["providers", "auth", "mcp", "console"].includes(command) && opts._.some((arg) => arg === "login" || arg === "auth"))
+    )) throw new Error("This command requires network access. Run it while online.")
+    // altimate_change end
     // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
     if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end

@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 // altimate_change start — debug report: gathers the facts `report.ts` analyses
 /**
  * Every probe here is read-only and independently guarded: a failing probe is
@@ -310,6 +313,9 @@ export async function probe(
   opts: { proxy?: boolean; timeoutMs?: number } = {},
   deps: ProbeDeps = defaultProbeDeps,
 ): Promise<NetworkCheck> {
+  // altimate_change start — skip network work in offline mode
+  if (offline()) return { target, host, ok: false, detail: "Skipped in offline mode", ms: 0 }
+  // altimate_change end
   const timeoutMs = opts.timeoutMs ?? NETWORK_TIMEOUT_MS
   const started = Date.now()
   const deadline = AbortSignal.timeout(timeoutMs)

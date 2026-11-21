@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import z from "zod"
 import { Global } from "../global"
 import { Log } from "../util/log"
@@ -51,6 +54,9 @@ export namespace BunProc {
   )
 
   export async function install(pkg: string, version = "latest") {
+    // altimate_change start — prevent package installs in offline mode
+    if (offline()) throw new Error("Offline mode disables package installation.")
+    // altimate_change end
     // Use lock to ensure only one install at a time
     using _ = await Lock.write("bun-install")
 

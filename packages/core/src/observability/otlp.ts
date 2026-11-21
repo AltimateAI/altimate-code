@@ -48,12 +48,12 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
 }
 
 export function loggers() {
-  if (!endpoint) return []
+  if (process.env.ALTIMATE_OFFLINE === "1" || !endpoint) return []
   return [OtlpLogger.make({ url: `${endpoint}/v1/logs`, resource: resource(), headers })]
 }
 
 export async function tracingLayer() {
-  if (!endpoint) return Layer.empty
+  if (process.env.ALTIMATE_OFFLINE === "1" || !endpoint) return Layer.empty
   const NodeSdk = await import("@effect/opentelemetry/NodeSdk")
   const OTLP = await import("@opentelemetry/exporter-trace-otlp-http")
   const SdkBase = await import("@opentelemetry/sdk-trace-base")

@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -2516,6 +2519,7 @@ export namespace Telemetry {
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
+    if (offline()) return Promise.resolve()
     // altimate_change start — never re-init across an in-flight shutdown.
     //
     // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
@@ -2973,6 +2977,7 @@ export namespace Telemetry {
   // altimate_change end
 
   export function track(event: Event) {
+    if (offline()) return
     // Before init completes: buffer (flushed once init enables, or cleared if disabled).
     // After init completed and disabled telemetry: drop silently.
     if (initDone && !enabled) return

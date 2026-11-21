@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { Effect, Layer, Schema, Context, Stream } from "effect"
@@ -840,6 +843,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       }),
       // altimate_change end
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
+        // altimate_change start — disable releases and installs in offline mode
+        if (offline()) return InstallationVersion
+        // altimate_change end
         const detectedMethod = installMethod || (yield* result.method())
 
         if (detectedMethod === "brew") {
@@ -908,6 +914,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         return data.tag_name.replace(/^v/, "")
       }, Effect.orDie),
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
+        // altimate_change start — disable releases and installs in offline mode
+        if (offline()) return yield* new UpgradeFailedError({ stderr: "Run the upgrade while online." })
+        // altimate_change end
         // altimate_change start — refuse before shelling out when the target is unwritable (#1305)
         const blocked = yield* preflight(m, target)
         if (blocked) {

@@ -44,6 +44,7 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `$schema` | `string` | JSON schema URL for editor autocompletion |
 | `theme` | `string` | UI theme name |
 | `username` | `string` | Custom display username |
+| `offline` | `boolean` | Restrict network access to the configured model endpoint |
 | `model` | `string` | Default model (`provider/model`) |
 | `small_model` | `string` | Smaller model for lightweight tasks |
 | `default_agent` | `string` | Default agent to use on startup |
@@ -158,3 +159,15 @@ Control how context is managed when conversations grow long:
 
 !!! info
     Compaction automatically summarizes older messages to free up context window space, allowing longer conversations without losing important context. See [Context Management](context-management.md) for full details.
+
+## Offline / air-gapped mode
+
+Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a local config file such as `~/.config/altimate-code/altimate-code.json` or `.altimate-code/altimate-code.json` in the project. A local opt-in applies for the lifetime of the CLI process and its workers.
+
+Before going offline:
+
+1. Configure the model locally, including its `provider/model` ID and the provider's explicit `options.baseURL`. For a self-hosted OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider. Define the model in your provider config if it is absent from the bundled or cached model catalog.
+2. From the linked project, run `altimate-code workspace refresh` while online. Keep the resulting skill snapshot and the local credentials for the same workspace account. Altimate Code uses the snapshot without refreshing or deleting it offline and prints one notice if the snapshot is unavailable.
+3. Pre-install any optional warehouse drivers you'll need when you reconnect. Run `warehouse_install_driver` while online, or run the npm command the tool prints. Network warehouse connections and automatic driver installs are disabled in offline mode.
+
+Offline mode sends model requests to the configured HTTP(S) endpoint. It turns off telemetry, account and remote config requests, model catalog downloads, update checks, workspace engine connections and session sharing. It also limits the tool catalog to local operations. For example, web tools, shell commands, external plugins, MCP servers, and language servers are unavailable. Install `ripgrep` ahead of time if you need file search on a fresh host.

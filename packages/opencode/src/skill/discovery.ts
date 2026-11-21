@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import { NodePath } from "@effect/platform-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Path, Schema, Context } from "effect"
@@ -55,6 +58,9 @@ export namespace Discovery {
         })
 
         const pull = Effect.fn("Discovery.pull")(function* (url: string) {
+          // altimate_change start — skip network work in offline mode
+          if (offline()) return []
+          // altimate_change end
           const base = url.endsWith("/") ? url : `${url}/`
           const index = new URL("index.json", base).href
           const host = base.slice(0, -1)

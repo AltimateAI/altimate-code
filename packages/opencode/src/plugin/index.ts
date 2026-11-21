@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 import type { Hooks, PluginInput, Plugin as PluginInstance } from "@opencode-ai/plugin"
 import { Config } from "../config/config"
 import { Bus } from "../bus"
@@ -111,6 +114,9 @@ export namespace Plugin {
       $: Bun.$,
     }
 
+    // altimate_change start — skip network work in offline mode
+    if (offline()) return { hooks, input }
+    // altimate_change end
     for (const plugin of INTERNAL_PLUGINS) {
       log.info("loading internal plugin", { name: plugin.name })
       const init = await plugin(input).catch((err) => {

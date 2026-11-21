@@ -95,6 +95,25 @@ describe("warehouse_install_driver permissions", () => {
     })
   }
 
+  test("offline driver installation gives the online command without invoking npm", async () => {
+    const prior = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    spyOn(DriverResolve, "isDriverInstalled").mockReturnValue(false)
+    const install = spyOn(DriverResolve, "installOptionalDriver").mockRejectedValue(new Error("npm must not run"))
+    const ask = mock(async () => {})
+    try {
+      const result = await tool.execute({ driver: "postgres" }, context(ask))
+      expect(result.metadata.installed).toBe(false)
+      expect(result.output).toContain("Install the driver while online: npm install --prefix")
+      expect(result.output).toContain("pg")
+      expect(ask).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally {
+      if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = prior
+    }
+  })
+
   test("an already-usable driver does not request mutation permissions", async () => {
     spyOn(DriverResolve, "isDriverInstalled").mockReturnValue(true)
     spyOn(DriverResolve, "loadOptionalDriver").mockResolvedValue({})

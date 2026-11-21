@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offline } from "@/config/offline"
+// altimate_change end
 /**
  * ConnectionRegistry — manages database connections.
  *
@@ -424,6 +427,11 @@ async function createConnector(
   isCurrent: () => boolean,
 ): Promise<Connector> {
   // altimate_change end
+  // altimate_change start — skip network work in offline mode
+  if (offline()) {
+    throw new Error("Offline mode disables warehouse connections.")
+  }
+  // altimate_change end
   const driverPath = DRIVER_MAP[config.type.toLowerCase()]
   if (!driverPath) {
     // altimate_change start — friendlier error for known-but-unsupported databases
@@ -663,6 +671,9 @@ export function names(): string[] {
 /** Get a connector instance (creates lazily). */
 export async function get(name: string): Promise<Connector> {
   // altimate_change start — captured once, so a connect that finishes later lands in the project that started it
+  // altimate_change start — skip network work in offline mode
+  if (offline()) throw new Error("Offline mode disables warehouse connections.")
+  // altimate_change end
   const s = ensureLoaded()
   const { configs, connectors, tunnels, pending } = s
   // altimate_change end

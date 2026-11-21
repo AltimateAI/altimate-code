@@ -1,3 +1,6 @@
+// altimate_change start — offline mode does not run project startup scripts
+import { offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { path } from "@opencode-ai/core/effect/layer-node-platform"
 import { Global } from "@opencode-ai/core/global"
@@ -491,6 +494,9 @@ export const layer: Layer.Layer<
     )
 
     const runStartScript = Effect.fnUntraced(function* (directory: string, cmd: string, kind: string) {
+      // altimate_change start — keep worktree startup commands offline
+      if (offline()) return true
+      // altimate_change end
       const text = cmd.trim()
       if (!text) return true
       const result = yield* runStartCommand(directory, text)
