@@ -173,6 +173,10 @@ export function create() {
     // (up to SessionRetry.RETRY_MAX_ATTEMPTS per step), and each retry streams
     // its own step-start but only the attempt that completes streams a
     // step-finish. Charging on start billed every failed attempt as a turn.
+    // Any step that ends without a step-finish is free: a failed or retried
+    // attempt, a context overflow that hands off to compaction, or a
+    // soft-deadline interrupt. The processor's retry cap, the compaction
+    // circuit breaker and --time-budget bound those paths.
     // `turnCount` is therefore the number of COMPLETED non-compaction steps;
     // harness-injected generations (idle-done challenge, continuation,
     // silent-turn reply) are real assistant steps and are charged the same way.

@@ -50,7 +50,7 @@ describe("opencode run: --max-turns charges completed steps only", () => {
   )
   // Attached-session fake: the CLI sees exactly the events the session publishes for
   // a step whose attempts start and fail, without waiting out real retry backoff.
-  const attached = (behavior: "all-attempts-fail" | "endless-attempts") =>
+  const attached = (behavior: "all-attempts-fail" | "endless-attempts" | "compaction-after-budget") =>
     Effect.gen(function* () {
       const sessionID = "ses_turn_budget_retry"
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
@@ -144,6 +144,46 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                   publish("session.status", { sessionID, status: { type: "idle" } })
                   return Response.json({ info: { finish: "stop" } })
                 }
+                if (behavior === "compaction-after-budget") {
+                  // The work step answers and completes, using the whole one-turn budget.
+                  startAttempt(messageID)
+                  publish("message.part.updated", {
+                    part: {
+                      id: `${messageID}_text`,
+                      messageID,
+                      sessionID,
+                      type: "text",
+                      text: "The answer.",
+                      time: { start: 1, end: 2 },
+                    },
+                  })
+                  publish("message.part.updated", {
+                    part: { id: `${messageID}_finish`, messageID, sessionID, type: "step-finish", reason: "stop" },
+                  })
+                  // Compaction machinery then runs a step of its own; it is never charged or stopped.
+                  const summaryID = `${messageID}zz_summary`
+                  publish("message.updated", {
+                    info: {
+                      id: summaryID,
+                      sessionID,
+                      role: "assistant",
+                      parentID,
+                      agent: "compaction",
+                      summary: true,
+                      modelID: "test-model",
+                      providerID: "test",
+                      time: { created: Date.now() },
+                    },
+                  })
+                  publish("message.part.updated", {
+                    part: { id: `${summaryID}_start`, messageID: summaryID, sessionID, type: "step-start" },
+                  })
+                  publish("message.part.updated", {
+                    part: { id: `${summaryID}_finish`, messageID: summaryID, sessionID, type: "step-finish", reason: "stop" },
+                  })
+                  publish("session.status", { sessionID, status: { type: "idle" } })
+                  return Response.json({ info: { finish: "stop" } })
+                }
                 if (behavior === "all-attempts-fail") {
                   // The first attempt plus every retry the processor allows, none completing.
                   for (let attempt = 0; attempt <= SessionRetry.RETRY_MAX_ATTEMPTS; attempt++) startAttempt(messageID)
@@ -198,6 +238,26 @@ describe("opencode run: --max-turns charges completed steps only", () => {
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
           { why_harness_stopped: "error" },
         ])
+      }),
+    30_000,
+  )
+
+  cliIt.concurrent(
+    "a compaction step after the budget is used is neither charged nor stopped",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const { server, sessionID, counts } = yield* attached("compaction-after-budget")
+        const result = yield* opencode.run("Answer once.", {
+          format: "json",
+          extraArgs: ["--attach", server.url.toString(), "--session", sessionID, "--max-turns", "1", "--no-trace"],
+          timeoutMs: 20_000,
+          bunRun: true,
+        })
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+        expect(counts.aborts).toBe(0)
+        expect(counts.prompts).toBe(1)
+        opencode.expectExit(result, 0)
       }),
     30_000,
   )
