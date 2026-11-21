@@ -69,7 +69,7 @@ describe("git() utility", () => {
   })
 
   test("offline treats submodule clones, LFS transfers and remote archives as network commands", () => {
-    for (const args of [["submodule", "update", "--init"], ["submodule", "update", "--recursive", "--no-fetch"], ["submodule", "add", "url"], ["remote", "add", "-f", "o", "url"], ["remote", "prune", "origin"], ["remote", "set-head", "origin", "--auto"], ["lfs", "fetch"], ["lfs", "pull"], ["archive", "--remote=origin", "HEAD"], ["-C", "x", "fetch"]])
+    for (const args of [["submodule", "update", "--init"], ["submodule", "update", "--recursive", "--no-fetch"], ["submodule", "add", "url"], ["remote", "add", "-f", "o", "url"], ["remote", "prune", "origin"], ["submodule", "--quiet", "update"], ["remote", "-v", "update"], ["remote", "set-head", "origin", "--auto"], ["lfs", "fetch"], ["lfs", "pull"], ["archive", "--remote=origin", "HEAD"], ["-C", "x", "fetch"]])
       expect(gitCommandUsesNetwork(args)).toBe(true)
     for (const args of [["submodule", "foreach", "git", "status"], ["remote", "add", "o", "url"], ["lfs", "ls-files"], ["archive", "HEAD"], ["status"], ["remote", "show", "-n", "origin"]])
       expect(gitCommandUsesNetwork(args)).toBe(false)

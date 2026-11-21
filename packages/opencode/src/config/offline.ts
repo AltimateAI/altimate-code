@@ -93,18 +93,23 @@ export function start() {
     async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       let url = input instanceof Request ? input.url : input.toString()
       if (!isLocalURL(url)) throw new Error("Offline mode allows network requests only to the configured model endpoint.")
-      // A Request carries its own method and body, and a caller may ask not to follow: refuse redirects then.
-      const follow = !(input instanceof Request) && (init?.redirect ?? "follow") === "follow"
-      if (!follow) return networkFetch!(input, { ...init, redirect: init?.redirect === "manual" ? "manual" : "error" })
-      // Otherwise follow redirects only while they stay on this machine.
-      let response = await networkFetch!(input, { ...init, redirect: "manual" })
+      const wanted = init?.redirect ?? (input instanceof Request ? input.redirect : "follow")
+      // A Request carries its own method and body, and a caller may ask not to follow: never follow for them.
+      if (wanted !== "follow" || input instanceof Request)
+        return networkFetch!(input, { ...init, redirect: wanted === "manual" ? "manual" : "error" })
+      // Otherwise follow redirects only while they stay on this machine, as fetch would.
+      let request: RequestInit = { ...init, redirect: "manual" }
+      let response = await networkFetch!(input, request)
       for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
         const location = response.headers.get("location")
         if (!location) return response
         if (hop === MAX_LOCAL_REDIRECTS) throw new Error("Offline mode stopped after too many local redirects.")
         url = new URL(location, url).href
         if (!isLocalURL(url)) throw new Error("Offline mode blocked a redirect away from this machine.")
-        response = await networkFetch!(url, { ...init, redirect: "manual" })
+        const method = (request.method ?? "GET").toUpperCase()
+        if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST"))
+          request = { ...request, method: method === "HEAD" ? "HEAD" : "GET", body: undefined }
+        response = await networkFetch!(url, request)
       }
       return response
     },

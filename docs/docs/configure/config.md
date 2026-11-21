@@ -182,7 +182,7 @@ While still online:
 
 ### What keeps working
 
-- Local warehouses: DuckDB and SQLite files, and Postgres, MySQL, SQL Server, ClickHouse, Trino, Oracle and MongoDB servers reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. Other hosts, connection strings that cannot be parsed, and account-addressed warehouses such as Snowflake, BigQuery and Databricks are refused.
+- Local warehouses: DuckDB and SQLite files, and Postgres, MySQL, SQL Server, ClickHouse, Trino, Oracle and MongoDB servers reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. Other hosts, connection strings that cannot be parsed (including Oracle Easy Connect strings; set `host` instead), and account-addressed warehouses such as Snowflake, BigQuery and Databricks are refused.
 - dbt commands whose selected profile and target are local. Values written as Jinja templates (for example `{{ env_var('DBT_HOST') }}`) cannot be checked and are refused; write them literally to use them offline. dbt-duckdb profiles can use extensions, local attachments and plugins; settings that point at remote storage, a remote server or a remote extension repository (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused. Named extensions and plugins are not checked: install extensions while online, and do not configure plugins that call remote services.
 - DuckDB loads extensions that are already installed and does not install new ones automatically.
 - The shell tool, installed language servers, stdio MCP servers and MCP servers at `localhost`, `127.0.0.1`, `[::1]` or `0.0.0.0`, including `tool run --daemon`.
@@ -212,6 +212,6 @@ Some network use happens inside programs Altimate Code starts and is not checked
 
 - Git in a partial (blobless or treeless) clone fetches missing objects on demand, even for local commands such as `diff`.
 - Cloud sign-in configured on a local warehouse (for example SQL Server `authentication: azure-active-directory-*` or MongoDB `authMechanism=MONGODB-AWS`) contacts its identity provider.
-- When offline mode turns on after startup (organisation-managed or remote configuration, or a server started without it that then loads an offline project), requests that were already set up are not guarded. Set `ALTIMATE_OFFLINE=1` before starting a server.
+- When offline mode turns on after startup (organisation-managed or remote configuration, or a server started without it that then loads an offline project), internal HTTP requests made through the shared HTTP client stay unguarded for the rest of that process. Set `ALTIMATE_OFFLINE=1` before starting a server.
 
 SQL that runs an explicit `INSTALL`, or loads an installed network extension (such as `httpfs`) and reads a remote path, is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs and usage reporting.

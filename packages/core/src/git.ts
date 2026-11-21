@@ -17,7 +17,11 @@ export function gitCommandUsesNetwork(args: string[]) {
   while (args[index]?.startsWith("-")) {
     index += ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(args[index]) ? 2 : 1
   }
-  const [command, operation, ...rest] = args.slice(index)
+  const [command, ...after] = args.slice(index)
+  // The operation is the first word after the subcommand's own options (`submodule --quiet update`).
+  const at = after.findIndex((arg) => !arg.startsWith("-"))
+  const operation = at === -1 ? "" : after[at]
+  const rest = at === -1 ? after : [...after.slice(0, at), ...after.slice(at + 1)]
   return (
     remoteCommands.has(command) ||
     (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n")))) ||

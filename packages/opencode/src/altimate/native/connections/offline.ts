@@ -56,4 +56,4 @@ const HOST_ADDRESSED = new Set([
   "postgres", "postgresql", "redshift", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "trino", "oracle", "mongodb", "mongo",
 ])
 
-const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo"])
+const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo", "trino", "oracle"])
