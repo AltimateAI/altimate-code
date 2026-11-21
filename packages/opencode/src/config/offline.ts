@@ -30,7 +30,8 @@ export async function optedIn(directory: string): Promise<boolean> {
 
 async function findOptIn(directory: string): Promise<boolean> {
   const sets = async (text: string | undefined, source: string | { source: string; dir: string }) => {
-    if (!text || (!text.includes("offline") && !/\{env:|\$\{|\{file:/.test(text))) return false
+    // A JSON escape (off\u006cine) or a substitution can produce the key without spelling it.
+    if (!text || (!text.includes("offline") && !/\{env:|\$\{|\{file:|\\u/.test(text))) return false
     const config = await ConfigPaths.parseText(text, source, "empty", { track: false }).catch(() => undefined)
     return config?.offline === true
   }

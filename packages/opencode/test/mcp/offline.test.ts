@@ -76,3 +76,16 @@ test("model fetch stays below the configured base URL", async () => {
   expect(() => Offline.modelFetch(undefined)).toThrow("explicit baseURL")
   expect(() => Offline.modelFetch("file:///tmp/model")).toThrow("HTTP(S)")
 })
+
+test("the startup check finds the setting in a project file, even written with a JSON escape", async () => {
+  const fs = await import("node:fs/promises")
+  const os = await import("node:os")
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "offline-optin-"))
+  try {
+    expect(await Offline.optedIn(dir)).toBe(false)
+    await fs.writeFile(path.join(dir, "opencode.json"), '{"off\\u006cine": true}')
+    expect(await Offline.optedIn(dir)).toBe(true)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})

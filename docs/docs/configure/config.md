@@ -168,7 +168,7 @@ With offline mode off, nothing on this page applies and Altimate Code behaves ex
 
 ### Turn it on
 
-Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file (or `OPENCODE_CONFIG_CONTENT`). Altimate Code checks those files for the setting when it starts, so startup requests are covered too. Organisation-managed configuration and remote (well-known) configuration apply the setting only once they load, after some startup requests; use `ALTIMATE_OFFLINE=1` there. Any one of these sources turns it on; a value of `false` elsewhere does not turn it back off. `ALTIMATE_OFFLINE` values of empty, `0`, `false`, `off` and `no` mean off. Once on, offline mode lasts for the rest of the process, including any server that loaded the project.
+Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file (or `OPENCODE_CONFIG_CONTENT`). Altimate Code checks those files for the setting when it starts, so startup requests are covered too. Organisation-managed configuration, remote (well-known) configuration and the legacy TOML `config` file apply the setting only once they load, after some startup requests; use `ALTIMATE_OFFLINE=1` there. Any one of these sources turns it on; a value of `false` elsewhere does not turn it back off. `ALTIMATE_OFFLINE` values of empty, `0`, `false`, `off` and `no` mean off. Once on, offline mode lasts for the rest of the process, including any server that loaded the project.
 
 Configure a provider with an explicit HTTP(S) `options.baseURL` and use one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Model requests go only to a provider's explicit `baseURL`, never to a catalog URL, and are not redirected. They respect `HTTPS_PROXY` and `HTTP_PROXY`. A `small_model` is used only if its provider also has an explicit `baseURL`.
 
@@ -186,7 +186,7 @@ While still online:
 - dbt commands whose selected profile and target are local. Values written as Jinja templates (for example `{{ env_var('DBT_HOST') }}`) cannot be checked and are refused; write them literally to use them offline. dbt-duckdb profiles can use extensions, local attachments and plugins; settings that point at remote storage, a remote server or a remote extension repository (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused. Named extensions and plugins are not checked: install extensions while online, and do not configure plugins that call remote services.
 - DuckDB loads extensions that are already installed and does not install new ones automatically.
 - The shell tool, installed language servers, stdio MCP servers and MCP servers at `localhost`, `127.0.0.1`, `[::1]` or `0.0.0.0`, including `tool run --daemon`.
-- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and leaves submodules at their current commits. Git LFS files that are not cached stay as pointer files.
+- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and leaves submodules at their current commits. Worktree create and reset leave Git LFS files as pointer files.
 - `attach` and `run --attach` to a server on this machine. The attached server applies its own policy, so start it with offline mode too.
 
 ### What is blocked
@@ -210,7 +210,8 @@ Programs you run or configure yourself keep their own network access and proxy s
 
 Some network use happens inside programs Altimate Code starts and is not checked either:
 
-- Git in a partial (blobless or treeless) clone fetches missing objects on demand, even for local commands such as `diff`.
+- Git in a partial (blobless or treeless) clone fetches missing objects on demand, even for local commands such as `diff`, and Git LFS can download missing objects during a checkout outside worktree reset.
+- dbt reads libpq environment variables such as `PGHOSTADDR` and `PGSERVICE`, which can point a Postgres profile at another host.
 - Cloud sign-in configured on a local warehouse (for example SQL Server `authentication: azure-active-directory-*` or MongoDB `authMechanism=MONGODB-AWS`) contacts its identity provider.
 - When offline mode turns on after startup (organisation-managed or remote configuration, or a server started without it that then loads an offline project), internal HTTP requests made through the shared HTTP client stay unguarded for the rest of that process. Set `ALTIMATE_OFFLINE=1` before starting a server.
 
