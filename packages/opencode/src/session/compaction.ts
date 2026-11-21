@@ -14,6 +14,9 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — the context measure shared with the pre-send budget guard
+import { reportedContextTokens } from "@/provider/output-token-budget"
+// altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
 // altimate_change start — summarizer-integrity error
@@ -223,17 +226,16 @@ export namespace SessionCompaction {
     const context = input.model.limit.context
     if (context === 0) return false
 
-    const count =
-      input.tokens.total ||
-      input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
-
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
     const reserved = config.compaction?.reserved ?? COMPACTION_BUFFER
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= headroom) return false
-    const estimated = input.estimatedTokens ?? 0
-    const adjusted = estimated > 0 ? count + Math.ceil(estimated / contextSafetyFraction(config)) : count
+    const adjusted = reportedContextTokens({
+      tokens: input.tokens,
+      estimatedTokens: input.estimatedTokens,
+      fraction: contextSafetyFraction(config),
+    })
     const threshold = overflowThreshold({ base, headroom, fraction: 1 })
     return adjusted >= threshold
   }

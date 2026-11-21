@@ -15,6 +15,7 @@ import { mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
 // altimate_change start — size and clamp the finalized provider request
 import {
+  calibratedInputTokens,
   clampOutputTokens,
   clampReasoningBudget,
   effectiveContextWindow,
@@ -81,6 +82,9 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
+    // altimate_change start — provider-reported size of this conversation (see reportedContextTokens)
+    reportedInputTokens?: number
+    // altimate_change end
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
@@ -358,13 +362,18 @@ export namespace LLM {
         // Provider defaults are lower precedence than the exact case-normalized outgoing record.
         headerSources: [provider.options, requestHeaders],
       }),
+      // The character estimate runs high on SQL/JSON; the provider-reported size of the same
+      // conversation (when known) keeps this guard on the measure the compaction trigger uses.
       inputTokens: () =>
-        estimateInputTokens({
-          system,
-          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-          tools,
-          instructions: params.options.instructions,
-        }),
+        calibratedInputTokens(
+          estimateInputTokens({
+            system,
+            messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+            tools,
+            instructions: params.options.instructions,
+          }),
+          input.reportedInputTokens,
+        ),
     })
     // altimate_change start — deadline effort wins configured variants and plugin overrides
     const requestOptions = clampReasoningBudget(

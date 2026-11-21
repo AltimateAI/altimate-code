@@ -392,6 +392,45 @@ export function estimateInputTokens(input: {
   return total
 }
 
+/** Provider-reported token usage of one finished assistant turn. */
+export type ReportedUsage = {
+  readonly total?: number
+  readonly input: number
+  readonly output: number
+  readonly cache: { readonly read: number; readonly write: number }
+}
+
+/**
+ * The context size the compaction trigger compares against its threshold: provider-reported usage
+ * (exact) plus an estimated uncounted tail inflated by 1/fraction. The pre-send guard uses the same
+ * measure, so it cannot refuse a request the compaction trigger still considers in budget.
+ */
+export function reportedContextTokens(input: {
+  readonly tokens: ReportedUsage
+  readonly estimatedTokens?: number
+  readonly fraction: number
+}): number {
+  const count =
+    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
+  const estimated = input.estimatedTokens ?? 0
+  return estimated > 0 ? count + Math.ceil(estimated / input.fraction) : count
+}
+
+/**
+ * Prefer the provider-reported size of the same conversation when it is smaller than the
+ * character estimate. The estimate runs high on SQL- and JSON-heavy context; reported usage plus
+ * an estimated tail is the measure the compaction trigger uses, so the guard and compaction agree.
+ */
+export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
+  if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
+  return Math.min(estimate, reported)
+}
+
+/** True for the pre-send refusals that compacting the conversation can resolve. */
+export function isContextBudgetError(error: unknown): error is OutputTokenBudgetError | InputTokenBudgetError {
+  return error instanceof OutputTokenBudgetError || error instanceof InputTokenBudgetError
+}
+
 /** Resolve a direct or lazy input estimate after cheap no-op checks have passed. */
 function resolveInputTokens(value: number | (() => number)): number {
   return typeof value === "function" ? value() : value

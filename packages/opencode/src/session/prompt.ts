@@ -30,6 +30,9 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+// altimate_change start — the context measure shared by compaction and the pre-send budget guard
+import { reportedContextTokens } from "@/provider/output-token-budget"
+// altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
@@ -2230,7 +2233,29 @@ export namespace SessionPrompt {
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
       // altimate_change end
+      // altimate_change start — the pre-send guard measures this request the way isOverflow does
+      // (provider-reported usage of the last turn on this model plus the estimated tail), and a
+      // guard refusal compacts whenever the proactive check above could have compacted.
+      // A provider that reports no usage leaves only the estimate: a tail alone would undercount.
+      const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
+      const compactable = measured !== undefined
+      const reportedInputTokens =
+        measured &&
+        measured.providerID === model.providerID &&
+        measured.modelID === model.id &&
+        reportedContextTokens({ tokens: measured.tokens, fraction: 1 }) > 0
+          ? reportedContextTokens({
+              tokens: measured.tokens,
+              estimatedTokens: uncountedTail,
+              fraction: SessionCompaction.contextSafetyFraction(await Config.get()),
+            })
+          : undefined
+      // altimate_change end
       const result = await processor.process({
+        // altimate_change start — see reportedInputTokens above
+        compactable,
+        reportedInputTokens,
+        // altimate_change end
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
         messageID: processor.message.id,

@@ -20,6 +20,9 @@ import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
+// altimate_change start — recognize pre-send context budget refusals
+import { isContextBudgetError } from "@/provider/output-token-budget"
+// altimate_change end
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
@@ -379,7 +382,15 @@ export namespace SessionProcessor {
       },
       // altimate_change end
       // altimate_change start - opt-in text buffering for committed-answer echoes
-      async process({ deferText, ...streamInput }: LLM.StreamInput & { deferText?: MessageV2.TextPart[] }) {
+      async process({
+        deferText,
+        compactable,
+        ...streamInput
+      }: LLM.StreamInput & {
+        deferText?: MessageV2.TextPart[]
+        // The prompt loop can compact this conversation (a finished non-summary turn exists).
+        compactable?: boolean
+      }) {
         // altimate_change end
         log.info("process")
         needsCompaction = false
@@ -1327,7 +1338,14 @@ export namespace SessionProcessor {
                 ...(traceId && { trace: traceId }),
                 // altimate_change end
               })
-              const error = MessageV2.fromError(e, { providerID: input.model.providerID })
+              // altimate_change start — a pre-send budget refusal on a compactable conversation is a
+              // context overflow: compact and retry, as for a provider-reported overflow. Right after
+              // a compaction (or on a first turn) it stays the fatal budget error, so it cannot loop.
+              const error =
+                compactable && isContextBudgetError(e)
+                  ? new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+                  : MessageV2.fromError(e, { providerID: input.model.providerID })
+              // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
               if (
                 (deferText || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
