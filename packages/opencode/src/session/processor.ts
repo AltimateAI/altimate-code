@@ -1407,7 +1407,7 @@ export namespace SessionProcessor {
               } else if (compactBlockedByMedia && isContextBudgetError(e)) {
                 error = new NamedError.Unknown(
                   {
-                    message: "The conversation plus the new attachment does not fit the model's context window. Run /compact, then attach it again, or remove the attachment.",
+                    message: "The conversation plus a new image or PDF (attached or returned by a tool) does not fit the model's context window. Run /compact, then retry; re-attach the file if you attached it.",
                   },
                   { cause: e },
                 ).toObject()

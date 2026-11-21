@@ -871,7 +871,7 @@ it.live(
 )
 
 const MEDIA_GUIDANCE =
-  "The conversation plus the new attachment does not fit the model's context window. Run /compact, then attach it again, or remove the attachment."
+  "The conversation plus a new image or PDF (attached or returned by a tool) does not fit the model's context window. Run /compact, then retry; re-attach the file if you attached it."
 
 it.live(
   "a refused request with an unseen user image gives manual compaction guidance",
