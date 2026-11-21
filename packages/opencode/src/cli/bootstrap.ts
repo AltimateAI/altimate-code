@@ -21,6 +21,7 @@ export async function bootstrap<T>(directory: string, cb: () => Promise<T>) {
       // The CLI's startup telemetry init ran before this project loaded; if it could not settle the
       // opt-out (a remote or organization config), read it here from the full config, so a command
       // that starts no session does not drop an opted-in user's events.
+      await Telemetry.settledOptOutState() // the startup read is not awaited; let it finish first
       if (Telemetry.awaitingConfig()) await Telemetry.init().catch(() => {})
       return cb()
     })

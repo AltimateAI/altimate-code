@@ -2383,8 +2383,11 @@ export namespace Telemetry {
   export function bufferedCountForTest() {
     return buffer.length
   }
-  // The test preload resets the gate between tests through this, without importing this module.
-  ;(globalThis as Record<symbol, unknown>)[Symbol.for("altimate.telemetry.resetGateForTest")] = resetGateForTest
+  // The test preload resets the gate between tests through this, without importing this module. Only
+  // under a test runner: in a shipped process nothing else can reopen a decided opt-out.
+  if (process.env.NODE_ENV === "test" || process.env.BUN_TEST) {
+    ;(globalThis as Record<symbol, unknown>)[Symbol.for("altimate.telemetry.resetGateForTest")] = resetGateForTest
+  }
   /** Test seam: end the unreadable-config retry backoff so the next init() re-resolves. */
   export function retryConfigNowForTest() {
     if (configRetry) configRetry.at = 0
@@ -3237,7 +3240,8 @@ export namespace Telemetry {
     appInsights = undefined
     // altimate_change start — while the opt-out is undecided nothing was flushed: keep the events for a
     // later init in this process to send or drop. At process exit they go with the process. Not when a
-    // project's own read failed: another project's decision must not send that project's events.
+    // project's own read failed: once its session ends, another project's decision must not send its
+    // events. (Sessions that overlap share one lifecycle, as before: see the docs' multi-project note.)
     if (gate !== "pending" || unresolvedInProject) {
       unresolvedInProject = false
       buffer = []
