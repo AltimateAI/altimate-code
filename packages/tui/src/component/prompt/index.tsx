@@ -415,7 +415,7 @@ export function Prompt(props: PromptProps) {
           if (restored) {
             // A stale keyless-Zen model is restored as Altimate Base; Zen's variant means nothing there.
             const same = restored.providerID === msg.model.providerID && restored.modelID === msg.model.modelID
-            local.model.variant.set(same ? msg.model.variant : undefined)
+            local.model.variant.restore(same ? msg.model.variant : undefined)
           }
           // altimate_change end
         }

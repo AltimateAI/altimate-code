@@ -544,17 +544,26 @@ test("a home picker correction moves to its new session without changing later h
     }
   }))
 
-test("matching picker model keeps its variant while ordinary history reports the restored selection", () =>
+test("the same picked model retains independent effort in each conversation", () =>
   withIsolatedState(async () => {
     const mounted = await mount({})
     try {
       const base = { providerID: "altimate-free", modelID: "altimate-base" }
-      mounted.route.navigate({ type: "session", sessionID: "ses_history" })
+      mounted.route.navigate({ type: "session", sessionID: "ses_low" })
+      mounted.local.model.set(base)
       expect(mounted.local.model.restoreSession(base)).toEqual(base)
+      mounted.local.model.variant.restore("low")
+      expect(mounted.local.model.variant.selected()).toBe("low")
+      mounted.local.model.variant.set("low")
+
+      mounted.route.navigate({ type: "session", sessionID: "ses_high" })
       mounted.local.model.set(base)
       mounted.local.model.variant.set("high")
-      expect(mounted.local.model.restoreSession(base)).toBeUndefined()
       expect(mounted.local.model.variant.selected()).toBe("high")
+
+      mounted.route.navigate({ type: "session", sessionID: "ses_low" })
+      expect(mounted.local.model.restoreSession(base)).toBeUndefined()
+      expect(mounted.local.model.variant.selected()).toBe("low")
     } finally {
       await mounted.cleanup()
     }

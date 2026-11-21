@@ -629,7 +629,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
       const [pickedModels, setPickedModels] = createStore<Record<string, ModelRef | undefined>>({})
       const [restoredModels, setRestoredModels] = createStore<Record<string, { scope: string; model: ModelRef }>>({})
+      const [sessionVariants, setSessionVariants] =
+        createStore<Record<string, { value: string; explicit: boolean } | undefined>>({})
       const sessionScope = () => route.data.type === "session" ? route.data.sessionID : "home"
+      const variantKey = (model: ModelRef, scope = sessionScope()) =>
+        JSON.stringify([scope, model.providerID, model.modelID])
       const pickerKey = (name: string, scope = sessionScope()) => JSON.stringify([scope, name])
       const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
       // altimate_change end
@@ -1035,10 +1039,20 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a || route.data.type !== "home") return
           const picked = pickedModels[pickerKey(a.name, "home")]
-          if (!picked) return
+          const active = currentModel()
           batch(() => {
-            setPickedModels(pickerKey(a.name, sessionID), { ...picked })
-            setPickedModels(pickerKey(a.name, "home"), undefined)
+            if (picked) {
+              setPickedModels(pickerKey(a.name, sessionID), { ...picked })
+              setPickedModels(pickerKey(a.name, "home"), undefined)
+            }
+            if (active) {
+              const key = variantKey(active, "home")
+              const variant = sessionVariants[key]
+              if (variant) {
+                setSessionVariants(variantKey(active, sessionID), { ...variant })
+                setSessionVariants(key, undefined)
+              }
+            }
           })
         },
         // altimate_change end
@@ -1150,7 +1164,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             scope: sessionScope(),
             model: { providerID: resolved.providerID, modelID: resolved.modelID },
           })
-          return sessionOverride() ? undefined : resolved
+          const current = currentModel()
+          if (!sameModel(current, resolved) || sessionVariants[variantKey(resolved)]?.explicit) return undefined
+          return resolved
         },
         // altimate_change end
         // altimate_change end
@@ -1182,7 +1198,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             const m = currentModel()
             if (!m) return undefined
             const key = `${m.providerID}/${m.modelID}`
-            return modelStore.variant[key]
+            // altimate_change start — a conversation keeps its own effort for the same model
+            return sessionVariants[variantKey(m)]?.value ?? modelStore.variant[key]
+            // altimate_change end
           },
           current() {
             const v = this.selected()
@@ -1202,9 +1220,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             const m = currentModel()
             if (!m) return
             const key = `${m.providerID}/${m.modelID}`
+            // altimate_change start — retain explicit effort in the active conversation
+            setSessionVariants(variantKey(m), { value: value ?? "default", explicit: true })
+            // altimate_change end
             setModelStore("variant", key, value ?? "default")
             save()
           },
+          // altimate_change start — restoring effort does not replace the global picker default
+          restore(value: string | undefined) {
+            const model = currentModel()
+            if (model) setSessionVariants(variantKey(model), { value: value ?? "default", explicit: false })
+          },
+          // altimate_change end
           cycle() {
             const variants = this.list()
             if (variants.length === 0) return
