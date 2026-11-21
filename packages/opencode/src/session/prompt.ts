@@ -206,6 +206,9 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+// altimate_change start — bytes per token for a file sent as a file part (pre-send oversize check)
+const FILE_BYTES_PER_TOKEN = 4
+// altimate_change end
 // altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
 const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
 // altimate_change end
@@ -2255,12 +2258,16 @@ export namespace SessionPrompt {
       // rather than continue without it. Media the model already saw does not block compaction.
       let unmeasuredMedia = false
       let unseenMedia = false
+      // Files sent as file parts (not converted to text) are outside the text tail estimate.
+      let unmeasuredFileTokens = 0
       for (const msg of msgs) {
         if (msg.info.id !== measuredID && !isAfterMeasured(msg.info.id)) continue
         for (const part of msg.parts) {
           if (part.type === "file") {
             unmeasuredMedia = true
             if (MessageV2.isMedia(part.mime)) unseenMedia = true
+            else if (part.mime !== "text/plain" && part.mime !== "application/x-directory")
+              unmeasuredFileTokens += Math.ceil((part.url.length * 3) / 4 / FILE_BYTES_PER_TOKEN)
           }
           if (part.type !== "tool" || part.state.status !== "completed") continue
           const attachments = part.state.attachments ?? []
@@ -2272,7 +2279,16 @@ export namespace SessionPrompt {
       // response cannot be helped by compacting the history before it: that refusal stays immediate
       // and the history untouched.
       const guardTail = measured ? estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens) : 0
-      const tailFillsWindow = guardTail + OUTPUT_TOKEN_FLOOR >= (model.limit.input || model.limit.context || Infinity)
+      // A dedicated input limit already excludes the response; a context window must also fit it.
+      // Only content after the measured step: that step's own tool results can still be summarized.
+      const measuredMsg = msgs.find((msg) => msg.info.id === measuredID)
+      const measuredOwnTokens = measuredMsg
+        ? estimateUncountedTail([measuredMsg], measuredMsg.info.id, () => false, estimateTextTokens)
+        : 0
+      const unmeasuredTokens = guardTail - measuredOwnTokens + unmeasuredFileTokens
+      const tailFillsWindow = model.limit.input
+        ? unmeasuredTokens >= model.limit.input
+        : unmeasuredTokens + OUTPUT_TOKEN_FLOOR >= (model.limit.context || Infinity)
       const compactable =
         measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia && !tailFillsWindow
       // A step that made tool calls was sent with the full tool set; a text-only step may have been
