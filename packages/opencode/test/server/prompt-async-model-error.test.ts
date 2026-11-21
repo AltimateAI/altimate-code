@@ -82,4 +82,42 @@ describe("prompt_async model errors", () => {
     { git: true },
     30_000,
   )
+
+  const syncStatus = Effect.fn("PromptAsyncModelErrorTest.syncStatus")(function* (error: unknown) {
+    const test = yield* TestInstance
+    const created = yield* SessionNs.use.create({ title: "sync prompt error" })
+    const prompt = spyOn(SessionPrompt, "prompt").mockImplementation((async () => {
+      throw error
+    }) as unknown as typeof SessionPrompt.prompt)
+    yield* Effect.addFinalizer(() => Effect.sync(() => prompt.mockRestore()))
+    const response = yield* Effect.promise(async () =>
+      Server.Default().request(`/session/${created.id}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-opencode-directory": test.directory },
+        body: JSON.stringify({ parts: [{ type: "text", text: "hello" }] }),
+      }),
+    )
+    yield* Effect.promise(() => response.text())
+    return response.status
+  })
+
+  it.instance(
+    "the synchronous route rejects an unavailable model with 400",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* syncStatus(notFound())).toBe(400)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
+    "the synchronous route keeps the empty 200 reply for other prompt failures",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* syncStatus(new Error("compaction failed"))).toBe(200)
+      }),
+    { git: true },
+    30_000,
+  )
 })
