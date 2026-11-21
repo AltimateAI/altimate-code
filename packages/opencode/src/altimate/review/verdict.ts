@@ -118,8 +118,25 @@ export const ReviewScope = z.object({
   outOfScopeFiles: z.number().int().nonnegative().optional(),
   /** Non-model renames with unchanged content, name, role and layer (pure moves): not re-reviewed. */
   movedUnchangedFiles: z.number().int().nonnegative().optional(),
-  /** Models the engine lanes could not verify, with the reason. */
-  unverified: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
+  /** Head commit the review ran on; a run on an older push never clears a block. */
+  headSha: z.string().optional(),
+  /** Parents of the head commit when it is a merge commit (a `pull_request`
+   *  checkout of `refs/pull/N/merge`): the PR head is one of them. */
+  headParents: z.array(z.string()).optional(),
+  /** Models the engine lanes could not verify, with the reason and its kind:
+   *  `failed` (the file's review threw), `abstained` (a check could not analyse
+   *  the SQL), `not_compiled` (no compiled SQL; engine lanes skipped). `side`
+   *  says which version lacked compiled SQL. */
+  unverified: z
+    .array(
+      z.object({
+        path: z.string(),
+        reason: z.string(),
+        kind: z.enum(["failed", "abstained", "not_compiled"]).optional(),
+        side: z.enum(["head", "base"]).optional(),
+      }),
+    )
+    .optional(),
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
@@ -156,6 +173,11 @@ export const VerdictEnvelope = z.object({
   staleManifest: z.boolean().optional(),
   /** Base resolution and review coverage (see ReviewScope). */
   scope: ReviewScope.optional(),
+  /** Engine calls that failed during the review. Their checks did not run, so
+   *  the verdict is never a clean APPROVE when this is present. */
+  engineErrors: z
+    .array(z.object({ method: z.string(), reason: z.string(), count: z.number().int().positive() }))
+    .optional(),
   /** The review policy applied: from the base branch, the working tree, or
    *  defaults; its hash; and settings the PR changes but that were not applied. */
   policy: z
@@ -235,6 +257,7 @@ export interface BuildEnvelopeInput {
   scope?: ReviewScope
   ai?: VerdictEnvelope["ai"]
   policy?: VerdictEnvelope["policy"]
+  engineErrors?: VerdictEnvelope["engineErrors"]
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -243,10 +266,39 @@ function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["sum
   return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
 }
 
+/** An error as one bounded line, for envelope reasons and the PR comment. */
+export function errorReason(err: unknown, max = 200): string {
+  return (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim().slice(0, max)
+}
+
+/** Prefix of the `scope.unverified` reason for a file whose review threw. */
+export const FAILED_FILE_REASON = "review failed for this file"
+
+/** True when some check did not run: an engine call failed, a file's review
+ *  threw, a check abstained on a model, or a model had no compiled head SQL (its
+ *  engine and PII checks were skipped). Missing findings then mean "not
+ *  checked", so the run can neither APPROVE nor clear an earlier block. A base
+ *  without compiled SQL only weakens the base comparison: the head was checked. */
+export function reviewIncomplete(input: Pick<BuildEnvelopeInput, "engineErrors" | "scope">): boolean {
+  if (input.engineErrors?.length) return true
+  return (input.scope?.unverified ?? []).some(
+    (u) =>
+      u.kind === "failed" ||
+      u.kind === "abstained" ||
+      (u.kind === "not_compiled" && u.side !== "base") ||
+      // Envelopes written before `kind` existed carry only the reason.
+      (u.kind === undefined && u.reason.startsWith(FAILED_FILE_REASON)),
+  )
+}
+
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
 export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   const rubric = input.rubric ?? DEFAULT_RUBRIC
-  const ideal = computeIdealVerdict(input.findings, rubric)
+  // An engine failure, a file whose review failed, a check that abstained, or
+  // a model without compiled head SQL means some checks did not run: "no findings" is then unknown, not clean,
+  // so the verdict cannot be APPROVE.
+  const computed = computeIdealVerdict(input.findings, rubric)
+  const ideal = computed === "APPROVE" && reviewIncomplete(input) ? "COMMENT" : computed
   const verdict = applyMode(ideal, input.mode)
   const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
   return VerdictEnvelope.parse({
@@ -266,6 +318,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     scope: input.scope,
     ai: input.ai,
     policy: input.policy,
+    engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,
   })
 }

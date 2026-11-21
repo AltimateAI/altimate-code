@@ -117,6 +117,7 @@ export function emitReviewRun(input: {
       ai_duration_ms: env.ai?.durationMs,
       base_source: env.scope?.baseSource,
       out_of_scope_files: env.scope?.outOfScopeFiles ?? 0,
+      engine_errors: env.engineErrors?.reduce((n, e) => n + e.count, 0) ?? 0,
       stale_manifest: env.staleManifest === true,
       critical: env.summary.critical,
       warning: env.summary.warning,

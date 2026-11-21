@@ -10,6 +10,8 @@ import {
   type ResolvedBase,
   gitRepoRoot,
   manifestHash,
+  resolveCommit,
+  commitParents,
   showAtRef,
 } from "./git"
 import { makeCompiledResolver, dbtProjectName, dbtProjectLayout } from "./compiled"
@@ -237,6 +239,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const resolved: ResolvedBase | undefined = needGit
     ? await resolveReviewBase({ cwd: opts.cwd, base: opts.base, head: opts.head })
     : undefined
+  const headSha = resolved ? await resolveCommit(opts.head ?? "HEAD", opts.cwd) : undefined
+  // A `pull_request` checkout is the synthetic merge commit; record its parents
+  // so the poster can tell it reviewed the PR head (one of them).
+  const parents = headSha ? await commitParents(headSha, opts.cwd) : []
+  const headParents = parents.length > 1 ? parents : undefined
 
   // The policy (.altimate/review.yml) comes from the BASE commit, so the PR
   // under review cannot relax its own rules; what it would change is listed.
@@ -436,6 +443,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     scope: {
       baseRef: resolved?.ref ?? opts.base,
       baseSha: resolved?.sha,
+      headSha,
+      headParents,
       baseSource: resolved?.source,
       projectRoot: projectRootRel,
       outOfScopeFiles: scoped.outOfScope || undefined,
