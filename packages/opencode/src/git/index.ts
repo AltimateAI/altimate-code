@@ -20,6 +20,19 @@ const cfg = [
   "core.quotepath=false",
 ] as const
 
+// altimate_change start — permit only the metadata reads used by offline clients
+const offlineMetadataCommands = new Set(["rev-parse", "symbolic-ref", "for-each-ref", "merge-base"])
+
+function gitCommandAllowedOffline(args: string[]) {
+  const [command, operation] = args
+  if (offlineMetadataCommands.has(command)) return true
+  if (command === "remote") return args.length === 1
+  if (command === "config") return args.length === 2 && operation === "init.defaultBranch"
+  if (command === "show") return args.length === 2 && !operation.startsWith("-") && operation.includes(":")
+  return command === "worktree" && operation === "list"
+}
+// altimate_change end
+
 const out = (result: { text(): string }) => result.text().trim()
 const nuls = (text: string) => text.split("\0").filter(Boolean)
 const fail = (err: unknown) =>
@@ -113,7 +126,7 @@ export const layer = Layer.effect(
     const run = Effect.fn("Git.run")(
       function* (args: string[], opts: Options) {
         // altimate_change start — Git can launch filters independently of its network transport
-        if (offlineModeEnabled() && ["diff", "status", "apply"].includes(args[0]))
+        if (offlineModeEnabled() && !gitCommandAllowedOffline(args))
           return fail(new Error("Git working-tree operations require an online run."))
         // altimate_change end
         const result = yield* appProcess.run(

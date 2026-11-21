@@ -175,6 +175,11 @@ describe("Vcs diff", () => {
         const vcs = yield* Vcs.Service
         const state = yield* vcs.status()
         const diff = yield* vcs.diff("git")
+        const prefixed = yield* Git.Service.use((git) => git.run(
+          ["-c", "core.quotepath=false", "diff", "--numstat", "HEAD"],
+          { cwd: directory },
+        ))
+        expect(prefixed.exitCode).not.toBe(0)
         expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(marker))).toBe(false)
         expect(state).toEqual([])
         expect(diff).toEqual([])

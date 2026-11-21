@@ -419,7 +419,6 @@ export namespace ToolRegistry {
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
     configInput?: RegistryConfigInput,
   ): Promise<Tool.Info[]> {
-    // altimate_change start — offer only local tools in offline mode
     const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
     if (Offline.enabled()) {
       return AppRuntime.runPromise(Effect.scoped(Effect.all([
@@ -427,7 +426,6 @@ export namespace ToolRegistry {
         TaskTool, TodoWriteTool, SkillTool, ApplyPatchTool, WarehouseInstallDriverTool,
       ])))
     }
-    // altimate_change end
     const custom = configInput?.matches
       ? await loadCustomTools(configInput.matches).then((x) => x.custom)
       : await state().then((x) => x.custom)

@@ -99,9 +99,7 @@ export namespace Ripgrep {
     const filepath = path.join(Global.Path.bin, "rg" + (process.platform === "win32" ? ".exe" : ""))
 
     if (!(await Filesystem.exists(filepath))) {
-      // altimate_change start — preserve installed ripgrep and skip downloads offline
       if (offlineModeEnabled()) throw new Error("Install ripgrep while online to use file search in offline mode.")
-      // altimate_change end
       const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
       const config = PLATFORM[platformKey]
       if (!config) throw new UnsupportedPlatformError({ platform: platformKey })

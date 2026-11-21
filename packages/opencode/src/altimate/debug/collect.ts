@@ -313,9 +313,7 @@ export async function probe(
   opts: { proxy?: boolean; timeoutMs?: number } = {},
   deps: ProbeDeps = defaultProbeDeps,
 ): Promise<NetworkCheck> {
-  // altimate_change start — skip network work in offline mode
   if (Offline.enabled()) return { target, host, ok: false, detail: "Skipped in offline mode", ms: 0 }
-  // altimate_change end
   const timeoutMs = opts.timeoutMs ?? NETWORK_TIMEOUT_MS
   const started = Date.now()
   const deadline = AbortSignal.timeout(timeoutMs)

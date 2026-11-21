@@ -20,11 +20,9 @@ export function env(key: string): string | undefined {
   return documented !== undefined && documented !== "" ? documented : process.env[key]
 }
 
-// altimate_change start — read offline policy after the CLI startup config preflight
 export function offlineModeEnabled() {
   return process.env.ALTIMATE_OFFLINE === "1"
 }
-// altimate_change end
 
 export function truthy(key: string) {
   const value = env(key)?.toLowerCase()

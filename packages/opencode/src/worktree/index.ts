@@ -413,6 +413,9 @@ export const layer: Layer.Layer<
     }
 
     const remove = Effect.fn("Worktree.remove")(function* (input: RemoveInput) {
+      // altimate_change start — reject before modifying a worktree offline
+      if (Offline.enabled()) return yield* new RemoveFailedError({ message: "Remove this worktree while online." })
+      // altimate_change end
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })

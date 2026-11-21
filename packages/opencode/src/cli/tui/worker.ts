@@ -44,10 +44,8 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // its events buffer until Telemetry.init() runs inside the Instance context in traceReady below
 // (NOT here: at module top level Config.get() throws and doInit() proceeds as enabled, which
 // silently bypassed a `telemetry.disabled` config opt-out for the whole first session).
-// altimate_change start — the parent has already selected the process-wide policy
 if (Offline.enabled()) await Offline.start(process.cwd())
 else Telemetry.startLoopMonitor()
-// altimate_change end
 // altimate_change end
 // altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
 // this sync before listening (cli/cmd/serve.ts), but the TUI worker never did, so an
