@@ -398,13 +398,13 @@ describe("altimate features: SystemPrompt.skills sorting", () => {
 // 9. Telemetry stays fail-safe outside Instance context
 // ===========================================================================
 describe("altimate features: telemetry fail-safe init", () => {
-  test("telemetry/index.ts catches Config.get() failures so init never throws", async () => {
-    const src = await readSrc("altimate", "telemetry", "index.ts")
-    // The try/catch around Config.get() — must be present so init() can be
-    // called from CLI middleware before Instance.provide().
-    expect(src).toMatch(/try\s*\{\s*const userConfig = \(await Config\.get\(\)\)/)
-    // The ALTIMATE_TELEMETRY_DISABLED env var escape hatch.
-    expect(src).toContain("ALTIMATE_TELEMETRY_DISABLED")
+  test("telemetry can resolve the opt-out before an Instance exists", async () => {
+    const init = await readSrc("altimate", "telemetry", "index.ts")
+    const config = await readSrc("altimate", "telemetry", "config-state.ts")
+    expect(init).toContain("await TelemetryConfig.resolve(configDirectory, retry)")
+    expect(config).toMatch(/try\s*\{\s*return await loadedState\(retry\)/)
+    expect(config).toContain('return instanceDirectory() ? "unreadable" : disabledState(directory)')
+    expect(config).toContain("ALTIMATE_TELEMETRY_DISABLED")
   })
 
   test("telemetry/index.ts no longer reads the account; identity comes from the stored credential", async () => {
