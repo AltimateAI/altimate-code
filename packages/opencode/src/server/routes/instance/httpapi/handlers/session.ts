@@ -206,13 +206,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const remove = Effect.fn("SessionHttpApi.remove")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* SessionError.mapStorageNotFound(
-        // altimate_change start — the offline refusal reaches the client as a 400 with its message (error middleware)
-        session
-          .remove(ctx.params.sessionID)
-          .pipe(Effect.catchTag("Session.OfflinePolicyError", (error) => Effect.die(new Offline.OfflinePolicyError(error.message)))),
-        // altimate_change end
-      )
+      // altimate_change start — the declared offline refusal passes through as a 400 with its message
+      yield* session
+        .remove(ctx.params.sessionID)
+        .pipe(
+          Effect.catchIf(
+            (error): error is Session.NotFound => !(error instanceof Session.OfflinePolicyError),
+            (error) => SessionError.mapStorageNotFound(Effect.fail(error)),
+          ),
+        )
+      // altimate_change end
       return true
     })
 
@@ -295,19 +298,21 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const share = Effect.fn("SessionHttpApi.share")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
       yield* shareSvc.share(ctx.params.sessionID).pipe(
-        // altimate_change start — the offline refusal reaches the client as a 400 with its message (error middleware)
-        Effect.catchIf(
-          (error): error is Session.OfflinePolicyError => error instanceof Session.OfflinePolicyError,
-          (error) => Effect.die(new Offline.OfflinePolicyError(error.message)),
+        // altimate_change start — the declared offline refusal passes through as a 400 with its message
+        Effect.mapError((error) =>
+          error instanceof Session.OfflinePolicyError ? error : new HttpApiError.InternalServerError({}),
         ),
         // altimate_change end
-        Effect.mapError(() => new HttpApiError.InternalServerError({})),
       )
       return yield* requireSession(ctx.params.sessionID)
     })
 
     const unshare = Effect.fn("SessionHttpApi.unshare")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
+      // altimate_change start — offline mode cannot revoke a share; the declared refusal is a 400 with its message
+      if (Offline.enabled())
+        return yield* new Session.OfflinePolicyError({ message: "Offline mode cannot revoke a share. Run unshare while online." })
+      // altimate_change end
       yield* shareSvc
         .unshare(ctx.params.sessionID)
         .pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))

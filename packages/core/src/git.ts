@@ -30,7 +30,7 @@ export function localGitEnv(env?: Record<string, string>) {
     GIT_CONFIG_COUNT: String(index + 1),
     [`GIT_CONFIG_KEY_${index}`]: "lfs.url",
     [`GIT_CONFIG_VALUE_${index}`]: OFFLINE_LFS_URL,
-    ...(parameters ? { GIT_CONFIG_PARAMETERS: `${parameters} 'lfs.url'='${OFFLINE_LFS_URL}'` } : {}),
+    ...(parameters ? { GIT_CONFIG_PARAMETERS: `${parameters} 'lfs.url=${OFFLINE_LFS_URL}'` } : {}),
   }
 }
 

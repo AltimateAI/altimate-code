@@ -59,7 +59,7 @@ describe("Git", () => {
       process.env.GIT_CONFIG_PARAMETERS = "'lfs.url'='https://inherited.example/'"
       try {
         const env = localGitEnv()!
-        expect(env.GIT_CONFIG_PARAMETERS).toBe("'lfs.url'='https://inherited.example/' 'lfs.url'='http://127.0.0.1:9/'")
+        expect(env.GIT_CONFIG_PARAMETERS).toBe("'lfs.url'='https://inherited.example/' 'lfs.url=http://127.0.0.1:9/'")
         // Git reads the last value of a key, so the closed loopback endpoint wins.
         const read = Bun.spawnSync(["git", "config", "--get", "lfs.url"], { env: { ...process.env, ...env }, stdout: "pipe" })
         expect(read.stdout.toString().trim()).toBe("http://127.0.0.1:9/")
