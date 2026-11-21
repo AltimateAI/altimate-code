@@ -6,10 +6,10 @@ import {
   catalogGate,
   isModelMetadataOnly,
   acceptSubmissionModel,
-  invalidModelOpensPicker,
   isServerReportedModelError,
   resolveCommandAgent,
   submissionModel,
+  submissionModelSource,
 } from "../../src/prompt/model"
 
 const current = { providerID: "local", modelID: "chat" }
@@ -164,32 +164,42 @@ test("a server-reported model rejection is not toasted a second time", () => {
   expect(isServerReportedModelError(undefined)).toBe(false)
 })
 
-test("an unavailable model opens the picker only for a user without a usable provider", () => {
-  expect(invalidModelOpensPicker({ ready: false, readyPending: false })).toBe(true)
-  expect(invalidModelOpensPicker({ ready: true, readyPending: false })).toBe(false)
-  expect(invalidModelOpensPicker({ ready: false, readyPending: true })).toBe(false)
-})
-
-test("submit-time model check shows the error, opens the picker for a new user and keeps the draft", () => {
-  const run = (valid: boolean, ready: boolean, readyPending = false) => {
-    const calls = { validated: [] as string[], picker: 0 }
+test("an unavailable configured model shows the error with its source and opens the picker", () => {
+  const run = (valid: boolean) => {
+    const calls = { validated: [] as [string, string | undefined][], picker: 0 }
     const accepted = acceptSubmissionModel({
       model: "missing/model",
-      validate: (model) => {
-        calls.validated.push(model)
+      source: "project or global config (model)",
+      validate: (model, source) => {
+        calls.validated.push([model, source])
         return valid
       },
-      ready: () => ready,
-      readyPending: () => readyPending,
       openPicker: () => calls.picker++,
     })
     return { accepted, ...calls }
   }
-  expect(run(false, false)).toEqual({ accepted: false, validated: ["missing/model"], picker: 1 })
-  expect(run(false, true)).toEqual({ accepted: false, validated: ["missing/model"], picker: 0 })
-  expect(run(false, false, true)).toEqual({ accepted: false, validated: ["missing/model"], picker: 0 })
-  expect(run(true, false)).toEqual({ accepted: true, validated: ["missing/model"], picker: 0 })
+  expect(run(false)).toEqual({
+    accepted: false,
+    validated: [["missing/model", "project or global config (model)"]],
+    picker: 1,
+  })
+  expect(run(true)).toEqual({
+    accepted: true,
+    validated: [["missing/model", "project or global config (model)"]],
+    picker: 0,
+  })
+  expect(acceptSubmissionModel({ model: undefined, validate: () => false, openPicker: () => {} })).toBe(true)
+})
+
+test("each submission model source is named for the error and picker trigger", () => {
+  expect(submissionModelSource({ command: { name: "review", model: "x/y" }, currentSource: "CLI --model" })).toBe(
+    'command "/review" config (model)',
+  )
+  expect(submissionModelSource({ command: { name: "review", model: "" } })).toBe('command "/review" config (model)')
   expect(
-    acceptSubmissionModel({ model: undefined, validate: () => false, ready: () => false, readyPending: () => false, openPicker: () => {} }),
-  ).toBe(true)
+    submissionModelSource({ command: { name: "review" }, commandAgent: { name: "explore", model: { providerID: "x", modelID: "y" } } }),
+  ).toBe('agent "explore" config (model)')
+  for (const source of ["CLI --model", 'agent "builder" config (model)', "session history", "project or global config (model)"])
+    expect(submissionModelSource({ currentSource: source })).toBe(source)
+  expect(submissionModelSource({})).toBeUndefined()
 })

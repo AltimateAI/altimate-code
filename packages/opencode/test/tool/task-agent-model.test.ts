@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test"
+import { expect, spyOn } from "bun:test"
 import { Effect } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { Config } from "../../src/config/config"
@@ -9,8 +9,10 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { initTool } from "../altimate/tool-fixture"
+import { it } from "../lib/effect"
 
-test("an unavailable subagent model names that agent's config as its source", async () => {
+it.effect("an unavailable subagent model names that agent's config as its source", () =>
+  Effect.gen(function* () {
   const parentID = SessionID.make("ses_agent_model_parent")
   const childID = SessionID.make("ses_agent_model_child")
   const messageID = MessageID.make("msg_agent_model_parent")
@@ -59,9 +61,10 @@ test("an unavailable subagent model names that agent's config as its source", as
         )
       }) as never,
   }
-  try {
-    const tool = await initTool(TaskTool)
-    const run = tool.execute(
+  yield* Effect.addFinalizer(() => Effect.sync(() => mocks.forEach((mock) => mock.mockRestore())))
+  const tool = yield* Effect.promise(() => initTool(TaskTool))
+  const error = yield* Effect.promise(() =>
+    tool.execute(
       { description: "Explore", prompt: "Look around", subagent_type: "explore" },
       {
         sessionID: parentID,
@@ -71,12 +74,14 @@ test("an unavailable subagent model names that agent's config as its source", as
         messages: [],
         extra: { promptOps, bypassAgentCheck: true },
       },
-    )
-    await expect(run).rejects.toThrow('Model not found: missing-provider/missing-model (from agent "explore" config (model))')
-    // As upstream does for a failed subtask, the child session exists and the prompt ran.
-    expect(prompted).toBe(true)
-    expect(created).toBe(true)
-  } finally {
-    for (const mock of mocks) mock.mockRestore()
-  }
-})
+    ).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    ),
+  )
+  expect(String(error)).toContain('Model not found: missing-provider/missing-model (from agent "explore" config (model))')
+  // As upstream does for a failed subtask, the child session exists and the prompt ran.
+  expect(prompted).toBe(true)
+  expect(created).toBe(true)
+  }),
+)

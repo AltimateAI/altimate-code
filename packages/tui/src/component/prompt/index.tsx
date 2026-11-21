@@ -6,6 +6,7 @@ import {
   isModelMetadataOnly,
   acceptSubmissionModel,
   isServerReportedModelError,
+  submissionModelSource,
   resolveCommandAgent,
   submissionModel,
 } from "../../prompt/model"
@@ -63,6 +64,8 @@ import { DialogProvider as DialogProviderConnect, WARNLIST } from "../dialog-pro
 // altimate_change — first-run submit gate: open the curated welcome picker instead
 // of erroring when no model is ready yet (see altimate-onboarding.tsx).
 import { DialogModelWelcome, markFirstRunActive, useReady, useReadyPending } from "../altimate-onboarding"
+// altimate_change — the model catalog opens when a submitted model is unavailable
+import { DialogModel } from "../dialog-model"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -1208,16 +1211,19 @@ export function Prompt(props: PromptProps) {
         deferredSubmit.defer()
         return false
       }
-      // The draft stays; a first-time user also gets the picker so they can choose an available model.
+      // The draft stays and the picker opens; a pick applies to this conversation only.
       const accepted = acceptSubmissionModel({
         model: selection.model,
-        validate: (model) => local.model.validate(model),
-        ready,
-        readyPending,
+        source: submissionModelSource({ command, commandAgent, currentSource: local.model.source() }),
+        validate: (model, source) => local.model.validate(model, source),
         openPicker: () => {
+          if (ready()) {
+            dialog.replace(() => <DialogModel />)
+            return
+          }
           const shown = dialog.replace(() => (
             <DialogModelWelcome
-              intro="The configured model isn't available. Pick a model to continue; your message is kept."
+              intro="The configured model isn't available. Pick a model for this conversation; your config is not changed and your message is kept."
               trigger="prompt_gate"
             />
           ))

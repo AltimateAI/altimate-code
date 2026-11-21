@@ -79,21 +79,27 @@ export function isServerReportedModelError(error: unknown): boolean {
   return typeof cause === "object" && cause !== null && isServerReportedModelError((cause as { body?: unknown }).body)
 }
 
-// A user with no usable provider yet gets the model picker alongside the error, so one step recovers.
-export function invalidModelOpensPicker(input: { ready: boolean; readyPending: boolean }) {
-  return !input.ready && !input.readyPending
-}
-
 // Submit-time check for the selected model. `validate` shows the error toast for an unavailable
-// model; a user without a usable provider also gets the picker. Returns whether submission continues.
+// model; the picker then opens so the user can choose an available model for this conversation.
+// Returns whether submission continues.
 export function acceptSubmissionModel<Model>(input: {
   model: Model | undefined
-  validate: (model: Model) => boolean
-  ready: () => boolean
-  readyPending: () => boolean
+  source?: string
+  validate: (model: Model, source?: string) => boolean
   openPicker: () => void
 }) {
-  if (input.model === undefined || input.validate(input.model)) return true
-  if (invalidModelOpensPicker({ ready: input.ready(), readyPending: input.readyPending() })) input.openPicker()
+  if (input.model === undefined || input.validate(input.model, input.source)) return true
+  input.openPicker()
   return false
+}
+
+// Names where a submission's model came from, matching session.command's precedence.
+export function submissionModelSource(input: {
+  command?: { name: string; model?: string }
+  commandAgent?: { name: string; model?: unknown }
+  currentSource?: string
+}) {
+  if (input.command?.model !== undefined) return `command "/${input.command.name}" config (model)`
+  if (input.commandAgent?.model) return `agent "${input.commandAgent.name}" config (model)`
+  return input.currentSource
 }
