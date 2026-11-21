@@ -12,6 +12,7 @@ import { Session } from "../../src/session"
 import { Session as SessionNs } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { ModelMetadata } from "../../src/altimate/session/model-metadata"
+import { ModelReport } from "../../src/altimate/session/model-report"
 import { TraceContext } from "../../src/altimate/observability/trace-context"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { TestInstance } from "../fixture/fixture"
@@ -22,10 +23,12 @@ const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, Project.defaultLaye
 
 // Spies on the route's own calls: its catch releases the trace first, then decides and publishes
 // synchronously, so the release signal marks the end of error handling.
+// `error` may be a function that produces the failure from the prompt's input, as the real prompt does.
 const errorsFor = Effect.fn("PromptAsyncModelErrorTest.errorsFor")(function* (error: unknown) {
   const test = yield* TestInstance
   const created = yield* SessionNs.use.create({ title: "async model error" })
-  const prompt = spyOn(SessionPrompt, "prompt").mockImplementation((async () => {
+  const prompt = spyOn(SessionPrompt, "prompt").mockImplementation((async (input: SessionPrompt.PromptInput) => {
+    if (typeof error === "function") return await error(input)
     throw error
   }) as unknown as typeof SessionPrompt.prompt)
   let handled!: () => void
@@ -79,6 +82,24 @@ describe("prompt_async model errors", () => {
         const error = notFound()
         ModelMetadata.markReported(error)
         expect(yield* errorsFor(error)).toHaveLength(0)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
+    "the real reporter publishes an unavailable model exactly once through the async route",
+    () =>
+      Effect.gen(function* () {
+        const errors = yield* errorsFor((input: SessionPrompt.PromptInput) =>
+          ModelReport.validateOrReport(
+            input.sessionID,
+            { providerID: ProviderID.make("missing-provider"), modelID: ModelID.make("missing-model") },
+            "config (model)",
+          ),
+        )
+        expect(errors).toHaveLength(1)
+        expect(JSON.stringify(errors[0])).toContain("missing-provider/missing-model (from config (model))")
       }),
     { git: true },
     30_000,

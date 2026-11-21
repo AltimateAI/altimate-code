@@ -12,7 +12,7 @@ import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { initTool } from "../altimate/tool-fixture"
 import { it } from "../lib/effect"
 
-it.effect("an unavailable subagent model names that agent's config as its source", () =>
+const runTask = (input: { background?: boolean; abort: AbortSignal }) =>
   Effect.gen(function* () {
     const parentID = SessionID.make("ses_agent_model_parent")
     const childID = SessionID.make("ses_agent_model_child")
@@ -25,6 +25,7 @@ it.effect("an unavailable subagent model names that agent's config as its source
       model: { providerID: "missing-provider", modelID: "missing-model" },
     } as unknown as Agent.Info
     let prompted = false
+    let lookedUp = false
     let created = false
     const published: unknown[][] = []
     const mocks = [
@@ -43,6 +44,7 @@ it.effect("an unavailable subagent model names that agent's config as its source
         ),
       ),
       spyOn(Provider, "getModel").mockImplementation((async (providerID: string, modelID: string) => {
+        lookedUp = true
         throw new Provider.ModelNotFoundError({
           providerID: ProviderID.make(providerID),
           modelID: ModelID.make(modelID),
@@ -81,14 +83,14 @@ it.effect("an unavailable subagent model names that agent's config as its source
     const error = yield* Effect.promise(() =>
       tool
         .execute(
-          { description: "Explore", prompt: "Look around", subagent_type: "explore" },
+          { description: "Explore", prompt: "Look around", subagent_type: "explore", background: input.background },
           {
             sessionID: parentID,
             messageID,
             agent: "build",
-            abort: new AbortController().signal,
+            abort: input.abort,
             messages: [],
-            extra: { promptOps, bypassAgentCheck: true },
+            extra: { promptOps, bypassAgentCheck: true, backgroundSubagents: input.background === true },
           },
         )
         .then(
@@ -96,6 +98,12 @@ it.effect("an unavailable subagent model names that agent's config as its source
           (failure: unknown) => failure,
         ),
     )
+    return { error, created, prompted, lookedUp, published }
+  })
+
+it.effect("an unavailable subagent model names that agent's config as its source", () =>
+  Effect.gen(function* () {
+    const { error, created, prompted, published } = yield* runTask({ abort: new AbortController().signal })
     expect(String(error)).toContain(
       'Model not found: missing-provider/missing-model (from agent "explore" config (model))',
     )
@@ -105,5 +113,26 @@ it.effect("an unavailable subagent model names that agent's config as its source
     expect(prompted).toBe(false)
     expect(JSON.stringify(published)).toContain('from agent \\"explore\\" config (model)')
     expect(JSON.stringify(published)).not.toContain("session request")
+  }),
+)
+
+it.effect("a background subagent with an unavailable model fails before it is reported running", () =>
+  Effect.gen(function* () {
+    const { error, prompted, published } = yield* runTask({ background: true, abort: new AbortController().signal })
+    expect(String(error)).toContain('(from agent "explore" config (model))')
+    expect(prompted).toBe(false)
+    expect(JSON.stringify(published)).toContain('from agent \\"explore\\" config (model)')
+  }),
+)
+
+it.effect("a cancelled parent turn reports the cancellation, not the subagent model", () =>
+  Effect.gen(function* () {
+    const controller = new AbortController()
+    controller.abort()
+    const { error, lookedUp, published } = yield* runTask({ abort: controller.signal })
+    expect(error).toBeDefined()
+    expect(String(error)).not.toContain("Model not found")
+    expect(lookedUp).toBe(false)
+    expect(published).toHaveLength(0)
   }),
 )
