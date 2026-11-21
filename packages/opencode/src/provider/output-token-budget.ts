@@ -178,7 +178,7 @@ function denseAsciiCharacters(input: string): number {
 }
 
 /** Estimate heterogeneous text in small chunks and conservatively count dense or non-ASCII text. */
-function estimateTextTokens(input: string): number {
+export function estimateTextTokens(input: string): number {
   let total = 0
   for (let offset = 0; offset < input.length; offset += ESTIMATE_CHUNK_SIZE) {
     const chunk = input.slice(offset, offset + ESTIMATE_CHUNK_SIZE)

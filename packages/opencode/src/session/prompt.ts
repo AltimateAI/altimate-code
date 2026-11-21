@@ -31,7 +31,7 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 // altimate_change start — the context measure shared by compaction and the pre-send budget guard
-import { reportedContextTokens } from "@/provider/output-token-budget"
+import { estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
 // altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
@@ -2260,6 +2260,7 @@ export namespace SessionPrompt {
               (part.type === "tool" && part.state.status === "completed" && (part.state.attachments?.length ?? 0) > 0),
           ),
       )
+      const guardTail = measured ? estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens) : 0
       const reportedInputTokens =
         measured &&
         !unmeasuredMedia &&
@@ -2269,8 +2270,10 @@ export namespace SessionPrompt {
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
           ? reportedContextTokens({
               tokens: measured.tokens,
-              estimatedTokens: uncountedTail,
-              fraction: uncountedTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
+              // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
+              // estimator, so the discount applies only to what the provider has counted.
+              estimatedTokens: guardTail,
+              fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
             })
           : undefined
       // altimate_change end
@@ -3810,6 +3813,7 @@ export namespace SessionPrompt {
     msgs: MessageV2.WithParts[],
     lastFinishedID: MessageID | undefined,
     isAfter: (id: MessageID) => boolean = (id) => id > lastFinishedID!,
+    estimate: (text: string) => number = Token.estimate,
   ): number {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
@@ -3828,7 +3832,7 @@ export namespace SessionPrompt {
     }
     let tokens = 0
     for (const part of lastFinished.parts) {
-      if (part.type === "tool") tokens += Token.estimate(toolText(part))
+      if (part.type === "tool") tokens += estimate(toolText(part))
     }
     // filterCompacted deliberately reorders retained-tail and summary messages,
     // so array position is not chronology. Select genuinely newer messages by
@@ -3836,8 +3840,8 @@ export namespace SessionPrompt {
     for (const m of msgs) {
       if (m.info.id === lastFinishedID || !isAfter(m.info.id)) continue
       for (const part of m.parts) {
-        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
-        if (part.type === "tool") tokens += Token.estimate(toolText(part))
+        if (part.type === "text") tokens += estimate(part.text ?? "")
+        if (part.type === "tool") tokens += estimate(toolText(part))
       }
     }
     return tokens

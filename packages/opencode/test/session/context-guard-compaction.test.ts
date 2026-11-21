@@ -13,6 +13,8 @@ import { Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import type { MessageV2 } from "../../src/session/message-v2"
+import { Token } from "../../src/util/token"
 import { SessionSummary } from "../../src/session/summary"
 import { MessageID, PartID } from "../../src/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
@@ -30,6 +32,7 @@ import {
   ReasoningTokenBudgetError,
   calibratedInputTokens,
   estimateInputTokens,
+  estimateTextTokens,
   isContextBudgetError,
   reportedContextTokens,
 } from "../../src/provider/output-token-budget"
@@ -604,5 +607,32 @@ describe("guard calibration", () => {
       ),
     ).toBe(false)
     expect(isContextBudgetError(new Error("Context budget exceeded before the request was sent."))).toBe(false)
+  })
+})
+
+describe("calibration tail", () => {
+  const text = (id: string, role: "user" | "assistant", body: string) =>
+    ({
+      info: { id, sessionID: "s", role, time: { created: 1 } },
+      parts: [{ id: `${id}-p`, sessionID: "s", messageID: id, type: "text", text: body }],
+    }) as unknown as MessageV2.WithParts
+
+  test("unmeasured multilingual text is sized with the guard's conservative estimator", () => {
+    const cjk = "\u6536\u5165\u96c6\u4e2d\u5728\u524d\u5341\u540d\u5ba2\u6237".repeat(5_000)
+    const msgs = [text("m1", "user", "task"), text("m2", "assistant", "done"), text("m3", "user", cjk)]
+    const plain = SessionPrompt.estimateUncountedTail(msgs, "m2" as any)
+    const guard = SessionPrompt.estimateUncountedTail(msgs, "m2" as any, undefined, estimateTextTokens)
+    expect(plain).toBe(Token.estimate(cjk))
+    // At least one token per non-ASCII character, where the plain ratio gives ~1 per 3.7.
+    expect(guard).toBeGreaterThanOrEqual(cjk.length)
+  })
+
+  test("follows the caller's stored order, not lexical IDs", () => {
+    // A later message with a lexically smaller caller-supplied ID.
+    const msgs = [text("m5", "user", "task"), text("m6", "assistant", "done"), text("a1", "user", "y".repeat(9_000))]
+    expect(SessionPrompt.estimateUncountedTail(msgs, "m6" as any)).toBe(0)
+    expect(SessionPrompt.estimateUncountedTail(msgs, "m6" as any, (id) => id === "a1")).toBe(
+      Token.estimate("y".repeat(9_000)),
+    )
   })
 })
