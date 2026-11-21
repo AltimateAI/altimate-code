@@ -108,6 +108,12 @@ export function endpoint(config: ModelConfig, providerID: string) {
   return provider(config) === providerID ? configuredBaseURL(config, providerID) : undefined
 }
 
+const httpSDKs = new Set(["@ai-sdk/openai-compatible", "@ai-sdk/openai", "@ai-sdk/anthropic"])
+
+export function supportsSDK(npm: string) {
+  return httpSDKs.has(npm)
+}
+
 export function modelFetch(baseURL: string | undefined): typeof fetch {
   if (!baseURL) throw new Error("Offline mode requires a model provider with an explicit baseURL.")
   const endpoint = new URL(baseURL)

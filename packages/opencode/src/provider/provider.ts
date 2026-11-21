@@ -107,10 +107,6 @@ const FREE_TIER_HEADER_TIMEOUT_DEFAULT = 300_000
 const FREE_TIER_HEADER_TIMEOUT_MIN = 1_000
 // altimate_change end
 
-// altimate_change start — HTTP-only SDKs supported without network credential discovery
-const OFFLINE_SDKS = new Set(["@ai-sdk/openai-compatible", "@ai-sdk/openai", "@ai-sdk/anthropic"])
-// altimate_change end
-
 export namespace Provider {
   const log = Log.create({ service: "provider" })
 
@@ -2175,7 +2171,7 @@ export namespace Provider {
       // altimate_change end
 
       // altimate_change start — constrain offline model transport to its configured origin
-      if (offlineMode && !OFFLINE_SDKS.has(model.api.npm))
+      if (offlineMode && !Offline.supportsSDK(model.api.npm))
         throw new Error("Offline mode requires a bundled HTTP model provider such as @ai-sdk/openai-compatible.")
       const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options, offlineMode }))
       // altimate_change end
