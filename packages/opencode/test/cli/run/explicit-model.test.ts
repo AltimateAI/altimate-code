@@ -93,7 +93,7 @@ describe("run model resolution", () => {
         const events = opencode.parseJsonEvents(result.stdout)
         expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(1)
         expect(result.stdout).toContain("Synthetic reply still used the command model")
-        expect(yield* llm.calls).toBe(2)
+        expect((yield* llm.inputs).map((body) => body.model)).toEqual(["test-model", "test-model"])
       }),
     90_000,
   )
