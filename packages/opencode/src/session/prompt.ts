@@ -2248,47 +2248,27 @@ export namespace SessionPrompt {
       // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
-      // Compaction drops images and PDFs (replay swaps them for a placeholder, summaries strip them):
-      // a refusal while the model has not yet seen one (in this turn's user messages, or in tool
-      // results since the last measured turn) stays the budget error rather than continue without it.
-      // The turn starts at its last user message with real content (synthetic follow-ups excluded).
-      const turnStart = msgs.findLastIndex(
-        (msg) =>
-          msg.info.role === "user" &&
-          msg.parts.some((part) => (part.type === "text" && !part.synthetic) || part.type === "file"),
-      )
-      const turnMedia =
-        turnStart >= 0 &&
-        msgs
-          .slice(turnStart)
-          .some(
-            (msg) =>
-              msg.info.role === "user" &&
-              msg.parts.some((part) => part.type === "file" && MessageV2.isMedia(part.mime)),
-          )
-      const unseenToolMedia = msgs.some(
-        (msg) =>
-          (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
-          msg.parts.some(
-            (part) =>
-              part.type === "tool" &&
-              part.state.status === "completed" &&
-              (part.state.attachments ?? []).some((attachment) => MessageV2.isMedia(attachment.mime)),
-          ),
-      )
-      const compactable =
-        measured !== undefined && loopConfig.compaction?.auto !== false && !turnMedia && !unseenToolMedia
-      // Attachments the provider has not counted (in the last turn's tool results or later messages)
-      // are not in the tail estimate: leave those requests to the estimate.
-      const unmeasuredMedia = msgs.some(
-        (msg) =>
-          (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
-          msg.parts.some(
-            (part) =>
-              part.type === "file" ||
-              (part.type === "tool" && part.state.status === "completed" && (part.state.attachments?.length ?? 0) > 0),
-          ),
-      )
+      // One pass over what the provider has not counted yet (the last measured step and later):
+      // any attachment keeps the estimate in charge. Compaction drops images and PDFs (replay swaps
+      // them for a placeholder, summaries strip them), so one the model has not seen yet (a user
+      // attachment or tool result since the last measured step) keeps a refusal the budget error
+      // rather than continue without it. Media the model already saw does not block compaction.
+      let unmeasuredMedia = false
+      let unseenMedia = false
+      for (const msg of msgs) {
+        if (msg.info.id !== measuredID && !isAfterMeasured(msg.info.id)) continue
+        for (const part of msg.parts) {
+          if (part.type === "file") {
+            unmeasuredMedia = true
+            if (MessageV2.isMedia(part.mime)) unseenMedia = true
+          }
+          if (part.type !== "tool" || part.state.status !== "completed") continue
+          const attachments = part.state.attachments ?? []
+          if (attachments.length > 0) unmeasuredMedia = true
+          if (attachments.some((attachment) => MessageV2.isMedia(attachment.mime))) unseenMedia = true
+        }
+      }
+      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
       // A step that made tool calls was sent with the full tool set; a text-only step may have been
       // sent without tools (an echo or final step), so its usage can undercount this request.
       const measuredWithTools = msgs

@@ -207,6 +207,8 @@ type Seeded = {
   }
   /** An image attached to the `next` user turn. */
   nextFile?: boolean
+  /** An image attached to the last `user` turn (sent before the measured step). */
+  userFile?: boolean
 }
 
 /** Seed [user history, finished assistant with provider usage, new user turn] and run the loop. */
@@ -288,10 +290,21 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         } as any)
       }
     })
+    const attachImage = (messageID: MessageID) =>
+      sessions.updatePart({
+        id: PartID.ascending(),
+        messageID,
+        sessionID,
+        type: "file",
+        mime: "image/png",
+        filename: "revenue-chart.png",
+        url: `data:image/png;base64,${PNG_BASE64}`,
+      } as any)
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
     for (const [index, text] of turns.entries()) {
       const msg = yield* user(text)
       const last = index === turns.length - 1
+      if (last && seeded.userFile) yield* attachImage(msg.id)
       if (!last) yield* answer(msg.id, 0)
       else if (seeded.assistantUsage !== undefined) yield* answer(msg.id, seeded.assistantUsage, seeded.last)
     }
@@ -602,6 +615,31 @@ it.live(
         expect(result.compactions.length).toBe(0)
         expect(result.errors.length).toBe(1)
         expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "an image the model already saw does not block compaction",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // The turn opened with a chart image, a measured tool step followed (the model saw it), and
+        // a later request is refused: that is compactable like any other mid-turn refusal.
+        yield* llm.text("summary of the revenue analysis so far")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: [...sqlJsonTurns(135_000), "Explain this revenue chart."],
+          userFile: true,
+          assistantUsage: 0,
+          last: { finish: "tool-calls", text: "Querying the data behind the chart.", toolOutput: "42 rows." },
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries.length).toBe(1)
+        expect(result.hits.length).toBe(2)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
     ),
