@@ -34,6 +34,10 @@ import { redactSecrets } from "@/altimate/learn/digest"
 // altimate_change start — upstream_fix: background subagents follow the experiment flag at execution time.
 import { AsyncLocalStorage } from "async_hooks"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+// altimate_change start — name an agent's configured model as the source of an unavailable-model error
+import { Provider, validateModelSelection } from "@/provider/provider"
+import { modelConfigHint, modelNotFoundMessage } from "@/altimate/provider/model-hint"
+// altimate_change end
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -428,6 +432,17 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       // altimate_change start — run command subtasks with the model selected at command dispatch
       const recordedModel = { modelID: msg.info.modelID, providerID: msg.info.providerID }
       const model = ctx.extra?.useRecordedModel === true ? recordedModel : agent.model ?? recordedModel
+      // An agent's configured model is reported against that agent's config, not the child request.
+      if (ctx.extra?.useRecordedModel !== true && agent.model) {
+        const source = `agent "${agent.name}" config (model)`
+        await validateModelSelection(
+          { providerID: ProviderID.make(agent.model.providerID), modelID: ModelID.make(agent.model.modelID) },
+          source,
+        ).catch((error) => {
+          if (!Provider.ModelNotFoundError.isInstance(error)) throw error
+          throw new Error(`${modelNotFoundMessage(error.data.providerID, error.data.modelID, source)}. ${modelConfigHint}`)
+        })
+      }
       // altimate_change end
 
       // altimate_change start — upstream_fix: bind partial findings to this child prompt during parent cancellation.

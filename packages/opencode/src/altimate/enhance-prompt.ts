@@ -92,6 +92,9 @@ export async function enhancePrompt(text: string): Promise<string> {
     const defaultModel = await Provider.defaultModel().catch(async (error) => {
       const configured = (await Config.get()).model
       if (!configured) throw error
+      log.warn("configured model unavailable; enhancing with its provider's small model", {
+        error: error instanceof Error ? error.message : String(error),
+      })
       return Provider.parseModel(configured)
     })
     const model =
