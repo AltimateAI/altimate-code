@@ -25,7 +25,7 @@ import { ModelID, ProviderID } from "../provider/schema"
 // altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
 import { FreeTier } from "../altimate/free/client"
 // altimate_change — explain a missing Anthropic provider (Claude Pro/Max sign-in removed)
-import { modelConfigHint, modelNotFoundHint, modelNotFoundMessage } from "../altimate/provider/model-hint"
+import { modelSelectionErrorText } from "../altimate/provider/model-hint"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -225,16 +225,10 @@ const RequestContinued = BusEvent.define(
 // altimate_change start — share model-error guidance across session entry points
 function reportModelSelectionError(sessionID: SessionID, error: unknown) {
   if (!Provider.ModelNotFoundError.isInstance(error)) return
-  const { providerID, modelID, suggestions, providerMissing, source } = error.data
-  const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
-  const guidance = modelNotFoundHint(providerID, providerMissing)
-  const message = modelNotFoundMessage(providerID, modelID, source)
   ModelMetadata.markReported(error)
   Bus.publish(Session.Event.Error, {
     sessionID,
-    error: new NamedError.Unknown({
-      message: `${message.endsWith(".") ? message : message + "."}${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
-    }).toObject(),
+    error: new NamedError.Unknown({ message: modelSelectionErrorText(error.data) }).toObject(),
   })
 }
 

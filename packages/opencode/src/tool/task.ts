@@ -37,7 +37,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
 // altimate_change start — name an agent's configured model as the source of an unavailable-model error
 import { Provider, validateModelSelection } from "@/provider/provider"
-import { modelConfigHint, modelNotFoundHint, modelNotFoundMessage } from "@/altimate/provider/model-hint"
+import { modelSelectionErrorText } from "@/altimate/provider/model-hint"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -371,12 +371,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           source,
         ).catch((error) => {
           if (!Provider.ModelNotFoundError.isInstance(error)) throw error
-          const { providerID, modelID, suggestions, providerMissing } = error.data
-          const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
-          const guidance = modelNotFoundHint(providerID, providerMissing)
-          throw new Error(
-            `${modelNotFoundMessage(providerID, modelID, source)}.${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
-          )
+          throw new Error(modelSelectionErrorText(error.data))
         })
       }
       // altimate_change end

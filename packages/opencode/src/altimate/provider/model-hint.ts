@@ -19,3 +19,18 @@ export function modelNotFoundMessage(providerID: string | undefined, modelID: st
   }
   return `Model not found: ${providerID}/${modelID}${sourceHint}`
 }
+
+// Full user-facing text for an unavailable model: the source-named line, suggestions, provider
+// guidance and where to correct the config.
+export function modelSelectionErrorText(data: {
+  providerID?: string
+  modelID?: string
+  source?: string
+  suggestions?: readonly string[]
+  providerMissing?: boolean
+}) {
+  const message = modelNotFoundMessage(data.providerID, data.modelID, data.source)
+  const hint = data.suggestions?.length ? ` Did you mean: ${data.suggestions.join(", ")}?` : ""
+  const guidance = modelNotFoundHint(data.providerID, data.providerMissing)
+  return `${message.endsWith(".") ? message : message + "."}${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`
+}
