@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import z from "zod"
 import path from "node:path"
@@ -89,7 +89,7 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
 
     const packages = DRIVER_PACKAGES[driver].join(" ")
     // altimate_change start — skip network work in offline mode
-    if (offline()) {
+    if (Offline.enabled()) {
       const error = `Offline mode. Install the driver while online: npm install --prefix ${shellQuote(dir)} ${packages}`
       return {
         title: `${label} driver: offline`,

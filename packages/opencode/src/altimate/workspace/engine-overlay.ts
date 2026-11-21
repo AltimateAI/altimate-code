@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 // altimate_change - new file
 //
@@ -233,7 +233,7 @@ export async function overlay(
   state.managed = opts.managed === true
   state.linked = null
   try {
-    if (offline() || !isEnabled() || isServe()) {
+    if (Offline.enabled() || !isEnabled() || isServe()) {
       state.current = null
       return
     }
@@ -502,7 +502,7 @@ export async function beforeTurn(sessionID: string): Promise<void> {
  * between this session's reconcile and its catalog snapshot. The hook's own
  * failures are logged and swallowed; `body`'s propagate. */
 export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>): Promise<T> {
-  if (offline() || !isEnabled() || isServe()) {
+  if (Offline.enabled() || !isEnabled() || isServe()) {
     record(sessionID, { kind: "disabled" })
     return body()
   }

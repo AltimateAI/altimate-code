@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 // altimate_change start — makeRuntime for the restored Promise-based InstructionPrompt facade (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
@@ -102,7 +102,7 @@ export const layer: Layer.Layer<
 
     const fetch = Effect.fnUntraced(function* (url: string) {
       // altimate_change start — skip network work in offline mode
-      if (offline()) return ""
+      if (Offline.enabled()) return ""
       // altimate_change end
       const res = yield* http.execute(HttpClientRequest.get(url)).pipe(
         Effect.timeout(5000),

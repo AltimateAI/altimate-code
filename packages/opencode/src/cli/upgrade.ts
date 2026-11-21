@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import { Config } from "@/config/config"
 import { AppRuntime } from "@/effect/app-runtime"
@@ -100,7 +100,7 @@ export function isAutoupdateDisabledByEnv() {
 
 export async function upgrade() {
   // altimate_change start — skip automatic update checks in offline mode
-  if (offline()) return
+  if (Offline.enabled()) return
   // altimate_change end
   // altimate_change start — skip the upgrade check for local / branch / dev builds.
   // These are never published to npm or GitHub releases, so the version lookup

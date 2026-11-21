@@ -1,3 +1,6 @@
+// altimate_change start — offline policy
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Effect } from "effect"
 import { effectCmd } from "../effect-cmd"
 import { AgentSideConnection, ndJsonStream } from "@agentclientprotocol/sdk"
@@ -42,6 +45,15 @@ export const AcpCommand = effectCmd({
     const sdk = createOpencodeClient({
       baseUrl: `http://${server.hostname}:${server.port}`,
       headers: ServerAuth.headers(),
+      // altimate_change start — route the offline ACP client to the in-process API
+      fetch: Offline.enabled()
+        ? Object.assign(
+            async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+              Server.Default().fetch(new Request(input, init)),
+            { preconnect: () => {} },
+          )
+        : undefined,
+      // altimate_change end
     })
 
     const input = new WritableStream<Uint8Array>({

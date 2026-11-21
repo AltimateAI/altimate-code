@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 // altimate_change - new file
 //
@@ -83,7 +83,7 @@ export function installCommand(): string {
  * binding on disk and the engine on PATH. Null when there is nothing to offer:
  * unbound, or an engine that clears the floor. */
 export async function describeOffer(directory: string): Promise<EngineOffer | null> {
-  if (offline()) return null
+  if (Offline.enabled()) return null
   const binding = syncInternals.resolveBinding
     ? await syncInternals.resolveBinding(directory)
     : await readLocalBinding(directory).catch((err) => {
@@ -236,7 +236,7 @@ export function runInstall(
  * usable engine — npm's global bin directory need not be on PATH — so the same
  * discovery the turn boundary does runs before success. */
 export async function installEngine(): Promise<InstallResult> {
-  if (offline()) return { ok: false, error: "Install the workspace engine while online." }
+  if (Offline.enabled()) return { ok: false, error: "Install the workspace engine while online." }
   const spec = installSpec()
   if (syncInternals.install) return syncInternals.install(spec)
   const npm = process.platform === "win32" ? "npm.cmd" : "npm"
@@ -372,7 +372,7 @@ export function toolsNeed(declared: number | undefined): string {
 /** Offer via the dialog surface when there is one; otherwise print (headless)
  * or toast (bus unavailable). Exactly one of these happens. */
 export async function offerOrNotify(offer: EngineOffer, toast: Toast, sessionID: string): Promise<void> {
-  if (offline()) return
+  if (Offline.enabled()) return
   // Telemetry: the offer was shown, on which surface, and whether Node was there to install with.
   const shown = (surface: "headless" | "dialog" | "bus" | "toast") =>
     void nodeMajor()

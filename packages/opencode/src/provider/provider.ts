@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline, offlineModelFetch, offlineProvider } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import z from "zod"
 import { Schema } from "effect"
@@ -1400,11 +1400,11 @@ export namespace Provider {
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : null
 
     // altimate_change start — offline provider selection is independent of online fallback rules
-    const offlineProviderID = offline() ? offlineProvider(config) : undefined
+    const offlineProviderID = Offline.enabled() ? Offline.provider(config) : undefined
     // altimate_change end
     function isProviderAllowed(providerID: ProviderID): boolean {
       // altimate_change start — require a locally configured model endpoint in offline mode
-      if (offline()) {
+      if (Offline.enabled()) {
         const options = config.provider?.[providerID]?.options
         if (
           providerID !== offlineProviderID ||
@@ -2026,7 +2026,7 @@ export namespace Provider {
       // altimate_change end
       const data = database[providerID]
       // altimate_change start — skip provider discovery and OAuth-backed loaders in offline mode
-      if (offline()) continue
+      if (Offline.enabled()) continue
       // altimate_change end
       if (!data) {
         log.error("Provider does not exist in model list " + providerID)
@@ -2171,10 +2171,10 @@ export namespace Provider {
       // altimate_change end
 
       // altimate_change start — constrain offline model transport to its configured origin
-      const offlineMode = offline()
+      const offlineMode = Offline.enabled()
       if (offlineMode) {
         const config = await Config.get()
-        if (offlineProvider(config) !== model.providerID || typeof config.provider?.[model.providerID]?.options?.baseURL !== "string")
+        if (Offline.provider(config) !== model.providerID || typeof config.provider?.[model.providerID]?.options?.baseURL !== "string")
           throw new Error("Offline mode requires a locally configured model endpoint.")
         if (!OFFLINE_SDKS.has(model.api.npm))
           throw new Error("Offline mode requires a bundled HTTP model provider such as @ai-sdk/openai-compatible.")
@@ -2185,7 +2185,7 @@ export namespace Provider {
       if (existing) return existing
 
       // altimate_change start — constrain offline model transport to its configured origin
-      const customFetch = offlineMode ? offlineModelFetch(baseURL) : options["fetch"]
+      const customFetch = offlineMode ? Offline.modelFetch(baseURL) : options["fetch"]
       // altimate_change end
       // altimate_change start — environment override controls the single stream watchdog (0 disables)
       // Precedence: valid ALTIMATE_STREAM_IDLE_TIMEOUT_MS (0 disables), provider chunkTimeout, then 300000ms.

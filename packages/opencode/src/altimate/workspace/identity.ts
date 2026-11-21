@@ -1,4 +1,4 @@
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change - new file
 //
 // Model-facing statement of Altimate Workspace identity: which workspace (if any) this
@@ -443,7 +443,7 @@ export async function systemSection(opts: { memoryTools?: MemoryTools } = {}): P
   // Behind the same opt-in as everything else about workspaces. A user outside
   // the pilot has no Altimate Workspace to be linked to, and must not be told
   // every turn that none is linked and how to link one.
-  if (offline() || !isEnabled()) return ""
+  if (Offline.enabled() || !isEnabled()) return ""
   try {
     const directory = Instance.directory
     const scope = await accountScope()

@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import { Bus } from "@/bus"
 import { Account } from "@/account"
@@ -79,7 +79,7 @@ export namespace ShareNext {
 
   export async function init() {
     // altimate_change start — skip session sharing in offline mode
-    if (offline() || disabled) return
+    if (Offline.enabled() || disabled) return
     // altimate_change end
     Bus.subscribe(Session.Event.Updated, async (evt) => {
       await sync(evt.properties.info.id, [
@@ -129,7 +129,7 @@ export namespace ShareNext {
 
   export async function create(sessionID: SessionID) {
     // altimate_change start — skip session sharing in offline mode
-    if (offline() || disabled) return { id: "", url: "", secret: "" }
+    if (Offline.enabled() || disabled) return { id: "", url: "", secret: "" }
     // altimate_change end
     log.info("creating share", { sessionID })
     const req = await request()
@@ -212,7 +212,7 @@ export namespace ShareNext {
   const queue = new Map<string, { timeout: NodeJS.Timeout; data: Map<string, Data> }>()
   async function sync(sessionID: SessionID, data: Data[]) {
     // altimate_change start — skip session sharing in offline mode
-    if (offline() || disabled) return
+    if (Offline.enabled() || disabled) return
     // altimate_change end
     const existing = queue.get(sessionID)
     if (existing) {
@@ -259,7 +259,7 @@ export namespace ShareNext {
 
   export async function remove(sessionID: SessionID) {
     // altimate_change start — skip session sharing in offline mode
-    if (offline() || disabled) return
+    if (Offline.enabled() || disabled) return
     // altimate_change end
     log.info("removing share", { sessionID })
     const share = get(sessionID)

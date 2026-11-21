@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline, warnOffline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import path from "path"
 import { Token } from "@/util/token"
@@ -478,11 +478,11 @@ export namespace SessionPrompt {
     // snapshot is actually there keeps the tick off the path that regressed —
     // a user who never used workspaces has no directory, so this costs one `stat` and
     // does not even load the sync module.
-    if (offline()) {
+    if (Offline.enabled()) {
       const dir = Instance.directory
       const { snapshotRoot, ownManifest } = await import("../altimate/workspace/skill-sync")
       const snapshot = await ownManifest(dir)
-      await warnOffline(snapshot !== null)
+      await Offline.announce(snapshot !== null)
       if (existsSync(snapshotRoot(dir))) await refreshSkillRegistry(dir)
     } else if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
@@ -4332,7 +4332,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   export type ShellInput = z.infer<typeof ShellInput>
   export async function shell(input: ShellInput) {
     // altimate_change start — prevent direct shell execution in offline sessions
-    if (offline()) throw new Error("Shell commands are disabled in offline mode.")
+    if (Offline.enabled()) throw new Error("Shell commands are disabled in offline mode.")
     // altimate_change end
     const abort = start(input.sessionID)
     if (!abort) {
@@ -4842,7 +4842,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const shell = ConfigMarkdown.shell(template)
     if (shell.length > 0) {
       // altimate_change start — template expansion can invoke an arbitrary program
-      if (offline()) throw new Error("Shell commands are disabled in offline mode.")
+      if (Offline.enabled()) throw new Error("Shell commands are disabled in offline mode.")
       // altimate_change end
       // altimate_change start — upstream_fix: command template shell
       // expansion must honor configured shell instead of Bun's default parser.

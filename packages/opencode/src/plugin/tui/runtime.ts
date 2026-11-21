@@ -1,3 +1,6 @@
+// altimate_change start — offline policy
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { runtimeModules as keymapRuntimeModules } from "@opentui/keymap/runtime-modules"
 import { ensureRuntimePluginSupport } from "@opentui/solid/runtime-plugin-support/configure"
 import {
@@ -1094,7 +1097,9 @@ async function load(input: {
       }).pipe(Effect.provide(RuntimeFlags.defaultLayer)),
     )
     const pluginOrigins = config.plugin_origins ?? (await TuiConfig.pluginOrigins())
-    const records = Flag.OPENCODE_PURE ? [] : pluginOrigins
+    // altimate_change start — skip external TUI plugins in offline mode
+    const records = Offline.enabled() || Flag.OPENCODE_PURE ? [] : pluginOrigins
+    // altimate_change end
     if (Flag.OPENCODE_PURE && pluginOrigins.length) {
     }
 

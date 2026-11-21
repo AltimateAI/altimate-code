@@ -1,3 +1,6 @@
+// altimate_change start — offline policy
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { cmd } from "@/cli/cmd/cmd"
 import { Rpc } from "@/util/rpc"
 import { type rpc } from "../tui/worker"
@@ -246,9 +249,12 @@ export const TuiThreadCommand = cmd({
           network.port !== 0 ||
           network.hostname !== "127.0.0.1"
 
-        const transport = external
+        // altimate_change start — keep the TUI's own requests inside its offline worker
+        const listener = external ? await client.call("server", network) : undefined
+        const transport = listener && !Offline.enabled()
           ? {
-              url: (await client.call("server", network)).url,
+              url: listener.url,
+        // altimate_change end
               fetch: undefined,
               events: undefined,
             }

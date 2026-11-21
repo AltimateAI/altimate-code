@@ -1,3 +1,6 @@
+// altimate_change start — offline policy
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -401,6 +404,7 @@ async function registerOnce(
 export async function register(
   input: { origin: "picker" | "server"; signal?: AbortSignal } = { origin: "picker" },
 ): Promise<Credentials> {
+  if (Offline.enabled()) throw new Error("Register Altimate Base while online.")
   const startedAt = performance.now()
   let configuredGateway: string
   try {
@@ -669,7 +673,7 @@ async function autoRegisterLocked(configuredGateway: string, signal: AbortSignal
  */
 export async function autoRegister(signal?: AbortSignal): Promise<AutoRegisterResult> {
   try {
-    if (autoRegisterDisabledByEnv()) return { status: "skipped", reason: "env" }
+    if (Offline.enabled() || autoRegisterDisabledByEnv()) return { status: "skipped", reason: "env" }
     let configuredGateway: string
     try {
       configuredGateway = gatewayUrl()

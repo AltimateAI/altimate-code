@@ -1,3 +1,4 @@
+import { offlineModeEnabled } from "./flag/flag"
 export * as Npm from "./npm"
 
 import path from "path"
@@ -126,7 +127,7 @@ export const layer = Layer.effect(
         return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
-      if (process.env.ALTIMATE_OFFLINE === "1") return yield* new InstallFailedError({ add: [pkg], dir })
+      if (offlineModeEnabled()) return yield* new InstallFailedError({ add: [pkg], dir })
       const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
@@ -138,7 +139,7 @@ export const layer = Layer.effect(
     }, Effect.scoped)
 
     const install: Interface["install"] = Effect.fn("Npm.install")(function* (dir, input) {
-      if (process.env.ALTIMATE_OFFLINE === "1") return
+      if (offlineModeEnabled()) return
       const canWrite = yield* afs.access(dir, { writable: true }).pipe(
         Effect.as(true),
         Effect.orElseSucceed(() => false),

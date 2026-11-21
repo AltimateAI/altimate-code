@@ -2,7 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import * as Effect from "effect/Effect"
-import { Flag, env } from "@opencode-ai/core/flag/flag"
+import { Flag, env, offlineModeEnabled as enabled } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Global } from "@/global"
@@ -11,9 +11,7 @@ import { ConfigPaths } from "./paths"
 
 const configNames = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]
 
-export function offline() {
-  return process.env.ALTIMATE_OFFLINE === "1"
-}
+export { enabled }
 
 async function localOptIn(directory: string) {
   // The switch is an opt-in from any local config source. Read just this
@@ -49,10 +47,18 @@ async function localOptIn(directory: string) {
   return enabled((await ConfigManaged.readManagedPreferences().catch(() => undefined))?.text)
 }
 
+export async function assertStartupPolicy(directory: string) {
+  if (!enabled() && (await localOptIn(directory))) {
+    throw new Error(
+      "This project requests offline mode. Start Altimate Code from the project to apply its offline policy.",
+    )
+  }
+}
+
 let networkFetch: typeof fetch | undefined
 
-export async function startOfflineMode(directory: string, model?: string) {
-  if (!offline() && !(await localOptIn(directory))) return
+export async function start(directory: string, model?: string) {
+  if (!enabled() && !(await localOptIn(directory))) return
   // Workers and core services must see the same policy before constructing
   // their layers. Once enabled, keep it for the lifetime of the process.
   process.env.ALTIMATE_OFFLINE = "1"
@@ -72,7 +78,7 @@ export async function startOfflineMode(directory: string, model?: string) {
   )
 }
 
-export function offlineProvider(
+export function provider(
   config: Pick<ConfigV1.Info, "model" | "provider" | "enabled_providers" | "disabled_providers">,
 ) {
   const model = process.env.ALTIMATE_OFFLINE_MODEL ?? config.model
@@ -86,7 +92,7 @@ export function offlineProvider(
   return candidates.length === 1 ? candidates[0][0] : undefined
 }
 
-export function offlineModelFetch(baseURL: string | undefined): typeof fetch {
+export function modelFetch(baseURL: string | undefined): typeof fetch {
   if (!baseURL) throw new Error("Offline mode requires a model provider with an explicit baseURL.")
   const endpoint = new URL(baseURL)
   if (!["http:", "https:"].includes(endpoint.protocol))
@@ -104,14 +110,16 @@ export function offlineModelFetch(baseURL: string | undefined): typeof fetch {
 
 let warned = false
 
-export async function warnOffline(hasSnapshot: boolean) {
+export async function announce(hasSnapshot: boolean) {
   if (warned) return
   warned = true
   const message = hasSnapshot
     ? "Using cached workspace skills."
-    : "No usable workspace skill snapshot. Run altimate-code workspace refresh while online."
+    : "No usable workspace skill snapshot. To use workspace skills, run altimate-code workspace refresh while online."
   const { isHeadless } = await import("@/altimate/workspace/engine-seams")
   const { notify, printLine } = await import("@/altimate/workspace/engine-probes")
   if (isHeadless()) printLine(`Offline mode: ${message}`)
   else await notify({ title: "Offline mode", message, variant: hasSnapshot ? "info" : "warning" })
 }
+
+export * as Offline from "./offline"

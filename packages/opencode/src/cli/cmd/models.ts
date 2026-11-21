@@ -1,5 +1,5 @@
 // altimate_change start — offline mode reads the cached model catalog
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import { EOL } from "os"
 import { Effect } from "effect"
@@ -31,7 +31,7 @@ export const ModelsCommand = effectCmd({
   handler: Effect.fn("Cli.models")(function* (args) {
     const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
     // altimate_change start — skip catalog refresh in offline mode
-    if (args.refresh && !offline()) {
+    if (args.refresh && !Offline.enabled()) {
       // altimate_change end
       yield* ModelsDev.Service.use((s) => s.refresh(true))
       UI.println(UI.Style.TEXT_SUCCESS_BOLD + "Models cache refreshed" + UI.Style.TEXT_NORMAL)

@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import { PlanExitTool } from "./plan"
 import { QuestionTool } from "./question"
@@ -420,9 +420,10 @@ export namespace ToolRegistry {
     configInput?: RegistryConfigInput,
   ): Promise<Tool.Info[]> {
     // altimate_change start — offer only local tools in offline mode
-    if (offline()) {
+    const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
+    if (Offline.enabled()) {
       return AppRuntime.runPromise(Effect.scoped(Effect.all([
-        InvalidTool, QuestionTool, ReadTool, GlobTool, GrepTool, EditTool, WriteTool,
+        InvalidTool, ...(question ? [QuestionTool] : []), ReadTool, GlobTool, GrepTool, EditTool, WriteTool,
         TaskTool, TodoWriteTool, SkillTool, ApplyPatchTool, WarehouseInstallDriverTool,
       ])))
     }
@@ -435,7 +436,6 @@ export namespace ToolRegistry {
     // altimate_change end
     const config = configInput?.config ?? (await Config.get())
     // altimate_change end
-    const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
     // built-in tool-definition effects against the AppRuntime layers (Truncate/Agent) before use.

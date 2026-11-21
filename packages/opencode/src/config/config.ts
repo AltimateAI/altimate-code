@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline, startOfflineMode } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
@@ -503,7 +503,7 @@ export const layer = Layer.effect(
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
         // altimate_change start — skip network work in offline mode
-        yield* Effect.promise(() => startOfflineMode(ctx.directory))
+        yield* Effect.promise(() => Offline.assertStartupPolicy(ctx.directory))
         // altimate_change end
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
@@ -566,7 +566,7 @@ export const layer = Layer.effect(
 
         for (const [key, value] of Object.entries(auth)) {
           // altimate_change start — skip well-known network config in offline mode
-          if (offline()) continue
+          if (Offline.enabled()) continue
           // altimate_change end
           if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
@@ -693,7 +693,7 @@ export const layer = Layer.effect(
         }
 
         // altimate_change start — skip account network config in offline mode
-        const activeAccount = offline()
+        const activeAccount = Offline.enabled()
           ? undefined
           : Option.getOrUndefined(yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))))
         // altimate_change end
@@ -784,7 +784,7 @@ export const layer = Layer.effect(
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
-          if (!offline() && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+          if (!Offline.enabled() && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
             const dep = yield* npmSvc
               .install(dir, {
                 add: [
@@ -847,10 +847,11 @@ export const layer = Layer.effect(
         }
 
         // altimate_change start — disable runtime sharing in offline mode
-        if (offline()) {
+        if (Offline.enabled()) {
           result.offline = true
           result.share = "disabled"
           result.formatter = false
+          result.lsp = false
         }
         // altimate_change end
         if (result.autoshare === true && !result.share) {
@@ -869,7 +870,7 @@ export const layer = Layer.effect(
         // may not yet be declared in the ConfigV1 experimental schema.
         const autoMcpDiscovery = (result.experimental as { auto_mcp_discovery?: boolean } | undefined)
           ?.auto_mcp_discovery
-        if (!offline() && !Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
+        if (!Offline.enabled() && !Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
           const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift, discoveredSource } =
             yield* Effect.promise(
             () => import("../mcp/discover"),
@@ -903,7 +904,7 @@ export const layer = Layer.effect(
         // workspace's pinned local engine — derived here, after discovery, so it has
         // the last word over IDE-written, hosted and stale entries, and never written
         // to any file. See altimate/workspace/engine-overlay.ts.
-        if (!offline() && !Flag.ALTIMATE_DISABLE_WORKSPACE) {
+        if (!Offline.enabled() && !Flag.ALTIMATE_DISABLE_WORKSPACE) {
           const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
           yield* Effect.promise(() =>
             overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),

@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -674,7 +674,7 @@ export const layer = Layer.effect(
     const create = Effect.fn("MCP.create")(
       function* (key: string, mcp: ConfigMCPV1.Info) {
         // altimate_change start — skip external MCP processes and servers in offline mode
-        if (offline()) return DISABLED_RESULT
+        if (Offline.enabled()) return DISABLED_RESULT
         // altimate_change end
         if (mcp.enabled === false) {
           return DISABLED_RESULT
@@ -1381,6 +1381,9 @@ export const layer = Layer.effect(
     })
 
     const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
+      // altimate_change start — no external OAuth flow in offline mode
+      if (Offline.enabled()) throw new Error("Authenticate MCP servers while online.")
+      // altimate_change end
       const lifecycle = yield* InstanceState.get(state)
       // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)

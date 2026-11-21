@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 /**
  * ConnectionRegistry — manages database connections.
@@ -428,7 +428,7 @@ async function createConnector(
 ): Promise<Connector> {
   // altimate_change end
   // altimate_change start — skip network work in offline mode
-  if (offline()) {
+  if (Offline.enabled()) {
     throw new Error("Offline mode disables warehouse connections.")
   }
   // altimate_change end
@@ -670,10 +670,10 @@ export function names(): string[] {
 
 /** Get a connector instance (creates lazily). */
 export async function get(name: string): Promise<Connector> {
-  // altimate_change start — captured once, so a connect that finishes later lands in the project that started it
-  // altimate_change start — skip network work in offline mode
-  if (offline()) throw new Error("Offline mode disables warehouse connections.")
+  // altimate_change start — reject warehouse execution before accessing the connector cache
+  if (Offline.enabled()) throw new Error("Offline mode disables warehouse connections.")
   // altimate_change end
+  // altimate_change start — captured once, so a connect that finishes later lands in the project that started it
   const s = ensureLoaded()
   const { configs, connectors, tunnels, pending } = s
   // altimate_change end

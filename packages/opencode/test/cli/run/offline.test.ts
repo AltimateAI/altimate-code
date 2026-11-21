@@ -11,13 +11,14 @@ const TENANT = "offline-fixture"
 const KEY = "fixture-key"
 const SKILL = "This unique statement came from the cached offline skill."
 
-async function fixture(snapshot: boolean, configMode: boolean) {
+async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace: boolean) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "altimate-offline-"))
   const project = path.join(root, "project")
   const config = path.join(root, "config", "altimate-code")
   const data = path.join(root, "data", "altimate-code")
   const calls = path.join(root, "calls.jsonl")
   const preload = path.join(root, "preload.ts")
+  const blocked = path.join(root, "blocked.jsonl")
   await Promise.all([fs.mkdir(project), fs.mkdir(config, { recursive: true }), fs.mkdir(data, { recursive: true })])
   await Bun.write(
     path.join(config, "altimate-code.json"),
@@ -101,19 +102,28 @@ async function fixture(snapshot: boolean, configMode: boolean) {
     ALTIMATE_OFFLINE: configMode ? "" : "1",
     // The environment switch must preserve the snapshot even when a deployment
     // still has the old workspace opt-out set.
-    ALTIMATE_DISABLE_WORKSPACE: configMode ? "" : "1",
+    ALTIMATE_DISABLE_WORKSPACE: disableWorkspace ? "1" : "",
     ALTIMATE_CODE_DISABLE_OS_CREDENTIAL_STORE: "1",
     ALTIMATE_RUN_STDIN_WAIT_MS: "0",
     NO_COLOR: "1",
   }
-  return { root, project, preload, env, calls, manifest, skill }
+  return { root, project, preload, env, calls, blocked, manifest, skill }
 }
 
-for (const configMode of [false, true]) {
-  test(`offline ${configMode ? "config" : "environment"} keeps network traffic on the model endpoint`, async () => {
-    const f = await fixture(!configMode, configMode)
+for (const { scenario, snapshot, configMode, disableWorkspace } of [
+  {
+    scenario: "environment switch with the workspace opt-out",
+    snapshot: true,
+    configMode: false,
+    disableWorkspace: true,
+  },
+  { scenario: "config switch with a cached snapshot", snapshot: true, configMode: true, disableWorkspace: false },
+  { scenario: "config switch without a snapshot", snapshot: false, configMode: true, disableWorkspace: false },
+]) {
+  test(`offline ${scenario} keeps network traffic on the model endpoint`, async () => {
+    const f = await fixture(snapshot, configMode, disableWorkspace)
     try {
-      const before = configMode ? undefined : await fs.readFile(f.manifest, "utf8")
+      const before = snapshot ? await fs.readFile(f.manifest, "utf8") : undefined
       const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "Hello"], {
         cwd: f.project,
         env: f.env,
@@ -134,12 +144,13 @@ for (const configMode of [false, true]) {
         .filter(Boolean)
         .map((line) => JSON.parse(line))
       expect(calls.filter((call) => call.url !== MODEL_ENDPOINT + "/chat/completions")).toEqual([])
+      expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
       expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
       expect(calls.length).toBeGreaterThan(0)
-      expect(calls.some((call) => call.hasSkill)).toBe(!configMode)
+      expect(calls.some((call) => call.hasSkill)).toBe(snapshot)
       expect(stderr.match(/Offline mode:/g)).toHaveLength(1)
       expect(stderr).not.toContain("Workspace skills not synced")
-      if (configMode) expect(stderr).toContain("No usable workspace skill snapshot")
+      if (!snapshot) expect(stderr).toContain("No usable workspace skill snapshot")
       else {
         expect(await fs.readFile(f.manifest, "utf8")).toBe(before!)
         expect(await fs.readFile(f.skill, "utf8")).toContain(SKILL)
@@ -175,10 +186,17 @@ test("offline model transport bypasses proxy settings and refuses redirects", as
         process.execPath,
         "-e",
         `
-          import { startOfflineMode, offlineModelFetch } from ${JSON.stringify(source)}
-          await startOfflineMode(process.cwd())
-          const request = offlineModelFetch(process.env.OFFLINE_TEST_MODEL)
+          import { Offline } from ${JSON.stringify(source)}
+          await Offline.start(process.cwd())
+          const request = Offline.modelFetch(process.env.OFFLINE_TEST_MODEL)
           console.log(await (await request(process.env.OFFLINE_TEST_MODEL)).text())
+          try {
+            await request(process.env.HTTP_PROXY)
+            throw new Error("cross-origin request was accepted")
+          } catch (error) {
+            if (!error.message.includes("outside the configured model endpoint")) throw error
+            console.log("cross-origin request refused")
+          }
           try {
             await request(new URL("/redirect", process.env.OFFLINE_TEST_MODEL))
             throw new Error("redirect was accepted")
@@ -211,7 +229,7 @@ test("offline model transport bypasses proxy settings and refuses redirects", as
     ])
     expect({ code, stdout, stderr }).toEqual({
       code: 0,
-      stdout: "direct model response\nredirect refused\n",
+      stdout: "direct model response\ncross-origin request refused\nredirect refused\n",
       stderr: "",
     })
     expect(proxyCalls).toBe(0)
@@ -220,3 +238,69 @@ test("offline model transport bypasses proxy settings and refuses redirects", as
     proxy.stop(true)
   }
 })
+
+test("offline skill install refuses a remote repository before running git clone", async () => {
+  const f = await fixture(false, false, false)
+  const clone = path.join(f.root, "unexpected-clone")
+  try {
+    await fs.appendFile(
+      f.preload,
+      `
+      const spawnSync = Bun.spawnSync
+      Bun.spawnSync = (args, options) => {
+        if (Array.isArray(args) && args[0] === "git" && args[1] === "clone") {
+          appendFileSync(${JSON.stringify(clone)}, "git clone ran")
+          return { exitCode: 1, stderr: Buffer.from("unexpected git clone") }
+        }
+        return spawnSync(args, options)
+      }
+    `,
+    )
+    await fs.rm(path.join(f.root, "data", "altimate-code", "auth.json"))
+    const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "skill", "install", "example/skill"], {
+      cwd: f.project,
+      env: f.env,
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(20_000),
+    })
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+    expect(await Bun.file(clone).exists()).toBe(false)
+    expect(code).toBe(1)
+    expect(stderr).toContain("Install remote skills while online")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 25_000)
+
+test("offline mode does not launch a configured language server", async () => {
+  const f = await fixture(false, false, false)
+  const marker = path.join(f.root, "unexpected-lsp")
+  const stub = path.join(f.root, "language-server.ts")
+  const file = path.join(f.project, "test.offline-fixture")
+  try {
+    await fs.rm(path.join(f.root, "data", "altimate-code", "auth.json"))
+    await Bun.write(file, "test")
+    await Bun.write(stub, `await Bun.write(${JSON.stringify(marker)}, "server started")`)
+    await Bun.write(
+      path.join(f.project, "opencode.json"),
+      JSON.stringify({ lsp: { fixture: { command: [process.execPath, stub], extensions: [".offline-fixture"] } } }),
+    )
+    const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "debug", "lsp", "diagnostics", file], {
+      cwd: f.project,
+      env: f.env,
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(20_000),
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    expect(await Bun.file(marker).exists()).toBe(false)
+    expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("{}") })
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 25_000)

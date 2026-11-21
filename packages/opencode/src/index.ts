@@ -1,5 +1,5 @@
 // altimate_change start — offline mode
-import { offline, startOfflineMode } from "@/config/offline"
+import { Offline } from "@/config/offline"
 // altimate_change end
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
@@ -170,12 +170,20 @@ let cli = yargs(args)
     }
     // altimate_change start — skip network work in offline mode
     const command = String(opts._[0] ?? "")
-    const args = opts as { dir?: string; project?: string; attach?: string; model?: string }
-    const directory = command === "run" && !args.attach && args.dir
-      ? path.resolve(args.dir)
-      : args.project ? resolveThreadDirectory(args.project) : process.cwd()
-    await startOfflineMode(directory, args.model)
-    if (offline() && (
+    const args = opts as {
+      dir?: string
+      cwd?: string
+      directory?: string
+      project?: string
+      attach?: string
+      model?: string
+    }
+    const offlineTarget = (command === "run" && !args.attach ? args.dir : undefined)
+      ?? (command === "acp" ? args.cwd : undefined)
+      ?? (command === "workspace" ? args.directory : undefined)
+    const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
+    await Offline.start(directory, args.model)
+    if (Offline.enabled() && (
       ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web"].includes(command) ||
       (command === "run" && args.attach) ||
       (command === "mcp" && opts._[1] === "serve") ||

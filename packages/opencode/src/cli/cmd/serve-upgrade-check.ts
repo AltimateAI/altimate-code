@@ -1,7 +1,7 @@
 // altimate_change start — self-update trigger for headless serve
 import { Instance } from "../../project/instance"
 import { InstanceBootstrap } from "../../project/bootstrap"
-import { offline } from "@/config/offline"
+import { Offline } from "@/config/offline"
 import { upgrade } from "../upgrade"
 import { Log } from "../../util/log"
 
@@ -64,7 +64,7 @@ export async function runStartupUpgradeCheck(deps: StartupUpgradeDeps = defaultD
 
 /** Schedules {@link runStartupUpgradeCheck} after a short settle delay; non-blocking. */
 export function scheduleStartupUpgradeCheck(): void {
-  if (offline()) return
+  if (Offline.enabled()) return
   // Jitter the delay so a fleet of servers restarting in the same window (rolling
   // deploy, node drain, mass IDE update) doesn't stampede the unauthenticated
   // GitHub releases API (60 req/hr/IP) in the same instant. Spreads checks over
