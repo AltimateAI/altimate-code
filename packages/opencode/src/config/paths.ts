@@ -191,7 +191,7 @@ async function substitute(
   // the telemetry schema). Dynamic import avoids a circular dep with @/altimate/telemetry (which
   // imports @/config/config). Matches main's single emit site in substitute().
   const { dollarRefs, dollarUnresolved, dollarDefaulted, dollarEscaped, legacyBraceRefs, legacyBraceUnresolved } = stats
-  if (track && (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0)) {
+  if (opts.track !== false && (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0)) {
     import("@/altimate/telemetry")
       .then(({ Telemetry }) => {
         Telemetry.track({

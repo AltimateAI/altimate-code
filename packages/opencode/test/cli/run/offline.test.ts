@@ -186,7 +186,7 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line))
-      expect(calls.filter((call) => call.url !== MODEL_ENDPOINT + "/chat/completions")).toEqual([])
+      expect({ code, stderr, nonModelCalls: calls.filter((call) => call.url !== MODEL_ENDPOINT + "/chat/completions") }).toMatchObject({ code: 0, nonModelCalls: [] })
       expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
       expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
       expect(calls.length).toBeGreaterThan(0)
