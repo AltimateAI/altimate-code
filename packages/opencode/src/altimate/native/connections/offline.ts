@@ -19,13 +19,18 @@ export function isLocalPath(value: unknown): boolean {
 export function assertLocalConnection(raw: ConnectionConfig): void {
   const config = normalizeConfig(raw)
   const type = String(config.type).toLowerCase()
+  // An SSH tunnel reaches another machine whatever the database type.
+  if (config.ssh_host) throw new Error(DENIED)
   if (type === "duckdb" || type === "sqlite") {
     if (!isLocalPath(config.path)) throw new Error(DENIED)
     return
   }
   // Only types whose driver connects to the configured host can be judged; account- or project-addressed
   // warehouses (Snowflake, BigQuery, Databricks and others) are refused.
-  if (!HOST_ADDRESSED.has(type) || config.ssh_host || config.replica_set) throw new Error(DENIED)
+  if (!HOST_ADDRESSED.has(type) || config.replica_set || config.direct_connection === false) throw new Error(DENIED)
+  // Trino and ClickHouse build `${protocol}://${host}`, so a protocol value could carry its own authority.
+  if (config.protocol !== undefined && !["http", "https"].includes(String(config.protocol).trim().toLowerCase()))
+    throw new Error(DENIED)
   // Cloud sign-in contacts an identity provider even for a loopback host.
   if (typeof config.authentication === "string" && /^azure-active-directory/i.test(config.authentication))
     throw new Error(DENIED)
@@ -51,7 +56,8 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
       throw new Error(DENIED)
     }
     // mongodb+srv:// and replica sets discover other hosts.
-    if (parsed.protocol.endsWith("+srv:") || [...parsed.searchParams.keys()].some((key) => key.toLowerCase() === "replicaset"))
+    const param = (name: string) => [...parsed.searchParams].find(([key]) => key.toLowerCase() === name)?.[1]
+    if (parsed.protocol.endsWith("+srv:") || param("replicaset") !== undefined || param("directconnection") === "false")
       throw new Error(DENIED)
     const mechanism = [...parsed.searchParams].find(([key]) => key.toLowerCase() === "authmechanism")?.[1]?.toUpperCase()
     if (mechanism && ["MONGODB-AWS", "MONGODB-OIDC", "GSSAPI"].includes(mechanism)) throw new Error(DENIED)
