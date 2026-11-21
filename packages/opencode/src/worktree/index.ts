@@ -550,6 +550,9 @@ export const layer: Layer.Layer<
     })
 
     const reset = Effect.fn("Worktree.reset")(function* (input: ResetInput) {
+      // altimate_change start — reset fetches the base and refreshes submodules
+      if (Offline.enabled()) return yield* new ResetFailedError({ message: "Reset this worktree while online." })
+      // altimate_change end
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })

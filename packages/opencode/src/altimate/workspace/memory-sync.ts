@@ -1,3 +1,4 @@
+import { Offline } from "@/config/offline"
 // altimate_change - new file
 //
 // Mirrors Altimate Code memory blocks to the workspace memory store, and loads
@@ -119,7 +120,7 @@ function sessionState(sessionID: string): SessionMemory {
 
 /** The mirror follows the workspace kill switch and honours the memory opt-out. */
 export function isEnabled(): boolean {
-  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE && !Flag.ALTIMATE_DISABLE_MEMORY
+  return !Offline.enabled() && !CoreFlag.ALTIMATE_DISABLE_WORKSPACE && !Flag.ALTIMATE_DISABLE_MEMORY
 }
 
 /** Test seam. Production leaves this unset and resolves the binding from the

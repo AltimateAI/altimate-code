@@ -16,8 +16,14 @@ export { enabled }
 async function localOptIn(directory: string) {
   // The switch is an opt-in from any local config source. Read just this
   // key so remote credentials and unrelated substitutions cannot affect it.
-  const enabled = (text: string | undefined) => text !== undefined && parse(text)?.offline === true
-  if (enabled(env("OPENCODE_CONFIG_CONTENT"))) return true
+  const optedIn = async (text: string | undefined, source: string | { source: string; dir: string }) => {
+    if (!text) return false
+    if (parse(text)?.offline === true) return true
+    if (!text.includes('"offline"')) return false
+    const config = await ConfigPaths.parseText(text, source, "empty", { track: false }).catch(() => undefined)
+    return config?.offline === true
+  }
+  if (await optedIn(env("OPENCODE_CONFIG_CONTENT"), { source: "OPENCODE_CONFIG_CONTENT", dir: directory })) return true
   let worktree = path.resolve(directory)
   while (!(await fs.stat(path.join(worktree, ".git")).catch(() => undefined))) {
     const parent = path.dirname(worktree)
@@ -42,9 +48,10 @@ async function localOptIn(directory: string) {
     Flag.OPENCODE_CONFIG,
   ]
   for (const file of files) {
-    if (file && enabled(await fs.readFile(file, "utf8").catch(() => undefined))) return true
+    if (file && (await optedIn(await fs.readFile(file, "utf8").catch(() => undefined), file))) return true
   }
-  return enabled((await ConfigManaged.readManagedPreferences().catch(() => undefined))?.text)
+  const managed = await ConfigManaged.readManagedPreferences().catch(() => undefined)
+  return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false
 }
 
 export async function assertStartupPolicy(directory: string) {
@@ -63,6 +70,7 @@ export async function start(directory: string, model?: string) {
   // their layers. Once enabled, keep it for the lifetime of the process.
   process.env.ALTIMATE_OFFLINE = "1"
   process.env.GIT_NO_LAZY_FETCH = "1"
+  process.env.GIT_ALLOW_PROTOCOL = "file"
   // Bun consults proxy environment variables even when fetch sets proxy: "".
   // Offline traffic must go directly to the one configured endpoint.
   process.env.NO_PROXY = "*"
@@ -78,18 +86,27 @@ export async function start(directory: string, model?: string) {
   )
 }
 
-export function provider(
-  config: Pick<ConfigV1.Info, "model" | "provider" | "enabled_providers" | "disabled_providers">,
-) {
+type ModelConfig = Pick<ConfigV1.Info, "model" | "provider" | "enabled_providers" | "disabled_providers">
+
+function configuredBaseURL(config: ModelConfig, providerID: string) {
+  const url = config.provider?.[providerID]?.options?.baseURL
+  return typeof url === "string" && url.trim() ? url : undefined
+}
+
+function provider(config: ModelConfig) {
   const model = process.env.ALTIMATE_OFFLINE_MODEL ?? config.model
   if (model) return model.split("/")[0]
-  const candidates = Object.entries(config.provider ?? {}).filter(
-    ([id, provider]) =>
-      typeof provider.options?.baseURL === "string" &&
+  const candidates = Object.keys(config.provider ?? {}).filter(
+    (id) =>
+      configuredBaseURL(config, id) !== undefined &&
       (!config.enabled_providers || config.enabled_providers.includes(id)) &&
       !config.disabled_providers?.includes(id),
   )
-  return candidates.length === 1 ? candidates[0][0] : undefined
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+export function endpoint(config: ModelConfig, providerID: string) {
+  return provider(config) === providerID ? configuredBaseURL(config, providerID) : undefined
 }
 
 export function modelFetch(baseURL: string | undefined): typeof fetch {

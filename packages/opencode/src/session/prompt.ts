@@ -2445,8 +2445,8 @@ export namespace SessionPrompt {
       // acts on a false positive instead of only measuring it, so it should
       // not ship until those heuristics are consolidated into shared,
       // tested primitives.
-      const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
-      const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
+      const validatorsEnabled = !Offline.enabled() && process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
+      const validatorsShadow = !Offline.enabled() && process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
       const validatorsActive = validatorsEnabled || validatorsShadow
       const maxValidatorRetries = Number(process.env.ALTIMATE_VALIDATORS_MAX_RETRIES ?? "3")
       const validatorsDebug = process.env.ALTIMATE_VALIDATORS_DEBUG === "1"

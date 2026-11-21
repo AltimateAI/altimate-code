@@ -1,3 +1,4 @@
+import { Offline } from "@/config/offline"
 // altimate_change - new file
 //
 // Notices for the person's own workspace review requests (skills and knowledge bases): when the owner approves or
@@ -289,7 +290,7 @@ export async function poll(directory: string, deps: PollDeps = {}): Promise<Poll
 }
 
 async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult> {
-  if (!workspacesOn()) return { status: "off" }
+  if (Offline.enabled() || !workspacesOn()) return { status: "off" }
   const [{ WorkspaceApi }, { resolveBindingOutcome, credentialDigest, accountDigest }, { RulesSync }] = await Promise.all([
     import("./api-client"),
     import("./state"),

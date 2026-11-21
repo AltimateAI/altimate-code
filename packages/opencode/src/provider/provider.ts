@@ -1399,16 +1399,11 @@ export namespace Provider {
     const disabled = new Set(config.disabled_providers ?? [])
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : null
 
-    // altimate_change start — offline provider selection is independent of online fallback rules
-    const offlineProviderID = Offline.enabled() ? Offline.provider(config) : undefined
-    // altimate_change end
     function isProviderAllowed(providerID: ProviderID): boolean {
       // altimate_change start — require a locally configured model endpoint in offline mode
       if (Offline.enabled()) {
-        const options = config.provider?.[providerID]?.options
         if (
-          providerID !== offlineProviderID ||
-          typeof options?.baseURL !== "string" ||
+          !Offline.endpoint(config, providerID) ||
           providerID === FreeTier.PROVIDER_ID ||
           providerID === ClaudeAgent.ID
         ) return false
@@ -2138,9 +2133,18 @@ export namespace Provider {
         options["includeUsage"] = true
       }
 
+      // altimate_change start — use the explicit local endpoint without any catalog fallback
+      const offlineMode = Offline.enabled()
+      const localBaseURL = offlineMode ? Offline.endpoint(await Config.get(), model.providerID) : undefined
+      if (offlineMode && !localBaseURL)
+        throw new Error("Offline mode requires a locally configured model endpoint.")
+      // altimate_change end
+
       const baseURL = iife(() => {
-        let url =
-          typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url
+        // altimate_change start — keep the model request on its explicitly configured offline endpoint
+        let url = localBaseURL ??
+          (typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url)
+        // altimate_change end
         if (!url) return
 
         // some models/providers have variable urls, ex: "https://${AZURE_RESOURCE_NAME}.services.ai.azure.com/anthropic/v1"
@@ -2171,14 +2175,8 @@ export namespace Provider {
       // altimate_change end
 
       // altimate_change start — constrain offline model transport to its configured origin
-      const offlineMode = Offline.enabled()
-      if (offlineMode) {
-        const config = await Config.get()
-        if (Offline.provider(config) !== model.providerID || typeof config.provider?.[model.providerID]?.options?.baseURL !== "string")
-          throw new Error("Offline mode requires a locally configured model endpoint.")
-        if (!OFFLINE_SDKS.has(model.api.npm))
-          throw new Error("Offline mode requires a bundled HTTP model provider such as @ai-sdk/openai-compatible.")
-      }
+      if (offlineMode && !OFFLINE_SDKS.has(model.api.npm))
+        throw new Error("Offline mode requires a bundled HTTP model provider such as @ai-sdk/openai-compatible.")
       const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options, offlineMode }))
       // altimate_change end
       const existing = s.sdk.get(key)

@@ -1,3 +1,4 @@
+import { Offline } from "@/config/offline"
 // altimate_change - new file
 //
 // Wire client for the workspace-binding endpoints in altimate-backend
@@ -429,6 +430,7 @@ async function req<T>(
     // altimate_change end
   } = {},
 ): Promise<T> {
+  if (Offline.enabled()) throw new Error("Workspace API access requires an online run.")
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
   const { url, instance, apiKey } = opts.actAs ?? (await creds())
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""

@@ -184,10 +184,11 @@ let cli = yargs(args)
     const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
     await Offline.start(directory, args.model)
     if (Offline.enabled() && (
-      ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web"].includes(command) ||
+      ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web", "integrations"].includes(command) ||
       (command === "run" && args.attach) ||
       (command === "mcp" && opts._[1] === "serve") ||
       (command === "tool" && opts._[1] === "daemon") ||
+      (command === "learn" && opts._[1] === "import-reviews") ||
       (["providers", "auth", "mcp", "console"].includes(command) && opts._.some((arg) => arg === "login" || arg === "auth"))
     )) throw new Error("This command requires network access. Run it while online.")
     // altimate_change end
