@@ -2266,8 +2266,8 @@ export namespace SessionPrompt {
       // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
+      // Estimate-only copy of the tools this request sends, with the removal rules LLM.stream applies.
       const requestTools = echoCommittedAnswer || textFinalStep ? {} : { ...tools }
-      // Use the same removal rules as LLM.stream so denied tools do not inflate overhead.
       for (const name of LLM.removedTools(Object.keys(requestTools), { agent, user: lastUser })) {
         delete requestTools[name]
       }
@@ -2383,7 +2383,7 @@ export namespace SessionPrompt {
         // altimate_change start - the final echo, and the step-cap answer, cannot spend another step on tools.
         // Text finalization uses the same toolless shape as compaction and title generation: no
         // tools and toolChoice "none", so llm.ts flattens historical tool calls for the gateway.
-        tools: requestTools,
+        tools: echoCommittedAnswer || textFinalStep ? {} : tools,
         deferText: echoCommittedAnswer ? deferredText : undefined,
         // altimate_change end
         model,
