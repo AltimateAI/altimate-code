@@ -216,6 +216,9 @@ export const TuiThreadCommand = cmd({
       const client = Rpc.client<typeof rpc>(worker)
       // altimate_change start — this thread loads no project, so where its own read of the opt-out
       // stays unresolved (a remote or organization config), it takes the worker's answer
+      client.on<"enabled" | "disabled">("telemetry.optOut", (state) => {
+        Telemetry.adoptOptOut(state).catch(() => {})
+      })
       client
         .call("telemetryOptOut", undefined)
         .then(async (state) => Telemetry.adoptOptOut(await state))

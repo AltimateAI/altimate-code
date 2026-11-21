@@ -270,7 +270,7 @@ type State = {
 }
 
 export interface Interface {
-  readonly get: (retryTelemetry?: boolean) => Effect.Effect<Info> // altimate_change — reload an unresolved opt-out
+  readonly get: () => Effect.Effect<Info>
   readonly getGlobal: () => Effect.Effect<Info>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
@@ -946,18 +946,9 @@ export const layer = Layer.effect(
       }),
     )
 
-    // altimate_change start — `retryTelemetry`: reload a config whose telemetry opt-out could not be
-    // resolved (or that failed to load), so a source that has recovered is read. The caller throttles.
-    const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {
-      const read = InstanceState.use(state, (s) => s.config)
-      if (!retryTelemetry || !(yield* InstanceState.has(state))) return yield* read
-      const cached = yield* Effect.exit(read)
-      if (Exit.isSuccess(cached) && !configsWithUnresolvedTelemetry.has(cached.value)) return cached.value
-      yield* invalidateGlobal
-      yield* InstanceState.invalidate(state)
-      return yield* read
+    const get = Effect.fn("Config.get")(function* () {
+      return yield* InstanceState.use(state, (s) => s.config)
     })
-    // altimate_change end
 
     const directories = Effect.fn("Config.directories")(function* () {
       return yield* InstanceState.use(state, (s) => s.directories)
@@ -1065,9 +1056,8 @@ export const node = LayerNode.make(layer, () => [FSUtil.node, Auth.node, Account
 // call `await Config.get()` etc. The makeRuntime bridge's `attach()` reads WorkspaceContext +
 // the current fiber's InstanceRef, so these reads stay bound to the active workspace/instance.
 const { runPromise: runConfig } = makeRuntime(Service, defaultLayer)
-// altimate_change — `retryTelemetry`: see Service.get
-export async function get(retryTelemetry = false) {
-  return runConfig((svc) => svc.get(retryTelemetry))
+export async function get() {
+  return runConfig((svc) => svc.get())
 }
 export async function getGlobal() {
   return runConfig((svc) => svc.getGlobal())

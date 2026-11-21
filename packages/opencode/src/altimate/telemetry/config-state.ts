@@ -78,19 +78,20 @@ export function instanceDirectory(): string | undefined {
 }
 
 /** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
-export async function loadedState(retry = false): Promise<State> {
-  const config = await Config.get(retry)
+export async function loadedState(): Promise<State> {
+  const config = await Config.get()
   if (Config.telemetryConfigUnresolved(config)) return "unreadable"
   // Auth.all() returns an empty store when its read or parse fails, hiding well-known remote config.
+  // Called only for that throw (an unparseable auth file); its result does not matter here.
   await hasWellKnownAuth()
   return config.telemetry?.disabled ? "disabled" : "enabled"
 }
 
 /** The opt-out as the caller can best read it: the full config inside an Instance (a failed load can
  * hide remote settings, so it is `unreadable`), the files on disk for commands that have none yet. */
-export async function resolve(directory?: string, retry = false): Promise<State> {
+export async function resolve(directory?: string): Promise<State> {
   try {
-    return await loadedState(retry)
+    return await loadedState()
   } catch {
     return instanceDirectory() ? "unreadable" : disabledState(directory)
   }
@@ -118,11 +119,17 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
     await header.close()
   }
 
-  const db = new SQLite(dbPath, { readonly: true })
+  // A read-only open of a WAL database needs its -wal/-shm files, which SQLite removes when the last
+  // connection closes cleanly (Linux, Windows). Without a -wal file every change is in the main file and
+  // no writer is attached, so read it as immutable (which reports its journal mode as "delete").
+  const immutable = !existsSync(`${dbPath}-wal`)
+  const db = immutable
+    ? new SQLite(`file:${dbPath}?immutable=1`, { readonly: true })
+    : new SQLite(dbPath, { readonly: true })
   try {
     db.exec("PRAGMA busy_timeout = 0")
     // If the journal mode changed since the header read, defer to the full loader.
-    if (db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode !== "wal") return true
+    if (!immutable && db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode !== "wal") return true
     const tables = db.query<{ count: number }, []>(
       "SELECT count(*) AS count FROM sqlite_schema WHERE name IN ('account', 'account_state') AND type = 'table'",
     ).get()

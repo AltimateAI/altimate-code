@@ -414,34 +414,85 @@ describe("telemetry opt-out", () => {
     expect(await settled).toBe("disabled")
   })
 
-  test("a retry inside a project never holds up the session that triggers it", async () => {
-    signOut()
-    await using dir = await tmpdir({ git: true })
-    configSpy.mockResolvedValue({})
-    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
-    try {
-      await Instance.provide({
-        directory: dir.path,
-        fn: async () => {
-          await Telemetry.init()
-          expect(Telemetry.optOutState()).toBe("pending")
+  test("a cleanly closed account database without WAL side files reads like any other", async () => {
+    const dbPath = path.join(home, "account.db")
+    databaseSpy.mockReturnValue(dbPath)
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', NULL);
+    `)
+    db.close()
+    // SQLite removes these when the last connection closes on Linux and Windows.
+    rmSync(`${dbPath}-wal`, { force: true })
+    rmSync(`${dbPath}-shm`, { force: true })
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
 
-          let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
-          configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
-          Telemetry.retryConfigNowForTest()
-          let returned = false
-          await Telemetry.init().then(() => (returned = true))
-          // The reload is still running, yet the caller already went on.
-          expect(returned).toBe(true)
-          expect(Telemetry.optOutState()).toBe("pending")
-          unresolved.mockReturnValue(false)
-          release({})
-          expect(await Telemetry.settledOptOutState()).toBe("enabled")
-        },
-      })
+    const writer = new SQLite(dbPath)
+    writer.exec("UPDATE account_state SET active_org_id = 'org'")
+    writer.close()
+    rmSync(`${dbPath}-wal`, { force: true })
+    rmSync(`${dbPath}-shm`, { force: true })
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+  })
+
+  test("events held across a session keep the session and project they were tracked under", async () => {
+    const recorded: Array<{ session_id: string; project_id: string }> = []
+    fetchSpy.mockImplementation(Object.assign(async (_url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+      for (const envelope of JSON.parse(String(request?.body))) {
+        recorded.push({ session_id: envelope.tags["ai.session.id"], project_id: envelope.data.baseData.properties.project_id })
+      }
+      return new Response(null, { status: 204 })
+    }, { preconnect: fetch.preconnect }))
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    await Telemetry.init()
+    Telemetry.setContext({ sessionId: "session-a", projectId: "project-a" })
+    // An event that names no session of its own (an MCP or stall event) takes the process's.
+    const { session_id: _omitted, ...sessionless } = errorEvent("Held")
+    Telemetry.track(sessionless as unknown as Telemetry.Event)
+    await Telemetry.shutdown()
+
+    Telemetry.setContext({ sessionId: "session-b", projectId: "project-b" })
+    configSpy.mockResolvedValue({})
+    Telemetry.retryConfigNowForTest()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(recorded.map((p) => [p.session_id, p.project_id])).toEqual([["session-a", "project-a"]])
+  })
+
+  test("each opt-out decision is announced once, for another thread to adopt", async () => {
+    const decisions: string[] = []
+    const stop = Telemetry.onOptOutDecided((state) => decisions.push(state))
+    try {
+      signOut()
+      configSpy.mockResolvedValue({})
+      await Telemetry.init()
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(decisions).toEqual(["enabled"])
     } finally {
-      unresolved.mockRestore()
+      stop()
     }
+  })
+
+  test("an opt-out adopted while this thread's own read runs still wins", async () => {
+    const names = recordIngestion()
+    signOut()
+    let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+    configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    trackStartup()
+    const init = Telemetry.init()
+    await Bun.sleep(10)
+    await Telemetry.adoptOptOut("disabled")
+    release({})
+    await init
+    await Telemetry.flush()
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(names).toEqual([])
   })
 
   test("the retry throttle still applies after an earlier session enabled telemetry", async () => {

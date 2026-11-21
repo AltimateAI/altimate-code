@@ -762,8 +762,8 @@ for (const failure of ["account", "organization"] as const) {
             { preconnect: fetch.preconnect },
           ))
           // Bridge the Promise facade to the same scoped service for each telemetry init.
-          const config = spyOn(Config, "get").mockImplementation((retry?: boolean) =>
-            Effect.runPromise(provideCurrentInstance(service.get(retry), context)),
+          const config = spyOn(Config, "get").mockImplementation(() =>
+            Effect.runPromise(provideCurrentInstance(service.get(), context)),
           )
           try {
             const track = () => Telemetry.track({
@@ -783,7 +783,15 @@ for (const failure of ["account", "organization"] as const) {
             await Telemetry.init()
             expect(orgLoads).toBe(1)
 
+            // A due retry reads the Instance's cached config: telemetry never forces a refetch.
             recovered = true
+            Telemetry.retryConfigNowForTest()
+            await Telemetry.init()
+            expect(orgLoads).toBe(1)
+            expect(events).toEqual([])
+
+            // Once the app reloads its config, the next retry reads the recovered one.
+            await Effect.runPromise(provideCurrentInstance(service.invalidate(), context))
             Telemetry.retryConfigNowForTest()
             await Telemetry.init()
             await Telemetry.flush()
@@ -800,22 +808,6 @@ for (const failure of ["account", "organization"] as const) {
     }),
   )
 }
-
-it.instance("a telemetry retry reloads a repaired config after a cached load failure", () =>
-  Effect.gen(function* () {
-    const { directory } = yield* TestInstance
-    const configPath = path.join(directory, "opencode.json")
-    yield* FSUtil.use.writeWithDirs(configPath, "{")
-    const failed = yield* Config.use.get().pipe(Effect.exit)
-    expect(Exit.isFailure(failed)).toBe(true)
-    const failedRetry = yield* Config.use.get(true).pipe(Effect.exit)
-    expect(Exit.isFailure(failedRetry)).toBe(true)
-
-    yield* FSUtil.use.writeWithDirs(configPath, JSON.stringify({ telemetry: { disabled: true } }))
-    const recovered = yield* Config.use.get(true)
-    expect(recovered.telemetry?.disabled).toBe(true)
-  }),
-)
 
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {

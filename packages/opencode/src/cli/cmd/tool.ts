@@ -368,14 +368,6 @@ const ToolReportEventCommand = cmd({
     // Flushed, or dropped under the opt-out, when the CLI exits.
     const { Telemetry } = await import("../../altimate/telemetry")
     Telemetry.track(event)
-    // altimate_change start — this command loads no project, and the files alone cannot settle a
-    // remote or organization opt-out; resolve it from the project's full config, or the event would
-    // be held and dropped at exit
-    await Telemetry.init().catch(() => {})
-    if (Telemetry.optOutState() === "pending") {
-      await bootstrap(process.cwd(), () => Telemetry.init()).catch(() => {})
-    }
-    // altimate_change end
   },
 })
 

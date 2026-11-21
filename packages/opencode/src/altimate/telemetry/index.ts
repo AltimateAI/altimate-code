@@ -2313,15 +2313,25 @@ export namespace Telemetry {
   // so a later init never sends what an earlier one refused. Unlike `enabled`, it survives the
   // per-session shutdown; it is never reset outside tests.
   let gate: "pending" | "enabled" | "disabled" = "pending"
-  // While the config is unreadable, re-resolve it at most this often (each try reloads the config).
+  // While the config is unreadable, re-resolve it at most this often.
   const CONFIG_RETRY_MS = 30_000
-  const CONFIG_RETRY_TIMEOUT_MS = 5_000
   let configRetry: { at: number; instance: boolean } | undefined
   // An enabled opt-out resolved by another thread of this launch (the TUI worker), used by the next init.
   let adopted: "enabled" | undefined
+  const decisionListeners = new Set<(state: "enabled" | "disabled") => void>()
+  function decide(next: "enabled" | "disabled") {
+    if (gate === next) return
+    gate = next
+    for (const listener of decisionListeners) listener(next)
+  }
   /** The opt-out as this thread has resolved it. */
   export function optOutState() {
     return gate
+  }
+  /** Called each time this thread decides the opt-out, for another thread to adopt. */
+  export function onOptOutDecided(listener: (state: "enabled" | "disabled") => void): () => void {
+    decisionListeners.add(listener)
+    return () => decisionListeners.delete(listener)
   }
   /** The opt-out once this thread's running init has settled (for another thread to adopt). */
   export async function settledOptOutState() {
@@ -2334,7 +2344,7 @@ export namespace Telemetry {
   export function adoptOptOut(state: "pending" | "enabled" | "disabled"): Promise<void> {
     if (gate !== "pending" || state === "pending") return Promise.resolve()
     if (state === "disabled") {
-      gate = "disabled"
+      decide("disabled")
       buffer = []
       droppedEvents = 0
       return Promise.resolve()
@@ -2576,31 +2586,14 @@ export namespace Telemetry {
     }
     // While the config stays unreadable, retry at most every CONFIG_RETRY_MS. The first init inside
     // an Instance is not throttled by an earlier one outside it: it reads the full config, which the
-    // instance-less probe could not. An opt-out adopted from another thread needs no read.
-    // A retry of an Instance read reloads the full config (remote fetches included), so it runs
-    // in the background, bounded by CONFIG_RETRY_TIMEOUT_MS: a session start never waits on it.
-    let background = false
-    if (!initPromise && !adopted && configRetry) {
-      const inInstance = Boolean(TelemetryConfig.instanceDirectory())
-      if (Date.now() < configRetry.at && (configRetry.instance || !inInstance)) return Promise.resolve()
-      background = configRetry.instance
+    // instance-less probe could not. An opt-out adopted from another thread needs no read. Inside an
+    // Instance a retry reads the Instance's cached config, which its own reloads keep current.
+    if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at) {
+      if (configRetry.instance || !TelemetryConfig.instanceDirectory()) return Promise.resolve()
     }
-    initPromise ??= doInit()
-    return background ? Promise.resolve() : initPromise
+    return (initPromise ??= doInit())
     // altimate_change end
   }
-
-  // altimate_change start — a retry is bounded: a remote that hangs counts as still unreadable
-  function readOptOut(): Promise<TelemetryConfig.State> {
-    const read = TelemetryConfig.resolve(configDirectory, configRetry !== undefined)
-    if (!configRetry) return read
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<TelemetryConfig.State>((resolve) => {
-      timer = setTimeout(() => resolve("unreadable"), CONFIG_RETRY_TIMEOUT_MS)
-    })
-    return Promise.race([read, timeout]).finally(() => clearTimeout(timer))
-  }
-  // altimate_change end
 
   async function doInit() {
     // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
@@ -2609,15 +2602,16 @@ export namespace Telemetry {
       // altimate_change start — resolve the opt-out before anything can be sent. Env vars first,
       // then the config: the full one inside an Instance, the files on disk outside one.
       if (gate === "disabled" || TelemetryConfig.disablingEnvironmentVariable()) {
-        gate = "disabled"
+        decide("disabled")
         buffer = []
         droppedEvents = 0
         return
       }
       const instance = Boolean(TelemetryConfig.instanceDirectory())
-      const state = adopted ?? (await readOptOut())
-      if (state === "disabled") {
-        gate = "disabled"
+      const state = adopted ?? (await TelemetryConfig.resolve(configDirectory))
+      // Another thread's opt-out may have been adopted while the read ran: it still wins.
+      if (state === "disabled" || optOutState() === "disabled") {
+        decide("disabled")
         buffer = []
         droppedEvents = 0
         return
@@ -2628,7 +2622,7 @@ export namespace Telemetry {
         configRetry = { at: Date.now() + CONFIG_RETRY_MS, instance }
         return
       }
-      gate = "enabled"
+      decide("enabled")
       configRetry = undefined
       // altimate_change end
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
@@ -2958,6 +2952,13 @@ export namespace Telemetry {
     const eventSession = (event as { session_id?: unknown }).session_id
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
+    // An event held while the opt-out is unknown can outlive this session: it keeps the session and
+    // project it was tracked under instead of taking the next one's at flush.
+    if (gate === "pending") {
+      const held = event as { session_id?: unknown; project_id?: unknown }
+      if (held.session_id === undefined && sessionId) held.session_id = sessionId
+      if (held.project_id === undefined && projectId) held.project_id = projectId
+    }
     // altimate_change end
     // altimate_change — no ambient workspace stamping: a row names its workspace itself (the prompt
     // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
