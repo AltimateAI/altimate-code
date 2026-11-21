@@ -69,6 +69,8 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "sqlite", path: "file:////server/share/db.sqlite" },
     { type: "sqlite", path: "file:///%5Cserver/share/db.sqlite" },
     { type: "duckdb", path: "file:///tmp/%zz.duckdb" },
+    { type: "sqlite", path: "file:///data/100%.db" },
+    { type: "sqlite", path: "file:///%5Cserver/share/100%.db" },
     { type: "postgres", host: "/tmp,db.example.com" },
     { type: "mysql", host: "/tmp/mysql" },
     { type: "mongodb", connection_string: "mongodb+srv://localhost/db" },
@@ -91,11 +93,26 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 
+test("offline host-addressed databases accept only integer ports in range", () => {
+  for (const type of [
+    "postgres", "postgresql", "redshift", "mysql", "mariadb", "sqlserver", "mssql",
+    "clickhouse", "trino", "oracle", "mongodb", "mongo",
+  ]) {
+    const config = { type, host: "localhost", direct_connection: true }
+    for (const port of [undefined, 1, 65535])
+      expect(() => assertLocalConnection({ ...config, port })).not.toThrow()
+    for (const port of [null, "27017", "27017,db.example.com:27017", 0, -1, 1.5, 65536, NaN, Infinity])
+      expect(() => assertLocalConnection({ ...config, port })).toThrow("Offline mode")
+  }
+})
+
 test("offline MongoDB errors show how to enable direct connections", () => {
   for (const config of [
     { type: "mongodb", host: "localhost" },
     { type: "mongo", host: "localhost", direct_connection: false },
     { type: "mongodb", url: "mongodb://localhost/db?directConnection=false" },
+    { type: "mongodb", url: "mongodb://localhost/db?directConnection=False", direct_connection: true },
+    { type: "mongo", url: "mongodb://localhost/db?DIRECTCONNECTION=FALSE", directConnection: true },
   ])
     expect(() => assertLocalConnection(config)).toThrow(
       "Set direct_connection to true or directConnection=true in the connection URI.",

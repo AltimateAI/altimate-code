@@ -36,6 +36,9 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   // Only types whose driver connects to the configured host can be judged; account- or project-addressed
   // warehouses (Snowflake, BigQuery, Databricks and others) are refused.
   if (!HOST_ADDRESSED.has(type) || config.replica_set) throw new Error(DENIED)
+  const { port } = config
+  if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535))
+    throw new Error(DENIED)
   if (config.direct_connection === false) throw new Error(mongo ? MONGO_DIRECT : DENIED)
   // Trino and ClickHouse build `${protocol}://${host}`, so a protocol value could carry its own authority.
   if (
@@ -80,7 +83,7 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
     const param = (name: string) => [...parsed.searchParams].find(([key]) => key.toLowerCase() === name)?.[1]
     const directParam = param("directconnection")
     if (parsed.protocol.endsWith("+srv:") || param("replicaset") !== undefined) throw new Error(DENIED)
-    if (directParam === "false") throw new Error(mongo ? MONGO_DIRECT : DENIED)
+    if (directParam?.toLowerCase() === "false") throw new Error(mongo ? MONGO_DIRECT : DENIED)
     if (mongo && param("proxyhost") !== undefined) throw new Error(DENIED)
     if (config.direct_connection === undefined) direct = directParam === "true"
     const mechanism = [...parsed.searchParams].find(([key]) => key.toLowerCase() === "authmechanism")?.[1]?.toUpperCase()

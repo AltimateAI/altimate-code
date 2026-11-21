@@ -3,6 +3,13 @@ import { expect, test } from "bun:test"
 import path from "node:path"
 import { Offline } from "../../src/config/offline"
 
+test("the offline config module self-exports before its imports", async () => {
+  const source = await Bun.file(new URL("../../src/config/offline.ts", import.meta.url)).text()
+  expect(source.match(/^(?:export \* as Offline from "\.\/offline"|import .*)$/m)?.[0]).toBe(
+    'export * as Offline from "./offline"',
+  )
+})
+
 test("the offline OAuth guard is covered by the existing lifecycle marker", async () => {
   const source = await Bun.file(new URL("../../src/mcp/index.ts", import.meta.url)).text()
   const start = source.indexOf("// altimate_change start — a flow belongs to a lifecycle call")

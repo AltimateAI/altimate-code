@@ -74,5 +74,18 @@ describe("git() utility", () => {
     for (const args of [["submodule", "foreach", "git", "status"], ["remote", "add", "o", "url"], ["lfs", "ls-files"], ["archive", "HEAD"], ["status"], ["remote", "show", "-n", "origin"]])
       expect(gitCommandUsesNetwork(args)).toBe(false)
   })
+
+  test("offline permits only literal local submodule foreach commands", () => {
+    for (const args of [
+      ["git", "remote", "update"],
+      ["git submodule update --init"],
+      ['git fet"ch"'],
+      ["git lfs fetch"],
+      ["git reset --hard && git fetch"],
+    ])
+      expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", ...args])).toBe(true)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "git", "reset", "--hard"])).toBe(false)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "git clean -fdx"])).toBe(false)
+  })
   // altimate_change end
 })

@@ -4,6 +4,8 @@
 // It is on when ALTIMATE_OFFLINE is set or a config file has `"offline": true`. Startup requests (the model
 // catalog, workspace and registration checks) run before the configuration loads, so the CLI checks config files
 // for the setting first (`optedIn`). Without either, `start()` never runs and nothing changes.
+export * as Offline from "./offline"
+
 import fs from "node:fs/promises"
 import { isIP } from "node:net"
 import path from "node:path"
@@ -182,5 +184,3 @@ export function assertLocalMcp(config: { type: string; url?: string }) {
   if (enabled() && config.type === "remote" && !isLocalURL(config.url ?? ""))
     throw new Error("Offline mode allows only stdio MCP servers or ones on this machine (localhost, 127.0.0.1, [::1] or 0.0.0.0).")
 }
-
-export * as Offline from "./offline"
