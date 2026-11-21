@@ -15,7 +15,6 @@ import fs from "fs"
 import path from "path"
 import os from "os"
 import { fileLog } from "@/altimate/util/file-log"
-import { Global } from "../../global" // altimate_change — test-isolated home for the legacy marker cleanup
 
 const log = Log.create({ service: "telemetry" })
 
@@ -2386,7 +2385,6 @@ export namespace Telemetry {
     configRetry = undefined
     unresolvedInProject = false
     adopted = undefined
-    legacyMarkersRemoved = false
     if (initDone && enabled) return
     gate = "pending"
     buffer = []
@@ -2643,23 +2641,8 @@ export namespace Telemetry {
   }
   // altimate_change end
 
-  // altimate_change start — the opt-out marker files earlier versions wrote are no longer read
-  let legacyMarkersRemoved = false
-  function removeLegacyOptOutMarkers() {
-    if (legacyMarkersRemoved) return
-    legacyMarkersRemoved = true
-    for (const name of ["telemetry-opted-out", "telemetry-opted-out.sending"]) {
-      try {
-        fs.rmSync(path.join(Global.Path.home, ".altimate", name), { force: true, recursive: true })
-      } catch {
-        // Best effort: a leftover marker is harmless.
-      }
-    }
-  }
-  // altimate_change end
 
   async function doInit() {
-    removeLegacyOptOutMarkers() // altimate_change
     // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
     let unresolved = false
     try {

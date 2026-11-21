@@ -681,11 +681,13 @@ describe("telemetry opt-out", () => {
     configSpy.mockResolvedValue({})
     await Telemetry.init()
     trackStartup()
-    const flushing = Telemetry.flush()
+    // A long request budget, so only the opt-out can abort the batch (not the flush's own timeout).
+    const flushing = Telemetry.flush(600_000)
     await inFlight
     await Telemetry.adoptOptOut("disabled")
-    await flushing
+    // Aborted by adoptOptOut itself, before it returned.
     expect(aborted).toBe(true)
+    await flushing
   })
 
   test("a command that loads a project settles an opt-out the startup read left open", async () => {
@@ -755,15 +757,6 @@ describe("telemetry opt-out", () => {
     // A config the app loads afresh is read as usual.
     configSpy.mockResolvedValue({})
     expect(await TelemetryConfig.loadedState()).toBe("enabled")
-  })
-
-  test("the opt-out marker files earlier versions wrote are removed", async () => {
-    const markers = ["telemetry-opted-out", "telemetry-opted-out.sending"].map((name) => path.join(home, ".altimate", name))
-    for (const marker of markers) writeFileSync(marker, "")
-    signOut()
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
-    expect(markers.filter((marker) => existsSync(marker))).toEqual([])
   })
 
   test("the retry throttle still applies after an earlier session enabled telemetry", async () => {
