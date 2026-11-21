@@ -130,7 +130,8 @@ export function acceptSubmissionSelection<Model>(input: {
   openPicker: () => void
 }): "accepted" | "rejected" | "missing-parent" {
   const { selection, validate, openPicker } = input
-  if (!acceptSubmissionModel({ model: selection.model, ...input.origin, validate, openPicker })) return "rejected"
+  const { source, pickerCanOverride } = input.origin
+  if (!acceptSubmissionModel({ model: selection.model, source, pickerCanOverride, validate, openPicker })) return "rejected"
   if (!selection.subtask) return "accepted"
   if (!selection.parent) return "missing-parent"
   const parent = acceptSubmissionModel({

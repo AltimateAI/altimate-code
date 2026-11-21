@@ -1,11 +1,11 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
 import {
-  isConfigSource,
   modelConfigHint,
   modelNotFoundMessage,
   modelSelectionErrorText,
 } from "../../../src/altimate/provider/model-hint"
+import { isConfigModelSource } from "@opencode-ai/core/altimate-model-source"
 
 describe("modelSelectionErrorText config advice", () => {
   test("config sources point at the config files", () => {
@@ -27,9 +27,9 @@ describe("modelSelectionErrorText config advice", () => {
   })
 
   test("a source merely mentioning config is not a config source", () => {
-    expect(isConfigSource("request (model) from config-like flag")).toBe(false)
-    expect(isConfigSource(undefined)).toBe(false)
-    expect(isConfigSource('agent "x" config (model)')).toBe(true)
+    expect(isConfigModelSource("request (model) from config-like flag")).toBe(false)
+    expect(isConfigModelSource(undefined)).toBe(false)
+    expect(isConfigModelSource('agent "x" config (model)')).toBe(true)
   })
 
   test("empty value advice names the environment variable only for config sources", () => {

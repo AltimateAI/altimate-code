@@ -13,13 +13,9 @@ export function modelNotFoundHint(providerID: string | undefined, providerMissin
   return "The Anthropic provider needs an API key. For a Claude Pro or Max plan, run /connect and pick Claude subscription."
 }
 
-// Sources that name a config setting end in "config (model)"; others (a flag, a request, session
-// history) have no setting to correct.
-export const isConfigSource = isConfigModelSource
-
 /** Whether to point at the config files: a config setting chose the model, or the source is unknown. */
 export function showsConfigHint(source: string | undefined) {
-  return source === undefined || isConfigSource(source)
+  return source === undefined || isConfigModelSource(source)
 }
 
 export function modelNotFoundMessage(providerID: string | undefined, modelID: string | undefined, source?: string) {
@@ -27,7 +23,7 @@ export function modelNotFoundMessage(providerID: string | undefined, modelID: st
   if (!modelID) {
     const empty = providerID ? `Empty model name in "${providerID}/"${sourceHint}` : `Empty model value${sourceHint}`
     // An environment variable that is not set substitutes to "", the usual cause of an empty config value.
-    if (isConfigSource(source))
+    if (isConfigModelSource(source))
       return `${empty}: the model key is incomplete. If it references an environment variable such as "\${ALTIMATE_MODEL}", check that the variable is set; otherwise set a provider/model-name value or remove the key.`
     return `${empty}. Use a provider/model-name value.`
   }

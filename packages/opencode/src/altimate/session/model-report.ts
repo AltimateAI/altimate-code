@@ -10,7 +10,8 @@ import { Log } from "../../util/log"
 
 const log = Log.create({ service: "model-report" })
 
-// The error is already marked reported, so a failed publish must leave a trace.
+// Publish an error event the client relies on (the route may not publish it again); a failed publish
+// must still leave a trace.
 export function publishReported(sessionID: SessionID, error: InstanceType<typeof NamedError.Unknown>) {
   void Bus.publish(Session.Event.Error, { sessionID, error: error.toObject() }).catch((cause) =>
     log.warn("session error event not published", { sessionID, cause }),
