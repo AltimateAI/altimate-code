@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.12] - 2026-11-20
+
+**dbt Power User features now work from the command line, and an owner can send a workspace request back for changes.** Nine new tools estimate what a dbt model or query would scan before it runs (BigQuery dry run, Snowflake and Databricks from the planner's EXPLAIN), read the last dbt run, check a model's docs coverage, report DataPilot project health, time a model's CTEs, draw its SQL graph, map raw SQL tables to `ref()` and `source()`, read the defer setting, and reply to comments on shared dbt docs. Call them with `altimate-code tool run` or from another coding agent through `mcp serve`. The new `altimate-code integrations` command connects GitHub, Jira and Linear with your own credentials. On workspaces with review on, a request can be sent back with a comment, then changed and sent again. The TUI says what changed in the workspace's skills and knowledge since your last session. Also in this release: stricter SQL checks in the tool CLI and MCP server, the agent keeps your changes instead of reverting them, `altimate review` reviews only the PR's own changes, and Snowflake key-pair login reads every private-key format.
+
+**Heads-up for support:**
+- **The dbt Power User tools are not offered to the agent in the TUI.** They are in `altimate-code tool run` and `mcp serve` only. `dbt_cost_estimate`, `dbt_health`, `dbt_cte_profile` (when timing a CTE) and `dbt_sql_graph` start the project's dbt adapter, which runs `dbt deps` and renders Jinja, so they need `--allow-write` and refuse in plan mode. `dbt_sql_graph` reads the parents' column metadata from the warehouse. `dbt_health` also needs the `altimate-datapilot-cli` package in the project's Python.
+- **What `dbt_cost_estimate` runs.** It never runs the query itself. On Databricks, `EXPLAIN COST` can start a stopped SQL warehouse, which is billed while it runs. Snowflake's number is an upper bound, except when the plan reads an external table, a stage or a secure view, or reports 0, which the answer says. A query that may hold a second statement, or that reads files on Databricks (including through `IDENTIFIER()`), gets no estimate. An EXPLAIN that takes over 90 s answers "explain failed". `dbt_cte_profile` runs one `COUNT(*)` per CTE timed.
+- **The tool CLI and MCP server refuse more SQL, even with `--allow-write`.** The new refusals are `DROP CATALOG`, `DROP NAMESPACE`, `DROP EXTERNAL SCHEMA`, `DROP PLUGGABLE DATABASE`, and MySQL and MariaDB executable comments (`/*! ... */`). Jinja in SQL sent to a dbt target counts as a write. `sql_explain` explains one statement only, without leading `EXPLAIN` or its options.
+- **On Snowflake, MySQL and ClickHouse, a backslash inside a quoted string makes the SQL uncertain.** `sql_explain` refuses it and says so, and `sql_execute` treats it as a write. Regexes and Windows paths are the usual triggers. Tracked in #1782.
+- **`altimate integrations` keeps secrets in the macOS keychain on macOS**, unless `ALTIMATE_INTEGRATIONS_DIR` is set. On Linux and Windows, and on macOS with that variable, they are kept in a file (in the data directory, or in `ALTIMATE_INTEGRATIONS_DIR`). Tracked in #1785.
+- **The tools that start the dbt adapter no longer write to the project's `target/`.** In the `core` and `corecommand` modes dbt writes their artifacts to `<target-path>/.altimate-code/`, so `target/manifest.json` stays as your own `dbt compile` left it. The first such call on a project parses it in full, so it is slower once. The `fusion` and `cloud` modes still write to `target/`.
+- **`altimate review` in CI now fails when the PR's target branch isn't fetched**, instead of guessing `origin/main`. Use `fetch-depth: 0`. `--base` with no common history also fails.
+- **New integration surfaces for plugins.** `skill publish --json` refusals carry a `code`. Requests can have the status `changes requested`. `serve` adds `POST /altimate/rules/{id}/withdraw|resubmit` `GET /altimate/workspace/activity` and `POST /altimate/workspace/activity/seen`.
+
+### Added
+
+- **`dbt_cost_estimate`** — the bytes a dbt model or query would scan, without running it: a BigQuery dry run, Snowflake `EXPLAIN USING JSON` and Databricks `EXPLAIN COST`. (#1732, #1768, #1776, #1779)
+- **`dbt_run_results`** — the last dbt run's invocation id, command, timings, counts and per-node results, failures first. (#1729)
+- **`dbt_docs_coverage`** — which output columns of a model have no description, and the percent documented. Column reach keeps how each reached column comes from the traced one. (#1733)
+- **`dbt_health`** — DataPilot project health insights per model, such as hard-coded references and missing tests or docs. (#1738)
+- **`dbt_cte_profile`** — a model's CTEs in source order, or the row count and warehouse time of one CTE, without dbt's start-up. (#1731, #1781)
+- **`dbt_sql_graph`** — a model's CTEs, joins and filters as a graph, with joins, filters, groups and sorts named by their clause. (#1735, #1781)
+- **`dbt_map_relations`** — the `ref()` or `source()` call for each table in raw SQL, matched against the manifest. (#1737)
+- **`dbt_defer_state`** — the dbt Power User defer setting and the profile's targets. (#1734)
+- **`docs_share_comments`** — list, reply to and resolve comment threads on shared dbt docs. (#1730)
+- **`altimate-code integrations`** — connect GitHub, Jira and Linear with your own credentials: `status`, `detect`, `fields`, `set`, `set-secret`, `connect`, `sync`, `block` and `disconnect`. Secrets never go on the command line, and a credential stays local or is saved to the workspace. See "Integrations" in the CLI docs. (#1622)
+- **Request changes on workspace review.** The owner or an admin can send a skill, knowledge or rule request back with a comment. You are told once, `workspace review status` and `/rules` show the comment, and the request can be sent again or withdrawn. Claude Code and Codex sessions are told too. (#1755)
+- **"What changed" in a linked workspace.** A few seconds after the TUI starts, one line names the skills and knowledge added or removed since your last session. The VS Code extension gets the same line from `serve`. (#1752)
+- **The Claude Code plugin's dbt helpers** are documented in "Using with Claude Code", including what `altimate-dbt` is. (#1728, #1779)
+- **`tool report-event` takes the Claude Code plugin's session-start and feature-used events**: versions, the OS and a random install id, with no session, machine, project or account id, and skipped when telemetry is off. (#1775)
+
+### Changed
+
+- **Stricter SQL classification in the tool CLI and MCP server** (see Heads-up). (#1644)
+- **`altimate review` reviews only the PR's own changes.** The base comes from `--base` or the CI target branch, the diff is taken from the merge-base, only files in the dbt project are reviewed, renamed models keep their old side, custom `model-paths` are honoured, and a Jinja model without compiled SQL is marked unverified instead of getting warnings. (#1719)
+- **The agent keeps your changes.** When a test or build fails because of a change you made, it fixes the test or the callers, or asks, instead of reverting your change. It never weakens a test to make it pass. (#1766)
+
+### Fixed
+
+- **A link that hits a workspace you cannot see names the workspace id and the account you are signed in as.** Before, it said only "a workspace you can't see". (#1764)
+- **Workspace review decisions are no longer hidden by "Sync now".** Decisions that arrive together show as one toast. (#1751)
+- **The column answer reads a cast after a SELECT modifier or in parentheses**, and column names at the edges of the answer are right. (#1760, #1754)
+- **`schema-verify` says when its verdict rests on a stale manifest.** (#1704)
+- **Snowflake key-pair login reads every private-key format**: PEMs whose line breaks became spaces, encrypted PKCS#8 keys with their passphrase (and a clear error when `private_key_passphrase` is missing), and legacy encrypted PKCS#1 keys. (#1777)
+- **`serve` never sends a stack trace in an error response.** A remote config that can't be fetched is a 502 that names the remote. (#1788)
+- **A missing npm on Windows is reported as missing**, not as a failed driver install. (#1790)
+- **dbt tool argument errors name the field**, and activating a different virtualenv (`VIRTUAL_ENV`, `CONDA_PREFIX`) gets a `tool run` daemon that uses it. (#1781)
+- **Release review fixes.**
+  - The `ALTIMATE_INTEGRATIONS_*_API` overrides must be https or a local address, judged by the parsed host, with no credentials in the URL.
+  - The missing-fields hint gives full commands, with a secret source for `set-secret`, and its re-run keeps the failed call's `update`, `--local-only`, `--share` and `--variant`.
+  - The dbt adapter refusal names the fix that applies: `--allow-write`, or leaving plan mode.
+  - `dbt_run_results` accepts a UNC target path and skips a `run_results.json` over 256 MiB.
+  - The dbt Power User tools and `integrations` are documented.
+  - `altimate review` refuses a `--base` or `--head` that starts with `-`.
+  - Remote-config errors and the debug log name the remote by its URL template, never the URL with the token filled in.
+
 ## [0.12.11] - 2026-11-16
 
 **You can use a Claude Pro or Max plan through your own Claude Code login, and workspace review works from every client.** The new Claude subscription provider runs Claude models through the `claude` you already have installed; Altimate Code never reads or stores its token. The first-run picker and `/connect` suggest the subscription logins already on the machine. On workspaces with review on, a member's skill goes to the owner or an admin for approval, everyone sees their own requests and their status, and requests can be withdrawn or removed from the TUI, `serve` and the plugins. Team rules also reach Claude Code and Codex sessions through the plugins. `impact_analysis` answers where a column's value goes, or where it comes from, hop by hop. Also in this release: a capped agent ends with an answer, one overflow compacts once, and the dbt adapter starts under Bun.

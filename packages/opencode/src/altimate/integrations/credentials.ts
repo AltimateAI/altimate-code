@@ -604,9 +604,27 @@ export interface Validation {
   message: string | null
 }
 
-const githubApi = () => (process.env.ALTIMATE_INTEGRATIONS_GITHUB_API || "https://api.github.com").replace(/\/+$/, "")
-const linearApi = () => process.env.ALTIMATE_INTEGRATIONS_LINEAR_API || "https://api.linear.app/graphql"
-const jiraCloudBase = (site: string) => (process.env.ALTIMATE_INTEGRATIONS_JIRA_API || `https://${site}.atlassian.net`).replace(/\/+$/, "")
+// An override receives the real token, so it must be https or a local http address, as a Jira server URL must; any other value is ignored.
+// The parsed host decides, so `http://localhost@remote.example` (userinfo before a remote host) is not local, and an override
+// carrying credentials of its own is refused.
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"])
+const apiOverride = (name: string) => {
+  const v = process.env[name]?.trim()
+  if (!v) return undefined
+  let u: URL
+  try {
+    u = new URL(v)
+  } catch {
+    return undefined
+  }
+  if (u.username || u.password) return undefined
+  return u.protocol === "https:" || (u.protocol === "http:" && LOCAL_HOSTS.has(u.hostname)) ? v : undefined
+}
+/** For tests. */
+export const credentialsInternals = { apiOverride }
+const githubApi = () => (apiOverride("ALTIMATE_INTEGRATIONS_GITHUB_API") || "https://api.github.com").replace(/\/+$/, "")
+const linearApi = () => apiOverride("ALTIMATE_INTEGRATIONS_LINEAR_API") || "https://api.linear.app/graphql"
+const jiraCloudBase = (site: string) => (apiOverride("ALTIMATE_INTEGRATIONS_JIRA_API") || `https://${site}.atlassian.net`).replace(/\/+$/, "")
 
 /** GitHub sends the expiry as `2026-11-01 00:00:00 UTC`. */
 export function parseGithubExpiry(header: string | null): string | null {

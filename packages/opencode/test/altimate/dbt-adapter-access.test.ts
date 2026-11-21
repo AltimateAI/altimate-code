@@ -193,12 +193,22 @@ describe("dbtAdapterFor", () => {
   })
 
   test("a refusal for an adapter that didn't load names the Python dbt ran with and how to fix it", async () => {
-    dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
-    const access = await dbtAdapterFor(ctx)
-    // The Python the config chose: dbt missing from it is the usual cause.
-    expect(access.reason).toContain("(python3)")
-    expect(access.reason).toContain("Activate the project's virtualenv")
-    expect(access.reason).toContain("altimate-code tool daemon stop")
+    // A HOME without ~/.altimate-code/dbt.json, so a developer's saved pythonPath can't change the hint.
+    const home = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-access-home-"))
+    const saved = process.env.HOME
+    try {
+      process.env.HOME = home
+      dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
+      const access = await dbtAdapterFor(ctx)
+      // The Python the config chose: dbt missing from it is the usual cause.
+      expect(access.reason).toContain("(python3)")
+      expect(access.reason).toContain("Activate the project's virtualenv")
+      expect(access.reason).toContain("altimate-code tool daemon stop")
+    } finally {
+      if (saved === undefined) delete process.env.HOME
+      else process.env.HOME = saved
+      await rm(home, { recursive: true, force: true })
+    }
   })
 
   test("with a saved dbt config, the refusal says to change its pythonPath, which wins over any virtualenv", async () => {

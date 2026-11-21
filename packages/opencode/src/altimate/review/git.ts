@@ -230,6 +230,9 @@ async function ciTargetBranch(env: NodeJS.ProcessEnv): Promise<{ branch: string;
  * is what made PRs into a non-default branch review hundreds of unrelated files.
  */
 export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<ResolvedBase> {
+  // `merge-base` takes these as bare argv entries, where a leading `-` would be read as a git option.
+  for (const [flag, ref] of [["--base", opts.base], ["--head", opts.head]] as const)
+    if (ref?.startsWith("-")) throw new Error(`${flag} ${ref}: a git ref cannot start with "-".`)
   const head = opts.head ?? "HEAD"
   const env = opts.env ?? process.env
 

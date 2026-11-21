@@ -29,6 +29,7 @@ altimate --agent analyst
 | `run`       | Run a prompt non-interactively |
 | `check`     | Run deterministic SQL checks (no LLM required) -- see [SQL Check](check.md) |
 | `tool`      | Run the data tools without a model, optionally via a warm daemon -- see [Tool CLI](tool.md) |
+| `integrations` | Connect GitHub, Jira and Linear with your own credentials -- see [Integrations](#integrations) |
 | `serve`     | Start the HTTP API server      |
 | `web`       | Start the web UI               |
 | `agent`     | Agent management               |
@@ -74,6 +75,24 @@ With workspaces on:
 - In an ordinary session the agent is told every turn which workspace the project is linked to — or that none is, or that the link could not be verified just now. In an extension-pinned session it is told the pinned workspace instead, and that it differs from the project's own link. Either way "which workspace am I in?" has an answer, and the agent is told not to confuse it with a Databricks workspace or an IDE workspace folder.
 - When `altimate-code serve` is launched by the VS Code / Cursor extension, the workspace selected in the extension's panel governs that session's skills, memory and (unless `--integrations local` is set) warehouse tool routing, taking priority over whatever the project is linked to on the backend, and is scoped to the folder it was launched for. A pin is fixed for the life of the `serve` process, so the extension relaunches `serve` when the selection changes; nothing updates a running one.
 - `serve` also gives the IDE extension what the TUI shows: `GET /altimate/workspace/starter` (the starter message after a link) and `GET /altimate/trace` with `GET /altimate/trace/<session>/view` (the trace list and viewer behind `/traces`). Traces hold prompts and tool output, including SQL and query results. Like every `serve` route, these need no password unless `OPENCODE_SERVER_PASSWORD` is set, so set one on a shared machine.
+
+### Integrations
+
+`altimate-code integrations` connects GitHub, Jira (Cloud or Server / Data Center) and Linear with your own credentials. A credential can stay on this machine or be saved to the linked workspace. Every subcommand accepts `--json`.
+
+```bash
+altimate-code integrations status                 # each provider's state
+altimate-code integrations detect                 # find credentials already on this machine (secrets are never printed)
+altimate-code integrations fields jira            # the fields a provider needs, pre-filled where possible
+altimate-code integrations set jira jiraDomain mycompany
+altimate-code integrations set-secret jira jiraApiToken --from-clipboard
+altimate-code integrations connect jira           # check the credential with the provider, then save it
+```
+
+- `set-secret` reads a secret only from `--from-clipboard`, `--from-env <VAR>` or `--stdin`, never from the command line. `open-token-page <provider>` opens the page where the provider's token is created.
+- `connect` checks the credential with the provider before saving it. With `--local-only` it stays on this machine. Otherwise it is saved to the linked workspace. Attaching it to a workspace that is not private, so its members can use it, needs `--share`.
+- `update <provider>` saves a new credential and keeps the sync mode. `sync [provider] | --all` pushes credentials to the workspace. `block` and `unblock` keep a provider on this machine only or allow it to sync again. `block` refuses a provider whose connection is saved only in the workspace; when the workspace can't be checked it blocks anyway, and a copy already saved there stays until you `disconnect` it. `discard` forgets fields typed in but not connected. `disconnect` removes the local credential and the workspace connection.
+- On macOS, secrets are kept in the keychain, unless `ALTIMATE_INTEGRATIONS_DIR` is set, which keeps them in a file in that folder. On Linux and Windows they are kept in a file in your altimate-code data directory (or `ALTIMATE_INTEGRATIONS_DIR`), readable only by you on Linux (mode 0600). Windows does not apply that mode.
 
 ## Global Flags
 
