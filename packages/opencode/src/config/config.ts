@@ -693,10 +693,15 @@ export const layer = Layer.effect(
 
         // altimate_change start — preserve resolution status for the telemetry opt-out gate
         let orgConfigUnresolved = false
-        // altimate_change end
         const activeAccount = Option.getOrUndefined(
-          yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
+          yield* accountSvc.active().pipe(
+            Effect.catch(() => {
+              orgConfigUnresolved = true
+              return Effect.succeed(Option.none())
+            }),
+          ),
         )
+        // altimate_change end
         if (activeAccount?.active_org_id) {
           const accountID = activeAccount.id
           const orgID = activeAccount.active_org_id

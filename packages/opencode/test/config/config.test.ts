@@ -13,7 +13,7 @@ import { InstanceRef } from "../../src/effect/instance-ref"
 import type { InstanceContext } from "../../src/project/instance-context"
 import { Auth } from "../../src/auth"
 import { Account } from "../../src/account/account"
-import { AccessToken, AccountID, OrgID } from "../../src/account/schema"
+import { AccessToken, AccountID, AccountServiceError, OrgID } from "../../src/account/schema"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Env } from "../../src/env"
 import {
@@ -687,8 +687,36 @@ accountTokenIt.instance("resolves env templates in account config with account t
   Effect.gen(function* () {
     const config = yield* Config.use.get()
     expect(config.provider?.["opencode"]?.options?.apiKey).toBe("st_test_token")
+    expect(Config.telemetryConfigUnresolved(config)).toBe(false)
   }),
 )
+
+for (const failure of ["account", "organization"] as const) {
+  const unavailable = Effect.fail(new AccountServiceError({ message: "Account config unavailable" }))
+  const failedAccountIt = configIt({
+    account: Layer.mock(Account.Service)({
+      active: () =>
+        failure === "account"
+          ? unavailable
+          : Effect.succeed(
+              Option.some({
+                id: AccountID.make("account-1"),
+                email: "user@example.com",
+                url: "https://control.example.com",
+                active_org_id: OrgID.make("org-1"),
+              }),
+            ),
+      config: () => unavailable,
+      token: () => Effect.succeed(Option.none()),
+    }),
+  })
+  failedAccountIt.instance(`an unavailable ${failure} leaves the telemetry config unresolved`, () =>
+    Effect.gen(function* () {
+      const config = yield* Config.use.get()
+      expect(Config.telemetryConfigUnresolved(config)).toBe(true)
+    }),
+  )
+}
 
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {
