@@ -1,5 +1,6 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
+import { mkdir, rm } from "node:fs/promises"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Result } from "effect"
@@ -115,25 +116,30 @@ describe("Worktree", () => {
         const result = Bun.spawnSync(["git", "-c", "protocol.file.allow=always", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
         if (result.exitCode !== 0) throw new Error(result.stderr.toString())
       }
+      // A path with a space checks that submodule paths are kept whole.
       const lib = path.join(path.dirname(directory), `${path.basename(directory)}-lib`)
-      Bun.spawnSync(["mkdir", "-p", lib])
-      for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "lib"]])
-        run(lib, args)
-      run(directory, ["submodule", "add", "-q", lib, "lib"])
-      run(directory, ["commit", "-q", "-m", "add submodule"])
       const previous = process.env.ALTIMATE_OFFLINE
-      process.env.ALTIMATE_OFFLINE = "1"
       try {
+        yield* Effect.promise(() => mkdir(lib, { recursive: true }))
+        for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "lib"]])
+          run(lib, args)
+        run(directory, ["submodule", "add", "-q", lib, "vendor lib"])
+        run(directory, ["commit", "-q", "-m", "add submodule"])
+        process.env.ALTIMATE_OFFLINE = "1"
         const svc = yield* Worktree.Service
         yield* withCreatedWorktree({ name: "offline-submodule" }, ({ info }) =>
           Effect.gen(function* () {
+            // Unpopulated submodule: the offline reset skips it instead of trying to clone it.
+            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
+            // Populated submodule whose path has a space: the offline reset updates it from local objects.
+            run(info.directory, ["submodule", "update", "--init"])
             expect(yield* svc.reset({ directory: info.directory })).toBe(true)
           }),
         )
       } finally {
         if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
         else process.env.ALTIMATE_OFFLINE = previous
-        Bun.spawnSync(["rm", "-rf", lib])
+        yield* Effect.promise(() => rm(lib, { recursive: true, force: true }))
       }
     }),
     { git: true },

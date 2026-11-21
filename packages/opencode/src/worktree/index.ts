@@ -613,13 +613,12 @@ export const layer: Layer.Layer<
       }
 
       // altimate_change start — update existing submodules from objects already on disk offline
-      // A submodule this worktree never checked out would need a clone, so offline updates only the present ones
-      // (`git submodule status` marks the others with a leading "-").
+      // A submodule this worktree never checked out would need a clone, so offline updates only the present
+      // ones (`submodule foreach` visits only checked-out submodules and prints full paths, spaces included).
       const offlineSubmodules = Offline.enabled()
-        ? (yield* git(["submodule", "status"], { cwd: worktreePath })).text
+        ? (yield* git(["submodule", "foreach", "--quiet", 'printf "%s\\n" "$sm_path"'], { cwd: worktreePath })).text
             .split("\n")
-            .filter((line) => line.trim() && !line.startsWith("-"))
-            .map((line) => line.trim().split(/\s+/)[1]!)
+            .filter((line) => line.length > 0)
         : undefined
       if (!offlineSubmodules || offlineSubmodules.length > 0)
         yield* gitExpect(
