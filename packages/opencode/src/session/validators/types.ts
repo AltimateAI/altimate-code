@@ -86,6 +86,9 @@ export interface ValidatorResult {
    *  message verbatim. */
   fixHint?: string
 
+  /** Overrides the reason in strict mode when prior diagnostics must be preserved. */
+  strictReason?: string
+
   /** Overrides the fix hint in strict mode when prior diagnostics must be preserved. */
   strictFixHint?: string
 

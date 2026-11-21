@@ -148,5 +148,7 @@ describe("dbt-tests-pass result classification", () => {
     }, DbtTestsPassValidator)
     expect(result).toMatchObject({ ok: false, classification: "finding" })
     expect(result.fixHint).toContain("not_null_orders_id")
+    expect(result.strictReason).toContain("could not be tested")
+    expect(result.strictFixHint).toContain("dbt exited with code 1")
   })
 })

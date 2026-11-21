@@ -182,55 +182,36 @@ export const DbtDeliverableNamesValidator: Validator = {
       ? "Could not verify the missing dbt deliverable names against aliases because manifest.json could not be read or parsed."
       : undefined
     const includeModelFindings = missingModels.length > 0 && (!advisory || missingFiles.length === 0)
-    const reasonParts: string[] = []
-    if (includeModelFindings) {
-      reasonParts.push(
-        `the task names ${missingModels.length} deliverable(s) this project does not define: ${missingModels.join(", ")}`,
-      )
-    }
-    if (missingFiles.length > 0) {
-      reasonParts.push(`required file(s) missing: ${missingFiles.join(", ")}`)
-    }
+    const modelReason = missingModels.length > 0
+      ? `the task names ${missingModels.length} deliverable(s) this project does not define: ${missingModels.join(", ")}`
+      : undefined
+    const fileReason = missingFiles.length > 0
+      ? `required file(s) missing: ${missingFiles.join(", ")}`
+      : undefined
+    const reason = (includeModels: boolean) =>
+      `Deliverable-name mismatch: ${[includeModels && modelReason, fileReason].filter(Boolean).join("; ")}.`
 
-    // The workspace directory is repository/environment-controlled and can in
-    // principle carry adversarial text; `contract.taskFile` is built from it.
-    // `dbt-nothing-built` already routes its own task-file path through
-    // `sanitizeForPrompt` for this reason — this interpolation is the
-    // matching gap in this file.
+    // Task paths and model filenames come from the repository. Quote and
+    // bound them before including them in synthetic retry messages.
     const safeTaskFile = sanitizeForPrompt(contract.taskFile, 160)
-    const hintLines: string[] = [
+    const safeUnrequested = unrequested.map((name) => sanitizeForPrompt(name, 80))
+    const fixHint = (includeModels: boolean) => [
       `The task document (${safeTaskFile}) states these names literally. A model that does the right thing under a different name does not satisfy the task, and self-verification against the renamed output will not detect it.`,
-    ]
-    if (includeModelFindings) {
-      hintLines.push(`  • Create or rename to exactly: ${missingModels.join(", ")}`)
-    }
-    if (missingFiles.length > 0) {
-      hintLines.push(`  • Create at exactly these paths: ${missingFiles.join(", ")}`)
-    }
-    if (unrequested.length > 0) {
-      // `unrequested` is derived from ACTUAL FILENAMES ON DISK, which — unlike
-      // `missingModels`/`missingFiles` (constrained to identifier/path-shaped
-      // code-span tokens by `extractRequiredDeliverables`) — can contain
-      // arbitrary bytes, including newlines, on a POSIX filesystem. Spliced
-      // verbatim into `fixHint`, a hostile or merely adversarial filename
-      // breaks out of the bullet it is quoted in and lands at instruction
-      // position in the synthetic retry turn `prompt.ts` builds from this.
-      const safeUnrequested = unrequested.map((n) => sanitizeForPrompt(n, 80))
-      hintLines.push(
+      includeModels && modelReason && `  • Create or rename to exactly: ${missingModels.join(", ")}`,
+      fileReason && `  • Create at exactly these paths: ${missingFiles.join(", ")}`,
+      includeModels && safeUnrequested.length > 0 &&
         `  • Models you created this session that the task did not name: ${safeUnrequested.join(", ")}. If one of them is a renamed version of a required deliverable, rename the file (and any \`ref()\` to it) back to the required name.`,
-      )
-    }
-    if (includeModelFindings) {
-      hintLines.push(
+      includeModels &&
         "  • If a required deliverable is produced under an alias, set `alias` in its config so the required name is the relation name.",
-      )
-    }
+    ].filter(Boolean).join("\n")
+
     return {
       ok: false,
       classification: advisory && missingFiles.length === 0 ? "unverifiable" : "finding",
       advisory,
-      reason: `Deliverable-name mismatch: ${reasonParts.join("; ")}.`,
-      fixHint: hintLines.join("\n"),
+      reason: reason(includeModelFindings),
+      fixHint: fixHint(includeModelFindings),
+      ...(!includeModelFindings && { strictReason: reason(true), strictFixHint: fixHint(true) }),
       details: { ...details, unrequested_models: unrequested },
     }
   },

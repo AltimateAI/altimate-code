@@ -132,6 +132,12 @@ describe("DbtDeliverableNamesValidator — check", () => {
     const result = await DbtDeliverableNamesValidator.check(ctx())
     expect(result).toMatchObject({ ok: false, classification })
     expect(result.advisory).toContain("manifest.json")
+    if (classification === "finding") {
+      expect(result.fixHint).not.toContain("fct_orders")
+      expect(result.strictReason).toContain("fct_orders")
+      expect(result.strictFixHint).toContain("fct_orders")
+      expect(result.strictFixHint).toContain("models/orders.sql")
+    }
   })
 
   test("a seed satisfies a required name", async () => {

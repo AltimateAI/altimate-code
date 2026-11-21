@@ -235,6 +235,7 @@ When a validator runs, it returns:
   strictFailure?: true // preserves a legacy failure in strict mode
   reason?: string      // human-readable failure summary
   fixHint?: string     // the body injected into the synthetic user turn
+  strictReason?: string  // legacy failure summary in strict mode
   strictFixHint?: string // legacy retry guidance in strict mode
   details: {
     models_touched: number

@@ -171,7 +171,7 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
       // A complete summary is usable even when the wrapper reports diagnostic stderr.
       const error = typeof envelope.error === "string" ? envelope.error.slice(0, 500) : undefined
       if (summary) {
-        resolve({ model, summary, error: summary.error === 0 ? error : undefined })
+        resolve({ model, summary, error })
         return
       }
       resolve({ model, error: error ?? `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
@@ -294,20 +294,22 @@ export const DbtTestsPassValidator: Validator = {
     const remediation = `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`
     const failingNames = failures.map((f) => f.model).filter(Boolean)
     const erroredNames = toolErrors.map((f) => f.model).filter(Boolean)
-    const reason =
-      failures.length > 0
-        ? `${failures.length} of ${results.length} models you edited have failing dbt tests${failingNames.length ? `: ${failingNames.join(", ")}` : ""}.`
+    const describeFailure = (names: string[]) =>
+      names.length > 0
+        ? `${names.length} of ${results.length} models you edited have failing dbt tests: ${names.join(", ")}.`
         : `${toolErrors.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
+    const strictFailures = failures.filter((result) => !result.error)
     const ok = failures.length === 0 && errored.length === 0
     return {
       ok,
       ...(ok && { strictFailure: true }),
       classification: failures.length > 0 ? "finding" : advisory ? "unverifiable" : undefined,
       advisory,
-      reason,
+      reason: describeFailure(failingNames),
       fixHint: formatFixHint(hintBlocks) + remediation,
       ...(failures.length > 0 && errorHints.length > 0 && {
-        strictFixHint: formatFixHint([...failures, ...errorHints]) + remediation,
+        strictReason: describeFailure(strictFailures.map((result) => result.model)),
+        strictFixHint: formatFixHint([...strictFailures, ...errorHints]) + remediation,
       }),
       details: {
         ...baseDetails,

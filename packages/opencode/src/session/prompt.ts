@@ -2587,7 +2587,8 @@ export namespace SessionPrompt {
             // the next user message and gets one more turn to address it.
             const body = failures
               .map(({ validator, result: vRes }) => {
-                const head = `[altimate-validator: ${validator.name}] ${vRes.reason ?? "validation failed"}`
+                const reason = (validatorStrict ? vRes.strictReason : undefined) ?? vRes.reason
+                const head = `[altimate-validator: ${validator.name}] ${reason ?? "validation failed"}`
                 const hint = (validatorStrict ? vRes.strictFixHint : undefined) ?? vRes.fixHint
                 const tail = hint ? `\n${hint}` : ""
                 return head + tail
