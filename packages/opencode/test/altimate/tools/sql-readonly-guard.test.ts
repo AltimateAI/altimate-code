@@ -5,11 +5,15 @@ import { PermissionNext } from "../../../src/permission/next"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import { SqlExecuteTool, deniedWriteMessage } from "../../../src/altimate/tools/sql-execute"
 import { classifyAndCheck, isScratchSafeWrite } from "../../../src/altimate/tools/sql-classify"
-import { readSql } from "../../../src/altimate/tools/read-only-sql"
+import { hardBlockRefusal, readSql } from "../../../src/altimate/tools/read-only-sql"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { initTool } from "../tool-fixture"
-import { askFor } from "../../../src/altimate/tool-cli/permissions"
+import { askFor, denied } from "../../../src/altimate/tool-cli/permissions"
+
+import { Telemetry } from "../../../src/altimate/telemetry"
+import { materialize } from "../../../src/altimate/tools/sql-materialize"
+import { checkEngineRead } from "../../../src/altimate/mcp-server/workspace"
 
 // A read-only agent denies `sql_execute_write`. Reads must never reach that rule, and when a query does,
 // the agent must learn why and what to change instead of a raw permission-rule dump it tends to retry.
@@ -255,6 +259,64 @@ describe("sql_execute on a read-only agent", () => {
 describe("denied write message branches", () => {
   const base = { sql: "SELECT 1", dialects: ["postgres"], jinja: false, mongo: false, scratch: false, warehouseGiven: true }
 
+  test("refusal messages keep their telemetry error class", async () => {
+    const write = { ...base, sql: "DELETE FROM orders" }
+    const hard = "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
+    const scoped = { ...write, readOnly: false }
+    const hint = denied("sql_execute_write").message
+    const refusal = async (fn: () => unknown) => {
+      try {
+        await fn()
+      } catch (error) {
+        if (error instanceof Error) return error.message
+        throw error
+      }
+      throw new Error("Expected a SQL refusal")
+    }
+    const tool = await initTool(SqlExecuteTool)
+    const cases = [
+      ["agent", deniedWriteMessage(write), "permission"],
+      ["pattern rule", deniedWriteMessage(scoped), "permission"],
+      ["scratch", deniedWriteMessage({ ...write, scratch: true }), "permission"],
+      ["CLI opening", deniedWriteMessage({ ...write, cli: true }), "permission"],
+      ["CLI hint", hint, "permission"],
+      ["CLI refusal with hint", deniedWriteMessage({ ...write, cli: true }) + " " + hint, "permission"],
+      ["Jinja", deniedWriteMessage({ ...scoped, jinja: true }), "permission"],
+      ["MongoDB", deniedWriteMessage({ ...scoped, mongo: true }), "permission"],
+      ["SQL parser error", deniedWriteMessage({ ...scoped, sql: "SELECT Order Date FROM orders" }), "parse_error"],
+      ["shell residue", deniedWriteMessage({ ...scoped, sql: "SELECT 1 2>/dev/null" }), "parse_error"],
+      ["open quote", deniedWriteMessage({ ...scoped, sql: "SELECT 'abc" }), "parse_error"],
+      ["hard block", hardBlockRefusal(hard, "TRUNCATE TABLE orders", "postgres"), "permission"],
+      ["hard-blocked open quote", hardBlockRefusal(hard, "SELECT 'truncate", "postgres"), "parse_error"],
+      ["hard-blocked comment", hardBlockRefusal(hard, "SELECT 1 /*! + 1 */", "mysql"), "permission"],
+      ["sql_check", await refusal(() => readSql(write.sql, "postgres")), "permission"],
+      ["sql_check statement word", await refusal(() => readSql("SELECT x AS load FROM t", "postgres")), "permission"],
+      ["sql_check query shape", await refusal(() => readSql("SHOW TABLES", "postgres")), "validation"],
+      [
+        "query_from source",
+        await refusal(() => tool.execute({
+          query_from: { warehouse: "guard_db", sql: write.sql },
+          warehouse: "guard_db",
+          limit: 10,
+        }, deniedCtx([]) as any)),
+        "permission",
+      ],
+      [
+        "sql_materialize",
+        await refusal(() => materialize({ source_warehouse: "guard_db", sql: write.sql, target_table: "guard_test" })),
+        "permission",
+      ],
+      [
+        "MCP workspace",
+        await refusal(() => checkEngineRead("postgresql_execute_database_query", { query: write.sql })),
+        "permission",
+      ],
+    ]
+    expect(cases.map(([label, message]) => [label, Telemetry.classifyError(message)])).toEqual(
+      cases.map(([label, , expected]) => [label, expected]),
+    )
+  })
+
   test("Jinja asks for plain SQL", () => {
     expect(deniedWriteMessage({ ...base, sql: "SELECT * FROM {{ ref('x') }}", jinja: true })).toContain("Send plain SQL without Jinja")
   })
@@ -265,7 +327,7 @@ describe("denied write message branches", () => {
 
   test("a pattern-scoped deny does not claim the agent may only read", () => {
     const message = deniedWriteMessage({ ...base, sql: "DROP TABLE stg_tmp", readOnly: false })
-    expect(message).toContain("A sql_execute_write rule denies it")
+    expect(message).toContain("A sql_execute_write permission rule denies it")
     expect(message).not.toContain("may only read")
     expect(message).toContain("rules allow")
   })
@@ -293,7 +355,7 @@ describe("denied write message branches", () => {
     const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
     await expect(
       tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
-    ).rejects.toThrow("A sql_execute_write rule denies it")
+    ).rejects.toThrow("A sql_execute_write permission rule denies it")
   })
 
   test("a pattern-only deny leaves other writes to the default ask, so it is not read-only", async () => {
@@ -302,7 +364,7 @@ describe("denied write message branches", () => {
     const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
     await expect(
       tool.execute({ query: "DROP TABLE stg_tmp", warehouse: "guard_db", limit: 10 }, ctx as any),
-    ).rejects.toThrow("A sql_execute_write rule denies it")
+    ).rejects.toThrow("A sql_execute_write permission rule denies it")
   })
 
   test("sql_execute reads the denial's rules to choose the wording", async () => {
@@ -314,7 +376,7 @@ describe("denied write message branches", () => {
     const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
     await expect(
       tool.execute({ query: "DROP TABLE stg_tmp", warehouse: "guard_db", limit: 10 }, ctx as any),
-    ).rejects.toThrow("A sql_execute_write rule denies it")
+    ).rejects.toThrow("A sql_execute_write permission rule denies it")
   })
 
   test("an unreadable query without a warehouse suggests passing one", () => {

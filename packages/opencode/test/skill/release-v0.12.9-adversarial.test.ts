@@ -425,7 +425,7 @@ describe("v0.12.9 adversarial: runner argument validation and the hard deny end 
     const result = await runner.run("sql_execute", { query: "INSERT INTO t VALUES (1)" })
     expect(result.status).toBe("error")
     // The refusal says why the query counts as a write, then how to enable writes.
-    expect(result.output).toContain("Writes are not enabled for this run, and the query counts as a write because it is not a read (INSERT)")
+    expect(result.output).toContain("Write permission is disabled for this run, and the query counts as a write because it is not a read (INSERT)")
     expect(result.output.endsWith("Permission denied: sql_execute_write. Re-run with --allow-write to enable writes.")).toBe(true)
   })
 

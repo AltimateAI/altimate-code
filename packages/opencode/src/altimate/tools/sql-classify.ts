@@ -640,6 +640,12 @@ function parserMessage(message: string): string {
   return `${prefix}${detail}`.trim() || "parse error"
 }
 
+function batchKeywordExplanation(dialect?: string): string {
+  return /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
+    ? "SQL Server runs a statement there even without a separator"
+    : "this dialect is not modeled, so it may run as a statement"
+}
+
 /**
  * Why classifyAndCheck treats this SQL as a write, in words an agent can act on: shell residue to
  * remove, the parser error and its position, or the first statement that is not a read. `unreadable`
@@ -660,7 +666,7 @@ export function explainWrite(
       return unreadable("it contains an executable comment (/*! ... */), which some engines run as SQL; remove it or use a plain comment")
     }
     return unreadable(
-      "it has unterminated or unsupported quoted text or comments, so it cannot be proven read-only. Check that every " +
+      "it has unterminated or unsupported quoted text or comments, so it cannot be proven read-only. To fix the syntax, check that every " +
       "quote and comment is closed; inside a string literal, write a single quote as ''"
     )
   }
@@ -684,7 +690,7 @@ export function explainWrite(
     if (result.parseError && batchKeyword) {
       return writes(
         `${where} holds the statement keyword ${batchKeyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
-          `${/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") ? "SQL Server runs a statement there even without a separator" : "this dialect is not modeled, so it may run as a statement"}` +
+          `${batchKeywordExplanation(dialect)}` +
           "; run each statement in its own call, or quote it if it is a column name",
       )
     }
@@ -734,12 +740,9 @@ export function explainWrite(
     }
     const keyword = batchedStatement(masked, dialect)
     if (keyword) {
-      const engine = /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
-        ? "SQL Server runs a statement there even without a separator"
-        : "this dialect is not modeled, so it may run as a statement"
       return writes(
         `${where} holds the statement keyword ${keyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
-          `${engine}; quote it if it is a column name`,
+          `${batchKeywordExplanation(dialect)}; quote it if it is a column name`,
       )
     }
     if (/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) return writes(`${where} chains statements with ->>`)

@@ -85,7 +85,7 @@ export function hardBlockRefusal(head: string, sql: string, dialect?: string): s
 }
 
 /** Why sql is refused as a read, as a sentence to append to a refusal: a hard block, the classifier's reason for a write,
- * or, for a read that only the stricter statement-word list refuses, that word (no SQL text). Empty otherwise. */
+ * a read shape that cannot be embedded, or a statement word refused by the stricter list. Empty for accepted reads. */
 export function writeReason(sql: string, dialect?: string): string {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
   if (blocked) {
@@ -94,7 +94,7 @@ export function writeReason(sql: string, dialect?: string): string {
     const index = statements.length > 1 ? statements.findIndex((statement) => classifyAndCheck(statement, dialect).blocked) : -1
     const where = index >= 0 ? `statement ${index + 1} of ${statements.length} is` : "it holds"
     const cause = hardBlockCause(index >= 0 ? statements[index] : sql, dialect)
-    const hard = ` It is refused because ${where} a hard-blocked statement (${cause}); hard-blocked statements never run and cannot be allowed.`
+    const hard = ` It is refused because ${where} a hard-blocked statement (${cause}); hard-blocked statements never run, regardless of permission.`
     // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone, inside the
     // unreadable text or outside it: name the unreadable text first, since fixing it may be the whole fix.
     const untilClosed =
@@ -105,13 +105,16 @@ export function writeReason(sql: string, dialect?: string): string {
       : ` It counts as a write because ${explainWrite(sql, dialect).reason}.${untilClosed}`
   }
   if (queryType === "write") {
-    const { reason, unavailable } = explainWrite(sql, dialect)
-    return ` It counts as a write because ${reason}.${unavailable ? ` ${UNAVAILABLE_NEXT_STEP}` : ""}`
+    const { reason, unreadable, unavailable } = explainWrite(sql, dialect)
+    const head = unreadable ? "It counts as a write because" : "It falls outside the read-only permission because"
+    return ` ${head} ${reason}.${unavailable ? ` ${UNAVAILABLE_NEXT_STEP}` : ""}`
   }
   // Name the word only when it is the sole reason: the body is otherwise one SELECT or WITH query.
   const body = readOnlyBody(sql, dialect)?.body
-  if (!body || !/^(SELECT|WITH)\b/i.test(body)) return ""
+  if (!body || !/^(SELECT|WITH)\b/i.test(body)) {
+    return " Invalid query shape here: send a single SELECT or WITH query that can be embedded."
+  }
   const [statement, replace] = wordPatterns(dialect)
   const word = (statement.exec(body) ?? replace.exec(body))?.[0]
-  return word ? ` It contains the statement word ${word.toUpperCase()} outside a literal or comment; quote it if it is a column name.` : ""
+  return word ? ` It contains the statement word ${word.toUpperCase()} outside a literal or comment, so the read-only permission does not cover it; quote it if it is a column name.` : ""
 }

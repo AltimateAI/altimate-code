@@ -137,7 +137,7 @@ describe("tool run", () => {
     const result = await runner.run("sql_execute", { query: "CREATE TABLE t (a int)" })
     expect(result.status).toBe("error")
     // The refusal says why the query counts as a write, then how to enable writes.
-    expect(result.output).toContain("Writes are not enabled for this run, and the query counts as a write because it is not a read (CREATE TABLE)")
+    expect(result.output).toContain("Write permission is disabled for this run, and the query counts as a write because it is not a read (CREATE TABLE)")
     expect(result.output.endsWith("Permission denied: sql_execute_write. Re-run with --allow-write to enable writes.")).toBe(true)
   })
 

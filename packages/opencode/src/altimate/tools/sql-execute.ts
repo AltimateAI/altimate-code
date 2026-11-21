@@ -259,13 +259,13 @@ export const SqlExecuteTool = Tool.define(
               if (blockedIn >= 0) throw new Error(hardBlockRefusal(head, sql, dialects[blockedIn]))
               if (jinja)
                 throw new Error(
-                  `${head} It contains Jinja, which dbt renders before the SQL runs, so DROP DATABASE, DROP SCHEMA or ` +
+                  `${head} This cannot be overridden by a permission rule. dbt renders Jinja before the SQL runs, so DROP DATABASE, DROP SCHEMA or ` +
                     "TRUNCATE words count wherever they sit, even in a literal or comment. Remove those words, or send plain SQL without Jinja.",
                 )
-              throw new Error(`${head} This cannot be overridden.`)
+              throw new Error(`${head} This cannot be overridden by a permission rule.`)
             }
             if (budget && queryType !== "read") {
-              throw new Error("Batched queries must be read-only; run a write as its own sql_execute call.")
+              throw new Error("Batched queries must be read-only. To use write permission, run a write as its own sql_execute call.")
             }
             const parseError = "parseError" in classification ? classification.parseError : undefined
             if (!mongo && queryType === "read") {
@@ -785,10 +785,10 @@ export function deniedWriteMessage(input: {
 }): string {
   const readOnly = input.readOnly !== false
   const head = input.cli
-    ? "sql_execute did not run this query. Writes are not enabled for this run, and the query counts as a write because"
+    ? "sql_execute did not run this query. Write permission is disabled for this run, and the query counts as a write because"
     : readOnly
     ? "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
-    : "sql_execute did not run this query. A sql_execute_write rule denies it, and the query counts as a write because"
+    : "sql_execute did not run this query. A sql_execute_write permission rule denies it, and the query counts as a write because"
   if (input.jinja) {
     return `${head} it contains Jinja ({{ }}, {% %} or {# #}), which dbt renders and runs before the SQL. Send plain SQL without Jinja.`
   }

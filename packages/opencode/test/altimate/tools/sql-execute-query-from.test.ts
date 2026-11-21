@@ -215,6 +215,14 @@ describe("sql_execute generated reads", () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
+  test.each(["SELECT 1; SELECT 2", "SHOW TABLES"])("explains the refused source shape %s", async (sql) => {
+    const tool = await initTool(SqlExecuteTool)
+    await expect(tool.execute({ query_from: { ...source, sql }, warehouse: "analytics" }, ctx)).rejects.toThrow(
+      "send a single SELECT or WITH query",
+    )
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
   for (const sql of [
     "DELETE FROM orders",
     "CREATE TEMP TABLE generated AS SELECT 1",

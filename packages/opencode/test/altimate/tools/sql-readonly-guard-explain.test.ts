@@ -218,6 +218,10 @@ test("unavailable", async () => {
     }
   }, 60_000)
 
+  test.each(["SELECT 1; SELECT 2", "SHOW TABLES"])("explains the unsupported read shape %s", (sql) => {
+    expect(writeReason(sql, "postgres")).toContain("send a single SELECT or WITH query")
+  })
+
   test("a refusal that is not about writing stays as it was", () => {
     expect(writeReason("SELECT 1", "postgres")).toBe("")
   })
