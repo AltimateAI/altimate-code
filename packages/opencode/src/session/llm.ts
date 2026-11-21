@@ -47,6 +47,7 @@ import { normalizeBigInts } from "@/altimate/util/json"
 import { randomUUIDv7 } from "bun"
 import { Bus } from "@/bus"
 import { LLMRequestEvent } from "@/altimate/observability/tracing"
+import { TurnContext } from "./turn-context"
 // altimate_change end
 // altimate_change start — run deadlines override reasoning effort for each remaining request
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
@@ -505,10 +506,7 @@ export namespace LLM {
                 // altimate_change end
                 // altimate_change start — append advisory context after the normal cache breakpoints
                 if (input.uncachedTurnContext) {
-                  args.params.prompt.push({
-                    role: "user",
-                    content: [{ type: "text", text: input.uncachedTurnContext }],
-                  })
+                  args.params.prompt.push(TurnContext.make(input.uncachedTurnContext))
                 }
                 // altimate_change end
               }

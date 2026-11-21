@@ -1,6 +1,7 @@
 export * as Fingerprint from "./fingerprint"
 
 import { createHash } from "node:crypto"
+import { TurnContext } from "@/session/turn-context"
 import type { LanguageModelV3Message, LanguageModelV3Prompt } from "@ai-sdk/provider"
 
 export interface Group {
@@ -92,7 +93,7 @@ export function groups(prompt: LanguageModelV3Prompt, prefix: readonly { readonl
     const message = prompt[i]!
     const start = i
     i++
-    if (message.role === "system") continue
+    if (message.role === "system" || TurnContext.isTransient(message)) continue
     const parts = visible(message)
     if (parts.length === 0) continue
     const members = [hash(parts)]
@@ -102,7 +103,7 @@ export function groups(prompt: LanguageModelV3Prompt, prefix: readonly { readonl
         const checkpoint = prefix[groups.length]
         if (checkpoint && hash({ role: message.role, members: members.toSorted() }) === checkpoint.hash) break
         const next = prompt[i]!
-        if (next.role !== "user") break
+        if (next.role !== "user" || TurnContext.isTransient(next)) break
         members.push(hash(visible(next)))
         i++
       }
