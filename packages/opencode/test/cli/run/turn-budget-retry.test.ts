@@ -57,7 +57,7 @@ describe("opencode run: --max-turns charges completed steps only", () => {
       let subscriptionReady = Promise.withResolvers<void>()
       let finishPrompt: (value: Response) => void = () => {}
       let attemptTimer: ReturnType<typeof setInterval> | undefined
-      const counts = { prompts: 0, aborts: 0, attempts: 0 }
+      const counts = { prompts: 0, aborts: 0, attempts: 0, timerAttempts: 0 }
       const encoder = new TextEncoder()
       const publish = (type: string, properties: object) =>
         stream?.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`))
@@ -243,7 +243,10 @@ describe("opencode run: --max-turns charges completed steps only", () => {
                 // A step that keeps failing and restarting without ever completing:
                 // more attempts than one step's retry cap at once, then more until aborted.
                 for (let attempt = 0; attempt <= SessionRetry.RETRY_MAX_ATTEMPTS + 1; attempt++) startAttempt(messageID)
-                attemptTimer = setInterval(() => startAttempt(messageID), 20)
+                attemptTimer = setInterval(() => {
+                  counts.timerAttempts++
+                  startAttempt(messageID)
+                }, 20)
                 return new Promise<Response>((resolve) => {
                   finishPrompt = resolve
                 })
@@ -359,7 +362,8 @@ describe("opencode run: --max-turns charges completed steps only", () => {
           expect.objectContaining({ limit_seconds: 5 }),
         ])
         expect(counts.aborts).toBeGreaterThanOrEqual(1)
-        expect(counts.attempts).toBeGreaterThan(SessionRetry.RETRY_MAX_ATTEMPTS + 1)
+        // Attempts kept restarting after the initial burst until the deadline stopped them.
+        expect(counts.timerAttempts).toBeGreaterThan(0)
         expect(
           events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text),
         ).toEqual(["Best-effort answer."])
