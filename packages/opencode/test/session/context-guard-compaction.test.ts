@@ -106,35 +106,44 @@ const it = testEffect(
 
 const model = { providerID: "altimate-backend", modelID: "test-model" } as any
 
-/** A local OpenAI-compatible model with the given window. */
-const providerCfg = (limit: { context: number; output: number }) => (url: string) => ({
-  provider: {
-    "altimate-backend": {
-      name: "Altimate (test)",
-      id: "altimate-backend",
-      env: [],
-      npm: "@ai-sdk/openai-compatible",
-      models: {
-        "test-model": {
-          id: "test-model",
-          name: "Test Model",
-          attachment: false,
-          reasoning: false,
-          temperature: false,
-          tool_call: true,
-          release_date: "2025-01-01",
-          limit,
-          cost: { input: 0, output: 0 },
-          options: {},
+/**
+ * A local OpenAI-compatible model with the given window, driven by a tool-less build agent unless
+ * `tools` is set. The build agent's system prompt and tool schemas vary by environment (tens of
+ * thousands of estimated tokens); without them each fixture's history alone decides the guard.
+ */
+const providerCfg =
+  (limit: { context: number; output: number }, opts: { tools?: boolean; attachment?: boolean } = {}) =>
+  (url: string) => ({
+    ...(opts.tools ? {} : { agent: { build: { permission: { "*": "deny" as const } } } }),
+    provider: {
+      "altimate-backend": {
+        name: "Altimate (test)",
+        id: "altimate-backend",
+        env: [],
+        npm: "@ai-sdk/openai-compatible",
+        models: {
+          "test-model": {
+            id: "test-model",
+            name: "Test Model",
+            attachment: opts.attachment === true,
+            reasoning: false,
+            temperature: false,
+            tool_call: true,
+            release_date: "2025-01-01",
+            limit,
+            cost: { input: 0, output: 0 },
+            options: {},
+          },
         },
+        options: { apiKey: "test-key", baseURL: url },
       },
-      options: { apiKey: "test-key", baseURL: url },
     },
-  },
-  model: "altimate-backend/test-model",
-})
+    model: "altimate-backend/test-model",
+  })
 
 const LARGE_WINDOW = { context: 131_072, output: 16_384 }
+/** A 1x1 PNG. */
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 const SMALL_WINDOW = { context: 16_384, output: 4_096 }
 
 const SQL = [
@@ -162,6 +171,9 @@ function sqlResultBlock(seed: number): string {
   return `Query ${seed}:\n${SQL}\nResult:\n${JSON.stringify(rows, null, 2)}\n`
 }
 
+/** Six user turns of SQL/JSON history totalling at least `target` estimated tokens (compaction trims whole turns). */
+const sqlJsonTurns = (target: number) => Array.from({ length: 6 }, () => sqlJsonHistory(Math.ceil(target / 6)))
+
 /** SQL/JSON history whose character estimate is at least `target` tokens. */
 function sqlJsonHistory(target: number): string {
   const blocks: string[] = []
@@ -183,7 +195,7 @@ type Seeded = {
   assistantUsage?: number
   next?: string
   last?: { modelID?: string; agent?: string; finish?: string; text?: string; toolOutput?: string }
-  /** A file attached to the `next` user turn. */
+  /** An image attached to the `next` user turn. */
   nextFile?: boolean
 }
 
@@ -266,9 +278,9 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
           messageID: next.id,
           sessionID,
           type: "file",
-          mime: "text/plain",
-          filename: "orders.csv",
-          url: `data:text/plain;base64,${Buffer.from("order_id,amount\n1,10\n").toString("base64")}`,
+          mime: "image/png",
+          filename: "revenue-chart.png",
+          url: `data:image/png;base64,${PNG_BASE64}`,
         } as any)
       }
     }
@@ -292,10 +304,10 @@ it.live(
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
         // The provider counted this conversation as 108k tokens, below the ~111k compaction trigger.
-        // The character estimate of the SQL/JSON history plus the build agent's system prompt and
-        // tool schemas is far higher (~150k here), past the guard's limit (131,072 less the 1,024-token
-        // response floor and a 2% margin). Without calibration this request is refused.
-        const history = sqlJsonHistory(88_000)
+        // The character estimate of the SQL/JSON history alone is ~130k (the ~20% overestimate on
+        // SQL/JSON), past the guard's limit (131,072 less the 1,024-token response floor and a 2%
+        // margin). Without calibration this request is refused.
+        const history = sqlJsonHistory(130_000)
         const reported = 108_000
 
         yield* llm.text("Revenue is concentrated in the top ten customers.")
@@ -323,7 +335,7 @@ it.live(
       Effect.fnUntraced(function* ({ dir, llm }) {
         // A local server that reports no usage gives compaction nothing to fire on; the guard's
         // estimate is then the only measure, and tripping it must compact rather than end the session.
-        const history = sqlJsonHistory(100_000)
+        const history = sqlJsonTurns(135_000)
 
         yield* llm.text("summary of the revenue analysis so far")
         yield* llm.text("Revenue is concentrated in the top ten customers.")
@@ -395,7 +407,7 @@ it.live(
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        const result = yield* runSession(dir, llm, { user: sqlJsonHistory(100_000) })
+        const result = yield* runSession(dir, llm, { user: sqlJsonHistory(135_000) })
 
         expect(result.hits.length).toBe(0)
         expect(result.compactions.length).toBe(0)
@@ -429,11 +441,7 @@ it.live(
       }),
       {
         git: true,
-        // A tool-less agent: the build agent's tool schemas alone estimate above a 16k window.
-        config: (url: string) => ({
-          ...providerCfg(SMALL_WINDOW)(url),
-          agent: { build: { permission: { "*": "deny" } } },
-        }),
+        config: providerCfg(SMALL_WINDOW),
       },
     ),
   { timeout: 120_000 },
@@ -454,7 +462,7 @@ for (const [name, last] of [
           yield* llm.text("summary of the revenue analysis so far")
           yield* llm.text("Revenue is concentrated in the top ten customers.")
           const result = yield* runSession(dir, llm, {
-            user: sqlJsonHistory(88_000),
+            user: sqlJsonTurns(130_000),
             assistantUsage: 108_000,
             last,
             next: "Summarize the revenue concentration.",
@@ -476,7 +484,7 @@ it.live(
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
         const result = yield* runSession(dir, llm, {
-          user: sqlJsonHistory(100_000),
+          user: sqlJsonHistory(135_000),
           assistantUsage: 0,
           next: "Summarize the revenue concentration.",
         })
@@ -502,7 +510,7 @@ it.live(
         yield* llm.text("summary of the revenue analysis so far")
         yield* llm.text("Revenue is concentrated in the top ten customers.")
         const result = yield* runSession(dir, llm, {
-          user: ["List the top customers by paid revenue.", sqlJsonHistory(100_000)],
+          user: [...sqlJsonTurns(135_000), "Break the revenue down by region."],
           assistantUsage: 0,
           last: {
             finish: "tool-calls",
@@ -524,25 +532,26 @@ it.live(
 )
 
 it.live(
-  "a new attachment keeps the estimate in charge: the guard trips and the session compacts",
+  "a new image keeps the estimate in charge, and a turn carrying it is not compacted away",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        // Same as the regression above, but the new turn attaches a file the tail estimate cannot see.
-        yield* llm.text("summary of the revenue analysis so far")
-        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        // Same as the regression above, but the new turn attaches an image the tail estimate cannot
+        // see, so the estimate decides and refuses. Compacting would drop the image, so the refusal
+        // is the budget error rather than an answer without it.
         const result = yield* runSession(dir, llm, {
-          user: sqlJsonHistory(88_000),
+          user: sqlJsonTurns(130_000),
           assistantUsage: 108_000,
           next: "Summarize the revenue concentration.",
           nextFile: true,
         })
 
-        expect(result.errors).toEqual([])
-        expect(result.summaries.length).toBe(1)
-        expect(result.hits.length).toBe(2)
+        expect(result.hits.length).toBe(0)
+        expect(result.compactions.length).toBe(0)
+        expect(result.errors.length).toBe(1)
+        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
       }),
-      { git: true, config: providerCfg(LARGE_WINDOW) },
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
     ),
   { timeout: 120_000 },
 )
@@ -557,7 +566,7 @@ it.live(
         yield* llm.text("summary of the revenue analysis so far")
         yield* llm.text("Revenue is concentrated in the top ten customers.")
         const result = yield* runSession(dir, llm, {
-          user: sqlJsonHistory(100_000),
+          user: sqlJsonTurns(135_000),
           assistantUsage: 0,
           next: "Summarize the revenue concentration.",
         })
@@ -569,7 +578,13 @@ it.live(
         expect(retry.tools?.length ?? 0).toBeGreaterThan(0)
         expect(JSON.stringify(retry)).not.toContain("maximum number of steps")
       }),
-      { git: true, config: (url: string) => ({ ...providerCfg(LARGE_WINDOW)(url), agent: { build: { steps: 2 } } }) },
+      {
+        git: true,
+        config: (url: string) => ({
+          ...providerCfg(LARGE_WINDOW, { tools: true })(url),
+          agent: { build: { steps: 2 } },
+        }),
+      },
     ),
   { timeout: 120_000 },
 )

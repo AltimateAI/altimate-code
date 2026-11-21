@@ -462,9 +462,13 @@ export namespace SessionProcessor {
         // produce a summary and cannot act on it, so the real working turn right
         // after compaction would silently never see the breaker/loop nudge.
         let effectiveStreamInput = streamInput
+        // altimate_change start — kept so a pre-send refusal can hand the directive to the retry
+        let takenDirective: ReturnType<typeof NudgeArbiter.take>
+        // altimate_change end
         if (runMode && !input.assistantMessage.summary) {
           const directive = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)
           // altimate_change end
+          takenDirective = directive // altimate_change — see takenDirective above
           if (directive) {
             // Attribute the injection to the DIRECTIVE that won arbitration,
             // not a hardcoded "nudge" — otherwise every injected doom-loop
@@ -1359,19 +1363,23 @@ export namespace SessionProcessor {
                 !input.abort.aborted &&
                 input.assistantMessage.finish !== "content-filter"
               refusedBeforeSend = compactable === true && isContextBudgetError(e)
-              if (refusedBeforeSend)
+              if (refusedBeforeSend) {
                 log.warn("pre-send context budget refusal; compacting before retrying", {
                   sessionID: input.sessionID,
                   providerID: input.model.providerID,
                   modelID: input.model.id,
                 })
-              const error =
-                refusedBeforeSend || (echoRecovery && isContextBudgetError(e))
+                // Nothing was sent: the directive this request carried belongs to the retry.
+                if (takenDirective) NudgeArbiter.register(input.sessionID, takenDirective, input.nudgeGeneration)
+              }
+              const error = refusedBeforeSend
                 ? new MessageV2.ContextOverflowError(
                     { message: "The request would not fit the model's context window; compacting the conversation and retrying." },
                     { cause: e },
                   ).toObject()
-                : MessageV2.fromError(e, { providerID: input.model.providerID })
+                : echoRecovery && isContextBudgetError(e)
+                  ? new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+                  : MessageV2.fromError(e, { providerID: input.model.providerID })
               // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
               if (

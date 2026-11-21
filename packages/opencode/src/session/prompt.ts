@@ -2248,7 +2248,12 @@ export namespace SessionPrompt {
       // leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
-      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false
+      // Compaction drops images and PDFs (replay swaps them for a placeholder, summaries strip them):
+      // a refusal on a turn that carries one stays the budget error rather than answer without it.
+      const turnMedia = msgs
+        .find((msg) => msg.info.id === lastUser.id)
+        ?.parts.some((part) => part.type === "file" && MessageV2.isMedia(part.mime))
+      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !turnMedia
       // Attachments the provider has not counted (in the last turn's tool results or later messages)
       // are not in the tail estimate: leave those requests to the estimate.
       const unmeasuredMedia = msgs.some(
