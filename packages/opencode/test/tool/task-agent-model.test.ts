@@ -22,6 +22,7 @@ test("an unavailable subagent model names that agent's config as its source", as
     model: { providerID: "missing-provider", modelID: "missing-model" },
   } as unknown as Agent.Info
   let prompted = false
+  let created = false
   const mocks = [
     spyOn(Agent, "list").mockResolvedValue([agent]),
     spyOn(Agent, "get").mockResolvedValue(agent),
@@ -39,6 +40,10 @@ test("an unavailable subagent model names that agent's config as its source", as
         Session.get,
       ),
     ),
+    spyOn(Session, "create").mockImplementation((async () => {
+      created = true
+      return { id: childID, permission: [] }
+    }) as never),
     spyOn(MessageV2, "get").mockResolvedValue({
       info: { role: "assistant", parentID: messageID, modelID: "test", providerID: "test" },
       parts: [],
@@ -56,7 +61,7 @@ test("an unavailable subagent model names that agent's config as its source", as
   try {
     const tool = await initTool(TaskTool)
     const run = tool.execute(
-      { description: "Explore", prompt: "Look around", subagent_type: "explore", task_id: childID },
+      { description: "Explore", prompt: "Look around", subagent_type: "explore" },
       {
         sessionID: parentID,
         messageID,
@@ -68,6 +73,7 @@ test("an unavailable subagent model names that agent's config as its source", as
     )
     await expect(run).rejects.toThrow('Model not found: missing-provider/missing-model (from agent "explore" config (model))')
     expect(prompted).toBe(false)
+    expect(created).toBe(false)
   } finally {
     for (const mock of mocks) mock.mockRestore()
   }
