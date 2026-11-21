@@ -106,6 +106,40 @@ describe("Worktree", () => {
     { git: true },
   )
 
+  // altimate_change start — offline reset with a submodule this worktree never checked out
+  it.instance(
+    "resets an offline worktree whose repository has a submodule it never checked out",
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      const run = (cwd: string, args: string[]) => {
+        const result = Bun.spawnSync(["git", "-c", "protocol.file.allow=always", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+        if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+      }
+      const lib = path.join(path.dirname(directory), `${path.basename(directory)}-lib`)
+      Bun.spawnSync(["mkdir", "-p", lib])
+      for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "lib"]])
+        run(lib, args)
+      run(directory, ["submodule", "add", "-q", lib, "lib"])
+      run(directory, ["commit", "-q", "-m", "add submodule"])
+      const previous = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        const svc = yield* Worktree.Service
+        yield* withCreatedWorktree({ name: "offline-submodule" }, ({ info }) =>
+          Effect.gen(function* () {
+            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
+          }),
+        )
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+        Bun.spawnSync(["rm", "-rf", lib])
+      }
+    }),
+    { git: true },
+  )
+  // altimate_change end
+
   describe("makeWorktreeInfo", () => {
     it.instance(
       "returns info with name, branch, and directory",

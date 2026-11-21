@@ -613,12 +613,22 @@ export const layer: Layer.Layer<
       }
 
       // altimate_change start — update existing submodules from objects already on disk offline
-      const submoduleMode = Offline.enabled() ? "--no-fetch" : "--init"
-      yield* gitExpect(
-        ["submodule", "update", submoduleMode, "--recursive", "--force"],
-        { cwd: worktreePath },
-        (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
-      )
+      // A submodule this worktree never checked out would need a clone, so offline updates only the present ones
+      // (`git submodule status` marks the others with a leading "-").
+      const offlineSubmodules = Offline.enabled()
+        ? (yield* git(["submodule", "status"], { cwd: worktreePath })).text
+            .split("\n")
+            .filter((line) => line.trim() && !line.startsWith("-"))
+            .map((line) => line.trim().split(/\s+/)[1]!)
+        : undefined
+      if (!offlineSubmodules || offlineSubmodules.length > 0)
+        yield* gitExpect(
+          offlineSubmodules
+            ? ["submodule", "update", "--no-fetch", "--recursive", "--force", "--", ...offlineSubmodules]
+            : ["submodule", "update", "--init", "--recursive", "--force"],
+          { cwd: worktreePath },
+          (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
+        )
       // altimate_change end
 
       yield* gitExpect(
