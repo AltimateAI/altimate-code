@@ -1,22 +1,22 @@
-import { afterEach, describe, expect, test } from "bun:test"
-import { Instance } from "../../src/project/instance"
-import { Session } from "../../src/session"
-import type { MessageV2 } from "../../src/session/message-v2"
+import { describe, expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Project } from "@/project/project"
+import { Session as SessionNs } from "@/session/session"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { getLastModel } from "../../src/tool/plan"
-import { tmpdir } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
 
-afterEach(async () => {
-  await Instance.disposeAll()
-})
+const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, Project.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
-async function addUser(
+const addUser = Effect.fn("PlanLastModelTest.addUser")(function* (
   sessionID: SessionID,
   model: { providerID: string; modelID: string },
   part: { text: string; synthetic?: boolean; metadata?: Record<string, unknown> },
 ) {
+  const session = yield* SessionNs.Service
   const id = MessageID.ascending()
-  await Session.updateMessage({
+  yield* session.updateMessage({
     id,
     sessionID,
     role: "user",
@@ -25,27 +25,26 @@ async function addUser(
     model,
     tools: {},
     mode: "",
-  } as unknown as MessageV2.Info)
-  await Session.updatePart({ id: PartID.ascending(), sessionID, messageID: id, type: "text", ...part })
-}
+  } as never)
+  yield* session.updatePart({ id: PartID.ascending(), sessionID, messageID: id, type: "text", ...part } as never)
+})
 
 describe("plan_exit model selection", () => {
-  test("skips shell and direct MCP rows recorded after the last real prompt", async () => {
-    await using tmp = await tmpdir({ git: true })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const session = await Session.create({ title: "plan exit" })
-        await addUser(session.id, { providerID: "test", modelID: "chat-model" }, { text: "make a plan" })
-        await addUser(
-          session.id,
+  it.instance(
+    "skips shell and direct MCP rows recorded after the last real prompt",
+    () =>
+      Effect.gen(function* () {
+        const created = yield* SessionNs.use.create({ title: "plan exit" })
+        yield* addUser(created.id, { providerID: "test", modelID: "chat-model" }, { text: "make a plan" })
+        yield* addUser(
+          created.id,
           { providerID: "display", modelID: "shell" },
           { text: "The following tool was executed by the user", synthetic: true },
         )
-        await addUser(session.id, { providerID: "", modelID: "" }, { text: "/mcps", metadata: { modelMetadataOnly: true } })
-        const model = await getLastModel(session.id)
+        yield* addUser(created.id, { providerID: "", modelID: "" }, { text: "/mcps", metadata: { modelMetadataOnly: true } })
+        const model = yield* Effect.promise(() => getLastModel(created.id))
         expect([String(model.providerID), String(model.modelID)]).toEqual(["test", "chat-model"])
-      },
-    })
-  })
+      }),
+    { git: true },
+  )
 })
