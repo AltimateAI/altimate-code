@@ -118,6 +118,26 @@ describe("buildCliContext", () => {
       expect(await contextHasMachineId()).toBe(false)
     })
 
+    test("omits machine_id when this process adopts an opt-out while the config is read", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      let release!: (value: unknown) => void
+      let started!: () => void
+      const reading = new Promise<void>((resolve) => (started = resolve))
+      cfg.mockImplementation((() => {
+        started()
+        return new Promise((resolve) => (release = resolve))
+      }) as never)
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const building = buildCliContext(idPath)
+      await reading
+      await Telemetry.adoptOptOut("disabled")
+      release({})
+      const ctx = JSON.parse(Buffer.from(await building, "base64url").toString("utf8")) as Record<string, unknown>
+      expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
+
     test("inside a project, omits machine_id when a remote config source could not be read", async () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       await using project = await tmpdir({ git: true })

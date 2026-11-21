@@ -793,6 +793,31 @@ describe("telemetry opt-out", () => {
     }
   })
 
+  test("a well-known entry Auth would reject does not hold telemetry", async () => {
+    writeFileSync(Auth.filepath(), JSON.stringify({ "https://config.example.invalid": { type: "wellknown" } }))
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+  })
+
+  test("an in-memory account database is an unknown organization source", async () => {
+    databaseSpy.mockReturnValue(":memory:")
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+  })
+
+  test("an account database not in WAL mode is not read, so its organization is unknown", async () => {
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', NULL);
+    `)
+    db.close()
+    databaseSpy.mockReturnValue(dbPath)
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+  })
+
   test("an empty auth file holds no well-known entry, as Auth reads it", async () => {
     writeFileSync(Auth.filepath(), "")
     expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
