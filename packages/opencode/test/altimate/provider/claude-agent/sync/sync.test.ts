@@ -3,6 +3,8 @@ import type { LanguageModelV3Prompt } from "@ai-sdk/provider"
 import { Fingerprint } from "@/altimate/provider/claude-agent/sync/fingerprint"
 import { SyncDecision } from "@/altimate/provider/claude-agent/sync/decide"
 import { CatchUp } from "@/altimate/provider/claude-agent/sync/catch-up"
+import { Checkpoints } from "@/altimate/provider/claude-agent/sync/checkpoints"
+import { TurnContext } from "@/session/turn-context"
 
 const user = (text: string): LanguageModelV3Prompt[number] => ({ role: "user", content: [{ type: "text", text }] })
 const assistant = (text: string): LanguageModelV3Prompt[number] => ({
@@ -98,6 +100,35 @@ describe("history reconciliation", () => {
     const hashes = (prompt: LanguageModelV3Prompt) => Fingerprint.groups(prompt).map((group) => group.hash)
     expect(hashes(changed)).toEqual(hashes(original))
     expect(hashes([user("Changed reminder"), ...past])).not.toEqual(hashes(original))
+  })
+
+  test("one-shot turn context reaches the model and keeps the saved tool continuation", () => {
+    const prompt = [...past, user("Read the file")]
+    const note = TurnContext.make("Schema verification could not run.")
+    const request = [...prompt, note]
+    const initial = SyncDecision.decide(request, record)
+    expect(initial).toEqual({ kind: "continue", start: 2 })
+    expect(CatchUp.content(request, initial.start)).toContainEqual({
+      type: "text", text: "Schema verification could not run.",
+    })
+    const call = { type: "tool-call", toolCallId: "a", toolName: "read", input: { path: "orders.sql" } } as const
+    const checkpoint = { previous: record, reply: [call], toolMessages: new Map() }
+    const history = Checkpoints.build({ ...checkpoint, prompt: request })
+    expect(history).toEqual(Checkpoints.build({ ...checkpoint, prompt }))
+    const followup: LanguageModelV3Prompt = [
+      ...prompt,
+      { role: "assistant", content: [call] },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "a", toolName: "read", output: { type: "text", value: "OK" } }],
+      },
+    ]
+    const saved = { ...record, history }
+    const continuation = SyncDecision.decide(followup, saved)
+    expect(continuation).toEqual({ kind: "catch-up", start: 4 })
+    expect(SyncDecision.decide([...prompt, note], { ...record, history: Fingerprint.groups(prompt) })).toEqual({
+      kind: "continue", start: 3,
+    })
   })
 
   test("compares tool inputs independent of key order and keeps tool images with their result", () => {

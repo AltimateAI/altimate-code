@@ -141,6 +141,7 @@ describe("DbtBuildGreenValidator — fresh artifact", () => {
     ])
     const r = await DbtBuildGreenValidator.check(ctx())
     expect(r.ok).toBe(false)
+    expect(r.classification).toBe("finding")
     expect(r.reason).toContain("stg_orders")
     expect(r.fixHint).toContain("Compilation Error in model")
   })

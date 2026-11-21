@@ -37,7 +37,7 @@ import {
   isFailedRunStatus,
   resolveDbtSourcePaths,
   runResultsProducedNodes,
-  collectProducedNodeNames,
+  collectProducedNodeInventory,
   resolveWithinRoot,
   sanitizeForPrompt,
   MODEL_NODE_EXTENSIONS,
@@ -298,9 +298,9 @@ export const DbtNothingBuiltValidator: Validator = {
     // Existence rather than authorship is also what `dbt-deliverable-names`
     // already asserts, so the two contract gates now agree on what "delivered"
     // means instead of disagreeing by one session.
-    const existingNodes = hasNamedDeliverables
-      ? await collectProducedNodeNames(dbtRoot)
-      : new Set<string>()
+    const { names: existingNodes, manifestUnreadable } = hasNamedDeliverables
+      ? await collectProducedNodeInventory(dbtRoot)
+      : { names: new Set<string>(), manifestUnreadable: false }
     // Same modification/creation split as `modificationModels`: "Update the
     // file `models/schema.yml`" cannot be satisfied by the file merely
     // existing from before this session — the task is asking for a change to
@@ -430,8 +430,13 @@ export const DbtNothingBuiltValidator: Validator = {
             : `The task document at ${safeTaskFile} names required deliverables${namedText}, but this session wrote no project files and produced no fresh successful build artifact. Nothing was built, so the task is not done.`
         : `This session wrote no project files and produced no fresh successful build artifact, but this project is configured to require artifacts. Nothing was built, so the task is not done.`
 
+    const advisory = manifestUnreadable && namedModels.some((name) => !modificationSet.has(name.toLowerCase()))
+      ? "Could not verify whether dbt deliverables already exist under aliases because manifest.json could not be read or parsed."
+      : undefined
     return {
       ok: false,
+      classification: advisory ? "unverifiable" : "finding",
+      advisory,
       reason,
       fixHint:
         [

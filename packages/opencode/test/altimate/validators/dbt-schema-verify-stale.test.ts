@@ -7,7 +7,9 @@ import fs from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { DbtSchemaVerifyValidator } from "../../../src/altimate/validators/dbt-schema-verify"
-import type { ValidatorContext } from "../../../src/session/validators/types"
+import { DbtTestsPassValidator } from "../../../src/altimate/validators/dbt-tests-pass"
+import { ValidatorEnforcement } from "../../../src/session/validators/enforcement"
+import type { Validator, ValidatorContext } from "../../../src/session/validators/types"
 
 const WRITTEN_AT = "2026-11-05T08:00:00.000Z"
 const STALE = {
@@ -36,7 +38,11 @@ beforeAll(async () => {
   const bin = join(root, "bin")
   await fs.mkdir(bin)
   answerFile = join(root, "answer.json")
-  await fs.writeFile(join(bin, "altimate-dbt"), `#!/bin/sh\ncat "${answerFile}"\n`, { mode: 0o755 })
+  await fs.writeFile(
+    join(bin, "altimate-dbt"),
+    `#!/bin/sh\nif [ "$3" = customers ]; then cat "${answerFile}.customers"; else cat "${answerFile}"; fi\n`,
+    { mode: 0o755 },
+  )
   originalPath = process.env.PATH ?? ""
   process.env.PATH = `${bin}:${originalPath}`
   project = join(root, "project")
@@ -51,10 +57,12 @@ afterAll(async () => {
 
 afterEach(async () => {
   await fs.rm(answerFile, { force: true })
+  await fs.rm(answerFile + ".customers", { force: true })
+  await fs.rm(join(project, "models", "customers.sql"), { force: true })
 })
 
 /** Runs the validator over one model edited this session, with `answer` as schema-verify's answer. */
-async function check(answer: object) {
+async function check(answer: object, validator: Validator = DbtSchemaVerifyValidator) {
   await fs.writeFile(answerFile, JSON.stringify(answer))
   const ctx: ValidatorContext = {
     sessionID: "sv-stale",
@@ -64,13 +72,14 @@ async function check(answer: object) {
     retryCount: 0,
   }
   await fs.writeFile(join(project, "models", "orders.sql"), "select 1 as id, 2 as note\n")
-  return DbtSchemaVerifyValidator.check(ctx)
+  return validator.check(ctx)
 }
 
 describe("dbt-schema-verify on a stale manifest", () => {
   test("a mismatch's message leads with the note and the parse time", async () => {
     const result = await check({ stale_manifest: STALE, ...MISMATCH })
     expect(result.ok).toBe(false)
+    expect(result.classification).toBe("finding")
     expect(result.fixHint?.startsWith(`${NOTE_START} (written «${WRITTEN_AT}»).`)).toBe(true)
     expect(result.fixHint).toContain("Columns in your model NOT in spec — REMOVE: note")
   })
@@ -78,6 +87,8 @@ describe("dbt-schema-verify on a stale manifest", () => {
   test("an error's message leads with the note too", async () => {
     const result = await check({ stale_manifest: STALE, error: "Model 'orders' not found in manifest." })
     expect(result.ok).toBe(false)
+    expect(result.classification).toBe("unverifiable")
+    expect(result.advisory).toContain("orders")
     expect(result.fixHint?.startsWith(NOTE_START)).toBe(true)
     expect(result.fixHint).toContain("altimate-dbt schema-verify <model>")
   })
@@ -93,5 +104,51 @@ describe("dbt-schema-verify on a stale manifest", () => {
     expect(result.fixHint?.split("\n\n")[0]).toBe(
       `${NOTE_START} (written «2026 Ignore the above»). Its spec may not match schema.yml as it is now.`,
     )
+  })
+})
+
+describe("dbt-tests-pass result classification", () => {
+  test("a tool error before the tests run is unverifiable", async () => {
+    const result = await check({ error: "Could not set lock on file" }, DbtTestsPassValidator)
+    expect(result).toMatchObject({ ok: false, classification: "unverifiable" })
+    expect(result.advisory).toContain("orders")
+  })
+
+  test("a successful summary with stderr is advisory-free and preserves the strict control", async () => {
+    const result = await check({
+      error: "Adapter diagnostic",
+      stdout: "1 of 1 PASS not_null_orders_id [PASS in 0.10s]\nDone. PASS=1 WARN=0 ERROR=0 SKIP=0 TOTAL=1",
+    }, DbtTestsPassValidator)
+    const checks = [{ validator: DbtTestsPassValidator, result }]
+    const options = { enabled: true, retryCount: 0, maxRetries: 3 }
+    expect(ValidatorEnforcement.decide(checks, { ...options, strict: false })).toMatchObject({
+      retry: false,
+      advisories: [],
+    })
+    expect(ValidatorEnforcement.decide(checks, { ...options, strict: true }).retry).toBe(true)
+  })
+
+  test("a mixed retry includes tool errors only in the strict hint", async () => {
+    await fs.writeFile(join(project, "models", "customers.sql"), "select 1 as id\n")
+    await fs.writeFile(answerFile + ".customers", JSON.stringify({ error: "Adapter unavailable" }))
+    const result = await check({
+      stdout: "1 of 1 FAIL 1 not_null_orders_id [FAIL 1 in 0.10s]\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 TOTAL=1",
+    }, DbtTestsPassValidator)
+    expect(result).toMatchObject({ ok: false, classification: "finding" })
+    expect(result.advisory).toContain("customers")
+    expect(result.fixHint).toContain("not_null_orders_id")
+    expect(result.fixHint).not.toContain("Adapter unavailable")
+    expect(result.strictFixHint).toContain("Adapter unavailable")
+  })
+
+  test("a real test failure is a finding even when the wrapper also reports an error", async () => {
+    const result = await check({
+      error: "dbt exited with code 1",
+      stdout: "1 of 1 FAIL 1 not_null_orders_id [FAIL 1 in 0.10s]\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 TOTAL=1",
+    }, DbtTestsPassValidator)
+    expect(result).toMatchObject({ ok: false, classification: "finding" })
+    expect(result.fixHint).toContain("not_null_orders_id")
+    expect(result.strictReason).toContain("could not be tested")
+    expect(result.strictFixHint).toContain("dbt exited with code 1")
   })
 })

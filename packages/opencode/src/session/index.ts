@@ -1,3 +1,6 @@
+// altimate_change start — clean up private validator state with its session
+import { ValidatorEnforcement } from "./validators/enforcement"
+// altimate_change end
 // altimate_change start — release session-owned scratch stores on deletion
 import { closeScratch } from "@/altimate/native/connections/scratch"
 // altimate_change end
@@ -753,7 +756,7 @@ export namespace Session {
         await remove(child.id)
       }
       await unshare(sessionID).catch(() => {})
-      // altimate_change start — release only the deleted session's scratch store
+      // altimate_change start — release the deleted session's scratch store
       await closeScratch(sessionID)
       // altimate_change end
       // CASCADE delete handles messages and parts automatically
@@ -765,6 +768,9 @@ export namespace Session {
           }),
         )
       })
+      // altimate_change start — clean up only after the session row is gone
+      await ValidatorEnforcement.removeAdvisories(sessionID)
+      // altimate_change end
     } catch (e) {
       log.error(e)
     }

@@ -2039,6 +2039,10 @@ const INVENTORY_MAX_DEPTH = 8
  * from literals, so a project on custom `model-paths` is inventoried too.
  */
 export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<string>> {
+  return (await collectProducedNodeInventory(dbtRoot)).names
+}
+
+export async function collectProducedNodeInventory(dbtRoot: string) {
   const names = new Set<string>()
   async function scan(dir: string, depth: number, extensions: string[]): Promise<void> {
     if (depth > INVENTORY_MAX_DEPTH) return
@@ -2116,10 +2120,13 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
         if (typeof value === "string" && value.length > 0) names.add(value.toLowerCase())
       }
     }
-  } catch {
-    // no manifest — the fs inventory stands alone
+  } catch (error) {
+    // A missing optional manifest uses the filesystem inventory. Read or
+    // parse errors mean the alias inventory could not be verified.
+    const manifestUnreadable = (error as NodeJS.ErrnoException).code !== "ENOENT"
+    return { names, manifestUnreadable }
   }
-  return names
+  return { names, manifestUnreadable: false }
 }
 
 /**

@@ -2,6 +2,7 @@ export * as SyncDecision from "./decide"
 
 import type { LanguageModelV3Prompt } from "@ai-sdk/provider"
 import { Fingerprint } from "./fingerprint"
+import { TurnContext } from "@/session/turn-context"
 import type { SessionRecord } from "./record"
 
 export function decide(prompt: LanguageModelV3Prompt, record?: SessionRecord.Record) {
@@ -24,8 +25,10 @@ export function decide(prompt: LanguageModelV3Prompt, record?: SessionRecord.Rec
     if (reply.role !== "assistant" || reply.content.some((part) => part.type === "tool-call")) break
     matched++
   }
-  const start = groups[matched]?.start ?? prompt.length
-  if (record?.interrupted && start === prompt.length) return { kind: "changed", start: 0 } as const
+  const next = groups[matched]
+  if (record?.interrupted && !next) return { kind: "changed", start: 0 } as const
+  const tail = prompt.at(-1)
+  const start = next?.start ?? (tail && TurnContext.isTransient(tail) ? prompt.length - 1 : prompt.length)
   const missed = groups.slice(matched)
   const kind = missed.some((group) => group.role !== "user") ? "catch-up" : "continue"
   return { kind, start } as const

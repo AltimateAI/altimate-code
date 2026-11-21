@@ -43,6 +43,8 @@ import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
+import { ValidatorRegistry } from "../../src/session/validators/registry"
+import { ValidatorEnforcement } from "../../src/session/validators/enforcement"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -569,6 +571,136 @@ for (const downgrade of [true, false]) {
         } } } },
       },
     },
+    30_000,
+  )
+}
+// altimate_change end
+
+// altimate_change start — completion validator enforcement through the real prompt loop
+for (const mode of ["advisory", "advisory-after-error", "deleted-session", "mixed", "finding", "strict"] as const) {
+  noLLMServer.instance(
+    `completion validators use the ${mode} policy`,
+    () => Effect.gen(function* () {
+      const flagNames = ["ALTIMATE_VALIDATORS_ENABLED", "ALTIMATE_VALIDATORS_STRICT", "ALTIMATE_VALIDATORS_MAX_RETRIES"]
+      const previousFlags = flagNames.map((name) => process.env[name])
+      process.env.ALTIMATE_VALIDATORS_ENABLED = "1"
+      process.env.ALTIMATE_VALIDATORS_STRICT = mode === "strict" ? "1" : "0"
+      delete process.env.ALTIMATE_VALIDATORS_MAX_RETRIES
+      const requests: string[] = []
+      const note = "Could not verify orders because the schema tool failed."
+      const retryNote = "Could not verify customers because the test tool failed."
+      const strictReason = "Previous failure summary."
+      const strictFixHint = "Previous fix guidance."
+      let checkCount = 0
+      const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async (ctx) => {
+        checkCount++
+        if (mode === "deleted-session") await LegacySession.remove(SessionID.make(ctx.sessionID))
+        if (mode === "advisory" && checkCount === 2) return []
+        const validator = ValidatorRegistry.list()[0]!
+        const finding = { validator, result: { ok: false, classification: "finding" as const, reason: "Confirmed failure." } }
+        const advisory = (text: string) => ({
+          validator,
+          result: { ok: false, classification: "unverifiable" as const, reason: text, advisory: text },
+        })
+        if (mode === "finding") return [finding]
+        if (mode === "strict") {
+          const check = advisory(note)
+          return [{ ...check, result: { ...check.result, strictReason, strictFixHint } }]
+        }
+        if (mode === "mixed") {
+          if (checkCount === 1) return [finding, advisory(note)]
+          if (checkCount === 2) return [advisory(retryNote)]
+          return []
+        }
+        return [advisory(note)]
+      })
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        requests.push(input.uncachedTurnContext ?? "")
+        if (mode === "advisory-after-error" && requests.length === 2) throw new Error("Provider unavailable")
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        const reply = (text: string) => prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: promptRef,
+          parts: [{ type: "text", text }],
+        })
+        if (mode === "deleted-session") {
+          yield* Effect.exit(reply("Review invoice totals."))
+          expect(runAll.mock.calls).toHaveLength(1)
+          const state = yield* Effect.promise(() => ValidatorEnforcement.loadAdvisories(chat.id))
+          expect(state).toEqual({ pending: [], shown: [] })
+          return
+        }
+        yield* reply("Review invoice totals.")
+        const retries = runAll.mock.calls.map(([ctx]) => ctx.retryCount)
+        if (mode === "advisory") {
+          expect(requests).toHaveLength(1)
+          expect(retries).toEqual([0])
+          expect(requests[0]).not.toContain(note)
+          yield* reply("Follow-up on invoice totals.")
+          yield* reply("Another question about invoices.")
+          yield* reply("A final invoice question.")
+          expect(requests).toHaveLength(4)
+          expect(requests[1]).toContain(note)
+          expect(requests[2]).not.toContain(note)
+          expect(requests[3]).not.toContain(note)
+          const storedConversation = JSON.stringify([...MessageV2.stream(chat.id)])
+          expect(storedConversation).not.toContain(note)
+          expect(storedConversation).not.toContain("validatorAdvisories")
+        } else if (mode === "mixed") {
+          expect(retries).toEqual([0, 1])
+          expect(requests).toEqual(["", ""])
+          yield* reply("Follow-up on invoice totals.")
+          expect(requests).toHaveLength(3)
+          expect(requests[2]).toContain(note)
+          expect(requests[2]).toContain(retryNote)
+          yield* reply("A final invoice question.")
+          expect(requests[3]).toBe("")
+        } else if (mode === "advisory-after-error") {
+          expect(requests).toHaveLength(1)
+          const failed = yield* reply("Follow-up while the provider is unavailable.")
+          expect(failed.info).toHaveProperty("error")
+          yield* reply("Try again.")
+          yield* reply("One more question.")
+          expect(requests).toHaveLength(4)
+          expect(requests[1]).toContain(note)
+          expect(requests[2]).toContain(note)
+          expect(requests[3]).not.toContain(note)
+        } else {
+          expect(requests).toHaveLength(4)
+          expect(retries).toEqual([0, 1, 2, 3])
+          expect(requests.every((request) => !request.includes(note))).toBe(true)
+          if (mode === "strict") {
+            const retryBody = JSON.stringify(stream.mock.calls[1]?.[0].messages)
+            expect(retryBody).toContain(strictReason)
+            expect(retryBody).toContain(strictFixHint)
+            expect(retryBody).not.toContain(note)
+          }
+        }
+      } finally {
+        stream.mockRestore()
+        runAll.mockRestore()
+        for (const [index, name] of flagNames.entries()) {
+          const value = previousFlags[index]
+          if (value === undefined) delete process.env[name]
+          else process.env[name] = value
+        }
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
     30_000,
   )
 }

@@ -4,7 +4,7 @@
  *
  * Fires after the agent declares done. Detects which dbt models the session
  * touched, runs `altimate-dbt test --model <name>` against each, and refuses
- * to terminate if any dbt test fails or errors.
+ * to terminate if the test run reports failures. Inconclusive checks are advisory by default.
  *
  * Catches row-data correctness errors that the column-shape validator does
  * not: a model whose schema.yml matches the actual columns can still fail
@@ -12,9 +12,8 @@
  * tests because the SELECT logic produces wrong values or wrong row counts.
  *
  * The agent does not see this validator existing — it runs in the harness
- * AFTER `finishReason === "stop"`. Its output is surfaced to the agent only
- * if there are failures, via a synthetic user message the framework injects
- * to force one more turn. See types.ts header for the rationale.
+ * AFTER `finishReason === "stop"`. Findings can trigger a retry. The harness
+ * adds an inconclusive check as an advisory on the next ordinary request.
  */
 
 import { spawn } from "child_process"
@@ -27,6 +26,7 @@ import {
   modelNameFromPath,
   extractLastJsonObject,
   runWithConcurrencyLimit,
+  sanitizeForPrompt,
 } from "./validator-utils"
 
 export interface TestSummary {
@@ -166,17 +166,15 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
         else resolve(null)
         return
       }
-      if (typeof envelope.error === "string") {
-        resolve({ model, error: envelope.error.slice(0, 500) })
-        return
-      }
       const dbtLog = typeof envelope.stdout === "string" ? envelope.stdout : ""
       const summary = parseDbtTestOutput(dbtLog)
-      if (!summary) {
-        resolve({ model, error: `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
+      // A complete summary is usable even when the wrapper reports diagnostic stderr.
+      const error = typeof envelope.error === "string" ? envelope.error.slice(0, 500) : undefined
+      if (summary) {
+        resolve({ model, summary, error })
         return
       }
-      resolve({ model, summary })
+      resolve({ model, error: error ?? `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
     })
   })
 }
@@ -207,7 +205,7 @@ function formatFixHint(failures: TestRunOutput[]): string {
 export const DbtTestsPassValidator: Validator = {
   name: "dbt-tests-pass",
   description:
-    "After the agent declares done, runs `altimate-dbt test` against every dbt model the agent modified during this session and refuses to terminate if any model's tests fail or error. Catches row-data correctness errors (relationships, unique, not_null, accepted_values, AUTO_*_equality) that column-shape verification cannot detect.",
+    "After the agent declares done, runs `altimate-dbt test` against every dbt model the agent modified during this session. Reported test failures block completion, and inconclusive checks are advisory by default. Catches row-data correctness errors (relationships, unique, not_null, accepted_values, AUTO_*_equality) that column-shape verification cannot detect.",
 
   async appliesTo(ctx: ValidatorContext): Promise<boolean> {
     return (await findDbtProjectRoot(ctx.workingDirectory)) !== null
@@ -255,7 +253,8 @@ export const DbtTestsPassValidator: Validator = {
     }
 
     const failures = results.filter((r) => r.summary && r.summary.error > 0)
-    const errored = results.filter((r) => r.error && !r.summary)
+    const toolErrors = results.filter((r) => r.error)
+    const errored = toolErrors.filter((r) => !r.summary)
     const passed = results.filter((r) => r.summary && r.summary.error === 0)
     // A model with no tests at all isn't a failure — it's just nothing to verify.
     const noTests = results.filter((r) => r.summary && r.summary.total === 0)
@@ -269,9 +268,18 @@ export const DbtTestsPassValidator: Validator = {
       elapsed_ms: Date.now() - startedAt,
     }
 
-    if (failures.length === 0 && errored.length === 0) {
+    const unverifiedNames = [
+      ...errored.map((r) => r.model),
+      ...touched.filter((_, index) => !outputs[index]).map(modelNameFromPath),
+    ]
+    const advisory = unverifiedNames.length > 0
+      ? `Could not verify dbt tests for ${unverifiedNames.length} model(s) because the test tool did not return a usable result: ${unverifiedNames.slice(0, 10).map((name) => sanitizeForPrompt(name.replace(/[^\w.-]/g, "?"), 80)).join(", ")}.`
+      : undefined
+
+    if (failures.length === 0 && toolErrors.length === 0) {
       return {
         ok: true,
+        ...(advisory && { classification: "unverifiable", advisory }),
         details: {
           ...baseDetails,
           passed: passed.length,
@@ -281,19 +289,28 @@ export const DbtTestsPassValidator: Validator = {
       }
     }
 
-    const hintBlocks: TestRunOutput[] = [...failures, ...errored]
+    const errorHints = toolErrors.map(({ model, error }) => ({ model, error }))
+    const hintBlocks = failures.length > 0 ? failures : errorHints
+    const remediation = `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`
     const failingNames = failures.map((f) => f.model).filter(Boolean)
-    const erroredNames = errored.map((f) => f.model).filter(Boolean)
-    const reason =
-      failures.length > 0
-        ? `${failures.length} of ${results.length} models you edited have failing dbt tests${failingNames.length ? `: ${failingNames.join(", ")}` : ""}.`
-        : `${errored.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
+    const erroredNames = toolErrors.map((f) => f.model).filter(Boolean)
+    const describeFailure = (names: string[]) =>
+      names.length > 0
+        ? `${names.length} of ${results.length} models you edited have failing dbt tests: ${names.join(", ")}.`
+        : `${toolErrors.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
+    const strictFailures = failures.filter((result) => !result.error)
+    const ok = failures.length === 0 && errored.length === 0
     return {
-      ok: false,
-      reason,
-      fixHint:
-        formatFixHint(hintBlocks) +
-        `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`,
+      ok,
+      ...(ok && { strictFailure: true }),
+      classification: failures.length > 0 ? "finding" : advisory ? "unverifiable" : undefined,
+      advisory,
+      reason: describeFailure(failingNames),
+      fixHint: formatFixHint(hintBlocks) + remediation,
+      ...(failures.length > 0 && errorHints.length > 0 && {
+        strictReason: describeFailure(strictFailures.map((result) => result.model)),
+        strictFixHint: formatFixHint([...strictFailures, ...errorHints]) + remediation,
+      }),
       details: {
         ...baseDetails,
         passed: passed.length,
@@ -301,7 +318,7 @@ export const DbtTestsPassValidator: Validator = {
         errored: errored.length,
         spawn_failures: spawnFailures,
         failing_models: failingNames,
-        errored_models: erroredNames,
+        errored_models: errored.map((r) => r.model),
       },
     }
   },

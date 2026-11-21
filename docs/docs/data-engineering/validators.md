@@ -7,10 +7,12 @@ description: "Harness-side validators run after the agent declares done, catchin
 
 Validators are harness-side checks that run **after** the agent declares done.
 Unlike tools, they are not visible to the agent — the framework dispatches
-them automatically once the LLM emits `finishReason === "stop"`. If a
-validator fails, the framework injects a synthetic user turn with the
-failure body, giving the agent one more turn to fix the issue (bounded by
-a per-session retry budget).
+them automatically once the LLM emits `finishReason === "stop"`.
+With `ALTIMATE_VALIDATORS_ENABLED=1`, a confirmed finding gives the agent
+one more turn to fix the issue within the retry budget. An inconclusive
+check leaves a note in the next model request's context. Set
+`ALTIMATE_VALIDATORS_STRICT=1` to restore the previous retry policy.
+Shadow-only mode records results in telemetry without injecting messages.
 
 This catches a class of error that prompt engineering alone cannot: the
 agent claiming "done" while the work is actually broken (failing dbt
@@ -53,7 +55,8 @@ deterministic-validators work and are currently soak-tested in shadow mode
 
 After the agent declares done, runs `altimate-dbt test --model <name>`
 against every dbt model the agent modified during this session. Refuses
-to terminate if any model's tests fail or error.
+to terminate if a model's test run reports failures. If the test tool cannot
+return a usable result, the validator reports an advisory.
 
 **Catches**: row-data correctness errors (`relationships`, `unique`,
 `not_null`, `accepted_values`, `AUTO_*_equality` tests) — the kind of
@@ -66,7 +69,8 @@ counts.
 After the agent declares done, runs `altimate-dbt schema-verify --model
 <name>` on every modified model. Reports a mismatch if the produced
 column shape diverges from the `schema.yml` spec (extra, missing,
-reordered, or type-mismatched columns).
+reordered, or type-mismatched columns). If the schema verification tool
+cannot complete the check, the validator reports an advisory.
 
 **Catches**: column-level drift that wouldn't be caught by `dbt build`
 alone — equality tests against the spec would fail later but the
@@ -137,7 +141,7 @@ Two opt-in modes:
 
 | Env var | Effect |
 |---|---|
-| `ALTIMATE_VALIDATORS_ENABLED=1` | Full enforcement. Failing validators inject a synthetic user turn for the agent to fix (bounded by retries). |
+| `ALTIMATE_VALIDATORS_ENABLED=1` | Enforces findings within the retry budget and adds inconclusive checks as advisories. |
 | `ALTIMATE_VALIDATORS_SHADOW=1` | Telemetry-only. Validators run and emit `validator_check` events (with `enforced: false`), but do **not** block the session. Use this to measure "would have caught a real bug" rates against production traffic. |
 
 Set in your shell, your `~/.altimate-code/altimate-code.json`'s `env`
@@ -158,6 +162,7 @@ export ALTIMATE_VALIDATORS_SHADOW=1
 |---|---|---|
 | `ALTIMATE_VALIDATORS_ENABLED` | unset (off) | Master enforcement switch |
 | `ALTIMATE_VALIDATORS_SHADOW` | unset (off) | Telemetry-only mode |
+| `ALTIMATE_VALIDATORS_STRICT` | unset (off) | Set to `1` to restore the prior retry policy for inconclusive checks and suppress advisories. Requires enforcement mode. |
 | `ALTIMATE_VALIDATORS_MAX_RETRIES` | `3` | How many synthetic-message retries per session before giving up |
 | `ALTIMATE_VALIDATORS_TIMEOUT_MS` | `60000` | Per-subprocess kill timeout (NaN/0/negative falls back to default) |
 | `ALTIMATE_VALIDATORS_CONCURRENCY` | `4` | Max concurrent `altimate-dbt` subprocesses (clamped to `items.length`) |
@@ -186,7 +191,11 @@ minute of wall time.
 ## Telemetry
 
 When validators run (either mode), they emit one
-`validator_check` event per applied validator:
+`validator_check` event per applied validator. The optional `classification`
+field is `finding` or `unverifiable`. The `ok` field retains its legacy
+meaning. `enforced` is false for advisory-only results when
+`ALTIMATE_VALIDATORS_ENABLED=1` is set without
+`ALTIMATE_VALIDATORS_STRICT=1`.
 
 ```json
 {
@@ -221,8 +230,13 @@ When a validator runs, it returns:
 ```ts
 {
   ok: boolean
+  classification?: "finding" | "unverifiable"
+  advisory?: string    // what could not be checked and why
+  strictFailure?: true // preserves a legacy failure in strict mode
   reason?: string      // human-readable failure summary
   fixHint?: string     // the body injected into the synthetic user turn
+  strictReason?: string  // legacy failure summary in strict mode
+  strictFixHint?: string // legacy retry guidance in strict mode
   details: {
     models_touched: number
     dbt_root: string | null

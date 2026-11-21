@@ -293,6 +293,7 @@ export const DbtDialectGuardValidator: Validator = {
 
     return {
       ok: false,
+      classification: "finding",
       // Repository-derived model names reach a synthetic `role: "user"` turn
       // through dispatch; sanitized as in `dbt-build-green`.
       reason: `${findings.length} unguarded warehouse-specific construct(s) in ${byModel.size} model(s) you edited: ${Array.from(byModel.keys()).map((m) => sanitizeForPrompt(m, 80)).join(", ")}.`,

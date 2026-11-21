@@ -37,7 +37,7 @@ import { Bus } from "../bus"
 // altimate_change start - distinguish submitted requests from compaction-created user rows in the stream
 import { BusEvent } from "../bus/bus-event"
 import { Database, eq, sql } from "../storage/db"
-import { MessageTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 // altimate_change end
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
@@ -115,6 +115,7 @@ import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change end
 
 // altimate_change start - validator framework (see session/validators/types.ts header)
+import { ValidatorEnforcement } from "./validators/enforcement"
 import { ValidatorRegistry } from "./validators/registry"
 import { registerAltimateValidators } from "../altimate/validators"
 import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils"
@@ -900,6 +901,19 @@ export namespace SessionPrompt {
     let compactionCount = 0
     // altimate_change start — validator framework retry counter
     let validatorRetryCount = 0
+    const validatorStrict = process.env.ALTIMATE_VALIDATORS_STRICT === "1"
+    const validatorAdvisories =
+      process.env.ALTIMATE_VALIDATORS_ENABLED === "1" && !validatorStrict
+        ? await ValidatorEnforcement.loadAdvisories(sessionID)
+        : undefined
+    const saveValidatorAdvisories = () => {
+      if (!validatorAdvisories) return
+      // The validator may have awaited a subprocess while the session was deleted.
+      const exists = Database.use((db) =>
+        db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get(),
+      )
+      if (exists) ValidatorEnforcement.saveAdvisories(sessionID, validatorAdvisories)
+    }
     // altimate_change end
     let sessionAgentName = ""
     let sessionHadError = false
@@ -2229,6 +2243,12 @@ export namespace SessionPrompt {
       // altimate_change end
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
+      const advisoryContext =
+        validatorAdvisories?.pending.length &&
+        !echoCommittedAnswer &&
+        msgs.some((message) => message.info.id === lastUser.id && UserRequest.requestID(message) !== undefined)
+          ? ["Completion checks that could not be verified (advisory only):", ...validatorAdvisories.pending].join("\n")
+          : undefined
       // altimate_change end
       const result = await processor.process({
         user: lastUser,
@@ -2239,6 +2259,9 @@ export namespace SessionPrompt {
         abort,
         sessionID,
         system,
+        // altimate_change start — one-shot advisory context for the existing turn
+        uncachedTurnContext: advisoryContext,
+        // altimate_change end
         // altimate_change start — upstream_fix: append ambient context after the cached instructions
         environment: await SystemPrompt.environment(model),
         // altimate_change end
@@ -2283,6 +2306,14 @@ export namespace SessionPrompt {
           echoCommittedAnswer || textFinalStep ? "none" : format.type === "json_schema" ? "required" : undefined,
         // altimate_change end
       })
+
+      // altimate_change start — deliver advisory context at most once
+      if (validatorAdvisories && advisoryContext && processor.message.finish && !processor.message.error && !abort.aborted) {
+        validatorAdvisories.shown.push(...validatorAdvisories.pending.map(ValidatorEnforcement.advisoryFingerprint))
+        validatorAdvisories.pending = []
+        saveValidatorAdvisories()
+      }
+      // altimate_change end
 
       // altimate_change start - finalize buffered echoes before publishing any text to clients
       const stepParts = MessageV2.parts(processor.message.id)
@@ -2512,7 +2543,12 @@ export namespace SessionPrompt {
                 }),
             )
           }
-          const failures = checks.filter((c) => !c.result.ok)
+          const { failures, advisories, retry, exhausted } = ValidatorEnforcement.decide(checks, {
+            enabled: validatorsEnabled,
+            strict: validatorStrict,
+            retryCount: validatorRetryCount,
+            maxRetries: maxValidatorRetries,
+          })
 
           // Telemetry: emit one event per validator that ran, plus a session
           // rollup. Always emitted, even when the feature flag is off, so we
@@ -2533,22 +2569,36 @@ export namespace SessionPrompt {
               timestamp: Date.now(),
               session_id: sessionID,
               validator_name: validator.name,
-              ok: vRes.ok,
+              ok: vRes.ok && !vRes.strictFailure,
               step,
               retry_count: validatorRetryCount,
-              enforced: validatorsEnabled,
+              enforced: validatorsEnabled && (validatorStrict || vRes.classification !== "unverifiable"),
+              ...(vRes.classification && { classification: vRes.classification }),
               ...(vRes.details && { details: sanitizeTelemetryDetails(vRes.details) }),
             } as any)
           }
 
-          if (failures.length > 0 && validatorsEnabled && validatorRetryCount < maxValidatorRetries) {
+          if (validatorAdvisories) {
+            const additional = advisories.filter((note) =>
+              !validatorAdvisories.pending.includes(note) &&
+              !validatorAdvisories.shown.includes(ValidatorEnforcement.advisoryFingerprint(note)),
+            )
+            if (additional.length > 0) {
+              validatorAdvisories.pending.push(...new Set(additional))
+              saveValidatorAdvisories()
+            }
+          }
+
+          if (retry) {
             // Build a single synthetic user-turn body that aggregates every
             // failing validator's reason + fixHint. The agent sees this as
             // the next user message and gets one more turn to address it.
             const body = failures
               .map(({ validator, result: vRes }) => {
-                const head = `[altimate-validator: ${validator.name}] ${vRes.reason ?? "validation failed"}`
-                const tail = vRes.fixHint ? `\n${vRes.fixHint}` : ""
+                const reason = (validatorStrict ? vRes.strictReason : undefined) ?? vRes.reason
+                const head = `[altimate-validator: ${validator.name}] ${reason ?? "validation failed"}`
+                const hint = (validatorStrict ? vRes.strictFixHint : undefined) ?? vRes.fixHint
+                const tail = hint ? `\n${hint}` : ""
                 return head + tail
               })
               .join("\n\n")
@@ -2585,7 +2635,7 @@ export namespace SessionPrompt {
 
             validatorRetryCount++
             continue
-          } else if (failures.length > 0 && validatorsEnabled && validatorRetryCount >= maxValidatorRetries) {
+          } else if (exhausted) {
             // Retry budget exhausted with outstanding failures. Session will
             // terminate on the natural break below. Emit an explicit signal so
             // the operator dashboard can distinguish "completed cleanly" from

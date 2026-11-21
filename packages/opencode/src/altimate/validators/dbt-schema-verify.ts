@@ -156,7 +156,7 @@ function leadWithStaleManifestNote(results: SchemaVerifyOutput[], hint: string):
 export const DbtSchemaVerifyValidator: Validator = {
   name: "dbt-schema-verify",
   description:
-    "After the agent declares done, runs `altimate-dbt schema-verify` on every dbt model the agent modified during this session and refuses to terminate if any model's actual columns diverge from the schema.yml spec (extra, missing, reordered, or type-mismatched).",
+    "After the agent declares done, runs `altimate-dbt schema-verify` on every dbt model the agent modified during this session and refuses to terminate if any model's actual columns diverge from the schema.yml spec (extra, missing, reordered, or type-mismatched). Inconclusive checks are advisory by default.",
 
   async appliesTo(ctx: ValidatorContext): Promise<boolean> {
     // Only run for sessions that took place inside a dbt project. Quick check.
@@ -231,9 +231,7 @@ export const DbtSchemaVerifyValidator: Validator = {
       elapsed_ms: Date.now() - startedAt,
     }
 
-    // Fail closed: return ok only when every model was verified and none mismatched.
-    // Errors (spawn failures, schema-verify tool errors) prevent a clean pass because
-    // we cannot rule out drift on models we failed to inspect.
+    // Retain the legacy ok value for strict mode. Classification controls advisory mode.
     if (mismatches.length === 0 && errored === 0) {
       return { ok: true, details: baseDetails }
     }
@@ -244,6 +242,14 @@ export const DbtSchemaVerifyValidator: Validator = {
     // (set at push time), so the operator can see WHICH models couldn't be verified
     // instead of an anonymous count.
     const erroredNames = results.filter((r) => r.error).map((r) => r.model).filter(Boolean) as string[]
+    const advisoryNames = results.flatMap((result, index) =>
+      result.error ? [modelNameFromPath(touched[index]!)] : [],
+    )
+    const advisoryCause =
+      spawnFailures === errored ? "the schema verification subprocess did not start or returned no output"
+      : spawnFailures > 0 ? "the schema verification subprocess could not run or the tool failed"
+      : "the schema verification tool failed"
+
     const reason =
       mismatches.length > 0
         ? `${mismatches.length} of ${results.length} models you edited have a column-shape mismatch against schema.yml${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}. The build may be green, but equality tests will fail.`
@@ -252,6 +258,10 @@ export const DbtSchemaVerifyValidator: Validator = {
 
     return {
       ok: false,
+      classification: mismatches.length > 0 ? "finding" : "unverifiable",
+      advisory: errored > 0
+        ? `Could not verify the schema for ${errored} model(s) because ${advisoryCause}: ${advisoryNames.slice(0, 10).map((name) => sanitizeForPrompt(name.replace(/[^\w.-]/g, "?"), 80)).join(", ")}.`
+        : undefined,
       reason,
       fixHint: leadWithStaleManifestNote(
         results,

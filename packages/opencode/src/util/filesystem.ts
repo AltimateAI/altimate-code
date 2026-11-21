@@ -345,11 +345,12 @@ export namespace Filesystem {
    *
    * @param targetPath Destination path. Parent directory is created if missing.
    * @param value Value to serialize as JSON.
+   * @param mode Permissions for the new file, when explicitly set.
    */
-  export function writeJsonAtomic(targetPath: string, value: unknown): void {
+  export function writeJsonAtomic(targetPath: string, value: unknown, mode?: number): void {
     const tmpPath = `${targetPath}.tmp-${randomBytes(6).toString("hex")}`
     mkdirSync(dirname(targetPath), { recursive: true })
-    writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n")
+    writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", { mode })
     renameSync(tmpPath, targetPath)
   }
   // altimate_change end

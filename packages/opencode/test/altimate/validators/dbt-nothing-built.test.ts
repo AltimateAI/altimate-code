@@ -384,6 +384,17 @@ describe("run_results and inventory helpers", () => {
     expect(isFailedRunStatus("")).toBe(true)
   })
 
+  test("an unreadable manifest leaves a possible alias unverifiable", async () => {
+    await makeProject()
+    await writeModel("orders_fact")
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.\n")
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(join(dir, "target", "manifest.json"), "{ invalid")
+    const result = await DbtNothingBuiltValidator.check(ctxFuture())
+    expect(result).toMatchObject({ ok: false, classification: "unverifiable" })
+    expect(result.advisory).toContain("manifest.json")
+  })
+
   test("collectProducedNodeNames unions filesystem names and manifest aliases", async () => {
     await makeProject()
     await writeModel("stg_orders")

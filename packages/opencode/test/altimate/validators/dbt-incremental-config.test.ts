@@ -76,6 +76,7 @@ describe("DbtIncrementalConfigValidator — upsert without a key", () => {
     )
     const r = await DbtIncrementalConfigValidator.check(ctx())
     expect(r.ok).toBe(false)
+    expect(r.classification).toBe("finding")
     expect(r.fixHint).toContain("unique_key")
     expect((r.details!["findings"] as Array<{ kind: string }>)[0]!.kind).toBe(
       "upsert-without-unique-key",

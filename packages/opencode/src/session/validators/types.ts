@@ -22,10 +22,9 @@
  *     framework is generic. The dispatch hook lives in the session step loop
  *     (prompt.ts); registered validators are evaluated when `finishReason`
  *     resolves to a non-tool stop.
- *   - A failed validator does not throw. It returns `{ok: false, ...}` and the
- *     framework inserts a synthetic user message describing the gap. The loop
- *     continues with that message in context; the model gets one more turn to
- *     fix the issue. A retry budget prevents runaway loops.
+ *   - A finding uses the retry budget to give the model another turn to fix
+ *     the issue. An unverifiable check adds an advisory to the next ordinary
+ *     request. Strict mode restores the previous enforcement policy.
  *
  * Generalisable: this is not a dbt-specific change. The hook fires for every
  * session regardless of workload; per-validator `appliesTo()` decides whether
@@ -66,8 +65,18 @@ export interface ValidatorContext {
  * Result of running a validator against a session context.
  */
 export interface ValidatorResult {
-  /** `true` means the agent's work passes this check. */
+  /** A pass has `ok: true`; a failed or inconclusive check can return `ok: false`. */
   ok: boolean
+
+  /** A legacy failure retained solely for the strict-mode control policy. */
+  strictFailure?: true
+
+  /** A failed result with no classification or with `finding` can spend a retry.
+   * `unverifiable` is advisory unless `ALTIMATE_VALIDATORS_STRICT=1`. */
+  classification?: "finding" | "unverifiable"
+
+  /** A prompt-safe description of what could not be checked and why. May accompany a finding. */
+  advisory?: string
 
   /** Short human-readable explanation of what's wrong. Surfaced in the
    *  synthetic user message; should fit on one or two lines. */
@@ -76,6 +85,12 @@ export interface ValidatorResult {
   /** Concrete next step the agent should take. Surfaced in the synthetic
    *  message verbatim. */
   fixHint?: string
+
+  /** Overrides the reason in strict mode when prior diagnostics must be preserved. */
+  strictReason?: string
+
+  /** Overrides the fix hint in strict mode when prior diagnostics must be preserved. */
+  strictFixHint?: string
 
   /** Structured detail for telemetry; not surfaced to the agent unless the
    *  validator explicitly includes it in `reason`/`fixHint`. */

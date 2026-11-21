@@ -47,6 +47,7 @@ import { normalizeBigInts } from "@/altimate/util/json"
 import { randomUUIDv7 } from "bun"
 import { Bus } from "@/bus"
 import { LLMRequestEvent } from "@/altimate/observability/tracing"
+import { TurnContext } from "./turn-context"
 // altimate_change end
 // altimate_change start — run deadlines override reasoning effort for each remaining request
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
@@ -74,6 +75,9 @@ export namespace LLM {
     system: string[]
     // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
     environment?: string[]
+    // altimate_change end
+    // altimate_change start — per-request context excluded from prompt cache breakpoints
+    uncachedTurnContext?: string
     // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
@@ -360,7 +364,7 @@ export namespace LLM {
       }),
       inputTokens: () =>
         estimateInputTokens({
-          system,
+          system: input.uncachedTurnContext ? [...system, input.uncachedTurnContext] : system,
           messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
           tools,
           instructions: params.options.instructions,
@@ -397,6 +401,7 @@ export namespace LLM {
             ...system,
             ...input.messages.filter((message) => message.role === "system").map((message) => message.content),
           ].join("\n\n"),
+          uncachedTurnContext: input.uncachedTurnContext,
           instructions: typeof requestOptions.instructions === "string" ? requestOptions.instructions : undefined,
           tools: await Promise.all(
             Object.entries(tools)
@@ -498,6 +503,11 @@ export namespace LLM {
                 // altimate_change start — transform messages with the reconciled reasoning options
                 // @ts-expect-error
                 args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, requestOptions)
+                // altimate_change end
+                // altimate_change start — append advisory context after the normal cache breakpoints
+                if (input.uncachedTurnContext) {
+                  args.params.prompt.push(TurnContext.make(input.uncachedTurnContext))
+                }
                 // altimate_change end
               }
               return args.params
