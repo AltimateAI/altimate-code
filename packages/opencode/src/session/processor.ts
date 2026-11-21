@@ -1359,6 +1359,12 @@ export namespace SessionProcessor {
                 !input.abort.aborted &&
                 input.assistantMessage.finish !== "content-filter"
               refusedBeforeSend = compactable === true && isContextBudgetError(e)
+              if (refusedBeforeSend)
+                log.warn("pre-send context budget refusal; compacting before retrying", {
+                  sessionID: input.sessionID,
+                  providerID: input.model.providerID,
+                  modelID: input.model.id,
+                })
               const error =
                 refusedBeforeSend || (echoRecovery && isContextBudgetError(e))
                 ? new MessageV2.ContextOverflowError(

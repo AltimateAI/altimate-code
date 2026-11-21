@@ -8,12 +8,13 @@
  * "Context budget exceeded before the request was sent" without compaction ever running.
  */
 import { describe, expect, test } from "bun:test"
+import { APICallError } from "ai"
+import { MessageV2 } from "../../src/session/message-v2"
 import path from "node:path"
 import { Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
-import type { MessageV2 } from "../../src/session/message-v2"
 import { Token } from "../../src/util/token"
 import { SessionSummary } from "../../src/session/summary"
 import { MessageID, PartID } from "../../src/session/schema"
@@ -635,4 +636,17 @@ describe("calibration tail", () => {
       Token.estimate("y".repeat(9_000)),
     )
   })
+})
+
+test("an input-plus-reservation overflow from the provider is a context overflow (reactive compaction)", () => {
+  const error = new APICallError({
+    message:
+      "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again",
+    url: "https://example.com",
+    requestBodyValues: {},
+    statusCode: 400,
+    responseHeaders: { "content-type": "application/json" },
+    isRetryable: false,
+  })
+  expect(MessageV2.ContextOverflowError.isInstance(MessageV2.fromError(error, { providerID: "p" as any }))).toBe(true)
 })

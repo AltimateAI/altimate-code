@@ -60,6 +60,10 @@ export namespace ProviderError {
     /request entity too large/i, // HTTP 413
     /the request was too long/i, // Azure OpenAI
     /maximum tokens for requested operation/i, // Azure OpenAI
+    // altimate_change start — input plus the output reservation over the window is an overflow too:
+    // compaction makes room for the reservation
+    /input length and `?max_tokens`? exceed context limit/i,
+    // altimate_change end
   ]
 
   function isOpenAiErrorRetryable(e: APICallError) {
