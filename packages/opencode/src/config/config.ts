@@ -51,6 +51,14 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
+// altimate_change start — keep telemetry off when an organization config was unavailable
+const configsWithUnresolvedOrg = new WeakSet<Info>()
+
+export function telemetryConfigUnresolved(config: Info): boolean {
+  return configsWithUnresolvedOrg.has(config)
+}
+// altimate_change end
+
 // altimate_change start — bootstrap can inspect config already loaded by service initialization
 // without introducing another asynchronous dependency for opted-out learning capture.
 const loadedConfig = new Map<string, Info>()
@@ -683,6 +691,9 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
+        // altimate_change start — preserve resolution status for the telemetry opt-out gate
+        let orgConfigUnresolved = false
+        // altimate_change end
         const activeAccount = Option.getOrUndefined(
           yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
         )
@@ -716,11 +727,14 @@ export const layer = Layer.effect(
             }
           }).pipe(
             Effect.withSpan("Config.loadActiveOrgConfig"),
-            Effect.catch((err) =>
-              Effect.logDebug("failed to fetch remote account config", {
+            // altimate_change start — telemetry must distinguish a partial config from a successful load
+            Effect.catch((err) => {
+              orgConfigUnresolved = true
+              return Effect.logDebug("failed to fetch remote account config", {
                 error: err instanceof Error ? err.message : String(err),
-              }),
-            ),
+              })
+            }),
+            // altimate_change end
           )
         }
 
@@ -891,6 +905,10 @@ export const layer = Layer.effect(
             overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),
           )
         }
+        // altimate_change end
+
+        // altimate_change start — associate the status with this resolved config object
+        if (orgConfigUnresolved) configsWithUnresolvedOrg.add(result)
         // altimate_change end
 
         return {

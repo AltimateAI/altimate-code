@@ -47,12 +47,30 @@ function worktreeOf(directory: string): string | undefined {
   }
 }
 
+export function disablingEnvironmentVariable(): string | undefined {
+  return ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY", "ALTIMATE_CLI_DISABLE_TELEMETRY"].find((key) =>
+    /^(true|1)$/i.test(process.env[key] ?? ""),
+  )
+}
+
+async function hasWellKnownSource(): Promise<boolean> {
+  let contents = process.env.OPENCODE_AUTH_CONTENT
+  if (!contents) {
+    try {
+      contents = await fs.readFile(Auth.filepath(), "utf8")
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
+      throw error
+    }
+  }
+  const entries = JSON.parse(contents) as Record<string, { type?: string } | null>
+  return Object.values(entries).some((entry) => entry?.type === "wellknown")
+}
+
 // The well-known config merges before local files, while an active organization's config can
 // override them. Inspect only local credentials and account state; never fetch config here.
 async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
-  if (local === undefined && Object.values(await Auth.all()).some((entry) => entry?.type === "wellknown")) {
-    return true
-  }
+  if (local === undefined && (await hasWellKnownSource())) return true
 
   // No on-disk account state to inspect. Avoid opening or creating a database on a fresh install.
   const dbPath = Database.path()

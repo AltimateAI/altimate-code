@@ -9,7 +9,6 @@ import { Telemetry } from "../telemetry"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
-import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
 // altimate_change — reads the config telemetry opt-out without an Instance
@@ -80,17 +79,12 @@ const log = Log.create({ service: "altimate-plugin" })
 /** `directory`: the project the command acts on, whose config may opt out; the process's working
  * directory when the command has none (`auth login`). */
 export async function buildCliContext(machineIdPath?: string, directory?: string): Promise<string> {
-  // altimate_change start — honour both telemetry opt-out gates, mirroring
-  // telemetry/index.ts::doInit:
-  //   1. ALTIMATE_TELEMETRY_DISABLED / OPENCODE_DISABLE_TELEMETRY env vars
-  //      ("true"/"TRUE"/"1", case-insensitive — see Flag.truthyEnv)
-  //   2. config.telemetry.disabled (resolved via the async Config.get())
-  let disabled =
-    Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")
+  // altimate_change start — apply the same opt-out to the auth URL’s machine ID
+  let disabled = Boolean(TelemetryConfig.disablingEnvironmentVariable())
   if (!disabled) {
     try {
-      const userConfig = (await Config.get()) as any
-      disabled = Boolean(userConfig.telemetry?.disabled)
+      const userConfig = await Config.get()
+      disabled = userConfig.telemetry?.disabled === true || Config.telemetryConfigUnresolved(userConfig)
     } catch (err) {
       // Config was unreadable — NOT the normal path. Server routes run inside
       // Instance.provide() (AsyncLocalStorage-propagated across awaits), so

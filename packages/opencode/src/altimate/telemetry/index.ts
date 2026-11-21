@@ -2527,10 +2527,9 @@ export namespace Telemetry {
 
   async function doInit() {
     try {
-      // altimate_change — accept "true"/"TRUE"/"1" (case-insensitive) via truthyEnv,
-      // and honor the OPENCODE_DISABLE_TELEMETRY fallback promised by v0.9.4's CHANGELOG
-      // (previously only wired in test fixtures, silent no-op in product).
-      if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
+      // altimate_change — ALTIMATE_TELEMETRY_DISABLED and either spelling of the legacy opt-out
+      // act independently, so a false alias cannot override a truthy opt-out.
+      if (TelemetryConfig.disablingEnvironmentVariable()) {
         buffer = []
         return
       }
@@ -2540,7 +2539,7 @@ export namespace Telemetry {
       let disabled: boolean
       try {
         const userConfig = (await Config.get())
-        disabled = userConfig.telemetry?.disabled === true
+        disabled = userConfig.telemetry?.disabled === true || Config.telemetryConfigUnresolved(userConfig)
       } catch {
         disabled = (await TelemetryConfig.disabledState(configDirectory)) !== "enabled"
       }
@@ -2671,11 +2670,11 @@ export namespace Telemetry {
    * Does nothing while telemetry is disabled. */
   export async function refreshIdentity(): Promise<void> {
     // Opted out (or not initialised): no lookup; an enabled init resolves from the stored credential.
-    if (!enabled) return
+    if (!enabled || shutdownPromise) return
     // A refresh queued behind a flush belongs to the init that started it.
     const startedUnder = initPromise
     await flush()
-    if (!enabled || initPromise !== startedUnder) return
+    if (!enabled || shutdownPromise || initPromise !== startedUnder) return
     identity = undefined
     await resolveIdentity({ refresh: true })
   }

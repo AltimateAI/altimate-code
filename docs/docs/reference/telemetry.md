@@ -182,9 +182,9 @@ You can also set the environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
-`OPENCODE_DISABLE_TELEMETRY` is also supported. Both variables accept `1` or `true` (case-insensitive).
+`ALTIMATE_CLI_DISABLE_TELEMETRY` and `OPENCODE_DISABLE_TELEMETRY` are also supported. Each variable accepts `1` or `true` (case-insensitive).
 
-When either variable or `telemetry.disabled: true` disables telemetry, the CLI makes zero usage telemetry requests. That includes startup, sessions, error reporting, shutdown, and the account lookup used to identify telemetry events. This applies even if the CLI has sent telemetry before. If startup cannot determine the config setting, it suppresses telemetry. This includes startup before a configured remote source that could set the flag has been loaded.
+When any of these variables or `telemetry.disabled: true` disables telemetry, the CLI makes zero usage telemetry requests. That includes startup, sessions, error reporting, shutdown, and the account lookup used to identify telemetry events. This applies even if the CLI has sent telemetry before. If startup cannot determine the config setting, it suppresses telemetry. This includes startup before a configured remote source that could set the flag has been loaded.
 
 ### Test runs are excluded
 
@@ -202,7 +202,7 @@ Two escape hatches exist for reporting from a test run deliberately:
   is always honoured, which is how the project's own telemetry tests work.
 - Set `ALTIMATE_TELEMETRY_FORCE=true` to use the default endpoint anyway.
 
-Both environment opt-outs and the config opt-out take precedence over these settings.
+The environment opt-outs and the config opt-out take precedence over these settings.
 
 ## Privacy
 

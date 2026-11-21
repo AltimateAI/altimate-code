@@ -183,7 +183,7 @@ No code, queries, file paths, or personal information is included. This event he
 
 The install scripts (`altimate.sh/install`, `install.ps1`), the npm postinstall, and the VS Code extension's installer send nothing themselves and contact no telemetry endpoint. They only record the version and installer name to a local file that the CLI reads on its next run, so the opt-out above decides whether anything is ever transmitted.
 
-The CLI sends zero usage telemetry requests when `ALTIMATE_TELEMETRY_DISABLED` or `OPENCODE_DISABLE_TELEMETRY` is set to `1` or `true` (case-insensitive), or when `telemetry.disabled` is `true` in config. This also covers first launch and shutdown. If startup cannot determine the config setting, it suppresses telemetry.
+The CLI sends zero usage telemetry requests when `ALTIMATE_TELEMETRY_DISABLED`, `ALTIMATE_CLI_DISABLE_TELEMETRY`, or `OPENCODE_DISABLE_TELEMETRY` is set to `1` or `true` (case-insensitive), or when `telemetry.disabled` is `true` in config. This also covers first launch and shutdown. If startup cannot determine the config setting, it suppresses telemetry.
 
 ## What happens when I authenticate via a well-known URL?
 

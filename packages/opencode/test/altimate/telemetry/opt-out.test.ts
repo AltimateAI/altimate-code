@@ -16,6 +16,9 @@ const ENV = [
   "OPENCODE_DISABLE_TELEMETRY",
   "ALTIMATE_TELEMETRY_FORCE",
   "OPENCODE_CONFIG_CONTENT",
+  "ALTIMATE_CLI_CONFIG_CONTENT",
+  "ALTIMATE_CLI_DISABLE_TELEMETRY",
+  "OPENCODE_AUTH_CONTENT",
 ] as const
 
 describe("telemetry opt-out", () => {
@@ -23,6 +26,7 @@ describe("telemetry opt-out", () => {
   let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>
   let configSpy: ReturnType<typeof spyOn<typeof Config, "get">>
   let homedirSpy: ReturnType<typeof spyOn<typeof os, "homedir">>
+  let authFileSpy: ReturnType<typeof spyOn<typeof Auth, "filepath">>
   let authSpy: ReturnType<typeof spyOn<typeof Auth, "get">>
   const saved: Record<string, string | undefined> = {}
 
@@ -48,6 +52,7 @@ describe("telemetry opt-out", () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = CS
     Telemetry.setConfigDirectory(home)
     homedirSpy = spyOn(os, "homedir").mockReturnValue(home)
+    authFileSpy = spyOn(Auth, "filepath").mockReturnValue(path.join(home, "auth.json"))
     authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
     configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
     fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(new Error("Telemetry must not invoke the transport"))
@@ -59,6 +64,7 @@ describe("telemetry opt-out", () => {
     fetchSpy.mockRestore()
     configSpy.mockRestore()
     homedirSpy.mockRestore()
+    authFileSpy.mockRestore()
     authSpy.mockRestore()
     for (const key of ENV) {
       if (saved[key] === undefined) delete process.env[key]
@@ -114,10 +120,16 @@ describe("telemetry opt-out", () => {
     expect(enabled).toBe(false)
   }
 
-  test.each(["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
+  test.each(["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY", "ALTIMATE_CLI_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
     process.env[key] = "1"
     await expectSilentLifecycle()
     // A later launch must also stay silent with the same existing machine ID.
+    await expectSilentLifecycle()
+  })
+
+  test("a false canonical alias cannot override the legacy opt-out", async () => {
+    process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = "false"
+    process.env.OPENCODE_DISABLE_TELEMETRY = "1"
     await expectSilentLifecycle()
   })
 
@@ -139,13 +151,24 @@ describe("telemetry opt-out", () => {
   })
 
   test("a configured well-known source suppresses telemetry until full config is available", async () => {
-    const auth = spyOn(Auth, "all").mockResolvedValue({
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
       "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
     })
+    await expectSilentLifecycle()
+  })
+
+  test("an unreadable auth store does not rule out a well-known opt-out", async () => {
+    writeFileSync(Auth.filepath(), "{")
+    await expectSilentLifecycle()
+  })
+
+  test("a partial config cannot enable telemetry after an organization config load failed", async () => {
+    configSpy.mockResolvedValue({} as Awaited<ReturnType<typeof Config.get>>)
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
     try {
       await expectSilentLifecycle()
     } finally {
-      auth.mockRestore()
+      unresolved.mockRestore()
     }
   })
 
