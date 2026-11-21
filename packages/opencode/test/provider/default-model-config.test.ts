@@ -24,7 +24,7 @@ it.instance(
       if (Exit.isFailure(exit)) {
         expect(Cause.squash(exit.cause)).toMatchObject({
           name: "ProviderModelNotFoundError",
-          data: { providerID: "missing-provider", modelID: "missing-model" },
+          data: { providerID: "missing-provider", modelID: "missing-model", source: "project or global config (model)" },
         })
       }
     }),
