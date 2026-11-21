@@ -13,6 +13,7 @@ import {
   runAiVerify,
   toolsChars,
   verifierTools,
+  isCredentialPath,
   type AiVerifyEvidence,
   type VerifierLlm,
   type VerifierStep,
@@ -868,7 +869,7 @@ describe("runAiVerify: the bounded tool loop", () => {
     await verify([aiFinding()], llm)
     const [secret, traversal, parent, bySuffix, downstreamOld] = toolResults(calls[1])
     expect(secret).toBe(
-      "not available: outside review scope (changed files, their dbt parents and direct downstream models only)",
+      "not available: outside review scope (files the PR changes, their dbt parents and direct downstream models only)",
     )
     expect(traversal).toStartWith("not available: outside review scope")
     expect(parent).toBe("1: select id as order_id, amount_cents from raw.orders")
@@ -1049,6 +1050,52 @@ describe("runAiVerify: the bounded tool loop", () => {
       Object.entries(defs).map(([n, d]) => [n, tool({ description: d.description, inputSchema: d.input })]),
     )
     expect(toolsChars(tools as any)).toBeLessThan(3_000)
+  })
+
+  test("read_file opens any file the PR changes, outside the dbt project too", async () => {
+    const read: string[] = []
+    const defs = verifierTools(
+      evidence({
+        prFiles: ["models/fct.sql", "packages/transform/tests/unit/test_override.py"],
+        readFile: async (p) => (read.push(p), "1: def test_x(): ..."),
+      }),
+    )
+    expect(await defs.read_file.run({ path: "packages/transform/tests/unit/test_override.py" })).toBe("1: def test_x(): ...")
+    expect(await defs.read_file.run({ path: "other/secret.py" })).toStartWith("not available: outside review scope")
+    expect(read).toEqual(["packages/transform/tests/unit/test_override.py"])
+  })
+
+  test("credential files the PR changes stay unreadable, whatever lists them, and never show in grep hits", async () => {
+    const read: string[] = []
+    const secrets = ["config/profiles.yml", "dbt/.env", "infra/prod.tfvars", "certs/client.pem", "profiles.yaml"]
+    const defs = verifierTools(
+      evidence({
+        prFiles: ["models/fct.sql", ...secrets],
+        addedLines: new Map([["config/profiles.yml", new Set([1])]]),
+        readFile: async (p) => (read.push(p), "1: password: hunter2"),
+        grepProject: async () => [
+          { path: "config/profiles.yml", line: 3, text: "password: hunter2" },
+          { path: "models/fct.sql", line: 1, text: "select password_hash" },
+        ],
+      }),
+      { parents: [{ name: "profiles", kind: "model", path: "profiles.yaml" }], downstream: [] } as any,
+    )
+    for (const p of [...secrets, "profiles.yml"]) expect(await defs.read_file.run({ path: p })).toStartWith("not available: outside review scope")
+    expect(read).toEqual([])
+    expect(await defs.grep_project.run({ pattern: "password" })).toBe("models/fct.sql:1: select password_hash")
+    expect(isCredentialPath("models/profiles_summary.sql")).toBe(false)
+    expect(isCredentialPath("models/env.yml")).toBe(false)
+  })
+
+  test("a test-coverage candidate lists the PR's files; other candidates don't", () => {
+    const files = ["models/fct.sql", "tests/unit/test_override.py"]
+    const gap = buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding({ category: "test_coverage" }), diff: DIFF }], files)
+    expect(gap).toContain("Files this PR changes (read_file can open any of them):\n- models/fct.sql\n- tests/unit/test_override.py")
+    const other = buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding(), diff: DIFF }], files)
+    expect(other).not.toContain("Files this PR changes")
+    expect(buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding(), diff: DIFF }])).toBe(
+      buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding(), diff: DIFF }], []),
+    )
   })
 
   test("verifierTools: equivalence needs a base side; grain needs the engine; grep needs 2 chars", async () => {

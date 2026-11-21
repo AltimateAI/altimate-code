@@ -1646,6 +1646,30 @@ describe("join predicate repeated from an earlier join", () => {
     const same = body.replace("'app'", "'web'")
     expect(redundant(same, ["inner join b on b.id = p.id and p.platform = 'web'"])).toHaveLength(1)
   })
+  test("a cross join with an alias in the chain keeps the chain", () => {
+    const body = [
+      "select * from claims as c",
+      "inner join months as m on c.month_id = m.month_id",
+      "cross join params as p",
+      "left join assigned as a",
+      "    on a.person_id = c.person_id",
+      "    and m.month_id = c.month_id",
+    ].join("\n")
+    expect(redundant(body, ["    and m.month_id = c.month_id"])).toHaveLength(1)
+    const bare = body.replace("cross join params as p", "cross join params")
+    expect(redundant(bare, ["    and m.month_id = c.month_id"])).toHaveLength(1)
+  })
+  test("twin: after a cross join, a predicate on the new relation is silent", () => {
+    const body = [
+      "select * from claims as c",
+      "inner join months as m on c.month_id = m.month_id",
+      "cross join params as p",
+      "left join assigned as a",
+      "    on a.person_id = c.person_id",
+      "    and a.month_id = c.month_id",
+    ].join("\n")
+    expect(redundant(body, ["    and a.month_id = c.month_id"])).toHaveLength(0)
+  })
   test("the same predicate in a separate query (another CTE) is not the same join chain", () => {
     const body = [
       "with x as (select * from e join a on e.region = a.target_region),",

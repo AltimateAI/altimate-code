@@ -120,6 +120,13 @@ describe("rubric", () => {
     expect(exclusionReason(f, DEFAULT_RUBRIC)).toContain("non-prod")
   })
 
+  test("exclusion: a finding that breaks dbt parse is kept in a scratch folder", () => {
+    for (const rule of ["dbt-project-rules:yaml-parse-error", "dbt-project-rules:doc-block-missing"]) {
+      const f = makeFinding({ severity: "warning", category: "sql_correctness", title: "parse", body: "x", file: "models/base/scratch/base.yml", ruleKey: "parse", rule })
+      expect(exclusionReason(f, DEFAULT_RUBRIC)).toBeNull()
+    }
+  })
+
   test("exclusion: SELECT * allowed in staging", () => {
     const f = makeFinding({
       severity: "suggestion",

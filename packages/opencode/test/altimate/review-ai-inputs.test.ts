@@ -7,7 +7,10 @@ import {
   aiInputBudget,
   batchAiFiles,
   buildUserMessage,
+  dedupAiFindings,
   excerptDiff,
+  groupAiFiles,
+  packFocusedBatches,
   excerptFile,
   laneUsage,
   planAiInput,
@@ -207,6 +210,27 @@ describe("files sent to the advisory AI lane", () => {
   test("deleted files are not sent", async () => {
     const input = await aiInputFor([mod("models/marts/m.sql"), { path: "macros/old.sql", status: "deleted", diff: "-x\n" }])
     expect(input?.files.some((f) => f.path === "macros/old.sql")).toBe(false)
+  })
+
+  test("PR files the user excluded, or build output, are neither listed nor readable by the verifier", async () => {
+    let seen: AiReviewInput | undefined
+    await runReview({
+      changedFiles: [mod("models/marts/m.sql")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: { ...DEFAULT_RUBRIC, exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["secrets/**"] } },
+      mode: "comment",
+      runner,
+      aiVerify: true,
+      getContent: async (f, side) => (side === "old" ? undefined : FILES[f]),
+      generatedAt: "2026-11-14T00:00:00Z",
+      prFiles: ["models/marts/m.sql", "secrets/key.sql", "target/run/m.sql", "tests/unit/test_m.py"],
+      aiReview: async (input) => {
+        seen = input
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    expect(seen?.prFiles).toEqual(["models/marts/m.sql", "tests/unit/test_m.py"])
+    expect(seen?.evidence?.prFiles).toEqual(["models/marts/m.sql", "tests/unit/test_m.py"])
   })
 })
 
@@ -446,8 +470,9 @@ describe("verifier evidence (opt-in)", () => {
     evidence: { tool: "ai-review", result: { confidence: "medium" } },
     rule: "ai-review:sql-correctness",
   }
-  const run = (aiVerify: boolean | undefined, seen: { input?: AiReviewInput }) =>
+  const run = (aiVerify: boolean | undefined, seen: { input?: AiReviewInput }, prFiles?: string[]) =>
     runReview({
+      ...(prFiles ? { prFiles } : {}),
       changedFiles: [mod("models/marts/m.sql", "@@ -1 +1 @@\n-select 1 as id\n+select 2 as id\n")],
       config: { ...DEFAULT_REVIEW_CONFIG },
       rubric: DEFAULT_RUBRIC,
@@ -486,6 +511,13 @@ describe("verifier evidence (opt-in)", () => {
     expect([...ev.addedLines.get("models/marts/m.sql")!]).toEqual([1])
     expect(ev.files.map((f) => f.path)).toEqual(["models/marts/m.sql"])
     expect(ev.dialect).toBe(DEFAULT_REVIEW_CONFIG.dialect)
+  })
+
+  test("the PR file list given to the lane and the verifier drops credential files", async () => {
+    const seen: { input?: AiReviewInput } = {}
+    await run(true, seen, ["models/marts/m.sql", "config/profiles.yml", ".env", "tests/test_m.py"])
+    expect(seen.input!.evidence!.prFiles).toEqual(["models/marts/m.sql", "tests/test_m.py"])
+    expect(seen.input!.prFiles).toEqual(["models/marts/m.sql", "tests/test_m.py"])
   })
 })
 
@@ -965,5 +997,196 @@ describe("review feedback: input planning and card resolution", () => {
     await attachContextCards(files, { ...r, graphParents: async () => [] })
     expect(files[0].card).toContain("model `orders`: materialized: table")
     expect(files[1].card).toContain("seed `countries`")
+  })
+})
+
+describe("focused batches for large PRs (opt-in ALTIMATE_REVIEW_AI_FOCUSED=1)", () => {
+  const FOCUSED = { ALTIMATE_REVIEW_AI_FOCUSED: "1" }
+  const file = (path: string, kind = "model_sql", sql = "select 1", model?: string): AiReviewFile => ({
+    path,
+    status: "modified",
+    kind,
+    model: model ?? path.split("/").pop()!.replace(/\.\w+$/, ""),
+    diff: "+x\n",
+    sql,
+  })
+  const paths = (groups: AiReviewFile[][]) => groups.map((g) => g.map((f) => f.path))
+  const tenFiles = () => {
+    const base = defaultPromptInput()
+    return { ...base, files: base.files.slice(0, 10) }
+  }
+
+  test("FOCUSED unset: batches and messages are today's, with and without coverage", () => {
+    const input = tenFiles()
+    for (const env of [{}, { ALTIMATE_REVIEW_AI_BATCH_CHARS: "3000" }, { ALTIMATE_REVIEW_AI_COVERAGE: "1" }]) {
+      const plan = planAiInput(input, env)
+      expect(plan.focused).toBe(false)
+      expect(plan.batches).toEqual(batchAiFiles(plan.files, plan.budget))
+      expect(plan.messages).toEqual(
+        plan.batches.map((b) => buildUserMessage({ ...input, files: b }, plan.budget.maxFileChars, plan.budget.coverage)),
+      )
+      expect(plan.input.some((r) => "batch" in r)).toBe(false)
+    }
+    // Coverage-only messages pinned before focused batching existed.
+    const envs = [{ ALTIMATE_REVIEW_AI_COVERAGE: "1" }, { ALTIMATE_REVIEW_AI_COVERAGE: "1", ALTIMATE_REVIEW_AI_BATCH_CHARS: "3000" }]
+    const snapshot = readFileSync(path.join(import.meta.dir, "fixtures/review-ai-prompt-coverage.txt"), "utf8")
+    expect(envs.flatMap((env) => planAiInput(input, env).messages).join("\n=====BATCH=====\n")).toBe(snapshot)
+    expect(planAiInput(input, { ...envs[0], ...FOCUSED }).focused).toBe(true)
+  })
+
+  test("a macro, its adapter variants and a file dispatching to it form one group", () => {
+    const groups = groupAiFiles([
+      file("macros/a/default__hash.sql", "macro", "{% macro default__hash(c) %}md5({{ c }}){% endmacro %}"),
+      file("models/x/m1.sql"),
+      file("macros/b/snowflake__hash.sql", "macro", "{%- macro snowflake__hash(c) -%}sha2({{ c }}){%- endmacro -%}"),
+      file("macros/c/hash.sql", "macro", "{% macro hash(c) %}{{ return(adapter.dispatch('hash', 'pkg')(c)) }}{% endmacro %}"),
+      file("models/y/m2.sql"),
+    ])
+    expect(paths(groups)).toEqual([
+      ["macros/a/default__hash.sql", "macros/b/snowflake__hash.sql", "macros/c/hash.sql"],
+      ["models/x/m1.sql"],
+      ["models/y/m2.sql"],
+    ])
+    // Without content, macro names come from the diff's added lines.
+    const fromDiff = groupAiFiles([
+      { path: "macros/p/postgres__k.sql", status: "added", kind: "macro", model: "postgres__k", diff: "+{% macro postgres__k() %}1{% endmacro %}\n" },
+      { path: "macros/q/default__k.sql", status: "added", kind: "macro", model: "default__k", diff: "+{% macro default__k() %}1{% endmacro %}\n" },
+    ])
+    expect(fromDiff).toHaveLength(1)
+  })
+
+  test("ref edges: a singular test joins the model it tests (package arg: the last string)", () => {
+    const groups = groupAiFiles([
+      file("models/marts/orders.sql"),
+      file("models/staging/stg_x.sql"),
+      file("tests/assert_orders.sql", "test", "select * from {{ ref(\"orders\") }} where amount < 0"),
+      file("models/other/uses_pkg.sql", "model_sql", "select * from {{ ref('pkg', 'stg_x') }}"),
+    ])
+    expect(paths(groups)).toEqual([
+      ["models/marts/orders.sql", "tests/assert_orders.sql"],
+      ["models/staging/stg_x.sql", "models/other/uses_pkg.sql"],
+    ])
+  })
+
+  test("a schema yml joins the models it declares", () => {
+    const groups = groupAiFiles([
+      file("models/marts/orders.sql"),
+      file("models/staging/stg.sql"),
+      file("models/schema/_core.yml", "schema_yml", "version: 2\nmodels:\n  - name: orders\n    columns:\n      - name: id\n"),
+    ])
+    expect(paths(groups)).toEqual([["models/marts/orders.sql", "models/schema/_core.yml"], ["models/staging/stg.sql"]])
+  })
+
+  test("files with no edge group by directory", () => {
+    const groups = groupAiFiles([
+      file("models/a/x.sql"),
+      file("models/b/y.sql"),
+      file("models/a/z.sql"),
+      file("models/c/p.sql"),
+      file("models/c/q.sql", "model_sql", "select * from {{ ref('p') }}"),
+      file("models/c/r.sql"),
+    ])
+    // p and q are linked by ref, so r (edge-less) stays alone despite sharing their directory.
+    expect(paths(groups)).toEqual([["models/a/x.sql", "models/a/z.sql"], ["models/b/y.sql"], ["models/c/p.sql", "models/c/q.sql"], ["models/c/r.sql"]])
+  })
+
+  test("a 12-file group splits into chunks of 5/5/2 and no chunk is split across calls", () => {
+    const big = Array.from({ length: 12 }, (_, i) => file(`models/big/m${i}.sql`))
+    const small = [file("models/s/a.sql"), file("models/s/b.sql"), file("models/s/c.sql"), file("models/s/d.sql")]
+    const budget = aiInputBudget(FOCUSED)
+    const batches = packFocusedBatches([big, small], budget)
+    expect(batches.map((b) => b.length)).toEqual([5, 5, 2, 4])
+    expect(paths(batches)[2]).toEqual(["models/big/m10.sql", "models/big/m11.sql"])
+    expect(batches.every((b) => b.length <= 5)).toBe(true)
+    // The 2-file chunk and a 3-file group share a call; a 4-file group does not fit after them.
+    const packed = packFocusedBatches([big.slice(10), small.slice(0, 3), small], budget)
+    expect(packed.map((b) => b.length)).toEqual([5, 4])
+  })
+
+  test("30 unrelated files with defaults: exactly 4 calls, balanced by prompt size", () => {
+    const files = Array.from({ length: 30 }, (_, i) => file(`models/d${i}/m${i}.sql`, "model_sql", "x".repeat(100 + i * 37)))
+    const plan = planAiInput({ grounding: [], files }, { ...FOCUSED, ALTIMATE_REVIEW_AI_MAX_FILES: "30" })
+    expect(plan.focused).toBe(true)
+    expect(plan.batches).toHaveLength(4)
+    expect(plan.batches.flat()).toHaveLength(30)
+    const chars = plan.batches.map((b) => b.reduce((n, f) => n + plan.input.find((r) => r.path === f.path)!.chars, 0))
+    expect(Math.max(...chars) - Math.min(...chars)).toBeLessThan(Math.max(...chars) * 0.1)
+    // Within a call, files keep input order.
+    for (const b of plan.batches) expect(b).toEqual(files.filter((f) => b.includes(f)))
+  })
+
+  test("focused packing honours batchChars, splitting past maxBatches when it must", () => {
+    // 30 files of ~6k chars each under coverage, 4 balanced calls of ~45k: none may exceed a 30k batch budget.
+    const files = Array.from({ length: 30 }, (_, i) => file(`models/d${i}/m${i}.sql`, "model_sql", "x".repeat(16_000)))
+    const env = { ...FOCUSED, ALTIMATE_REVIEW_AI_COVERAGE: "1", ALTIMATE_REVIEW_AI_QUOTA_MODEL: "30", ALTIMATE_REVIEW_AI_BATCH_CHARS: "30000" }
+    const plan = planAiInput({ grounding: [], files }, env)
+    expect(plan.focused).toBe(true)
+    expect(plan.batches.flat()).toHaveLength(30)
+    const chars = plan.batches.map((b) => b.reduce((n, f) => n + plan.input.find((r) => r.path === f.path)!.chars, 0))
+    expect(Math.max(...chars)).toBeLessThanOrEqual(plan.budget.batchChars)
+    expect(plan.batches.length).toBeGreaterThan(4)
+    // A related group that fits the file count but not batchChars is split too.
+    const small = Array.from({ length: 8 }, (_, i) => file(`models/s/m${i}.sql`, "model_sql", "y".repeat(2_500)))
+    const budget = { ...aiInputBudget(FOCUSED), batchChars: 3_000 }
+    const packed = packFocusedBatches(groupAiFiles(small), budget)
+    expect(packed.flat()).toHaveLength(8)
+    for (const b of packed) expect(b.length === 1 || b.reduce((n, f) => n + f.sql!.length, 0) <= 3_000).toBe(true)
+  })
+
+  test("focus settings must be positive integers", () => {
+    const b = aiInputBudget({ ...FOCUSED, ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES: "2.5", ALTIMATE_REVIEW_AI_FOCUS_MAX_BATCHES: "0", ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES: "x" })
+    expect(b.focused).toEqual({ minFiles: 7, batchFiles: 5, maxBatches: 4 })
+  })
+
+  test("fewer than 7 selected files: today's batching", () => {
+    const files = Array.from({ length: 6 }, (_, i) => file(`models/d${i}/m${i}.sql`))
+    const plan = planAiInput({ grounding: [], files }, FOCUSED)
+    expect(plan.focused).toBe(false)
+    expect(plan.batches).toEqual([files])
+    expect(plan.messages[0]).not.toContain("OTHER FILES CHANGED")
+    expect(planAiInput({ grounding: [], files }, { ...FOCUSED, ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES: "6" }).focused).toBe(true)
+  })
+
+  test("each call carries its own files' grounding and lists the other changed files", () => {
+    const files = Array.from({ length: 8 }, (_, i) => file(`models/d${i}/m${i}.sql`))
+    const g = (p: string | undefined, title: string) =>
+      makeFinding({ severity: "warning", category: "warehouse_cost", title, body: "b", file: p ?? "" })
+    const grounding = [g("models/d0/m0.sql", "first-file finding"), g("models/d7/m7.sql", "last-file finding"), g(undefined, "project finding")]
+    const plan = planAiInput({ grounding, files }, FOCUSED)
+    expect(plan.batches.map((b) => b.length)).toEqual([5, 3])
+    const [m0, m1] = plan.messages
+    expect(m0).toContain("first-file finding")
+    expect(m0).not.toContain("last-file finding")
+    expect(m1).toContain("last-file finding")
+    expect(m1).not.toContain("first-file finding")
+    expect(m0).toContain("project finding")
+    expect(m1).toContain("project finding")
+    const others = m0.split("## OTHER FILES CHANGED IN THIS PR (reviewed in separate calls; do not comment on them):")[1]
+    expect(others).toContain("- models/d5/m5.sql (model_sql)")
+    expect(others).toContain("- models/d7/m7.sql (model_sql)")
+    expect(others).not.toContain("models/d0/m0.sql")
+    expect(m0.indexOf("### models/d4/m4.sql")).toBeLessThan(m0.indexOf("## OTHER FILES CHANGED"))
+  })
+
+  test("duplicate findings across calls collapse to the first", () => {
+    const f = (title: string, startLine?: number, p = "models/a.sql") =>
+      makeFinding({ severity: "suggestion", category: "sql_correctness", title, body: title, file: p, startLine })
+    const out = dedupAiFindings([f("a: Fan-out JOIN!", 3), f("A: fan-out  join", 3), f("a: fan-out join", 4), f("a: fan-out join", 3, "models/b.sql"), f("x"), f("X.")])
+    expect(out.map((x) => [x.title, x.startLine, x.file])).toEqual([
+      ["a: Fan-out JOIN!", 3, "models/a.sql"],
+      ["a: fan-out join", 4, "models/a.sql"],
+      ["a: fan-out join", 3, "models/b.sql"],
+      ["x", undefined, "models/a.sql"],
+    ])
+  })
+
+  test("ai.input records the call index only under focused batching", () => {
+    const files = Array.from({ length: 8 }, (_, i) => file(`models/d${i}/m${i}.sql`))
+    expect(planAiInput({ grounding: [], files }, FOCUSED).input.map((r) => r.batch)).toEqual([0, 0, 0, 0, 0, 1, 1, 1])
+    expect(planAiInput({ grounding: [], files }, { ALTIMATE_REVIEW_AI_COVERAGE: "1" }).input.every((r) => r.batch === undefined)).toBe(true)
+    expect(aiInputBudget(FOCUSED).focused).toEqual({ minFiles: 7, batchFiles: 5, maxBatches: 4 })
+    expect(
+      aiInputBudget({ ...FOCUSED, ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES: "3", ALTIMATE_REVIEW_AI_FOCUS_MAX_BATCHES: "6", ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES: "10" }).focused,
+    ).toEqual({ minFiles: 10, batchFiles: 3, maxBatches: 6 })
   })
 })
