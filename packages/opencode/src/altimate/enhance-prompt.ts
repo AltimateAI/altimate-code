@@ -88,7 +88,12 @@ export async function enhancePrompt(text: string): Promise<string> {
   const timeout = setTimeout(() => controller.abort(), ENHANCE_TIMEOUT_MS)
 
   try {
-    const defaultModel = await Provider.defaultModel()
+    // Enhancement needs only a provider; an unavailable configured model still names one.
+    const defaultModel = await Provider.defaultModel().catch(async (error) => {
+      const configured = (await Config.get()).model
+      if (!configured) throw error
+      return Provider.parseModel(configured)
+    })
     const model =
       (await Provider.getSmallModel(defaultModel.providerID)) ??
       (await Provider.getModel(defaultModel.providerID, defaultModel.modelID))
