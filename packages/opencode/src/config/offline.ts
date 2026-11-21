@@ -23,6 +23,12 @@ const CONFIG_NAMES = ["altimate-code.json", "altimate-code.jsonc", "opencode.jso
  * produce it by substitution, is parsed. Organisation-managed config is applied when the configuration loads.
  */
 export async function optedIn(directory: string): Promise<boolean> {
+  if (process.argv.includes("--get-yargs-completions")) return false
+  // A failure to read config here must not stop a command; the instance applies the setting when it loads.
+  return findOptIn(directory).catch(() => false)
+}
+
+async function findOptIn(directory: string): Promise<boolean> {
   const sets = async (text: string | undefined, source: string | { source: string; dir: string }) => {
     if (!text || (!text.includes("offline") && !/\{env:|\$\{|\{file:/.test(text))) return false
     const config = await ConfigPaths.parseText(text, source, "empty", { track: false }).catch(() => undefined)

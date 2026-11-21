@@ -601,8 +601,10 @@ export const layer: Layer.Layer<
       }
 
       yield* gitExpect(
-        // altimate_change — offline mode updates submodules from objects already on disk
-        ["submodule", "update", "--init", "--recursive", "--force", ...(offlineModeEnabled() ? ["--no-fetch"] : [])],
+        // altimate_change — offline mode updates checked-out submodules from objects on disk and clones none
+        offlineModeEnabled()
+          ? ["submodule", "update", "--recursive", "--force", "--no-fetch"]
+          : ["submodule", "update", "--init", "--recursive", "--force"],
         { cwd: worktreePath },
         (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
       )

@@ -33,13 +33,17 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   }
   const url = config.connection_string ?? config.url
   if (url !== undefined) {
-    let hostname: string
+    let parsed: URL
     try {
-      hostname = new URL(String(url)).hostname
+      parsed = new URL(String(url))
     } catch {
       throw new Error(DENIED)
     }
-    if (!isLoopbackHost(hostname)) throw new Error(DENIED)
+    // A query parameter such as Postgres's ?host= or ?hostaddr= overrides the URL's host.
+    const overrides = [...parsed.searchParams].filter(([key]) => ["host", "hostaddr", "server"].includes(key.toLowerCase()))
+    if (!parsed.hostname && overrides.length === 0) throw new Error(DENIED)
+    for (const host of [parsed.hostname, ...overrides.map(([, value]) => value)].filter(Boolean))
+      if (!host.startsWith("/") && !isLoopbackHost(host)) throw new Error(DENIED)
   }
   // Without a host these drivers connect to localhost; any other type names its server some other way.
   if (hosts.length === 0 && url === undefined && config.socketPath === undefined && !LOCALHOST_BY_DEFAULT.has(type))

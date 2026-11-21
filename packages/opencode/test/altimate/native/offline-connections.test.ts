@@ -32,6 +32,7 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "mysql", socketPath: "/tmp/mysql.sock" },
     { type: "postgres", connectionString: "postgres://localhost/test" },
     { type: "trino", server: "http://localhost:8080" },
+    { type: "postgres", connection_string: "postgresql:///analytics?host=/var/run/postgresql" },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -51,6 +52,9 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "trino", server: "https://example.com" },
     { type: "postgres", connection_string: "not a url" },
     { type: "oracle", connection_string: "db.example.com:1521/ORCL" },
+    { type: "postgres", connection_string: "postgresql://localhost/db?host=db.example.com" },
+    { type: "postgres", connection_string: "postgresql://localhost/db?hostaddr=10.0.0.5" },
+    { type: "postgres", connection_string: "postgresql:///analytics" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 

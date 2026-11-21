@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test"
 import { tmpdir } from "../fixture/fixture"
+import { gitCommandUsesNetwork } from "@opencode-ai/core/git"
 import { git } from "../../src/util/git"
 
 describe("git() utility", () => {
@@ -65,6 +66,13 @@ describe("git() utility", () => {
       if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
       else process.env.ALTIMATE_OFFLINE = previous
     }
+  })
+
+  test("offline treats submodule clones, LFS transfers and remote archives as network commands", () => {
+    for (const args of [["submodule", "update", "--init"], ["submodule", "update"], ["lfs", "fetch"], ["lfs", "pull"], ["archive", "--remote=origin", "HEAD"], ["-C", "x", "fetch"]])
+      expect(gitCommandUsesNetwork(args)).toBe(true)
+    for (const args of [["submodule", "update", "--recursive", "--no-fetch"], ["lfs", "ls-files"], ["archive", "HEAD"], ["status"], ["remote", "show", "-n", "origin"]])
+      expect(gitCommandUsesNetwork(args)).toBe(false)
   })
   // altimate_change end
 })

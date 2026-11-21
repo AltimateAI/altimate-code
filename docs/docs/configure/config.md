@@ -168,7 +168,7 @@ With offline mode off, nothing on this page applies and Altimate Code behaves ex
 
 ### Turn it on
 
-Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file (or `OPENCODE_CONFIG_CONTENT`). Altimate Code checks those files for the setting when it starts, so startup requests are covered too. Organisation-managed configuration and remote (well-known) configuration apply the setting only once they load, after some startup requests; use `ALTIMATE_OFFLINE=1` there. Once on, offline mode lasts for the rest of the process, including any server that loaded the project.
+Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file (or `OPENCODE_CONFIG_CONTENT`). Altimate Code checks those files for the setting when it starts, so startup requests are covered too. Organisation-managed configuration and remote (well-known) configuration apply the setting only once they load, after some startup requests; use `ALTIMATE_OFFLINE=1` there. Any one of these sources turns it on; a value of `false` elsewhere does not turn it back off. `ALTIMATE_OFFLINE` values of empty, `0`, `false`, `off` and `no` mean off. Once on, offline mode lasts for the rest of the process, including any server that loaded the project.
 
 Configure a provider with an explicit HTTP(S) `options.baseURL` and use one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Model requests go only to a provider's explicit `baseURL`, never to a catalog URL, and are not redirected. They respect `HTTPS_PROXY` and `HTTP_PROXY`. A `small_model` is used only if its provider also has an explicit `baseURL`.
 
@@ -183,7 +183,7 @@ While still online:
 ### What keeps working
 
 - Local warehouses: DuckDB and SQLite files, and warehouses reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. A host that is not one of these, or a connection string that cannot be parsed, is refused.
-- dbt commands whose selected profile and target are local. dbt-duckdb profiles can use installed extensions, local attachments and plugins; settings that point at remote storage or a remote server (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused.
+- dbt commands whose selected profile and target are local. dbt-duckdb profiles can use extensions, local attachments and plugins; settings that point at remote storage, a remote server or a remote extension repository (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused. Named extensions and plugins are not checked: install extensions while online, and do not configure plugins that call remote services.
 - DuckDB loads extensions that are already installed; it does not download new ones.
 - The shell tool, installed language servers, stdio MCP servers and MCP servers at `localhost`, `127.0.0.1` or `[::1]`, including `tool run --daemon`.
 - Git diffs, session snapshots and revert, and worktree create, remove and reset (reset uses the locally cached base branch).

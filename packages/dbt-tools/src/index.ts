@@ -147,7 +147,7 @@ async function main() {
   try {
     const { create } = await import("./adapter")
     // Inherited from an offline Altimate Code session (same parse as its kill switches).
-    const offline = !["", "0", "false"].includes(process.env.ALTIMATE_OFFLINE?.trim().toLowerCase() ?? "")
+    const offline = !["", "0", "false", "off", "no"].includes(process.env.ALTIMATE_OFFLINE?.trim().toLowerCase() ?? "")
     adapter = await create(cfg, { offline })
   } catch (err) {
     return failure(err)

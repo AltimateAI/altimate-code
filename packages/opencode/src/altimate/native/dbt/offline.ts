@@ -81,6 +81,6 @@ export async function assertLocalDbt(
     assertLocalConnection({ ...output, path: output.path ?? (output.type === "duckdb" ? ":memory:" : undefined) })
   }
   if (output.type === "duckdb" && remoteDuckdbSetting(output))
-    throw new Error("Offline mode refuses dbt-duckdb settings that use remote storage, a remote server or remote extensions.")
+    throw new Error("Offline mode refuses dbt-duckdb settings that use remote storage, a remote server or a remote extension repository.")
   return { profilesDir }
 }

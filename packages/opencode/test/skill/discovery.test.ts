@@ -65,7 +65,7 @@ describe("Discovery.pull", () => {
     }),
   )
 
-  // altimate_change start — offline mode leaves the skill cache layout alone
+  // altimate_change start — with offline mode off, the skill cache layout is unchanged
   it.live("caches each skill directly under cache/skills/<name>", () =>
     Effect.gen(function* () {
       const discovery = yield* Discovery.Service

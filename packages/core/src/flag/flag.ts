@@ -21,7 +21,8 @@ export function env(key: string): string | undefined {
 }
 
 export function offlineModeEnabled() {
-  return killSwitchSet(process.env.ALTIMATE_OFFLINE)
+  const value = process.env.ALTIMATE_OFFLINE?.trim().toLowerCase()
+  return killSwitchSet(value) && value !== "off" && value !== "no"
 }
 
 export function truthy(key: string) {

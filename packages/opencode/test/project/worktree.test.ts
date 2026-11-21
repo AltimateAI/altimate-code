@@ -85,6 +85,17 @@ describe("Worktree", () => {
   wintest(
     "creates, resets, and removes a local worktree offline",
     Effect.gen(function* () {
+      // The base branch is a cached remote-tracking ref whose remote cannot be reached: online, reset would fetch it.
+      const { directory } = yield* TestInstance
+      const run = (args: string[]) => {
+        const result = Bun.spawnSync(["git", ...args], { cwd: directory, stdout: "pipe", stderr: "pipe" })
+        if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+        return result.stdout.toString().trim()
+      }
+      const branch = run(["rev-parse", "--abbrev-ref", "HEAD"])
+      run(["remote", "add", "origin", path.join(directory, "missing-remote.git")])
+      run(["update-ref", `refs/remotes/origin/${branch}`, "HEAD"])
+      run(["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${branch}`])
       const previous = process.env.ALTIMATE_OFFLINE
       process.env.ALTIMATE_OFFLINE = "1"
       try {

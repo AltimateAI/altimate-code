@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process"
 // altimate_change — offline mode
 import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+import { existsSync, readdirSync } from "node:fs"
+import path from "node:path"
 // Direct cross-workspace import — `@altimateai/dbt-tools`'s `src/index.ts` is
 // a CLI entry (runs on import), so we bypass the package entrypoint and
 // consume the resolver from its file directly. This is the same pattern
@@ -82,13 +84,30 @@ export function _resetDbtRuntimeCacheForTests() {
   cached = undefined
 }
 
+// altimate_change start — offline mode finds dbt-duckdb in the environment dbt was installed into
+function hasDuckdbAdapter(binDir: string | undefined): boolean {
+  if (!binDir) return false
+  const lib = path.join(binDir, "..", process.platform === "win32" ? "Lib" : "lib")
+  const pythons = process.platform === "win32" ? [""] : readdirSafe(lib).filter((name) => name.startsWith("python"))
+  return pythons.some((python) => existsSync(path.join(lib, python, "site-packages", "dbt", "adapters", "duckdb")))
+}
+
+function readdirSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+// altimate_change end
+
 async function probe(): Promise<DbtRuntime> {
   // resolveDbt: multi-manager search (venv/uv/pyenv/conda/pipx/poetry/…
   // + PATH + explicit override via ALTIMATE_DBT_PATH). Returns the first
   // candidate that exists.
   const resolved = resolveDbt()
   // altimate_change start — `dbt --version` asks PyPI for the latest release, so offline mode does not run it
-  if (offlineModeEnabled()) return { hasDbt: !resolved.source.startsWith("fallback"), hasDbtDuckdb: false }
+  if (offlineModeEnabled()) return { hasDbt: !resolved.source.startsWith("fallback"), hasDbtDuckdb: hasDuckdbAdapter(resolved.binDir) }
   // altimate_change end
   const env = buildDbtEnv(resolved)
 

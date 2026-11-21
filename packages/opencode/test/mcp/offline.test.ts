@@ -37,6 +37,23 @@ test("the fetch guard allows loopback, refuses everything else and keeps the use
   })
 })
 
+test("ALTIMATE_OFFLINE accepts the usual off spellings", () => {
+  const previous = process.env.ALTIMATE_OFFLINE
+  try {
+    for (const value of ["", "0", "false", "off", "NO", " Off "]) {
+      process.env.ALTIMATE_OFFLINE = value
+      expect(Offline.enabled()).toBe(false)
+    }
+    for (const value of ["1", "true", "yes", "on"]) {
+      process.env.ALTIMATE_OFFLINE = value
+      expect(Offline.enabled()).toBe(true)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+    else process.env.ALTIMATE_OFFLINE = previous
+  }
+})
+
 test("model fetch stays below the configured base URL", async () => {
   const fetch = Offline.modelFetch("http://model.test:9000/v1")
   for (const url of ["http://model.test:9000/v2/chat", "http://model.test:9000/v1beta", "https://model.test:9000/v1/chat", "http://other.test:9000/v1/chat"])
