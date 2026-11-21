@@ -397,8 +397,8 @@ export async function withPackagesLock<T>(root: string, fn: () => Promise<T>, op
 
 // dbt writes package-lock.yml during deps. The project declarations and the
 // destination it read must stay stable while the installer is running.
-function installInputs(root: string, installPath: string): string {
-  return fingerprint(root, installPath, declarationContents(root).filter(({ file }) => file !== "package-lock.yml"))
+function installInputs(root: string, installPath: string, declarations = declarationContents(root)): string {
+  return fingerprint(root, installPath, declarations.filter(({ file }) => file !== "package-lock.yml"))
 }
 
 /**
@@ -423,7 +423,8 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     if (!failedCommand(result)) rmSync(dirty, { force: true })
     return result
   }
-  if (inputsBefore !== installInputs(root, installPath)) {
+  const declarationsAfter = declarationContents(root)
+  if (inputsBefore !== installInputs(root, installPath, declarationsAfter)) {
     // The install may have consumed the earlier declarations. Leave the dirty
     // marker so the next adapter-backed command repairs the current inputs.
     rmSync(stampFile, { force: true })
@@ -438,7 +439,7 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     throw new Error(`dbt deps finished but the package directory is incomplete${broken.length ? `: ${broken.join(", ")}` : ""}`)
   }
   if (record || (!incomplete && commandExitCode(result) === 0)) {
-    writeFileSync(stampFile, JSON.stringify({ fingerprint: fingerprint(root, installPath), packages: complete } satisfies Stamp))
+    writeFileSync(stampFile, JSON.stringify({ fingerprint: fingerprint(root, installPath, declarationsAfter), packages: complete } satisfies Stamp))
   } else {
     // An explicit install may return no exit status. The next call verifies
     // the directories rather than trusting the old stamp.
