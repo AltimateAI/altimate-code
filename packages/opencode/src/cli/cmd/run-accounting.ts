@@ -4,8 +4,8 @@
 //     failed or retried attempt costs nothing. Step parts carry only
 //     messageID/sessionID, so the owning message's summary flag is resolved via
 //     a lookup populated from `message.updated` events (the assistant message
-//     row is persisted — and its
-//     event published — before its first step-start part streams).
+//     row is persisted — and its event published — before its first
+//     step-start part streams).
 //   - dual-attribution termination logging: every run records TWO independent
 //     fields instead of one rc: `why_model_stopped` and `why_harness_stopped`,
 //     so model-looping, tight budgets, and harness errors stop being conflated
