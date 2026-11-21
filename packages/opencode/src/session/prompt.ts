@@ -4877,16 +4877,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     template = template.trim()
 
     const taskModelRaw = await (async () => {
-      if (command.model) {
-        return Provider.parseModel(command.model)
-      }
+      // altimate_change start — an empty command model is an invalid explicit model
+      if (command.model !== undefined) return Provider.parseModel(command.model)
+      // altimate_change end
       if (command.agent) {
         const cmdAgent = await Agent.get(command.agent)
         if (cmdAgent?.model) {
           return cmdAgent.model
         }
       }
-      if (input.model) return Provider.parseModel(input.model)
+      // altimate_change start — use the command's effective agent before falling back to project or history
+      if (input.model !== undefined) return Provider.parseModel(input.model)
+      const selectedAgent = await Agent.get(agentName)
+      if (selectedAgent?.model) return selectedAgent.model
+      // altimate_change end
       return await lastModel(input.sessionID)
     })()
     // altimate_change start — cmdAgent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
@@ -4907,7 +4911,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         Bus.publish(Session.Event.Error, {
           sessionID: input.sessionID,
           error: new NamedError.Unknown({
-            message: `Model not found: ${providerID}/${modelID}.${hint}${guidance ? ` ${guidance}` : ""}`,
+            // altimate_change start — show config locations for a command's unavailable model
+            message: `Model not found: ${providerID}/${modelID}.${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
+            // altimate_change end
           }).toObject(),
         })
       }

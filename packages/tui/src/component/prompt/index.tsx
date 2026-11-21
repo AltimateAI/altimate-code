@@ -1114,7 +1114,13 @@ export function Prompt(props: PromptProps) {
     }
     // altimate_change start — upstream_fix: reject unavailable explicit models before onboarding or session
     // creation; preserve the draft so choosing an available model is enough to retry.
-    if (local.model.current() && !local.model.validate()) return false
+    const promptText = store.prompt.input
+    const commandName = promptText.startsWith("/") ? promptText.split("\n")[0].split(" ")[0].slice(1) : undefined
+    const command = sync.data.command.find((item) => item.name === commandName)
+    const commandAgent = command?.agent && sync.data.agent.find((item) => item.name === command.agent)
+    const hasCommandModel = command?.model !== undefined || Boolean(commandAgent && commandAgent.model)
+    const usesChatModel = store.mode !== "shell" && command?.name !== "mcps" && !hasCommandModel
+    if (usesChatModel && local.model.current() && !local.model.validate()) return false
     // altimate_change end
     // altimate_change start — first-run gate without dead chat / error copy: a normal
     // message with no provider ready opens the welcome picker (the message is

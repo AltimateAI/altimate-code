@@ -39,4 +39,26 @@ describe("run model resolution", () => {
       30_000,
     )
   }
+
+  cliIt.live(
+    "lets a standalone command use its own model when the project default is unavailable",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        yield* llm.text("Command answered on its own model")
+        const result = yield* opencode.spawn(["run", "--command", "local", "test"], {
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              model: "missing-provider/missing-model",
+              command: { local: { model: "test/test-model", template: "Say hello" } },
+            }),
+          },
+        })
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toContain("Command answered on its own model")
+      }),
+    30_000,
+  )
 })

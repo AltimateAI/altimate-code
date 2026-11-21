@@ -59,6 +59,7 @@ import { applyRunModeDefault } from "./run/run-mode"
 // altimate_change end
 // altimate_change start — a failed provider list is reported as itself, not "Model not found" (fork-only module)
 import { providerListOrThrow } from "./run/provider-list"
+import { FormatError } from "../error"
 // altimate_change end
 // altimate_change start — run-mode-only idle-done fallback (fork-only modules).
 // Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
@@ -1437,12 +1438,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — validate explicit models before starting the session event loop.
       // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
       // `run` waiting until the process-level timeout kills it.
+      // Commands resolve their own model and agent on the server. Keep the CLI flag check,
+      // but leave project and agent defaults to the command's own precedence.
       const requested = args.model ?? (await (async () => {
+        if (args.command) return undefined
         const config = (await sdk.config.get(undefined, { throwOnError: true })).data
         const selected = args.attach
-          ? (await remoteAgents()).find((item) => agent || config?.default_agent
-            ? item.name === (agent ?? config?.default_agent)
-            : item.mode !== "subagent" && !item.hidden)
+          ? (await remoteAgents()).find((item) =>
+              agent || config?.default_agent
+                ? item.name === (agent ?? config?.default_agent)
+                : item.mode !== "subagent" && !item.hidden,
+            )
           : await Agent.get(agent ?? (await Agent.defaultAgent()))
         return selected?.model ? `${selected.model.providerID}/${selected.model.modelID}` : config?.model
       })())
@@ -1971,7 +1977,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
         if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
         else {
           accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
-          error = RunAccounting.serializeSessionError(sendResult.error)
+          // altimate_change start — preserve model resolution guidance from command requests
+          error = Provider.ModelNotFoundError.isInstance(sendResult.error)
+            ? (FormatError(sendResult.error) ?? RunAccounting.serializeSessionError(sendResult.error))
+            : RunAccounting.serializeSessionError(sendResult.error)
+          // altimate_change end
         }
         eventAbort.abort()
       } else accounting.onPromptResult(sendResult?.data?.info)
