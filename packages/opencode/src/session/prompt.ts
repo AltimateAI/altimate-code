@@ -19,12 +19,13 @@ import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
 import { Agent } from "../agent/agent"
-import { Provider } from "../provider/provider"
+// altimate_change — identify the effective model source when validation fails
+import { Provider, validateModelSelection } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
 // altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
 import { FreeTier } from "../altimate/free/client"
 // altimate_change — explain a missing Anthropic provider (Claude Pro/Max sign-in removed)
-import { modelConfigHint, modelNotFoundHint } from "../altimate/provider/model-hint"
+import { modelConfigHint, modelNotFoundHint, modelNotFoundMessage } from "../altimate/provider/model-hint"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -216,6 +217,22 @@ const RequestContinued = BusEvent.define(
   "session.request.continued",
   z.object({ sessionID: SessionID.zod, messageID: MessageID.zod, parentID: MessageID.zod }),
 )
+// altimate_change end
+
+// altimate_change start — share model-error guidance across session entry points
+function reportModelSelectionError(sessionID: SessionID, error: unknown) {
+  if (!Provider.ModelNotFoundError.isInstance(error)) return
+  const { providerID, modelID, suggestions, providerMissing, source } = error.data
+  const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
+  const guidance = modelNotFoundHint(providerID, providerMissing)
+  const message = modelNotFoundMessage(providerID, modelID, source)
+  Bus.publish(Session.Event.Error, {
+    sessionID,
+    error: new NamedError.Unknown({
+      message: `${message.endsWith(".") ? message : message + "."}${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
+    }).toObject(),
+  })
+}
 // altimate_change end
 
 export namespace SessionPrompt {
@@ -1304,19 +1321,8 @@ export namespace SessionPrompt {
 
       step++
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
-        if (Provider.ModelNotFoundError.isInstance(e)) {
-          const hint = e.data.suggestions?.length ? ` Did you mean: ${e.data.suggestions.join(", ")}?` : ""
-          // altimate_change — explain a missing Anthropic provider
-          const guidance = modelNotFoundHint(e.data.providerID, e.data.providerMissing)
-          Bus.publish(Session.Event.Error, {
-            sessionID,
-            error: new NamedError.Unknown({
-              // altimate_change start — identify config locations when resolving a session model fails
-              message: `Model not found: ${e.data.providerID}/${e.data.modelID}.${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
-              // altimate_change end
-            }).toObject(),
-          })
-        }
+        // altimate_change — identify the unavailable model and where to correct it
+        reportModelSelectionError(sessionID, e)
         throw e
       })
       // altimate_change start — resolve the chat model before sending any context for titling
@@ -2818,15 +2824,9 @@ export namespace SessionPrompt {
     throw new Error("Impossible")
   })
 
-  // altimate_change start — non-model commands may record model metadata without validating it
-  async function lastModel(sessionID: SessionID, validateConfigured = true) {
-    const configured = (await Config.get()).model
-    const configuredModel = configured === undefined ? undefined : Provider.parseModel(configured)
-    if (configuredModel && validateConfigured) {
-      await Provider.getModel(configuredModel.providerID, configuredModel.modelID)
-    }
-    // altimate_change end
-    // altimate_change start — a session's last-used model can be a stale keyless public-Zen pick
+  // altimate_change start — resolve only the model used by this session
+  async function lastModel(sessionID: SessionID, metadataOnly = false) {
+    // A session's last-used model can be a stale keyless public-Zen pick
     // from before this machine registered Altimate Base. OpenCode Zen now rejects that tier
     // outright, so replaying it here (e.g. on `run --continue`) is guaranteed to fail; re-resolve
     // the default instead so the session picks up Base. A credentialed/paid selection (or any
@@ -2838,18 +2838,30 @@ export namespace SessionPrompt {
     // registered) never pays that cost.
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user" && item.info.model) {
+        // Shell and direct MCP commands can record model metadata without selecting a model for inference.
+        if (
+          item.parts.some((part) =>
+            part.type === "text" &&
+            (part.metadata?.modelMetadataOnly === true ||
+              (part.synthetic && part.text === "The following tool was executed by the user")),
+          )
+        ) continue
         // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,
         // bad config). This re-resolution is best-effort — an error here must not abort resuming
         // the session, so it falls through to the unchanged model, same as "not registered".
-        if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
+        if (!metadataOnly && item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
           const providers = await Provider.list()
           const provider = providers[item.info.model.providerID]
-          if (provider && isPublicZen(provider)) return configuredModel ?? Provider.defaultModel()
+          if (provider && isPublicZen(provider)) break
         }
-        return item.info.model
+        return { model: item.info.model, source: "session history" }
       }
     }
-    return configuredModel ?? Provider.defaultModel()
+    const configured = (await Config.get()).model
+    if (configured !== undefined) {
+      return { model: Provider.parseModel(configured), source: "project or global config (model)" }
+    }
+    return { model: metadataOnly ? Provider.parseModel("") : await Provider.defaultModel(), source: "automatic selection" }
     // altimate_change end
   }
 
@@ -3256,7 +3268,7 @@ export namespace SessionPrompt {
   }
 
   // altimate_change start — allow local commands to record message metadata without a model call
-  async function createUserMessage(input: PromptInput, validateConfigured = true) {
+  async function createUserMessage(input: PromptInput, validateModel = true) {
     // altimate_change end
     // altimate_change start — the workspace this message's attachment reads name: the turn's, or for a
     // `noReply` prompt, which runs no turn, one read without the pin's validation or wait.
@@ -3285,17 +3297,27 @@ export namespace SessionPrompt {
     }
 
     // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
-    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID, validateConfigured))
+    const selection = input.model
+      ? { model: input.model, source: "session request (model)" }
+      : agent.model
+        ? { model: agent.model, source: `agent "${agentName}" config (model)` }
+        : await lastModel(input.sessionID, !validateModel)
     const model = {
-      providerID: ProviderID.make(resolvedModel.providerID),
-      modelID: ModelID.make(resolvedModel.modelID),
+      providerID: ProviderID.make(selection.model.providerID),
+      modelID: ModelID.make(selection.model.modelID),
+    }
+    if (validateModel && !input.noReply) {
+      await validateModelSelection(model, selection.source).catch((error) => {
+        reportModelSelectionError(input.sessionID, error)
+        throw error
+      })
     }
     // altimate_change end
     // Use agent.variant only when the user did not provide an explicit model
     // override; if the user picked a different model, agent.variant doesn't apply.
     const useAgentModel = !input.model
     const full =
-      !input.variant && agent.variant && useAgentModel
+      validateModel && !input.variant && agent.variant && useAgentModel
         ? await Provider.getModel(model.providerID, model.modelID).catch(() => undefined)
         : undefined
     const variant =
@@ -4363,7 +4385,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const agent = await Agent.get(input.agent)
     // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
     // Shell records model metadata but never calls a model.
-    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID, false))
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID, true)).model
     const model = {
       providerID: ProviderID.make(resolvedModel.providerID),
       modelID: ModelID.make(resolvedModel.modelID),
@@ -4714,7 +4736,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           {
             sessionID: input.sessionID,
             messageID: input.messageID,
-            parts: [{ type: "text", text: "/mcps" }],
+            parts: [{ type: "text", text: "/mcps", metadata: { modelMetadataOnly: true } }],
           },
           false,
         )
@@ -4749,7 +4771,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           {
             sessionID: input.sessionID,
             messageID: input.messageID,
-            parts: [{ type: "text", text: `/mcps ${subCmd} ${name}` }],
+            parts: [{ type: "text", text: `/mcps ${subCmd} ${name}`, metadata: { modelMetadataOnly: true } }],
           },
           false,
         )
@@ -4809,6 +4831,52 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       })
     }
     const agentName = command.agent ?? input.agent ?? (await Agent.defaultAgent())
+
+    // altimate_change start — resolve and validate the effective command model before expanding the template
+    const agent = await Agent.get(agentName)
+    if (!agent) {
+      const available = await Agent.list().then((agents) => agents.filter((a) => !a.hidden).map((a) => a.name))
+      const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+      const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
+      Bus.publish(Session.Event.Error, {
+        sessionID: input.sessionID,
+        error: error.toObject(),
+      })
+      throw error
+    }
+
+    const agentSelection = agent.model
+      ? { model: agent.model, source: `agent "${agentName}" config (model)` }
+      : undefined
+    const selection = await (async () => {
+      if (command.model !== undefined) {
+        return { model: Provider.parseModel(command.model), source: `command "${input.command}" config (model)` }
+      }
+      if (command.agent && agentSelection) return agentSelection
+      if (input.model !== undefined) {
+        return { model: Provider.parseModel(input.model), source: "command request (model)" }
+      }
+      return agentSelection ?? lastModel(input.sessionID)
+    })()
+    const taskModel = {
+      providerID: ProviderID.make(selection.model.providerID),
+      modelID: ModelID.make(selection.model.modelID),
+    }
+    const isSubtask = (agent.mode === "subagent" && command.subtask !== false) || command.subtask === true
+    const userAgent = isSubtask ? (input.agent ?? (await Agent.defaultAgent())) : agentName
+    const userSelection = isSubtask
+      ? input.model !== undefined
+        ? { model: Provider.parseModel(input.model), source: "command request (model)" }
+        : await lastModel(input.sessionID)
+      : { model: taskModel, source: selection.source }
+    try {
+      await validateModelSelection(taskModel, selection.source)
+      if (isSubtask) await validateModelSelection(userSelection.model, userSelection.source)
+    } catch (error) {
+      reportModelSelectionError(input.sessionID, error)
+      throw error
+    }
+    // altimate_change end
 
     const raw = input.arguments.match(argsRegex) ?? []
     const args = raw.map((arg) => arg.replace(quoteTrimRegex, ""))
@@ -4877,63 +4945,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }
     template = template.trim()
 
-    const taskModelRaw = await (async () => {
-      // altimate_change start — an empty command model is an invalid explicit model
-      if (command.model !== undefined) return Provider.parseModel(command.model)
-      // altimate_change end
-      if (command.agent) {
-        const cmdAgent = await Agent.get(command.agent)
-        if (cmdAgent?.model) {
-          return cmdAgent.model
-        }
-      }
-      // altimate_change start — use the command's effective agent before falling back to project or history
-      if (input.model !== undefined) return Provider.parseModel(input.model)
-      const selectedAgent = await Agent.get(agentName)
-      if (selectedAgent?.model) return selectedAgent.model
-      // altimate_change end
-      return await lastModel(input.sessionID)
-    })()
-    // altimate_change start — cmdAgent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
-    const taskModel = {
-      providerID: ProviderID.make(taskModelRaw.providerID),
-      modelID: ModelID.make(taskModelRaw.modelID),
-    }
-    // altimate_change end
-
-    try {
-      await Provider.getModel(taskModel.providerID, taskModel.modelID)
-    } catch (e) {
-      if (Provider.ModelNotFoundError.isInstance(e)) {
-        const { providerID, modelID, suggestions } = e.data
-        const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
-        // altimate_change — explain a missing Anthropic provider
-        const guidance = modelNotFoundHint(providerID, e.data.providerMissing)
-        Bus.publish(Session.Event.Error, {
-          sessionID: input.sessionID,
-          error: new NamedError.Unknown({
-            // altimate_change start — show config locations for a command's unavailable model
-            message: `Model not found: ${providerID}/${modelID}.${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
-            // altimate_change end
-          }).toObject(),
-        })
-      }
-      throw e
-    }
-    const agent = await Agent.get(agentName)
-    if (!agent) {
-      const available = await Agent.list().then((agents) => agents.filter((a) => !a.hidden).map((a) => a.name))
-      const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-      const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
-      Bus.publish(Session.Event.Error, {
-        sessionID: input.sessionID,
-        error: error.toObject(),
-      })
-      throw error
-    }
-
     const templateParts = await resolvePromptParts(template)
-    const isSubtask = (agent.mode === "subagent" && command.subtask !== false) || command.subtask === true
     const parts = isSubtask
       ? [
           {
@@ -4951,13 +4963,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         ]
       : [...templateParts, ...(input.parts ?? [])]
 
-    const userAgent = isSubtask ? (input.agent ?? (await Agent.defaultAgent())) : agentName
-    const userModel = isSubtask
-      ? input.model
-        ? Provider.parseModel(input.model)
-        : await lastModel(input.sessionID)
-      : taskModel
-
     await Plugin.trigger(
       "command.execute.before",
       {
@@ -4971,7 +4976,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const result = (await prompt({
       sessionID: input.sessionID,
       messageID: input.messageID,
-      model: userModel,
+      model: userSelection.model,
       agent: userAgent,
       parts,
       variant: input.variant,

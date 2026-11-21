@@ -382,6 +382,40 @@ it.instance("migrates tui-specific keys from opencode.json when tui.json does no
   ),
 )
 
+// altimate_change start — upstream_fix: migration preserves precedence and missing legacy settings
+it.instance("merges legacy and branded project TUI settings with JSONC precedence", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const sources = {
+        "opencode.json": { theme: "legacy-json", tui: { scroll_speed: 1, diff_style: "stacked" } },
+        "opencode.jsonc": {
+          theme: "legacy-jsonc",
+          keybinds: { app_exit: "ctrl+q" },
+          tui: { scroll_speed: 3 },
+        },
+        "altimate-code.json": { theme: "branded-json", tui: { diff_style: "auto" } },
+        "altimate-code.jsonc": { theme: "branded-jsonc" },
+      }
+      for (const [name, data] of Object.entries(sources)) {
+        yield* fs.writeJson(path.join(test.directory, name), data)
+      }
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.theme).toBe("branded-jsonc")
+      expect(config.scroll_speed).toBe(3)
+      expect(config.diff_style).toBe("auto")
+      expect(config.keybinds.get("app.exit")?.[0]?.key).toBe("ctrl+q")
+      for (const [name, data] of Object.entries(sources)) {
+        const source = path.join(test.directory, name)
+        expect(JSON.parse(yield* fs.readFileString(source + ".tui-migration.bak"))).toEqual(data)
+        expect(JSON.parse(yield* fs.readFileString(source))).toEqual({})
+      }
+    }),
+  ),
+)
+// altimate_change end
+
 it.instance("migrates project legacy tui keys even when global tui.json already exists", () =>
   withCleanState(
     Effect.gen(function* () {

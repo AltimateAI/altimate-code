@@ -929,32 +929,28 @@ export const SessionRoutes = lazy(() =>
       ),
       validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
       async (c) => {
-        c.status(200)
-        c.header("Content-Type", "application/json")
-        return stream(c, async (stream) => {
-          const sessionID = c.req.valid("param").sessionID
-          const body = c.req.valid("json")
-          // altimate_change start — bind the client's trace to this turn's user message (see TraceContext).
-          // A noReply prompt runs no turn, so binds nothing; a prompt that fails before its loop is released.
-          const messageID = body.messageID ?? MessageID.ascending()
-          TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
-          // altimate_change start — save the soft reminder before interrupting, with run-scoped effort
-          const msg = await withBudgetControl(
-            {
-              sessionID,
-              control: c.req.header("x-altimate-run-budget"),
-              noReply: body.noReply,
-              queryDeadline: c.req.header("x-altimate-run-query-deadline"),
-            },
-            () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
-          ).catch((error) => {
-            TraceContext.release(sessionID, [messageID])
-            throw error
-          })
-          // altimate_change end
-          // altimate_change end
-          stream.write(JSON.stringify(msg))
+        // altimate_change start — allow model resolution errors to return a non-2xx response
+        const sessionID = c.req.valid("param").sessionID
+        const body = c.req.valid("json")
+        // Bind the client's trace to this turn's user message.
+        // A noReply prompt runs no turn, so binds nothing; a prompt that fails before its loop is released.
+        const messageID = body.messageID ?? MessageID.ascending()
+        TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
+        // Save the soft reminder before interrupting, with run-scoped effort.
+        const msg = await withBudgetControl(
+          {
+            sessionID,
+            control: c.req.header("x-altimate-run-budget"),
+            noReply: body.noReply,
+            queryDeadline: c.req.header("x-altimate-run-query-deadline"),
+          },
+          () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
+        ).catch((error) => {
+          TraceContext.release(sessionID, [messageID])
+          throw error
         })
+        return c.json(msg)
+        // altimate_change end
       },
     )
     .post(

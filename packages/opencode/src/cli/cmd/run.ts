@@ -612,9 +612,8 @@ export const RunCommand = cmd({
       return message.slice(0, 50) + (message.length > 50 ? "..." : "")
     }
 
-    async function session(sdk: OpencodeClient) {
-      const baseID = args.continue ? (await sdk.session.list()).data?.find((s) => !s.parentID)?.id : args.session
-
+    // altimate_change — reuse the resume target from model preflight
+    async function session(sdk: OpencodeClient, baseID: string | undefined) {
       if (baseID && args.fork) {
         const forked = await sdk.session.fork({ sessionID: baseID })
         return forked.data?.id
@@ -1435,13 +1434,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
         return { agent: args.agent, agentAudience: aud }
       })()
 
-      // altimate_change start — validate explicit models before starting the session event loop.
-      // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
-      // `run` waiting until the process-level timeout kills it.
-      // Commands resolve their own model and agent on the server. Keep the CLI flag check,
-      // but leave project and agent defaults to the command's own precedence.
-      const requested = args.model ?? (await (async () => {
+      // altimate_change start — validate fresh runs before creating a session
+      const baseID = args.continue ? (await sdk.session.list()).data?.find((s) => !s.parentID)?.id : args.session
+      // The server owns command and resumed-session precedence, including model overrides.
+      const selection = await (async () => {
         if (args.command) return undefined
+        if (args.model !== undefined) return { value: args.model, source: "CLI --model" }
+        if (baseID) return undefined
         const config = (await sdk.config.get(undefined, { throwOnError: true })).data
         const selected = await (async () => {
           if (!args.attach) return Agent.get(agent ?? (await Agent.defaultAgent()))
@@ -1452,10 +1451,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
           return agents.find((item) => item.name === name)
             ?? (name === "data-qa" ? agents.find((item) => item.name === "analyst") : undefined)
         })()
-        return selected?.model ? `${selected.model.providerID}/${selected.model.modelID}` : config?.model
-      })())
-      if (requested !== undefined) {
+        if (selected?.model) {
+          const { providerID, modelID } = selected.model
+          return {
+            value: providerID || modelID ? `${providerID}/${modelID}` : "",
+            source: `agent "${selected.name}" config (model)`,
+          }
+        }
+        if (config?.model !== undefined) return { value: config.model, source: "project or global config (model)" }
+      })()
+      if (selection) {
+        const requested = selection.value
         const parsed = Provider.parseModel(requested)
+        if (!requested) throw new Provider.ModelNotFoundError({ ...parsed, source: selection.source })
         // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
         // instead of masquerading as an unknown model.
         const providers = await (async () => {
@@ -1474,6 +1482,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             modelID: parsed.modelID,
             suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
             providerMissing: !provider,
+            source: selection.source,
           })
         }
       }
@@ -1483,7 +1492,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const audienceMode = args.audience ?? agentAudience
       const audienceSystem = audienceMode === "executive" ? EXECUTIVE_DIRECTIVE : undefined
 
-      const sessionID = await session(sdk)
+      const sessionID = await session(sdk, baseID)
       if (!sessionID) {
         UI.error("Session not found")
         process.exit(1)
@@ -1979,10 +1988,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
         if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
         else {
           accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
-          // altimate_change start — preserve model resolution guidance from command requests
-          error = Provider.ModelNotFoundError.isInstance(sendResult.error)
-            ? (FormatError(sendResult.error) ?? RunAccounting.serializeSessionError(sendResult.error))
-            : RunAccounting.serializeSessionError(sendResult.error)
+          // altimate_change start — preserve model resolution guidance from rejected session requests
+          if (Provider.ModelNotFoundError.isInstance(sendResult.error)) {
+            const modelError = FormatError(sendResult.error) ?? RunAccounting.serializeSessionError(sendResult.error)
+            if (!error && !emit("error", { error: sendResult.error })) UI.error(modelError)
+            error = modelError
+          } else error = RunAccounting.serializeSessionError(sendResult.error)
           // altimate_change end
         }
         eventAbort.abort()

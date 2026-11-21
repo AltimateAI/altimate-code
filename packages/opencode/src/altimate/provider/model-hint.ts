@@ -11,3 +11,11 @@ export function modelNotFoundHint(providerID: string | undefined, providerMissin
   if (providerID !== "anthropic" || providerMissing !== true) return undefined
   return "The Anthropic provider needs an API key. For a Claude Pro or Max plan, run /connect and pick Claude subscription."
 }
+
+export function modelNotFoundMessage(providerID: string | undefined, modelID: string | undefined, source?: string) {
+  const sourceHint = source ? ` (from ${source})` : ""
+  if (providerID === "" && modelID === "") {
+    return `Empty model value${sourceHint}. Use a provider/model-name value.`
+  }
+  return `Model not found: ${providerID}/${modelID}${sourceHint}`
+}
