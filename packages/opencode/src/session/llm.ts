@@ -353,6 +353,8 @@ export namespace LLM {
     // altimate_change end
 
     // altimate_change start — clamp after every context-affecting request field is finalized.
+    // Tool schemas and provider instructions share the window; encoded media counts at fixed
+    // allowances. The estimate runs only when the clamp needs it.
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,

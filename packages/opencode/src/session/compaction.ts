@@ -14,7 +14,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
-// altimate_change start — the context measure shared with the pre-send budget guard
+// altimate_change start — reported usage plus the inflated uncounted tail
 import { reportedContextTokens } from "@/provider/output-token-budget"
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events

@@ -1014,7 +1014,7 @@ describe("guard calibration", () => {
     }
   })
 
-  test("the shared measure is reported usage plus the tail inflated by the safety fraction", () => {
+  test("the compaction measure is reported usage plus the tail inflated by the safety fraction", () => {
     const tokens = { input: 100_000, output: 2_000, reasoning: 0, cache: { read: 6_000, write: 0 } }
     expect(reportedContextTokens({ tokens, fraction: 0.65 })).toBe(108_000)
     expect(reportedContextTokens({ tokens, estimatedTokens: 650, fraction: 0.65 })).toBe(109_000)
