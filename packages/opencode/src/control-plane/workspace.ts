@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { Context, Effect, FiberMap, Iterable, Layer, Schema, Stream } from "effect"
@@ -800,21 +803,27 @@ export const layer = Layer.effect(
 
     const remove = Effect.fn("Workspace.remove")(function* (id: WorkspaceV2.ID) {
       const sessions = yield* db
-        .select({ id: SessionTable.id, parentID: SessionTable.parent_id })
+        // altimate_change start — the share URL decides whether an offline removal may proceed
+        .select({ id: SessionTable.id, parentID: SessionTable.parent_id, shareURL: SessionTable.share_url })
+        // altimate_change end
         .from(SessionTable)
         .where(eq(SessionTable.workspace_id, id))
         .all()
         .pipe(Effect.orDie)
+      // altimate_change start — offline mode cannot revoke a public share, so it refuses before removing anything
+      if (Offline.enabled() && sessions.some((sessionInfo) => sessionInfo.shareURL))
+        return yield* Effect.die(
+          new Offline.OfflinePolicyError("This workspace has a shared session. Remove it while online so the share can be revoked."),
+        )
+      // altimate_change end
       const sessionIDs = new Set(sessions.map((sessionInfo) => sessionInfo.id))
       yield* Effect.forEach(
         sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID)),
         (sessionInfo) =>
           session.remove(sessionInfo.id).pipe(
             Effect.catchIf(NotFoundError.isInstance, () => Effect.void),
-            // altimate_change start — offline mode keeps a shared session (its share cannot be revoked offline)
-            Effect.catchTag("Session.OfflinePolicyError", (error) =>
-              Effect.logWarning("kept a shared session while offline", { sessionID: sessionInfo.id, error: error.message }),
-            ),
+            // altimate_change start — a share created since the check above: refuse rather than half-remove
+            Effect.catchTag("Session.OfflinePolicyError", (error) => Effect.die(new Offline.OfflinePolicyError(error.message))),
             // altimate_change end
           ),
         { discard: true },
