@@ -26,6 +26,9 @@ test("offline rejects remote targets, SSH, cloud auth, and URI host overrides", 
     { type: "sqlserver", host: "localhost", authentication: "azure-active-directory-default" },
     { type: "postgres", connection_string: "postgres://localhost/db?host=remote" },
     { type: "mongodb", connection_string: "mongodb+srv://localhost/db" },
+    { type: "mongodb", connection_string: "mongodb://localhost/db?directConnection=true", direct_connection: false },
+    { type: "mongodb", connection_string: "mongodb://localhost/db?directConnection=true&authMechanism=MONGODB-AWS" },
+    { type: "trino", url: "https://example.com" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 test("dbt checks selected target and CLI overrides", async () => {

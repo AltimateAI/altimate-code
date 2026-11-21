@@ -13,7 +13,7 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-state-pin-test-${process.pid}-$
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 
-const { resolveBindingOutcome, __resetPinValidation, PIN_VALIDATION_TTL_MS, PIN_STALE_IF_ERROR_MS } =
+const { recordApprovedBinding, resolveBindingOutcome, __resetPinValidation, PIN_VALIDATION_TTL_MS, PIN_STALE_IF_ERROR_MS } =
   await import("../../../src/altimate/workspace/state")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { WorkspaceApi, ForbiddenError, WorkspaceApiError } = await import(
@@ -116,6 +116,30 @@ afterAll(() => {
 })
 
 describe("resolveBindingOutcome — extension pin", () => {
+  test("offline only returns an existing unpinned local binding", async () => {
+    const directory = path.join(SANDBOX, "offline-project")
+    mkdirSync(directory, { recursive: true })
+    const previous = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    let requests = 0
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => {
+      requests++
+      return []
+    }
+    try {
+      expect(await resolveBindingOutcome(directory)).toEqual({ status: "unknown" })
+      const binding = { datamateId: 17, datamateName: "local", linkedAt: Date.now(), repoRemote: null, projectPath: null }
+      await recordApprovedBinding(directory, binding, { seed: false, awaitBackfill: true })
+      expect(await resolveBindingOutcome(directory)).toMatchObject({ status: "bound", stale: true, binding })
+      setPin({ ALTIMATE_PINNED_WORKSPACE_ROOT: directory })
+      expect(await resolveBindingOutcome(directory)).toEqual({ status: "unknown" })
+      expect(requests).toBe(0)
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  })
+
   test("a valid, account-visible pin binds, and is marked pinned", async () => {
     setPin()
     const out = await resolveBindingOutcome(ROOT)

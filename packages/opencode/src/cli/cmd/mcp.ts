@@ -142,7 +142,12 @@ export const McpServeCommand = cmd({
   async handler(args) {
     await Offline.start(process.cwd())
     const { serveStdio } = await import("../../altimate/mcp-server/server")
-    await serveStdio({ connections: args.connections, allowWrite: args.allowWrite, allTools: args.allTools, workspaceTools: args.workspaceTools })
+    await serveStdio({
+      connections: args.connections,
+      allowWrite: args.allowWrite,
+      allTools: args.allTools,
+      workspaceTools: !Offline.enabled() && args.workspaceTools,
+    })
   },
 })
 // altimate_change end

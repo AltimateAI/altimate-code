@@ -101,6 +101,8 @@ async function open(p) {
     temp_directory: process.env.TMPDIR + "/duckdb-" + process.pid,
     ...(p.accessMode ? { access_mode: p.accessMode } : {}),
     ...(p.extensionDirectory ? { extension_directory: p.extensionDirectory } : {}),
+    // altimate_change — ordinary offline connections keep local file access
+    ...(p.offline ? { autoinstall_known_extensions: "false", autoload_known_extensions: "false" } : {}),
   };
   let instance;
   await new Promise((resolve, reject) => {

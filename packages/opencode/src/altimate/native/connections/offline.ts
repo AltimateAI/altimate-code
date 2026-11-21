@@ -36,6 +36,8 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   if (!["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "oracle", "redshift", "clickhouse", "trino", "mongodb", "mongo"].includes(type)) deny()
   // Cloud authentication may contact an identity provider even for a loopback host.
   if (config.authentication && !["default", "sql", "ntlm"].includes(String(config.authentication).toLowerCase())) deny()
+  const mongo = type === "mongodb" || type === "mongo"
+  if (mongo && config.direct_connection !== undefined && config.direct_connection !== true) deny()
   if (config.host !== undefined && !isLoopbackHost(config.host)) deny()
   const connectionString = type === "trino"
     ? config.connection_string ?? config.server ?? config.url
@@ -45,11 +47,13 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
       const url = new URL(String(connectionString))
       if ((type === "trino" || type === "clickhouse") && !["http:", "https:"].includes(url.protocol)) deny()
       if (!isLoopbackHost(url.hostname) || url.protocol === "mongodb+srv:") deny()
-      if (["mongodb", "mongo"].includes(type) && url.searchParams.get("directConnection") !== "true") deny()
+      const query = new Map([...url.searchParams].map(([key, value]) => [key.toLowerCase(), value.toLowerCase()]))
+      if (mongo && config.direct_connection !== true && query.get("directconnection") !== "true") deny()
+      if (mongo && ["mongodb-aws", "mongodb-oidc", "gssapi"].includes(query.get("authmechanism") ?? "")) deny()
       // Drivers can override the authority via URL parameters or discover replica peers.
       for (const key of url.searchParams.keys()) {
         if (["host", "hostaddr", "server", "replicaset", "service"].includes(key.toLowerCase())) deny()
       }
     } catch { deny() }
-  } else if (["mongodb", "mongo"].includes(type) || !isLoopbackHost(config.host ?? "127.0.0.1")) deny()
+  } else if (mongo && config.direct_connection !== true) deny()
 }

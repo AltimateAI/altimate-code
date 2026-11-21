@@ -1101,6 +1101,8 @@ export const layer = Layer.effect(
       const token = claim(s, name, seq)
       // altimate_change end
       const mcp = yield* requireMcpConfig(name)
+      // altimate_change — reject before persisting enabled:true for an offline remote server
+      Offline.assertLocalMcp(mcp)
       // altimate_change start — see createAndStore
       yield* createAndStore(name, { ...mcp, enabled: true }, token)
       // altimate_change end

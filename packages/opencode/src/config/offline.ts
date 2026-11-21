@@ -19,7 +19,7 @@ async function localOptIn(directory: string) {
   const optedIn = async (text: string | undefined, source: string | { source: string; dir: string }) => {
     if (!text) return false
     if (parse(text)?.offline === true) return true
-    const config = await ConfigPaths.parseText(text, source, "empty", { track: false }).catch(() => undefined)
+    const config = await ConfigPaths.parseText(text, source, "empty", { track: false, expandFiles: false }).catch(() => undefined)
     return config?.offline === true
   }
   if (await optedIn(env("OPENCODE_CONFIG_CONTENT"), { source: "OPENCODE_CONFIG_CONTENT", dir: directory })) return true

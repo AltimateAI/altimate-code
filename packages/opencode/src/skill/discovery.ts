@@ -62,14 +62,17 @@ export namespace Discovery {
           const base = url.endsWith("/") ? url : `${url}/`
           const index = new URL("index.json", base).href
           // altimate_change start — reuse the cached index for this source without contacting it
-          const indexPath = path.join(cache, ".indexes", createHash("sha256").update(index).digest("hex") + ".json")
+          const sourceCache = path.join(cache, ".sources", createHash("sha256").update(index).digest("hex"))
+          const indexPath = path.join(sourceCache, "index.json")
           if (Offline.enabled()) {
             const cached = yield* fs.readJson(indexPath).pipe(Effect.catch(() => Effect.succeed(undefined)))
             const directories = Array.isArray(cached) ? cached : []
-            return yield* Effect.filter(directories.filter((dir): dir is string =>
-              typeof dir === "string" && path.relative(cache, dir).split(path.sep).length === 1 &&
-                path.dirname(dir) === cache,
-            ), (dir) => fs.exists(path.join(dir, "SKILL.md")).pipe(Effect.orElseSucceed(() => false)))
+            const local = directories.filter((dir): dir is string =>
+              typeof dir === "string" && path.dirname(dir) === sourceCache,
+            )
+            return yield* Effect.filter(local, (dir) =>
+              fs.exists(path.join(dir, "SKILL.md")).pipe(Effect.orElseSucceed(() => false)),
+            )
           }
           // altimate_change end
           const host = base.slice(0, -1)
@@ -91,6 +94,7 @@ export namespace Discovery {
           if (!data) return []
 
           const list = data.skills.filter((skill) => {
+            if (skill.name === "." || skill.name === ".." || !skill.name || /[\\/]/.test(skill.name)) return false
             if (!skill.files.includes("SKILL.md")) {
               log.warn("skill entry missing SKILL.md", { url: index, skill: skill.name })
               return false
@@ -102,7 +106,7 @@ export namespace Discovery {
             list,
             (skill) =>
               Effect.gen(function* () {
-                const root = path.join(cache, skill.name)
+                const root = path.join(sourceCache, skill.name)
 
                 yield* Effect.forEach(
                   skill.files,
