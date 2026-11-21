@@ -136,7 +136,13 @@ async function opencodeFiles(input: { directories: string[]; cwd: string; worktr
     )
   ).reverse()
   // altimate_change end
-  const files = [...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"), ...walkedUp]
+  // altimate_change start — the global loader merges branded names after legacy ones, so they rank first here
+  const files = [
+    ...ConfigPaths.fileInDirectory(Global.Path.config, "altimate-code"),
+    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
+    ...walkedUp,
+  ]
+  // altimate_change end
   // altimate_change end
   for (const dir of unique(input.directories)) {
     // altimate_change start — config directories also load branded names, below the legacy names
@@ -145,7 +151,12 @@ async function opencodeFiles(input: { directories: string[]; cwd: string; worktr
   }
   if (Flag.OPENCODE_CONFIG) files.push(Flag.OPENCODE_CONFIG)
   // altimate_change start — upstream_fix: include managed config dir in TUI migration
-  if (input.managed) files.push(...ConfigPaths.fileInDirectory(input.managed, "opencode"))
+  if (input.managed)
+    files.push(
+      ...ConfigPaths.fileInDirectory(input.managed, "opencode"),
+      // altimate_change — managed config also loads branded names
+      ...ConfigPaths.fileInDirectory(input.managed, "altimate-code"),
+    )
   // altimate_change end
 
   const existing = await Promise.all(

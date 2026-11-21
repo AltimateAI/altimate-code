@@ -834,6 +834,21 @@ describe("ACP service sessions", () => {
     expect(select(resumed, "effort")?.currentValue).toBe("high")
   })
 
+  it("does not restore the model of a reply to a shell row", async () => {
+    const { service } = makeService([
+      {
+        info: { id: "msg_shell", role: "user", model: { providerID: "test", modelID: "test-model" }, agent: "build" },
+        parts: [{ type: "text", text: "The following tool was executed by the user", synthetic: true }],
+      },
+      { info: { id: "msg_reply", parentID: "msg_shell", role: "assistant", providerID: "test", modelID: "test-model", variant: "high" }, parts: [] },
+    ])
+    const resumed = await Effect.runPromise(
+      service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] }),
+    )
+    expect(select(resumed, "effort")?.currentValue).toBeDefined()
+    expect(select(resumed, "effort")?.currentValue).not.toBe("high")
+  })
+
   it("closes local ACP state and aborts the backing session best-effort", async () => {
     const { service, aborts } = makeService()
     const created = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))

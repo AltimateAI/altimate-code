@@ -742,6 +742,9 @@ type SdkResponse<T> = {
 }
 
 type MessageInfo = {
+  // altimate_change — ids link an assistant reply to the user row that produced it
+  readonly id?: string
+  readonly parentID?: string
   readonly role?: Message["role"]
   readonly model?: Extract<Message, { role: "user" }>["model"]
   readonly providerID?: Extract<Message, { role: "assistant" }>["providerID"]
@@ -1211,12 +1214,11 @@ function stableStringify(value: unknown): string {
 // altimate_change start — shell and direct MCP rows record a display-only model; restore skips them
 function restoreFromMessages(items: readonly { info: MessageInfo; parts?: readonly unknown[] }[]) {
   const messages = items.map((item) => item.info)
+  const isDisplayOnly = (item: (typeof items)[number]) =>
+    item.info.role === "user" && ModelMetadata.isModelMetadataOnly((item.parts ?? []) as MessageV2.Part[])
+  const displayOnly = new Set(items.filter(isDisplayOnly).flatMap((item) => (item.info.id ? [item.info.id] : [])))
   const user = items.findLast(
-    (item) =>
-      item.info.role === "user" &&
-      item.info.model?.providerID &&
-      item.info.model.modelID &&
-      !ModelMetadata.isModelMetadataOnly((item.parts ?? []) as MessageV2.Part[]),
+    (item) => item.info.role === "user" && item.info.model?.providerID && item.info.model.modelID && !isDisplayOnly(item),
   )?.info
   // altimate_change end
   if (user?.model?.providerID && user.model.modelID) {
@@ -1227,7 +1229,10 @@ function restoreFromMessages(items: readonly { info: MessageInfo; parts?: readon
     }
   }
 
-  const assistant = messages.findLast((message) => message.providerID && message.modelID)
+  // altimate_change — replies to display-only rows carry the same display-only model
+  const assistant = messages.findLast(
+    (message) => message.providerID && message.modelID && !(message.parentID && displayOnly.has(message.parentID)),
+  )
   if (assistant?.providerID && assistant.modelID) {
     return {
       model: { providerID: assistant.providerID as ProviderV2.ID, modelID: assistant.modelID as ModelV2.ID },

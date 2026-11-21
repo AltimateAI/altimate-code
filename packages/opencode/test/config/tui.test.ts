@@ -435,6 +435,36 @@ it.instance("migrates TUI keys from branded files inside config directories", ()
 )
 // altimate_change end
 
+// altimate_change start — global branded files outrank legacy ones, as in the server loader
+it.instance("migrates global TUI keys with branded names ahead of legacy names", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      yield* fs.writeJson(path.join(Global.Path.config, "opencode.json"), { theme: "global-legacy" })
+      yield* fs.writeJson(path.join(Global.Path.config, "altimate-code.json"), { theme: "global-branded" })
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.theme).toBe("global-branded")
+    }),
+  ),
+)
+
+it.instance("migrates and applies TUI keys from branded files in .altimate-code directories", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const local = path.join(test.directory, ".altimate-code")
+      yield* fs.makeDirectory(local, { recursive: true })
+      yield* fs.writeJson(path.join(local, "altimate-code.json"), { theme: "altimate-dir" })
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.theme).toBe("altimate-dir")
+      expect(JSON.parse(yield* fs.readFileString(path.join(local, "tui.json"))).theme).toBe("altimate-dir")
+    }),
+  ),
+)
+// altimate_change end
+
 it.instance("migrates project legacy tui keys even when global tui.json already exists", () =>
   withCleanState(
     Effect.gen(function* () {
