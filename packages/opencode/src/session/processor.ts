@@ -1362,7 +1362,7 @@ export namespace SessionProcessor {
                 (deferText !== undefined || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
                 !input.abort.aborted &&
                 input.assistantMessage.finish !== "content-filter"
-              refusedBeforeSend = compactable === true && isContextBudgetError(e)
+              refusedBeforeSend = compactable === true && !echoRecovery && isContextBudgetError(e)
               if (refusedBeforeSend) {
                 log.warn("pre-send context budget refusal; compacting before retrying", {
                   sessionID: input.sessionID,

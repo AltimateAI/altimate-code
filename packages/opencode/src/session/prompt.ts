@@ -2250,9 +2250,21 @@ export namespace SessionPrompt {
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
       // Compaction drops images and PDFs (replay swaps them for a placeholder, summaries strip them):
       // a refusal on a turn that carries one stays the budget error rather than answer without it.
-      const turnMedia = msgs
-        .find((msg) => msg.info.id === lastUser.id)
-        ?.parts.some((part) => part.type === "file" && MessageV2.isMedia(part.mime))
+      // The turn starts at its last user message with real content (synthetic follow-ups excluded).
+      const turnStart = msgs.findLastIndex(
+        (msg) =>
+          msg.info.role === "user" &&
+          msg.parts.some((part) => (part.type === "text" && !part.synthetic) || part.type === "file"),
+      )
+      const turnMedia =
+        turnStart >= 0 &&
+        msgs
+          .slice(turnStart)
+          .some(
+            (msg) =>
+              msg.info.role === "user" &&
+              msg.parts.some((part) => part.type === "file" && MessageV2.isMedia(part.mime)),
+          )
       const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !turnMedia
       // Attachments the provider has not counted (in the last turn's tool results or later messages)
       // are not in the tail estimate: leave those requests to the estimate.
