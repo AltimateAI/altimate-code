@@ -31,7 +31,7 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 // altimate_change start — the context measure shared by compaction and the pre-send budget guard
-import { OUTPUT_TOKEN_FLOOR, estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
+import { estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
 // altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
@@ -206,8 +206,8 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
-// altimate_change start — bytes per token for a file sent as a file part (pre-send oversize check)
-const FILE_BYTES_PER_TOKEN = 4
+// altimate_change start — assistant-message metadata key marking a request sent without tools
+const SENT_WITHOUT_TOOLS = "sent_without_tools"
 // altimate_change end
 // altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
 const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
@@ -2258,16 +2258,13 @@ export namespace SessionPrompt {
       // rather than continue without it. Media the model already saw does not block compaction.
       let unmeasuredMedia = false
       let unseenMedia = false
-      // Files sent as file parts (not converted to text) are outside the text tail estimate.
-      let unmeasuredFileTokens = 0
       for (const msg of msgs) {
         if (msg.info.id !== measuredID && !isAfterMeasured(msg.info.id)) continue
         for (const part of msg.parts) {
-          if (part.type === "file") {
+          // text/plain files and directories arrive as text parts, already in the tail estimate.
+          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
             unmeasuredMedia = true
             if (MessageV2.isMedia(part.mime)) unseenMedia = true
-            else if (part.mime !== "text/plain" && part.mime !== "application/x-directory")
-              unmeasuredFileTokens += Math.ceil((part.url.length * 3) / 4 / FILE_BYTES_PER_TOKEN)
           }
           if (part.type !== "tool" || part.state.status !== "completed") continue
           const attachments = part.state.attachments ?? []
@@ -2275,43 +2272,32 @@ export namespace SessionPrompt {
           if (attachments.some((attachment) => MessageV2.isMedia(attachment.mime))) unseenMedia = true
         }
       }
-      // Unmeasured content (sized like the guard sizes it) that alone leaves no room for a minimal
-      // response cannot be helped by compacting the history before it: that refusal stays immediate
-      // and the history untouched.
-      const guardTail = measured ? estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens) : 0
-      // A dedicated input limit already excludes the response; a context window must also fit it.
-      // Only content after the measured step: that step's own tool results can still be summarized.
-      const measuredMsg = msgs.find((msg) => msg.info.id === measuredID)
-      const measuredOwnTokens = measuredMsg
-        ? estimateUncountedTail([measuredMsg], measuredMsg.info.id, () => false, estimateTextTokens)
-        : 0
-      const unmeasuredTokens = guardTail - measuredOwnTokens + unmeasuredFileTokens
-      const tailFillsWindow = model.limit.input
-        ? unmeasuredTokens >= model.limit.input
-        : unmeasuredTokens + OUTPUT_TOKEN_FLOOR >= (model.limit.context || Infinity)
-      const compactable =
-        measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia && !tailFillsWindow
-      // A step that made tool calls was sent with the full tool set; a text-only step may have been
-      // sent without tools (an echo or final step), so its usage can undercount this request.
-      const measuredWithTools = msgs
-        .find((msg) => msg.info.id === measuredID)
-        ?.parts.some((part) => part.type === "tool")
+      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
+      // A step sent without tools (an echo or final step, tagged below) reported usage that can
+      // undercount this request by the tool schemas; every other step carried the full tool set.
       const reportedInputTokens =
         measured &&
-        measuredWithTools &&
+        measured.metadata?.[SENT_WITHOUT_TOOLS] !== true &&
         !unmeasuredMedia &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
-          ? reportedContextTokens({
-              tokens: measured.tokens,
+          ? (() => {
               // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
               // estimator, so the discount applies only to what the provider has counted.
-              estimatedTokens: guardTail,
-              fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
-            })
+              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens)
+              return reportedContextTokens({
+                tokens: measured.tokens,
+                estimatedTokens: guardTail,
+                fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
+              })
+            })()
           : undefined
+      // altimate_change end
+      // altimate_change start — record a request sent without tools; its usage cannot calibrate the guard
+      if (echoCommittedAnswer || textFinalStep)
+        processor.message.metadata = { ...processor.message.metadata, [SENT_WITHOUT_TOOLS]: true }
       // altimate_change end
       const result = await processor.process({
         // altimate_change start — see reportedInputTokens above

@@ -204,6 +204,8 @@ type Seeded = {
     toolOutput?: string
     /** Attach an image to the step's tool result. */
     toolImage?: boolean
+    /** The step's request was sent without tools (an echo or final step). */
+    sentWithoutTools?: boolean
   }
   /** An image attached to the `next` user turn. */
   nextFile?: boolean
@@ -248,6 +250,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         parentID,
         finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
+        ...(last.sentWithoutTools ? { metadata: { sent_without_tools: true } } : {}),
       } as any)
       yield* sessions.updatePart({
         id: PartID.ascending(),
@@ -352,7 +355,7 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: history,
           assistantUsage: reported,
-          last: TOOL_STEP,
+          // The previous turn ended with a plain text answer, the usual shape at a new user turn.
           next: "Summarize the revenue concentration.",
         })
 
@@ -425,25 +428,24 @@ it.live(
 )
 
 it.live(
-  "a new message that alone fills the window fails at once, leaving the history uncompacted",
+  "a final step sent without tools is tagged so its usage never calibrates the guard",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        // 16k window, where the proactive compaction trigger never fires: compacting the earlier
-        // history cannot make room for a message bigger than the window, so the guard refuses at once.
-        const result = yield* runSession(dir, llm, {
-          user: "List the top customers by paid revenue.",
-          assistantUsage: 1_000,
-          last: TOOL_STEP,
-          next: sqlJsonHistory(18_000),
-        })
+        // steps: 1 makes the first request the final step, sent without tools.
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, { user: "Summarize the revenue concentration." })
 
-        expect(result.hits.length).toBe(0)
-        expect(result.compactions.length).toBe(0)
-        expect(result.errors.length).toBe(1)
-        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+        const answer = result.messages.find((m) => m.info.role === "assistant")?.info as any
+        expect(answer?.metadata?.sent_without_tools).toBe(true)
       }),
-      { git: true, config: providerCfg(SMALL_WINDOW) },
+      {
+        git: true,
+        config: (url: string) => ({
+          ...providerCfg(LARGE_WINDOW, { tools: true })(url),
+          agent: { build: { steps: 1 } },
+        }),
+      },
     ),
   { timeout: 120_000 },
 )
@@ -511,12 +513,12 @@ it.live(
 )
 
 // Usage counted for another model (different tokenizer), another agent (different system prompt and
-// tools) or a text-only step (possibly sent without tools) does not describe this request: the estimate
+// tools) or a step sent without tools (an echo or final step) does not describe this request: the estimate
 // decides, trips, and the session compacts.
 for (const [name, last] of [
   ["another model", { ...TOOL_STEP, modelID: "another-model" }],
   ["another agent", { ...TOOL_STEP, agent: "plan" }],
-  ["a text-only step", {}],
+  ["a step sent without tools", { sentWithoutTools: true }],
 ] as const) {
   it.live(
     `usage reported by ${name} is not trusted: the guard trips and the session compacts`,
