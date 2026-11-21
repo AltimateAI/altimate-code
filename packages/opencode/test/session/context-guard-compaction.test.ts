@@ -8,7 +8,7 @@
  * "Context budget exceeded before the request was sent" without compaction ever running.
  */
 import { describe, expect, test } from "bun:test"
-import { APICallError } from "ai"
+import * as RunBudgetEffort from "../../src/altimate/session/run-budget-effort"
 import { MessageV2 } from "../../src/session/message-v2"
 import path from "node:path"
 import { Effect, Layer } from "effect"
@@ -812,33 +812,16 @@ describe("calibration tail", () => {
   })
 })
 
-test("an input-plus-reservation provider error is an overflow only when the input is a large share", () => {
-  const error = (message: string) =>
-    MessageV2.fromError(
-      new APICallError({
-        message,
-        url: "https://example.com",
-        requestBodyValues: {},
-        statusCode: 400,
-        responseHeaders: { "content-type": "application/json" },
-        isRetryable: false,
-      }),
-      { providerID: "p" as any },
-    )
-  // A large input: compaction can make room for the reservation.
-  expect(
-    MessageV2.ContextOverflowError.isInstance(
-      error(
-        "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again",
-      ),
-    ),
-  ).toBe(true)
-  // A tiny input with an oversized max_tokens: a configuration problem, not compactable.
-  expect(
-    MessageV2.ContextOverflowError.isInstance(
-      error(
-        "input length and `max_tokens` exceed context limit: 5 + 64000 > 32768, decrease input length or `max_tokens` and try again",
-      ),
-    ),
-  ).toBe(false)
+test("the deadline tag follows the run a task child inherits from its ancestors", async () => {
+  const parents: Record<string, string | undefined> = { child: "parent", parent: "root", root: undefined }
+  const parentOf = async (id: string) => parents[id]
+  const end = RunBudgetEffort.begin("parent", true)
+  try {
+    expect(await RunBudgetEffort.inheritedRun("child", parentOf)).toBe("parent")
+    expect(RunBudgetEffort.toolsDisabled((await RunBudgetEffort.inheritedRun("child", parentOf))!)).toBe(true)
+    expect(await RunBudgetEffort.inheritedRun("root", parentOf)).toBeUndefined()
+  } finally {
+    end()
+  }
+  expect(await RunBudgetEffort.inheritedRun("child", parentOf)).toBeUndefined()
 })

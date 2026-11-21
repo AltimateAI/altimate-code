@@ -51,7 +51,7 @@ import { LLMRequestEvent } from "@/altimate/observability/tracing"
 // altimate_change end
 // altimate_change start — run deadlines override reasoning effort for each remaining request
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
-import { activeRun, effortOverride, hasActiveRuns, toolsDisabled } from "@/altimate/session/run-budget-effort"
+import { effortOverride, inheritedRun, toolsDisabled } from "@/altimate/session/run-budget-effort"
 import { analystEffortOptions } from "@/altimate/session/analyst-effort"
 // altimate_change start — Claude Agent provider request routing
 import { ClaudeAgent } from "@/altimate/provider/claude-agent"
@@ -91,15 +91,11 @@ export namespace LLM {
 
   // altimate_change start — task subagents inherit a live ancestor's run effort without retaining state
   async function sessionRunBudget(sessionID: string) {
-    if (!hasActiveRuns()) return undefined
-    const visited = new Set<string>()
-    let current: string | undefined = sessionID
-    while (current && !visited.has(current)) {
-      if (activeRun(current)) return { effort: effortOverride(current), toolsDisabled: toolsDisabled(current) }
-      visited.add(current)
-      current = (await Session.get(SessionID.make(current)).catch(() => undefined))?.parentID
-    }
-    return undefined
+    const run = await inheritedRun(
+      sessionID,
+      async (id) => (await Session.get(SessionID.make(id)).catch(() => undefined))?.parentID,
+    )
+    return run === undefined ? undefined : { effort: effortOverride(run), toolsDisabled: toolsDisabled(run) }
   }
   // altimate_change end
 

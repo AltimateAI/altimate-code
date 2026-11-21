@@ -40,3 +40,19 @@ export function hasActiveRuns(): boolean {
 export function activeRun(sessionID: string): boolean {
   return active.has(sessionID)
 }
+
+/** The session (this one or the nearest ancestor) whose live run governs it; task subagents inherit it. */
+export async function inheritedRun(
+  sessionID: string,
+  parentOf: (sessionID: string) => Promise<string | undefined>,
+): Promise<string | undefined> {
+  if (!hasActiveRuns()) return undefined
+  const visited = new Set<string>()
+  let current: string | undefined = sessionID
+  while (current && !visited.has(current)) {
+    if (activeRun(current)) return current
+    visited.add(current)
+    current = await parentOf(current)
+  }
+  return undefined
+}

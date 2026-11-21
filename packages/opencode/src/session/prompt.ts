@@ -211,15 +211,11 @@ const SENT_WITHOUT_TOOLS = "sent_without_tools"
 
 /** Whether a deadline has disabled tools for this session, inherited from a live ancestor run (as llm.ts applies it). */
 async function runToolsDisabled(sessionID: string): Promise<boolean> {
-  if (!RunBudgetEffort.hasActiveRuns()) return false
-  const visited = new Set<string>()
-  let current: string | undefined = sessionID
-  while (current && !visited.has(current)) {
-    if (RunBudgetEffort.activeRun(current)) return RunBudgetEffort.toolsDisabled(current)
-    visited.add(current)
-    current = (await Session.get(SessionID.make(current)).catch(() => undefined))?.parentID
-  }
-  return false
+  const run = await RunBudgetEffort.inheritedRun(
+    sessionID,
+    async (id) => (await Session.get(SessionID.make(id)).catch(() => undefined))?.parentID,
+  )
+  return run !== undefined && RunBudgetEffort.toolsDisabled(run)
 }
 // altimate_change end
 // altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
