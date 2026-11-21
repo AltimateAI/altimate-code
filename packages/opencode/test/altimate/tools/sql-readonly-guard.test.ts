@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { Effect } from "effect"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { PermissionNext } from "../../../src/permission/next"
 import { SessionID, MessageID } from "../../../src/session/schema"
@@ -167,6 +168,18 @@ describe("sql_execute on a read-only agent", () => {
     const { error, asked } = await run("CREATE OR REPLACE TABLE scratch.pubs AS SELECT 1 AS x", "scratch")
     expect(error).toBeUndefined()
     expect(asked).toHaveLength(0)
+  })
+
+  test("a denial that fails an Effect, as the tool bridge runs it, is explained", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    // The production context runs ctx.ask through Effect.runPromise (EffectBridge.promise).
+    const ctx = {
+      ...deniedCtx([]),
+      ask: () => Effect.runPromise(Effect.fail(new PermissionV1.DeniedError({ ruleset: [] }))),
+    }
+    await expect(
+      tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
+    ).rejects.toThrow("it is not a read (DELETE)")
   })
 
   test("a denial from the subagent permission path is explained too", async () => {
