@@ -82,8 +82,6 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
 export function writeReason(sql: string, dialect?: string): string {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
   if (blocked) {
-    // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone: name
-    // the unreadable text first, since fixing it may be the whole fix.
     // Name the first statement that is blocked on its own, by position only (no SQL text is quoted back).
     const statements = tokenizeSql(sql, dialect).complete ? statementsOf(sql, dialect) : []
     const index = statements.length > 1 ? statements.findIndex((statement) => classifyAndCheck(statement, dialect).blocked) : -1
@@ -91,9 +89,11 @@ export function writeReason(sql: string, dialect?: string): string {
     const hard =
       ` It is refused because ${where} a hard-blocked statement, such as DROP DATABASE, DROP SCHEMA, TRUNCATE, SQL run` +
       " from a string literal or an executable comment; those never run and cannot be allowed."
+    // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone, inside the
+    // unreadable text or outside it: name the unreadable text first, since fixing it may be the whole fix.
     const untilClosed =
-      " Until that quoted text or comment can be read, words inside it such as DROP DATABASE or TRUNCATE count as a" +
-      " hard-blocked statement, which never runs."
+      " Until it can be read, words such as DROP DATABASE or TRUNCATE anywhere in the SQL, inside that quoted text or" +
+      " outside it, count as a hard-blocked statement; a real one outside it stays refused once the text is fixed."
     return tokenizeSql(sql, dialect).complete || hasExecutableComment(sql, dialect)
       ? hard
       : ` It counts as a write because ${explainWrite(sql, dialect).reason}.${untilClosed}`

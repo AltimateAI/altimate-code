@@ -121,7 +121,7 @@ describe("other read-only refusals carry the reason", () => {
     const refusal = writeReason("SELECT 1 /*! + 1 */", "mysql")
     expect(refusal).toContain("hard-blocked statement")
     expect(refusal).toContain("executable comment")
-    expect(refusal).not.toContain("Until that quoted text")
+    expect(refusal).not.toContain("Until it can be read")
     // The marker inside a literal is not a comment.
     expect(explainWrite("SELECT '/*! x' AS a, 'unclosed", "mysql").reason).not.toContain("executable comment")
   })
@@ -131,8 +131,10 @@ describe("other read-only refusals carry the reason", () => {
     // An unclosed quote holding a blocked word names the quote first.
     const reason = writeReason("SELECT a FROM t WHERE n = 'do not truncate", "postgres")
     expect(reason.indexOf("unterminated")).toBeGreaterThan(-1)
-    expect(reason.indexOf("unterminated")).toBeLessThan(reason.indexOf("Until that quoted text"))
+    expect(reason.indexOf("unterminated")).toBeLessThan(reason.indexOf("Until it can be read"))
     expect(reason).not.toContain("cannot be allowed")
+    // A real hard block outside the open quote is not described as sitting inside it.
+    expect(writeReason("DROP DATABASE x; SELECT 'abc", "postgres")).toContain("inside that quoted text or outside it")
   })
 
   test("a refusal that is not about writing stays as it was", () => {
