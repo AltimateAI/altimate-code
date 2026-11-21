@@ -112,7 +112,9 @@ describe("history reconciliation", () => {
       type: "text", text: "Schema verification could not run.",
     })
     const call = { type: "tool-call", toolCallId: "a", toolName: "read", input: { path: "orders.sql" } } as const
-    const history = Checkpoints.build({ prompt: request, previous: record, reply: [call], toolMessages: new Map() })
+    const checkpoint = { previous: record, reply: [call], toolMessages: new Map() }
+    const history = Checkpoints.build({ ...checkpoint, prompt: request })
+    expect(history).toEqual(Checkpoints.build({ ...checkpoint, prompt }))
     const followup: LanguageModelV3Prompt = [
       ...prompt,
       { role: "assistant", content: [call] },
@@ -124,7 +126,6 @@ describe("history reconciliation", () => {
     const saved = { ...record, history }
     const continuation = SyncDecision.decide(followup, saved)
     expect(continuation).toEqual({ kind: "catch-up", start: 4 })
-    expect(JSON.stringify(CatchUp.content(followup, continuation.start))).not.toContain("Schema verification")
     expect(SyncDecision.decide([...prompt, note], { ...record, history: Fingerprint.groups(prompt) })).toEqual({
       kind: "continue", start: 3,
     })

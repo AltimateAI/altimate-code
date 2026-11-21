@@ -86,6 +86,9 @@ export interface ValidatorResult {
    *  message verbatim. */
   fixHint?: string
 
+  /** Overrides the fix hint in strict mode when prior diagnostics must be preserved. */
+  strictFixHint?: string
+
   /** Structured detail for telemetry; not surfaced to the agent unless the
    *  validator explicitly includes it in `reason`/`fixHint`. */
   details?: Record<string, unknown>

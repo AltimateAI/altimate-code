@@ -289,9 +289,9 @@ export const DbtTestsPassValidator: Validator = {
       }
     }
 
-    const hintBlocks = failures.length > 0
-      ? failures
-      : toolErrors.map(({ model, error }) => ({ model, error }))
+    const errorHints = toolErrors.map(({ model, error }) => ({ model, error }))
+    const hintBlocks = failures.length > 0 ? failures : errorHints
+    const remediation = `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`
     const failingNames = failures.map((f) => f.model).filter(Boolean)
     const erroredNames = toolErrors.map((f) => f.model).filter(Boolean)
     const reason =
@@ -305,9 +305,10 @@ export const DbtTestsPassValidator: Validator = {
       classification: failures.length > 0 ? "finding" : advisory ? "unverifiable" : undefined,
       advisory,
       reason,
-      fixHint:
-        formatFixHint(hintBlocks) +
-        `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`,
+      fixHint: formatFixHint(hintBlocks) + remediation,
+      ...(failures.length > 0 && errorHints.length > 0 && {
+        strictFixHint: formatFixHint([...failures, ...errorHints]) + remediation,
+      }),
       details: {
         ...baseDetails,
         passed: passed.length,

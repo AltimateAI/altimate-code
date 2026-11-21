@@ -38,7 +38,11 @@ beforeAll(async () => {
   const bin = join(root, "bin")
   await fs.mkdir(bin)
   answerFile = join(root, "answer.json")
-  await fs.writeFile(join(bin, "altimate-dbt"), `#!/bin/sh\ncat "${answerFile}"\n`, { mode: 0o755 })
+  await fs.writeFile(
+    join(bin, "altimate-dbt"),
+    `#!/bin/sh\nif [ "$3" = customers ]; then cat "${answerFile}.customers"; else cat "${answerFile}"; fi\n`,
+    { mode: 0o755 },
+  )
   originalPath = process.env.PATH ?? ""
   process.env.PATH = `${bin}:${originalPath}`
   project = join(root, "project")
@@ -53,6 +57,8 @@ afterAll(async () => {
 
 afterEach(async () => {
   await fs.rm(answerFile, { force: true })
+  await fs.rm(answerFile + ".customers", { force: true })
+  await fs.rm(join(project, "models", "customers.sql"), { force: true })
 })
 
 /** Runs the validator over one model edited this session, with `answer` as schema-verify's answer. */
@@ -120,6 +126,19 @@ describe("dbt-tests-pass result classification", () => {
       advisories: [],
     })
     expect(ValidatorEnforcement.decide(checks, { ...options, strict: true }).retry).toBe(true)
+  })
+
+  test("a mixed retry includes tool errors only in the strict hint", async () => {
+    await fs.writeFile(join(project, "models", "customers.sql"), "select 1 as id\n")
+    await fs.writeFile(answerFile + ".customers", JSON.stringify({ error: "Adapter unavailable" }))
+    const result = await check({
+      stdout: "1 of 1 FAIL 1 not_null_orders_id [FAIL 1 in 0.10s]\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 TOTAL=1",
+    }, DbtTestsPassValidator)
+    expect(result).toMatchObject({ ok: false, classification: "finding" })
+    expect(result.advisory).toContain("customers")
+    expect(result.fixHint).toContain("not_null_orders_id")
+    expect(result.fixHint).not.toContain("Adapter unavailable")
+    expect(result.strictFixHint).toContain("Adapter unavailable")
   })
 
   test("a real test failure is a finding even when the wrapper also reports an error", async () => {

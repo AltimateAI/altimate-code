@@ -25,8 +25,9 @@ export function decide(
         ? result.strictFailure || !result.ok
         : !result.ok && result.classification !== "unverifiable"
       if (blocks) failures.push(check)
-      if (!options.strict && result.advisory) {
-        advisories.push(`[altimate-validator advisory: ${validator.name}] ${result.advisory}`)
+      if (!options.strict && (result.advisory || result.classification === "unverifiable")) {
+        const note = result.advisory ?? "The validator could not complete this check."
+        advisories.push(`[altimate-validator advisory: ${validator.name}] ${note}`)
       }
     }
   }
@@ -44,6 +45,8 @@ interface AdvisoryState {
 }
 
 const log = Log.create({ service: "validator-advisories" })
+// A transient write failure must not replay a delivered note on the next turn.
+const unsaved = new Map<SessionID, AdvisoryState>()
 
 export function advisoryFingerprint(text: string): string {
   return createHash("sha256").update(text).digest("hex")
@@ -55,6 +58,11 @@ function advisoryFile(sessionID: SessionID): string {
 
 // A local file avoids putting advisories in the conversation and share stream.
 export async function loadAdvisories(sessionID: SessionID): Promise<AdvisoryState> {
+  const recovery = unsaved.get(sessionID)
+  if (recovery) {
+    saveAdvisories(sessionID, recovery)
+    return recovery
+  }
   try {
     const value = await Filesystem.readJson<AdvisoryState>(advisoryFile(sessionID))
     if (
@@ -70,12 +78,15 @@ export async function loadAdvisories(sessionID: SessionID): Promise<AdvisoryStat
 export function saveAdvisories(sessionID: SessionID, state: AdvisoryState): void {
   try {
     Filesystem.writeJsonAtomic(advisoryFile(sessionID), state, 0o600)
-  } catch {
-    log.warn("failed to save validator advisories")
+    unsaved.delete(sessionID)
+  } catch (error) {
+    unsaved.set(sessionID, state)
+    log.warn("failed to save validator advisories", { error })
   }
 }
 
 export async function removeAdvisories(sessionID: SessionID): Promise<void> {
+  unsaved.delete(sessionID)
   await rm(advisoryFile(sessionID), { force: true }).catch(() => log.warn("failed to remove validator advisories"))
 }
 

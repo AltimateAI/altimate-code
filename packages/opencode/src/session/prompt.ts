@@ -2588,7 +2588,8 @@ export namespace SessionPrompt {
             const body = failures
               .map(({ validator, result: vRes }) => {
                 const head = `[altimate-validator: ${validator.name}] ${vRes.reason ?? "validation failed"}`
-                const tail = vRes.fixHint ? `\n${vRes.fixHint}` : ""
+                const hint = (validatorStrict ? vRes.strictFixHint : undefined) ?? vRes.fixHint
+                const tail = hint ? `\n${hint}` : ""
                 return head + tail
               })
               .join("\n\n")
