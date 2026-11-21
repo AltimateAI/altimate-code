@@ -208,4 +208,10 @@ Each of these fails with a one-line message or is skipped:
 
 Programs you run or configure yourself keep their own network access and proxy settings: shell commands, language servers, local MCP servers and their child processes. Offline mode does not sandbox them. They inherit `ALTIMATE_OFFLINE=1`, so an `altimate-code` started from the shell is offline too, and `NO_PROXY` gains `localhost,127.0.0.1,[::1],0.0.0.0` so that local requests do not go through a proxy.
 
+Some network use happens inside programs Altimate Code starts and is not checked either:
+
+- Git in a partial (blobless or treeless) clone fetches missing objects on demand, even for local commands such as `diff`.
+- Cloud sign-in configured on a local warehouse (for example SQL Server `authentication: azure-active-directory-*` or MongoDB `authMechanism=MONGODB-AWS`) contacts its identity provider.
+- When offline mode turns on after startup (organisation-managed or remote configuration, or a server started without it that then loads an offline project), requests that were already set up are not guarded. Set `ALTIMATE_OFFLINE=1` before starting a server.
+
 SQL that runs an explicit `INSTALL`, or loads an installed network extension (such as `httpfs`) and reads a remote path, is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs and usage reporting.

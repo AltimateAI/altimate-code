@@ -93,11 +93,15 @@ export function start() {
     async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       let url = input instanceof Request ? input.url : input.toString()
       if (!isLocalURL(url)) throw new Error("Offline mode allows network requests only to the configured model endpoint.")
-      // Follow redirects only while they stay on this machine.
+      // A Request carries its own method and body, and a caller may ask not to follow: refuse redirects then.
+      const follow = !(input instanceof Request) && (init?.redirect ?? "follow") === "follow"
+      if (!follow) return networkFetch!(input, { ...init, redirect: init?.redirect === "manual" ? "manual" : "error" })
+      // Otherwise follow redirects only while they stay on this machine.
       let response = await networkFetch!(input, { ...init, redirect: "manual" })
-      for (let hop = 0; hop < MAX_LOCAL_REDIRECTS && response.status >= 300 && response.status < 400; hop++) {
+      for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
         const location = response.headers.get("location")
         if (!location) return response
+        if (hop === MAX_LOCAL_REDIRECTS) throw new Error("Offline mode stopped after too many local redirects.")
         url = new URL(location, url).href
         if (!isLocalURL(url)) throw new Error("Offline mode blocked a redirect away from this machine.")
         response = await networkFetch!(url, { ...init, redirect: "manual" })
