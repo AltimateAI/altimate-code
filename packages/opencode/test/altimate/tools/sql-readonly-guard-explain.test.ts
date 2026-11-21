@@ -34,22 +34,27 @@ describe("shellResidue", () => {
     expect(shellResidue("SELECT * FROM t | grep -i private | head", "postgres")).toBeUndefined()
   })
 
+  // Timing compares two sizes on the same host instead of a wall-clock bound: linear work grows about 8x
+  // from 1x to 8x input, quadratic about 64x.
+  const growth = (build: (n: number) => string, n: number) => {
+    const time = (sql: string) => {
+      const start = performance.now()
+      explainWrite(sql, "postgres")
+      shellResidue(sql, "postgres")
+      return performance.now() - start
+    }
+    time(build(n)) // warm up
+    return time(build(n * 8)) / Math.max(time(build(n)), 1)
+  }
+
   test("a long literal before a syntax error is explained in linear time", () => {
-    const sql = `SELECT '${"x".repeat(200_000)}' FROM WHERE`
-    const start = performance.now()
-    explainWrite(sql, "postgres")
-    shellResidue(sql, "postgres")
-    // Quadratic trimming took about 4 s at 80k characters; linear work stays far below this.
-    expect(performance.now() - start).toBeLessThan(3000)
+    expect(growth((n) => `SELECT '${"x".repeat(n)}' FROM WHERE`, 25_000)).toBeLessThan(30)
   })
 
   test("a crafted tail is scanned in linear time", () => {
-    const start = performance.now()
-    shellResidue(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")
-    shellResidue(`SELECT * FROM t ${"| head   ".repeat(44)};y`, "postgres")
-    explainWrite(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")
-    // A backtracking blowup takes many seconds; parser calls alone stay far below this on a busy runner.
-    expect(performance.now() - start).toBeLessThan(5000)
+    // The tail patterns see at most 400 characters, so a longer crafted tail costs no more.
+    expect(growth((n) => `SELECT * FROM t ${"| head ".repeat(n)}x;y`, 8)).toBeLessThan(30)
+    expect(growth((n) => `SELECT * FROM t ${"| head   ".repeat(n)};y`, 6)).toBeLessThan(30)
   })
 
   test("a comparison before the residue is kept", () => {

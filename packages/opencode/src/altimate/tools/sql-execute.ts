@@ -774,8 +774,10 @@ export function deniedWriteMessage(input: {
     return `${head} it is a MongoDB write (a write command, or an aggregate with a $out or $merge stage). Use a read command (find, aggregate, countDocuments, distinct) instead.`
   }
   const dialect = input.dialects.find((d) => classifyAndCheck(input.sql, d).queryType === "write")
-  const { reason, unreadable } = explainWrite(input.sql, dialect)
-  const next = unreadable
+  const { reason, unreadable, unavailable } = explainWrite(input.sql, dialect)
+  const next = unavailable
+    ? "Changing the SQL will not help; ask the user to check the installation."
+    : unreadable
     ? "Fix the query and call sql_execute again; the same text will be refused again." +
       (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
       (input.warehouseGiven || input.dialects.length < 2

@@ -610,7 +610,10 @@ function parserMessage(message: string): string {
  * remove, the parser error and its position, or the first statement that is not a read. `unreadable`
  * is true when the SQL could not be read at all (fix the text), false when a statement writes.
  */
-export function explainWrite(sql: string, dialect?: string): { reason: string; unreadable: boolean } {
+export function explainWrite(
+  sql: string,
+  dialect?: string,
+): { reason: string; unreadable: boolean; unavailable?: boolean } {
   const unreadable = (reason: string) => ({ reason, unreadable: true })
   const writes = (reason: string) => ({ reason, unreadable: false })
   const residue = shellResidue(sql, dialect)
@@ -633,9 +636,11 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     const batchKeyword = batchedStatement(maskSql(tokenizeSql(statement, dialect).tokens), dialect)
     // The classifier itself could not run: no rewrite of the SQL can help.
     if (result.parseError === "SQL parser is unavailable" || result.parseError === "SQL parser returned an invalid statement list") {
-      return writes(
-        "the SQL classifier is unavailable in this installation, so no query can be proven read-only; changing the SQL will not help",
-      )
+      return {
+        reason: "the SQL classifier is unavailable in this installation, so no query can be proven read-only",
+        unreadable: false,
+        unavailable: true,
+      }
     }
     if (result.parseError && batchKeyword) {
       return writes(

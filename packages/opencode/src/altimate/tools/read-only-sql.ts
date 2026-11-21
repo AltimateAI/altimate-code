@@ -42,14 +42,14 @@ export function requireReadOnlyQuery(sql: string, dialect?: string): void {
     throw new Error("Only a single read-only query is accepted here; it never writes data.")
 }
 
-// Statement words refused anywhere in a read handed to sql_check; a column qualified by a whole
-// identifier (t.update) is not one, as in the classifier.
-const STATEMENT_WORD =
-  /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b(?<!(?:^|[^\w$.])[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*\.[A-Za-z]+)/i
-const REPLACE_WORD = /\bREPLACE\b(?!\s*\()(?<!(?:^|[^\w$.])[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*\.REPLACE)/i
-// The bundled ClickHouse parser accepts trailing text, so there a dotted name gets no exemption.
-const STRICT_STATEMENT_WORD =
-  /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b/i
+// Statement words refused anywhere in a read handed to sql_check. A column qualified by a whole
+// identifier (t.update) is not one, as in the classifier, except on ClickHouse, whose bundled parser
+// accepts trailing text.
+const WORDS = "INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE"
+const QUALIFIED = "(?<!(?:^|[^\\w$.])[A-Za-z_][\\w$]*(?:\\.[A-Za-z_][\\w$]*)*\\.[A-Za-z]+)"
+const STATEMENT_WORD = new RegExp(`\\b(${WORDS})\\b${QUALIFIED}`, "i")
+const REPLACE_WORD = new RegExp(`\\bREPLACE\\b(?!\\s*\\()${QUALIFIED}`, "i")
+const STRICT_STATEMENT_WORD = new RegExp(`\\b(${WORDS})\\b`, "i")
 const STRICT_REPLACE_WORD = /\bREPLACE\b(?!\s*\()/i
 
 function wordPatterns(dialect?: string): [RegExp, RegExp] {
