@@ -1,6 +1,3 @@
-// altimate_change start — offline policy refusals
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -309,13 +306,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     const unshare = Effect.fn("SessionHttpApi.unshare")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      // altimate_change start — offline mode cannot revoke a share; the declared refusal is a 400 with its message
-      if (Offline.enabled())
-        return yield* new Session.OfflinePolicyError({ message: "Offline mode cannot revoke a share. Run unshare while online." })
-      // altimate_change end
-      yield* shareSvc
-        .unshare(ctx.params.sessionID)
-        .pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))
+      yield* shareSvc.unshare(ctx.params.sessionID).pipe(
+        // altimate_change start — the declared offline refusal passes through as a 400 with its message
+        Effect.mapError((error) =>
+          error instanceof Session.OfflinePolicyError ? error : new HttpApiError.InternalServerError({}),
+        ),
+        // altimate_change end
+      )
       return yield* requireSession(ctx.params.sessionID)
     })
 

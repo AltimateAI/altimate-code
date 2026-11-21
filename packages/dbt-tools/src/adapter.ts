@@ -1,4 +1,5 @@
 import type { Config } from "./config"
+import { LIBPQ_DESTINATION_VARS } from "./offline-env"
 import { bufferLog } from "./log-buffer"
 import { recordManifest } from "./stale-manifest"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
@@ -104,10 +105,7 @@ function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
     vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
     vars.DO_NOT_TRACK = "1"
     vars.DBT_VERSION_CHECK = "false"
-    // libpq reads these destinations from the environment, overriding the checked profile host.
-    delete vars.PGHOSTADDR
-    delete vars.PGSERVICE
-    delete vars.PGSERVICEFILE
+    for (const name of LIBPQ_DESTINATION_VARS) delete vars[name]
   }
   if (options.profilesDir) vars.DBT_PROFILES_DIR = options.profilesDir
   if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
