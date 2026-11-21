@@ -82,7 +82,10 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
 export function writeReason(sql: string, dialect?: string): string {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
   if (blocked) return ""
-  if (queryType === "write") return ` It counts as a write because ${explainWrite(sql, dialect).reason}.`
+  if (queryType === "write") {
+    const { reason, unavailable } = explainWrite(sql, dialect)
+    return ` It counts as a write because ${reason}.${unavailable ? " Changing the SQL will not help; ask the user to check the installation." : ""}`
+  }
   // Name the word only when it is the sole reason: the body is otherwise one SELECT or WITH query.
   const body = readOnlyBody(sql, dialect)?.body
   if (!body || !/^(SELECT|WITH)\b/i.test(body)) return ""
