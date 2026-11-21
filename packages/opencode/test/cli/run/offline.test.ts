@@ -11,7 +11,12 @@ const TENANT = "offline-fixture"
 const KEY = "fixture-key"
 const SKILL = "This unique statement came from the cached offline skill."
 
-async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace: boolean) {
+async function fixture(
+  snapshot: boolean,
+  configMode: boolean,
+  disableWorkspace: boolean,
+  provider = "offline-test",
+) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "altimate-offline-"))
   const project = path.join(root, "project")
   const config = path.join(root, "config", "altimate-code")
@@ -23,9 +28,9 @@ async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace:
   await Bun.write(
     path.join(config, "altimate-code.json"),
     JSON.stringify({
-      model: "offline-test/fixture",
+      model: `${provider}/fixture`,
       provider: {
-        "offline-test": {
+        [provider]: {
           npm: "@ai-sdk/openai-compatible",
           options: { baseURL: MODEL_ENDPOINT, apiKey: "local-only" },
           models: { fixture: { name: "Offline fixture", limit: { context: 100000, output: 2000 } } },
@@ -163,7 +168,7 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
   { scenario: "config switch without a snapshot", snapshot: false, configMode: true, disableWorkspace: false },
 ]) {
   test(`offline ${scenario} keeps network traffic on the model endpoint`, async () => {
-    const f = await fixture(snapshot, configMode, disableWorkspace)
+    const f = await fixture(snapshot, configMode, disableWorkspace, snapshot ? "offline-test" : "openai")
     try {
       const before = snapshot ? await fs.readFile(f.manifest, "utf8") : undefined
       const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "Hello"], {

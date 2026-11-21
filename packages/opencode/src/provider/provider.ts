@@ -635,6 +635,8 @@ export namespace Provider {
       return {
         autoload: false,
         async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          // altimate_change — provider IDs can use a compatible SDK with no Responses API
+          if (Offline.enabled() && typeof sdk.responses !== "function") return sdk.languageModel(modelID)
           return sdk.responses(modelID)
         },
         // altimate_change start — OpenAI API auth gets the v1.17.9 header-timeout default

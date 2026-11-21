@@ -515,7 +515,9 @@ async function registryIdentity(canon: string): Promise<string> {
   } catch {
     /* no credentials resolved; the empty account is the honest answer */
   }
-  return `${snapshotFingerprint(canon)}\u0000${account}`
+  // altimate_change — a changed local binding can hide a snapshot without changing its files
+  const binding = Offline.enabled() ? await readLocalBinding(canon) : null
+  return `${snapshotFingerprint(canon)}\u0000${account}\u0000${binding?.datamateId ?? ""}`
 }
 
 /** Does the skill registry still reflect a different snapshot, or a different

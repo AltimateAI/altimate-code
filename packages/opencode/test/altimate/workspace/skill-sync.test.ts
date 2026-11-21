@@ -1338,6 +1338,25 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("offline registry notices a changed local binding without deleting the snapshot", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const previous = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      expect(await snapshotWorkspaceId(project)).toBe(1)
+      await markRegistryApplied(project)
+      expect(await registryStale(project)).toBe(false)
+      bindTo(2)
+      expect(await registryStale(project)).toBe(true)
+      expect(await snapshotWorkspaceId(project)).toBeNull()
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  })
+
   test("registryStale reports a credential switch, with the snapshot untouched", async () => {
     // The disclosure this guards: the registry had already loaded the previous
     // account's skills, and an A-to-B switch changes nothing on disk. Keyed on
