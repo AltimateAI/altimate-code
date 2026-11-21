@@ -84,10 +84,6 @@ describe("RunAccounting turn accounting", () => {
     expect(acc.turnBudgetStop(1)).toBe("attempts")
     expect(acc.turnBudgetStop(2)).toBeUndefined()
     expect(acc.turnBudgetStop(undefined)).toBeUndefined()
-    // A budget abort's one finalization step still gets a full step's attempts.
-    acc.onBudgetExhausted()
-    expect(acc.takeBudgetFinalizationAllowance()).toBe(1)
-    expect(acc.turnBudgetStop(1)).toBeUndefined()
     // Completed steps take precedence in the reported reason.
     acc.onStepFinish("msg_1", "stop")
     expect(acc.turnBudgetStop(1)).toBe("completed")

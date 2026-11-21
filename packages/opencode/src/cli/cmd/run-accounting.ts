@@ -202,7 +202,8 @@ export function create() {
     // overflow, which is still charged (see onSessionError). So that free
     // steps cannot repeat forever, the budget also stops a run once
     // `maxTurns * ATTEMPTS_PER_TURN` attempts started, the most N steps can
-    // use when every one exhausts its retries.
+    // use when every one exhausts its retries. The one budget finalization is
+    // exempt from that backstop (the caller skips it); its own timeout bounds it.
     /** Record a started non-compaction step attempt (it is charged a turn only if it finishes). */
     onStepAttempt(messageID: string) {
       // A compaction step supersedes any unfinished step; its overflow is not that step's.
@@ -328,8 +329,6 @@ export function create() {
     takeBudgetFinalizationAllowance(): number | undefined {
       if (!budgetExhausted || fatalError || pendingContextOverflow || budgetFinalizationSent) return undefined
       budgetFinalizationSent = true
-      // The finalization step gets exactly one step's worth of attempts.
-      attemptCount = turnCount * ATTEMPTS_PER_TURN
       return turnCount + 1
     },
     // altimate_change end

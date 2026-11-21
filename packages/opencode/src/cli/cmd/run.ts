@@ -1157,10 +1157,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // than maxTurns steps have completed, so a retried attempt is free.
               const requestID = requestOwnership.ownerOf(part.messageID)
               const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
-              const budgetStop = compactionStep ? undefined : accounting.turnBudgetStop(maxTurns)
+              // The attempt backstop does not apply to the one budget finalization
+              // (options.turnLimit), which its own timeout bounds.
+              const stop = compactionStep ? undefined : accounting.turnBudgetStop(maxTurns)
+              const budgetStop = stop === "attempts" && options?.turnLimit !== undefined ? undefined : stop
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                maxTurns && budgetStop && !committedAnswer && !budgetAborted &&
+                maxTurns && budgetStop && (budgetStop === "attempts" || !committedAnswer) && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
@@ -1303,8 +1306,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // step-start, so the step-start budget check never sees the cycle.
             if (
               props.error.name === "ContextOverflowError" && sessionID && maxTurns && !budgetAborted &&
-              accounting.turnBudgetStop(maxTurns) === "attempts" &&
-              (!timeExhausted() || options?.turnLimit !== undefined)
+              options?.turnLimit === undefined && !timeExhausted() &&
+              accounting.turnBudgetStop(maxTurns) === "attempts"
             ) {
               stopTimeBudget()
               budgetAborted = true
