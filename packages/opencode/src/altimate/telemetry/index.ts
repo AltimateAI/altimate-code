@@ -217,6 +217,14 @@ const PATH_RULES = {
 }
 // altimate_change end
 
+function telemetryWorkingDirectory(): string | undefined {
+  try {
+    return process.cwd()
+  } catch {
+    return undefined
+  }
+}
+
 export namespace Telemetry {
   const FLUSH_INTERVAL_MS = 5_000
   const MAX_BUFFER_SIZE = 200
@@ -2287,7 +2295,7 @@ export namespace Telemetry {
   }
 
   let enabled = false
-  let buffer: { event: Event; scope?: string; held?: boolean }[] = []
+  let buffer: { event: Event; scope?: string | null; held?: boolean }[] = []
   let configScope: string | undefined
   let reinitScope: string | undefined
   let flushTimer: ReturnType<typeof setInterval> | undefined
@@ -2331,7 +2339,8 @@ export namespace Telemetry {
   let nextTurn = 0
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
-  let droppedEvents = 0
+  // Keep counters only for scopes still represented in the bounded buffer.
+  const droppedEvents = new Map<string | null | undefined, number>()
   let initPromise: Promise<void> | undefined
   // altimate_change — unresolved config holds events for the next init call.
   let configUnresolved = false
@@ -2495,7 +2504,8 @@ export namespace Telemetry {
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
     const instance = TelemetryConfig.instanceDirectory()
-    const scope = instance ?? configDirectory ?? process.cwd()
+    const scope = instance ?? configDirectory ?? telemetryWorkingDirectory()
+    if (scope === undefined) return Promise.resolve()
     // altimate_change start — never re-init across an in-flight shutdown.
     //
     // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
@@ -2556,22 +2566,28 @@ export namespace Telemetry {
 
   function clearScope(scope: string | undefined) {
     buffer = buffer.filter((entry) => entry.scope !== scope)
-    droppedEvents = 0
+    droppedEvents.delete(scope)
   }
 
   async function doInit(scope: string) {
     // Events tracked before the CLI selects its config directory belong to the
     // first scope it resolves. Later scopes must resolve their own opt-out.
-    for (const entry of buffer) entry.scope ??= scope
+    for (const entry of buffer) {
+      if (entry.scope === undefined) entry.scope = scope
+    }
+    const earlyDrops = droppedEvents.get(undefined)
+    if (earlyDrops) {
+      droppedEvents.set(scope, (droppedEvents.get(scope) ?? 0) + earlyDrops)
+      droppedEvents.delete(undefined)
+    }
     const retry = (configUnresolved && configScope === scope) || buffer.some((entry) => entry.scope === scope && entry.held)
-    if (configScope !== undefined && configScope !== scope) droppedEvents = 0
     configScope = scope
     configUnresolved = false
     try {
       // altimate_change start — hold bounded startup events until the opt-out is resolved.
       if (TelemetryConfig.disablingEnvironmentVariable()) {
         buffer = []
-        droppedEvents = 0
+        droppedEvents.clear()
         return
       }
       const state = await TelemetryConfig.resolve(scope, retry)
@@ -2751,7 +2767,7 @@ export namespace Telemetry {
   /** Returns true once telemetry is enabled for the calling project's config. */
   export function isEnabled(): boolean {
     if (!initDone || !enabled) return false
-    return configScope === (TelemetryConfig.instanceDirectory() ?? configDirectory ?? process.cwd())
+    return configScope === (TelemetryConfig.instanceDirectory() ?? configDirectory ?? telemetryWorkingDirectory())
   }
 
   // altimate_change start — first-run health instrumentation (see the startup_ready, event_loop_stall
@@ -2906,7 +2922,9 @@ export namespace Telemetry {
     // Membership is decided when events are tracked, never by whichever
     // project happens to initialize before the next flush.
     const directory = TelemetryConfig.instanceDirectory() ?? configDirectory
-    const scope = directory ?? (configScope === undefined ? undefined : process.cwd())
+    const cwd = directory === undefined ? telemetryWorkingDirectory() : undefined
+    // Keep events from an inaccessible directory unassigned until exit.
+    const scope = directory ?? (cwd === undefined ? null : configScope === undefined ? undefined : cwd)
     if (scope === configScope && initDone && !enabled && !configUnresolved) return
     // altimate_change start — stamp the client trace of the turn the event's own session is
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
@@ -2922,7 +2940,13 @@ export namespace Telemetry {
     // their replacements.
     buffer.push({ event, scope, held: scope === configScope && configUnresolved })
     if (buffer.length > MAX_BUFFER_SIZE) {
-      if (buffer.shift()?.scope === configScope) droppedEvents++
+      const dropped = buffer.shift()!
+      const owner = dropped.scope
+      if (owner !== null && buffer.some((entry) => entry.scope === owner)) {
+        droppedEvents.set(owner, (droppedEvents.get(owner) ?? 0) + 1)
+      } else {
+        droppedEvents.delete(owner)
+      }
     }
     // altimate_change start — anchor events flush immediately. A frozen-then-killed process otherwise
     // dies with its buffer: the 5 s interval cannot fire while the loop is blocked, and the stall
@@ -2975,16 +2999,17 @@ export namespace Telemetry {
     if (events.length === 0) return
     buffer = buffer.filter((entry) => entry.scope !== scope)
 
-    if (droppedEvents > 0) {
+    const dropped = droppedEvents.get(scope)
+    droppedEvents.delete(scope)
+    if (dropped) {
       events.push({
         type: "error",
         timestamp: Date.now(),
         session_id: sessionId,
         error_name: "TelemetryBufferOverflow",
-        error_message: `${droppedEvents} events dropped due to buffer overflow`,
+        error_message: `${dropped} events dropped due to buffer overflow`,
         context: "telemetry",
       } as Event)
-      droppedEvents = 0
     }
 
     const controller = new AbortController()
@@ -3145,7 +3170,7 @@ export namespace Telemetry {
       configUnresolved = false
       configScope = undefined
       buffer = []
-      droppedEvents = 0
+      droppedEvents.clear()
     } else if (!configUnresolved) {
       clearScope(configScope)
       configScope = undefined

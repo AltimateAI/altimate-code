@@ -320,6 +320,54 @@ describe("telemetry opt-out", () => {
     expect(names).toEqual(["error", "startup_ready"])
   })
 
+  test("a missing working directory leaves telemetry unresolved without throwing", async () => {
+    const names = recordIngestion()
+    Telemetry.setConfigDirectory(undefined)
+    const cwd = spyOn(process, "cwd").mockImplementation(() => {
+      throw new Error("working directory deleted")
+    })
+    try {
+      trackStartup()
+      await Telemetry.init()
+      await Telemetry.flush()
+      expect(Telemetry.isEnabled()).toBe(false)
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      cwd.mockRestore()
+    }
+
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    Telemetry.setConfigDirectory(home)
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual([])
+  })
+
+  test("held overflow counts stay with the owning project", async () => {
+    const names = recordIngestion()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    await Telemetry.init()
+    for (let i = 0; i < 201; i++) trackStartup()
+    await Telemetry.shutdown({ preserveUnresolved: true })
+
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    const other = path.join(home, "other")
+    mkdirSync(other)
+    Telemetry.setConfigDirectory(other)
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual([])
+    await Telemetry.shutdown({ preserveUnresolved: true })
+
+    Telemetry.setConfigDirectory(home)
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names.filter((name) => name === "startup_ready")).toHaveLength(200)
+    expect(names.filter((name) => name === "error")).toHaveLength(1)
+  })
+
   test("resolution to disabled discards held startup events", async () => {
     const names = recordIngestion()
     process.env.OPENCODE_CONFIG_CONTENT = "{"
