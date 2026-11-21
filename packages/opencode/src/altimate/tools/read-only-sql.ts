@@ -51,7 +51,8 @@ export function readSql(sql: string, dialect?: string): string {
   if (
     checked === undefined ||
     !/^(SELECT|WITH)\b/i.test(body) ||
-    /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b/i.test(
+    // A column qualified by a whole identifier (t.update) is not a statement word, as in the classifier.
+    /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b(?<!(?:^|[^\w$])[A-Za-z_][\w$]*\.[A-Za-z]+)/i.test(
       body,
     ) ||
     /\bREPLACE\b(?!\s*\()/i.test(body)

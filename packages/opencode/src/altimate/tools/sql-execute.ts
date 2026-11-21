@@ -277,7 +277,7 @@ export const SqlExecuteTool = Tool.define(
             // the hard-deny list above still applies.
             if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(sql))) {
               // Unprovable SQL still goes through write approval; the prompt carries the parse error.
-              // altimate_change start — a denied write says why and how to proceed, instead of a rule dump
+              // A denied write says why and how to proceed, instead of a rule dump.
               try {
                 await ctx.ask({
                   permission: "sql_execute_write",
@@ -292,9 +292,17 @@ export const SqlExecuteTool = Tool.define(
                 })
               } catch (error) {
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
-                throw new Error(deniedWriteMessage({ sql, dialects, jinja, mongo: mongo !== null, scratch: isScratch(args.warehouse) }))
+                throw new Error(
+                  deniedWriteMessage({
+                    sql,
+                    dialects,
+                    jinja,
+                    mongo: mongo !== null,
+                    scratch: isScratch(args.warehouse),
+                    warehouseGiven: !!args.warehouse,
+                  }),
+                )
               }
-              // altimate_change end
             }
             // altimate_change end
 
@@ -740,6 +748,7 @@ function deniedWriteMessage(input: {
   jinja: boolean
   mongo: boolean
   scratch: boolean
+  warehouseGiven: boolean
 }): string {
   const head = "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
   if (input.jinja) {
@@ -751,9 +760,12 @@ function deniedWriteMessage(input: {
   const dialect = input.dialects.find((d) => classifyAndCheck(input.sql, d).queryType === "write")
   const { reason, unreadable } = explainWrite(input.sql, dialect)
   const next = unreadable
-    ? "Fix the query and call sql_execute again; the same text will be refused again."
+    ? "Fix the query and call sql_execute again; the same text will be refused again." +
+      (input.warehouseGiven || input.dialects.length < 2
+        ? ""
+        : " No warehouse was given, so the query was read in every dialect it could reach; pass warehouse to read it in that warehouse's dialect only.")
     : input.scratch
-      ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission; send reads in their own call."
+      ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."
       : "Rewrite it as a single read (SELECT, or WITH ... SELECT). To keep an intermediate result, store it in scratch with sql_materialize if that tool is available."
   return `${head} ${reason}. ${next}`
 }

@@ -527,18 +527,20 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
 
 // Shell syntax pasted into a query out of terminal habit. A redirect to a descriptor or /dev/null
 // (`2>/dev/null`, `2>&1`) can sit anywhere, even before LIMIT; a pipe into a shell command (`| head -20`)
-// or a redirect into a file (`> out.csv`) only ends the text. A file target needs a / or an extension,
-// so a comparison such as `x > 2` never matches.
+// or a redirect into a file (`> out.csv`) only ends the text. A file target must start like a path
+// (/, ./, ../, ~/) or end in a known output extension, so comparisons such as `x > 2`, `x > 1.5` and
+// `x > t.total` never match.
 const SHELL_REDIRECT = /\s(?:[12]|&)?>>?\s*(?:&[12]|\/dev\/null)(?![\w/])/g
 const SHELL_TAIL =
-  /(?:\s*\|\s*(?:head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|\n]*|\s*(?:[12]|&)?>>?\s*[\w~.-]*[/.][\w./~-]+)+\s*;?\s*$/i
+  /(?:\s*\|\s*(?:head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|\n]*|\s*(?:[12]|&)?>>?\s*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp)\b))+\s*;?\s*$/i
 
 /** The shell syntax in a query that is a read without it, or undefined. Only code counts (literals and
  * comments are masked). The query is never rewritten: the caller names the residue so the sender removes
  * it, since running the query without it would run SQL other than what was sent. */
 export function shellResidue(sql: string, dialect?: string): string | undefined {
   const lexical = tokenizeSql(sql, dialect)
-  if (!lexical.complete) return undefined
+  // Residue is only an explanation for text that does not parse; valid SQL is never offered for removal.
+  if (!lexical.complete || !classifyAndCheck(sql, dialect).parseError) return undefined
   // Masking keeps every offset, so a match in the masked text cuts the same span of the original.
   const masked = maskSql(lexical.tokens)
   const cuts = [...masked.matchAll(SHELL_REDIRECT)].map((match) => [match.index!, match.index! + match[0].length])
@@ -564,11 +566,6 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
   return result.queryType === "read" && !result.blocked ? fragments.filter(Boolean).join("`, `") : undefined
 }
 
-function snippet(statement: string): string {
-  const flat = statement.replace(/\s+/g, " ").trim()
-  return flat.length > 80 ? `${flat.slice(0, 77)}...` : flat
-}
-
 /**
  * Why classifyAndCheck treats this SQL as a write, in words an agent can act on: shell residue to
  * remove, the parser error and its position, or the first statement that is not a read. `unreadable`
@@ -590,10 +587,11 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
   for (const [index, statement] of statements.entries()) {
     const result = classifySql(statement, dialect, 0)
     if (result.queryType === "read" && !result.blocked) continue
-    const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length} (${snippet(statement)})` : "it"
+    // No SQL text is quoted back: the error is also recorded by telemetry.
+    const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length}` : "it"
     if (result.parseError) {
       return unreadable(
-        `the SQL parser could not read ${where} (${result.parseError}), so it cannot be proven read-only. ` +
+        `the ${dialect ?? "generic"} SQL parser could not read ${where} (${result.parseError}), so it cannot be proven read-only. ` +
         'Fix the syntax at that position: quote identifiers that contain spaces or are keywords ("order date"), ' +
         "check the clause order, and replace any placeholder text such as ..."
       )

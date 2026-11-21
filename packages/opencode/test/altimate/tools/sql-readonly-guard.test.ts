@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { PermissionNext } from "../../../src/permission/next"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import { SqlExecuteTool } from "../../../src/altimate/tools/sql-execute"
 import { classifyAndCheck, isScratchSafeWrite } from "../../../src/altimate/tools/sql-classify"
@@ -143,26 +144,35 @@ describe("sql_execute on a read-only agent", () => {
 
   test("unparseable SQL reports the parser's position", async () => {
     const { error } = await run("SELECT Order Date FROM orders WHERE Order Date > '2020-01-01'")
-    expect(error).toMatch(/could not read it \(.*line 1, column \d+/)
+    expect(error).toMatch(/sqlite SQL parser could not read it \(.*line 1, column \d+/)
     expect(error).toContain("Fix the query")
   })
 
   test("a write names the statement and suggests a read", async () => {
     const { error } = await run("SELECT 1; DELETE FROM orders")
-    expect(error).toContain("statement 2 of 2 (DELETE FROM orders) is not a read (DELETE)")
+    expect(error).toContain("statement 2 of 2 is not a read (DELETE)")
+    expect(error).not.toContain("FROM orders")
     expect(error).toContain("single read")
   })
 
   test("a scratch batch mixing a write and a read says to split it", async () => {
     const { error } = await run("CREATE TABLE items AS SELECT 1 AS v; SELECT * FROM items", "scratch")
     expect(error).toContain("statement 1 of 2")
-    expect(error).toContain("send reads in their own call")
+    expect(error).toContain("each call without reads")
   })
 
   test("a scratch write through the scratch catalog runs without asking", async () => {
     const { error, asked } = await run("CREATE OR REPLACE TABLE scratch.pubs AS SELECT 1 AS x", "scratch")
     expect(error).toBeUndefined()
     expect(asked).toHaveLength(0)
+  })
+
+  test("a denial from the subagent permission path is explained too", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionNext.DeniedError([])) }
+    await expect(
+      tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
+    ).rejects.toThrow("it is not a read (DELETE)")
   })
 
   test("errors other than a rule denial pass through unchanged", async () => {

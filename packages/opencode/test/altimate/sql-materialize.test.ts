@@ -347,6 +347,10 @@ describe("sql_materialize", () => {
         /only reads/,
       )
     }
+    // The refusal names the statement that writes.
+    await expect(
+      materialize({ source_warehouse: "ordersdb", sql: "SELECT 1; DELETE FROM orders", target_table: "nope" }),
+    ).rejects.toThrow("statement 2 of 2 is not a read (DELETE)")
     const db = new Database(ordersDb, { readonly: true })
     expect((db.query("SELECT count(*) AS n FROM orders").get() as any).n).toBe(4)
     db.close()

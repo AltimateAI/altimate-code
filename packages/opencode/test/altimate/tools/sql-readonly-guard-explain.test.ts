@@ -27,6 +27,16 @@ describe("shellResidue", () => {
     expect(shellResidue("SELECT a FROM t WHERE x >= 2.5", "postgres")).toBeUndefined()
   })
 
+  test("a comparison before the residue is kept", () => {
+    expect(shellResidue("SELECT a FROM t WHERE flag OR x > 1.5 2>/dev/null", "postgres")).toBe("2>/dev/null")
+    expect(shellResidue("SELECT a FROM t WHERE x > t.total 2>/dev/null", "postgres")).toBe("2>/dev/null")
+  })
+
+  test("SQL that parses is never offered for removal", () => {
+    expect(shellResidue("SELECT a FROM t WHERE a > out.csv", "postgres")).toBeUndefined()
+    expect(shellResidue("SELECT a FROM t WHERE a > b / 2", "postgres")).toBeUndefined()
+  })
+
   test("text inside a comment or literal is not residue", () => {
     expect(shellResidue("SELECT 1 -- 2>/dev/null", "postgres")).toBeUndefined()
     expect(shellResidue("SELECT '2>/dev/null'", "postgres")).toBeUndefined()
@@ -42,6 +52,11 @@ describe("other read-only refusals carry the reason", () => {
   test("sql_check and query_from (readSql)", () => {
     expect(() => readSql("SELECT 1 2>/dev/null", "postgres")).toThrow("`2>/dev/null`")
     expect(() => readSql("SELECT 1; DELETE FROM t", "postgres")).toThrow("statement 2 of 2")
+  })
+
+  test("qualified columns named like keywords are reads here too", () => {
+    expect(readSql("SELECT o.update, o.delete FROM orders o", "postgres")).toBe("SELECT o.update, o.delete FROM orders o")
+    expect(() => readSql("SELECT 1. INTO c FROM orders", "postgres")).toThrow()
   })
 
   test("a refusal that is not about writing stays as it was", () => {
@@ -70,7 +85,7 @@ describe("explainWrite", () => {
   test("names the first write statement", () => {
     expect(explainWrite("SELECT 1; SELECT 2; DROP TABLE t", "postgres")).toEqual({
       unreadable: false,
-      reason: "statement 3 of 3 (DROP TABLE t) is not a read (DROP TABLE)",
+      reason: "statement 3 of 3 is not a read (DROP TABLE)",
     })
     expect(explainWrite("COPY INTO orders FROM @stage", "snowflake").reason).toBe("it is not a read (COPY)")
   })
