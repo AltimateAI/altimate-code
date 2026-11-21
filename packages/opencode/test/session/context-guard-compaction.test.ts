@@ -197,6 +197,7 @@ type Seeded = {
   user: string | string[]
   assistantUsage?: number
   next?: string
+  nextSystem?: string
   last?: {
     modelID?: string
     agent?: string
@@ -207,6 +208,8 @@ type Seeded = {
     toolImage?: boolean
     /** The step's request was sent without tools (an echo or final step). */
     sentWithoutTools?: boolean
+    /** Null represents a message persisted before overhead was recorded. */
+    requestOverheadTokens?: number | null
   }
   /** An image attached to the `next` user turn. */
   nextFile?: boolean
@@ -224,13 +227,14 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       permission: [{ permission: "*", pattern: "*", action: "allow" }],
     })
     const sessionID = session.id
-    const user = Effect.fnUntraced(function* (text: string) {
+    const user = Effect.fnUntraced(function* (text: string, system?: string) {
       const msg = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "user",
         sessionID,
         agent: "build",
         model,
+        system,
         time: { created: Date.now() },
       } as any)
       yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, type: "text", text } as any)
@@ -251,7 +255,10 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         parentID,
         finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
-        ...(last.sentWithoutTools ? { metadata: { sent_without_tools: true } } : {}),
+        metadata: {
+          ...(last.sentWithoutTools ? { sent_without_tools: true } : {}),
+          ...(last.requestOverheadTokens === null ? {} : { request_overhead_tokens: last.requestOverheadTokens ?? 0 }),
+        },
       } as any)
       yield* sessions.updatePart({
         id: PartID.ascending(),
@@ -313,7 +320,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       else if (seeded.assistantUsage !== undefined) yield* answer(msg.id, seeded.assistantUsage, seeded.last)
     }
     if (seeded.next !== undefined) {
-      const next = yield* user(seeded.next)
+      const next = yield* user(seeded.next, seeded.nextSystem)
       if (seeded.nextFile) {
         yield* sessions.updatePart({
           id: PartID.ascending(),
@@ -365,6 +372,53 @@ it.live(
         expect(result.compactions.length).toBe(0)
         // The output reservation was not squeezed by the inflated estimate either.
         expect(result.hits[0]!.body.max_tokens).toBe(LARGE_WINDOW.output)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a new system prompt that exceeds the context budget forces compaction",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Summary of the revenue analysis.")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(130_000),
+          assistantUsage: 108_000,
+          last: { requestOverheadTokens: 10 },
+          next: "Summarize the revenue concentration.",
+          nextSystem: sqlJsonHistory(40_000),
+        })
+
+        expect(result.summaries.length).toBe(1)
+        expect(result.errors).toEqual([])
+        expect(result.hits.length).toBe(2)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a measured step without recorded request overhead cannot calibrate the guard",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Summary of the revenue analysis.")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(130_000),
+          assistantUsage: 108_000,
+          last: { requestOverheadTokens: null },
+          next: "Summarize the revenue concentration.",
+        })
+
+        expect(result.summaries.length).toBe(1)
+        expect(result.errors).toEqual([])
+        expect(result.hits.length).toBe(2)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
     ),

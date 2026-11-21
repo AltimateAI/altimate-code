@@ -31,7 +31,12 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 // altimate_change start — the context measure shared by compaction and the pre-send budget guard
-import { attachmentTokenAllowance, estimateTextTokens, reportedContextTokens } from "@/provider/output-token-budget"
+import {
+  attachmentTokenAllowance,
+  estimateInputTokens,
+  estimateTextTokens,
+  reportedContextTokens,
+} from "@/provider/output-token-budget"
 // altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
@@ -206,8 +211,9 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
-// altimate_change start — assistant-message metadata key marking a request sent without tools
+// altimate_change start — assistant-message metadata for request calibration
 const SENT_WITHOUT_TOOLS = "sent_without_tools"
+const REQUEST_OVERHEAD_TOKENS = "request_overhead_tokens"
 
 /** Whether a deadline has disabled tools for this session, inherited from a live ancestor run (as llm.ts applies it). */
 async function runToolsDisabled(sessionID: string): Promise<boolean> {
@@ -2256,10 +2262,22 @@ export namespace SessionPrompt {
       // (provider-reported usage of the last turn on this model plus the estimated tail), and a
       // guard refusal compacts whenever the proactive check above could have compacted.
       // The reported usage applies only to a tool-calling step of the same model and agent (same
-      // tokenizer, system prompt and tools), and only when it counts input: a provider reporting none,
+      // tokenizer), and only when it counts input: a provider reporting none,
       // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
+      const requestTools = echoCommittedAnswer || textFinalStep ? {} : { ...tools }
+      // Use the same removal rules as LLM.stream so denied tools do not inflate overhead.
+      for (const name of LLM.removedTools(Object.keys(requestTools), { agent, user: lastUser })) {
+        delete requestTools[name]
+      }
+      const requestOverheadTokens = estimateInputTokens({
+        // LLM.stream appends the per-user system prompt to the supplied system instructions.
+        system: lastUser.system ? [...system, lastUser.system] : system,
+        messages: [],
+        tools: requestTools,
+      })
+      const measuredOverheadTokens = measured?.metadata?.[REQUEST_OVERHEAD_TOKENS]
       // One pass over what the provider has not counted yet (the last measured step and later):
       // attachments are added to the reported measure at the guard's own allowance. Compaction drops
       // images and PDFs (replay swaps them for a placeholder, summaries strip them), so one the model
@@ -2283,11 +2301,12 @@ export namespace SessionPrompt {
         }
       }
       const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
-      // A step sent without tools (an echo or final step, tagged below) reported usage that can
-      // undercount this request by the tool schemas; every other step carried the full tool set.
+      // Usage from a tool-less final step or a message without recorded overhead cannot calibrate.
       const reportedInputTokens =
         measured &&
         measured.metadata?.[SENT_WITHOUT_TOOLS] !== true &&
+        typeof measuredOverheadTokens === "number" &&
+        Number.isFinite(measuredOverheadTokens) &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
@@ -2301,15 +2320,20 @@ export namespace SessionPrompt {
                   tokens: measured.tokens,
                   estimatedTokens: guardTail,
                   fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
-                }) + attachmentTokens
+                }) +
+                attachmentTokens +
+                Math.max(0, requestOverheadTokens - measuredOverheadTokens)
               )
             })()
           : undefined
       // altimate_change end
-      // altimate_change start — record a request sent without tools; its usage cannot calibrate the guard
-      // (an answer echo, the final step, or a deadline finalization)
-      if (echoCommittedAnswer || textFinalStep || (await runToolsDisabled(sessionID)))
-        processor.message.metadata = { ...processor.message.metadata, [SENT_WITHOUT_TOOLS]: true }
+      // altimate_change start — record request overhead and mark echo, final, and deadline steps sent without tools
+      const sentWithoutTools = echoCommittedAnswer || textFinalStep || (await runToolsDisabled(sessionID))
+      processor.message.metadata = {
+        ...processor.message.metadata,
+        [REQUEST_OVERHEAD_TOKENS]: requestOverheadTokens,
+        ...(sentWithoutTools ? { [SENT_WITHOUT_TOOLS]: true } : {}),
+      }
       // altimate_change end
       const result = await processor.process({
         // altimate_change start — see reportedInputTokens above
@@ -2359,7 +2383,7 @@ export namespace SessionPrompt {
         // altimate_change start - the final echo, and the step-cap answer, cannot spend another step on tools.
         // Text finalization uses the same toolless shape as compaction and title generation: no
         // tools and toolChoice "none", so llm.ts flattens historical tool calls for the gateway.
-        tools: echoCommittedAnswer || textFinalStep ? {} : tools,
+        tools: requestTools,
         deferText: echoCommittedAnswer ? deferredText : undefined,
         // altimate_change end
         model,
