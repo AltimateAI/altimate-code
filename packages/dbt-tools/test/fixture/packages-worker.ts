@@ -2,10 +2,10 @@
 // project with a deliberately slow, non-atomic fake `dbt deps`, then reports
 // what it observed once ensurePackages returned.
 //
-// usage: bun packages-worker.ts <projectRoot> <logFile> <pkgName> [crash|dbt]
+// usage: bun packages-worker.ts <projectRoot> <logFile> <pkgName> [crash|dbt|explicit]
 import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs"
 import { join } from "path"
-import { dbtDepsInstaller, ensurePackages } from "../../src/packages"
+import { dbtDepsInstaller, ensurePackages, installPackagesLocked, trackedExplicitInstaller } from "../../src/packages"
 
 const [root, log, pkg, mode] = process.argv.slice(2) as [string, string, string, string | undefined]
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -27,8 +27,16 @@ async function slowInstall() {
   await sleep(50)
 }
 
-const install = mode === "dbt" ? dbtDepsInstaller({ projectRoot: root }) : slowInstall
-await ensurePackages(root, install, { staleMs: 1500, heartbeatMs: 100 })
+const opts = { staleMs: 1500, heartbeatMs: 100 }
+if (mode === "explicit") {
+  await installPackagesLocked(root, async () => {
+    const install = trackedExplicitInstaller({ command: process.env.ALTIMATE_DBT_PATH!, args: ["deps"], cwd: root })
+    return install!()
+  }, opts)
+} else {
+  const install = mode === "dbt" ? dbtDepsInstaller({ projectRoot: root }) : slowInstall
+  await ensurePackages(root, install, opts)
+}
 // This is the moment a real command would go on to read the packages.
 const ok = existsSync(join(root, "dbt_packages", pkg, "dbt_project.yml"))
 appendFileSync(log, `${ok ? "ready" : "BROKEN"} ${process.pid}\n`)

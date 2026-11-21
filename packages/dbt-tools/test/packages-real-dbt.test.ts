@@ -25,11 +25,11 @@ function dbtSync(args: string[]) {
   return spawnSync(REAL_DBT!, args, { cwd: proj, encoding: "utf-8", env: { ...process.env, ...env }, timeout: 120_000 })
 }
 
-function runAltimateDbt(i: number) {
+function runAltimateDbt(i: number, args = ["schema-verify", "--model", "m"]) {
   return new Promise<{ code: number | null; out: string }>((resolve) => {
     const c = spawn(
       "node",
-      [DIST, "schema-verify", "--model", "m"],
+      [DIST, ...args],
       { cwd: proj, env: { ...process.env, ...env, E2E_DB: join(proj, `db${i}.duckdb`), BUILD_ROOT: "build" } },
     )
     let out = ""
@@ -134,16 +134,23 @@ suite("real dbt: concurrent altimate-dbt invocations and `dbt deps`", () => {
     expect(depsCalls()).toBe(1)
     expect(packageHealthy()).toBe(true)
   }, 120_000)
-  test("a compound Jinja package path installs deps through dbt before parsing", async () => {
+  test("explicit deps succeeds with the integration's selected command under the lock", async () => {
+    const result = await runAltimateDbt(0, ["deps"])
+    expect(result.code, result.out).toBe(0)
+    expect(packageHealthy()).toBe(true)
+    expect(existsSync(join(proj, "target", ".altimate-dbt", "packages.lock"))).toBe(false)
+  }, 120_000)
+
+  test("concurrent commands install and read a compound Jinja package path without overlap", async () => {
     const config = join(proj, "dbt_project.yml")
     const original = readFileSync(config, "utf-8")
     const buildRoot = join(proj, "build")
     try {
       writeFileSync(config, original + `packages-install-path: "{{ env_var('BUILD_ROOT') }}/dbt_packages"\n`)
       writeFileSync(log, "")
-      const result = await runAltimateDbt(0)
-      expect(result.code, result.out).toBe(0)
-      expect(depsCalls()).toBe(1)
+      const runs = await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => runAltimateDbt(i)))
+      for (const result of runs) expect(result.code, result.out).toBe(0)
+      expect(depsCalls()).toBe(CONCURRENCY)
       expect(existsSync(join(buildRoot, "dbt_packages", "localpkg", "dbt_project.yml"))).toBe(true)
     } finally {
       writeFileSync(config, original)

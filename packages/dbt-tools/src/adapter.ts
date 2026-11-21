@@ -2,7 +2,7 @@ import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
 import { recordManifest } from "./stale-manifest"
 import { retryParseManifest } from "./manifest-retry"
-import { dbtDepsInstaller, ensurePackages, PackageLockTimeoutError } from "./packages"
+import { dbtDepsInstaller, ensurePackages, PackageLockTimeoutError, trackedExplicitInstaller } from "./packages"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
@@ -132,6 +132,13 @@ export async function create(cfg: Config, options: CreateOptions = {}): Promise<
     onEnvironmentChanged: () => () => {},
   }
   const exec = new CommandProcessExecutionFactory(term)
+  const createExecution = exec.createCommandProcessExecution.bind(exec)
+  exec.createCommandProcessExecution = (options) => {
+    const execution = createExecution(options)
+    const install = trackedExplicitInstaller(options)
+    if (install) execution.complete = install
+    return execution
+  }
   const infra = new DBTCommandExecutionInfrastructure(runtime, term)
   const python = new PythonDBTCommandExecutionStrategy(exec, runtime, term, config)
   const cli = (cwd: string, path: string) => new CLIDBTCommandExecutionStrategy(exec, runtime, term, cwd, path)

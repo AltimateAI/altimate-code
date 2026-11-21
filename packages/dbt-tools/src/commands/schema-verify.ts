@@ -16,7 +16,8 @@ import { staleManifestNote } from "../stale-manifest"
  *   - A declared column the model does not produce is a real problem when a
  *     test is attached to it (the test reads a column that is not there), and
  *     when a contract is enforced. With neither, it is a stale or aspirational
- *     entry: worth knowing, not a failure.
+ *     entry: worth knowing, not a failure. With unresolved test attachment in
+ *     a legacy manifest, report the missing column and the uncertainty.
  *   - Column order in YAML never constrains the model (dbt aligns it itself
  *     under a contract), and `data_type` is only checked by dbt under a contract
  *     (adapters spell types differently, so string comparison is not evidence).

@@ -20,7 +20,7 @@
  *   packages.dirty        present while an install is running or after one did not finish
  */
 
-import { execFile } from "child_process"
+import { spawn, spawnSync } from "child_process"
 import { createHash, randomUUID } from "crypto"
 import {
   existsSync,
@@ -33,6 +33,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "fs"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { hostname } from "os"
 import { isAbsolute, join, relative, resolve } from "path"
 import { parse as parseYaml } from "yaml"
@@ -122,10 +123,21 @@ function declaredPackages(root: string): Declared[] {
   return [...packages.values()]
 }
 
-/** Directories under the install path that look like a complete package. */
-function completePackageDirs(installPath: string): Map<string, string | undefined> {
-  const out = new Map<string, string | undefined>()
-  for (const name of packageEntries(installPath)) {
+function packageEntries(installPath: string): string[] | undefined {
+  try {
+    return readdirSync(installPath)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return []
+    bufferLog(`[dbt-tools] could not inspect the package directory: ${String(e)}`)
+  }
+}
+
+function inspectPackages(installPath: string) {
+  const entries = packageEntries(installPath)
+  if (!entries) return undefined
+  const complete = new Set<string>()
+  const incomplete: string[] = []
+  for (const name of entries) {
     if (name.startsWith(".")) continue
     const dir = join(installPath, name)
     try {
@@ -133,46 +145,12 @@ function completePackageDirs(installPath: string): Map<string, string | undefine
     } catch {
       continue // dangling symlink
     }
-    const projectFile = join(dir, "dbt_project.yml")
-    if (!existsSync(projectFile)) continue
     // A truncated or half-written file is not a complete package.
-    const project = readYaml(projectFile)
-    if (!project || typeof project !== "object" || Array.isArray(project)) continue
-    const v = (project as { version?: unknown }).version
-    out.set(name, v === undefined ? undefined : String(v))
+    const project = readYaml(join(dir, "dbt_project.yml"))
+    if (project && typeof project === "object" && !Array.isArray(project)) complete.add(name)
+    else incomplete.push(name)
   }
-  return out
-}
-
-/** Every directory directly under the install path, complete or not. Plain files and dangling links are not packages. */
-function allPackageDirs(installPath: string): string[] {
-  return packageEntries(installPath).filter((n) => {
-    if (n.startsWith(".")) return false
-    try {
-      return statSync(join(installPath, n)).isDirectory()
-    } catch {
-      return false
-    }
-  })
-}
-
-function packageEntries(installPath: string): string[] {
-  try {
-    return readdirSync(installPath)
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return []
-    throw e
-  }
-}
-
-function inspectPackages(installPath: string) {
-  try {
-    const complete = completePackageDirs(installPath)
-    const incomplete = allPackageDirs(installPath).filter((name) => !complete.has(name))
-    return { complete, incomplete }
-  } catch (e) {
-    bufferLog(`[dbt-tools] could not inspect the package directory: ${String(e)}`)
-  }
+  return { complete, incomplete }
 }
 
 const PACKAGE_ENV_VAR = /\benv_var\s*\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1/g
@@ -298,17 +276,38 @@ interface Owner {
   startedAt: number
   /** Null means the installer is starting or its process is managed by the adapter. */
   installerPid?: number | null
+  installerStarted?: string
+  processStarted?: string
 }
 
-type TrackInstaller = (pid: number | null) => void
+type TrackInstaller = (pid: number | null | undefined) => void
 
-function pidAlive(pid: number): boolean {
+function processIdentity(pid: number): { started: string; exited: boolean } | undefined {
+  if (process.platform === "linux") {
+    try {
+      // comm is parenthesized and may contain spaces or parentheses.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+      if (fields[19]) return { started: fields[19], exited: fields[0] === "Z" || fields[0] === "X" }
+    } catch {}
+  }
+  if (process.platform === "darwin") {
+    const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "stat="], { encoding: "utf8", timeout: 500 })
+    const match = result.stdout?.trim().match(/^(.*?)\s+(\S+)$/)
+    if (result.status === 0 && match?.[1]) return { started: match[1], exited: match[2]?.startsWith("Z") === true }
+  }
+}
+
+function pidAlive(pid: number, started?: string): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
-    return true
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "EPERM"
   }
+  if (started === undefined) return true
+  const identity = processIdentity(pid)
+  return !identity || (!identity.exited && identity.started === started)
 }
 
 function readOwner(lockDir: string): Owner | undefined {
@@ -328,8 +327,8 @@ function lockIsStale(lockDir: string, staleMs: number): boolean {
   }
   const owner = readOwner(lockDir)
   if (owner?.host === hostname()) {
-    if (pidAlive(owner.pid) || owner.installerPid === null) return false
-    return owner.installerPid === undefined || !pidAlive(owner.installerPid)
+    if (pidAlive(owner.pid, owner.processStarted) || owner.installerPid === null) return false
+    return owner.installerPid === undefined || !pidAlive(owner.installerPid, owner.installerStarted)
   }
   return Date.now() - mtime > staleMs
 }
@@ -371,14 +370,20 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<{ rel
       if (lockIsStale(lockDir, opts.staleMs)) breakStaleLock(lockDir, opts.staleMs, readOwner(lockDir)?.token)
       if (Date.now() > deadline) {
         const owner = readOwner(lockDir)
-        const unknownInstaller = owner?.host === hostname() && owner.installerPid === null && !pidAlive(owner.pid)
+        const unknownInstaller = owner?.host === hostname() && owner.installerPid === null && !pidAlive(owner.pid, owner.processStarted)
         const recovery = unknownInstaller ? " Verify the previous dbt install has stopped before removing this lock." : ""
         throw new PackageLockTimeoutError(`timed out after ${opts.maxWaitMs}ms waiting for the package install lock at ${lockDir}.${recovery}`)
       }
       await sleep(jitter(50))
     }
   }
-  const owner: Owner = { pid: process.pid, host: hostname(), token: randomUUID(), startedAt: Date.now() }
+  const owner: Owner = {
+    pid: process.pid,
+    host: hostname(),
+    token: randomUUID(),
+    startedAt: Date.now(),
+    processStarted: processIdentity(process.pid)?.started,
+  }
   writeFileSync(join(lockDir, "owner.json"), JSON.stringify(owner))
   const beat = setInterval(() => {
     try {
@@ -396,7 +401,8 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<{ rel
     if (readOwner(lockDir)?.token !== owner.token) throw new Error("Lost the package install lock")
     // Publish each update atomically so readers always see the owner or its installer.
     const temp = join(lockDir, `owner.${owner.token}.tmp`)
-    writeFileSync(temp, JSON.stringify({ ...owner, installerPid: pid }))
+    const installerStarted = typeof pid === "number" ? processIdentity(pid)?.started : undefined
+    writeFileSync(temp, JSON.stringify({ ...owner, installerPid: pid, installerStarted }))
     renameSync(temp, join(lockDir, "owner.json"))
   }
   const release = () => {
@@ -420,14 +426,38 @@ function withDefaults(o?: LockOptions): Required<LockOptions> {
   }
 }
 
-/** Run `fn` while holding the project's package lock. */
-export async function withPackagesLock<T>(root: string, fn: () => Promise<T>, opts?: LockOptions): Promise<T> {
-  const { release } = await acquire(root, withDefaults(opts))
+// A CLI command with an unverified destination holds the lock across all
+// adapter work, including nested installs and the post-build verification.
+const commandPackageLock = new AsyncLocalStorage<{ root: string; trackInstaller: TrackInstaller }>()
+
+async function underPackagesLock<T>(
+  root: string,
+  fn: (trackInstaller: TrackInstaller) => Promise<T>,
+  opts?: LockOptions,
+): Promise<T> {
+  const held = commandPackageLock.getStore()
+  if (held?.root === root) return fn(held.trackInstaller)
+
+  const { release, trackInstaller } = await acquire(root, withDefaults(opts))
   try {
-    return await fn()
+    return await fn(trackInstaller)
   } finally {
     release()
   }
+}
+
+/** Run `fn` while holding the project's package lock. */
+export async function withPackagesLock<T>(root: string, fn: () => Promise<T>, opts?: LockOptions): Promise<T> {
+  return underPackagesLock(root, fn, opts)
+}
+
+export async function withUnverifiedPackagesLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
+  if (declaredPackages(root).length === 0) return fn()
+  const installPath = projectInstallPath(root)
+  if (installPath && packageEntries(installPath)) return fn()
+  // A waiting caller will have to run deps again. Keep it from deleting the
+  // first caller's packages until that caller has finished reading them.
+  return underPackagesLock(root, (trackInstaller) => commandPackageLock.run({ root, trackInstaller }, fn))
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +500,7 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     rmSync(stampFile, { force: true })
     return result
   }
-  const complete = [...inspection.complete.keys()]
+  const complete = [...inspection.complete]
   const broken = inspection.incomplete
   // An explicit install (record = false) returns dbt's own failure result instead, so the
   // caller can show dbt's message rather than this one; the dirty marker stays for the next check.
@@ -490,8 +520,8 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
 }
 
 function commandExitCode(result: unknown): number | undefined {
-  if (result && typeof result === "object" && "exitCode" in result && typeof result.exitCode === "number") {
-    return result.exitCode
+  if (result && typeof result === "object" && "exitCode" in result && (typeof result.exitCode === "number" || result.exitCode === null)) {
+    return result.exitCode ?? 1
   }
 }
 
@@ -521,16 +551,13 @@ export async function ensurePackages(
   if (fast.ok) return { action: "skipped", reason: fast.reason }
 
   const waitedFor = existsSync(join(stateDir(root), "packages.lock"))
-  const { release, trackInstaller } = await acquire(root, withDefaults(opts))
-  try {
+  return underPackagesLock(root, async (trackInstaller) => {
     // Another process may have finished the install while we waited.
     const again = packagesSatisfied(root)
     if (again.ok) return { action: "skipped-after-wait", reason: waitedFor ? `${again.reason} (after waiting for the lock)` : again.reason }
     await installUnderLock(root, () => install(trackInstaller), true)
     return { action: "installed", reason: again.reason }
-  } finally {
-    release()
-  }
+  }, opts)
 }
 
 /**
@@ -539,43 +566,116 @@ export async function ensurePackages(
  * with complete package directories.
  */
 export async function installPackagesLocked<T>(root: string, install: () => Promise<T>, opts?: LockOptions): Promise<T> {
-  const { release, trackInstaller } = await acquire(root, withDefaults(opts))
-  try {
-    return await installUnderLock(root, () => {
-      // The integration does not expose its installer PID. A dead adapter
-      // process alone cannot establish that the install has stopped.
-      trackInstaller(null)
-      return install()
-    }, false)
-  } finally {
-    release()
-  }
+  return underPackagesLock(root, (trackInstaller) =>
+    installUnderLock(root, () => explicitInstaller.run(trackInstaller, install), false), opts)
+}
+
+const explicitInstaller = new AsyncLocalStorage<TrackInstaller>()
+
+type InstallProcess = {
+  command: string
+  args?: string[]
+  cwd?: string
+  envVars?: NodeJS.ProcessEnv
+  stdin?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+  maxBuffer?: number
+}
+
+// The integration selects the appropriate command and flags for each dbt
+// engine. Only its explicit package installs need our process tracker.
+export function trackedExplicitInstaller(options: InstallProcess) {
+  const track = explicitInstaller.getStore()
+  if (track) return () => runInstallProcess(options, track)
+}
+
+function runInstallProcess(options: InstallProcess, track: TrackInstaller) {
+  return new Promise<{ exitCode: number | null; stdout: string; stderr: string; fullOutput: string }>((resolve, reject) => {
+    let stdout = ""
+    let stderr = ""
+    let fullOutput = ""
+    if (options.signal?.aborted) {
+      reject(new Error("dbt deps was cancelled"))
+      return
+    }
+
+    // A crash between spawning and publishing the PID must block reclaim.
+    track(null)
+    const child = spawn(options.command, options.args, {
+      cwd: options.cwd,
+      env: options.envVars,
+      windowsHide: true,
+    })
+    let error: unknown
+    let forceKill: ReturnType<typeof setTimeout> | undefined
+    const abort = () => {
+      if (forceKill) return
+      child.kill("SIGTERM")
+      forceKill = setTimeout(() => child.kill("SIGKILL"), 5_000)
+      forceKill.unref()
+    }
+    const timeout = options.timeoutMs ? setTimeout(() => {
+      error ??= new Error("dbt deps timed out")
+      abort()
+    }, options.timeoutMs) : undefined
+    let bytes = 0
+    const collect = (chunk: Buffer, stream: "stdout" | "stderr") => {
+      bytes += chunk.length
+      if (options.maxBuffer !== undefined && bytes > options.maxBuffer) {
+        error ??= new Error("dbt deps output exceeded its buffer limit")
+        abort()
+        return
+      }
+      const text = chunk.toString()
+      if (stream === "stdout") stdout += text
+      else stderr += text
+      fullOutput += text
+    }
+    options.signal?.addEventListener("abort", abort, { once: true })
+    child.stdout.on("data", (chunk: Buffer) => collect(chunk, "stdout"))
+    child.stderr.on("data", (chunk: Buffer) => collect(chunk, "stderr"))
+    child.once("error", (err) => { error ??= err })
+    child.stdin.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code !== "EPIPE") error ??= err
+    })
+    child.once("close", (exitCode, signal) => {
+      clearTimeout(timeout)
+      clearTimeout(forceKill)
+      options.signal?.removeEventListener("abort", abort)
+      try {
+        track(undefined)
+      } catch (err) {
+        error ??= err
+      }
+      if (error) reject(error)
+      else if (signal) reject(new Error(`dbt deps terminated by ${signal}`))
+      else resolve({ exitCode, stdout, stderr, fullOutput })
+    })
+    try {
+      if (child.pid !== undefined) track(child.pid)
+      child.stdin.end(options.stdin)
+    } catch (err) {
+      error = err
+      abort()
+    }
+  })
 }
 
 /** An installer that shells out to `dbt deps` with the project's resolved dbt binary. */
 export function dbtDepsInstaller(cfg: { pythonPath?: string; projectRoot: string }): (trackInstaller: TrackInstaller) => Promise<void> {
-  return (trackInstaller) =>
-    new Promise<void>((res, rej) => {
-      const dbt = resolveDbt(cfg.pythonPath, cfg.projectRoot)
-      // A crash between spawning and publishing the PID must also block reclaim.
-      trackInstaller(null)
-      let trackingError: unknown
-      const child = execFile(
-        dbt.path,
-        ["deps"],
-        { cwd: cfg.projectRoot, env: buildDbtEnv(dbt), timeout: DEPS_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
-        (err, _stdout, stderr) => {
-          if (trackingError) rej(trackingError)
-          else if (err) rej(new Error(`dbt deps failed: ${String(stderr || err.message).slice(-500)}`))
-          else res()
-        },
-      )
-      try {
-        if (child.pid !== undefined) trackInstaller(child.pid)
-      } catch (e) {
-        // Keep the lock until execFile confirms the child has exited.
-        trackingError = e
-        child.kill()
-      }
-    })
+  return async (trackInstaller) => {
+    const dbt = resolveDbt(cfg.pythonPath, cfg.projectRoot)
+    const result = await runInstallProcess({
+      command: dbt.path,
+      args: ["deps"],
+      cwd: cfg.projectRoot,
+      envVars: buildDbtEnv(dbt),
+      timeoutMs: DEPS_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    }, trackInstaller)
+    if (result.exitCode !== 0) {
+      throw new Error(`dbt deps failed: ${(result.stderr || result.stdout || "process terminated").slice(-500)}`)
+    }
+  }
 }

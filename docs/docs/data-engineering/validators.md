@@ -91,6 +91,9 @@ establish as a problem, and says which file declares what:
 - **Declared column with tests, not produced.** The YAML declares a column
   that has at least one test attached, but the built table does not have it.
   The test reads a column that does not exist.
+- **Test attachment unverified.** The table lacks a declared column and a
+  legacy manifest lists the model as a dependency of a test on that column.
+  Check the test's YAML to establish which relation it reads.
 
 It does **not** report, and never tells the agent to remove, add or
 reorder anything because of:
@@ -109,7 +112,7 @@ reorder anything because of:
 The message states the evidence and leaves the decision with the agent
 (change the model if the YAML is right, or the YAML if its entry is
 stale). The full classification appears in `altimate-dbt schema-verify`
-and `altimate-dbt build --model` as `findings` (established problems),
+and `altimate-dbt build --model` as `findings` (mismatches and evidence),
 `notes` (true observations) and `spec` (declaring file, package, contract
 flag). The project-wide `altimate-dbt build` returns these detailed fields
 only for models with a mismatch; matching models are summarised as a count.

@@ -80,7 +80,7 @@ Returns a structured JSON result:
 | verdict | meaning | what to do |
 |---|---|---|
 | `match` | nothing dbt treats as an error was found (`notes` may still hold true observations) | proceed |
-| `mismatch` | `findings` is non-empty: an enforced contract the table does not match, or a declared column with tests attached that the table lacks | NOT DONE until you decide which side is wrong |
+| `mismatch` | `findings` is non-empty: an enforced contract the table does not match, or a missing declared column with an attached test or a legacy test whose attachment could not be verified | NOT DONE until you decide which side is wrong |
 | `no-spec` | the model has no columns declared in YAML | nothing to compare |
 
 `spec` says which YAML file declares the columns, in which package, and
@@ -99,6 +99,10 @@ A finding says two things disagree. It does not say which one is wrong.
 - **Declared column with tests, not produced.** The tests read a column that
   is not there and will fail or error. Either the model should produce the
   column, or the YAML entry (and its tests) is stale. Decide from the task.
+- **Test attachment unverified.** The table lacks the declared column, and
+  the legacy manifest lists the model as a test dependency without identifying
+  which relation the test reads. Confirm the attachment in the test's YAML
+  before deciding whether to change the model or its declaration.
 - **Never** delete or invent a column just because the YAML does or does not
   list it. Undocumented columns are normal, and a declared column with no
   tests and no contract (a `note`) may simply be stale. If the task states

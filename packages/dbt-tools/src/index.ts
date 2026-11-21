@@ -147,6 +147,11 @@ async function main() {
   const { configure } = await import("./dbt-cli")
   configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
 
+  const { withUnverifiedPackagesLock } = await import("./packages")
+  return withUnverifiedPackagesLock(cfg.projectRoot, () => runAdapterCommand(cfg))
+}
+
+async function runAdapterCommand(cfg: Config) {
   // Lazy import: the adapter loads dbt-integration, which commands above don't need
   const { create } = await import("./adapter")
   let adapter
