@@ -31,6 +31,9 @@ import { PermissionNext } from "@/permission/next"
 // altimate_change end
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — recognize model selection errors already reported by the prompt
+import { Provider } from "@/provider/provider"
+// altimate_change end
 import { errors } from "../error"
 import { NotFoundError as StorageNotFoundError } from "../../storage/db"
 import { lazy } from "../../util/lazy"
@@ -990,6 +993,9 @@ export const SessionRoutes = lazy(() =>
             TraceContext.release(sessionID, [messageID])
             // altimate_change end
             log.error("prompt_async failed", { sessionID, error: err })
+            // altimate_change start — the prompt already published guided text for an unavailable model
+            if (Provider.ModelNotFoundError.isInstance(err)) return
+            // altimate_change end
             Bus.publish(Session.Event.Error, {
               sessionID,
               error: new NamedError.Unknown({ message: err instanceof Error ? err.message : String(err) }).toObject(),

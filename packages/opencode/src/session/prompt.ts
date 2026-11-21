@@ -163,6 +163,9 @@ import { isPublicZen } from "@/provider/public-zen"
 import { RunBudget } from "@/altimate/run-budget"
 import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
 // altimate_change end
+// altimate_change start — shared check for display-only model rows
+import { ModelMetadata } from "@/altimate/session/model-metadata"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -2841,13 +2844,7 @@ export namespace SessionPrompt {
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user" && item.info.model) {
         // Shell and direct MCP commands can record model metadata without selecting a model for inference.
-        if (
-          item.parts.some((part) =>
-            part.type === "text" &&
-            (part.metadata?.modelMetadataOnly === true ||
-              (part.synthetic && part.text === "The following tool was executed by the user")),
-          )
-        ) continue
+        if (ModelMetadata.isModelMetadataOnly(item.parts)) continue
         // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,
         // bad config). This re-resolution is best-effort — an error here must not abort resuming
         // the session, so it falls through to the unchanged model, same as "not registered".

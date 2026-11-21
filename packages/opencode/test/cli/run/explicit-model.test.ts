@@ -308,6 +308,54 @@ describe("run model resolution", () => {
   )
 
   cliIt.live(
+    "runs shell without a usable model and reports an unavailable async prompt model once",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              model: "missing-provider/missing-model",
+            }),
+          },
+        })
+        const sdk = createOpencodeClient({ baseUrl: server.url, throwOnError: true })
+        const { data } = yield* Effect.promise(() => sdk.session.create({ title: "Unavailable default" }))
+        if (!data) throw new Error("Session creation returned no data")
+        const sessionID = data.id
+        const shell = yield* Effect.promise(() => sdk.session.shell({ sessionID, agent: "build", command: "echo shell-ok" }))
+        expect(JSON.stringify(shell.data)).toContain("shell-ok")
+
+        const controller = new AbortController()
+        const events = yield* Effect.promise(() => fetch(`${server.url}/event`, { signal: controller.signal }))
+        const reader = events.body!.getReader()
+        let received = ""
+        const collect = (async () => {
+          const decoder = new TextDecoder()
+          while (true) {
+            const chunk = await reader.read().catch(() => ({ done: true, value: undefined }))
+            if (chunk.done) return
+            received += decoder.decode(chunk.value, { stream: true })
+          }
+        })()
+        yield* Effect.promise(() => sdk.session.promptAsync({ sessionID, parts: [{ type: "text", text: "test" }] }))
+        const deadline = Date.now() + 10_000
+        while (!received.includes("Model not found") && Date.now() < deadline) yield* Effect.promise(() => Bun.sleep(50))
+        yield* Effect.promise(() => Bun.sleep(500))
+        controller.abort()
+        yield* Effect.promise(() => collect)
+
+        const errors = received.split("\n").filter((line) => line.includes('"session.error"'))
+        expect(errors).toHaveLength(1)
+        expect(errors[0]).toContain("missing-provider/missing-model (from project or global config (model))")
+        expect(yield* llm.calls).toBe(0)
+      }),
+    60_000,
+  )
+
+  cliIt.live(
     "rejects an unavailable recorded model on resume",
     ({ opencode, llm }) =>
       Effect.gen(function* () {
