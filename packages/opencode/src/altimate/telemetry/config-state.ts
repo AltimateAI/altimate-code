@@ -85,7 +85,8 @@ async function hasWellKnownAuth(): Promise<boolean> {
   // such values (null) fail Config's load outright, and it is not worth matching Auth case by case.
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
   // Any well-known-typed entry counts: Auth passes OPENCODE_AUTH_CONTENT through without decoding it, so
-  // Config can fetch remote config even for an entry the file path would reject (fail closed).
+  // Config can fetch remote config even for an entry the file path would reject. For the file this is
+  // looser than Auth's decode (a malformed entry also counts), which only errs toward holding (fail closed).
   return Object.values(parsed).some(
     (entry) => entry && typeof entry === "object" && (entry as { type?: unknown }).type === "wellknown",
   )

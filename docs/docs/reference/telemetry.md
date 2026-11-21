@@ -227,7 +227,7 @@ What identifies the sender of an event depends on whether the machine is signed 
 
 The Claude Code plugin's `plugin_session_start` and `plugin_feature_used` are the exception: signed in or not, they carry neither the machine ID nor your account, and their `ai.user.id` is the plugin's own random install id.
 
-These identifiers are sent only while telemetry is enabled. While the opt-out setting is unresolved, Altimate Code holds events in a bounded in-memory buffer and skips telemetry requests, including the `/users/me` lookup. If a later initialization resolves telemetry as enabled, it sends the queued events. It discards them if it resolves as disabled, if the process exits while the setting is still unresolved, or when a session ends for a project whose own config could not be read. A legacy global `config` (TOML) file that fails to import keeps the setting unresolved until it is fixed or removed.
+These identifiers are sent only while telemetry is enabled. While the opt-out setting is unresolved, Altimate Code holds events in a bounded in-memory buffer and skips telemetry requests, including the `/users/me` lookup. If a later initialization resolves telemetry as enabled, it sends the queued events. It discards them if it resolves as disabled, if the process exits while the setting is still unresolved, or when a session ends for a project whose own config could not be read. A legacy global `config` (TOML) file that fails to import keeps the setting unresolved until it is fixed or removed and the config is reloaded (a long-running process reloads it on restart).
 
 ### CLI Authentication Flow
 
