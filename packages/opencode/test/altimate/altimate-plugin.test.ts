@@ -10,6 +10,7 @@ import { TelemetryConfig } from "../../src/altimate/telemetry/config-state"
 import os from "os"
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
+import { Database } from "@opencode-ai/core/database/database"
 
 const VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
 
@@ -185,6 +186,21 @@ describe("buildCliContext", () => {
       const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) })
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
+
+    test("inside a project, keeps machine_id for another project without an opt-out when remote sources exist", async () => {
+      if (TelemetryConfig.disablingEnvironmentVariable()) return
+      await using current = await tmpdir({ git: true })
+      await using other = await tmpdir({ git: true })
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      // An account database the startup probe cannot read: only the loaded config can rule on remote sources.
+      const database = spyOn(Database, "path").mockReturnValue(":memory:")
+      const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) }).finally(
+        () => database.mockRestore(),
+      )
+      expect(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))["machine_id"]).toBe(VALID_UUID)
     })
 
     test("inside a project, omits machine_id when the full config fails to load", async () => {

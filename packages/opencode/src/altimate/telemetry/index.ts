@@ -2379,7 +2379,11 @@ export namespace Telemetry {
     // Not during a shutdown: a re-init chained behind the exit flush would start a lifecycle nobody ends.
     if (gate !== "pending" || shutdownPromise) return Promise.resolve()
     adopted = "enabled"
-    return (initPromise ?? Promise.resolve()).catch(() => {}).then(() => init())
+    const shutdownsAtCall = shutdownsStarted
+    // Checked again once the running init settles: a shutdown may have started (or finished) meanwhile.
+    return (initPromise ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => (shutdownPromise || shutdownsStarted !== shutdownsAtCall ? undefined : init()))
   }
   /** Test seam: forget the process-wide opt-out decision and the events held for it. A lifecycle a
    * test left running and enabled keeps its decision, so it goes on sending as it did before the gate. */
@@ -2436,6 +2440,8 @@ export namespace Telemetry {
   // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
   // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
   let shutdownPromise: Promise<void> | undefined
+  // Counts shutdowns started, so a deferred init can tell one began while it waited.
+  let shutdownsStarted = 0
   // altimate_change — init chained onto an in-flight shutdown; see init().
   let reinitPromise: Promise<void> | undefined
   // altimate_change — the currently running flush, so shutdown waits rather than racing it.
@@ -3120,7 +3126,8 @@ export namespace Telemetry {
       // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
       // regardless, so re-inserting here does not save these events; it only leaves them to be
       // shipped by whatever lifecycle comes next, under a different launch id.
-      if (shuttingDown) return
+      // Nor after an opt-out: it aborted this batch, and nothing may be held for sending.
+      if (shuttingDown || gate === "disabled") return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
       // altimate_change — a batch never attempted (an earlier one failed) keeps its retry.
@@ -3181,6 +3188,7 @@ export namespace Telemetry {
       if (timer) clearTimeout(timer)
       return
     }
+    shutdownsStarted++
     shutdownPromise = doShutdown(opts?.timeoutMs).finally(() => {
       shutdownPromise = undefined
     })

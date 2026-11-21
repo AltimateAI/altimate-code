@@ -173,7 +173,8 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
   }
 }
 
-export async function disabledState(directory: string = process.cwd()): Promise<State> {
+/** `filesOnly` skips the remote and organization sources, for a caller whose loaded config already covers them. */
+export async function disabledState(directory: string = process.cwd(), opts?: { filesOnly?: boolean }): Promise<State> {
   try {
     let value: boolean | undefined
     // Any source that fails to read, parse or validate fails Config's whole load, so the answer
@@ -254,7 +255,7 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     if (unknown) return "unreadable"
     // The files themselves opt out: that stands, even if a remote config might turn it back on (fail closed).
     if (value === true) return "disabled"
-    if (!managedSetting && (await remoteMayDisable(value))) return "unreadable"
+    if (!opts?.filesOnly && !managedSetting && (await remoteMayDisable(value))) return "unreadable"
     return "enabled"
   } catch {
     return "unreadable"

@@ -30,7 +30,7 @@ async function until(pred: () => boolean, ms = 2_000) {
   return pred()
 }
 
-const DISABLE_FLAGS = ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"] as const
+const DISABLE_FLAGS = ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"] as const
 
 describe("telemetry identity", () => {
   const savedFlags: Record<string, string | undefined> = {}

@@ -101,10 +101,11 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
     const loaded = await TelemetryConfig.loadedState().catch(() => undefined)
     const instance = TelemetryConfig.instanceDirectory()
     // A handoff for another project than the one this Instance serves: that project's own files
-    // may opt out, so they must allow it too.
+    // may opt out, so they must allow it too. The remote and organization sources are the same for
+    // both projects and the loaded config already covers them.
     const otherProject = Boolean(instance && directory && canonicalDirectory(directory) !== instance)
     if (loaded) {
-      disabled = loaded !== "enabled" || (otherProject && (await TelemetryConfig.disabledState(directory)) !== "enabled")
+      disabled = loaded !== "enabled" || (otherProject && (await TelemetryConfig.disabledState(directory, { filesOnly: true })) !== "enabled")
     } else if (instance) {
       disabled = true
     } else {

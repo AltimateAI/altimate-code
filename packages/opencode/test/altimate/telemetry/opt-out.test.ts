@@ -756,6 +756,33 @@ describe("telemetry opt-out", () => {
     // Aborted by adoptOptOut itself, before it returned.
     expect(aborted).toBe(true)
     await flushing
+    // The aborted batch is not put back: nothing stays held after the opt-out.
+    expect(Telemetry.bufferedCountForTest()).toBe(0)
+  })
+
+  test("an enabled answer from the worker starts nothing once a shutdown began while this thread's init ran", async () => {
+    signOut()
+    wellKnownAuth()
+    let fail!: (error: Error) => void
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => (started = resolve))
+    configSpy.mockImplementation(() => {
+      started()
+      return new Promise((_, reject) => (fail = reject))
+    })
+    trackStartup()
+    const initializing = Telemetry.init()
+    await reading
+    const adopting = Telemetry.adoptOptOut("enabled")
+    const exiting = Telemetry.shutdown()
+    // The startup read cannot see the remote config, so this thread's own init leaves it pending.
+    fail(new Error("InstanceRef not provided"))
+    await initializing
+    await exiting
+    await adopting
+    await Telemetry.flush()
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   test("a command that loads a project settles an opt-out the startup read left open", async () => {
