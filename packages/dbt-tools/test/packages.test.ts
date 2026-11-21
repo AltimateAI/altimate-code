@@ -80,6 +80,39 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(0)
   })
 
+  test("a newly checked out lock invalidates an older preinstalled directory", async () => {
+    writeProject({ lock: lockFor("2.0.0"), packages: `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n` })
+    installPackage("1.0.0")
+    const older = new Date(Date.now() - 60_000)
+    utimesSync(join(root, "dbt_packages"), older, older)
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("an env_var package path is stamped and does not get reset on the next command", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ env_var('TEST_ALTIMATE_PACKAGE_PATH', 'custom_packages') }}"\n`)
+    const installPath = join(root, "custom_packages", PKG)
+    let calls = 0
+    const install = async () => {
+      calls++
+      mkdirSync(installPath, { recursive: true })
+      writeFileSync(join(installPath, "dbt_project.yml"), `name: ${PKG}\n`)
+    }
+    expect((await ensurePackages(root, install)).action).toBe("installed")
+    expect((await ensurePackages(root, install)).action).toBe("skipped")
+    expect(calls).toBe(1)
+  })
+
+  test("an unresolved Jinja package path does not reset dependencies on startup", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ var('package_directory') }}"\n`)
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).reason).toContain("altimate-dbt deps")
+    expect(c.calls).toBe(0)
+  })
+
   test("the version inside an installed hub package is not compared with the lock (hub packages report stale versions)", async () => {
     // dbt_utils locked at 1.3.0 installs with `version: 0.1.0` in its dbt_project.yml.
     writeProject({ lock: lockFor("1.3.0") })

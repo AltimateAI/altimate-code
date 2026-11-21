@@ -322,7 +322,7 @@ describe("schema-verify command", () => {
     expect((result as { error: string }).error).toContain("Build the model first")
   })
 
-  test("f1002 shape: extra rank-breakdown columns beyond the YAML are not an error by themselves", async () => {
+  test("extra rank-breakdown columns beyond the YAML are not an error by themselves", async () => {
     // YAML: rank, driver_full_name, podiums. Model also returns p1, p2, p3. dbt is happy with that;
     // whether the extras are wanted is a question for the task, not for the YAML.
     const adapter = makeAdapter({

@@ -20,14 +20,14 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 /** Replace `source.parseManifest` with a version that retries while the result is missing. */
 export function retryParseManifest<T>(
   source: ManifestSource<T>,
-  opts: { attempts?: number; baseDelayMs?: number } = {},
+  opts: { attempts?: number; baseDelayMs?: number; shouldRetry?: () => boolean } = {},
 ): void {
   const attempts = opts.attempts ?? 6
   const base = opts.baseDelayMs ?? 150
   const original = source.parseManifest.bind(source)
   source.parseManifest = async () => {
     let result = await original()
-    for (let i = 1; result === undefined && i < attempts; i++) {
+    for (let i = 1; result === undefined && i < attempts && (opts.shouldRetry?.() ?? true); i++) {
       await sleep(base * i + Math.floor(Math.random() * base))
       result = await original()
     }

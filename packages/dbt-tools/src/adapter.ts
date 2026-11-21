@@ -251,9 +251,8 @@ export async function create(cfg: Config, options: CreateOptions = {}): Promise<
   // Before `initialize`, whose parse is the one the commands answer from.
   adapter.on(DBTProjectIntegrationAdapterEvents.MANIFEST_PARSED, recordManifest)
   try {
-    retryParseManifest(adapter)
+    retryParseManifest(adapter, { shouldRetry: () => adapter.getTargetPath() !== undefined })
     await adapter.initialize()
-    await adapter.parseManifest()
   } catch (e) {
     // initialize() can fail after the integration started a Python bridge; stop it.
     await adapter.dispose().catch(() => {})

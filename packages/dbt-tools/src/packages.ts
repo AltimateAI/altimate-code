@@ -87,11 +87,17 @@ function readYaml(path: string): unknown {
   }
 }
 
-function projectInstallPath(root: string): string {
+function projectInstallPath(root: string): string | undefined {
   const cfg = readYaml(join(root, "dbt_project.yml")) as Record<string, unknown> | undefined
   const raw = cfg?.["packages-install-path"]
-  if (typeof raw === "string" && raw.length > 0 && !raw.includes("{{")) return resolve(root, raw)
-  return resolve(root, DEFAULT_INSTALL_PATH)
+  if (typeof raw !== "string" || raw.length === 0) return resolve(root, DEFAULT_INSTALL_PATH)
+  if (!raw.includes("{{") && !raw.includes("{%")) return resolve(root, raw)
+
+  // Resolve dbt's common env_var form without guessing the result of other Jinja.
+  const envVar = /^\s*{{\s*env_var\(\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*(?:,\s*(['"])(.*?)\3\s*)?\)\s*}}\s*$/.exec(raw)
+  if (!envVar) return
+  const value = process.env[envVar[2]!] ?? envVar[4]
+  if (value) return resolve(root, value)
 }
 
 /** Entries the project asks dbt to install. Prefers the lock file (exact versions). */
@@ -156,12 +162,11 @@ function allPackageDirs(installPath: string): string[] {
   })
 }
 
-function fingerprint(root: string): string {
+function fingerprint(root: string, installPath: string): string {
   const h = createHash("sha256")
   // The install path decides which directories hold the packages, so a change of it invalidates the stamp.
   // Relative to the project when inside it, so reaching the same project through a symlink gives
   // the same fingerprint; a path outside the project is kept as written.
-  const installPath = projectInstallPath(root)
   const rel = relative(root, installPath)
   h.update(rel.startsWith("..") || isAbsolute(rel) ? installPath : rel).update("\0")
   for (const f of DECLARATION_FILES) {
@@ -204,13 +209,14 @@ export function packagesSatisfied(root: string): SatisfiedResult {
     return { ok: false, reason: "a previous or concurrent install has not finished" }
 
   const installPath = projectInstallPath(root)
+  if (!installPath) return { ok: false, reason: "packages-install-path cannot be determined before dbt runs" }
   const installed = completePackageDirs(installPath)
   const incomplete = allPackageDirs(installPath).filter((n) => !installed.has(n))
   if (incomplete.length > 0) return { ok: false, reason: `incomplete package directory: ${incomplete.join(", ")}` }
 
   const stamp = readStamp(root)
   if (stamp) {
-    if (stamp.fingerprint !== fingerprint(root))
+    if (stamp.fingerprint !== fingerprint(root, installPath))
       return { ok: false, reason: "package declarations changed since the last install" }
     const gone = stamp.packages.filter((p) => !installed.has(p))
     if (gone.length > 0) return { ok: false, reason: `installed package missing: ${gone.join(", ")}` }
@@ -224,6 +230,9 @@ export function packagesSatisfied(root: string): SatisfiedResult {
       ...["packages.yml", "dependencies.yml"].filter((f) => existsSync(join(root, f))).map((f) => statSync(join(root, f)).mtimeMs),
     )
     if (declM > lockM + 1000) return { ok: false, reason: "packages.yml is newer than package-lock.yml" }
+    if (lockM > statSync(installPath).mtimeMs + 1000) {
+      return { ok: false, reason: "package-lock.yml is newer than the installed package directory" }
+    }
   } catch {}
 
   // No stamp: packages were installed by something else (image build, `dbt deps` by hand).
@@ -382,6 +391,14 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
   writeFileSync(dirty, JSON.stringify({ pid: process.pid, startedAt: Date.now() }))
   const result = await install()
   const installPath = projectInstallPath(root)
+  const stampFile = join(dir, "packages.stamp.json")
+  if (!installPath) {
+    // An explicit deps command can resolve Jinja itself. Its output is authoritative
+    // when we cannot inspect the resulting directory.
+    rmSync(stampFile, { force: true })
+    rmSync(dirty, { force: true })
+    return result
+  }
   const complete = [...completePackageDirs(installPath).keys()]
   const broken = allPackageDirs(installPath).filter((n) => !complete.includes(n))
   // An explicit install (record = false) returns dbt's own failure result instead, so the
@@ -390,9 +407,8 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
   if (incomplete && record) {
     throw new Error(`dbt deps finished but the package directory is incomplete${broken.length ? `: ${broken.join(", ")}` : ""}`)
   }
-  const stampFile = join(dir, "packages.stamp.json")
   if (record) {
-    writeFileSync(stampFile, JSON.stringify({ fingerprint: fingerprint(root), packages: complete } satisfies Stamp))
+    writeFileSync(stampFile, JSON.stringify({ fingerprint: fingerprint(root, installPath), packages: complete } satisfies Stamp))
   } else {
     // The caller's installer reports failure as a result, not a throw, so success is not
     // known. Drop the old stamp: the next check verifies the directories against the
@@ -413,6 +429,11 @@ export async function ensurePackages(
   opts?: LockOptions,
 ): Promise<EnsureResult> {
   if (declaredPackages(root).length === 0) return { action: "none", reason: "no packages declared" }
+  if (!projectInstallPath(root)) {
+    const reason = "Could not resolve packages-install-path before dbt runs. Use altimate-dbt deps to install packages for this project."
+    bufferLog(`[dbt-tools] ${reason}`)
+    return { action: "none", reason }
+  }
   const fast = packagesSatisfied(root)
   if (fast.ok) return { action: "skipped", reason: fast.reason }
 
