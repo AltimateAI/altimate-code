@@ -532,16 +532,6 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     // trailing statements. Keep dialect-aware lexical hard denies authoritative.
     const functions = functionSafety(sql, dialect, depth)
     const masked = maskSql(lexical.tokens)
-    // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
-    // (never SQL) would pass as a read. Treat it as unreadable so the residue is named, as on other dialects.
-    // Only for queries: a write is already refused and named by its type.
-    if (
-      dialect?.toLowerCase() === "clickhouse" &&
-      result.statements.every((s: { category?: string }) => s.category === "query") &&
-      masked.search(SHELL_REDIRECT) >= 0
-    ) {
-      return { ...classifyFallback(sql, dialect), parseError: "shell redirect after the SQL" }
-    }
     const hardType = result.statements.find(
       (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
     )?.statement_type
@@ -566,6 +556,12 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
       otherIsReadOnly(sql, result.statements, dialect)
       ? "read"
       : "write"
+    // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
+    // (never SQL) would pass as a read. Treat such a read as unreadable so the residue is named, as on other
+    // dialects; a write is already refused and named by its type.
+    if (queryType === "read" && dialect?.toLowerCase() === "clickhouse" && masked.search(SHELL_REDIRECT) >= 0) {
+      return { ...classifyFallback(sql, dialect), parseError: "shell redirect after the SQL" }
+    }
     const writeTruncate = queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))
     const finalCause = cause ?? (writeTruncate ? "TRUNCATE" : undefined)
     return { queryType, blocked: finalCause !== undefined, ...(finalCause && { cause: finalCause }) }

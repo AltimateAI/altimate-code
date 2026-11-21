@@ -28,7 +28,12 @@ describe("shellResidue", () => {
   }
 
   test("on ClickHouse, whose parser accepts trailing text, a redirect is still named and not run", () => {
-    for (const [sql, residue] of [["SELECT 1 2>/dev/null", "2>/dev/null"], ["SELECT * FROM t LIMIT 5 2>&1", "2>&1"]]) {
+    for (const [sql, residue] of [
+      ["SELECT 1 2>/dev/null", "2>/dev/null"],
+      ["SELECT * FROM t LIMIT 5 2>&1", "2>&1"],
+      ["SHOW TABLES 2>/dev/null", "2>/dev/null"],
+      ["DESCRIBE TABLE t 2>&1", "2>&1"],
+    ]) {
       expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("write")
       expect(shellResidue(sql, "clickhouse")).toBe(residue)
     }
