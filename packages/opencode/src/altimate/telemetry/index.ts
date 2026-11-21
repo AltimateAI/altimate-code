@@ -2326,7 +2326,13 @@ export namespace Telemetry {
   function decide(next: "enabled" | "disabled") {
     if (gate === next) return
     gate = next
-    for (const listener of decisionListeners) listener(next)
+    for (const listener of decisionListeners) {
+      try {
+        listener(next)
+      } catch {
+        // A listener (the TUI worker's RPC push) must not undo this thread's own decision.
+      }
+    }
   }
   /** The opt-out as this thread has resolved it. */
   export function optOutState() {

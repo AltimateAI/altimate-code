@@ -492,6 +492,23 @@ describe("telemetry opt-out", () => {
     }
   })
 
+  test("a listener that throws does not stop this thread's telemetry", async () => {
+    const names = recordIngestion()
+    signOut()
+    const stop = Telemetry.onOptOutDecided(() => {
+      throw new Error("port closed")
+    })
+    try {
+      configSpy.mockResolvedValue({})
+      await Telemetry.init()
+      trackStartup()
+      await Telemetry.flush()
+      expect(names).toEqual(["startup_ready"])
+    } finally {
+      stop()
+    }
+  })
+
   test("an opt-out adopted while this thread's own read runs still wins", async () => {
     const names = recordIngestion()
     signOut()
