@@ -36,6 +36,17 @@ function readOnlyBody(sql: string, dialect?: string): { masked: string; body: st
   return safe ? { masked, body } : undefined
 }
 
+/** Why readOnlyBody refused a classifier read, in fixed words (function names only from fixed lists). */
+function unembeddableReason(sql: string, dialect?: string): string {
+  const calls = sqlFunctionCalls(sql, dialect)
+  if (calls.some((call) => call.name === "query")) return "it calls query(), which runs SQL text that cannot be checked; query the tables directly"
+  if (calls.some((call) => call.escaped)) return "it has an escaped function call, which cannot be checked"
+  if (calls.some((call) => hasSideEffectFunction(call.name))) return "it calls a function that is not known to be read-only"
+  if (statementsOf(sql, dialect).length > 1) return "it holds more than one statement"
+  if (!isSingleQuery(sql, dialect)) return "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)"
+  return "its parentheses, quotes or comments do not balance"
+}
+
 /** Throws unless sql is one read-only query that is safe to embed in a larger query. */
 export function requireReadOnlyQuery(sql: string, dialect?: string): void {
   if (readOnlyBody(sql, dialect) === undefined)
@@ -106,13 +117,14 @@ export function writeReason(sql: string, dialect?: string): string {
   }
   if (queryType === "write") {
     const { reason, unreadable, unavailable } = explainWrite(sql, dialect)
-    const head = unreadable ? "It counts as a write because" : "It falls outside the read-only permission because"
+    // A missing classifier is an installation failure, not a permission decision.
+    const head = unreadable || unavailable ? "It counts as a write because" : "It falls outside the read-only permission because"
     return ` ${head} ${reason}.${unavailable ? ` ${UNAVAILABLE_NEXT_STEP}` : ""}`
   }
   // Name the word only when it is the sole reason: the body is otherwise one SELECT or WITH query.
   const body = readOnlyBody(sql, dialect)?.body
   if (!body || !/^(SELECT|WITH)\b/i.test(body)) {
-    return " Invalid query shape here: send a single SELECT or WITH query that can be embedded."
+    return ` This read is invalid here because ${body ? "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)" : unembeddableReason(sql, dialect)}; send a single SELECT or WITH query that can be embedded.`
   }
   const [statement, replace] = wordPatterns(dialect)
   const word = (statement.exec(body) ?? replace.exec(body))?.[0]

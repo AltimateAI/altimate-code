@@ -200,6 +200,8 @@ test("unavailable", async () => {
   expect(explained.unavailable).toBe(true)
   expect(explained.reason).not.toContain("could not read")
   expect(writeReason("SELECT 1", "postgres")).toContain(UNAVAILABLE_NEXT_STEP)
+  // An installation failure is not a permission decision, in words or in its telemetry class.
+  expect(writeReason("SELECT 1", "postgres")).not.toContain("permission")
 })
 `,
     )
@@ -218,8 +220,23 @@ test("unavailable", async () => {
     }
   }, 60_000)
 
-  test.each(["SELECT 1; SELECT 2", "SHOW TABLES"])("explains the unsupported read shape %s", (sql) => {
-    expect(writeReason(sql, "postgres")).toContain("send a single SELECT or WITH query")
+  test.each([
+    ["SELECT 1; SELECT 2", "more than one statement"],
+    ["SHOW TABLES", "not a SELECT or WITH query"],
+    ["SELECT pg_sleep(1)", "not known to be read-only"],
+  ])("explains the unsupported read shape %s", (sql, cause) => {
+    const reason = writeReason(sql, "postgres")
+    expect(reason).toContain(cause)
+    expect(reason).toContain("send a single SELECT or WITH query")
+  })
+
+  test("a single read calling query() is refused for the function", () => {
+    const sql = "SELECT * FROM query('SELECT 1 AS private_alias')"
+    const reason = writeReason(sql, "duckdb")
+    expect(reason).toContain("calls query()")
+    expect(reason).not.toContain("Invalid query shape")
+    expect(reason).not.toContain("private_alias")
+    expect(() => readSql(sql, "duckdb")).toThrow("calls query()")
   })
 
   test("a refusal that is not about writing stays as it was", () => {
