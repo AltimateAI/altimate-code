@@ -4,7 +4,7 @@ import {
   catalogGate,
   deferredSubmitRevision,
   isModelMetadataOnly,
-  acceptSubmissionModel,
+  acceptSubmissionSelection,
   isServerReportedModelError,
   resolveSubmissionModel,
   resolveCommandAgent,
@@ -1217,39 +1217,34 @@ export function Prompt(props: PromptProps) {
         current: chatModel,
         currentSource: local.model.source(),
       })
-      // The draft stays; the picker opens when a pick (for this conversation only) can replace the model.
-      const accepted = acceptSubmissionModel({
-        model: selection.model,
-        source: origin.source,
-        pickerCanOverride: origin.pickerCanOverride,
-        validate: (model, source, pickable) => local.model.validate(model, source, pickable),
-        openPicker: () => {
-          // Readiness is unknown while kv hydrates; retry once it settles instead of guessing.
-          if (readyPending()) {
-            deferredSubmit.defer()
-            return
-          }
-          if (ready()) {
-            dialog.replace(() => <DialogModel />)
-            return
-          }
-          const shown = dialog.replace(() => (
-            <DialogModelWelcome
-              intro="The configured model isn't available. Pick a model for this conversation; your config is not changed and your message is kept."
-              trigger="prompt_gate"
-            />
-          ))
-          if (shown) markFirstRunActive()
-        },
-      })
-      if (!accepted) return false
-      if (selection.subtask) {
-        if (!selection.parent) {
-          void promptModelWarning()
-          return false
+      const openPicker = () => {
+        // Readiness is unknown while kv hydrates; retry once it settles instead of guessing.
+        if (readyPending()) {
+          deferredSubmit.defer()
+          return
         }
-        if (!local.model.validate(selection.parent)) return false
+        if (ready()) {
+          dialog.replace(() => <DialogModel />)
+          return
+        }
+        const shown = dialog.replace(() => (
+          <DialogModelWelcome
+            intro="The configured model isn't available. Pick a model for this conversation; your config is not changed and your message is kept."
+            trigger="prompt_gate"
+          />
+        ))
+        if (shown) markFirstRunActive()
       }
+      // The draft stays; the picker opens when a pick (for this conversation only) can replace the model.
+      const accepted = acceptSubmissionSelection({
+        selection,
+        origin,
+        chatSource: local.model.source(),
+        validate: (model, source, pickable) => local.model.validate(model, source, pickable),
+        openPicker,
+      })
+      if (accepted === "missing-parent") void promptModelWarning()
+      if (accepted !== "accepted") return false
     }
     // altimate_change end
     // altimate_change start — first-run gate without dead chat / error copy: a normal

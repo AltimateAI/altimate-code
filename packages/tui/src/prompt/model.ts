@@ -121,3 +121,25 @@ export function acceptSubmissionModel<Model>(input: {
   return false
 }
 
+// Accept a submission's model and, for a subtask, its parent turn's chat model, which a pick can replace.
+export function acceptSubmissionSelection<Model>(input: {
+  selection: { model?: Model; subtask?: boolean; parent?: Model }
+  origin: { source?: string; pickerCanOverride: boolean }
+  chatSource?: string
+  validate: (model: Model, source?: string, pickable?: boolean) => boolean
+  openPicker: () => void
+}): "accepted" | "rejected" | "missing-parent" {
+  const { selection, validate, openPicker } = input
+  if (!acceptSubmissionModel({ model: selection.model, ...input.origin, validate, openPicker })) return "rejected"
+  if (!selection.subtask) return "accepted"
+  if (!selection.parent) return "missing-parent"
+  const parent = acceptSubmissionModel({
+    model: selection.parent,
+    source: input.chatSource,
+    pickerCanOverride: true,
+    validate,
+    openPicker,
+  })
+  return parent ? "accepted" : "rejected"
+}
+

@@ -6,6 +6,7 @@ import {
   catalogGate,
   isModelMetadataOnly,
   acceptSubmissionModel,
+  acceptSubmissionSelection,
   isServerReportedModelError,
   resolveCommandAgent,
   resolveSubmissionModel,
@@ -214,3 +215,30 @@ test("each submission model source is named, and only chat-model sources let a p
   for (const source of ["CLI --model", 'agent "builder" config (model)', "session history", "project or global config (model)"])
     expect(resolveSubmissionModel({ current, currentSource: source })).toEqual({ model: current, source, pickerCanOverride: true })
 })
+
+// altimate_change start — a subtask's parent chat model gets the same picker recovery
+test("a subtask whose parent chat model is unavailable opens the picker", () => {
+  const opened: string[] = []
+  const validated: [string, string | undefined, boolean | undefined][] = []
+  const result = acceptSubmissionSelection({
+    selection: { model: "sub/ok", subtask: true, parent: "missing/model" },
+    origin: { source: 'agent "explore" config (model)', pickerCanOverride: false },
+    chatSource: "project or global config (model)",
+    validate: (model, source, pickable) => {
+      validated.push([model, source, pickable])
+      return model === "sub/ok"
+    },
+    openPicker: () => opened.push("picker"),
+  })
+  expect(result).toBe("rejected")
+  expect(opened).toEqual(["picker"])
+  expect(validated[1]).toEqual(["missing/model", "project or global config (model)", true])
+})
+
+test("a subtask selection reports a missing parent and accepts a valid one", () => {
+  const base = { origin: { pickerCanOverride: true }, validate: () => true, openPicker: () => {} }
+  expect(acceptSubmissionSelection({ ...base, selection: { model: "a/b", subtask: true } })).toBe("missing-parent")
+  expect(acceptSubmissionSelection({ ...base, selection: { model: "a/b", subtask: true, parent: "c/d" } })).toBe("accepted")
+  expect(acceptSubmissionSelection({ ...base, selection: { model: "a/b" } })).toBe("accepted")
+})
+// altimate_change end
