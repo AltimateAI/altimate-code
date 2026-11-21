@@ -1,3 +1,6 @@
+// altimate_change start — offline policy refusals
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import { Log } from "../util/log"
@@ -305,6 +308,10 @@ export namespace Server {
         // altimate_change start — a busy session answers 400 with its message, as the instance routes' handler does
         // (middleware.ts); everything else unrecognised gets a fixed message and the ref it was logged under, never
         // the error's text or stack.
+        // altimate_change start — offline policy refusals reach the client with their one-line message
+        const refusal = Offline.policyError(err)
+        if (refusal) return c.json({ name: refusal.name, data: { message: refusal.message } }, { status: 400 })
+        // altimate_change end
         if (err instanceof Session.BusyError) {
           return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 400 })
         }

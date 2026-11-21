@@ -1,3 +1,6 @@
+// altimate_change start — offline policy refusals
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Provider } from "../provider/provider"
 import { NamedError } from "@opencode-ai/util/error"
 import { NotFoundError } from "../storage/db"
@@ -29,6 +32,10 @@ export function errorHandler(log: Log.Logger): ErrorHandler {
       else status = 500
       return c.json(err.toObject(), { status })
     }
+    // altimate_change start — offline policy refusals reach the client with their one-line message
+    const refusal = Offline.policyError(err)
+    if (refusal) return c.json({ name: refusal.name, data: { message: refusal.message } }, { status: 400 })
+    // altimate_change end
     if (err instanceof Session.BusyError) {
       return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 400 })
     }

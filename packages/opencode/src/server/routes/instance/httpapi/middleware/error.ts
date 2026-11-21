@@ -1,3 +1,6 @@
+// altimate_change start — offline policy refusals
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { NamedError } from "@opencode-ai/core/util/error"
 import { ConfigErrorV1 } from "@opencode-ai/core/v1/config/error"
 import { Cause, Effect } from "effect"
@@ -24,6 +27,14 @@ export const errorLayer = HttpRouter.middleware<{ handles: unknown }>()((effect)
       ) {
         return Effect.succeed(HttpServerResponse.jsonUnsafe(error.toObject(), { status: 400 }))
       }
+      // altimate_change start — offline policy refusals reach the client with their one-line message
+      const refusal = Offline.policyError(error)
+      if (refusal) {
+        return Effect.succeed(
+          HttpServerResponse.jsonUnsafe({ name: refusal.name, data: { message: refusal.message } }, { status: 400 }),
+        )
+      }
+      // altimate_change end
 
       const ref = `err_${crypto.randomUUID().slice(0, 8)}`
 

@@ -66,9 +66,23 @@ async function localOptIn(directory: string) {
   return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false
 }
 
+/** A refusal by the offline policy. Servers report it to the client as a 400 with this message. */
+export class OfflinePolicyError extends Error {
+  override name = "OfflinePolicyError"
+}
+
+/** The policy refusal behind an error, following `cause` links that runtimes add when they wrap it. */
+export function policyError(error: unknown): OfflinePolicyError | undefined {
+  for (let current = error, depth = 0; current && depth < 8; depth++) {
+    if (current instanceof OfflinePolicyError) return current
+    current = (current as { cause?: unknown }).cause
+  }
+  return undefined
+}
+
 export async function assertStartupPolicy(directory: string) {
   if (!enabled() && (await localOptIn(directory))) {
-    throw new Error(
+    throw new OfflinePolicyError(
       "This project requests offline mode. Start Altimate Code from the project to apply its offline policy.",
     )
   }

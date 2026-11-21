@@ -762,7 +762,7 @@ export namespace Session {
         const id = pending.pop()!
         tree.push(id)
         if ((await get(id)).share?.url)
-          throw new Error("This session is shared. Delete it while online so its share can be revoked.")
+          throw new Offline.OfflinePolicyError("This session is shared. Delete it while online so its share can be revoked.")
         pending.push(...(await children(id)).map((child) => child.id))
       }
       // The recursive removal of each descendant skips the scan it has already passed.

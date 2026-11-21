@@ -682,7 +682,7 @@ export const layer: Layer.Layer<
       const session = yield* get(sessionID)
       // altimate_change start — offline mode cannot revoke a public share, so a shared tree is not deleted
       if (Offline.enabled() && (yield* sharedInTree(sessionID)))
-        return yield* Effect.die(new Error(OFFLINE_SHARED_SESSION))
+        return yield* Effect.die(new Offline.OfflinePolicyError(OFFLINE_SHARED_SESSION))
       // altimate_change end
       try {
         // `remove` needs to work in all cases, such as broken sessions that

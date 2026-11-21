@@ -216,7 +216,7 @@ const ToolRunCommand = cmd({
     try {
       const toolArgs = await readArgs(args)
       const directory = process.cwd()
-      const workspaceTools = !Offline.enabled() && (await resolveWorkspaceTools(args["workspace-tools"], directory))
+      const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], directory)
       const daemon = await import("../../altimate/tool-cli/daemon")
       const reply = !Offline.enabled() && args.daemon && !daemon.daemonDisabled()
         ? await daemon.runViaDaemon(directory, InstallationVersion, {
