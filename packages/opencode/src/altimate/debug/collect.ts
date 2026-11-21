@@ -93,7 +93,7 @@ function envFlags(): string[] {
 function optOutReason(state: "pending" | "enabled" | "disabled") {
   if (state === "pending") return "config not readable yet"
   if (state === "disabled") return "disabled in config"
-  return "no telemetry sink (test runner or invalid connection string)"
+  return "not running in this process (no telemetry sink, or this session's config not resolved yet)"
 }
 
 /** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read

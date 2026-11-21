@@ -264,8 +264,10 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     if (managed) await readText(managed.text, managed.source, path.dirname(managed.source))
 
     if (unknown) return "unreadable"
+    // The files themselves opt out: that stands, even if a remote config might turn it back on (fail closed).
+    if (value === true) return "disabled"
     if (!managedSetting && (await remoteMayDisable(value))) return "unreadable"
-    return value === true ? "disabled" : "enabled"
+    return "enabled"
   } catch {
     return "unreadable"
   }

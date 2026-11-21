@@ -533,6 +533,35 @@ describe("telemetry opt-out", () => {
     expect(names).toEqual(["startup_ready"])
   })
 
+  test("a file opt-out added mid-process wins over an earlier enabled decision, even with an organization selected", async () => {
+    const names = recordIngestion()
+    signOut()
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', 'org');
+    `)
+    db.close()
+    databaseSpy.mockReturnValue(dbPath)
+    await using dir = await tmpdir({ git: true })
+    configSpy.mockResolvedValue({})
+    await Instance.provide({ directory: dir.path, fn: () => Telemetry.init() })
+    expect(Telemetry.optOutState()).toBe("enabled")
+    await Telemetry.shutdown()
+
+    configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: true } })
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(names).toEqual([])
+  })
+
   test("an opt-out adopted while this thread's own read runs still wins", async () => {
     const names = recordIngestion()
     signOut()
