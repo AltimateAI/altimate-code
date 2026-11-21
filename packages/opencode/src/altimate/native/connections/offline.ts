@@ -37,8 +37,11 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   // warehouses (Snowflake, BigQuery, Databricks and others) are refused.
   if (!HOST_ADDRESSED.has(type) || config.replica_set) throw new Error(DENIED)
   const { port } = config
-  if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535))
-    throw new Error(DENIED)
+  if (port !== undefined) {
+    const numeric = typeof port === "string" && port.length > 0 && !/\D/.test(port) ? Number(port) : port
+    if (typeof numeric !== "number" || !Number.isInteger(numeric) || numeric < 1 || numeric > 65535)
+      throw new Error(DENIED)
+  }
   if (config.direct_connection === false) throw new Error(mongo ? MONGO_DIRECT : DENIED)
   // Trino and ClickHouse build `${protocol}://${host}`, so a protocol value could carry its own authority.
   if (
@@ -81,9 +84,9 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
     }
     // mongodb+srv:// and replica sets discover other hosts.
     const param = (name: string) => [...parsed.searchParams].find(([key]) => key.toLowerCase() === name)?.[1]
-    const directParam = param("directconnection")
+    const directParam = param("directconnection")?.toLowerCase()
     if (parsed.protocol.endsWith("+srv:") || param("replicaset") !== undefined) throw new Error(DENIED)
-    if (directParam?.toLowerCase() === "false") throw new Error(mongo ? MONGO_DIRECT : DENIED)
+    if (directParam === "false") throw new Error(mongo ? MONGO_DIRECT : DENIED)
     if (mongo && param("proxyhost") !== undefined) throw new Error(DENIED)
     if (config.direct_connection === undefined) direct = directParam === "true"
     const mechanism = [...parsed.searchParams].find(([key]) => key.toLowerCase() === "authmechanism")?.[1]?.toUpperCase()

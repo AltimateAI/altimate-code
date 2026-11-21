@@ -22,16 +22,15 @@ export function gitCommandUsesNetwork(args: string[]) {
   const at = after.findIndex((arg) => !arg.startsWith("-"))
   const operation = at === -1 ? "" : after[at]
   const rest = at === -1 ? after : [...after.slice(0, at), ...after.slice(at + 1)]
+  // Git runs foreach through a shell. Allow only these literal local commands.
+  if (command === "submodule" && operation === "foreach") {
+    const nested = rest.findIndex((arg) => arg === "--" || !arg.startsWith("-"))
+    return nested === -1 || !["git reset --hard", "git clean -fdx", "git status"].includes(rest.slice(nested).join(" "))
+  }
   return (
     remoteCommands.has(command) ||
     (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n")))) ||
     (command === "submodule" && ["update", "add"].includes(operation)) ||
-    // Git runs foreach through a shell. Allow only these literal local commands.
-    (command === "submodule" &&
-      operation === "foreach" &&
-      !["git reset --hard", "git clean -fdx", "git status"].includes(
-        rest.slice(rest[0] === "--recursive" ? 1 : 0).join(" "),
-      )) ||
     (command === "remote" && operation === "add" && rest.some((arg) => arg === "-f" || arg === "--fetch")) ||
     (command === "remote" && (operation === "prune" || (operation === "set-head" && rest.some((arg) => arg === "-a" || arg === "--auto")))) ||
     (command === "lfs" && ["fetch", "pull", "push", "clone"].includes(operation)) ||

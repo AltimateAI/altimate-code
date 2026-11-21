@@ -83,9 +83,11 @@ describe("git() utility", () => {
       ["git lfs fetch"],
       ["git reset --hard && git fetch"],
     ])
-      expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", ...args])).toBe(true)
+      expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "--quiet", ...args])).toBe(true)
     expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "git", "reset", "--hard"])).toBe(false)
     expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "git clean -fdx"])).toBe(false)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--quiet", "git status"])).toBe(false)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--quiet", "--recursive", "git status"])).toBe(false)
   })
   // altimate_change end
 })

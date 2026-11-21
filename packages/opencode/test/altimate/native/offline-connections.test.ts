@@ -29,6 +29,7 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "postgres", host: "127.0.1.2" },
     { type: "postgres", host: "::1" },
     { type: "postgres", host: "/var/run/postgresql" },
+    { type: "redshift", host: "/var/run/postgresql" },
     { type: "postgres" },
     { type: "mysql", server: "127.0.0.1" },
     { type: "mysql", socketPath: "/tmp/mysql.sock" },
@@ -42,6 +43,8 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "oracle", host: "localhost", protocol: "tcp" },
     { type: "mongo", host: "localhost", directConnection: true },
     { type: "mongodb", url: "mongodb://localhost/db?DIRECTCONNECTION=true" },
+    { type: "mongodb", url: "mongodb://localhost/db?directConnection=True" },
+    { type: "mongodb", url: "mongodb://localhost/db?DIRECTCONNECTION=TRUE" },
     { type: "mongodb", connection_string: "mongodb://localhost/db", direct_connection: true },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
@@ -95,15 +98,18 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 
-test("offline host-addressed databases accept only integer ports in range", () => {
+test("offline host-addressed databases accept integers and digit-string ports in range", () => {
   for (const type of [
     "postgres", "postgresql", "redshift", "mysql", "mariadb", "sqlserver", "mssql",
     "clickhouse", "trino", "oracle", "mongodb", "mongo",
   ]) {
     const config = { type, host: "localhost", direct_connection: true }
-    for (const port of [undefined, 1, 65535])
+    for (const port of [undefined, 1, 65535, "1", "5432", "65535"])
       expect(() => assertLocalConnection({ ...config, port })).not.toThrow()
-    for (const port of [null, "27017", "27017,db.example.com:27017", 0, -1, 1.5, 65536, NaN, Infinity])
+    for (const port of [
+      null, "", "0", "65536", "-1", "1.5", "1e3", " 5432", "5432\n", "27017,db.example.com:27017",
+      0, -1, 1.5, 65536, NaN, Infinity,
+    ])
       expect(() => assertLocalConnection({ ...config, port })).toThrow("Offline mode")
   }
 })

@@ -1,7 +1,14 @@
 // altimate_change - new file
 import { expect, test } from "bun:test"
 import path from "node:path"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Effect, Layer } from "effect"
 import { Offline } from "../../src/config/offline"
+import { MCP } from "../../src/mcp"
+import { provideTmpdirInstance } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
+
+const mcpTest = testEffect(MCP.defaultLayer.pipe(Layer.provideMerge(CrossSpawnSpawner.defaultLayer)))
 
 test("the offline config module self-exports before its imports", async () => {
   const source = await Bun.file(new URL("../../src/config/offline.ts", import.meta.url)).text()
@@ -10,16 +17,50 @@ test("the offline config module self-exports before its imports", async () => {
   )
 })
 
-test("the offline OAuth guard is covered by the existing lifecycle marker", async () => {
+test("the OAuth flow stays in the existing lifecycle marker", async () => {
   const source = await Bun.file(new URL("../../src/mcp/index.ts", import.meta.url)).text()
   const start = source.indexOf("// altimate_change start — a flow belongs to a lifecycle call")
   const end = source.indexOf("// altimate_change end", start)
   expect(start).toBeGreaterThan(-1)
   const block = source.slice(start, end)
-  expect(block).toContain('if (Offline.enabled()) throw new Error("Authenticate MCP servers while online.")')
+  expect(block).toContain('const beginAuth = Effect.fn("MCP.beginAuth")')
   expect(block.match(/\/\/ altimate_change start/g)).toHaveLength(1)
-  expect(block).toContain("const lifecycle = yield* InstanceState.get(state)")
 })
+
+mcpTest.live("offline MCP auth refuses both entry points without contacting the server", () =>
+  Effect.gen(function* () {
+    let requests = 0
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++
+        return new Response(null, { status: 500 })
+      },
+    })
+    const previous = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      yield* provideTmpdirInstance(
+        () =>
+          Effect.gen(function* () {
+            const mcp = yield* MCP.Service
+            for (const call of [Effect.asVoid(mcp.startAuth("oauth")), Effect.asVoid(mcp.authenticate("oauth"))]) {
+              const refusal = yield* call.pipe(
+                Effect.catchDefect((error) => Effect.succeed(error instanceof Error ? error.message : undefined)),
+              )
+              expect(refusal).toBe("Authenticate MCP servers while online.")
+            }
+          }),
+        { config: { mcp: { oauth: { type: "remote", url: server.url.href, enabled: false } } } },
+      )
+      expect(requests).toBe(0)
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  }),
+)
 
 test("loopback checks accept only literal local addresses", () => {
   for (const url of ["http://localhost:3000/mcp", "https://127.0.0.1/mcp", "http://[::1]:3000/mcp"])
