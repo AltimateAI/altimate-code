@@ -808,11 +808,13 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.workspace_id, id))
         .all()
         .pipe(Effect.orDie)
-      // altimate_change start — offline mode cannot revoke a public share, so it refuses before removing anything.
-      // The session service's tree check covers subagent sessions, which carry only a parent id.
+      // altimate_change start — one root list for the offline share check and the removal below
+      const sessionIDs = new Set(sessions.map((sessionInfo) => sessionInfo.id))
+      const roots = sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID))
+      // Offline mode cannot revoke a public share, so it refuses before removing anything. The session service's
+      // tree check covers subagent sessions, which carry only a parent id.
       if (Offline.enabled()) {
-        const ids = new Set(sessions.map((sessionInfo) => sessionInfo.id))
-        for (const root of sessions.filter((sessionInfo) => !sessionInfo.parentID || !ids.has(sessionInfo.parentID))) {
+        for (const root of roots) {
           const shared = yield* session.sharedInTree(root.id).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(false)))
           if (shared)
             return yield* Effect.die(
@@ -820,10 +822,9 @@ export const layer = Layer.effect(
             )
         }
       }
-      // altimate_change end
-      const sessionIDs = new Set(sessions.map((sessionInfo) => sessionInfo.id))
       yield* Effect.forEach(
-        sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID)),
+        roots,
+        // altimate_change end
         (sessionInfo) =>
           session.remove(sessionInfo.id).pipe(
             Effect.catchIf(NotFoundError.isInstance, () => Effect.void),
