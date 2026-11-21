@@ -10,6 +10,7 @@ import { ConfigManaged } from "../../../src/config/managed"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
 import { Instance } from "../../../src/project/instance"
+import { bootstrap } from "../../../src/cli/bootstrap"
 import { tmpdir } from "../../fixture/fixture"
 
 const CS = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
@@ -268,6 +269,17 @@ describe("telemetry opt-out", () => {
     return names
   }
 
+  /** Make the next config read wait for the caller; resolves once that read has started. */
+  function holdConfigRead(capture: (resolve: (value: Awaited<ReturnType<typeof Config.get>>) => void) => void) {
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => (started = resolve))
+    configSpy.mockImplementation(() => {
+      started()
+      return new Promise(capture)
+    })
+    return reading
+  }
+
   function errorEvent(name: string) {
     return { type: "error", timestamp: Date.now(), session_id: "", error_name: name, error_message: "test", context: "test" } as const
   }
@@ -406,10 +418,10 @@ describe("telemetry opt-out", () => {
   test("the state handed to another thread waits for this thread's running init", async () => {
     signOut()
     let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
-    configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    const reading = holdConfigRead((resolve) => (release = resolve))
     void Telemetry.init()
     const settled = Telemetry.settledOptOutState()
-    await Bun.sleep(10)
+    await reading
     expect(Telemetry.optOutState()).toBe("pending")
     release({ telemetry: { disabled: true } })
     expect(await settled).toBe("disabled")
@@ -484,10 +496,10 @@ describe("telemetry opt-out", () => {
     const names = recordIngestion()
     signOut()
     let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
-    configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    const reading = holdConfigRead((resolve) => (release = resolve))
     trackStartup()
     const init = Telemetry.init()
-    await Bun.sleep(10)
+    await reading
     await Telemetry.adoptOptOut("disabled")
     release({})
     await init
@@ -532,9 +544,9 @@ describe("telemetry opt-out", () => {
   test("an unresolved init settling during a shutdown leaves the re-init published", async () => {
     signOut()
     let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
-    configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    const reading = holdConfigRead((resolve) => (release = resolve))
     void Telemetry.init()
-    await Bun.sleep(10)
+    await reading
     const shutdown = Telemetry.shutdown()
     const reinit = Telemetry.init()
     // The first read now comes back unreadable while the shutdown waits for it.
@@ -657,6 +669,60 @@ describe("telemetry opt-out", () => {
     await Telemetry.adoptOptOut("disabled")
     await flushing
     expect(aborted).toBe(true)
+  })
+
+  test("a command that loads a project settles an opt-out the startup read left open", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    expect(Telemetry.awaitingConfig()).toBe(true)
+
+    // The project's own load reads the real config; give it a readable one.
+    delete process.env.OPENCODE_CONFIG_CONTENT
+    configSpy.mockResolvedValue({})
+    await using dir = await tmpdir({ git: true })
+    await bootstrap(dir.path, async () => {
+      expect(Telemetry.optOutState()).toBe("enabled")
+    })
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("a project left unresolved drops its held events before another project decides", async () => {
+    const names = recordIngestion()
+    signOut()
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const unresolvedConfig = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockImplementation(async () => (TelemetryConfig.instanceDirectory() === b.path ? unresolvedConfig : {}))
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockImplementation((config) => config === unresolvedConfig)
+    try {
+      await Instance.provide({
+        directory: b.path,
+        fn: async () => {
+          await Telemetry.init()
+          Telemetry.track(errorEvent("B"))
+        },
+      })
+      await Telemetry.shutdown()
+      expect(Telemetry.optOutState()).toBe("pending")
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.flush()
+      expect(names).toEqual([])
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("auth content that does not parse falls back to the auth file, as Auth does", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = "{"
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+    writeFileSync(Auth.filepath(), JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    }))
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
   test("the opt-out marker files earlier versions wrote are removed", async () => {

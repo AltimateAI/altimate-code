@@ -2317,6 +2317,9 @@ export namespace Telemetry {
   // While the config is unreadable, re-resolve it at most this often.
   const CONFIG_RETRY_MS = 30_000
   let configRetry: { at: number } | undefined
+  // A project's own read (inside an Instance) came back unreadable: its held events are not kept past
+  // its session, where another project's decision could send them.
+  let unresolvedInProject = false
   // An enabled opt-out resolved by another thread of this launch (the TUI worker), used by the next init.
   let adopted: "enabled" | undefined
   const decisionListeners = new Set<(state: "enabled" | "disabled") => void>()
@@ -2328,6 +2331,10 @@ export namespace Telemetry {
   /** The opt-out as this thread has resolved it. */
   export function optOutState() {
     return gate
+  }
+  /** An init ran and could not settle the opt-out: a later init with more config (inside a project) may. */
+  export function awaitingConfig() {
+    return gate === "pending" && configRetry !== undefined
   }
   /** Called each time this thread decides the opt-out, for another thread to adopt. */
   export function onOptOutDecided(listener: (state: "enabled" | "disabled") => void): () => void {
@@ -2364,6 +2371,7 @@ export namespace Telemetry {
    * test left running and enabled keeps its decision, so it goes on sending as it did before the gate. */
   export function resetGateForTest() {
     configRetry = undefined
+    unresolvedInProject = false
     adopted = undefined
     legacyMarkersRemoved = false
     if (initDone && enabled) return
@@ -2658,13 +2666,17 @@ export namespace Telemetry {
       if (state === "unreadable") {
         // An opted-out user may be behind it: hold the buffer (capped) and send nothing.
         unresolved = true
+        const inProject = Boolean(TelemetryConfig.instanceDirectory())
+        // A warning, once per hold: a corrupt auth file or a failed organization config fetch holds
+        // telemetry this way.
+        if (!configRetry) log.warn("telemetry held: opt-out unresolved", { instance: inProject })
         configRetry = { at: Date.now() + CONFIG_RETRY_MS }
-        // A warning: a corrupt auth file or a failed organization config fetch holds telemetry this way.
-        log.warn("telemetry held: opt-out unresolved", { instance: Boolean(TelemetryConfig.instanceDirectory()) })
+        if (inProject) unresolvedInProject = true
         return
       }
       decide("enabled")
       configRetry = undefined
+      unresolvedInProject = false
       // altimate_change end
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
       // The baked-in key is refused under a test runner so suites never ship to the production
@@ -3224,8 +3236,10 @@ export namespace Telemetry {
     enabled = false
     appInsights = undefined
     // altimate_change start — while the opt-out is undecided nothing was flushed: keep the events for a
-    // later init in this process to send or drop. At process exit they go with the process.
-    if (gate !== "pending") {
+    // later init in this process to send or drop. At process exit they go with the process. Not when a
+    // project's own read failed: another project's decision must not send that project's events.
+    if (gate !== "pending" || unresolvedInProject) {
+      unresolvedInProject = false
       buffer = []
       droppedEvents = 0
     }

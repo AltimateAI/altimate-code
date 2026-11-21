@@ -56,18 +56,29 @@ export function disablingEnvironmentVariable(): string | undefined {
   )
 }
 
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
 async function hasWellKnownAuth(): Promise<boolean> {
-  let contents = process.env.OPENCODE_AUTH_CONTENT
-  if (!contents) {
+  // As Auth reads it: OPENCODE_AUTH_CONTENT when it parses, otherwise the auth file.
+  const inline = process.env.OPENCODE_AUTH_CONTENT
+  let parsed: unknown = inline ? parseJson(inline) : undefined
+  if (parsed === undefined) {
+    let contents: string
     try {
       contents = await fs.readFile(Auth.filepath(), "utf8")
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
       throw error
     }
+    // Unparseable: a well-known entry may be behind it. `Config` would load without its remote config.
+    parsed = JSON.parse(contents)
   }
-  // Unparseable: a well-known entry may be behind it. `Config` would load without its remote config.
-  const parsed: unknown = JSON.parse(contents)
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
   return Object.values(parsed).some(
     (entry) => entry && typeof entry === "object" && (entry as { type?: unknown }).type === "wellknown",
