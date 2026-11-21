@@ -180,7 +180,7 @@ type Seeded = {
   user: string | string[]
   assistantUsage?: number
   next?: string
-  last?: { modelID?: string; finish?: string; text?: string }
+  last?: { modelID?: string; agent?: string; finish?: string; text?: string }
 }
 
 /** Seed [user history, finished assistant with provider usage, new user turn] and run the loop. */
@@ -210,8 +210,8 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         id: MessageID.ascending(),
         role: "assistant",
         sessionID,
-        mode: "build",
-        agent: "build",
+        mode: last.agent ?? "build",
+        agent: last.agent ?? "build",
         path: { cwd: dir, root: dir },
         cost: 0,
         tokens: { input: usage, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -402,29 +402,36 @@ it.live(
   { timeout: 120_000 },
 )
 
-it.live(
-  "usage reported by another model is not trusted: the guard trips and the session compacts",
-  () =>
-    provideTmpdirServerLegacy(
-      Effect.fnUntraced(function* ({ dir, llm }) {
-        // Same history and usage as the regression above, but counted by a different model's tokenizer.
-        yield* llm.text("summary of the revenue analysis so far")
-        yield* llm.text("Revenue is concentrated in the top ten customers.")
-        const result = yield* runSession(dir, llm, {
-          user: sqlJsonHistory(88_000),
-          assistantUsage: 108_000,
-          last: { modelID: "another-model" },
-          next: "Summarize the revenue concentration.",
-        })
+// Usage counted for another model (different tokenizer) or agent (different system prompt and tools)
+// does not describe this request: the estimate decides, trips, and the session compacts.
+for (const [name, last] of [
+  ["another model", { modelID: "another-model" }],
+  ["another agent", { agent: "plan" }],
+] as const) {
+  it.live(
+    `usage reported for ${name} is not trusted: the guard trips and the session compacts`,
+    () =>
+      provideTmpdirServerLegacy(
+        Effect.fnUntraced(function* ({ dir, llm }) {
+          // Same history and usage as the regression above.
+          yield* llm.text("summary of the revenue analysis so far")
+          yield* llm.text("Revenue is concentrated in the top ten customers.")
+          const result = yield* runSession(dir, llm, {
+            user: sqlJsonHistory(88_000),
+            assistantUsage: 108_000,
+            last,
+            next: "Summarize the revenue concentration.",
+          })
 
-        expect(result.errors).toEqual([])
-        expect(result.summaries.length).toBe(1)
-        expect(result.hits.length).toBe(2)
-      }),
-      { git: true, config: providerCfg(LARGE_WINDOW) },
-    ),
-  { timeout: 120_000 },
-)
+          expect(result.errors).toEqual([])
+          expect(result.summaries.length).toBe(1)
+          expect(result.hits.length).toBe(2)
+        }),
+        { git: true, config: providerCfg(LARGE_WINDOW) },
+      ),
+    { timeout: 120_000 },
+  )
+}
 
 it.live(
   "with auto-compaction off a refusal stays the budget error",
@@ -479,8 +486,8 @@ describe("guard calibration", () => {
     expect(calibratedInputTokens(128_000, 108_400)).toBe(108_400)
     // Reported usage never raises the estimate: the guard stays at least as permissive as before.
     expect(calibratedInputTokens(90_000, 108_400)).toBe(90_000)
-    // Nor lowers it below half the estimate (partial usage, a request that changed since).
-    expect(calibratedInputTokens(128_000, 2_000)).toBe(64_000)
+    // Nor lowers it below three quarters of the estimate (partial usage, a request that changed since).
+    expect(calibratedInputTokens(128_000, 2_000)).toBe(96_000)
     for (const reported of [undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(calibratedInputTokens(128_000, reported)).toBe(128_000)
     }

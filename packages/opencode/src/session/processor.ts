@@ -1354,7 +1354,10 @@ export namespace SessionProcessor {
               // a compaction (or on a first turn) it stays the fatal budget error, so it cannot loop.
               refusedBeforeSend = compactable === true && isContextBudgetError(e)
               const error = refusedBeforeSend
-                ? new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+                ? new MessageV2.ContextOverflowError(
+                    { message: "The request would not fit the model's context window; compacting the conversation and retrying." },
+                    { cause: e },
+                  ).toObject()
                 : MessageV2.fromError(e, { providerID: input.model.providerID })
               // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event

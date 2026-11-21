@@ -20,8 +20,12 @@ const VIDEO_TOKEN_ALLOWANCE = 8_192
 const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
-/** Lowest share of the character estimate that provider-reported usage may calibrate the guard to. */
-const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.5
+/**
+ * Lowest share of the character estimate that provider-reported usage may calibrate the guard to.
+ * The estimate runs ~15-20% high on SQL/JSON; the floor bounds an undercount from usage that missed
+ * inputs that changed since (per-step tool selection, refreshed rules, partial usage reporting).
+ */
+const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.75
 const EMOJI = /\p{Extended_Pictographic}/u
 const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
 const DENSE_ASCII_MIN_LENGTH = 32
@@ -425,8 +429,6 @@ export function reportedContextTokens(input: {
  */
 export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
   if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
-  // Usage from a request that differed in ways the tail cannot see (new tools, partial reporting)
-  // may undercount; never let it lower the guard below this share of the estimate.
   return Math.min(estimate, Math.max(reported, Math.ceil(estimate * MIN_CALIBRATED_ESTIMATE_FRACTION)))
 }
 
