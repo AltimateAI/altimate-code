@@ -54,6 +54,7 @@ import { InstanceRef } from "@/effect/instance-ref"
 
 // altimate_change start — defer telemetry when any config layer was unavailable
 const configsWithUnresolvedTelemetry = new WeakSet<Info>()
+const configsWithUnresolvedGlobal = new WeakSet<Info>()
 
 export function telemetryConfigUnresolved(config: Info): boolean {
   return configsWithUnresolvedTelemetry.has(config)
@@ -930,7 +931,9 @@ export const layer = Layer.effect(
         // altimate_change end
 
         // altimate_change start — associate the status with this resolved config object
-        if (orgConfigUnresolved || incompleteGlobals.has(global) || Auth.configSourcesUnresolved(auth)) {
+        const globalUnresolved = incompleteGlobals.has(global)
+        if (globalUnresolved) configsWithUnresolvedGlobal.add(result)
+        if (orgConfigUnresolved || globalUnresolved || Auth.configSourcesUnresolved(auth)) {
           configsWithUnresolvedTelemetry.add(result)
         }
         // altimate_change end
@@ -966,13 +969,25 @@ export const layer = Layer.effect(
       }),
     )
 
-    // altimate_change start — reload partial config for the current instance on telemetry retry
+    // altimate_change start — retry only this instance and rate-limit repeated reloads during an outage.
+    const telemetryRetryAt = new WeakMap<InstanceContext, number>()
+    const TELEMETRY_RETRY_MS = 30_000
     const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {
       const read = InstanceState.use(state, (s) => s.config)
       if (!retryTelemetry || !(yield* InstanceState.has(state))) return yield* read
       const cached = yield* Effect.exit(read)
-      if (Exit.isSuccess(cached) && !telemetryConfigUnresolved(cached.value)) return cached.value
-      yield* invalidateGlobal
+      const ctx = yield* InstanceState.context
+      if (Exit.isSuccess(cached) && !telemetryConfigUnresolved(cached.value)) {
+        telemetryRetryAt.delete(ctx)
+        return cached.value
+      }
+      const now = Date.now()
+      if (now < (telemetryRetryAt.get(ctx) ?? 0)) {
+        if (Exit.isFailure(cached)) return yield* Effect.failCause(cached.cause)
+        return cached.value
+      }
+      telemetryRetryAt.set(ctx, now + TELEMETRY_RETRY_MS)
+      if (Exit.isSuccess(cached) && configsWithUnresolvedGlobal.has(cached.value)) yield* invalidateGlobal
       yield* InstanceState.invalidate(state)
       return yield* read
     })

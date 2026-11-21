@@ -50,33 +50,24 @@ function worktreeOf(directory: string): string | undefined {
 }
 
 export function disablingEnvironmentVariable(): string | undefined {
-  return ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"].find((key) =>
+  return ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"].find((key) =>
     /^(true|1)$/i.test(process.env[key] ?? ""),
   )
 }
 
-async function authEntries(): Promise<Record<string, unknown>> {
+async function hasWellKnownAuth(): Promise<boolean> {
   let contents = process.env.OPENCODE_AUTH_CONTENT
   if (!contents) {
     try {
       contents = await fs.readFile(Auth.filepath(), "utf8")
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {}
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
       throw error
     }
   }
-  const entries: unknown = JSON.parse(contents)
-  if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
-    throw new Error("Invalid auth store")
-  }
-  const values = Object.values(entries)
-  for (const entry of values) {
-    if (!entry || typeof entry !== "object" || !("type" in entry) || entry.type !== "wellknown") continue
-    if (!("key" in entry && typeof entry.key === "string" && "token" in entry && typeof entry.token === "string")) {
-      throw new Error("Invalid well-known auth entry")
-    }
-  }
-  return entries as Record<string, unknown>
+  const parsed = Auth.parseStore(contents)
+  if (!parsed || parsed.incomplete) throw new Error("Unresolved auth store")
+  return parsed.hasWellKnown
 }
 
 export function instanceDirectory(): string | undefined {
@@ -88,7 +79,7 @@ export async function loadedState(retry = false): Promise<State> {
   if (Config.telemetryConfigUnresolved(config)) return "unreadable"
   // Auth.all() can return an empty store when its read or parse fails.
   try {
-    await authEntries()
+    await hasWellKnownAuth()
   } catch {
     return "unreadable"
   }
@@ -106,10 +97,8 @@ export async function resolve(directory?: string, retry = false): Promise<State>
 }
 
 async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
-  const auth = await authEntries()
-  if (local === undefined && Object.values(auth).some((entry) =>
-    entry && typeof entry === "object" && "type" in entry && entry.type === "wellknown"
-  )) return true
+  const wellKnown = await hasWellKnownAuth()
+  if (local === undefined && wellKnown) return true
 
   const dbPath = Database.path()
   if (dbPath === ":memory:") return true
@@ -138,9 +127,13 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
       "SELECT count(*) AS count FROM sqlite_schema WHERE name IN ('account', 'account_state') AND type = 'table'",
     ).get()
     if (tables?.count !== 2) return false // A pre-migration database cannot select an organization.
+    const modern = db.query("SELECT 1 FROM pragma_table_info('account_state') WHERE name = 'active_org_id'").get()
+    // The earlier schema stored the selected org on the account row. The migration
+    // copies that value into account_state, so it can still enable remote config.
+    const orgColumn = modern ? "account_state.active_org_id" : "account.selected_org_id"
     return db.query(`SELECT 1 FROM account_state
       JOIN account ON account.id = account_state.active_account_id
-      WHERE account_state.id = 1 AND account_state.active_org_id IS NOT NULL`).get() !== null
+      WHERE account_state.id = 1 AND ${orgColumn} IS NOT NULL`).get() !== null
   } finally {
     db.close()
   }

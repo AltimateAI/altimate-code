@@ -3,7 +3,7 @@ import { readFileSync } from "fs"
 import path from "path"
 import { TelemetryConfig } from "../../src/altimate/telemetry/config-state"
 
-const keys = ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"]
+const keys = ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"]
 const saved = new Map<string, string | undefined>()
 
 beforeEach(() => {

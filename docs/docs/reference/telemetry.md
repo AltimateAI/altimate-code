@@ -182,7 +182,7 @@ You can also set the environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
-`OPENCODE_DISABLE_TELEMETRY` is also supported. Each variable accepts `1` or `true` (case-insensitive).
+`ALTIMATE_CLI_DISABLE_TELEMETRY` and its older spelling `OPENCODE_DISABLE_TELEMETRY` are also supported. Each variable accepts `1` or `true` (case-insensitive).
 
 When any of these variables or `telemetry.disabled: true` disables telemetry, the CLI makes zero usage telemetry requests. That includes startup, sessions, error reporting, shutdown, and the account lookup used to identify telemetry events. This applies even if the CLI has sent telemetry before. If startup cannot determine the config setting, it suppresses telemetry. This includes startup before a configured remote source that could set the flag has been loaded.
 
@@ -231,7 +231,7 @@ These identifiers are sent only while telemetry is enabled. While the opt-out se
 
 ### CLI Authentication Flow
 
-When you sign in using the CLI browser auth flow (`altimate auth login`), the anonymous machine ID (a random UUID persisted at `~/.altimate/machine-id` — a device/installation identifier, reused across sessions) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is not used for advertising or cross-site tracking. Your telemetry opt-out suppresses this: when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true`, `OPENCODE_DISABLE_TELEMETRY=true`, or the `telemetry.disabled` config option — the machine ID is omitted from the authorization URL entirely. The machine ID is associated with your account in PostHog for this funnel analysis, separate from the Azure Application Insights pipeline used for other CLI telemetry events.
+When you sign in using the CLI browser auth flow (`altimate auth login`), the anonymous machine ID (a random UUID persisted at `~/.altimate/machine-id` — a device/installation identifier, reused across sessions) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is not used for advertising or cross-site tracking. Your telemetry opt-out suppresses this: when you disable telemetry — via any of the environment flags above or the `telemetry.disabled` config option — the machine ID is omitted from the authorization URL entirely. The machine ID is associated with your account in PostHog for this funnel analysis, separate from the Azure Application Insights pipeline used for other CLI telemetry events.
 
 ### Data Retention
 

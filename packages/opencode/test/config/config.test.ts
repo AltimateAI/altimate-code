@@ -724,10 +724,12 @@ test("telemetry sends held events after an organization config fetch recovers", 
   const savedSink = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
   const savedOptOut = process.env.ALTIMATE_TELEMETRY_DISABLED
   const savedLegacyOptOut = process.env.OPENCODE_DISABLE_TELEMETRY
+  const savedCliOptOut = process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
   process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
     "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/"
   delete process.env.ALTIMATE_TELEMETRY_DISABLED
   delete process.env.OPENCODE_DISABLE_TELEMETRY
+  delete process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
   let recovered = false
   let orgLoads = 0
   const account = Layer.mock(Account.Service)({
@@ -795,9 +797,29 @@ test("telemetry sends held events after an organization config fetch recovers", 
     else process.env.ALTIMATE_TELEMETRY_DISABLED = savedOptOut
     if (savedLegacyOptOut === undefined) delete process.env.OPENCODE_DISABLE_TELEMETRY
     else process.env.OPENCODE_DISABLE_TELEMETRY = savedLegacyOptOut
+    if (savedCliOptOut === undefined) delete process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
+    else process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = savedCliOptOut
     await directory[Symbol.asyncDispose]()
   }
 })
+
+{
+  let loads = 0
+  const account = Layer.mock(Account.Service)({
+    active: () => Effect.suspend(() => {
+      loads++
+      return Effect.fail(new AccountServiceError({ message: "Organization unavailable" }))
+    }),
+  })
+  configIt({ account }).instance("repeated telemetry retries back off while account config remains unavailable", () =>
+    Effect.gen(function* () {
+      expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(true)
+      expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
+      expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
+      expect(loads).toBe(2)
+    }),
+  )
+}
 
 it.instance("a telemetry retry reloads a repaired config after a cached load failure", () =>
   Effect.gen(function* () {

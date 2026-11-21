@@ -19,6 +19,7 @@ const ENV = [
   "APPLICATIONINSIGHTS_CONNECTION_STRING",
   "ALTIMATE_TELEMETRY_DISABLED",
   "OPENCODE_DISABLE_TELEMETRY",
+  "ALTIMATE_CLI_DISABLE_TELEMETRY",
   "ALTIMATE_TELEMETRY_FORCE",
   "OPENCODE_CONFIG_CONTENT",
   "ALTIMATE_CLI_CONFIG_CONTENT",
@@ -129,7 +130,7 @@ describe("telemetry opt-out", () => {
     expect(enabled).toBe(false)
   }
 
-  test.each(["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
+  test.each(["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
     process.env[key] = "1"
     await expectSilentLifecycle()
     // A later launch must also stay silent with the same existing machine ID.
@@ -137,7 +138,7 @@ describe("telemetry opt-out", () => {
   })
 
   test("a false canonical alias cannot override the legacy opt-out", async () => {
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "false"
+    process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = "false"
     process.env.OPENCODE_DISABLE_TELEMETRY = "1"
     await expectSilentLifecycle()
   })
@@ -195,6 +196,26 @@ describe("telemetry opt-out", () => {
     db.close()
     databaseSpy.mockReturnValue(dbPath)
     await expectSilentLifecycle()
+  })
+
+  test("a legacy account schema still defers to its selected organization's config", async () => {
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    try {
+      db.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE account (id TEXT PRIMARY KEY, selected_org_id TEXT);
+        CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT);
+        INSERT INTO account VALUES ('account', NULL);
+        INSERT INTO account_state VALUES (1, 'account');
+      `)
+      databaseSpy.mockReturnValue(dbPath)
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+      db.exec("UPDATE account SET selected_org_id = 'org'")
+      expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+    } finally {
+      db.close()
+    }
   })
 
   test("the startup probe can read while an account writer holds a WAL transaction", async () => {

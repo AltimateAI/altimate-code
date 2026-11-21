@@ -6,6 +6,7 @@
  * names or hosts before they leave this file.
  */
 import fs from "fs"
+import { TelemetryConfig } from "@/altimate/telemetry/config-state"
 import os from "os"
 import path from "path"
 import dns from "dns/promises"
@@ -92,8 +93,8 @@ function envFlags(): string[] {
 /** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
  * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
 async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
-  if (/^(1|true)$/i.test(process.env["ALTIMATE_TELEMETRY_DISABLED"] ?? "")) return { enabled: false, reason: "ALTIMATE_TELEMETRY_DISABLED is set" }
-  if (/^(1|true)$/i.test(process.env["OPENCODE_DISABLE_TELEMETRY"] ?? "")) return { enabled: false, reason: "OPENCODE_DISABLE_TELEMETRY is set" }
+  const optOut = TelemetryConfig.disablingEnvironmentVariable()
+  if (optOut) return { enabled: false, reason: `${optOut} is set` }
   if (!network) return { enabled: false, checked: false, reason: "not started with --no-network" }
   try {
     await Telemetry.init()
