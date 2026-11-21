@@ -423,6 +423,7 @@ test("picker recovery follows a new session but does not overwrite a different r
   try {
     const base = { providerID: "altimate-free", modelID: "altimate-base" }
     mounted.local.model.set(base)
+    mounted.local.model.adoptSession("ses_new")
     mounted.route.navigate({ type: "session", sessionID: "ses_new" })
     mounted.local.model.restoreSession(base)
     expect(mounted.local.model.current()).toEqual(base)
@@ -450,6 +451,17 @@ test("picker recovery transfers to a new metadata-only session without a chat ro
     mounted.route.navigate({ type: "session", sessionID: "ses_shell" })
     expect(mounted.local.model.current()).toEqual(base)
     mounted.route.navigate({ type: "session", sessionID: "ses_unrelated" })
+    expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
+  } finally { await mounted.cleanup() }
+}))
+
+test("an unrelated session with the same recorded model does not inherit a picker override", () => withIsolatedState(async () => {
+  const mounted = await mount({ model: "ollama/missing" })
+  try {
+    const base = { providerID: "altimate-free", modelID: "altimate-base" }
+    mounted.local.model.set(base)
+    mounted.route.navigate({ type: "session", sessionID: "ses_unrelated" })
+    expect(mounted.local.model.restoreSession(base)).toBeUndefined()
     expect(mounted.local.model.current()).toEqual({ providerID: "ollama", modelID: "missing" })
   } finally { await mounted.cleanup() }
 }))

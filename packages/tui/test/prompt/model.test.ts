@@ -1,6 +1,6 @@
 import { expandTrackedPastedText } from "../../src/prompt/part"
 import { expect, test } from "bun:test"
-import { isModelMetadataOnly, submissionModel } from "../../src/prompt/model"
+import { isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../src/prompt/model"
 
 const current = { providerID: "local", modelID: "chat" }
 const commandAgentModel = { providerID: "local", modelID: "agent" }
@@ -56,4 +56,14 @@ test("pasted command expansion selects its override and does not exempt indirect
       .toEqual({ required: true, model: { providerID: "missing", modelID: "command" } })
     expect(text).toBe(pasted)
   }
+})
+
+test("command agent resolution prefers exact build, then the builder compatibility alias", () => {
+  const build = { name: "build", model: { providerID: "exact", modelID: "model" } }
+  const builder = { name: "builder", model: { providerID: "alias", modelID: "model" } }
+  expect(resolveCommandAgent([builder, build], "build")).toBe(build)
+  expect(resolveCommandAgent([builder], "build")).toBe(builder)
+  expect(resolveCommandAgent([builder], "missing")).toBeUndefined()
+  expect(submissionModel({ shell: false, text: "/task", command: { name: "task" }, commandAgentModel: resolveCommandAgent([builder], "build")?.model, current }))
+    .toEqual({ required: true, model: builder.model })
 })

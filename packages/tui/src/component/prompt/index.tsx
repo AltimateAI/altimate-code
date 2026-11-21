@@ -1,5 +1,5 @@
 // altimate_change start — resolve the model used by a submission
-import { isModelMetadataOnly, submissionModel } from "../../prompt/model"
+import { isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../prompt/model"
 // altimate_change end
 import {
   BoxRenderable,
@@ -1140,7 +1140,7 @@ export function Prompt(props: PromptProps) {
     )
     const commandName = promptText.startsWith("/") ? promptText.split("\n")[0].split(" ")[0].slice(1) : undefined
     const command = sync.data.command.find((item) => item.name === commandName)
-    const commandAgent = command?.agent && sync.data.agent.find((item) => item.name === command.agent)
+    const commandAgent = resolveCommandAgent(sync.data.agent, command?.agent)
     const chatModel = local.model.current()
     const selection = submissionModel({
       shell: currentMode === "shell",

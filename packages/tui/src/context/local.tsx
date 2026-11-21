@@ -1143,7 +1143,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a) return undefined
           const picked = pickedModels[a.name]
-          setPickedModels(a.name, picked && sameModel(picked.model, model)
+          setPickedModels(a.name, picked && picked.scope === sessionScope() && sameModel(picked.model, model)
             ? { scope: sessionScope(), model: { ...picked.model } }
             : undefined)
           setRestoredModels(a.name, {

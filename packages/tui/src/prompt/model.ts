@@ -31,3 +31,9 @@ export function isModelMetadataOnly(parts: readonly {
     (part.metadata?.modelMetadataOnly === true ||
       (part.synthetic && part.text === "The following tool was executed by the user")))
 }
+
+export function resolveCommandAgent<T extends { name: string }>(agents: readonly T[], name: string | undefined): T | undefined {
+  if (name === undefined) return undefined
+  return agents.find((agent) => agent.name === name) ??
+    (name === "build" ? agents.find((agent) => agent.name === "builder") : undefined)
+}
