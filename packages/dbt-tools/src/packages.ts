@@ -100,30 +100,25 @@ function projectInstallPath(root: string): string | undefined {
   if (value) return resolve(root, value)
 }
 
-/** Entries the project asks dbt to install. Prefers the lock file (exact versions). */
+/** Check current declarations as well as the lock, which can lag the project. */
 function declaredPackages(root: string): Declared[] {
-  // The lock file lists exactly what was resolved, but an empty or unreadable one says nothing:
-  // fall back to the declarations then, so newly added packages are not masked by it.
-  const entries: unknown[] = []
-  for (const f of ["package-lock.yml", "packages.yml", "dependencies.yml"] as const) {
-    if (!existsSync(join(root, f))) continue
-    const doc = readYaml(join(root, f)) as { packages?: unknown } | undefined
-    if (Array.isArray(doc?.packages) && doc.packages.length > 0) {
-      entries.push(...(doc.packages as unknown[]))
-      break
+  const packages = new Map<string, Declared>()
+  for (const file of ["package-lock.yml", "packages.yml", "dependencies.yml"]) {
+    const doc = readYaml(join(root, file)) as { packages?: unknown } | undefined
+    if (!Array.isArray(doc?.packages)) continue
+    for (const entry of doc.packages) {
+      if (!entry || typeof entry !== "object") continue
+      const spec = entry as Record<string, unknown>
+      if (typeof spec.package === "string") {
+        packages.set(`hub:${spec.package}`, { hubDir: spec.package.split("/").pop() ?? spec.package })
+      } else {
+        const kind = ["local", "git", "tarball", "private"].find((key) => typeof spec[key] === "string")
+        const identity = kind ? JSON.stringify([kind, spec[kind], spec.subdirectory ?? ""]) : JSON.stringify(spec)
+        packages.set(identity, {})
+      }
     }
   }
-  const out: Declared[] = []
-  for (const e of entries) {
-    if (!e || typeof e !== "object") continue
-    const rec = e as Record<string, unknown>
-    if (typeof rec.package === "string") {
-      out.push({ hubDir: rec.package.split("/").pop() ?? rec.package })
-    } else {
-      out.push({})
-    }
-  }
-  return out
+  return [...packages.values()]
 }
 
 /** Directories under the install path that look like a complete package. */

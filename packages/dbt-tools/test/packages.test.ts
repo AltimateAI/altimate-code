@@ -80,6 +80,23 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(0)
   })
 
+  test("a recent lock does not hide a newly declared package", async () => {
+    writeProject({
+      lock: lockFor("1.0.0"),
+      packages: `packages:\n  - package: acme/${PKG}\n    version: 1.0.0\n  - package: acme/new_package\n    version: 1.0.0\n`,
+    })
+    installPackage()
+    const sameTime = new Date()
+    utimesSync(join(root, "packages.yml"), sameTime, sameTime)
+    utimesSync(join(root, "package-lock.yml"), sameTime, sameTime)
+    let calls = 0
+    expect((await ensurePackages(root, async () => {
+      calls++
+      installPackage("1.0.0", "new_package")
+    })).action).toBe("installed")
+    expect(calls).toBe(1)
+  })
+
   test("a newly checked out lock invalidates an older preinstalled directory", async () => {
     writeProject({ lock: lockFor("2.0.0"), packages: `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n` })
     installPackage("1.0.0")

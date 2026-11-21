@@ -62,7 +62,7 @@ async function verify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
       error: `Failed to read actual columns for '${model}': ${e instanceof Error ? e.message : String(e)}. Build the model first: altimate-dbt build --model ${model}`,
     }
   }
-  if (!actual) {
+  if (!actual || (actual.length === 0 && expectedEntries.length > 0)) {
     return {
       error: `Model '${model}' is in the manifest but has no warehouse table. Build it first: altimate-dbt build --model ${model}`,
     }

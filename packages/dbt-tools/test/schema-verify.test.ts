@@ -88,6 +88,12 @@ describe("schema-verify command", () => {
     expect(result).toEqual({ error: "Missing --model" })
   })
 
+  test("a missing relation stays an error when its YAML columns are only documented", async () => {
+    const adapter = makeAdapter({ actualColumns: [], expectedColumns: { id: col("id") } })
+    const result = await schemaVerify(adapter, ["--model", "target"])
+    expect(result).toMatchObject({ error: expect.stringContaining("has no warehouse table") })
+  })
+
   test("model not found in manifest", async () => {
     const adapter = makeAdapter({ nodeFound: false })
     const result = await schemaVerify(adapter, ["--model", "missing_model"])
