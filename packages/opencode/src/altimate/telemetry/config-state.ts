@@ -1,32 +1,38 @@
+import { Database as SQLite } from "bun:sqlite"
 import path from "path"
 import fs from "fs/promises"
 import { existsSync } from "fs"
+import { pathToFileURL } from "url"
 import * as Effect from "effect/Effect"
+import { InstanceRef } from "@/effect/instance-ref"
+import { attach } from "@/effect/run-service"
 import { Flag, env as flagEnv } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Database } from "@opencode-ai/core/database/database"
+import { Auth } from "@/auth"
 import { Global } from "../../global"
 import { ConfigPaths } from "@/config/paths"
 import { ConfigManaged } from "@/config/managed"
-import { validateLoaded } from "@/config/config"
+import { Config, validateLoaded } from "@/config/config"
 
 /**
  * Whether the user config turns telemetry off, read without an Instance.
  *
  * `Config.get()` needs an Instance, and the CLI's main thread initialises telemetry in middleware
- * before one exists, so there it throws. Treating that as "enabled" let an opted-out user's main
- * thread clear the opt-out marker and resolve their identity. This reads the same files `Config`
+ * before one exists, so there it throws. This reads the same files `Config`
  * merges, in the same order (a later source overrides an earlier one), straight from disk:
  * the global config files (the legacy TOML `config` file included), `OPENCODE_CONFIG`, the project
  * files and `.altimate-code`/`.opencode` directories found from `directory`, the inline
  * `OPENCODE_CONFIG_CONTENT`, the managed config directory and macOS managed preferences. Remote and
- * account configs are not read (they need the network). The read emits no telemetry of its own: it
- * runs before telemetry knows whether it may.
+ * account configs are not fetched here. If either could still opt out, the answer is unknown.
+ * The read runs before telemetry knows whether it may send.
  *
  * - `disabled`: the last source that sets `telemetry.disabled` sets it to `true`.
  * - `enabled`: no source turns it off.
  * - `unreadable`: some source could not be read, parsed or validated as `Config` does (a missing
  *   `{file:}` reference, a value its schema rejects). `Config` would fail to load at all, so the
- *   answer is unknown. Callers fail closed for anything an opt-out forbids.
+ *   answer is unknown. A configured remote source that could still opt out is also unknown.
+ *   Callers fail closed for anything an opt-out forbids.
  */
 export type State = "disabled" | "enabled" | "unreadable"
 
@@ -44,15 +50,154 @@ function worktreeOf(directory: string): string | undefined {
   }
 }
 
+export function disablingEnvironmentVariable(): string | undefined {
+  return ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"].find((key) =>
+    /^(true|1)$/i.test(process.env[key] ?? ""),
+  )
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+async function hasWellKnownAuth(): Promise<boolean> {
+  // As Auth reads it: OPENCODE_AUTH_CONTENT when it parses, otherwise the auth file.
+  const inline = process.env.OPENCODE_AUTH_CONTENT
+  let parsed: unknown = inline ? parseJson(inline) : undefined
+  if (parsed === undefined) {
+    let contents: string
+    try {
+      contents = await fs.readFile(Auth.filepath(), "utf8")
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
+      throw error
+    }
+    // Unparseable: a well-known entry may be behind it. `Config` would load without its remote config.
+    // An empty file (touched, or a crash between Auth.set's truncate and write) holds no entry, as Auth reads it.
+    parsed = contents.trim() === "" ? {} : JSON.parse(contents)
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
+  return Object.values(parsed).some(
+    (entry) => entry && typeof entry === "object" && (entry as { type?: unknown }).type === "wellknown",
+  )
+}
+
+export function instanceDirectory(): string | undefined {
+  return Effect.runSync(attach(InstanceRef))?.directory
+}
+
+/** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
+// Loaded configs built while the auth store could not be read: they lack its well-known remote
+// configs even after the store is repaired, until the app reloads its config.
+const loadedWithoutAuth = new WeakSet<object>()
+// Loaded configs already read alongside a readable auth store: a later failed read is transient.
+const readWithAuth = new WeakSet<object>()
+const AUTH_REREAD_MS = 100
+
+export async function loadedState(): Promise<State> {
+  const config = await Config.get()
+  if (Config.telemetryConfigUnresolved(config) || loadedWithoutAuth.has(config)) return "unreadable"
+  // Auth.all() returns an empty store when its read or parse fails, hiding well-known remote config.
+  // Called only for that throw (an unparseable auth file); its result does not matter here.
+  try {
+    await hasWellKnownAuth().catch(async () => {
+      // Auth.set truncates then writes, so a read can land mid-write: look again before deciding.
+      await new Promise((resolve) => setTimeout(resolve, AUTH_REREAD_MS))
+      return hasWellKnownAuth()
+    })
+  } catch (error) {
+    if (!readWithAuth.has(config)) loadedWithoutAuth.add(config)
+    throw error
+  }
+  readWithAuth.add(config)
+  return config.telemetry?.disabled ? "disabled" : "enabled"
+}
+
+/** The opt-out as the caller can best read it: the full config inside an Instance (a failed load can
+ * hide remote settings, so it is `unreadable`), the files on disk for commands that have none yet. */
+export async function resolve(directory?: string): Promise<State> {
+  try {
+    return await loadedState()
+  } catch {
+    return instanceDirectory() ? "unreadable" : disabledState(directory)
+  }
+}
+
+async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
+  const wellKnown = await hasWellKnownAuth()
+  if (local === undefined && wellKnown) return true
+
+  const dbPath = Database.path()
+  // An in-memory database belongs to the connection that opened it: this probe cannot see whether an
+  // organization was selected there, so the answer is unknown.
+  if (dbPath === ":memory:") return true
+
+  // Only read a WAL database. In rollback-journal mode even a short SELECT
+  // takes a shared lock that can block a writer's commit.
+  const header = await fs.open(dbPath, "r").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined
+    throw error
+  })
+  if (!header) return false
+  try {
+    const versions = Buffer.alloc(2)
+    const { bytesRead } = await header.read(versions, 0, 2, 18)
+    // An empty file is new: it holds no account yet. A short non-empty one is corrupt: unknown.
+    if (bytesRead !== 2) return (await header.stat()).size > 0
+    // A non-WAL database is not read (see above), so an organization it may hold is unknown: fail closed.
+    if (versions[0] !== 2 || versions[1] !== 2) return true
+  } finally {
+    await header.close()
+  }
+
+  // A read-only open of a WAL database needs its -wal/-shm files, which SQLite removes when the last
+  // connection closes cleanly (Linux, Windows). Without a -wal file every change is in the main file and
+  // no writer is attached, so read it as immutable (which reports its journal mode as "delete").
+  const immutable = !existsSync(`${dbPath}-wal`)
+  const db = immutable
+    ? new SQLite(`${pathToFileURL(dbPath).href}?immutable=1`, { readonly: true }) // escapes `#`, `?`, `%`
+    : new SQLite(dbPath, { readonly: true })
+  try {
+    db.exec("PRAGMA busy_timeout = 0")
+    // If the journal mode changed since the header read, defer to the full loader.
+    if (!immutable && db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode !== "wal") return true
+    const tables = db.query<{ count: number }, []>(
+      "SELECT count(*) AS count FROM sqlite_schema WHERE name IN ('account', 'account_state') AND type = 'table'",
+    ).get()
+    // An immutable read is a snapshot: a writer that attached since (a -wal file appeared) may have
+    // selected an organization, so the answer is unknown.
+    const writerAttached = () => immutable && existsSync(`${dbPath}-wal`)
+    if (tables?.count !== 2) return writerAttached() // A pre-migration database cannot select an organization.
+    const modern = db.query("SELECT 1 FROM pragma_table_info('account_state') WHERE name = 'active_org_id'").get()
+    // The earlier schema stored the selected org on the account row. The migration
+    // copies that value into account_state, so it can still enable remote config.
+    const orgColumn = modern ? "account_state.active_org_id" : "account.selected_org_id"
+    const selected = db.query(`SELECT 1 FROM account_state
+      JOIN account ON account.id = account_state.active_account_id
+      WHERE account_state.id = 1 AND ${orgColumn} IS NOT NULL`).get() !== null
+    return selected || writerAttached()
+  } finally {
+    db.close()
+  }
+}
+
 export async function disabledState(directory: string = process.cwd()): Promise<State> {
   try {
     let value: boolean | undefined
     // Any source that fails to read, parse or validate fails Config's whole load, so the answer
     // is unknown however the other sources set it.
     let unknown = false
+    // Managed config is merged after the remote and organization configs, so a setting there wins.
+    let readingManaged = false
+    let managedSetting = false
     const take = (data: unknown) => {
       const disabled = (data as { telemetry?: { disabled?: unknown } } | undefined)?.telemetry?.disabled
       if (disabled === undefined) return
+      if (readingManaged) managedSetting = true
       if (typeof disabled !== "boolean") unknown = true
       else value = disabled
     }
@@ -109,6 +254,7 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     const inline = flagEnv("OPENCODE_CONFIG_CONTENT")
     if (inline) await readText(inline, "OPENCODE_CONFIG_CONTENT", directory)
 
+    readingManaged = true
     const managedDir = ConfigManaged.managedConfigDir()
     if (existsSync(managedDir)) for (const file of DIR_FILES) await readFile(path.join(managedDir, file))
     const managed = await ConfigManaged.readManagedPreferences().catch(() => {
@@ -118,7 +264,8 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     if (managed) await readText(managed.text, managed.source, path.dirname(managed.source))
 
     if (unknown) return "unreadable"
-    return value ? "disabled" : "enabled"
+    if (!managedSetting && (await remoteMayDisable(value))) return "unreadable"
+    return value === true ? "disabled" : "enabled"
   } catch {
     return "unreadable"
   }

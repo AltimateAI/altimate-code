@@ -65,7 +65,6 @@ We collect the following categories of events:
 | `gateway_auth_completed` / `gateway_auth_failed` | Gateway sign-in outcome. `reason` is `timeout`, `denied`, or `error` — never the underlying message, which can contain the instance name. An unrecognised callback state does not reject the pending attempt, so a CSRF mismatch surfaces as `timeout`. |
 | `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. The event names no instance itself; like every event sent after sign-in, it carries the account's `user_id` and `tenant` once they are resolved (see [User Identification](#new-user-identification)). |
 | `onboarding_completed` | A model is ready and chat is live. |
-| `telemetry_opted_out` | The last event from a machine that turns telemetry off, sent once (see [Disabling Telemetry](#disabling-telemetry)). Contains `opt_out_source` (`env` for an environment variable, `config` for `telemetry.disabled`), the machine ID, the CLI version and the client. It carries no account (`user_id`, `tenant`), project, session or launch ID. |
 | `scan_gate_shown` / `scan_gate_choice` | The "scan your environment?" gate appeared, and what the user did — `scan`, `skip`, or `dismissed` (esc / click-away). |
 | `environment_scan_completed` | A `project_scan` finished during onboarding — `has_dbt`, `has_warehouse`, `is_repo`, `connections_found`, and a bounded list of short `degraded` detection keys. No paths, hostnames, or connection details. Emitted only inside an onboarding session, and only once per session, so scans from `/discover` or a model-initiated call are excluded. |
 | `sample_setup_completed` | The sample dbt project was materialised. `success`, `models`, `tables`, and `reused` — the tool is deliberately re-callable, so this is per invocation. The target path is never sent. |
@@ -88,7 +87,7 @@ We collect the following categories of events:
 | `plugin_session_start` | A Claude Code session started with the Altimate Code plugin, sent by the plugin through `altimate-code tool report-event`. Its payload is the plugin version, this altimate-code's version (`altimate_code_version`), the OS as Claude Code names it (`host_os`: `macos`, `linux`, `windows`, `wsl` or `unknown`; named apart from the `os` other events carry as `process.platform`) and the plugin's anonymous install id (a random UUID the plugin makes on first run and keeps in its Claude Code plugin store). It carries no session id, machine id, project id or account (`user_id`, `tenant`), nor the per-launch `launch_id`, so it cannot be joined to the CLI's other events: beside its own fields, only `cli_version`, `client` and `source`, keyed to the install id (`ai.user.id`). It is sent in a request of its own, never in one batch with the CLI's other events. |
 | `plugin_feature_used` | One of the plugin's panels or commands was opened (`lineage`, `dbt_show`, `profile_ctes`, `scan_cost`, `comments`, `sql_graph`, `health`, `runs`, `to_model`), or one of its gates held or allowed a command (`cost_gate`, `health_push_gate`). Its payload is the feature, the outcome (`opened`; `failed` when the panel could not open; `held` or `allowed` for a gate), the plugin version and the install id: no model, column, file or project names, SQL or session text. Like `plugin_session_start`, it carries no session id, machine id, project id, launch id or account: beside its own fields, only `cli_version`, `client` and `source`, keyed to the install id. |
 
-Each event (except the plugin's `plugin_session_start` and `plugin_feature_used`, described above) includes a timestamp, session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and a machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and not derived from your hardware or identity). The final `telemetry_opted_out`, in the same table, is the other exception: it carries the timestamp, CLI version and machine ID, but no session ID, `launch_id` or account. When the machine is signed in to Altimate, each event also carries `user_id` and `tenant`, described under [User Identification](#new-user-identification).
+Each event (except the plugin's `plugin_session_start` and `plugin_feature_used`, described above) includes a timestamp, session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and a machine ID when available (a random UUID stored in `~/.altimate/machine-id`, generated once and not derived from your hardware or identity). Signed-in events carry `user_id` and `tenant` once account identity resolves. See [User Identification](#new-user-identification).
 
 ### Workspace events
 
@@ -183,13 +182,9 @@ You can also set the environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
-When telemetry is disabled, a machine with an existing machine ID sends one final `telemetry_opted_out` event, then nothing: no further events and no requests to the telemetry endpoint until telemetry is turned back on. The event carries only the machine ID, the opt-out source, the CLI version and the client — see the event table above. With it, an opted-out machine can be counted instead of looking like a client that stopped working.
+`ALTIMATE_CLI_DISABLE_TELEMETRY` and its older spelling `OPENCODE_DISABLE_TELEMETRY` are also supported. Each variable accepts `1` or `true` (case-insensitive).
 
-- The event is sent only if `~/.altimate/machine-id` already exists. A machine that never ran with telemetry on sends nothing.
-- Once the telemetry endpoint accepts the event, Altimate Code writes the marker file `~/.altimate/telemetry-opted-out`, and later launches send nothing. If the endpoint cannot be reached, no marker is written and a later launch tries again.
-- While the event is being sent, a short-lived `~/.altimate/telemetry-opted-out.sending` file stops a second process from sending it too.
-- Turning telemetry back on removes the marker, so a later opt-out is recorded again.
-- No account lookup is made while telemetry is disabled.
+When any of these variables or `telemetry.disabled: true` disables telemetry, the CLI makes zero usage telemetry requests. That includes startup, sessions, error reporting, shutdown, and the account lookup used to identify telemetry events. This applies even if the CLI has sent telemetry before. Until the CLI can read the setting (for example at startup, before the project config or a configured remote source that could set the flag has loaded), it sends nothing; see [Privacy](#privacy). Once a process reads the setting as disabled, that process sends nothing more, even for another project it serves. One exception: a process that serves several projects (`serve`, an IDE) reads a project's own `telemetry.disabled` when that project's session starts, so a few of its events from before then can be sent if another, opted-in project already turned telemetry on. The environment variables are honoured process-wide from the start, and so is the global config unless an organization config set by your admin overrides it.
 
 ### Test runs are excluded
 
@@ -207,7 +202,7 @@ Two escape hatches exist for reporting from a test run deliberately:
   is always honoured, which is how the project's own telemetry tests work.
 - Set `ALTIMATE_TELEMETRY_FORCE=true` to use the default endpoint anyway.
 
-`ALTIMATE_TELEMETRY_DISABLED` and the config opt-out take precedence over both.
+The environment opt-outs and the config opt-out take precedence over these settings.
 
 ## Privacy
 
@@ -232,11 +227,11 @@ What identifies the sender of an event depends on whether the machine is signed 
 
 The Claude Code plugin's `plugin_session_start` and `plugin_feature_used` are the exception: signed in or not, they carry neither the machine ID nor your account, and their `ai.user.id` is the plugin's own random install id.
 
-These identifiers are sent only while telemetry is enabled. The final `telemetry_opted_out` event carries the machine ID and nothing that identifies your account, and no `/users/me` lookup is made while telemetry is disabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
+These identifiers are sent only while telemetry is enabled. While the opt-out setting is unresolved, Altimate Code holds events in a bounded in-memory buffer and skips telemetry requests, including the `/users/me` lookup. If a later initialization resolves telemetry as enabled, it sends the queued events. If it resolves as disabled or the process exits while the setting is still unresolved, it discards them.
 
 ### CLI Authentication Flow
 
-When you sign in using the CLI browser auth flow (`altimate auth login`), the anonymous machine ID (a random UUID persisted at `~/.altimate/machine-id` — a device/installation identifier, reused across sessions) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is not used for advertising or cross-site tracking. Your telemetry opt-out suppresses this: when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true` **or** the `telemetry.disabled` config option — the machine ID is omitted from the authorization URL entirely. The machine ID is associated with your account in PostHog for this funnel analysis, separate from the Azure Application Insights pipeline used for other CLI telemetry events.
+When you sign in using the CLI browser auth flow (`altimate auth login`), the anonymous machine ID (a random UUID persisted at `~/.altimate/machine-id` — a device/installation identifier, reused across sessions) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is not used for advertising or cross-site tracking. Your telemetry opt-out suppresses this: when you disable telemetry — via any of the environment flags above or the `telemetry.disabled` config option — the machine ID is omitted from the authorization URL entirely. The URL also omits it while telemetry permission is unresolved. The machine ID is associated with your account in PostHog for this funnel analysis, separate from the Azure Application Insights pipeline used for other CLI telemetry events.
 
 ### Data Retention
 

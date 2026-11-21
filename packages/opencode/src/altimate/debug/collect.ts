@@ -15,6 +15,7 @@ import { Global } from "@opencode-ai/core/global"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { resolveInstall } from "@/installation"
 import { Telemetry } from "@/altimate/telemetry"
+import { TelemetryConfig } from "@/altimate/telemetry/config-state"
 import { AltimateApi } from "@/altimate/api/client"
 import * as Registry from "@/altimate/native/connections/registry"
 import { resolveConfig } from "@/altimate/native/connections/credential-store"
@@ -89,15 +90,21 @@ function envFlags(): string[] {
     })
 }
 
+function optOutReason(state: "pending" | "enabled" | "disabled") {
+  if (state === "pending") return "config not readable yet"
+  if (state === "disabled") return "disabled in config"
+  return "no telemetry sink (test runner or invalid connection string)"
+}
+
 /** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
  * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
 async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
-  if (/^(1|true)$/i.test(process.env["ALTIMATE_TELEMETRY_DISABLED"] ?? "")) return { enabled: false, reason: "ALTIMATE_TELEMETRY_DISABLED is set" }
-  if (/^(1|true)$/i.test(process.env["OPENCODE_DISABLE_TELEMETRY"] ?? "")) return { enabled: false, reason: "OPENCODE_DISABLE_TELEMETRY is set" }
+  const optOut = TelemetryConfig.disablingEnvironmentVariable()
+  if (optOut) return { enabled: false, reason: `${optOut} is set` }
   if (!network) return { enabled: false, checked: false, reason: "not started with --no-network" }
   try {
     await Telemetry.init()
-    return Telemetry.isEnabled() ? { enabled: true } : { enabled: false, reason: "disabled in config" }
+    return Telemetry.isEnabled() ? { enabled: true } : { enabled: false, reason: optOutReason(Telemetry.optOutState()) }
   } catch {
     return { enabled: false, checked: false, reason: "could not be determined" }
   }

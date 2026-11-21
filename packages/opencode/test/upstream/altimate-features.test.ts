@@ -398,13 +398,31 @@ describe("altimate features: SystemPrompt.skills sorting", () => {
 // 9. Telemetry stays fail-safe outside Instance context
 // ===========================================================================
 describe("altimate features: telemetry fail-safe init", () => {
-  test("telemetry/index.ts catches Config.get() failures so init never throws", async () => {
-    const src = await readSrc("altimate", "telemetry", "index.ts")
-    // The try/catch around Config.get() — must be present so init() can be
-    // called from CLI middleware before Instance.provide().
-    expect(src).toMatch(/try\s*\{\s*const userConfig = \(await Config\.get\(\)\)/)
-    // The ALTIMATE_TELEMETRY_DISABLED env var escape hatch.
-    expect(src).toContain("ALTIMATE_TELEMETRY_DISABLED")
+  test("telemetry can resolve the opt-out before an Instance exists", async () => {
+    const init = await readSrc("altimate", "telemetry", "index.ts")
+    const config = await readSrc("altimate", "telemetry", "config-state.ts")
+    expect(init).toContain("TelemetryConfig.resolve(configDirectory")
+    expect(config).toMatch(/try\s*\{\s*return await loadedState\(\)/)
+    expect(config).toContain('return instanceDirectory() ? "unreadable" : disabledState(directory)')
+    expect(config).toContain("ALTIMATE_TELEMETRY_DISABLED")
+  })
+
+  test("both CLI project loaders settle an opt-out the startup read left open", async () => {
+    // Behaviour is tested in opt-out.test.ts through bootstrap(); this pins the effectCmd loader too.
+    const bootstrap = await readSrc("cli", "bootstrap.ts")
+    const effectCmd = await readSrc("cli", "effect-cmd.ts")
+    expect(bootstrap).toMatch(/Instance\.restore\(ctx, async \(\) => \{\s*await Telemetry\.settleInProject\(\)\s*return cb\(\)/)
+    expect(effectCmd).toMatch(/Instance\.restore\(ctx, async \(\) => \{\s*await Telemetry\.settleInProject\(\)\s*return AppRuntime\.runPromise\(opts\.handler/)
+  })
+
+  test("the TUI main thread adopts the worker's resolved opt-out", async () => {
+    const tui = await readSrc("cli", "cmd", "tui.ts")
+    const worker = await readSrc("cli", "tui", "worker.ts")
+    expect(tui).toMatch(/\.call\("telemetryOptOut", undefined\)\s*\.then\(async \(state\) => Telemetry\.adoptOptOut\(await state\)\)/)
+    expect(worker).toMatch(/async telemetryOptOut\(\) \{[\s\S]*?return Telemetry\.settledOptOutState\(\)/)
+    // A decision the worker makes later (a later init) reaches the main thread too.
+    expect(worker).toContain('Telemetry.onOptOutDecided((state) => Rpc.emit("telemetry.optOut", state))')
+    expect(tui).toMatch(/client\.on<[^>]*>\("telemetry\.optOut", \(state\) => \{\s*Telemetry\.adoptOptOut\(state\)/)
   })
 
   test("telemetry/index.ts no longer reads the account; identity comes from the stored credential", async () => {

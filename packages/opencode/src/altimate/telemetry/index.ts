@@ -1,4 +1,3 @@
-import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
@@ -8,7 +7,6 @@ import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 // altimate_change — the Claude Code plugin's actions, whose events are sent anonymous (see ANONYMOUS_EVENTS)
 import { PLUGIN_ACTIONS } from "@/altimate/tool-cli/report-event"
 import { TelemetryIdentity } from "./identity"
-import { OptOutMarker } from "./opt-out"
 import { TelemetryConfig } from "./config-state"
 import { createHash, randomUUID } from "crypto"
 // altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
@@ -69,17 +67,9 @@ const log = Log.create({ service: "telemetry" })
  */
 function isAutomatedRun(): boolean {
   if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return false
-  return underTestRunner()
-}
-
-// altimate_change start — the raw test-runner check, without the force flag. The opt-out marker
-// reads and writes files in the real home directory, so under a test runner it stays inert unless
-// a suite opts in through Telemetry.allowOptOutUnderTestRunner(); the force flag must not reach it.
-function underTestRunner(): boolean {
   if (process.env.NODE_ENV === "test") return true
   return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
 }
-// altimate_change end
 
 // altimate_change start — composed path-masking rules (shared fragments)
 // R: one path-run character — anything but whitespace/separators/quotes,
@@ -1058,14 +1048,6 @@ export namespace Telemetry {
     // The 0.11.0 first-run freeze (an in-process @npmcli/arborist install blocking the loop for minutes)
     // was invisible for two months: nothing timed startup or registration, and a blocked loop cannot
     // flush, so a killed process left only `session_start`. These events close that gap.
-    | {
-        /** The last event an opted-out machine sends; nothing follows it until telemetry is
-         * turned back on. Built directly in recordOptOut(), never through track(). */
-        type: "telemetry_opted_out"
-        timestamp: number
-        /** Where the opt-out was set: an environment variable or the user config. */
-        opt_out_source: "env" | "config"
-      }
     | {
         type: "startup_ready"
         timestamp: number
@@ -2325,15 +2307,105 @@ export namespace Telemetry {
   // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
   const IDENTITY_RETRY_MS = 60_000
   let identityRetryAt = 0 // 0: no retry pending
-  // altimate_change start — bumped by shutdown(); a detached opt-out send started under an earlier
-  // lifecycle does not post. Its marker write keys on markerGeneration instead, which only an
-  // enabled init bumps: a send accepted across a shutdown while still opted out keeps its marker.
-  let lifecycleGeneration = 0
-  let markerGeneration = 0
+  // altimate_change start — process-wide opt-out gate. Events are tracked while the opt-out is
+  // unknown (CLI startup, before config can be read) but nothing leaves until an init resolves the
+  // config to enabled. An opt-out (env or config) makes it `disabled` for the rest of the process,
+  // so a later init never sends what an earlier one refused. Unlike `enabled`, it survives the
+  // per-session shutdown; it is never reset outside tests.
+  let gate: "pending" | "enabled" | "disabled" = "pending"
+  // While the config is unreadable, re-resolve it at most this often.
+  const CONFIG_RETRY_MS = 30_000
+  let configRetry: { at: number } | undefined
+  // A project's own read (inside an Instance) came back unreadable: its held events are not kept past
+  // its session, where another project's decision could send them.
+  let unresolvedInProject = false
+  // An enabled opt-out resolved by another thread of this launch (the TUI worker), used by the next init.
+  let adopted: "enabled" | undefined
+  const decisionListeners = new Set<(state: "enabled" | "disabled") => void>()
+  function decide(next: "enabled" | "disabled") {
+    if (gate === next) return
+    gate = next
+    for (const listener of decisionListeners) {
+      try {
+        listener(next)
+      } catch {
+        // A listener (the TUI worker's RPC push) must not undo this thread's own decision.
+      }
+    }
+  }
+  /** The opt-out as this thread has resolved it. */
+  export function optOutState() {
+    return gate
+  }
+  /** An init ran and could not settle the opt-out: a later init with more config (inside a project) may. */
+  export function awaitingConfig() {
+    return gate === "pending" && configRetry !== undefined
+  }
+  /** For a CLI command that has just loaded its project: the startup init ran before the project
+   * existed, and if it could not settle the opt-out (a remote or organization config), read it now
+   * from the full config, so a command that starts no session neither drops nor leaks those events. */
+  export async function settleInProject(): Promise<void> {
+    if (gate !== "pending" && !initPromise) return // decided and idle: nothing to wait for
+    await settledOptOutState() // the startup init is not awaited; let it finish first
+    if (awaitingConfig()) await init().catch(() => {})
+  }
+  /** Called each time this thread decides the opt-out, for another thread to adopt. */
+  export function onOptOutDecided(listener: (state: "enabled" | "disabled") => void): () => void {
+    decisionListeners.add(listener)
+    return () => decisionListeners.delete(listener)
+  }
+  /** The opt-out once this thread's running init has settled (for another thread to adopt). */
+  export async function settledOptOutState() {
+    await initPromise?.catch(() => {})
+    return gate
+  }
+  /** Take the opt-out another thread of this launch resolved: the TUI main thread never loads a project,
+   * so where its own probe cannot read the config (a remote or organization config) it uses the
+   * worker's answer. Does nothing once this thread has decided, or while the other has not. */
+  export function adoptOptOut(state: "pending" | "enabled" | "disabled"): Promise<void> {
+    if (state === "pending" || gate === "disabled") return Promise.resolve()
+    if (state === "disabled") {
+      // An opt-out wins even after this thread enabled telemetry (a config reload in the worker):
+      // stop the running lifecycle too, so nothing more is sent from this process.
+      decide("disabled")
+      buffer = []
+      droppedEvents = 0
+      enabled = false
+      if (flushTimer) clearInterval(flushTimer)
+      flushTimer = undefined
+      activeFlushAbort?.abort() // a batch already taken must not post after the opt-out
+      return Promise.resolve()
+    }
+    // Not during a shutdown: a re-init chained behind the exit flush would start a lifecycle nobody ends.
+    if (gate !== "pending" || shutdownPromise) return Promise.resolve()
+    adopted = "enabled"
+    return (initPromise ?? Promise.resolve()).catch(() => {}).then(() => init())
+  }
+  /** Test seam: forget the process-wide opt-out decision and the events held for it. A lifecycle a
+   * test left running and enabled keeps its decision, so it goes on sending as it did before the gate. */
+  export function resetGateForTest() {
+    configRetry = undefined
+    unresolvedInProject = false
+    adopted = undefined
+    if (initDone && enabled) return
+    gate = "pending"
+    buffer = []
+    droppedEvents = 0
+  }
+  /** Test seam. */
+  export function bufferedCountForTest() {
+    return buffer.length
+  }
+  // The test preload resets the gate between tests through this, without importing this module. Only
+  // when that preload asked for it: in a shipped process nothing else can reopen a decided opt-out.
+  if (process.env.ALTIMATE_TELEMETRY_TEST_HOOKS === "1") {
+    ;(globalThis as Record<symbol, unknown>)[Symbol.for("altimate.telemetry.resetGateForTest")] = resetGateForTest
+  }
+  /** Test seam: end the unreadable-config retry backoff so the next init() re-resolves. */
+  export function retryConfigNowForTest() {
+    if (configRetry) configRetry.at = 0
+  }
   // altimate_change end
-  // altimate_change — false when this init could not read the user config: an opted-out user may be
-  // behind it, so no identity is resolved (at init, at a flush or on refresh) until an init that can.
-  let identityAllowed = true
   // altimate_change — the project the command will run in, for reading the config without an
   // Instance: the CLI initialises telemetry before a command changes into its `--dir` or project.
   let configDirectory: string | undefined
@@ -2415,9 +2487,6 @@ export namespace Telemetry {
     return { iKey, endpoint: `${base}v2/track` }
   }
 
-  // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
-  // the module's current state (the opt-out marker runs while telemetry is disabled and must not
-  // touch the state an enabled init may be using concurrently).
   // altimate_change start — the Claude Code plugin's usage events are anonymous and unlinkable: they carry
   // none of the identifiers the CLI's other events share (account, machine id, project, session, launch id),
   // so they cannot be joined to a signed-in row. They are keyed to the plugin's own random install id only.
@@ -2427,10 +2496,9 @@ export namespace Telemetry {
   function toAppInsightsEnvelopes(
     events: Event[],
     cfg: AppInsightsConfig,
-    ids?: { machineId: string; identity: TelemetryIdentity.Identity | undefined },
+    ids: { machineId: string; identity: TelemetryIdentity.Identity | undefined },
   ): object[] {
-    const mid = ids ? ids.machineId : machineId
-    const who = ids ? ids.identity : identity
+    const { machineId: mid, identity: who } = ids
     // Process-level client, read live from the env flag (defaults to "cli") so events
     // emitted before any prompt runs — startup, connection setup, standalone CLI
     // subcommands — are labelled correctly instead of stuck at a hardcoded default.
@@ -2531,12 +2599,14 @@ export namespace Telemetry {
     // wait for the new init rather than joining the dying one.
     if (shutdownPromise) {
       if (!reinitPromise) {
-        reinitPromise = shutdownPromise
+        const chained: Promise<void> = shutdownPromise
           .catch(() => {})
-          .then(doInit)
+          .then(() => (retryThrottled() ? startLoopMonitor() : doInit())) // altimate_change — the throttle applies here too
+          .then(() => releaseUnresolved(chained)) // altimate_change — see releaseUnresolved
           .finally(() => {
             reinitPromise = undefined
           })
+        reinitPromise = chained
         // Publish it as initPromise too. Without this, a caller arriving after the shutdown had
         // settled — but before this chained doInit() finished — saw an empty initPromise and
         // started a SECOND one, replacing the flush timer and racing over the buffer.
@@ -2551,42 +2621,73 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
-    return (initPromise ??= doInit())
+    // While the config stays unreadable, re-read the files outside an Instance at most every
+    // CONFIG_RETRY_MS. Inside an Instance a read is the Instance's cached config (its own reloads keep
+    // it current), so every init reads it: one project's unreadable config never holds up another's.
+    // An opt-out adopted from another thread needs no read.
+    if (!initPromise && retryThrottled()) {
+      startLoopMonitor() // a shutdown stopped it; the stall watcher runs whether or not telemetry does
+      return Promise.resolve()
+    }
+    if (!initPromise) {
+      const started: Promise<void> = doInit().then(() => releaseUnresolved(started))
+      initPromise = started
+    }
+    return initPromise
     // altimate_change end
   }
 
+  // altimate_change — an unreadable config is re-read outside an Instance at most every CONFIG_RETRY_MS
+  function retryThrottled() {
+    return !adopted && configRetry !== undefined && Date.now() < configRetry.at && !TelemetryConfig.instanceDirectory()
+  }
+
+  // altimate_change start — an init left unresolved stays pre-init so the next init() retries; only
+  // the init that still owns initPromise unpublishes it (not a re-init published during a shutdown)
+  function releaseUnresolved(owner: Promise<void>) {
+    if (!initDone && initPromise === owner) initPromise = undefined
+  }
+  // altimate_change end
+
+
   async function doInit() {
+    // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
+    let unresolved = false
     try {
-      // altimate_change — accept "true"/"TRUE"/"1" (case-insensitive) via truthyEnv,
-      // and honor the OPENCODE_DISABLE_TELEMETRY fallback promised by v0.9.4's CHANGELOG
-      // (previously only wired in test fixtures, silent no-op in product).
-      if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
+      // altimate_change start — resolve the opt-out before anything can be sent. Env vars first,
+      // then the config: the full one inside an Instance, the files on disk outside one.
+      if (gate === "disabled" || TelemetryConfig.disablingEnvironmentVariable()) {
+        decide("disabled")
         buffer = []
-        optOutSend = recordOptOut("env")
+        droppedEvents = 0
         return
       }
-      // Config.get() may throw outside Instance context (e.g. CLI middleware
-      // before Instance.provide()). Telemetry stays enabled then, as before.
-      // altimate_change start — but the opt-out still counts: read `telemetry.disabled` from the
-      // config files directly, and when even that fails, skip what an opt-out forbids (clearing the
-      // opt-out marker, resolving the account) while ordinary rows keep flowing.
-      let configUnreadable = false
-      try {
-        const userConfig = (await Config.get()) as any
-        if (userConfig.telemetry?.disabled) {
-          buffer = []
-          optOutSend = recordOptOut("config")
-          return
-        }
-      } catch {
-        const state = await TelemetryConfig.disabledState(configDirectory)
-        if (state === "disabled") {
-          buffer = []
-          optOutSend = recordOptOut("config")
-          return
-        }
-        configUnreadable = state === "unreadable"
+      let state = adopted ?? (await TelemetryConfig.resolve(configDirectory))
+      // Outside an Instance only the files can be read. Where they cannot settle it (a remote or
+      // organization config), an enabled decision a full config already made in this process stands;
+      // an opt-out the files do show still wins.
+      if (state === "unreadable" && gate === "enabled" && !TelemetryConfig.instanceDirectory()) state = "enabled"
+      // Another thread's opt-out may have been adopted while the read ran: it still wins.
+      if (state === "disabled" || optOutState() === "disabled") {
+        decide("disabled")
+        buffer = []
+        droppedEvents = 0
+        return
       }
+      if (state === "unreadable") {
+        // An opted-out user may be behind it: hold the buffer (capped) and send nothing.
+        unresolved = true
+        const inProject = Boolean(TelemetryConfig.instanceDirectory())
+        // A warning, once per hold: a corrupt auth file or a failed organization config fetch holds
+        // telemetry this way.
+        if (!configRetry) log.warn("telemetry held: opt-out unresolved", { instance: inProject })
+        configRetry = { at: Date.now() + CONFIG_RETRY_MS }
+        if (inProject) unresolvedInProject = true
+        return
+      }
+      decide("enabled")
+      configRetry = undefined
+      unresolvedInProject = false
       // altimate_change end
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
       // The baked-in key is refused under a test runner so suites never ship to the production
@@ -2607,25 +2708,17 @@ export namespace Telemetry {
         return
       }
       appInsights = cfg
-      identityAllowed = !configUnreadable
       // altimate_change start — identity for the funnel join: the backend user uuid and tenant from
       // the stored Altimate credential, cached per credential so this costs no network unless the
       // credential changed. Replaces the hashed account email. Not awaited: events flushed before it
       // resolves carry only the machine id, and telemetry never waits on the backend.
-      if (identityAllowed) void resolveIdentity()
+      void resolveIdentity()
       // altimate_change end
       // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
       // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
       // logs + returns ""). No try/catch needed — all paths are handled inside.
       machineId = getOrCreateMachineId()
       enabled = true
-      // altimate_change — telemetry is on: forget the opt-out marker, so turning it off again is
-      // recorded again. The bump first, so a send still in flight never recreates it. Not when the
-      // config could not be read: the user may have opted out there.
-      if (!configUnreadable) {
-        markerGeneration++
-        OptOutMarker.clear()
-      }
       log.info("telemetry initialized", { mode: "appinsights" })
       // altimate_change — clear any existing interval before installing a new one. doInit() can
       // run more than once per process (init/shutdown cycles per session in prompt.ts), and
@@ -2643,7 +2736,9 @@ export namespace Telemetry {
     } catch {
       buffer = []
     } finally {
-      initDone = true
+      // altimate_change start — unresolved: stay pre-init so events keep buffering and init() retries
+      initDone = !unresolved
+      // altimate_change end
       // altimate_change start — the stall watcher also writes each stall to opencode.log, which `debug bundle`
       // reads, so it runs whether or not telemetry is on; with telemetry off its events are dropped by `track`.
       startLoopMonitor()
@@ -2701,7 +2796,11 @@ export namespace Telemetry {
     const generation = ++identityGeneration
     identityStamp = TelemetryIdentity.credentialStamp()
     identityRetryAt = 0
-    return TelemetryIdentity.resolveWithOutcome(opts)
+    // altimate_change — no account lookup (a backend request) once this lifecycle has ended
+    return TelemetryIdentity.resolveWithOutcome({
+      ...opts,
+      canSend: () => generation === identityGeneration && gate === "enabled" && !shutdownPromise,
+    })
       .then(({ identity: resolved, outcome }) => {
         if (generation !== identityGeneration) return
         identity = resolved
@@ -2718,7 +2817,7 @@ export namespace Telemetry {
    * Does nothing while telemetry is disabled. */
   export async function refreshIdentity(): Promise<void> {
     // Opted out (or not initialised): no lookup; an enabled init resolves from the stored credential.
-    if (!enabled || !identityAllowed) return
+    if (!enabled) return
     await flush()
     identity = undefined
     await resolveIdentity({ refresh: true })
@@ -2732,74 +2831,6 @@ export namespace Telemetry {
   /** Test seam: end a pending retry backoff so the next flush re-resolves. */
   export function retryIdentityNowForTest() {
     if (identityRetryAt !== 0) identityRetryAt = 1
-  }
-  // altimate_change end
-
-  // altimate_change start — the final event of an opted-out machine. Sent once, only from a
-  // machine that has sent telemetry before (a machine id exists; none is minted here), under the
-  // same sink rules as doInit(). It carries the machine id and the opt-out source, never the account,
-  // project or launch. One send at a time across threads and processes (OptOutMarker.claim). The
-  // marker is written only once the ingest endpoint accepted the event, so an offline launch tries
-  // again next time; after the marker, nothing is sent until telemetry is re-enabled. Not awaited:
-  // an opted-out launch must not wait on the network.
-  const OPT_OUT_TIMEOUT_MS = 3_000
-  // The launch does not wait for the send, but shutdown does (bounded), so a short command such as
-  // `tool run` records the marker instead of sending the event again on every later launch.
-  let optOutSend: Promise<void> | undefined
-  let optOutUnderTestRunner = false
-  /** Test seam: let a suite that redirects the home directory exercise recordOptOut(). */
-  export function allowOptOutUnderTestRunner(on: boolean) {
-    optOutUnderTestRunner = on
-  }
-  async function recordOptOut(source: "env" | "config"): Promise<void> {
-    const lifecycle = lifecycleGeneration
-    const marker = markerGeneration
-    try {
-      if (underTestRunner() && !optOutUnderTestRunner) return
-      // The force flag is a developer knob for running telemetry under a test runner; the opt-out
-      // marker is about real users, and "disabled" must keep winning over "force" to the letter.
-      if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return
-      if (OptOutMarker.exists()) return
-      const id = OptOutMarker.readMachineId()
-      if (!id) return
-      const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
-      const cfg = parseConnectionString(explicit ?? DEFAULT_CONNECTION_STRING)
-      if (!cfg) return
-      const envelopes = toAppInsightsEnvelopes(
-        [{ type: "telemetry_opted_out", timestamp: Date.now(), opt_out_source: source }],
-        cfg,
-        { machineId: id, identity: undefined },
-      ) as Array<{ data: { baseData: { properties: Record<string, string> } } }>
-      for (const envelope of envelopes) {
-        delete envelope.data.baseData.properties.project_id
-        delete envelope.data.baseData.properties.launch_id
-      }
-      // A shutdown since this task started means a later init may own the marker now: do not
-      // send, and let the next disabled init start over.
-      if (lifecycle !== lifecycleGeneration) return
-      const claim = OptOutMarker.claim()
-      if (!claim) return
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
-      try {
-        // Another send may have finished between the marker check above and the claim.
-        if (OptOutMarker.exists()) return
-        const res = await fetch(cfg.endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(envelopes),
-          signal: controller.signal,
-        })
-        // Accepted: write the marker unless telemetry was turned back on meanwhile, in this process
-        // (the generation) or another one (an enabled init removes the claim).
-        if (res.ok && marker === markerGeneration && OptOutMarker.holds(claim)) OptOutMarker.write()
-      } finally {
-        clearTimeout(timeout)
-        OptOutMarker.release(claim)
-      }
-    } catch {
-      // The opt-out path never surfaces: a missed marker only means one more attempt next launch.
-    }
   }
   // altimate_change end
 
@@ -2975,7 +3006,8 @@ export namespace Telemetry {
   export function track(event: Event) {
     // Before init completes: buffer (flushed once init enables, or cleared if disabled).
     // After init completed and disabled telemetry: drop silently.
-    if (initDone && !enabled) return
+    // altimate_change — opted out (env or config): drop. Unresolved config keeps initDone false, so it buffers.
+    if (gate === "disabled" || (initDone && !enabled)) return
     // altimate_change start — stamp the client trace of the turn the event's own session is
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
     // explicit per-event `session_id` is used — the process-global session can be another one.
@@ -2983,6 +3015,13 @@ export namespace Telemetry {
     const eventSession = (event as { session_id?: unknown }).session_id
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
+    // An event held while the opt-out is unknown can outlive this session: it keeps the session and
+    // project it was tracked under instead of taking the next one's at flush.
+    if (!initDone) {
+      const held = event as { session_id?: unknown; project_id?: unknown }
+      if (held.session_id === undefined && sessionId) held.session_id = sessionId
+      if (held.project_id === undefined && projectId) held.project_id = projectId
+    }
     // altimate_change end
     // altimate_change — no ambient workspace stamping: a row names its workspace itself (the prompt
     // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
@@ -3028,7 +3067,7 @@ export namespace Telemetry {
     // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
     const who = identity
     const mid = machineId
-    if (enabled && identityAllowed) {
+    if (enabled) {
       const stamp = TelemetryIdentity.credentialStamp()
       const retryDue = identityRetryAt !== 0 && Date.now() >= identityRetryAt
       if (stamp !== identityStamp || retryDue) {
@@ -3161,15 +3200,6 @@ export namespace Telemetry {
         // init failed — nothing to flush
       }
     }
-    // altimate_change start — let an opted-out launch's final event finish before the process exits
-    if (optOutSend) {
-      const send = optOutSend
-      optOutSend = undefined
-      let timer: ReturnType<typeof setTimeout> | undefined
-      await Promise.race([send, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.min(timeoutMs ?? OPT_OUT_TIMEOUT_MS, OPT_OUT_TIMEOUT_MS))))])
-      if (timer) clearTimeout(timer)
-    }
-    // altimate_change end
     // altimate_change — first-run health: stop the stall monitor only once init has settled, so a
     // shutdown that overlaps init cannot be undone by doInit() starting the monitor afterwards.
     stopLoopMonitor()
@@ -3216,8 +3246,16 @@ export namespace Telemetry {
     shuttingDown = false
     enabled = false
     appInsights = undefined
-    buffer = []
-    droppedEvents = 0
+    // altimate_change start — while the opt-out is undecided nothing was flushed: keep the events for a
+    // later init in this process to send or drop. At process exit they go with the process. Not when a
+    // project's own read failed: once its session ends, another project's decision must not send its
+    // events. (Sessions that overlap share one lifecycle, as before: see the docs' multi-project note.)
+    if (gate !== "pending" || unresolvedInProject) {
+      unresolvedInProject = false
+      buffer = []
+      droppedEvents = 0
+    }
+    // altimate_change end
     sessionId = ""
     projectId = ""
     machineId = ""
@@ -3225,7 +3263,6 @@ export namespace Telemetry {
     // previous account on events; doInit() resolves it again from whatever credential is on disk.
     // The generation bump makes any resolution still in flight a no-op when it settles.
     identityGeneration++
-    lifecycleGeneration++
     identity = undefined
     identityStamp = ""
     identityRetryAt = 0

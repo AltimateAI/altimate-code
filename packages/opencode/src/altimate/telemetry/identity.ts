@@ -135,7 +135,7 @@ export type Outcome = "ok" | "none" | "rejected" | "error"
 
 /** {@link resolve}, also saying how it ended, so a caller retries only a transient failure. */
 export async function resolveWithOutcome(
-  opts: { refresh?: boolean } = {},
+  opts: { refresh?: boolean; canSend?: () => boolean } = {},
 ): Promise<{ identity?: Identity; outcome: Outcome }> {
   try {
     const creds = await loadCredential()
@@ -149,6 +149,7 @@ export async function resolveWithOutcome(
       if (hit && hit.fingerprint === fp)
         return { identity: { user_id: hit.user_id, tenant: hit.tenant }, outcome: "ok" }
     }
+    if (opts.canSend && !opts.canSend()) return { outcome: "none" }
     const answer = await fetchMe(creds)
     if (answer.kind === "rejected") {
       const hit = await readCache()

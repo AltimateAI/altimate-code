@@ -2,7 +2,7 @@
  * Adversarial coverage for the v0.12.9 release payload (v0.12.8..HEAD): the model-free `tool` CLI and
  * `mcp serve` permission gate (read/write split, the DROP DATABASE / DROP SCHEMA / TRUNCATE hard deny, the
  * allow-list, `--args -` folding, runner argument validation), the workspace-rules classifier and terminal
- * sanitiser, the telemetry opt-out marker, identity cache, endpoint masking and string masking, sign-out
+ * sanitiser, the telemetry identity cache, endpoint masking and string masking, sign-out
  * removing the cached telemetry identity, analyst's post-config write denies, and `Filesystem.realLocation`.
  *
  * Targets the exported helpers with hostile inputs: comment-split and dollar-quoted SQL, chained
@@ -30,7 +30,6 @@ import {
 } from "../../src/altimate/tools/sql-classify"
 import { classify as classifyRule, memoryScope } from "../../src/altimate/rules/classify"
 import { printable } from "../../src/altimate/rules/printable"
-import { OptOutMarker } from "../../src/altimate/telemetry/opt-out"
 import { TelemetryIdentity } from "../../src/altimate/telemetry/identity"
 import { Telemetry } from "../../src/altimate/telemetry"
 import { endpointOf } from "../../src/altimate/workspace/api-client"
@@ -543,10 +542,10 @@ describe("v0.12.9 adversarial: printable", () => {
 })
 
 // ---------------------------------------------------------------------------------------------------------
-// 3. #1501 / #1513 — telemetry: opt-out marker, identity cache, endpoint masking, maskString
+// 3. #1501 / #1513 — telemetry: identity cache, endpoint masking, maskString
 // ---------------------------------------------------------------------------------------------------------
 
-describe("v0.12.9 adversarial: telemetry opt-out marker and identity cache", () => {
+describe("v0.12.9 adversarial: telemetry identity cache", () => {
   const originalHome = process.env.OPENCODE_TEST_HOME
   let home: string
 
@@ -561,92 +560,7 @@ describe("v0.12.9 adversarial: telemetry opt-out marker and identity cache", () 
   })
 
   test("paths resolve under the redirected home", () => {
-    expect(OptOutMarker.markerPath()).toBe(path.join(home, ".altimate", "telemetry-opted-out"))
     expect(TelemetryIdentity.cachePath()).toBe(path.join(home, ".altimate", "telemetry-identity.json"))
-  })
-
-  test("write creates the marker once; a second write fails instead of overwriting", () => {
-    expect(OptOutMarker.exists()).toBe(false)
-    OptOutMarker.write()
-    expect(OptOutMarker.exists()).toBe(true)
-    expect(Number.isNaN(Date.parse(fs.readFileSync(OptOutMarker.markerPath(), "utf8").trim()))).toBe(false)
-    expect(() => OptOutMarker.write()).toThrow()
-  })
-
-  test.skipIf(process.platform === "win32")("write never follows a planted symlink", () => {
-    const victim = path.join(home, "victim.txt")
-    fs.writeFileSync(victim, "untouched")
-    fs.mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    fs.symlinkSync(victim, OptOutMarker.markerPath())
-    expect(() => OptOutMarker.write()).toThrow()
-    expect(fs.readFileSync(victim, "utf8")).toBe("untouched")
-  })
-
-  test("claim is exclusive: a fresh claim blocks a second one until released", () => {
-    fs.mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    const token = OptOutMarker.claim()
-    expect(token).toBeString()
-    expect(OptOutMarker.holds(token!)).toBe(true)
-    expect(OptOutMarker.claim()).toBeUndefined()
-    OptOutMarker.release(token!)
-    expect(OptOutMarker.holds(token!)).toBe(false)
-    const next = OptOutMarker.claim()
-    expect(next).toBeString()
-    expect(next).not.toBe(token)
-  })
-
-  test("a stale claim is taken over", () => {
-    fs.mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    const old = OptOutMarker.claim()!
-    const claimFile = path.join(home, ".altimate", "telemetry-opted-out.sending")
-    const past = new Date(Date.now() - 60_000)
-    fs.utimesSync(claimFile, past, past)
-    const fresh = OptOutMarker.claim()
-    expect(fresh).toBeString()
-    expect(OptOutMarker.holds(old)).toBe(false)
-    expect(OptOutMarker.holds(fresh!)).toBe(true)
-  })
-
-  test("claim without the .altimate directory returns undefined instead of throwing", () => {
-    expect(OptOutMarker.claim()).toBeUndefined()
-  })
-
-  test("holds and release reject foreign, empty and prefix tokens", () => {
-    fs.mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    const token = OptOutMarker.claim()!
-    for (const other of ["", " ", token.slice(0, -1), `${token}x`, "__proto__"]) {
-      expect(OptOutMarker.holds(other), other).toBe(false)
-      OptOutMarker.release(other)
-      expect(OptOutMarker.holds(token)).toBe(true)
-    }
-  })
-
-  test("holds does not trim the caller's token", () => {
-    fs.mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    const token = OptOutMarker.claim()!
-    expect(OptOutMarker.holds(` ${token}`)).toBe(false)
-  })
-
-  test("clear removes the marker and an in-flight claim, and is a no-op when both are absent", () => {
-    expect(() => OptOutMarker.clear()).not.toThrow()
-    OptOutMarker.write()
-    const token = OptOutMarker.claim()!
-    OptOutMarker.clear()
-    expect(OptOutMarker.exists()).toBe(false)
-    expect(OptOutMarker.holds(token)).toBe(false)
-  })
-
-  test("readMachineId ignores a non-UUID or oversized file", () => {
-    fs.mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    const idFile = path.join(home, ".altimate", "machine-id")
-    expect(OptOutMarker.readMachineId()).toBeUndefined()
-    fs.writeFileSync(idFile, "not-a-uuid")
-    expect(OptOutMarker.readMachineId()).toBeUndefined()
-    fs.writeFileSync(idFile, "a".repeat(10_000))
-    expect(OptOutMarker.readMachineId()).toBeUndefined()
-    const uuid = "123e4567-e89b-42d3-a456-426614174000"
-    fs.writeFileSync(idFile, `${uuid}\n`)
-    expect(OptOutMarker.readMachineId()).toBe(uuid)
   })
 
   test("identity clear is a no-op when the cache is absent and removes it when present", async () => {

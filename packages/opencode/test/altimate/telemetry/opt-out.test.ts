@@ -1,134 +1,96 @@
+import { Database as SQLite } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
+import { Database } from "@opencode-ai/core/database/database"
 import { Auth } from "../../../src/auth"
 import { Config } from "../../../src/config/config"
+import { ConfigManaged } from "../../../src/config/managed"
 import { Telemetry } from "../../../src/altimate/telemetry"
-import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
-import { OptOutMarker } from "../../../src/altimate/telemetry/opt-out"
+import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
+import { Instance } from "../../../src/project/instance"
+import { bootstrap } from "../../../src/cli/bootstrap"
+import { tmpdir } from "../../fixture/fixture"
 
-const MACHINE = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
-const UUID = "0f3c2a1e-6b7d-4c8e-9f10-1a2b3c4d5e6f"
-const API = "https://api.example.invalid"
 const CS = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+const ENV = [
+  "NODE_ENV",
+  "BUN_TEST",
+  "VITEST",
+  "JEST_WORKER_ID",
+  "OPENCODE_TEST_HOME",
+  "APPLICATIONINSIGHTS_CONNECTION_STRING",
+  "ALTIMATE_TELEMETRY_DISABLED",
+  "OPENCODE_DISABLE_TELEMETRY",
+  "ALTIMATE_CLI_DISABLE_TELEMETRY",
+  "ALTIMATE_TELEMETRY_FORCE",
+  "OPENCODE_CONFIG_CONTENT",
+  "ALTIMATE_CLI_CONFIG_CONTENT",
+  "OPENCODE_AUTH_CONTENT",
+] as const
 
-type Call = { url: string; body: string }
-
-async function waitFor(pred: () => boolean, ms = 2_000) {
-  const until = Date.now() + ms
-  while (!pred() && Date.now() < until) await new Promise((r) => setTimeout(r, 20))
-  return pred()
-}
-
-describe("telemetry opt-out marker", () => {
+describe("telemetry opt-out", () => {
   let home: string
-  let calls: Call[]
-  let trackStatus = 200
-  /** When set, the next /v2/track POST waits on it before answering. */
-  let holdTrack: Promise<void> | undefined
-  let fetchSpy: ReturnType<typeof spyOn>
-  let homedirSpy: ReturnType<typeof spyOn>
-  let authSpy: ReturnType<typeof spyOn>
+  let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>
+  let configSpy: ReturnType<typeof spyOn<typeof Config, "get">>
+  let homedirSpy: ReturnType<typeof spyOn<typeof os, "homedir">>
+  let authFileSpy: ReturnType<typeof spyOn<typeof Auth, "filepath">>
+  let databaseSpy: ReturnType<typeof spyOn<typeof Database, "path">>
+  let authSpy: ReturnType<typeof spyOn<typeof Auth, "get">>
   const saved: Record<string, string | undefined> = {}
-  const ENV = [
-    "OPENCODE_TEST_HOME",
-    "APPLICATIONINSIGHTS_CONNECTION_STRING",
-    "ALTIMATE_TELEMETRY_DISABLED",
-    "OPENCODE_DISABLE_TELEMETRY",
-    "ALTIMATE_TELEMETRY_FORCE",
-    "OPENCODE_CONFIG_CONTENT",
-  ]
 
-  const optOuts = () =>
-    calls
-      .filter((c) => c.url.includes("/v2/track"))
-      .flatMap((c) => JSON.parse(c.body) as any[])
-      .filter((e) => e.data?.baseData?.name === "telemetry_opted_out")
-  const trackPosts = () => calls.filter((c) => c.url.includes("/v2/track"))
-
-  function writeMachineId() {
-    mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    writeFileSync(path.join(home, ".altimate", "machine-id"), MACHINE)
-  }
-  function writeCreds() {
-    mkdirSync(path.join(home, ".altimate"), { recursive: true })
+  beforeEach(async () => {
+    await Telemetry.shutdown()
+    Telemetry.resetGateForTest()
+    home = mkdtempSync(path.join(os.tmpdir(), "telemetry-opt-out-"))
+    mkdirSync(path.join(home, ".altimate"))
+    // Simulate a previously signed-in installation with a machine ID.
+    writeFileSync(path.join(home, ".altimate", "machine-id"), "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
     writeFileSync(
       path.join(home, ".altimate", "altimate.json"),
-      JSON.stringify({ altimateUrl: API, altimateInstanceName: "acme", altimateApiKey: "key-1" }),
+      JSON.stringify({
+        altimateUrl: "https://api.example.invalid",
+        altimateInstanceName: "workspace",
+        altimateApiKey: "test-key",
+      }),
     )
-  }
-
-  beforeEach(() => {
-    home = mkdtempSync(path.join(os.tmpdir(), "telemetry-opt-out-"))
-    for (const k of ENV) saved[k] = process.env[k]
+    for (const key of ENV) {
+      saved[key] = process.env[key]
+      delete process.env[key]
+    }
+    // Exercise the production opt-out behavior with both transports intercepted.
+    process.env.NODE_ENV = "production"
     process.env.OPENCODE_TEST_HOME = home
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = CS
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
-    delete process.env.OPENCODE_DISABLE_TELEMETRY
-    delete process.env.ALTIMATE_TELEMETRY_FORCE
-    homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
-    // The auth store lives in the real data directory; never let a test read it.
+    Telemetry.setConfigDirectory(home)
+    homedirSpy = spyOn(os, "homedir").mockReturnValue(home)
+    authFileSpy = spyOn(Auth, "filepath").mockReturnValue(path.join(home, "auth.json"))
+    databaseSpy = spyOn(Database, "path").mockReturnValue(path.join(home, "missing.db"))
     authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
-    Telemetry.allowOptOutUnderTestRunner(true)
-    calls = []
-    trackStatus = 200
-    holdTrack = undefined
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
-      calls.push({ url, body: String(init?.body ?? "") })
-      if (url === `${API}/users/me`) {
-        return new Response(JSON.stringify({ id: 7, uuid: UUID }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })
-      }
-      if (url.includes("/v2/track")) {
-        if (holdTrack) await holdTrack
-        return new Response("", { status: trackStatus })
-      }
-      return new Response("", { status: 200 })
-    }) as any)
+    configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
+    fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(new Error("Telemetry must not invoke the transport"))
   })
 
   afterEach(async () => {
     await Telemetry.shutdown()
-    Telemetry.allowOptOutUnderTestRunner(false)
+    Telemetry.resetGateForTest()
+    Telemetry.setConfigDirectory(undefined)
     fetchSpy.mockRestore()
+    configSpy.mockRestore()
     homedirSpy.mockRestore()
+    authFileSpy.mockRestore()
     authSpy.mockRestore()
-    for (const k of ENV) {
-      if (saved[k] === undefined) delete process.env[k]
-      else process.env[k] = saved[k]
+    databaseSpy.mockRestore()
+    for (const key of ENV) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
     }
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("an opted-out machine sends one final event with its machine id only, then nothing", async () => {
-    writeMachineId()
-    writeCreds()
-    expect(await TelemetryIdentity.resolve()).toEqual({ user_id: UUID, tenant: "acme" })
-    const meCallsBefore = calls.filter((c) => c.url.endsWith("/users/me")).length
-
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => optOuts().length > 0)).toBe(true)
-    const [event] = optOuts()
-    expect(event.data.baseData.properties.machine_id).toBe(MACHINE)
-    expect(event.data.baseData.properties.opt_out_source).toBe("env")
-    // Never the account, the project or the launch, even with a cached identity on disk.
-    for (const key of ["user_id", "tenant", "project_id", "launch_id"])
-      expect(event.data.baseData.properties[key]).toBeUndefined()
-    expect(typeof event.data.baseData.properties.cli_version).toBe("string")
-    expect(event.tags["ai.user.id"]).toBe(MACHINE)
-    // No request to resolve an identity while opted out.
-    expect(calls.filter((c) => c.url.endsWith("/users/me")).length).toBe(meCallsBefore)
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-
-    // Nothing after it: tracked events are dropped, and a new init does not send again.
-    const posts = trackPosts().length
-    Telemetry.track({
+  async function expectSilentLifecycle() {
+    const startupEvent = {
       type: "startup_ready",
       session_id: "",
       command: "test",
@@ -136,298 +98,775 @@ describe("telemetry opt-out marker", () => {
       duration_ms: 1,
       fresh_install: false,
       timestamp: Date.now(),
+    } as const
+    Telemetry.track(startupEvent)
+    await Telemetry.init()
+    const startupCalls = fetchSpy.mock.calls.length
+    const enabled = Telemetry.isEnabled()
+
+    Telemetry.setContext({ sessionId: "session", projectId: "project" })
+    Telemetry.track({
+      type: "session_start",
+      timestamp: Date.now(),
+      session_id: "session",
+      project_id: "project",
+      model_id: "model",
+      provider_id: "provider",
+      agent: "agent",
+      os: process.platform,
+      arch: process.arch,
+      node_version: process.version,
     })
+    await Telemetry.refreshIdentity()
+    await Telemetry.flush()
+    const sessionCalls = fetchSpy.mock.calls.length - startupCalls
+
+    // Leave a final event for shutdown to drain if tracking was accidentally enabled.
+    Telemetry.track({
+      type: "error",
+      timestamp: Date.now(),
+      session_id: "session",
+      error_name: "TestError",
+      error_message: "test",
+      context: "test",
+    })
+    await Telemetry.shutdown()
+    const shutdownCalls = fetchSpy.mock.calls.length - startupCalls - sessionCalls
+    expect({ startupCalls, sessionCalls, shutdownCalls }).toEqual({ startupCalls: 0, sessionCalls: 0, shutdownCalls: 0 })
+    expect(enabled).toBe(false)
+  }
+
+  test.each(["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"])("%s suppresses all requests", async (key) => {
+    process.env[key] = "1"
+    await expectSilentLifecycle()
+    // A later launch must also stay silent with the same existing machine ID.
+    await expectSilentLifecycle()
+  })
+
+  test("a false canonical alias cannot override the legacy opt-out", async () => {
+    process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = "false"
+    process.env.OPENCODE_DISABLE_TELEMETRY = "1"
+    await expectSilentLifecycle()
+  })
+
+  test("opt-out takes precedence over the test force flag and explicit sink", async () => {
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "TRUE"
+    process.env.NODE_ENV = "test"
+    process.env.ALTIMATE_TELEMETRY_FORCE = "true"
+    await expectSilentLifecycle()
+  })
+
+  test("loaded telemetry.disabled suppresses all requests", async () => {
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } } as Awaited<ReturnType<typeof Config.get>>)
+    await expectSilentLifecycle()
+  })
+
+  test("project telemetry.disabled suppresses all requests before instance startup", async () => {
+    mkdirSync(path.join(home, ".altimate-code"))
+    writeFileSync(path.join(home, ".altimate-code", "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
+    await expectSilentLifecycle()
+  })
+
+  test("a configured well-known source suppresses telemetry until full config is available", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    })
+    await expectSilentLifecycle()
+  })
+
+  test("an unreadable auth store does not rule out a well-known opt-out", async () => {
+    writeFileSync(Auth.filepath(), "{")
+    await expectSilentLifecycle()
+  })
+
+  test("a partial config cannot enable telemetry after an organization config load failed", async () => {
+    configSpy.mockResolvedValue({} as Awaited<ReturnType<typeof Config.get>>)
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+    try {
+      await expectSilentLifecycle()
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("a configured organization source suppresses telemetry until full config is available", async () => {
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', 'org');
+    `)
+    db.close()
+    databaseSpy.mockReturnValue(dbPath)
+    await expectSilentLifecycle()
+  })
+
+  test("a legacy account schema still defers to its selected organization's config", async () => {
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    try {
+      db.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE account (id TEXT PRIMARY KEY, selected_org_id TEXT);
+        CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT);
+        INSERT INTO account VALUES ('account', NULL);
+        INSERT INTO account_state VALUES (1, 'account');
+      `)
+      databaseSpy.mockReturnValue(dbPath)
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+      db.exec("UPDATE account SET selected_org_id = 'org'")
+      expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+    } finally {
+      db.close()
+    }
+  })
+
+  test("the startup probe can read while an account writer holds a WAL transaction", async () => {
+    const dbPath = path.join(home, "account.db")
+    const writer = new SQLite(dbPath)
+    try {
+      writer.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE account (id TEXT PRIMARY KEY);
+        CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+        INSERT INTO account VALUES ('account');
+        BEGIN IMMEDIATE;
+        INSERT INTO account_state VALUES (1, 'account', 'org');
+      `)
+      databaseSpy.mockReturnValue(dbPath)
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+      writer.exec("COMMIT")
+      expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+    } finally {
+      writer.close()
+    }
+  })
+
+  function trackStartup() {
+    Telemetry.track({
+      type: "startup_ready",
+      timestamp: Date.now(),
+      session_id: "",
+      command: "test",
+      surface: "test",
+      duration_ms: 1,
+      fresh_install: false,
+    })
+  }
+
+  function recordIngestion() {
+    const names: string[] = []
+    fetchSpy.mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+      if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
+      for (const envelope of JSON.parse(String(request?.body))) {
+        names.push(envelope.data.baseData.properties?.error_name ?? envelope.data.baseData.name)
+      }
+      return new Response(null, { status: 204 })
+    }, { preconnect: fetch.preconnect }))
+    return names
+  }
+
+  /** Make the next config read wait for the caller; resolves once that read has started. */
+  function holdConfigRead(capture: (resolve: (value: Awaited<ReturnType<typeof Config.get>>) => void) => void) {
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => (started = resolve))
+    configSpy.mockImplementation(() => {
+      started()
+      return new Promise(capture)
+    })
+    return reading
+  }
+
+  function errorEvent(name: string) {
+    return { type: "error", timestamp: Date.now(), session_id: "", error_name: name, error_message: "test", context: "test" } as const
+  }
+
+  /** No signed-in account, so the only requests are ingestion. */
+  function signOut() {
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+  }
+
+  test("an unreadable config holds startup events; a later enabled init sends them once", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    configSpy.mockResolvedValue({})
+    // While unreadable, init() re-resolves the config at most every 30 s.
+    const reads = configSpy.mock.calls.length
+    await Telemetry.init()
+    expect(configSpy.mock.calls.length).toBe(reads)
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    Telemetry.retryConfigNowForTest()
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
     await Telemetry.flush()
     await Telemetry.shutdown()
-    await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 150))
-    expect(trackPosts().length).toBe(posts)
-    expect(optOuts()).toHaveLength(1)
+    expect(names).toEqual(["startup_ready"])
   })
 
-  test("a short opted-out run that shuts down at once still writes the marker, so the next launch sends nothing", async () => {
-    writeMachineId()
-    holdTrack = new Promise<void>((r) => setTimeout(r, 100)) // the ingest endpoint answers after 100ms
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+  test("a session shutdown while unresolved keeps held events for a later init", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
     await Telemetry.shutdown()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    configSpy.mockResolvedValue({})
+    Telemetry.retryConfigNowForTest()
     await Telemetry.init()
-    await Telemetry.shutdown() // the command finished before the send did
-    expect(OptOutMarker.exists()).toBe(true)
-    await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 100))
-    expect(optOuts()).toHaveLength(1)
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
   })
 
-  test("a machine that never sent telemetry sends nothing and gets no marker", async () => {
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
+  test("an unreadable config that resolves to disabled sends nothing, then stays off for the process", async () => {
+    const names = recordIngestion()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
     await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 150))
-    expect(trackPosts()).toHaveLength(0)
-    expect(OptOutMarker.exists()).toBe(false)
-    expect(existsSync(path.join(home, ".altimate", "machine-id"))).toBe(false)
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
+    Telemetry.retryConfigNowForTest()
+    await Telemetry.init()
+    await Telemetry.flush()
+    await Telemetry.refreshIdentity()
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    // Another session of the same process whose config reads as enabled.
+    await Telemetry.shutdown()
+    signOut()
+    configSpy.mockResolvedValue({})
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual([])
   })
 
-  test("a corrupt or oversized machine-id file sends nothing", async () => {
-    mkdirSync(path.join(home, ".altimate"), { recursive: true })
-    writeFileSync(path.join(home, ".altimate", "machine-id"), "not-a-uuid\n" + "x".repeat(4096))
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
+  test("exit while unresolved sends nothing", async () => {
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
     await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 150))
-    expect(trackPosts()).toHaveLength(0)
-    expect(OptOutMarker.exists()).toBe(false)
+    trackStartup()
+    await Telemetry.shutdown({ timeoutMs: Telemetry.EXIT_FLUSH_BUDGET_MS })
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  test("the marker is written only once the sink accepted the event", async () => {
-    writeMachineId()
-    process.env.OPENCODE_DISABLE_TELEMETRY = "true"
-    trackStatus = 500
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 1)).toBe(true)
-    await new Promise((r) => setTimeout(r, 50))
-    expect(OptOutMarker.exists()).toBe(false)
+  function wellKnownAuth() {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    })
+  }
 
-    trackStatus = 200
-    await Telemetry.shutdown()
+  test("a thread that cannot read a remote config sends its held events once the worker resolves enabled", async () => {
+    const names = recordIngestion()
+    signOut()
+    wellKnownAuth()
+    trackStartup()
     await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 2)).toBe(true)
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-    expect(optOuts()).toHaveLength(2)
-    expect(optOuts()[1].data.baseData.properties.user_id).toBeUndefined()
-    expect(optOuts()[1].tags["ai.user.id"]).toBe(MACHINE)
-  })
+    await Telemetry.flush()
+    expect(Telemetry.optOutState()).toBe("pending")
+    expect(fetchSpy).not.toHaveBeenCalled()
 
-  test("a send still pending when telemetry is re-enabled never recreates the marker", async () => {
-    writeMachineId()
-    let release: () => void = () => {}
-    holdTrack = new Promise<void>((r) => (release = r))
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 1)).toBe(true) // the POST is in flight
-
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
-    await Telemetry.shutdown()
-    await Telemetry.init() // telemetry on again; this lifecycle owns the marker now
+    await Telemetry.adoptOptOut("pending")
+    expect(Telemetry.optOutState()).toBe("pending")
+    await Telemetry.adoptOptOut("enabled")
     expect(Telemetry.isEnabled()).toBe(true)
-    release()
-    await new Promise((r) => setTimeout(r, 100))
-    expect(OptOutMarker.exists()).toBe(false)
-
-    // Opting out again is recorded afresh.
-    holdTrack = undefined
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => optOuts().length === 2)).toBe(true)
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
   })
 
-  test("a send accepted after a shutdown still writes the marker, so the next opted-out init sends nothing", async () => {
-    writeMachineId()
-    let release: () => void = () => {}
-    holdTrack = new Promise<void>((r) => (release = r))
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+  test("an opt-out resolved by the worker drops the held events and stays off", async () => {
+    const names = recordIngestion()
+    signOut()
+    wellKnownAuth()
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.adoptOptOut("disabled")
+    await Telemetry.adoptOptOut("enabled")
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.flush()
     await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 1)).toBe(true) // the POST is in flight
-
-    await Telemetry.shutdown() // still opted out: nothing has cleared the marker
-    release()
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-
-    holdTrack = undefined
-    await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 100))
-    expect(optOuts()).toHaveLength(1)
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(names).toEqual([])
   })
 
-  test("an init that cannot read the config keeps the marker and resolves no account", async () => {
-    writeMachineId()
-    writeCreds()
-    OptOutMarker.write()
-    const configSpy = spyOn(Config, "get")
+  test("an env opt-out wins over an enabled answer from the worker", async () => {
+    signOut()
+    wellKnownAuth()
+    trackStartup()
+    await Telemetry.init()
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.adoptOptOut("enabled")
+    await Telemetry.flush()
+    await Telemetry.shutdown()
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test("the state handed to another thread waits for this thread's running init", async () => {
+    signOut()
+    let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+    const reading = holdConfigRead((resolve) => (release = resolve))
+    void Telemetry.init()
+    const settled = Telemetry.settledOptOutState()
+    await reading
+    expect(Telemetry.optOutState()).toBe("pending")
+    release({ telemetry: { disabled: true } })
+    expect(await settled).toBe("disabled")
+  })
+
+  test("a cleanly closed account database without WAL side files reads like any other", async () => {
+    const dbPath = path.join(home, "account.db")
+    databaseSpy.mockReturnValue(dbPath)
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', NULL);
+    `)
+    db.close()
+    // SQLite removes these when the last connection closes on Linux and Windows.
+    rmSync(`${dbPath}-wal`, { force: true })
+    rmSync(`${dbPath}-shm`, { force: true })
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+
+    const writer = new SQLite(dbPath)
+    writer.exec("UPDATE account_state SET active_org_id = 'org'")
+    writer.close()
+    rmSync(`${dbPath}-wal`, { force: true })
+    rmSync(`${dbPath}-shm`, { force: true })
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+  })
+
+  test("events held across a session keep the session and project they were tracked under", async () => {
+    const recorded: Array<{ session_id: string; project_id: string }> = []
+    fetchSpy.mockImplementation(Object.assign(async (_url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+      for (const envelope of JSON.parse(String(request?.body))) {
+        recorded.push({ session_id: envelope.tags["ai.session.id"], project_id: envelope.data.baseData.properties.project_id })
+      }
+      return new Response(null, { status: 204 })
+    }, { preconnect: fetch.preconnect }))
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    await Telemetry.init()
+    Telemetry.setContext({ sessionId: "session-a", projectId: "project-a" })
+    // An event that names no session of its own (an MCP or stall event) takes the process's.
+    const { session_id: _omitted, ...sessionless } = errorEvent("Held")
+    Telemetry.track(sessionless as unknown as Telemetry.Event)
+    await Telemetry.shutdown()
+
+    Telemetry.setContext({ sessionId: "session-b", projectId: "project-b" })
+    configSpy.mockResolvedValue({})
+    Telemetry.retryConfigNowForTest()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(recorded.map((p) => [p.session_id, p.project_id])).toEqual([["session-a", "project-a"]])
+  })
+
+  test("each opt-out decision is announced once, for another thread to adopt", async () => {
+    const decisions: string[] = []
+    const stop = Telemetry.onOptOutDecided((state) => decisions.push(state))
     try {
-      // The main thread's init: no Instance, so Config.get() throws, and the files cannot be read.
-      configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
-      process.env.OPENCODE_CONFIG_CONTENT = "{ not json"
+      signOut()
+      configSpy.mockResolvedValue({})
+      await Telemetry.init()
       await Telemetry.shutdown()
       await Telemetry.init()
-      expect(Telemetry.isEnabled()).toBe(true) // ordinary rows keep flowing, as before
+      expect(decisions).toEqual(["enabled"])
+    } finally {
+      stop()
+    }
+  })
+
+  test("a listener that throws does not stop this thread's telemetry", async () => {
+    const names = recordIngestion()
+    signOut()
+    let listenerCalled = false
+    const stop = Telemetry.onOptOutDecided(() => {
+      listenerCalled = true
+      throw new Error("port closed")
+    })
+    try {
+      configSpy.mockResolvedValue({})
+      await Telemetry.init()
+      trackStartup()
       await Telemetry.flush()
-      await Telemetry.refreshIdentity()
-      await new Promise((r) => setTimeout(r, 50))
-      expect(OptOutMarker.exists()).toBe(true)
-      expect(calls.filter((c) => c.url.endsWith("/users/me"))).toHaveLength(0)
-      expect(Telemetry.identityForTest()).toBeUndefined()
-      expect(optOuts()).toHaveLength(0)
-
-      // The worker's init, inside an Instance: the config says disabled, and the marker held.
-      delete process.env.OPENCODE_CONFIG_CONTENT
-      configSpy.mockResolvedValue({ telemetry: { disabled: true } } as never)
-      await Telemetry.shutdown()
-      await Telemetry.init()
-      await new Promise((r) => setTimeout(r, 50))
-      expect(Telemetry.isEnabled()).toBe(false)
-      expect(optOuts()).toHaveLength(0)
-      expect(OptOutMarker.exists()).toBe(true)
+      expect(listenerCalled).toBe(true)
+      expect(names).toEqual(["startup_ready"])
     } finally {
-      configSpy.mockRestore()
+      stop()
     }
   })
 
-  test("an init without an Instance honours a config opt-out read from the files", async () => {
-    writeMachineId()
-    const configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
-    try {
-      process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: true } })
-      await Telemetry.shutdown()
-      await Telemetry.init()
-      expect(Telemetry.isEnabled()).toBe(false)
-      expect(await waitFor(() => optOuts().length === 1)).toBe(true)
-      expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("config")
-      expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-    } finally {
-      configSpy.mockRestore()
-    }
-  })
-
-  test("OPENCODE_DISABLE_TELEMETRY records the opt-out with source env", async () => {
-    writeMachineId()
-    process.env.OPENCODE_DISABLE_TELEMETRY = "true"
+  test("an enabled decision from the full config stands for later inits outside a project", async () => {
+    const names = recordIngestion()
+    signOut()
+    wellKnownAuth() // the files alone cannot settle this user's opt-out
+    await using dir = await tmpdir({ git: true })
+    configSpy.mockResolvedValue({})
+    await Instance.provide({ directory: dir.path, fn: () => Telemetry.init() })
+    expect(Telemetry.optOutState()).toBe("enabled")
     await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => optOuts().length === 1)).toBe(true)
-    expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("env")
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-  })
 
-  test("the config opt-out records the event with source config", async () => {
-    writeMachineId()
-    const configSpy = spyOn(Config, "get").mockResolvedValue({ telemetry: { disabled: true } } as never)
-    try {
-      await Telemetry.shutdown()
-      await Telemetry.init()
-      expect(Telemetry.isEnabled()).toBe(false)
-      expect(await waitFor(() => optOuts().length === 1)).toBe(true)
-      expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("config")
-    } finally {
-      configSpy.mockRestore()
-    }
-  })
-
-  test("ALTIMATE_TELEMETRY_FORCE never sends the opt-out event", async () => {
-    writeMachineId()
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    process.env.ALTIMATE_TELEMETRY_FORCE = "true"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 100)) // nothing to wait for: the force check returns first
-    expect(trackPosts()).toHaveLength(0)
-    expect(OptOutMarker.exists()).toBe(false)
-    expect(existsSync(path.join(home, ".altimate", "telemetry-opted-out.sending"))).toBe(false)
-  })
-
-  test("two disabled inits while the first send is in flight send the event once", async () => {
-    writeMachineId()
-    let release: () => void = () => {}
-    holdTrack = new Promise<void>((r) => (release = r))
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 1)).toBe(true) // the first send holds the claim
-
-    await Telemetry.shutdown()
-    await Telemetry.init() // a second init, as the TUI's worker beside its main thread
-    await new Promise((r) => setTimeout(r, 100))
-    expect(trackPosts()).toHaveLength(1)
-
-    release()
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-    expect(existsSync(path.join(home, ".altimate", "telemetry-opted-out.sending"))).toBe(false)
-    expect(optOuts()).toHaveLength(1)
-  })
-
-  test("another process's fresh claim holds the send; a stale one is taken over", async () => {
-    writeMachineId()
-    const claimFile = path.join(home, ".altimate", "telemetry-opted-out.sending")
-    writeFileSync(claimFile, "123\n")
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 100))
-    expect(trackPosts()).toHaveLength(0)
-
-    const old = (Date.now() - 60_000) / 1000
-    utimesSync(claimFile, old, old) // the process that held it died mid-send
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => optOuts().length === 1)).toBe(true)
-    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
-  })
-
-  test("a failed send gives the claim back, so the next launch tries again", async () => {
-    writeMachineId()
-    trackStatus = 500
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 1)).toBe(true)
-    const claimFile = path.join(home, ".altimate", "telemetry-opted-out.sending")
-    expect(await waitFor(() => !existsSync(claimFile))).toBe(true)
-    expect(OptOutMarker.exists()).toBe(false)
-  })
-
-  test("telemetry turned back on in another process stops an in-flight send from writing the marker", async () => {
-    writeMachineId()
-    let release: () => void = () => {}
-    holdTrack = new Promise<void>((r) => (release = r))
-    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(await waitFor(() => trackPosts().length === 1)).toBe(true)
-    OptOutMarker.clear() // what an enabled init in another process does
-    release()
-    await new Promise((r) => setTimeout(r, 100))
-    expect(OptOutMarker.exists()).toBe(false)
-  })
-
-  test("an init without an Instance reads the opt-out from the command's project directory", async () => {
-    writeMachineId()
-    const project = mkdtempSync(path.join(os.tmpdir(), "telemetry-opt-out-project-"))
-    mkdirSync(path.join(project, ".altimate-code"))
-    writeFileSync(path.join(project, ".altimate-code", "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
-    const configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
-    try {
-      Telemetry.setConfigDirectory(project)
-      await Telemetry.shutdown()
-      await Telemetry.init()
-      expect(Telemetry.isEnabled()).toBe(false)
-      expect(await waitFor(() => optOuts().length === 1)).toBe(true)
-      expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("config")
-    } finally {
-      Telemetry.setConfigDirectory(undefined)
-      configSpy.mockRestore()
-      rmSync(project, { recursive: true, force: true })
-    }
-  })
-
-  test("the marker creates a missing ~/.altimate owner-only", () => {
-    expect(existsSync(path.join(home, ".altimate"))).toBe(false)
-    OptOutMarker.write()
-    expect(statSync(path.join(home, ".altimate")).mode & 0o777).toBe(0o700)
-  })
-
-  test("turning telemetry back on clears the marker", async () => {
-    writeMachineId()
-    OptOutMarker.write()
-    expect(OptOutMarker.exists()).toBe(true)
-    await Telemetry.shutdown()
+    // Between sessions, outside any project: the full config cannot load here, and the files alone
+    // read as unreadable (a well-known login), so only the earlier enabled decision keeps it on.
+    configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+    expect(await TelemetryConfig.resolve(home)).toBe("unreadable")
+    trackStartup()
     await Telemetry.init()
     expect(Telemetry.isEnabled()).toBe(true)
-    expect(OptOutMarker.exists()).toBe(false)
-    expect(optOuts()).toHaveLength(0)
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("an opt-out adopted while this thread's own read runs still wins", async () => {
+    const names = recordIngestion()
+    signOut()
+    let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+    const reading = holdConfigRead((resolve) => (release = resolve))
+    trackStartup()
+    const init = Telemetry.init()
+    await reading
+    await Telemetry.adoptOptOut("disabled")
+    release({})
+    await init
+    await Telemetry.flush()
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(names).toEqual([])
+  })
+
+  test("a later opt-out from the worker stops telemetry this thread already enabled", async () => {
+    const names = recordIngestion()
+    signOut()
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
+    await Telemetry.adoptOptOut("disabled")
+    trackStartup()
+    await Telemetry.flush()
+    await Telemetry.shutdown()
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(names).toEqual([])
+  })
+
+  test("the first init inside a project is not held back by an earlier unreadable read outside one", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    expect(Telemetry.optOutState()).toBe("pending")
+
+    // Within the 30 s backoff: a read outside a project is throttled, one inside a project is not.
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    expect(Telemetry.optOutState()).toBe("pending")
+    await using dir = await tmpdir({ git: true })
+    await Instance.provide({ directory: dir.path, fn: () => Telemetry.init() })
+    expect(Telemetry.optOutState()).toBe("enabled")
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("an unresolved init settling during a shutdown leaves the re-init published", async () => {
+    signOut()
+    let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+    const reading = holdConfigRead((resolve) => (release = resolve))
+    void Telemetry.init()
+    await reading
+    const shutdown = Telemetry.shutdown()
+    const reinit = Telemetry.init()
+    // The first read now comes back unreadable while the shutdown waits for it.
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+    configSpy.mockResolvedValue({})
+    release({})
+    await shutdown
+    unresolved.mockRestore()
+    // A caller arriving now joins the re-init instead of starting a second one.
+    expect(Telemetry.init()).toBe(reinit)
+    await reinit
+    // The re-init is throttled like any instance-less retry, so the opt-out stays undecided.
+    expect(Telemetry.optOutState()).toBe("pending")
+  })
+
+  test("one project's unreadable config never holds up an opted-in project's next session", async () => {
+    const names = recordIngestion()
+    signOut()
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const unresolvedConfig = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockImplementation(async () => (TelemetryConfig.instanceDirectory() === b.path ? unresolvedConfig : {}))
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockImplementation((config) => config === unresolvedConfig)
+    try {
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.shutdown()
+      await Instance.provide({ directory: b.path, fn: () => Telemetry.init() })
+      await Telemetry.shutdown()
+      // Within 30 s of B's failed read, A's next session still starts telemetry and sends its events.
+      await Instance.provide({
+        directory: a.path,
+        fn: async () => {
+          await Telemetry.init()
+          expect(Telemetry.isEnabled()).toBe(true)
+          Telemetry.track(errorEvent("A"))
+          await Telemetry.flush()
+        },
+      })
+      expect(names).toEqual(["A"])
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("a project whose opt-out never resolved does not have its events sent under another project", async () => {
+    const names = recordIngestion()
+    signOut()
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const unresolvedConfig = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockImplementation(async () => (TelemetryConfig.instanceDirectory() === b.path ? unresolvedConfig : {}))
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockImplementation((config) => config === unresolvedConfig)
+    try {
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.shutdown()
+      await Instance.provide({
+        directory: b.path,
+        fn: async () => {
+          await Telemetry.init()
+          Telemetry.track(errorEvent("B"))
+        },
+      })
+      await Telemetry.shutdown()
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.flush()
+      expect(names).toEqual([])
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("a managed telemetry setting settles the startup read even with an organization selected", async () => {
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', 'org');
+    `)
+    db.close()
+    databaseSpy.mockReturnValue(dbPath)
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+
+    const managed = path.join(home, "managed")
+    mkdirSync(managed)
+    const managedDir = spyOn(ConfigManaged, "managedConfigDir").mockReturnValue(managed)
+    try {
+      writeFileSync(path.join(managed, "altimate-code.json"), '{ "telemetry": { "disabled": false } }')
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+      writeFileSync(path.join(managed, "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
+      expect(await TelemetryConfig.disabledState(home)).toBe("disabled")
+    } finally {
+      managedDir.mockRestore()
+    }
+  })
+
+  test("an opt-out adopted mid-flush aborts the batch already in flight", async () => {
+    signOut()
+    let aborted = false
+    let started!: () => void
+    const inFlight = new Promise<void>((resolve) => (started = resolve))
+    fetchSpy.mockImplementation(Object.assign(
+      (_url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+        started()
+        return new Promise<Response>((_, reject) => {
+          request?.signal?.addEventListener("abort", () => {
+            aborted = true
+            reject(new Error("aborted"))
+          }, { once: true })
+        })
+      },
+      { preconnect: fetch.preconnect },
+    ))
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    trackStartup()
+    // A long request budget, so only the opt-out can abort the batch (not the flush's own timeout).
+    const flushing = Telemetry.flush(600_000)
+    await inFlight
+    await Telemetry.adoptOptOut("disabled")
+    // Aborted by adoptOptOut itself, before it returned.
+    expect(aborted).toBe(true)
+    await flushing
+  })
+
+  test("a command that loads a project settles an opt-out the startup read left open", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    expect(Telemetry.awaitingConfig()).toBe(true)
+
+    // The project's own load reads the real config; give it a readable one.
+    delete process.env.OPENCODE_CONFIG_CONTENT
+    configSpy.mockResolvedValue({})
+    await using dir = await tmpdir({ git: true })
+    await bootstrap(dir.path, async () => {
+      expect(Telemetry.optOutState()).toBe("enabled")
+    })
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("a project left unresolved drops its held events before another project decides", async () => {
+    const names = recordIngestion()
+    signOut()
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const unresolvedConfig = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockImplementation(async () => (TelemetryConfig.instanceDirectory() === b.path ? unresolvedConfig : {}))
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockImplementation((config) => config === unresolvedConfig)
+    try {
+      await Instance.provide({
+        directory: b.path,
+        fn: async () => {
+          await Telemetry.init()
+          Telemetry.track(errorEvent("B"))
+        },
+      })
+      await Telemetry.shutdown()
+      expect(Telemetry.optOutState()).toBe("pending")
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.flush()
+      expect(names).toEqual([])
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("an empty auth file holds no well-known entry, as Auth reads it", async () => {
+    writeFileSync(Auth.filepath(), "")
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+  })
+
+  test("auth content that does not parse falls back to the auth file, as Auth does", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = "{"
+    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+    writeFileSync(Auth.filepath(), JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    }))
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+  })
+
+  test("a config loaded while the auth store was unreadable stays unresolved after the store is repaired", async () => {
+    const loaded = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockResolvedValue(loaded)
+    writeFileSync(Auth.filepath(), "{")
+    await expect(TelemetryConfig.loadedState()).rejects.toThrow()
+    // Repaired with a well-known login: the cached config never read that login's remote config.
+    writeFileSync(Auth.filepath(), JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    }))
+    expect(await TelemetryConfig.loadedState()).toBe("unreadable")
+    // A config the app loads afresh is read as usual.
+    configSpy.mockResolvedValue({})
+    expect(await TelemetryConfig.loadedState()).toBe("enabled")
+  })
+
+  test("after a session enabled telemetry, an unreadable read outside a project keeps that decision", async () => {
+    recordIngestion()
+    signOut()
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    await Telemetry.shutdown()
+
+    configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    const reads = configSpy.mock.calls.length
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
+    expect(configSpy.mock.calls.length - reads).toBe(1)
+  })
+
+  test("after an opt-out, events tracked between sessions are not even buffered", async () => {
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
+    await Telemetry.init()
+    await Telemetry.shutdown()
+    for (let i = 0; i < 5; i++) trackStartup()
+    expect(Telemetry.bufferedCountForTest()).toBe(0)
+  })
+
+  test("two opted-in projects in one process share one lifecycle and lose no events", async () => {
+    const names = recordIngestion()
+    signOut()
+    configSpy.mockResolvedValue({})
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const enabledDuringTurns: boolean[] = []
+    let releaseA!: () => void
+    const aMidTurn = new Promise<void>((resolve) => (releaseA = resolve))
+    let markAStarted!: () => void
+    const aStarted = new Promise<void>((resolve) => (markAStarted = resolve))
+
+    const turnA = Instance.provide({
+      directory: a.path,
+      fn: async () => {
+        await Telemetry.init()
+        Telemetry.track(errorEvent("A1"))
+        markAStarted()
+        await aMidTurn
+        // B's turn started meanwhile: A's telemetry is still on.
+        enabledDuringTurns.push(Telemetry.isEnabled())
+        Telemetry.track(errorEvent("A2"))
+      },
+    })
+    // A failing turn A rejects the wait instead of leaving it hanging.
+    await Promise.race([aStarted, turnA.then(() => Promise.reject(new Error("turn A ended before starting")))])
+    try {
+      await Instance.provide({
+        directory: b.path,
+        fn: async () => {
+          await Telemetry.init()
+          enabledDuringTurns.push(Telemetry.isEnabled())
+          Telemetry.track(errorEvent("B1"))
+        },
+      })
+    } finally {
+      releaseA()
+      await turnA
+    }
+    await Telemetry.flush()
+
+    expect(enabledDuringTurns).toEqual([true, true])
+    // B joined the running lifecycle: no shutdown and re-init, so the config was resolved once.
+    expect(configSpy).toHaveBeenCalledTimes(1)
+    expect(names.sort()).toEqual(["A1", "A2", "B1"])
+  })
+
+  test("malformed auth prevents an otherwise loaded config from enabling telemetry", async () => {
+    writeFileSync(Auth.filepath(), "null")
+    configSpy.mockResolvedValue({})
+    await expectSilentLifecycle()
+  })
+
+  test("an unreadable config suppresses all requests", async () => {
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    await expectSilentLifecycle()
   })
 })

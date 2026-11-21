@@ -51,6 +51,15 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
+// altimate_change start — loaded configs in which a source that may set `telemetry.disabled` (the
+// organization remote config, a legacy global config that failed to import) could not be read.
+const configsWithUnresolvedTelemetry = new WeakSet<Info>()
+const incompleteGlobals = new WeakSet<Info>()
+export function telemetryConfigUnresolved(config: Info): boolean {
+  return configsWithUnresolvedTelemetry.has(config)
+}
+// altimate_change end
+
 // altimate_change start — bootstrap can inspect config already loaded by service initialization
 // without introducing another asynchronous dependency for opted-out learning capture.
 const loadedConfig = new Map<string, Info>()
@@ -447,7 +456,10 @@ export const layer = Layer.effect(
       // altimate_change end
 
       const legacy = path.join(Global.Path.config, "config")
+      // altimate_change — a legacy file that fails to load may hold a telemetry opt-out
+      let legacyUnread = false
       if (existsSync(legacy)) {
+        legacyUnread = true
         yield* Effect.promise(() =>
           import(pathToFileURL(legacy).href, { with: { type: "toml" } })
             .then(async (mod) => {
@@ -457,6 +469,7 @@ export const layer = Layer.effect(
               result["$schema"] = "https://altimate.ai/config.json"
               // altimate_change end
               result = mergeConfig(result, rest)
+              legacyUnread = false // altimate_change — merged; a failed migration below is harmless
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
@@ -464,6 +477,7 @@ export const layer = Layer.effect(
         )
       }
 
+      if (legacyUnread) incompleteGlobals.add(result) // altimate_change
       return result
     })
 
@@ -687,9 +701,17 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
+        // altimate_change start — an organization config that could not be read may opt out of telemetry
+        let orgConfigUnresolved = false
         const activeAccount = Option.getOrUndefined(
-          yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
+          yield* accountSvc.active().pipe(
+            Effect.catch(() => {
+              orgConfigUnresolved = true
+              return Effect.succeed(Option.none())
+            }),
+          ),
         )
+        // altimate_change end
         if (activeAccount?.active_org_id) {
           const accountID = activeAccount.id
           const orgID = activeAccount.active_org_id
@@ -720,11 +742,14 @@ export const layer = Layer.effect(
             }
           }).pipe(
             Effect.withSpan("Config.loadActiveOrgConfig"),
-            Effect.catch((err) =>
-              Effect.logDebug("failed to fetch remote account config", {
+            // altimate_change start — mark the config unresolved for the telemetry opt-out
+            Effect.catch((err) => {
+              orgConfigUnresolved = true
+              return Effect.logDebug("failed to fetch remote account config", {
                 error: err instanceof Error ? err.message : String(err),
-              }),
-            ),
+              })
+            }),
+            // altimate_change end
           )
         }
 
@@ -896,6 +921,9 @@ export const layer = Layer.effect(
           )
         }
         // altimate_change end
+
+        // altimate_change — a source that could set `telemetry.disabled` was not read
+        if (orgConfigUnresolved || incompleteGlobals.has(global)) configsWithUnresolvedTelemetry.add(result)
 
         return {
           config: result,

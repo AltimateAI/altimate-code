@@ -123,19 +123,6 @@ export function showWelcomeBannerIfNeeded(): void {
     // first-install from auto-update) — carrying that in the marker would be the fix if a
     // strict install count is ever required. Documented in docs/docs/reference/telemetry.md.
     //
-    // FIXME(telemetry-init-config-opt-out): doInit() may run before Instance.provide() has made
-    // Config.get() resolvable (see the try/catch around Config.get in telemetry/index.ts::doInit
-    // — the catch branch proceeds with telemetry enabled). A user who opted out via the
-    // `telemetry.disabled` config key — with no env var set — can therefore still have early
-    // events transmitted. The env-var opt-out (ALTIMATE_TELEMETRY_DISABLED /
-    // OPENCODE_DISABLE_TELEMETRY) is unaffected — that check needs no Instance context.
-    // Pre-existing and NOT specific to this event: every event emitted from CLI middleware
-    // shares the same gate. It is called out here because this event's volume grew ~30x when
-    // the shell and extension installers began writing the marker, so the exposure window is
-    // now routinely hit rather than theoretical. Fixing it belongs in telemetry init (make
-    // Config resolvable there, or adopt an explicit fail-closed policy module-wide) rather
-    // than in this function, which cannot resolve config without duplicating the merge and
-    // JSONC semantics of config/config.ts.
     const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
     const isUpgrade = fs.existsSync(machineIdPath)
     // altimate_change end

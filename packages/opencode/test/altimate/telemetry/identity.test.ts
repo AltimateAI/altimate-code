@@ -4,6 +4,7 @@ import os from "os"
 import path from "path"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { Auth } from "../../../src/auth"
+import { Config } from "../../../src/config/config"
 import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
 
 const UUID = "0f3c2a1e-6b7d-4c8e-9f10-1a2b3c4d5e6f"
@@ -355,6 +356,29 @@ describe("telemetry identity", () => {
     await Telemetry.refreshIdentity()
     expect(meCalls()).toHaveLength(0)
     expect(Telemetry.identityForTest()).toBeUndefined()
+  })
+
+  test.each(["before", "after"] as const)("an identity refresh queued %s shutdown cannot reach an opted-out init", async (when) => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    const config = spyOn(Config, "get").mockResolvedValue({} as Awaited<ReturnType<typeof Config.get>>)
+    try {
+      writeCreds()
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(await until(() => Telemetry.identityForTest()?.user_id === UUID)).toBe(true)
+
+      const queued = when === "before" ? Telemetry.refreshIdentity() : undefined
+      const shutdown = Telemetry.shutdown()
+      process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+      const disabledInit = Telemetry.init()
+      await Promise.all([queued ?? Telemetry.refreshIdentity(), shutdown, disabledInit])
+
+      expect(Telemetry.isEnabled()).toBe(false)
+      expect(meCalls()).toHaveLength(1)
+    } finally {
+      config.mockRestore()
+    }
   })
 
   test("a rejected key is not polled; only a new credential is looked up again", async () => {

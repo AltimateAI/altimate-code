@@ -135,7 +135,17 @@ const altimateBaseRegistration = FreeTierConsent.createRegistrationGate({
 const pendingRequests = new Map<string, AbortController>()
 // altimate_change end
 
+// altimate_change — a decision made after the main thread first asked (a later init) is pushed to it
+Telemetry.onOptOutDecided((state) => Rpc.emit("telemetry.optOut", state))
+
 export const rpc = {
+  // altimate_change start — the opt-out as resolved from the project's full config, for the main
+  // thread, which loads no project and so cannot read a remote or organization config itself.
+  async telemetryOptOut() {
+    await traceReady.catch(() => {})
+    return Telemetry.settledOptOutState()
+  },
+  // altimate_change end
   // altimate_change start — no consent token: an explicit picker selection always registers if needed
   async registerAltimateBase() {
     return altimateBaseRegistration.register()
