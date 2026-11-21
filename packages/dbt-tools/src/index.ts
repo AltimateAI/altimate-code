@@ -73,7 +73,9 @@ function output(result: unknown) {
   const fmt = rest.includes("--format") && rest[rest.indexOf("--format") + 1] === "text"
   if (fmt && typeof result === "object" && result !== null) {
     const obj = result as Record<string, unknown>
-    if (Array.isArray(obj.notes)) for (const note of obj.notes) console.log(note)
+    if (cmd === "build" && Array.isArray(obj.notes)) {
+      for (const note of obj.notes) console.log(note)
+    }
     if ("error" in obj) {
       console.error(failureLines(obj).join("\n"))
       process.exit(1)
