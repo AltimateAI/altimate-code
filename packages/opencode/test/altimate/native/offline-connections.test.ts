@@ -96,7 +96,13 @@ test("dbt-duckdb profiles that reach remote storage or a remote server are refus
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "offline-dbt-duckdb-"))
   try {
     await fs.writeFile(path.join(root, "dbt_project.yml"), "profile: test\n")
-    for (const extra of ["external_root: s3://bucket/x", "remote:\n        host: db.example.com", "filesystems:\n        - fs: s3"]) {
+    for (const extra of [
+      "external_root: s3://bucket/x",
+      "external_root: \"{{ var('root') }}\"",
+      "external_root: \"{{ env_var('OFFLINE_TEST_UNSET_ROOT') }}\"",
+      "remote:\n        host: db.example.com",
+      "filesystems:\n        - fs: s3",
+    ]) {
       await fs.writeFile(path.join(root, "profiles.yml"), `test:\n  outputs:\n    default:\n      type: duckdb\n      path: local.duckdb\n      ${extra}\n`)
       await expect(assertLocalDbt(root, ["--profiles-dir", root])).rejects.toThrow("Offline mode")
     }
