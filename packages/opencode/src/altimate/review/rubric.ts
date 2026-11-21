@@ -52,6 +52,12 @@ export const Rubric = z.object({
     ]),
   /** >= this many `warning` findings is treated as a risk pattern → block. */
   warningPatternThreshold: z.number().int().positive().default(3),
+  /**
+   * Catalog (regex/pattern) rule ids allowed to influence the verdict. By
+   * default only deterministic engine findings can block; a team that trusts a
+   * specific pattern rule (e.g. `hardcoded-credential`) names it here.
+   */
+  blockingRules: z.array(z.string()).default([]),
   thresholds: Thresholds.default(Thresholds.parse({})),
   exclusions: Exclusions.default(Exclusions.parse({})),
 })

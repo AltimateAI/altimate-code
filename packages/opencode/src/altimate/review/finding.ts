@@ -84,8 +84,42 @@ export const Finding = z.object({
   /** True when produced without a manifest/warehouse (lint-only degraded run). */
   degraded: z.boolean().default(false),
   evidence: Evidence.optional(),
+  /** Which layer produced it: the deterministic engine, the regex/pattern
+   *  catalog, or the advisory AI lane. Only `engine` findings decide the
+   *  verdict unless the rubric opts a named catalog rule in. Stamped by
+   *  buildEnvelope from `evidence.tool`. */
+  origin: z.enum(["engine", "catalog", "ai"]).optional(),
 })
 export type Finding = z.infer<typeof Finding>
+
+export type FindingOrigin = NonNullable<Finding["origin"]>
+
+/** Evidence tools backed by the deterministic engine (AST, manifest, lineage,
+ *  warehouse) rather than text patterns. */
+const ENGINE_TOOLS = new Set(["impact_analysis", "dbt.manifest", "data.diff", "schema.detect_pii"])
+
+/** The layer a finding came from, always derived from `evidence.tool`: a
+ *  supplied `origin` is ignored, so an externally built finding cannot claim
+ *  to be engine-backed. Unknown or missing evidence counts as `catalog`, so a
+ *  new detector can never block until it is classified. */
+export function findingOrigin(f: Pick<Finding, "evidence" | "origin">): FindingOrigin {
+  const tool = f.evidence?.tool ?? ""
+  if (tool === "ai-review") return "ai"
+  if (tool.startsWith("altimate_core.") || ENGINE_TOOLS.has(tool)) return "engine"
+  return "catalog"
+}
+
+/** A rule id in one spelling: catalog sources use `hardcoded-credential` and
+ *  `pii_into_mart` alike, so ids compare lowercased with `_` as `-`. */
+export function normalizeRuleId(id: string): string {
+  return id.trim().toLowerCase().replace(/_/g, "-")
+}
+
+/** The catalog rule id behind a finding (`evidence.result.rule`), if any. */
+export function catalogRuleId(f: Pick<Finding, "evidence">): string | undefined {
+  const rule = (f.evidence?.result as { rule?: unknown } | undefined)?.rule
+  return typeof rule === "string" ? rule : undefined
+}
 
 /** Fields that define finding identity for fingerprinting / dedup. */
 export interface FingerprintInput {
