@@ -471,7 +471,8 @@ export const layer = Layer.effect(
           // altimate_change start — read again on retry so a repaired TOML file replaces a failed load.
           fsNode.readFile(legacy, "utf8")
             .then(async (text) => {
-              const { provider, model, ...rest } = Bun.TOML.parse(text)
+              const legacyConfig = Bun.TOML.parse(text) as Omit<Info, "provider"> & { provider?: string }
+              const { provider, model, ...rest } = legacyConfig
               // altimate_change end
               if (provider && model) result.model = `${provider}/${model}`
               // altimate_change start — altimate config schema URL
