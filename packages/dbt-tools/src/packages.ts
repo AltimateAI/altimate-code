@@ -246,8 +246,8 @@ export function packagesSatisfied(root: string): SatisfiedResult {
   )
   const lockedAt = statSync(join(root, "package-lock.yml"), { throwIfNoEntry: false })?.mtimeMs ?? 0
   const installedAt = statSync(installPath, { throwIfNoEntry: false })?.mtimeMs
-  if (lockedAt && declaredAt > lockedAt + 1000) return { ok: false, reason: "packages.yml is newer than package-lock.yml" }
-  if (installedAt !== undefined && Math.max(declaredAt, lockedAt) > installedAt + 1000) {
+  if (lockedAt && declaredAt > lockedAt) return { ok: false, reason: "packages.yml is newer than package-lock.yml" }
+  if (installedAt !== undefined && (declaredAt > installedAt || lockedAt > installedAt + 1000)) {
     return { ok: false, reason: "package declarations are newer than the installed package directory" }
   }
 

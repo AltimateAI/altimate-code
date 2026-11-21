@@ -26,6 +26,13 @@ describe("retryParseManifest", () => {
     expect(s.calls).toBe(3)
   })
 
+  test("a failed project check without a target does not wait for a missing manifest", async () => {
+    const s = source([undefined, { nodes: 2 }])
+    retryParseManifest(s, { baseDelayMs: 1, shouldRetry: () => false })
+    expect(await s.parseManifest()).toBeUndefined()
+    expect(s.calls).toBe(1)
+  })
+
   test("gives up after the attempt limit and reports the absence", async () => {
     const s = source([undefined])
     retryParseManifest(s, { attempts: 4, baseDelayMs: 1 })

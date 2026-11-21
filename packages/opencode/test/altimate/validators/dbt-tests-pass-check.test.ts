@@ -106,6 +106,14 @@ describe("dbt-tests-pass still fails when tests exist and fail, or cannot run", 
     expect(r.fixHint).not.toMatch(FIX_THE_SQL)
   })
 
+  test.each([NO_TESTS, PASSING])("a confirmed failed dbt command cannot pass on its stdout", async (stdout) => {
+    await fake.touchModel("orders")
+    await fake.respond("test", "orders", JSON.stringify({ stdout, error: "dbt failed", dbt_exit_code: 2 }), 1)
+    const status = await DbtTestsPassValidator.check(ctxFor(fake.project))
+    expect(status.ok).toBe(false)
+    expect(status.details).toMatchObject({ errored: 1 })
+  })
+
   test("'Nothing to do' next to an abort marker is not trusted as 'no tests'", async () => {
     const r = await run({ orders: { stdout: `${LOCK_ERROR}\n[WARNING]: Nothing to do. Try checking your model configs and model specification args\n` } })
     expect(r.ok).toBe(false)

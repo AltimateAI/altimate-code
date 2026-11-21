@@ -83,9 +83,10 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
   test("changed declarations invalidate an older install without a lock or stamp", async () => {
     writeProject()
     installPackage("1.0.0")
-    const older = new Date(Date.now() - 60_000)
-    utimesSync(join(root, "dbt_packages"), older, older)
     writeProject({ packages: `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n` })
+    const now = Date.now()
+    utimesSync(join(root, "dbt_packages"), new Date(now - 250), new Date(now - 250))
+    utimesSync(join(root, "packages.yml"), new Date(now), new Date(now))
     const c = counter()
     expect((await ensurePackages(root, c.install)).action).toBe("installed")
     expect(c.calls).toBe(1)

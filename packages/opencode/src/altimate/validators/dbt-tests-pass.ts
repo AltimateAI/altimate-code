@@ -195,9 +195,16 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
       }
       const dbtLog = typeof envelope.stdout === "string" ? envelope.stdout : ""
       const summary = parseDbtTestOutput(dbtLog)
-      // altimate-dbt reports `error` whenever dbt wrote anything to stderr, even on a
-      // run that completed, so a parsed summary or dbt's "Nothing to do" notice in
-      // stdout outranks the envelope's error text.
+      // The producer's dbt exit status is authoritative even if its log contains
+      // empty-selection or success text. Keep individual failing tests when available.
+      const dbtExitCode = envelope.dbt_exit_code
+      if (typeof dbtExitCode === "number" && dbtExitCode !== 0 && (!summary || summary.error === 0)) {
+        const error = typeof envelope.error === "string" ? envelope.error : `dbt exited with code ${dbtExitCode}`
+        resolve({ model, error: error.slice(0, 500) })
+        return
+      }
+      // Older producers reported stderr as an error even on success. Their
+      // passing summary or empty-selection message still outranks benign logs.
       if (!summary) {
         // stderr text is checked for abort markers too: an error that only reached stderr must
         // not be hidden behind a "Nothing to do" in stdout.

@@ -49,6 +49,9 @@ export async function test(adapter: DBTProjectIntegrationAdapter, args: string[]
   if (!model) return { error: "Missing --model" }
   const result = await adapter.unsafeRunModelTestImmediately(model)
   const formatted = formatCommandResult(result)
+  if (result?.exitCode && result.exitCode !== 0) {
+    return { ...formatted, dbt_exit_code: result.exitCode }
+  }
   if (
     "error" in formatted ||
     /does not match any (?:enabled )?nodes?|Encountered an error|Compilation Error|Parsing Error|Runtime Error|Database Error|Could not set lock|Done\.\s+PASS=/i.test(formatted.stdout)

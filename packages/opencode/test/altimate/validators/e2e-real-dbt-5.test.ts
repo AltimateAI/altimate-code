@@ -142,8 +142,10 @@ models:
     columns:
       - name: id
 `)
-    spawnSync(ALTIMATE_DBT_BIN, ["init", "--python-path", join(resolve(Bun.which("dbt")!, ".."), "python3")], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
-    spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
+    const init = spawnSync(ALTIMATE_DBT_BIN, ["init", "--python-path", join(resolve(Bun.which("dbt")!, ".."), "python3")], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    expect(init.status, init.stdout + init.stderr).toBe(0)
+    const build = spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
+    expect(build.status, build.stdout + build.stderr).toBe(0)
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(true)
     expect(r.fixHint).toBeUndefined()
