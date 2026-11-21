@@ -257,7 +257,10 @@ function describeSource(file: string | undefined, declaringPackage: string | und
 // the relation under test and other kwargs (e.g. relationships.to) may add refs.
 function legacyTestModel(model: unknown, dependencies: string[]): string | undefined {
   if (typeof model === "string") {
-    const ref = /^\s*{{\s*ref\(\s*(['"])([\w-]+)\1(?:\s*,\s*(['"])([\w-]+)\3)?(?:\s*,\s*(?:v|version)\s*=\s*(\d+))?\s*\)\s*}}\s*$/.exec(model)
+    const expression = /^\s*{{\s*(.*?)\s*}}\s*$/s.exec(model)?.[1]
+    if (!expression) return undefined
+    const relation = /^get_where_subquery\(\s*(.*?)\s*\)$/s.exec(expression)?.[1] ?? expression
+    const ref = /^ref\(\s*(['"])([\w-]+)\1(?:\s*,\s*(['"])([\w-]+)\3)?(?:\s*,\s*(?:v|version)\s*=\s*(\d+))?\s*\)$/.exec(relation)
     if (ref) {
       const [, , first, , second, version] = ref
       const candidates = dependencies.filter((id) => {
@@ -268,8 +271,13 @@ function legacyTestModel(model: unknown, dependencies: string[]): string | undef
       })
       return candidates.length === 1 ? candidates[0] : undefined
     }
-    // A source or opaque expression cannot establish which model the test reads.
-    return undefined
+    const source = /^source\(\s*(['"])([\w-]+)\1\s*,\s*(['"])([\w-]+)\3\s*\)$/.exec(relation)
+    if (!source) return undefined
+    const candidates = dependencies.filter((id) => {
+      const [resource, , name, table] = id.split(".")
+      return resource === "source" && name === source[2] && table === source[4]
+    })
+    return candidates.length === 1 ? candidates[0] : undefined
   }
   return dependencies.length === 1 ? dependencies[0] : undefined
 }

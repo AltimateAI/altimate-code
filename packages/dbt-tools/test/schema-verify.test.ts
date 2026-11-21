@@ -190,14 +190,15 @@ describe("schema-verify command", () => {
   })
 
   test.each([
-    ["{{ ref('target') }}", "mismatch", "tested-column-missing"],
-    ["{{ ref('proj', 'customers') }}", "match", undefined],
-    [undefined, "mismatch", "test-attachment-unverified"],
-  ] as const)("a legacy relationship test with two dependencies and model %s", async (model, verdict, kind) => {
+    ["{{ get_where_subquery(ref('target')) }}", "model.proj.customers", "mismatch", "tested-column-missing"],
+    ["{{ ref('proj', 'customers') }}", "model.proj.customers", "match", undefined],
+    ["{{ get_where_subquery(source('raw', 'customers')) }}", "source.proj.raw.customers", "match", undefined],
+    [undefined, "model.proj.customers", "mismatch", "test-attachment-unverified"],
+  ] as const)("a legacy relationship test with two dependencies and model %s", async (model, otherDependency, verdict, kind) => {
     const adapter = makeAdapter({
       expectedColumns: { id: col("id"), customer_id: col("customer_id") },
       actualColumns: [db("id")],
-      legacyRelationship: { dependencies: ["model.proj.customers", "model.proj.target"], model },
+      legacyRelationship: { dependencies: [otherDependency, "model.proj.target"], model },
     })
     const result = await schemaVerify(adapter, ["--model", "target"])
     expect(result).toMatchObject({
