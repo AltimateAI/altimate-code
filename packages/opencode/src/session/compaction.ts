@@ -234,7 +234,8 @@ export namespace SessionCompaction {
     const adjusted = reportedContextTokens({
       tokens: input.tokens,
       estimatedTokens: input.estimatedTokens,
-      fraction: contextSafetyFraction(config),
+      // Resolve the fraction only when an estimate needs it (an invalid override warns on each read).
+      fraction: (input.estimatedTokens ?? 0) > 0 ? contextSafetyFraction(config) : 1,
     })
     const threshold = overflowThreshold({ base, headroom, fraction: 1 })
     return adjusted >= threshold

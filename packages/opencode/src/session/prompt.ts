@@ -1588,7 +1588,14 @@ export namespace SessionPrompt {
       // counted, and one oversized output can jump the session past the window
       // between checks (a common failure mode for long headless runs). Estimate the
       // uncounted tail and include it.
-      const uncountedTail = estimateUncountedTail(msgs, lastFinished?.id)
+      // Messages after the last finished turn by stored order (caller-supplied IDs carry no chronology).
+      const measuredID = lastFinished?.id
+      const isAfterMeasured = (id: MessageID) => {
+        if (!measuredID) return false
+        const order = compareMessageOrder(messageOrder, id, measuredID)
+        return order !== 0 ? order > 0 : id > measuredID
+      }
+      const uncountedTail = estimateUncountedTail(msgs, measuredID, isAfterMeasured)
       if (
         lastFinished &&
         lastFinished.summary !== true &&
@@ -2242,8 +2249,20 @@ export namespace SessionPrompt {
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
       const compactable = measured !== undefined && loopConfig.compaction?.auto !== false
+      // Attachments the provider has not counted (in the last turn's tool results or later messages)
+      // are not in the tail estimate: leave those requests to the estimate.
+      const unmeasuredMedia = msgs.some(
+        (msg) =>
+          (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
+          msg.parts.some(
+            (part) =>
+              part.type === "file" ||
+              (part.type === "tool" && part.state.status === "completed" && (part.state.attachments?.length ?? 0) > 0),
+          ),
+      )
       const reportedInputTokens =
         measured &&
+        !unmeasuredMedia &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
@@ -2251,7 +2270,7 @@ export namespace SessionPrompt {
           ? reportedContextTokens({
               tokens: measured.tokens,
               estimatedTokens: uncountedTail,
-              fraction: SessionCompaction.contextSafetyFraction(loopConfig),
+              fraction: uncountedTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
             })
           : undefined
       // altimate_change end
@@ -2313,6 +2332,9 @@ export namespace SessionPrompt {
         // altimate_change end
       })
 
+      // altimate_change start — a pre-send refusal sent nothing: it does not consume the agent's step cap
+      if (processor.refusedBeforeSend) modelSteps--
+      // altimate_change end
       // altimate_change start - finalize buffered echoes before publishing any text to clients
       const stepParts = MessageV2.parts(processor.message.id)
       // Capture before post-processing can fail or request compaction.
@@ -3782,7 +3804,11 @@ export namespace SessionPrompt {
    * figure); its own text is not (already inside `tokens.output`).
    * Everything after it is counted in full.
    */
-  export function estimateUncountedTail(msgs: MessageV2.WithParts[], lastFinishedID: MessageID | undefined): number {
+  export function estimateUncountedTail(
+    msgs: MessageV2.WithParts[],
+    lastFinishedID: MessageID | undefined,
+    isAfter: (id: MessageID) => boolean = (id) => id > lastFinishedID!,
+  ): number {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
     if (!lastFinished) return 0
@@ -3803,10 +3829,10 @@ export namespace SessionPrompt {
       if (part.type === "tool") tokens += Token.estimate(toolText(part))
     }
     // filterCompacted deliberately reorders retained-tail and summary messages,
-    // so array position is not chronology. IDs are monotonic; select genuinely
-    // newer messages by ID regardless of their rendered position.
+    // so array position is not chronology. Select genuinely newer messages by
+    // the caller's stored order (default: monotonic IDs), not rendered position.
     for (const m of msgs) {
-      if (m.info.id <= lastFinishedID) continue
+      if (m.info.id === lastFinishedID || !isAfter(m.info.id)) continue
       for (const part of m.parts) {
         if (part.type === "text") tokens += Token.estimate(part.text ?? "")
         if (part.type === "tool") tokens += Token.estimate(toolText(part))

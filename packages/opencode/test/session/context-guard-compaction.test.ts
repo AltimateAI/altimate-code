@@ -180,7 +180,9 @@ type Seeded = {
   user: string | string[]
   assistantUsage?: number
   next?: string
-  last?: { modelID?: string; agent?: string; finish?: string; text?: string }
+  last?: { modelID?: string; agent?: string; finish?: string; text?: string; toolOutput?: string }
+  /** A file attached to the `next` user turn. */
+  nextFile?: boolean
 }
 
 /** Seed [user history, finished assistant with provider usage, new user turn] and run the loop. */
@@ -228,6 +230,24 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         type: "text",
         text: last.text ?? "The top customers by paid revenue are listed above.",
       } as any)
+      if (last.toolOutput !== undefined) {
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID,
+          type: "tool",
+          callID: "call_revenue_query",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: { command: "run the revenue query" },
+            output: last.toolOutput,
+            title: "revenue query",
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+        } as any)
+      }
     })
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
     for (const [index, text] of turns.entries()) {
@@ -236,7 +256,20 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       if (!last) yield* answer(msg.id, 0)
       else if (seeded.assistantUsage !== undefined) yield* answer(msg.id, seeded.assistantUsage, seeded.last)
     }
-    if (seeded.next !== undefined) yield* user(seeded.next)
+    if (seeded.next !== undefined) {
+      const next = yield* user(seeded.next)
+      if (seeded.nextFile) {
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: next.id,
+          sessionID,
+          type: "file",
+          mime: "text/plain",
+          filename: "orders.csv",
+          url: `data:text/plain;base64,${Buffer.from("order_id,amount\n1,10\n").toString("base64")}`,
+        } as any)
+      }
+    }
 
     yield* prompt.loop({ sessionID })
 
@@ -461,12 +494,17 @@ it.live(
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
         // [earlier turn] [current user turn] [a finished tool step of the current turn] -> refusal.
+        // The step's completed tool result must survive compaction.
         yield* llm.text("summary of the revenue analysis so far")
         yield* llm.text("Revenue is concentrated in the top ten customers.")
         const result = yield* runSession(dir, llm, {
           user: ["List the top customers by paid revenue.", sqlJsonHistory(100_000)],
           assistantUsage: 0,
-          last: { finish: "tool-calls", text: "Step result of the current turn: 42 customers above threshold." },
+          last: {
+            finish: "tool-calls",
+            text: "Running the revenue query.",
+            toolOutput: "Step result of the current turn: 42 customers above threshold.",
+          },
         })
 
         expect(result.errors).toEqual([])
@@ -481,13 +519,64 @@ it.live(
   { timeout: 120_000 },
 )
 
+it.live(
+  "a new attachment keeps the estimate in charge: the guard trips and the session compacts",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // Same as the regression above, but the new turn attaches a file the tail estimate cannot see.
+        yield* llm.text("summary of the revenue analysis so far")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonHistory(88_000),
+          assistantUsage: 108_000,
+          next: "Summarize the revenue concentration.",
+          nextFile: true,
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries.length).toBe(1)
+        expect(result.hits.length).toBe(2)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a refused attempt does not consume the agent's step cap",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // steps: 2. Counting the refused attempt would make the retry the last step: tools removed
+        // and a final answer forced before any work.
+        yield* llm.text("summary of the revenue analysis so far")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonHistory(100_000),
+          assistantUsage: 0,
+          next: "Summarize the revenue concentration.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries.length).toBe(1)
+        expect(result.hits.length).toBe(2)
+        const retry = result.hits[1]!.body as { tools?: unknown[] }
+        expect(retry.tools?.length ?? 0).toBeGreaterThan(0)
+        expect(JSON.stringify(retry)).not.toContain("maximum number of steps")
+      }),
+      { git: true, config: (url: string) => ({ ...providerCfg(LARGE_WINDOW)(url), agent: { build: { steps: 2 } } }) },
+    ),
+  { timeout: 120_000 },
+)
+
 describe("guard calibration", () => {
   test("uses the smaller provider-reported size, and the estimate when usage is missing or unusable", () => {
     expect(calibratedInputTokens(128_000, 108_400)).toBe(108_400)
     // Reported usage never raises the estimate: the guard stays at least as permissive as before.
     expect(calibratedInputTokens(90_000, 108_400)).toBe(90_000)
-    // Nor lowers it below three quarters of the estimate (partial usage, a request that changed since).
-    expect(calibratedInputTokens(128_000, 2_000)).toBe(96_000)
+    // Nor lowers it below 60% of the estimate (partial usage, a request that changed since).
+    expect(calibratedInputTokens(128_000, 2_000)).toBe(76_800)
     for (const reported of [undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(calibratedInputTokens(128_000, reported)).toBe(128_000)
     }

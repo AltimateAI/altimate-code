@@ -22,10 +22,10 @@ const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
 /**
  * Lowest share of the character estimate that provider-reported usage may calibrate the guard to.
- * The estimate runs ~15-20% high on SQL/JSON; the floor bounds an undercount from usage that missed
- * inputs that changed since (per-step tool selection, refreshed rules, partial usage reporting).
+ * The estimate runs ~15-20% high on SQL/JSON and higher on tool schemas; the floor bounds an
+ * undercount from usage that missed inputs changed since (per-step tool selection, refreshed rules).
  */
-const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.75
+const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.6
 const EMOJI = /\p{Extended_Pictographic}/u
 const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
 const DENSE_ASCII_MIN_LENGTH = 32
