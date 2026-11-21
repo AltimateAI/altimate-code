@@ -76,7 +76,10 @@ export async function collectChangedFiles(opts: CollectOptions): Promise<Changed
       // A rename's hunk diff must name BOTH paths: limiting the pathspec to the
       // new path hides the old one from git, so it cannot pair the rename and
       // reports every line as added.
-      const pathspec = oldPath ? [oldPath, newPath] : [newPath]
+      // `--name-status` paths are repo-root relative while git resolves a
+      // pathspec against the cwd (the dbt project, often a subdirectory), so
+      // anchor them at the top or the hunk diff comes back empty.
+      const pathspec = (oldPath ? [oldPath, newPath] : [newPath]).map((p) => `:(top)${p}`)
       let diff = ""
       try {
         diff = await git(["diff", "-M", ...range, "--", ...pathspec], opts.cwd)
@@ -162,6 +165,41 @@ export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
     return root || undefined
   } catch {
     return undefined
+  }
+}
+
+/** Every tracked file at `ref` (default HEAD), repo-root relative; undefined when git can't list it. */
+export async function listFilesAt(cwd: string, ref?: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(["ls-tree", "-r", "--full-tree", "--name-only", ref || "HEAD"], cwd)
+    return out.split("\n").filter(Boolean)
+  } catch {
+    return undefined
+  }
+}
+
+/** Files in the index plus untracked, non-ignored files (the working tree), repo-root relative; undefined when git fails. */
+export async function listWorkingTreeFiles(cwd: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(["ls-files", "--full-name", "--cached", "--others", "--exclude-standard", "--", ":(top)"], cwd)
+    return out.split("\n").filter(Boolean)
+  } catch {
+    return undefined
+  }
+}
+
+/** Matches of `pattern` (extended regex) under the repo-root-relative `pathspec`, as `ref:path:match` lines;
+ *  undefined when git fails. With no `ref` it searches the working tree (tracked and untracked, non-ignored
+ *  files) and the ref part of each line is empty (`:path:match`). */
+export async function grepMatchesAt(cwd: string, ref: string | undefined, pattern: string, pathspec: string): Promise<string[] | undefined> {
+  try {
+    const where = ref ? [ref] : ["--untracked"]
+    const out = await git(["grep", "--full-name", "-o", "-E", "-e", pattern, ...where, "--", `:(top)${pathspec}`], cwd)
+    const lines = out.split("\n").filter(Boolean)
+    return ref ? lines : lines.map((l) => ":" + l)
+  } catch (e) {
+    // git grep exits 1 when nothing matches
+    return (e as { code?: number }).code === 1 ? [] : undefined
   }
 }
 

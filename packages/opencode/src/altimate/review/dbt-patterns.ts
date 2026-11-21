@@ -140,24 +140,10 @@ const detectClock: Detector = (c) => {
   })
 }
 
-// 4. SELECT * added (warehouse cost + fragility on columnar warehouses).
-const detectSelectStar: Detector = (c) => {
-  const hit = c.added.find((l) => /^\s*select\s+\*/i.test(stripComments(l)) && !/select\s+\*\s+from\s+\{\{/i.test(l))
-  if (!hit) return null
-  return makeFinding({
-    severity: "suggestion",
-    category: "warehouse_cost",
-    title: `${c.model}: SELECT * scans all columns`,
-    body:
-      "`SELECT *` reads every column on a columnar warehouse (Snowflake/BigQuery) and makes the model fragile to " +
-      "upstream column adds. Select only the columns you need.",
-    file: c.file.path,
-    model: c.model,
-    confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "select_star", line: hit.trim() } },
-    ruleKey: "warehouse_cost:select-star",
-  })
-}
+// 4. SELECT * — covered by the catalog's "SELECT * in final projection" rule, which
+// fires only when the model's final SELECT reads straight from another relation.
+// A `select *` from a CTE or an import CTE is the dbt style-guide idiom, and
+// columnar engines prune the unused columns, so it is not flagged per line.
 
 // 5. LEFT/RIGHT JOIN silently collapsed to INNER by a WHERE/AND on the outer table.
 
@@ -180,15 +166,69 @@ const detectCrossJoin: Detector = (c) => {
   })
 }
 
+const INFLATING_AGGREGATE = /\b(sum|avg)\s*\(|\bcount\s*\(\s*(?!distinct\b)/i
+const NULL_CONSUMING_CALL =
+  /\b(sum|count|avg|min|max|any_value|array_agg|listagg|string_agg|count_if|bool_or|bool_and|coalesce|ifnull|nvl|nullif)\s*\(\s*(distinct\s+)?$/i
+
+/** The SELECT bodies of a query: each CTE body and each UNION branch, split at top level. */
+function selectScopes(sql: string): string[] {
+  const scopes: string[] = []
+  let depth = 0
+  let start = 0
+  const cut = (end: number) => {
+    const s = sql.slice(start, end).trim()
+    if (s) scopes.push(s)
+  }
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]
+    if (ch === "(") {
+      depth++
+      if (depth === 1 && /\bas\s*$/i.test(sql.slice(Math.max(0, i - 8), i))) {
+        cut(i)
+        start = i + 1
+      }
+    } else if (ch === ")") {
+      if (depth === 1) {
+        cut(i)
+        start = i + 1
+      }
+      depth = Math.max(0, depth - 1)
+    } else if (depth <= 1 && /^\bunion\b/i.test(sql.slice(i, i + 6)) && /\W/.test(sql[i - 1] ?? " ")) {
+      cut(i)
+      start = i + 5
+    }
+  }
+  cut(sql.length)
+  return scopes
+}
+
+/** True when one relation is read twice in a scope's own FROM … JOIN chain. */
+function scopeJoinsItself(scope: string): boolean {
+  // Mask nested parentheses so a subquery's FROM counts as its own scope.
+  let depth = 0
+  let flat = ""
+  for (const ch of scope) {
+    if (ch === "(") depth++
+    if (depth === 0) flat += ch
+    else flat += ch === "\n" ? "\n" : " "
+    if (ch === ")") depth = Math.max(0, depth - 1)
+  }
+  const rels = [...flat.matchAll(/\b(?:from|join)\s+(\{\{[^}]*\}\}|[\w."`]+)/gi)].map((m) => m[1].replace(/\s+/g, "").toLowerCase())
+  return /\bjoin\b/i.test(flat) && rels.some((r, i) => rels.indexOf(r) !== i)
+}
+
 // 7. A new JOIN added into a model that aggregates → likely fan-out inflating SUM/COUNT.
 const detectFanout: Detector = (c) => {
   const sql = stripComments(c.newSql)
-  const aggregates = /\b(sum|count|avg|min|max)\s*\(/i.test(sql) && /\bgroup\s+by\b/i.test(sql)
+  // MIN/MAX and COUNT(DISTINCT …) return the same value however often a row repeats;
+  // only SUM, AVG and a plain COUNT inflate under a fan-out join.
+  const aggregates = INFLATING_AGGREGATE.test(sql) && /\bgroup\s+by\b/i.test(sql)
   if (!aggregates) return null
   const newJoins = c.added.filter((l) => /\bjoin\b/i.test(stripComments(l)) && !/\bcross\s+join\b/i.test(l))
   if (newJoins.length < 1) return null
   return makeFinding({
-    severity: "warning",
+    // A "may": the join's cardinality is unknown here (1 partial match in 254 on replay).
+    severity: "suggestion",
     category: "fanout",
     title: `${c.model}: new join before an aggregate may fan out and inflate metrics`,
     body:
@@ -342,11 +382,37 @@ const detectDedupLoadTimestamp: Detector = (c) => {
   return null
 }
 
+const NOT_COLUMN = new Set([
+  "year", "month", "day", "week", "quarter", "hour", "minute", "second", "epoch", "dow", "doy", "from", "as", "date", "timestamp",
+  "timestamp_ntz", "timestamp_tz", "datetime", "time", "boolean", "bool", "int", "integer", "bigint", "smallint", "numeric", "decimal",
+  "float", "double", "real", "varchar", "char", "string", "text", "current_date", "current_timestamp", "now", "null", "true", "false",
+  "interval", "with", "zone", "at", "precision",
+])
+
+/** True when a partition-defeating function in the line wraps a bare column (not a literal, var or clock). */
+function wrapsColumn(line: string): boolean {
+  const s = line.replace(/'(?:[^']|'')*'/g, "''").replace(/\{\{[\s\S]*?\}\}/g, " ")
+  for (const m of s.matchAll(/\b(extract|date_trunc|date|year|month|cast|trunc)\s*\(/gi)) {
+    let depth = 1
+    let i = (m.index ?? 0) + m[0].length
+    const start = i
+    while (i < s.length && depth > 0) {
+      if (s[i] === "(") depth++
+      else if (s[i] === ")") depth--
+      i++
+    }
+    const args = s.slice(start, i - 1)
+    const idents = [...args.matchAll(/(?<![\w.'])([a-z_][\w]*(?:\.[a-z_][\w]*)*)(?!\s*\()/gi)].map((x) => x[1].toLowerCase())
+    if (idents.some((x) => !NOT_COLUMN.has(x.split(".").pop()!))) return true
+  }
+  return false
+}
+
 // 11. Function/cast wrapped around a column in an added WHERE — defeats partition pruning.
 const detectPartitionFunction: Detector = (c) => {
   const hit = c.added.find((l) => {
     const s = stripComments(l)
-    return /^\s*(where|and)\b/i.test(s) && /\b(extract|date_trunc|date|year|month|cast|trunc)\s*\(/i.test(s)
+    return /^\s*(where|and)\b/i.test(s) && wrapsColumn(s)
   })
   if (!hit) return null
   return makeFinding({
@@ -649,8 +715,13 @@ const detectHavingNoGroupBy: Detector = (c) => {
 // 34. CASE expression with no ELSE → silent NULLs for unmatched rows.
 const detectCaseNoElse: Detector = (c) => {
   const joined = stripComments(c.added.join("\n"))
-  const m = /\bcase\b[\s\S]*?\bend\b/i.exec(joined)
-  if (!m || /\belse\b/i.test(m[0])) return null
+  // NULL for unmatched rows is the point of a CASE inside an aggregate or a null-handling
+  // call: the `max(case when k = 'x' then v end)` pivot, `count(case when … then 1 end)`,
+  // `coalesce(case … end, fallback)`. Only a bare CASE leaks NULLs unintentionally.
+  const bare = [...joined.matchAll(/\bcase\b[\s\S]*?\bend\b/gi)].find(
+    (m) => !/\belse\b/i.test(m[0]) && !NULL_CONSUMING_CALL.test(joined.slice(0, m.index)),
+  )
+  if (!bare) return null
   return pattern(
     c,
     "sql_correctness",
@@ -694,11 +765,12 @@ const detectNaturalJoin: Detector = (c) => {
 // 38. Self-join: same ref()/source() appears 2+ times.
 const detectSelfJoin: Detector = (c) => {
   if (!addedHit(c, /\bjoin\b/i)) return null
-  const refs = [...stripComments(c.newSql).matchAll(/\{\{\s*(ref|source)\([^)]*\)\s*\}\}/gi)].map((m) =>
-    m[0].replace(/\s+/g, ""),
+  // A self-join reads one relation twice in the same FROM … JOIN chain. The same ref in two
+  // CTEs, or in two UNION branches, is two separate reads, not a self-join.
+  const sql = stripComments(c.newSql).replace(/\{\{\s*(ref|source)\s*\(([^)]*)\)\s*\}\}/gi, (_, kind, args) =>
+    `__${kind}_${String(args).replace(/\W+/g, "_")}__`.toLowerCase(),
   )
-  const dup = refs.find((r, i) => refs.indexOf(r) !== i)
-  if (!dup) return null
+  if (!selectScopes(sql).some(scopeJoinsItself)) return null
   return pattern(
     c,
     "join_risk",
@@ -711,7 +783,26 @@ const detectSelfJoin: Detector = (c) => {
 
 // 39. Window function without PARTITION BY (whole-table window — often unintended).
 const detectWindowNoPartition: Detector = (c) => {
-  const hit = c.added.find((l) => /\bover\s*\(/i.test(stripComments(l)) && !/partition\s+by/i.test(l))
+  // Read each OVER clause whole: `over (` on one line and `partition by` on the next is partitioned.
+  const changed = c.added.map((l) => stripComments(l).trim()).filter((l) => /\bover\s*\(/i.test(l))
+  const whole = stripComments(c.newSql ?? "")
+  const sql = /\bover\s*\(/i.test(whole) ? whole : changed.join("\n")
+  const unpartitioned = [...sql.matchAll(/\bover\s*\(/gi)].some((m) => {
+    const open = m.index! + m[0].length - 1
+    let depth = 0
+    let end = sql.length
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "(") depth++
+      else if (sql[i] === ")" && --depth === 0) {
+        end = i
+        break
+      }
+    }
+    const lineStart = sql.lastIndexOf("\n", m.index!) + 1
+    const head = sql.slice(lineStart, open + 1).trim()
+    return changed.some((l) => l.includes(head)) && !/partition\s+by/i.test(sql.slice(open, end))
+  })
+  const hit = unpartitioned ? changed[0] : undefined
   if (!hit) return null
   return pattern(
     c,
@@ -726,7 +817,8 @@ const detectWindowNoPartition: Detector = (c) => {
 
 // 40. BETWEEN on a timestamp/date — inclusive upper bound off-by-one.
 const detectBetweenTimestamp: Detector = (c) => {
-  const hit = c.added.find((l) => /\bbetween\b/i.test(stripComments(l)) && /(_at|_ts|date|timestamp|_time)\b/i.test(l))
+  // On a DATE column BETWEEN is the right inclusive range; the off-by-one needs a time part.
+  const hit = c.added.find((l) => /\b[\w.]*(_at|_ts|timestamp|datetime|_time)\s+between\b/i.test(stripComments(l)))
   if (!hit) return null
   return pattern(
     c,
@@ -823,7 +915,6 @@ const detectMultiCountDistinct: Detector = (c) => {
 
 const MODEL_DETECTORS: Detector[] = [
   detectClock,
-  detectSelectStar,
   detectCrossJoin,
   detectFanout,
   detectNotIn,
@@ -857,6 +948,64 @@ const MODEL_DETECTORS: Detector[] = [
   detectOffsetNoOrder,
   detectMultiCountDistinct,
 ]
+
+/**
+ * A changed macro: the catalog rules marked `macros`, and `var('x')` read with no
+ * default when `x` isn't set in dbt_project.yml (in a package, every project that
+ * doesn't set it fails to compile).
+ */
+export const ADAPTERS = ["bigquery", "snowflake", "databricks", "spark", "redshift", "postgres", "trino", "athena", "duckdb", "exasol", "synapse", "sqlserver", "fabric", "oracle", "clickhouse", "presto"]
+
+/** The adapter a macro file is specific to, from its directory or its macros' `<adapter>__` prefix. */
+function macroAdapter(p: string, sql: string): string | undefined {
+  const seg = p.toLowerCase().split("/").find((s) => ADAPTERS.includes(s))
+  if (seg) return seg
+  const names = [...sql.matchAll(/\{%-?\s*macro\s+(\w+?)__\w+/g)].map((m) => m[1].toLowerCase())
+  return names.length && names.every((n) => n === names[0]) && ADAPTERS.includes(names[0]) ? names[0] : undefined
+}
+
+export function detectMacroPatterns(
+  file: ChangedFile,
+  newSql: string,
+  rubric: Rubric,
+  projectVars: Set<string>,
+  catalogCtx?: CatalogContext,
+): Finding[] {
+  if (fileKind(file) !== "macro" || file.status === "deleted") return []
+  const { added, removed } = splitDiff(file.diff)
+  // An adapter's own variant (`macros/…/bigquery/x.sql`, `{% macro bigquery__x %}`) runs only on that
+  // adapter, so portability advice applies only where that adapter lacks the construct.
+  const adapter = macroAdapter(file.path, newSql)
+  const out = evaluateCatalog(file, newSql, added, removed, rubric, catalogCtx).filter((f) => {
+    if (!adapter || f.evidence?.tool !== "rule-catalog" || (f.evidence.result as { portability?: boolean })?.portability !== true) return true
+    const worksOn = (f.evidence.result as { worksOn?: string[] }).worksOn
+    return !!worksOn && !worksOn.includes(adapter)
+  })
+  const model = modelNameFromPath(file.path)
+  const seen = new Set<string>()
+  for (const line of added) {
+    for (const m of stripComments(line).matchAll(/\bvar\(\s*['"]([\w.]+)['"]\s*\)/g)) {
+      const name = m[1]
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      if (seen.has(name) || projectVars.has(name) || new RegExp(`var\\(\\s*['"]${esc}['"]\\s*,`).test(newSql)) continue
+      seen.add(name)
+      out.push(
+        makeFinding({
+          severity: "suggestion",
+          category: "materialization",
+          title: `${model}: var('${name}') read with no default in a macro`,
+          body: `\`var('${name}')\` has no default and isn't set in dbt_project.yml, so any project that calls this macro without setting it fails to compile. Pass a default: \`var('${name}', <default>)\`.`,
+          file: file.path,
+          model,
+          confidence: "high",
+          evidence: { tool: "dbt-patterns", result: { rule: "macro-var-no-default", var: name } },
+          ruleKey: `materialization:macro-var-no-default`,
+        }),
+      )
+    }
+  }
+  return out.filter((f) => !exclusionReason(f, rubric))
+}
 
 /** Run the dbt anti-pattern detectors over a changed MODEL file. */
 export function detectModelPatterns(
@@ -907,7 +1056,9 @@ export function detectModelPatterns(
  * (column is empty string for model-level tests). Yields nothing when the
  * document isn't shaped like a schema.yml.
  */
-function extractTestOccurrences(doc: unknown): Set<string> {
+/** `declared`, when given, collects every column each entity declares in the
+ *  yml (tested or not), keyed like the occurrence entity. */
+function extractTestOccurrences(doc: unknown, declared?: Map<string, Set<string>>): Set<string> {
   const out = new Set<string>()
   if (!doc || typeof doc !== "object") return out
   const d = doc as Record<string, unknown>
@@ -969,6 +1120,10 @@ function extractTestOccurrences(doc: unknown): Set<string> {
         const c = col as Record<string, unknown>
         const cname = typeof c.name === "string" ? c.name : undefined
         if (!cname) continue
+        if (declared) {
+          if (!declared.has(entityName)) declared.set(entityName, new Set())
+          declared.get(entityName)!.add(cname)
+        }
         emitTests(entityName, cname, c.tests)
         emitTests(entityName, cname, c.data_tests)
       }
@@ -1462,11 +1617,25 @@ export function detectSchemaYmlPatterns(
       ? oldDoc !== undefined
       : newDoc !== undefined && (isAddedFile || oldDoc !== undefined)
     if (canCommit) {
-      const oldSet = extractTestOccurrences(oldDoc ?? {})
-      const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc)
+      const oldCols = new Map<string, Set<string>>()
+      const newCols = new Map<string, Set<string>>()
+      const oldSet = extractTestOccurrences(oldDoc ?? {}, oldCols)
+      const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc, newCols)
+      // A test that moved with a column rename is not a removal: the old column
+      // is no longer declared in the yml and exactly one newly declared column
+      // on the same model carries the same test. Column existence comes from
+      // the yml's `columns:` lists, not from which columns still have tests.
+      const movedTo = (model: string, column: string, testField: string) =>
+        !!column &&
+        !newCols.get(model)?.has(column) &&
+        [...newSet].filter((k) => {
+          const [mod, col, tf] = k.split("\x00")
+          return mod === model && tf === testField && !!col && !oldCols.get(model)?.has(col)
+        }).length === 1
       for (const key of oldSet) {
         if (newSet.has(key)) continue
         const [model, column, testField] = key.split("\x00")
+        if (movedTo(model, column, testField)) continue
         // `testField` may carry a `\x01<to>\x02<field>` discriminator for
         // `relationships` tests so multiple relationships on the same column
         // don't collapse to one removal (MINOR #4). Strip it for display;
@@ -1660,14 +1829,15 @@ export function detectSchemaYmlPatterns(
       : `Add \`not_null\` to \`${g.column}\`'s \`data_tests:\` on \`${g.model}\` (contract is not enforced, so a \`constraints:\` entry would be inert — use a data_test).`
     findings.push(
       makeFinding({
-        severity: clampSeverity("test_coverage", "warning", "high"),
+        severity: "suggestion",
         category: "test_coverage",
         title: `${filename}: grain column \`${g.column}\` in unique_combination_of_columns lacks \`not_null\` on \`${g.model}\``,
         body:
           `The \`unique_combination_of_columns\` test on \`${g.model}\` names \`${g.column}\` as a grain key, but no \`not_null\` ` +
           `coverage is declared for it (either as a \`constraints:\` entry on a contracted model, or as a \`data_tests: [not_null]\` ` +
-          `on a view). A NULL grain-key value silently passes the uniqueness test, so a fan-out or duplicate bug can ship without ` +
-          `any test catching it. ${recommendation}`,
+          `on a view). The uniqueness test still catches duplicates (rows with NULL keys group together), but nothing stops NULL ` +
+          `grain keys themselves, and as an incremental \`unique_key\` a NULL never matches on merge, so those rows are re-inserted every run. ` +
+          `${recommendation}`,
         file: file.path,
         model: g.model,
         column: g.column,

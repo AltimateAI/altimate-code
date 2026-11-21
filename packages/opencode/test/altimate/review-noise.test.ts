@@ -9,7 +9,7 @@ import {
 } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
-import { makeFinding, type Finding } from "../../src/altimate/review/finding"
+import { makeFinding, mergeRepeats, type Finding } from "../../src/altimate/review/finding"
 import {
   findingMarker,
   inlineComments,
@@ -144,10 +144,12 @@ describe("summary grouping and budget", () => {
     expect(md).toContain("4 findings across 4 model(s): `a`, `b`, `c`, `d`")
   })
 
-  test("two occurrences stay as separate bullets", () => {
+  test("two occurrences group; a single one stays its own bullet", () => {
     const fs = ["a", "b"].map((m) => finding({ model: m, file: `models/${m}.sql`, title: `${m}: new model has no uniqueness/grain test` }))
     const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
-    expect(md.match(/no uniqueness\/grain test/g)?.length).toBe(2)
+    expect(md).toContain("2 findings across 2 model(s)")
+    const one = renderSummary(buildEnvelope({ findings: fs.slice(0, 1), tier: "lite", mode: "comment" }))
+    expect(one).toContain("a: new model has no uniqueness/grain test")
   })
 
   test("several findings of one rule on the same model are not collapsed", () => {
@@ -224,6 +226,13 @@ describe("portability noise", () => {
     expect(isSuppressiblePortability(untagged, "snowflake")).toBe(true)
   })
 
+  test("a package with macros for several adapters keeps advice that fails on any of them", () => {
+    expect(isSuppressiblePortability(portability, "postgres", ["duckdb"])).toBe(true)
+    expect(isSuppressiblePortability(portability, "postgres", ["duckdb", "snowflake"])).toBe(false)
+    const untagged = { ...portability, evidence: { tool: "rule-catalog", result: { rule: "pivot-portability", portability: true } } }
+    expect(isSuppressiblePortability(untagged, "postgres", ["snowflake"])).toBe(true)
+  })
+
   test("catalog portability advice is recognised; core's dialect-aware check is not", () => {
     expect(isCatalogPortability(portability)).toBe(true)
     expect(isCatalogPortability(coreMissing)).toBe(false)
@@ -263,6 +272,23 @@ describe("portability noise", () => {
     expect((await runReview({ ...pg, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBe(0)
     // Snowflake doesn't: on a Snowflake project it is a real error and stays.
     expect((await runReview({ ...base, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBeGreaterThan(0)
+
+    // The AI lane is grounded in the same cleaned list: dropped advice never reaches it.
+    let grounding: Finding[] | undefined
+    const withAi = {
+      ...pg,
+      config: { ...pg.config, reviewers: ["dbt_patterns", "ai_review"] },
+      forceTier: "full" as const,
+      suppressPortability: true,
+      aiReview: async (input: { grounding: Finding[] }) => {
+        grounding = input.grounding
+        return []
+      },
+    }
+    const env = await runReview(withAi)
+    expect(grounding).toBeDefined()
+    expect(grounding!.filter(isCatalogPortability).length).toBe(0)
+    expect(grounding!.map((f) => f.title)).toEqual(env.findings.map((f) => f.title))
   })
 })
 
@@ -276,5 +302,44 @@ describe("moved files", () => {
     })
     expect(renderSummary(env)).toContain("3 file(s) moved without edits")
     expect(renderSummary(env)).toContain("`+schema`")
+  })
+})
+
+describe("repeats of one rule within a file", () => {
+  const grain = (col: string, severity: "suggestion" | "critical" = "suggestion") =>
+    makeFinding({
+      severity,
+      category: "test_coverage",
+      title: `_schema.yml: grain column \`${col}\` in unique_combination_of_columns lacks \`not_null\``,
+      body: `\`${col}\` can be NULL.`,
+      file: "models/_schema.yml",
+      ruleKey: `grain:${col}`,
+    })
+  test("merge into one finding listing every instance", () => {
+    const [m, ...rest] = mergeRepeats([grain("tx_hash"), grain("evt_index"), grain("block_month")])
+    expect(rest).toHaveLength(0)
+    expect(m.title).toBe("_schema.yml: grain column `block_month` in unique_combination_of_columns lacks `not_null` (+2 more)")
+    expect(m.body).toContain("- grain column `evt_index`")
+    expect(m.body).toContain("- grain column `tx_hash`")
+  })
+  test("same-titled lint findings keep each message and line", () => {
+    const lint = (line: number, msg: string) =>
+      makeFinding({ severity: "suggestion", category: "sql_quality", title: "m: L001", body: msg, file: "models/m.sql", startLine: line })
+    const [m, ...rest] = mergeRepeats([lint(3, "first issue"), lint(9, "second issue"), lint(12, "third issue")])
+    expect(rest).toHaveLength(0)
+    const all = `${m.body}`
+    for (const t of ["first issue", "second issue", "third issue"]) expect(all).toContain(t)
+    expect(all).toMatch(/\(line (3|9|12)\)/)
+  })
+  test("other files, other rules, and critical findings stay separate", () => {
+    const other = { ...grain("tx_hash"), id: "x", file: "models/other.yml" }
+    const crit = [grain("a", "critical"), { ...grain("b", "critical"), id: "y" }]
+    expect(mergeRepeats([grain("tx_hash"), other, ...crit])).toHaveLength(4)
+  })
+  test("the merged id is the group's, so fixing the first instance does not change it", () => {
+    const [all] = mergeRepeats([grain("tx_hash"), grain("evt_index"), grain("block_month")])
+    const [rest] = mergeRepeats([grain("tx_hash"), grain("evt_index")])
+    expect(all.id).toBe(rest.id)
+    expect(all.id).not.toBe(grain("block_month").id)
   })
 })
