@@ -4,6 +4,7 @@ import {
   captureDraftRevision,
   catalogGate,
   isModelMetadataOnly,
+  isServerReportedModelError,
   resolveCommandAgent,
   submissionModel,
 } from "../../src/prompt/model"
@@ -145,4 +146,11 @@ test("shell and MCP admin submissions wait only for catalogs, never for model re
 
 test("enhancement without pasted text uses the rewritten prompt", () => {
   expect(expandEnhancedPrompt("draft", "rewritten", [], "draft")).toBe("rewritten")
+})
+
+test("a server-reported model rejection is not toasted a second time", () => {
+  expect(isServerReportedModelError({ name: "ProviderModelNotFoundError", data: { providerID: "x", modelID: "y" } })).toBe(true)
+  expect(isServerReportedModelError({ name: "UnknownError", data: { message: "boom" } })).toBe(false)
+  expect(isServerReportedModelError(new Error("network"))).toBe(false)
+  expect(isServerReportedModelError(undefined)).toBe(false)
 })

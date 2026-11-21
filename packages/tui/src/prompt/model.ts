@@ -68,3 +68,9 @@ export function catalogGate(input: {
   if (input.agentStatus === "loading" || (input.needsCommands && input.commandStatus === "loading")) return "wait"
   return "ready"
 }
+
+// The server publishes guided text for an unavailable model before rejecting the request, so the
+// rejection itself needs no second toast.
+export function isServerReportedModelError(error: unknown) {
+  return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "ProviderModelNotFoundError"
+}

@@ -4,6 +4,7 @@ import {
   catalogGate,
   deferredSubmitRevision,
   isModelMetadataOnly,
+  isServerReportedModelError,
   resolveCommandAgent,
   submissionModel,
 } from "../../prompt/model"
@@ -1461,6 +1462,8 @@ export function Prompt(props: PromptProps) {
           { throwOnError: true },
         )
         .catch((error) => {
+          // altimate_change — the session error event already carries the guided model message
+          if (isServerReportedModelError(error)) return
           toast.show({
             title: "Failed to send prompt",
             message: errorMessage(error),
