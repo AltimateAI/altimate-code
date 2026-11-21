@@ -684,8 +684,10 @@ describe("guard calibration", () => {
     expect(calibratedInputTokens(128_000, 108_400)).toBe(108_400)
     // Reported usage never raises the estimate: the guard stays at least as permissive as before.
     expect(calibratedInputTokens(90_000, 108_400)).toBe(90_000)
-    // Nor lowers it below 60% of the estimate (partial usage, a request that changed since).
-    expect(calibratedInputTokens(128_000, 2_000)).toBe(76_800)
+    // Usage below 60% of the estimate is distrusted (partial usage, a request that changed since).
+    expect(calibratedInputTokens(128_000, 2_000)).toBe(128_000)
+    expect(calibratedInputTokens(128_000, 76_000)).toBe(128_000)
+    expect(calibratedInputTokens(128_000, 77_000)).toBe(77_000)
     for (const reported of [undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(calibratedInputTokens(128_000, reported)).toBe(128_000)
     }

@@ -21,7 +21,8 @@ const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
 /**
- * Lowest share of the character estimate that provider-reported usage may calibrate the guard to.
+ * Lowest share of the character estimate that provider-reported usage is trusted at; below it the
+ * full estimate decides.
  * The estimate runs ~15-20% high on SQL/JSON and higher on tool schemas; the floor bounds an
  * undercount from usage that missed inputs changed since (per-step tool selection, refreshed rules).
  */
@@ -429,7 +430,10 @@ export function reportedContextTokens(input: {
  */
 export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
   if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
-  return Math.min(estimate, Math.max(reported, Math.ceil(estimate * MIN_CALIBRATED_ESTIMATE_FRACTION)))
+  // Usage far below the estimate more likely missed inputs (partial reporting, a changed request)
+  // than measured them: the estimate decides, so the response reservation is clamped as before.
+  if (reported < estimate * MIN_CALIBRATED_ESTIMATE_FRACTION) return estimate
+  return Math.min(estimate, reported)
 }
 
 /** True for the pre-send refusals that compacting the conversation can resolve. */
