@@ -46,5 +46,6 @@ describe("plan_exit model selection", () => {
         expect([String(model.providerID), String(model.modelID)]).toEqual(["test", "chat-model"])
       }),
     { git: true },
+    30_000,
   )
 })

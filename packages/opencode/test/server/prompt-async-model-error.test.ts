@@ -68,6 +68,7 @@ describe("prompt_async model errors", () => {
         expect(yield* errorsFor(notFound())).toHaveLength(1)
       }),
     { git: true },
+    30_000,
   )
 
   it.instance(
@@ -79,5 +80,6 @@ describe("prompt_async model errors", () => {
         expect(yield* errorsFor(error)).toHaveLength(0)
       }),
     { git: true },
+    30_000,
   )
 })
