@@ -77,7 +77,8 @@ async function hasWellKnownAuth(): Promise<boolean> {
       throw error
     }
     // Unparseable: a well-known entry may be behind it. `Config` would load without its remote config.
-    parsed = JSON.parse(contents)
+    // An empty file (touched, or a crash between Auth.set's truncate and write) holds no entry, as Auth reads it.
+    parsed = contents.trim() === "" ? {} : JSON.parse(contents)
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
   return Object.values(parsed).some(

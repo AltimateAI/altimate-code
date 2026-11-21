@@ -2345,6 +2345,7 @@ export namespace Telemetry {
    * existed, and if it could not settle the opt-out (a remote or organization config), read it now
    * from the full config, so a command that starts no session neither drops nor leaks those events. */
   export async function settleInProject(): Promise<void> {
+    if (gate !== "pending" && !initPromise) return // decided and idle: nothing to wait for
     await settledOptOutState() // the startup init is not awaited; let it finish first
     if (awaitingConfig()) await init().catch(() => {})
   }
@@ -2600,7 +2601,7 @@ export namespace Telemetry {
       if (!reinitPromise) {
         const chained: Promise<void> = shutdownPromise
           .catch(() => {})
-          .then(() => (retryThrottled() ? undefined : doInit())) // altimate_change — the throttle applies here too
+          .then(() => (retryThrottled() ? startLoopMonitor() : doInit())) // altimate_change — the throttle applies here too
           .then(() => releaseUnresolved(chained)) // altimate_change — see releaseUnresolved
           .finally(() => {
             reinitPromise = undefined
@@ -2624,7 +2625,10 @@ export namespace Telemetry {
     // CONFIG_RETRY_MS. Inside an Instance a read is the Instance's cached config (its own reloads keep
     // it current), so every init reads it: one project's unreadable config never holds up another's.
     // An opt-out adopted from another thread needs no read.
-    if (!initPromise && retryThrottled()) return Promise.resolve()
+    if (!initPromise && retryThrottled()) {
+      startLoopMonitor() // a shutdown stopped it; the stall watcher runs whether or not telemetry does
+      return Promise.resolve()
+    }
     if (!initPromise) {
       const started: Promise<void> = doInit().then(() => releaseUnresolved(started))
       initPromise = started

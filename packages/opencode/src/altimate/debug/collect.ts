@@ -6,7 +6,6 @@
  * names or hosts before they leave this file.
  */
 import fs from "fs"
-import { TelemetryConfig } from "@/altimate/telemetry/config-state"
 import os from "os"
 import path from "path"
 import dns from "dns/promises"
@@ -16,6 +15,7 @@ import { Global } from "@opencode-ai/core/global"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { resolveInstall } from "@/installation"
 import { Telemetry } from "@/altimate/telemetry"
+import { TelemetryConfig } from "@/altimate/telemetry/config-state"
 import { AltimateApi } from "@/altimate/api/client"
 import * as Registry from "@/altimate/native/connections/registry"
 import { resolveConfig } from "@/altimate/native/connections/credential-store"
@@ -90,14 +90,14 @@ function envFlags(): string[] {
     })
 }
 
-/** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
- * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
 function optOutReason(state: "pending" | "enabled" | "disabled") {
   if (state === "pending") return "config not readable yet"
   if (state === "disabled") return "disabled in config"
   return "no telemetry sink (test runner or invalid connection string)"
 }
 
+/** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
+ * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
 async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
   const optOut = TelemetryConfig.disablingEnvironmentVariable()
   if (optOut) return { enabled: false, reason: `${optOut} is set` }
