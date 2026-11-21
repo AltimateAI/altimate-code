@@ -559,7 +559,15 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
     if (end <= position) continue
     const from = Math.max(start, position)
     query += sql.slice(position, from) + " "
-    fragments.push(sql.slice(from, end).trim())
+    // Name only the shell form: a file path or a pipe's arguments may hold private text, and telemetry
+    // records this error.
+    fragments.push(
+      sql
+        .slice(from, end)
+        .trim()
+        .replace(/(>>?\s*)(?!&[12]|\/dev\/null)\S+/g, "$1<file>")
+        .replace(/(\|\s*[A-Za-z]+)[^|]*/g, "$1 ..."),
+    )
     position = end
   }
   query += sql.slice(position)
@@ -618,7 +626,11 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
       )
     }
     if (/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) return writes(`${where} chains statements with ->>`)
-    if (/\bTRANSFORM\s*\(/i.test(masked) && /\bUSING\b(?!\s*\()/i.test(masked)) {
+    if (
+      (/^(spark|databricks|hive)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
+      /\bTRANSFORM\s*\(/i.test(masked) &&
+      /\bUSING\b(?!\s*\()/i.test(masked)
+    ) {
       return writes(`${where} runs a command through TRANSFORM ... USING`)
     }
     if (advancesSequence(tokens, masked, dialect)) return writes(`${where} advances a sequence`)

@@ -55,7 +55,7 @@ export function readSql(sql: string, dialect?: string): string {
     /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b(?<!(?:^|[^\w$])[A-Za-z_][\w$]*\.[A-Za-z]+)/i.test(
       body,
     ) ||
-    /\bREPLACE\b(?!\s*\()/i.test(body)
+    /\bREPLACE\b(?!\s*\()(?<!(?:^|[^\w$])[A-Za-z_][\w$]*\.REPLACE)/i.test(body)
   ) {
     throw new Error(
       "This operation only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data." +

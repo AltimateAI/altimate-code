@@ -7,12 +7,14 @@ describe("shellResidue", () => {
     "SELECT 1 2>/dev/null": "2>/dev/null",
     "SELECT * FROM t LIMIT 5 2>&1": "2>&1",
     "SELECT * FROM t >/dev/null": ">/dev/null",
-    "SELECT * FROM t > out.csv": "> out.csv",
-    "SELECT * FROM t | head -20": "| head -20",
-    "SELECT * FROM t LIMIT 5 2>&1 | head -n 20": "2>&1`, `| head -n 20",
+    "SELECT * FROM t > /home/someone/private/out.csv": "> <file>",
+    "SELECT * FROM t | grep private-name": "| grep ...",
+    "SELECT * FROM t > out.csv": "> <file>",
+    "SELECT * FROM t | head -20": "| head ...",
+    "SELECT * FROM t LIMIT 5 2>&1 | head -n 20": "2>&1`, `| head ...",
     "SELECT * FROM t;  2>/dev/null": "2>/dev/null",
     "SELECT a FROM t ORDER BY a 2>/dev/null LIMIT 5": "2>/dev/null",
-    "SELECT a FROM t 2>/dev/null | head -5": "2>/dev/null`, `| head -5",
+    "SELECT a FROM t 2>/dev/null | head -5": "2>/dev/null`, `| head ...",
   }
   for (const [sql, residue] of Object.entries(cases)) {
     test(`finds ${residue}`, () => {
@@ -62,6 +64,8 @@ describe("other read-only refusals carry the reason", () => {
 
   test("qualified columns named like keywords are reads here too", () => {
     expect(readSql("SELECT o.update, o.delete FROM orders o", "postgres")).toBe("SELECT o.update, o.delete FROM orders o")
+    expect(readSql("SELECT o.replace FROM orders o", "postgres")).toBe("SELECT o.replace FROM orders o")
+    expect(() => readSql("REPLACE INTO orders VALUES (1)", "mysql")).toThrow()
     expect(() => readSql("SELECT 1. INTO c FROM orders", "postgres")).toThrow()
   })
 
@@ -94,6 +98,10 @@ describe("explainWrite", () => {
       reason: "statement 3 of 3 is not a read (DROP TABLE)",
     })
     expect(explainWrite("COPY INTO orders FROM @stage", "snowflake").reason).toBe("it is not a read (COPY)")
+  })
+
+  test("a TRANSFORM call outside Spark and Hive does not hide the statement type", () => {
+    expect(explainWrite("DELETE FROM t USING u WHERE transform(t.x) = 1", "postgres").reason).toBe("it is not a read (DELETE)")
   })
 
   test("names a SQL Server batch keyword", () => {
