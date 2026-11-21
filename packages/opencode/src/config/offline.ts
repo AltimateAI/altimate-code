@@ -66,6 +66,21 @@ async function localOptIn(directory: string) {
   return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false
 }
 
+/**
+ * Environment for an app-owned helper program whose only network use is optional (for example dbt's
+ * version lookup): every proxy points at a closed loopback port, so its requests fail on this machine.
+ */
+export const CLOSED_PROXY_ENV: Record<string, string> = {
+  HTTP_PROXY: "http://127.0.0.1:9",
+  HTTPS_PROXY: "http://127.0.0.1:9",
+  ALL_PROXY: "http://127.0.0.1:9",
+  http_proxy: "http://127.0.0.1:9",
+  https_proxy: "http://127.0.0.1:9",
+  all_proxy: "http://127.0.0.1:9",
+  NO_PROXY: "",
+  no_proxy: "",
+}
+
 export const SHARE_REFUSAL = "Sharing sessions requires an online run."
 export const UNSHARE_REFUSAL = "Offline mode cannot revoke a share. Run unshare while online."
 

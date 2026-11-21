@@ -1,6 +1,4 @@
 import { execFile } from "node:child_process"
-import { existsSync, realpathSync } from "node:fs"
-import path from "node:path"
 import { Offline } from "@/config/offline"
 // Direct cross-workspace import — `@altimateai/dbt-tools`'s `src/index.ts` is
 // a CLI entry (runs on import), so we bypass the package entrypoint and
@@ -88,10 +86,9 @@ async function probe(): Promise<DbtRuntime> {
   // + PATH + explicit override via ALTIMATE_DBT_PATH). Returns the first
   // candidate that exists.
   const resolved = resolveDbt()
-  const env = buildDbtEnv(resolved)
-  // `dbt --version` asks PyPI for the latest release whatever DBT_VERSION_CHECK says, so offline mode
-  // reads the installed packages from dbt's own environment on disk instead.
-  if (Offline.enabled()) return offlineRuntime(resolved.path)
+  // `dbt --version` asks PyPI for the latest release whatever DBT_VERSION_CHECK says. Offline, that
+  // lookup goes to a closed loopback proxy and fails locally; dbt still prints the installed versions.
+  const env = Offline.enabled() ? { ...buildDbtEnv(resolved), ...Offline.CLOSED_PROXY_ENV } : buildDbtEnv(resolved)
 
   // Async --version invocation. Reads BOTH stdout AND stderr (some dbt 1.x
   // builds write --version output to stderr with color codes). If it fails,
@@ -127,23 +124,6 @@ async function probe(): Promise<DbtRuntime> {
     hasDbtDuckdb,
     dbtCoreVersion: versionMatch?.[1],
   }
-}
-
-/** dbt's environment is the virtualenv or prefix its executable lives in: <prefix>/bin/dbt. */
-function offlineRuntime(dbtPath: string): DbtRuntime {
-  const executable = path.isAbsolute(dbtPath) ? dbtPath : Bun.which(dbtPath)
-  if (!executable || !existsSync(executable)) return { hasDbt: false, hasDbtDuckdb: false }
-  const prefix = path.dirname(path.dirname(realpathSync(executable)))
-  const sitePackages = [
-    ...new Bun.Glob("lib/python*/site-packages").scanSync({ cwd: prefix, onlyFiles: false, absolute: true }),
-    ...new Bun.Glob("Lib/site-packages").scanSync({ cwd: prefix, onlyFiles: false, absolute: true }),
-  ]
-  const hasDbtDuckdb = sitePackages.some((dir) => existsSync(path.join(dir, "dbt", "adapters", "duckdb")))
-  const core = sitePackages
-    .flatMap((dir) => [...new Bun.Glob("dbt_core-*.dist-info").scanSync({ cwd: dir, onlyFiles: false })])
-    .map((name) => name.match(/^dbt_core-([0-9]+\.[0-9]+\.[0-9]+\S*?)\.dist-info$/)?.[1])
-    .find(Boolean)
-  return { hasDbt: true, hasDbtDuckdb, dbtCoreVersion: core }
 }
 
 interface DbtVersionResult {

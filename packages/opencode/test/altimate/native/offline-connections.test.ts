@@ -124,6 +124,7 @@ test.skipIf(process.platform === "win32")("offline dbt runs with the checked pro
     process.env.PATH = `${bin}${path.delimiter}${previousPath}`
     process.env.ALTIMATE_OFFLINE = "1"
     const previousHostaddr = process.env.PGHOSTADDR
+    const previousService = process.env.pgservice
     process.env.PGHOSTADDR = "198.51.100.20"
     // A differently-cased name is dropped too.
     process.env.pgservice = "remote-service"
@@ -133,7 +134,8 @@ test.skipIf(process.platform === "win32")("offline dbt runs with the checked pro
       // libpq's destination override is dropped; usage reporting and the version check are off.
       expect(result.stdout.trim()).toBe(`${root}|false|false|1||`)
     } finally {
-      delete process.env.pgservice
+      if (previousService === undefined) delete process.env.pgservice
+      else process.env.pgservice = previousService
       if (previousHostaddr === undefined) delete process.env.PGHOSTADDR
       else process.env.PGHOSTADDR = previousHostaddr
     }

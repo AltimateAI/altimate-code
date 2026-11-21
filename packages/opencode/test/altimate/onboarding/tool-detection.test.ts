@@ -205,27 +205,26 @@ Plugins:
   })
 })
 
-// altimate_change start — offline mode reads dbt's environment instead of running `dbt --version`
-test.skipIf(process.platform === "win32")("offline detection reads the installed dbt packages without running dbt", async () => {
-  const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "offline-dbt-prefix-"))
+// altimate_change start — offline dbt detection sends dbt's PyPI lookup to a closed loopback proxy
+test.skipIf(process.platform === "win32")("offline detection runs dbt --version behind a closed loopback proxy", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "offline-dbt-detect-"))
   const previous = process.env.ALTIMATE_OFFLINE
   try {
-    const marker = path.join(prefix, "dbt-ran")
-    const bin = path.join(prefix, "bin")
-    const site = path.join(prefix, "lib", "python3.11", "site-packages")
-    fs.mkdirSync(bin, { recursive: true })
-    fs.mkdirSync(path.join(site, "dbt", "adapters", "duckdb"), { recursive: true })
-    fs.mkdirSync(path.join(site, "dbt_core-1.9.3.dist-info"))
-    fs.writeFileSync(path.join(bin, "dbt"), `#!/bin/sh\ntouch "${marker}"\necho "Core:"\n`, { mode: 0o755 })
-    process.env.ALTIMATE_DBT_PATH = path.join(bin, "dbt")
+    const seen = path.join(dir, "proxy")
+    fs.writeFileSync(
+      path.join(dir, "dbt"),
+      `#!/bin/sh\nprintf "%s|%s" "$HTTPS_PROXY" "$NO_PROXY" > "${seen}"\nprintf "Core:\\n  - installed: 1.9.3\\nPlugins:\\n  - duckdb: 1.9.0\\n"\n`,
+      { mode: 0o755 },
+    )
+    process.env.ALTIMATE_DBT_PATH = path.join(dir, "dbt")
     process.env.ALTIMATE_OFFLINE = "1"
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true, dbtCoreVersion: "1.9.3" })
-    expect(fs.existsSync(marker)).toBe(false)
+    expect(fs.readFileSync(seen, "utf8")).toBe("http://127.0.0.1:9|")
   } finally {
     if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
     else process.env.ALTIMATE_OFFLINE = previous
-    fs.rmSync(prefix, { recursive: true, force: true })
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 // altimate_change end
