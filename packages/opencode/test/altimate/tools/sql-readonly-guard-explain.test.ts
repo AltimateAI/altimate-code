@@ -117,6 +117,28 @@ describe("explainWrite", () => {
     expect(explainWrite("DELETE FROM t USING u WHERE transform(t.x) = 1", "postgres").reason).toBe("it is not a read (DELETE)")
   })
 
+  test("a plain write on SQL Server or an unmodeled dialect is named by its type", () => {
+    for (const dialect of ["sqlserver", undefined]) {
+      expect(explainWrite("DELETE FROM orders", dialect).reason).toBe("it is not a read (DELETE)")
+      expect(explainWrite("INSERT INTO t VALUES (1)", dialect).reason).toBe("it is not a read (INSERT)")
+    }
+  })
+
+  test("parser messages keep no token text", () => {
+    const reason = explainWrite("SELECT set FROM t", "sqlserver").reason
+    expect(reason).toContain("line 1, column")
+    expect(reason).not.toContain("Set")
+    for (const sql of [
+      "SELECT len(DISTINCT customer_secret_name(a)) FROM t",
+      "SELECT customer_secret_name customer_x customer_y FROM t",
+      "SELECT a FROM customer_secret_table WHERE (((",
+    ]) {
+      const message = explainWrite(sql, "sqlite").reason
+      expect(message).toContain("could not read")
+      expect(message).not.toMatch(/customer_/)
+    }
+  })
+
   test("names a SQL Server batch keyword", () => {
     expect(explainWrite("SELECT exec FROM t", "sqlserver").reason).toContain("statement keyword EXEC")
   })

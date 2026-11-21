@@ -581,6 +581,15 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
   return result.queryType === "read" && !result.blocked ? labels.join("`, `") : undefined
 }
 
+/** The parser's message with any quoted or named token removed: only the position and the kind of error
+ * remain, since telemetry records this error and does not mask a bare word. */
+function parserMessage(message: string): string {
+  return message
+    .replace(/\s*near \[[^\]]*\]?/gi, "")
+    .replace(/\s*\('[^']*'\)/g, "")
+    .replace(/(Unexpected token|found|got):\s*[^\s,)]+/gi, "$1 a token")
+}
+
 /**
  * Why classifyAndCheck treats this SQL as a write, in words an agent can act on: shell residue to
  * remove, the parser error and its position, or the first statement that is not a read. `unreadable`
@@ -607,7 +616,7 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length}` : "it"
     if (result.parseError) {
       return unreadable(
-        `the ${dialect ?? "generic"} SQL parser could not read ${where} (${result.parseError}), so it cannot be proven read-only. ` +
+        `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
         'Fix the syntax at that position: quote identifiers that contain spaces or are keywords ("order date"), ' +
         "check the clause order, and replace any placeholder text such as ..."
       )
@@ -623,11 +632,16 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     const tokens = tokenizeSql(statement, dialect).tokens
     const masked = maskSql(tokens)
     if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
+    // A statement that is itself a write is named by its type, before any batch keyword inside it.
+    if (parsed && parsed.category !== "query") return writes(`${where} is not a read (${type})`)
     const keyword = batchedStatement(masked, dialect)
     if (keyword) {
+      const engine = /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
+        ? "SQL Server runs a statement there even without a separator"
+        : "this dialect is not modeled, so it may run as a statement"
       return writes(
         `${where} holds the statement keyword ${keyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
-          "SQL Server runs a statement there even without a separator, so quote it if it is a column name",
+          `${engine}; quote it if it is a column name`,
       )
     }
     if (/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) return writes(`${where} chains statements with ->>`)
