@@ -876,6 +876,45 @@ for (const [format, body] of [
   )
 }
 
+for (const localSource of ["auth", "global"] as const) {
+  let requests = 0
+  const account = Layer.mock(Account.Service)({
+    active: () => Effect.succeed(Option.some({
+      id: AccountID.make("local-config-account"),
+      email: "user@example.com",
+      url: "https://control.example.invalid",
+      active_org_id: OrgID.make("org"),
+    })),
+    config: () => Effect.sync(() => {
+      requests++
+      return Option.none()
+    }),
+    token: () => Effect.succeed(Option.none()),
+  })
+  configIt({ account, auth: Auth.defaultLayer }).instance(
+    `an unreadable ${localSource} source recovers without refetching org config until repaired`,
+    () =>
+      withGlobalConfig({}, ({ dir }) =>
+        withProcessEnv(
+          "OPENCODE_AUTH_CONTENT",
+          localSource === "auth" ? "{" : "{}",
+          Effect.gen(function* () {
+            const legacy = path.join(dir, "config")
+            if (localSource === "global") yield* FSUtil.use.writeWithDirs(legacy, "broken = [")
+            expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(true)
+            expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
+            expect(requests).toBe(1)
+
+            if (localSource === "global") yield* FSUtil.use.writeWithDirs(legacy, "[telemetry]\ndisabled = false")
+            else process.env.OPENCODE_AUTH_CONTENT = "{}"
+            expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(false)
+            expect(requests).toBe(2)
+          }),
+        ),
+      ),
+  )
+}
+
 it.instance("a telemetry retry reloads a repaired config after a cached load failure", () =>
   Effect.gen(function* () {
     const { directory } = yield* TestInstance
