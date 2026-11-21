@@ -603,7 +603,7 @@ export const layer = Layer.effect(
               options: {},
               native: false,
             }
-          // altimate_change start — retain an empty explicit model so resolution can reject it
+          // altimate_change start — upstream_fix: retain an empty explicit model so resolution can reject it
           if (value.model !== undefined) {
             // Re-brand fork ProviderID/ModelID to core ProviderV2.ID/ModelV2.ID (identity at runtime).
             const parsed = Provider.parseModel(value.model)

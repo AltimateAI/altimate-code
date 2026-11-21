@@ -14,6 +14,10 @@ import { Filesystem } from "@/util/filesystem"
 import { JsonError, InvalidError } from "@opencode-ai/core/v1/config/error"
 // altimate_change end
 
+// altimate_change start — share project filenames in low-to-high merge order
+export const projectConfigNames = ["opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"] as const
+// altimate_change end
+
 export const files = Effect.fn("ConfigPaths.projectFiles")(function* (
   name: string,
   directory: string,
@@ -24,7 +28,7 @@ export const files = Effect.fn("ConfigPaths.projectFiles")(function* (
     // altimate_change start — load the branded project config at the same levels as the legacy name
     targets:
       name === "opencode"
-        ? ["altimate-code.jsonc", "altimate-code.json", "opencode.jsonc", "opencode.json"]
+        ? projectConfigNames.toReversed()
         : [`${name}.jsonc`, `${name}.json`],
     // altimate_change end
     start: directory,

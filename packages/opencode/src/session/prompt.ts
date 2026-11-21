@@ -2818,7 +2818,14 @@ export namespace SessionPrompt {
     throw new Error("Impossible")
   })
 
-  async function lastModel(sessionID: SessionID) {
+  // altimate_change start — non-model commands may record model metadata without validating it
+  async function lastModel(sessionID: SessionID, validateConfigured = true) {
+    const configured = (await Config.get()).model
+    const configuredModel = configured === undefined ? undefined : Provider.parseModel(configured)
+    if (configuredModel && validateConfigured) {
+      await Provider.getModel(configuredModel.providerID, configuredModel.modelID)
+    }
+    // altimate_change end
     // altimate_change start — a session's last-used model can be a stale keyless public-Zen pick
     // from before this machine registered Altimate Base. OpenCode Zen now rejects that tier
     // outright, so replaying it here (e.g. on `run --continue`) is guaranteed to fail; re-resolve
@@ -2829,8 +2836,6 @@ export namespace SessionPrompt {
     // `Provider.list()` below is expensive (it can hit the models.dev catalog) — check both cheap,
     // sync-ish preconditions first so the common case (any other provider, or Base not
     // registered) never pays that cost.
-    // altimate_change — project configuration takes precedence over an old session model
-    if ((await Config.get()).model !== undefined) return Provider.defaultModel()
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user" && item.info.model) {
         // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,
@@ -2839,13 +2844,13 @@ export namespace SessionPrompt {
         if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
           const providers = await Provider.list()
           const provider = providers[item.info.model.providerID]
-          if (provider && isPublicZen(provider)) return Provider.defaultModel()
+          if (provider && isPublicZen(provider)) return configuredModel ?? Provider.defaultModel()
         }
         return item.info.model
       }
     }
+    return configuredModel ?? Provider.defaultModel()
     // altimate_change end
-    return Provider.defaultModel()
   }
 
   // altimate_change start — only delivery-owned request parts may be reused or retired.
@@ -3250,7 +3255,9 @@ export namespace SessionPrompt {
     })
   }
 
-  async function createUserMessage(input: PromptInput) {
+  // altimate_change start — allow local commands to record message metadata without a model call
+  async function createUserMessage(input: PromptInput, validateConfigured = true) {
+    // altimate_change end
     // altimate_change start — the workspace this message's attachment reads name: the turn's, or for a
     // `noReply` prompt, which runs no turn, one read without the pin's validation or wait.
     const attachmentWorkspace = async () =>
@@ -3278,7 +3285,7 @@ export namespace SessionPrompt {
     }
 
     // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
-    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID, validateConfigured))
     const model = {
       providerID: ProviderID.make(resolvedModel.providerID),
       modelID: ModelID.make(resolvedModel.modelID),
@@ -4702,12 +4709,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       if (!trimmed) {
         // /mcps (no args): return actual runtime status directly
-        const userMsg = await createUserMessage({
-          sessionID: input.sessionID,
-          messageID: input.messageID,
-          parts: [{ type: "text", text: "/mcps" }],
-        })
-        const model = await lastModel(input.sessionID)
+        const userMsg = await createUserMessage(
+          {
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            parts: [{ type: "text", text: "/mcps" }],
+          },
+          false,
+        )
+        const model = userMsg.info.model
         const statusMap = await MCP.status()
         const rows = Object.entries(statusMap)
           .map(
@@ -4734,13 +4744,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const [, subCmd, name] = subMatch
         const isEnable = subCmd === "enable"
 
-        const userMsg = await createUserMessage({
-          sessionID: input.sessionID,
-          messageID: input.messageID,
-          parts: [{ type: "text", text: `/mcps ${subCmd} ${name}` }],
-        })
-
-        const model = await lastModel(input.sessionID)
+        const userMsg = await createUserMessage(
+          {
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            parts: [{ type: "text", text: `/mcps ${subCmd} ${name}` }],
+          },
+          false,
+        )
+        const model = userMsg.info.model
         // The workspace-managed `datamate` key is derived per process: this
         // command must not close or restart that engine, nor persist `enabled`
         // for it. Asked before the config check — a refused engine has no
