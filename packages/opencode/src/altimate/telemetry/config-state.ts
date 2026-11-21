@@ -93,32 +93,21 @@ export function instanceDirectory(): string | undefined {
 }
 
 /** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
-// Loaded configs built while the auth store could not be read: they lack its well-known remote
-// configs even after the store is repaired, until the app reloads its config.
-const loadedWithoutAuth = new WeakSet<object>()
-// Loaded configs already read alongside a readable auth store: a later failed read is transient.
-const readWithAuth = new WeakSet<object>()
 const AUTH_REREAD_MS = 100
 
 export async function loadedState(): Promise<State> {
   const config = await Config.get()
   // An opt-out the readable sources already set stands, even if another source could not be read.
   if (config.telemetry?.disabled === true) return "disabled"
-  if (Config.telemetryConfigUnresolved(config) || loadedWithoutAuth.has(config)) return "unreadable"
-  // Auth.all() returns an empty store when its read or parse fails, hiding well-known remote config.
-  // Called only for that throw (an unparseable auth file); its result does not matter here.
-  try {
-    await hasWellKnownAuth().catch(async () => {
-      // Auth.set truncates then writes, so a read can land mid-write: look again before deciding.
-      await new Promise((resolve) => setTimeout(resolve, AUTH_REREAD_MS))
-      return hasWellKnownAuth()
-    })
-  } catch (error) {
-    if (!readWithAuth.has(config)) loadedWithoutAuth.add(config)
-    throw error
-  }
-  readWithAuth.add(config)
-  return config.telemetry?.disabled ? "disabled" : "enabled"
+  // Config marks a load whose auth store could not be read (its well-known remote configs were skipped).
+  if (Config.telemetryConfigUnresolved(config)) return "unreadable"
+  // A store unreadable now leaves this read unknown; it throws. Auth.set truncates then writes, so a
+  // read can land mid-write: look again before deciding. The result itself does not matter here.
+  await hasWellKnownAuth().catch(async () => {
+    await new Promise((resolve) => setTimeout(resolve, AUTH_REREAD_MS))
+    return hasWellKnownAuth()
+  })
+  return "enabled"
 }
 
 /** The opt-out as the caller can best read it: the full config inside an Instance (a failed load can

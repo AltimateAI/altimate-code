@@ -820,6 +820,23 @@ it.effect("a legacy global config that fails to load leaves the telemetry opt-ou
   ),
 )
 
+it.instance("a config loaded while the auth store is unreadable leaves the telemetry opt-out unresolved", () =>
+  withProcessEnv(
+    "OPENCODE_AUTH_CONTENT",
+    undefined,
+    Effect.gen(function* () {
+      const authFile = Auth.filepath()
+      const previous = yield* Effect.promise(() => fs.readFile(authFile, "utf8").catch(() => undefined))
+      yield* Effect.promise(() => fs.mkdir(path.dirname(authFile), { recursive: true }).then(() => fs.writeFile(authFile, "{")))
+      try {
+        expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(true)
+      } finally {
+        yield* Effect.promise(() => (previous === undefined ? fs.rm(authFile, { force: true }) : fs.writeFile(authFile, previous)))
+      }
+    }),
+  ),
+)
+
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance

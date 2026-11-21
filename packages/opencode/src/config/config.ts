@@ -52,9 +52,28 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
 // altimate_change start — loaded configs in which a source that may set `telemetry.disabled` (the
-// organization remote config, a legacy global config that failed to import) could not be read.
+// organization remote config, a legacy global config that failed to import, the well-known remote
+// configs behind an unreadable auth store) could not be read.
 const configsWithUnresolvedTelemetry = new WeakSet<Info>()
 const incompleteGlobals = new WeakSet<Info>()
+// Auth.all() returns an empty store when the store cannot be read, so the load skips its well-known
+// remote configs. Read it as Auth does: OPENCODE_AUTH_CONTENT when it parses, otherwise the file.
+async function authStoreUnreadable(): Promise<boolean> {
+  const inline = process.env.OPENCODE_AUTH_CONTENT
+  if (inline) {
+    try {
+      JSON.parse(inline)
+      return false
+    } catch {}
+  }
+  try {
+    const text = await fsNode.readFile(Auth.filepath(), "utf8")
+    if (text.trim() !== "") JSON.parse(text)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ENOENT"
+  }
+}
 export function telemetryConfigUnresolved(config: Info): boolean {
   return configsWithUnresolvedTelemetry.has(config)
 }
@@ -514,6 +533,7 @@ export const layer = Layer.effect(
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
         const auth = yield* authSvc.all().pipe(Effect.orDie)
+        const authUnreadable = yield* Effect.promise(authStoreUnreadable) // altimate_change — see authStoreUnreadable
 
         let result: Info = {}
         const authEnv: Record<string, string> = {}
@@ -919,7 +939,7 @@ export const layer = Layer.effect(
         // altimate_change end
 
         // altimate_change — a source that could set `telemetry.disabled` was not read
-        if (orgConfigUnresolved || incompleteGlobals.has(global)) configsWithUnresolvedTelemetry.add(result)
+        if (orgConfigUnresolved || authUnreadable || incompleteGlobals.has(global)) configsWithUnresolvedTelemetry.add(result)
 
         return {
           config: result,

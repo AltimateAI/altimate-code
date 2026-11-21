@@ -842,18 +842,12 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
-  test("a config loaded while the auth store was unreadable stays unresolved after the store is repaired", async () => {
-    const loaded = {} as Awaited<ReturnType<typeof Config.get>>
-    configSpy.mockResolvedValue(loaded)
+  test("an auth store unreadable at read time leaves that read unknown, not the config", async () => {
+    configSpy.mockResolvedValue({})
     writeFileSync(Auth.filepath(), "{")
     await expect(TelemetryConfig.loadedState()).rejects.toThrow()
-    // Repaired with a well-known login: the cached config never read that login's remote config.
-    writeFileSync(Auth.filepath(), JSON.stringify({
-      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
-    }))
-    expect(await TelemetryConfig.loadedState()).toBe("unreadable")
-    // A config the app loads afresh is read as usual.
-    configSpy.mockResolvedValue({})
+    // The store recovers: the config itself was loaded fine (Config marks a load that missed it).
+    writeFileSync(Auth.filepath(), "{}")
     expect(await TelemetryConfig.loadedState()).toBe("enabled")
   })
 

@@ -119,7 +119,12 @@ describe("buildCliContext", () => {
     })
 
     test("omits machine_id when this process adopts an opt-out while the config is read", async () => {
-      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      // Every env opt-out short-circuits before the config read this test holds open.
+      const saved = ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"].map(
+        (key) => [key, process.env[key]] as const,
+      )
+      for (const [key] of saved) delete process.env[key]
+      try {
       let release!: (value: unknown) => void
       let started!: () => void
       const reading = new Promise<void>((resolve) => (started = resolve))
@@ -136,6 +141,12 @@ describe("buildCliContext", () => {
       release({})
       const ctx = JSON.parse(Buffer.from(await building, "base64url").toString("utf8")) as Record<string, unknown>
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+      } finally {
+        for (const [key, value] of saved) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }
     })
 
     test("inside a project, omits machine_id when a remote config source could not be read", async () => {
