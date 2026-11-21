@@ -719,17 +719,7 @@ for (const failure of ["account", "organization"] as const) {
   )
 }
 
-test("telemetry sends held events after an organization config fetch recovers", async () => {
-  const directory = await tmpdir()
-  const savedSink = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
-  const savedOptOut = process.env.ALTIMATE_TELEMETRY_DISABLED
-  const savedLegacyOptOut = process.env.OPENCODE_DISABLE_TELEMETRY
-  const savedCliOptOut = process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
-  process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-    "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/"
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
-  delete process.env.OPENCODE_DISABLE_TELEMETRY
-  delete process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
+{
   let recovered = false
   let orgLoads = 0
   const account = Layer.mock(Account.Service)({
@@ -747,61 +737,63 @@ test("telemetry sends held events after an organization config fetch recovers", 
     }),
     token: () => Effect.succeed(Option.none()),
   })
-  const events: string[] = []
-  await Telemetry.shutdown()
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
-    if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
-    for (const envelope of JSON.parse(String(request?.body))) events.push(envelope.data.baseData.name)
-    return new Response(null, { status: 204 })
-  }, { preconnect: fetch.preconnect }))
-  // Exercise the real per-instance config cache with only its account service replaced.
-  const context = { directory: directory.path, worktree: directory.path } as InstanceContext
-  const program = Config.Service.use((service) => Effect.promise(async () => {
-    const config = spyOn(Config, "get").mockImplementation((retry?: boolean) =>
-      Effect.runPromise(provideCurrentInstance(
-        service.get(retry),
-        context,
-      )),
-    )
-    try {
-      const track = () => Telemetry.track({
-        type: "startup_ready", timestamp: Date.now(), session_id: "",
-        command: "run", surface: "run", duration_ms: 1, fresh_install: false,
-      })
-      track()
-      await Telemetry.init()
-      track()
-      await Telemetry.refreshIdentity()
-      await Telemetry.flush()
-      const telemetryCalls = fetchSpy.mock.calls.filter(([url]) => /\/(v2\/track|users\/me)$/.test(String(url)))
-      expect(telemetryCalls).toEqual([])
-      expect(orgLoads).toBe(1)
+  configIt({ account }).instance("telemetry sends held events after an organization config fetch recovers", () =>
+    Effect.gen(function* () {
+      const context = (yield* InstanceRef)!
+      const service = yield* Config.Service
+      yield* withProcessEnvs(
+        {
+          APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/",
+          ALTIMATE_TELEMETRY_DISABLED: undefined,
+          ALTIMATE_CLI_DISABLE_TELEMETRY: undefined,
+          OPENCODE_DISABLE_TELEMETRY: undefined,
+        },
+        Effect.promise(async () => {
+          const events: string[] = []
+          await Telemetry.shutdown()
+          Telemetry.setConfigDirectory(context.directory)
+          const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(
+            async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+              if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
+              for (const envelope of JSON.parse(String(request?.body))) events.push(envelope.data.baseData.name)
+              return new Response(null, { status: 204 })
+            },
+            { preconnect: fetch.preconnect },
+          ))
+          // Bridge the Promise facade to the same scoped service for each telemetry init.
+          const config = spyOn(Config, "get").mockImplementation((retry?: boolean) =>
+            Effect.runPromise(provideCurrentInstance(service.get(retry), context)),
+          )
+          try {
+            const track = () => Telemetry.track({
+              type: "startup_ready", timestamp: Date.now(), session_id: "",
+              command: "run", surface: "run", duration_ms: 1, fresh_install: false,
+            })
+            track()
+            await Telemetry.init()
+            track()
+            await Telemetry.refreshIdentity()
+            await Telemetry.flush()
+            const telemetryCalls = fetchSpy.mock.calls.filter(([url]) => /\/(v2\/track|users\/me)$/.test(String(url)))
+            expect(telemetryCalls).toEqual([])
+            expect(orgLoads).toBe(1)
 
-      recovered = true
-      await Telemetry.init()
-      await Telemetry.flush()
-      expect(events).toEqual(["startup_ready", "startup_ready"])
-      expect(orgLoads).toBe(2)
-    } finally {
-      await Telemetry.shutdown()
-      config.mockRestore()
-    }
-  }))
-  try {
-    await Effect.runPromise(program.pipe(Effect.scoped, Effect.provide(configLayer({ account }))))
-  } finally {
-    fetchSpy.mockRestore()
-    if (savedSink === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
-    else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedSink
-    if (savedOptOut === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
-    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedOptOut
-    if (savedLegacyOptOut === undefined) delete process.env.OPENCODE_DISABLE_TELEMETRY
-    else process.env.OPENCODE_DISABLE_TELEMETRY = savedLegacyOptOut
-    if (savedCliOptOut === undefined) delete process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
-    else process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = savedCliOptOut
-    await directory[Symbol.asyncDispose]()
-  }
-})
+            recovered = true
+            await Telemetry.init()
+            await Telemetry.flush()
+            expect(events).toEqual(["startup_ready", "startup_ready"])
+            expect(orgLoads).toBe(2)
+          } finally {
+            await Telemetry.shutdown()
+            Telemetry.setConfigDirectory(undefined)
+            config.mockRestore()
+            fetchSpy.mockRestore()
+          }
+        }),
+      )
+    }),
+  )
+}
 
 {
   let loads = 0
