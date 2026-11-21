@@ -60,11 +60,20 @@ export namespace ProviderError {
     /request entity too large/i, // HTTP 413
     /the request was too long/i, // Azure OpenAI
     /maximum tokens for requested operation/i, // Azure OpenAI
-    // altimate_change start — input plus the output reservation over the window is an overflow too:
-    // compaction makes room for the reservation
-    /input length and `?max_tokens`? exceed context limit/i,
-    // altimate_change end
   ]
+
+  // altimate_change start — input plus the output reservation over the window is an overflow when the
+  // input is a large share of the limit (compaction can make room). A small input with an oversized
+  // max_tokens is a configuration problem compaction cannot fix, so it stays a plain API error.
+  const INPUT_PLUS_RESERVATION = /input length and `?max_tokens`? exceed context limit:\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)/i
+  function isInputPlusReservationOverflow(message: string) {
+    const match = message.match(INPUT_PLUS_RESERVATION)
+    if (!match) return false
+    const input = Number(match[1])
+    const limit = Number(match[3])
+    return input * 2 > limit
+  }
+  // altimate_change end
 
   function isOpenAiErrorRetryable(e: APICallError) {
     const status = e.statusCode
@@ -92,6 +101,9 @@ export namespace ProviderError {
   // - z.ai: can accept overflow silently (needs token-count/context-window checks)
   function isOverflow(message: string) {
     if (OVERFLOW_PATTERNS.some((p) => p.test(message))) return true
+    // altimate_change start — see isInputPlusReservationOverflow
+    if (isInputPlusReservationOverflow(message)) return true
+    // altimate_change end
 
     // Providers/status patterns handled outside of regex list:
     // - Cerebras: often returns "400 (no body)" / "413 (no body)"

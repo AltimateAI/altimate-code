@@ -208,6 +208,19 @@ IMPORTANT:
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
 // altimate_change start — assistant-message metadata key marking a request sent without tools
 const SENT_WITHOUT_TOOLS = "sent_without_tools"
+
+/** Whether a deadline has disabled tools for this session, inherited from a live ancestor run (as llm.ts applies it). */
+async function runToolsDisabled(sessionID: string): Promise<boolean> {
+  if (!RunBudgetEffort.hasActiveRuns()) return false
+  const visited = new Set<string>()
+  let current: string | undefined = sessionID
+  while (current && !visited.has(current)) {
+    if (RunBudgetEffort.activeRun(current)) return RunBudgetEffort.toolsDisabled(current)
+    visited.add(current)
+    current = (await Session.get(SessionID.make(current)).catch(() => undefined))?.parentID
+  }
+  return false
+}
 // altimate_change end
 // altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
 const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
@@ -2299,7 +2312,7 @@ export namespace SessionPrompt {
       // altimate_change end
       // altimate_change start — record a request sent without tools; its usage cannot calibrate the guard
       // (an answer echo, the final step, or a deadline finalization)
-      if (echoCommittedAnswer || textFinalStep || RunBudgetEffort.toolsDisabled(sessionID))
+      if (echoCommittedAnswer || textFinalStep || (await runToolsDisabled(sessionID)))
         processor.message.metadata = { ...processor.message.metadata, [SENT_WITHOUT_TOOLS]: true }
       // altimate_change end
       const result = await processor.process({

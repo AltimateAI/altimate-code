@@ -462,9 +462,8 @@ export namespace SessionProcessor {
         // produce a summary and cannot act on it, so the real working turn right
         // after compaction would silently never see the breaker/loop nudge.
         let effectiveStreamInput = streamInput
-        // altimate_change start — kept so a pre-send refusal can hand the directive to the retry
+        // Kept so a pre-send refusal can hand the directive to the retry.
         let takenDirective: ReturnType<typeof NudgeArbiter.take> = undefined
-        // altimate_change end
         if (runMode && !input.assistantMessage.summary) {
           const directive = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)
           // altimate_change end

@@ -784,15 +784,33 @@ describe("calibration tail", () => {
   })
 })
 
-test("an input-plus-reservation overflow from the provider is a context overflow (reactive compaction)", () => {
-  const error = new APICallError({
-    message:
-      "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again",
-    url: "https://example.com",
-    requestBodyValues: {},
-    statusCode: 400,
-    responseHeaders: { "content-type": "application/json" },
-    isRetryable: false,
-  })
-  expect(MessageV2.ContextOverflowError.isInstance(MessageV2.fromError(error, { providerID: "p" as any }))).toBe(true)
+test("an input-plus-reservation provider error is an overflow only when the input is a large share", () => {
+  const error = (message: string) =>
+    MessageV2.fromError(
+      new APICallError({
+        message,
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        responseHeaders: { "content-type": "application/json" },
+        isRetryable: false,
+      }),
+      { providerID: "p" as any },
+    )
+  // A large input: compaction can make room for the reservation.
+  expect(
+    MessageV2.ContextOverflowError.isInstance(
+      error(
+        "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again",
+      ),
+    ),
+  ).toBe(true)
+  // A tiny input with an oversized max_tokens: a configuration problem, not compactable.
+  expect(
+    MessageV2.ContextOverflowError.isInstance(
+      error(
+        "input length and `max_tokens` exceed context limit: 5 + 64000 > 32768, decrease input length or `max_tokens` and try again",
+      ),
+    ),
+  ).toBe(false)
 })
