@@ -186,6 +186,11 @@ function hardDenyLabel(match: string): string {
   return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
 }
 
+/** SQL Server and its aliases, whose batches run statements without separators and whose XML .query() takes XQuery. */
+export function isSqlServerDialect(dialect?: string): boolean {
+  return /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
+}
+
 // Parse errors that mean the installation, not the SQL, is at fault; explainWrite reports them as such.
 const PARSER_UNAVAILABLE = "SQL parser is unavailable"
 const PARSER_INVALID_RESULT = "SQL parser returned an invalid statement list"
@@ -245,7 +250,7 @@ function classifyFallback(
  * must hold no statement keyword in its code (literals, identifiers and comments masked): the
  * engine would run `SELECT ... DELETE FROM t` as two statements however a parser reads it. */
 function batchedStatement(masked: string, dialect?: string): string | undefined {
-  if (!/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return undefined
+  if (!isSqlServerDialect(dialect) && isModeledDialect(dialect)) return undefined
   // A name qualified by a whole unquoted identifier (t.update, s.t.into) cannot start a statement:
   // every part after the first of a dotted name (s.t.update) is a name.
   const names = masked.replace(/((?:^|[^\w$.])[A-Za-z_][\w$]*)((?:\.[A-Za-z_][\w$]*)+)/g, (_, head: string, rest: string) =>
@@ -462,7 +467,7 @@ function functionSafety(sql: string, dialect: string | undefined, depth: number,
       Object.hasOwn(SQL_ARGUMENTS, call.name) && call.qualifier === undefined && !hasSideEffectFunction(call.name)
     if (depth > 0 && !nestedExecutor && !isReadOnlyNestedFunction(call.name, call.qualifier)) write = true
     // SQL Server's XML .query() takes XQuery, not executable SQL.
-    if (call.name === "query" && /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")) continue
+    if (call.name === "query" && isSqlServerDialect(dialect)) continue
     const argument = Object.hasOwn(SQL_ARGUMENTS, call.name) ? SQL_ARGUMENTS[call.name] : undefined
     if (!argument) continue
     const inner = sqlLiteral(call.args[argument.index], dialect)
@@ -645,7 +650,7 @@ function parserMessage(message: string): string {
 }
 
 function batchKeywordExplanation(dialect?: string): string {
-  return /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
+  return isSqlServerDialect(dialect)
     ? "SQL Server runs a statement there even without a separator"
     : "this dialect is not modeled, so it may run as a statement"
 }
@@ -734,12 +739,14 @@ export function explainWrite(
     // A statement that is itself a write is named by its type, before any batch keyword inside it.
     if (parsed && parsed.category !== "query") return writes(`${where} is not a read (${type})`)
     if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
+      // Quoted names keep their case; engines that store unquoted names in uppercase need it written so.
+      const stored = /^(snowflake|oracle)$/i.test(dialect ?? "") ? ', in the case the engine stores, such as "UPDATE"' : ""
       return writes(
         dialect?.toLowerCase() === "clickhouse"
           ? `${where} contains a write clause (SELECT ... INTO or a modifying CTE), or a write keyword that on ClickHouse ` +
               'counts even after a dot: quote the column, t."update"'
           : `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
-              'or a write keyword after a quoted name such as "t".update: quote the column too, "t"."update")',
+              `or a write keyword after a quoted name such as "t".update: quote the column too, "t"."update"${stored})`,
       )
     }
     const keyword = batchedStatement(masked, dialect)

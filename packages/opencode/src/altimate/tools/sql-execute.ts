@@ -259,10 +259,10 @@ export const SqlExecuteTool = Tool.define(
               if (blockedIn >= 0) throw new Error(hardBlockRefusal(head, sql, dialects[blockedIn]))
               if (jinja)
                 throw new Error(
-                  `${head} This cannot be overridden by any rule. dbt renders Jinja before the SQL runs, so DROP DATABASE, DROP SCHEMA or ` +
+                  `${head} This cannot be overridden by any permission rule. dbt renders Jinja before the SQL runs, so DROP DATABASE, DROP SCHEMA or ` +
                     "TRUNCATE words count wherever they sit, even in a literal or comment. Remove those words, or send plain SQL without Jinja.",
                 )
-              throw new Error(`${head} This cannot be overridden by any rule.`)
+              throw new Error(`${head} This cannot be overridden by any permission rule.`)
             }
             if (budget && queryType !== "read") {
               throw new Error("Batched queries must be read-only. To use write permission, run a write as its own sql_execute call.")

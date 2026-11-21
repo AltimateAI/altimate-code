@@ -259,7 +259,6 @@ describe("sql_execute on a read-only agent", () => {
 describe("denied write message branches", () => {
   const base = { sql: "SELECT 1", dialects: ["postgres"], jinja: false, mongo: false, scratch: false, warehouseGiven: true }
 
-  // Hard blocks keep the class they had on main, apart from permission denials, so safety blocks stay countable.
   test("refusal messages carry their telemetry error class", async () => {
     const write = { ...base, sql: "DELETE FROM orders" }
     const hard = "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
@@ -287,9 +286,9 @@ describe("denied write message branches", () => {
       ["SQL parser error", deniedWriteMessage({ ...scoped, sql: "SELECT Order Date FROM orders" }), "parse_error"],
       ["shell residue", deniedWriteMessage({ ...scoped, sql: "SELECT 1 2>/dev/null" }), "parse_error"],
       ["open quote", deniedWriteMessage({ ...scoped, sql: "SELECT 'abc" }), "parse_error"],
-      ["hard block", hardBlockRefusal(hard, "TRUNCATE TABLE orders", "postgres"), "unknown"],
+      ["hard block", hardBlockRefusal(hard, "TRUNCATE TABLE orders", "postgres"), "permission"],
       ["hard-blocked open quote", hardBlockRefusal(hard, "SELECT 'truncate", "postgres"), "parse_error"],
-      ["hard-blocked comment", hardBlockRefusal(hard, "SELECT 1 /*! + 1 */", "mysql"), "unknown"],
+      ["hard-blocked comment", hardBlockRefusal(hard, "SELECT 1 /*! + 1 */", "mysql"), "permission"],
       ["sql_check", await refusal(() => readSql(write.sql, "postgres")), "permission"],
       ["sql_check statement word", await refusal(() => readSql("SELECT x AS load FROM t", "postgres")), "permission"],
       ["sql_check query shape", await refusal(() => readSql("SHOW TABLES", "postgres")), "validation"],

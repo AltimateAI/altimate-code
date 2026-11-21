@@ -61,8 +61,8 @@ describe("shellResidue", () => {
 
   test("a crafted tail is scanned in linear time", () => {
     // The tail patterns see at most 400 characters, so a longer crafted tail costs no more.
-    expect(growth((n) => `SELECT * FROM t ${"| head ".repeat(n)}x;y`, 8)).toBeLessThan(30)
-    expect(growth((n) => `SELECT * FROM t ${"| head   ".repeat(n)};y`, 6)).toBeLessThan(30)
+    expect(growth((n) => `SELECT * FROM t ${"| head ".repeat(n)}x;y`, 2_000)).toBeLessThan(30)
+    expect(growth((n) => `SELECT * FROM t ${"| head   ".repeat(n)};y`, 1_500)).toBeLessThan(30)
   })
 
   test("a comparison before the residue is kept", () => {
@@ -317,6 +317,8 @@ describe("explainWrite", () => {
 
   test("a quoted qualifier gets a specific hint", () => {
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).toContain('"t"."update"')
+    expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).not.toContain("stores")
+    expect(explainWrite('SELECT "T".update FROM t', "snowflake").reason).toContain('the case the engine stores, such as "UPDATE"')
   })
 
   test("every write in the guard corpus is a write with a specific reason", () => {
