@@ -2649,7 +2649,6 @@ export namespace Telemetry {
   }
   // altimate_change end
 
-
   async function doInit() {
     // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
     let unresolved = false

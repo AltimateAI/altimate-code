@@ -828,9 +828,11 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
-  test("an empty auth file holds no well-known entry, as Auth reads it", async () => {
+  test("an empty auth file holds no well-known entry, but a whitespace-only one is unreadable, as Auth reads them", async () => {
     writeFileSync(Auth.filepath(), "")
     expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+    writeFileSync(Auth.filepath(), " \n")
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
   test("auth content that does not parse falls back to the auth file, as Auth does", async () => {

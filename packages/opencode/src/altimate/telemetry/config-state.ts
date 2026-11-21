@@ -94,7 +94,6 @@ export function instanceDirectory(): string | undefined {
 }
 
 /** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
-
 export async function loadedState(): Promise<State> {
   const config = await Config.get()
   // An opt-out the readable sources already set stands, even if another source could not be read.
