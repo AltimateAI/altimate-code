@@ -1352,8 +1352,15 @@ export namespace SessionProcessor {
               // altimate_change start — a pre-send budget refusal on a compactable conversation is a
               // context overflow: compact and retry, as for a provider-reported overflow. Right after
               // a compaction (or on a first turn) it stays the fatal budget error, so it cannot loop.
+              // A committed-answer echo recovers from an overflow without compacting (the arm below), so a
+              // refusal there converts whether or not the conversation could be compacted.
+              const echoRecovery =
+                (deferText !== undefined || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
+                !input.abort.aborted &&
+                input.assistantMessage.finish !== "content-filter"
               refusedBeforeSend = compactable === true && isContextBudgetError(e)
-              const error = refusedBeforeSend
+              const error =
+                refusedBeforeSend || (echoRecovery && isContextBudgetError(e))
                 ? new MessageV2.ContextOverflowError(
                     { message: "The request would not fit the model's context window; compacting the conversation and retrying." },
                     { cause: e },

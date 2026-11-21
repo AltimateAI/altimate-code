@@ -132,8 +132,6 @@ const providerCfg = (limit: { context: number; output: number }) => (url: string
 
 const LARGE_WINDOW = { context: 131_072, output: 16_384 }
 const SMALL_WINDOW = { context: 16_384, output: 4_096 }
-// isOverflow's trigger for LARGE_WINDOW: context minus max(20_000 reserved, 16_384 output).
-const LARGE_WINDOW_COMPACTION_THRESHOLD = 131_072 - 20_000
 
 const SQL = [
   "with paid as (",
@@ -289,13 +287,12 @@ it.live(
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        // The provider counted this conversation as 108k tokens, below the 111k compaction trigger.
+        // The provider counted this conversation as 108k tokens, below the ~111k compaction trigger.
         // The character estimate of the SQL/JSON history plus the build agent's system prompt and
-        // tool schemas comes to roughly 130k+, past the guard's limit (131,072 less the 1,024-token
-        // response floor and a 2% margin): the ~20% overestimate seen on SQL/JSON context.
+        // tool schemas is far higher (~150k here), past the guard's limit (131,072 less the 1,024-token
+        // response floor and a 2% margin). Without calibration this request is refused.
         const history = sqlJsonHistory(88_000)
         const reported = 108_000
-        expect(reported).toBeLessThan(LARGE_WINDOW_COMPACTION_THRESHOLD)
 
         yield* llm.text("Revenue is concentrated in the top ten customers.")
         const result = yield* runSession(dir, llm, {
@@ -335,6 +332,9 @@ it.live(
         expect(result.errors).toEqual([])
         expect(result.summaries.length).toBe(1)
         expect(result.hits.length).toBe(2)
+        // Refused on the turn's first request: the prompt is replayed verbatim after the summary,
+        // not paraphrased into it.
+        expect(JSON.stringify(result.hits[0]!.body)).not.toContain("Summarize the revenue concentration.")
         expect(JSON.stringify(result.hits[1]!.body)).toContain("Summarize the revenue concentration.")
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },

@@ -2693,9 +2693,11 @@ export namespace SessionPrompt {
           agent: lastUser.agent,
           model: lastUser.model,
           auto: true,
-          // altimate_change start — a pre-send refusal sent nothing: compact the whole conversation as the
-          // proactive check does, instead of replaying the last user message and dropping this turn's steps
-          overflow: !processor.message.finish && !processor.refusedBeforeSend,
+          // altimate_change start — a pre-send refusal mid-turn compacts the whole conversation, as the
+          // proactive check does, so this turn's steps are kept; on the turn's first request the user's
+          // prompt is replayed verbatim, as for a provider overflow
+          overflow:
+            !processor.message.finish && (!processor.refusedBeforeSend || lastFinished?.parentID !== lastUser.id),
           // altimate_change end
         })
       }
