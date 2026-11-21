@@ -303,7 +303,7 @@ export const SqlExecuteTool = Tool.define(
                   },
                 })
               } catch (error) {
-                const explain = (readOnly: boolean) =>
+                const explain = (readOnly: boolean, cli = false) =>
                   deniedWriteMessage({
                     sql,
                     dialects,
@@ -312,9 +312,10 @@ export const SqlExecuteTool = Tool.define(
                     scratch: isScratch(args.warehouse),
                     warehouseGiven: !!args.warehouse,
                     readOnly,
+                    cli,
                   })
                 // The MCP server and `altimate tool` refuse writes unless --allow-write was given.
-                if (error instanceof WriteDeniedError) throw new Error(`${explain(true)} ${error.message}`)
+                if (error instanceof WriteDeniedError) throw new Error(`${explain(true, true)} ${error.message}`)
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
                 const rules: Array<{ pattern?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
                 // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
@@ -776,9 +777,13 @@ export function deniedWriteMessage(input: {
   scratch: boolean
   warehouseGiven: boolean
   readOnly?: boolean
+  /** Refused because this MCP server or tool CLI run was started without --allow-write. */
+  cli?: boolean
 }): string {
   const readOnly = input.readOnly !== false
-  const head = readOnly
+  const head = input.cli
+    ? "sql_execute did not run this query. Writes are not enabled for this run, and the query counts as a write because"
+    : readOnly
     ? "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
     : "sql_execute did not run this query. A sql_execute_write rule denies it, and the query counts as a write because"
   if (input.jinja) {

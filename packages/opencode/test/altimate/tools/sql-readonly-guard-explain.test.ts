@@ -142,6 +142,12 @@ describe("other read-only refusals carry the reason", () => {
     expect(writeReason("SELECT q.truncate FROM query('DROP SCHEMA s') q", "duckdb")).toContain("(SQL run from a string literal)")
     expect(writeReason("INSERT INTO t VALUES (U&'d!0061t' UESCAPE '!')", "postgres")).toContain("Unicode escape")
     expect(writeReason("EXEC sp_x /* drop schema s */", "sqlserver")).toContain("(dynamic SQL")
+    // Only fixed words reach the label: a name after DROP inside a TRUNCATE target is not echoed.
+    const target = writeReason("SELECT 1 THEN TRUNCATE IDENTIFIER(drop secret_tbl);", "postgres")
+    expect(target).toContain("(TRUNCATE)")
+    expect(target).not.toMatch(/secret_tbl/i)
+    // SQL Server's query() is XQuery, so a qualified column named truncate beside it is a read.
+    expect(classifyAndCheck("SELECT q.truncate FROM query('DROP SCHEMA s') q", "sqlserver")).toMatchObject({ queryType: "read", blocked: false })
     // An unclosed quote holding a blocked word names the quote first.
     const reason = writeReason("SELECT a FROM t WHERE n = 'do not truncate", "postgres")
     expect(reason.indexOf("unterminated")).toBeGreaterThan(-1)

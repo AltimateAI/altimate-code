@@ -179,16 +179,17 @@ const HARD_DENY_TYPES = new Set(["DROP DATABASE", "DROP SCHEMA", "TRUNCATE", "TR
 
 const HARD_DENY_PATTERN = /^\s*(DROP\s+((EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b|TRUNCATE(\s+TABLE)?\b)/i
 
+// The label of a hard-deny match (DROP DATABASE, DROP SCHEMA, ..., TRUNCATE): a match that starts with
+// DROP and a fixed object kind is that DROP; any other is TRUNCATE. Only fixed words reach the label.
+function hardDenyLabel(match: string): string {
+  const drop = /^\W*DROP\s+(?:(?:EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b/i.exec(match)
+  return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
+}
+
 /**
  * Fail closed when the parser is unavailable or rejects the input. Lexical
  * statement boundaries still enforce hard denies without reading quoted text.
  */
-// The label of a hard-deny match (DROP DATABASE, DROP SCHEMA, ..., TRUNCATE), from the matched text only.
-function hardDenyLabel(match: string): string {
-  const drop = /\bDROP\s+(?:(?:EXTERNAL|PLUGGABLE)\s+)?(\w+)/i.exec(match)
-  return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
-}
-
 function classifyFallback(
   sql: string,
   dialect?: string,
