@@ -4362,7 +4362,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }
     const agent = await Agent.get(input.agent)
     // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
-    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    // Shell records model metadata but never calls a model.
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID, false))
     const model = {
       providerID: ProviderID.make(resolvedModel.providerID),
       modelID: ModelID.make(resolvedModel.modelID),
