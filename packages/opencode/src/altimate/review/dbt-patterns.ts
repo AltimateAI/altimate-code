@@ -932,6 +932,141 @@ const detectMultiCountDistinct: Detector = (c) => {
   )
 }
 
+const JOIN_TYPE_GAP = /^\s*(?:(?:natural|inner|left|right|full|cross)\s+)?(?:outer\s+)?$/i
+const JOIN_CLAUSE_END = /^(?:join|where|group\s+by|order\s+by|qualify|having|union|limit|window|left|right|inner|full|cross|natural|lateral|select|from)\b|^;/i
+
+/**
+ * Normalised equality/comparison predicate: whitespace dropped and lowercased outside quoted
+ * literals (literal contents stay exact, so `'X'` and `'x'` differ), `a=b` with sides sorted.
+ */
+function predKey(p: string): string {
+  const t = p
+    .split(/('(?:[^']|'')*')/)
+    .map((part, i) => (i % 2 ? part : part.replace(/\s+/g, "").toLowerCase()))
+    .join("")
+  const eq = /^([^=<>!]+)=([^=<>!]+)$/.exec(t)
+  return eq ? [eq[1], eq[2]].sort().join("=") : t
+}
+
+/**
+ * Predicates in a JOIN's ON clause that an earlier INNER join of the same join chain already states
+ * and that don't reference the newly joined relation: the inner join already dropped every row they
+ * would reject, so they filter nothing. (After a LEFT join the same predicate is not redundant: the
+ * left join keeps the rows it rejects.) Literals are compared as written. Returns each such
+ * predicate as written (whitespace collapsed).
+ */
+export function redundantJoinPredicates(sql: string): string[] {
+  // Literal text stays (`= 'a'` and `= 'b'` differ); `and`/parens inside a literal are rare enough here.
+  const s = stripComments(sql).replace(/\{\{[\s\S]*?\}\}/g, "__jinja__").replace(/\{%[\s\S]*?%\}/g, " ")
+  const joins: {
+    alias?: string
+    preds: { raw: string; key: string }[]
+    start: number
+    end: number
+    inner: boolean
+    /** RIGHT/FULL join: re-introduces rows an earlier inner join dropped. */
+    outer: boolean
+  }[] = []
+  for (const m of s.matchAll(/\bjoin\b/gi)) {
+    const before = s.slice(Math.max(0, m.index! - 20), m.index)
+    const inner = !/\b(left|right|full|cross|natural|outer)\s+(?:outer\s+)?$/i.test(before)
+    const outer = /\b(right|full)\s+(?:outer\s+)?$/i.test(before)
+    let i = m.index! + 4
+    const rest = s.slice(i)
+    let rel = /^\s*(\S+)/.exec(rest)
+    if (rest.trimStart().startsWith("(")) {
+      const open = i + rest.indexOf("(")
+      let depth = 0
+      for (i = open; i < s.length; i++) {
+        if (s[i] === "(") depth++
+        else if (s[i] === ")" && --depth === 0) break
+      }
+      i++
+      rel = null
+    } else if (rel) i += rel[0].length
+    const tail = /^\s+(?:as\s+)?(\w+)\s+on\b/i.exec(s.slice(i)) ?? /^\s+on\b/i.exec(s.slice(i))
+    if (!tail) {
+      joins.push({ preds: [], start: m.index!, end: i, inner, outer })
+      continue
+    }
+    const fallback = rel?.[1].split(".").pop()?.toLowerCase()
+    const alias = tail[1] && tail[1].toLowerCase() !== "on" ? tail[1].toLowerCase() : fallback
+    // An unaliased table function (`join unnest(a.arr) on ...`) has no name to qualify columns with,
+    // so which predicates reference it is unknown: abstain for this join.
+    if (!alias || !/^\w+$/.test(alias)) {
+      joins.push({ preds: [], start: m.index!, end: i, inner, outer })
+      continue
+    }
+    let j = i + tail[0].length
+    const onStart = j
+    let depth = 0
+    for (; j < s.length; j++) {
+      const ch = s[j]
+      if (ch === "(") depth++
+      else if (ch === ")") {
+        if (depth === 0) break
+        depth--
+      } else if (depth === 0 && /\W/.test(s[j - 1]) && JOIN_CLAUSE_END.test(s.slice(j, j + 12))) break
+    }
+    const clause = s.slice(onStart, j)
+    const preds = /\bor\b/i.test(clause)
+      ? []
+      : topLevelAnd(clause).map((raw) => ({ raw: raw.replace(/\s+/g, " ").trim(), key: predKey(raw) })).filter((p) => p.key)
+    joins.push({ alias, preds, start: m.index!, end: j, inner, outer })
+  }
+  const out: string[] = []
+  let seen: Set<string> = new Set()
+  for (let k = 0; k < joins.length; k++) {
+    const prev = joins[k - 1]
+    // A join nested inside a parenthesised relation starts before `prev.end`: not a chain link.
+    const chained = prev && prev.end <= joins[k].start && JOIN_TYPE_GAP.test(s.slice(prev.end, joins[k].start))
+    if (!chained || joins[k].outer) seen = new Set()
+    const { alias, preds } = joins[k]
+    const ownRef = alias ? new RegExp(`\\b${alias}\\.`, "i") : undefined
+    for (const p of preds) if (chained && seen.has(p.key) && /=/.test(p.key) && !ownRef?.test(p.raw)) out.push(p.raw)
+    if (joins[k].inner) for (const p of preds) seen.add(p.key)
+  }
+  return out
+}
+
+/** Split a predicate list on top-level AND. */
+function topLevelAnd(clause: string): string[] {
+  const parts: string[] = []
+  let depth = 0
+  let last = 0
+  for (const m of clause.matchAll(/[()]|\band\b/gi)) {
+    if (m[0] === "(") depth++
+    else if (m[0] === ")") depth--
+    else if (depth === 0) {
+      parts.push(clause.slice(last, m.index))
+      last = m.index! + m[0].length
+    }
+  }
+  parts.push(clause.slice(last))
+  return parts.map((p) => p.trim()).filter(Boolean)
+}
+
+// 46. A join predicate an earlier INNER join of the same chain already states.
+const detectRedundantJoinPredicate: Detector = (c) => {
+  if (!c.added.some((l) => /=/.test(l))) return null
+  const norm = (t: string) => stripComments(t).replace(/\s+/g, "").toLowerCase()
+  for (const pred of redundantJoinPredicates(c.newSql)) {
+    const key = norm(pred)
+    const hit = c.added.find((l) => norm(l).includes(key))
+    if (!hit) continue
+    return pattern(
+      c,
+      "sql_quality",
+      "suggestion",
+      "redundant-join-predicate",
+      "join repeats a predicate an earlier join already applies",
+      `\`${pred}\` doesn't involve the relation this join adds and is already in an earlier join's ON clause, so it filters nothing. Remove it, or compare the joined relation's own column if that was the intent.`,
+      hit,
+    )
+  }
+  return null
+}
+
 const MODEL_DETECTORS: Detector[] = [
   detectClock,
   detectCrossJoin,
@@ -966,6 +1101,7 @@ const MODEL_DETECTORS: Detector[] = [
   detectBooleanPrecedence,
   detectOffsetNoOrder,
   detectMultiCountDistinct,
+  detectRedundantJoinPredicate,
 ]
 
 /**

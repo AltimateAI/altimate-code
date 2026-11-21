@@ -119,6 +119,18 @@ const SUMMARY = [
   "rule-catalog:union-not-all",
   "rule-catalog:unqualified-column-multi-table",
   "rule-catalog:where-1-eq-1",
+  // Macro, test and yml rules: summary until each is judged on replayed PRs.
+  "rule-catalog:macro-group-by-ordinal",
+  "dbt-project-rules:macro-param-no-default",
+  "dbt-project-rules:dispatch-kwarg-not-in-variant",
+  "dbt-project-rules:test-window-shrunk",
+  "dbt-project-rules:yaml-parse-error",
+  "dbt-project-rules:quickstart-public-model-missing",
+  "dbt-project-rules:doc-block-missing",
+  "dbt-project-rules:package-lock-in-package",
+  "dbt-project-rules:merge-no-incremental-predicates",
+  "dbt-patterns:redundant-join-predicate",
+  "rule-catalog:jinja-concat-missing-space",
 ]
 
 export const DEFAULT_RULE_TIERS: Record<string, RuleTier> = {

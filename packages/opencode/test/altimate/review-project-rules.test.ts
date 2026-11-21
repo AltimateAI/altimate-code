@@ -1,17 +1,25 @@
 import { describe, test, expect } from "bun:test"
 import {
   dbtProjectFindings,
+  dispatchKwargFindings,
+  dispatchVariants,
+  docRefFindings,
   jinjaBalance,
   jinjaFindings,
   joinTargets,
   literalNullColumns,
   missingRefFindings,
   modelConfigFindings,
+  packageLockFindings,
   packagesFindings,
+  quickstartModelFindings,
+  testWindowFindings,
   testsOnNullColumns,
+  yamlParseFindings,
 } from "../../src/altimate/review/project-rules"
 import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
-import { isSuppressiblePortability } from "../../src/altimate/review/orchestrate"
+import { inlineConfigSplats, isSuppressiblePortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { detectMacroPatterns } from "../../src/altimate/review/dbt-patterns"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
@@ -376,5 +384,373 @@ describe("config read from Jinja variables and project defaults", () => {
     const sql = "{{ config(unique_key=['contract_id']) }}\nselect 1"
     expect(titles(modelConfigFindings(file("models/m.sql", sql), sql, "bigquery", { materialized: "table" }))).toContain("m: `unique_key` has no effect on a table")
     expect(titles(modelConfigFindings(file("models/m.sql", sql), sql, "bigquery", { materialized: "incremental" }))).not.toContain("m: `unique_key` has no effect on a table")
+  })
+})
+
+describe("GROUP BY a single position in macro SQL", () => {
+  const macro = (body: string, path = "macros/tables/hub.sql") =>
+    detectMacroPatterns({ path, status: "modified", diff: plus(body) }, body, DEFAULT_RUBRIC, new Set())
+  const ordinal = <T extends { rule?: string }>(fs: T[]) => fs.filter((f) => f.rule === "rule-catalog:macro-group-by-ordinal")
+  const body = "{% macro hub(src_loaded_at) %}\nSELECT max(t.{{ src_loaded_at }}) AS {{ src_loaded_at }},\n'x' AS src_label\nFROM {{ this }} t\nGROUP BY 2\n{% endmacro %}"
+  test("fires on the added GROUP BY line and records it", () => {
+    const hits = ordinal(macro(body))
+    expect(hits).toHaveLength(1)
+    expect((hits[0].evidence?.result as { line?: string }).line).toBe("GROUP BY 2")
+  })
+  test("twin: grouping by the column name is silent", () => {
+    expect(ordinal(macro(body.replace("GROUP BY 2", "GROUP BY src_label")))).toHaveLength(0)
+  })
+  test("two positions stay with group-by-positional; a model's GROUP BY 1 is not this rule", () => {
+    expect(ordinal(macro(body.replace("GROUP BY 2", "GROUP BY 1, 2")))).toHaveLength(0)
+    const sql = "select a, count(*) from t\ngroup by 1"
+    const model = evaluateCatalog({ path: "models/m.sql", status: "modified" }, sql, sql.split("\n"), [], DEFAULT_RUBRIC)
+    expect(ordinal(model)).toHaveLength(0)
+  })
+})
+
+describe("parameter added to an existing macro without a default", () => {
+  const noDefault = (diff: string, old: string, head: string, path = "macros/tests/anomalies.sql") =>
+    jinjaFindings({ path, status: "modified", diff }, old, head).filter((f) => f.rule === "dbt-project-rules:macro-param-no-default")
+  const old = "{% test anomalies(\n    model,\n    days_back,\n    sensitivity=3\n) %}\nselect 1\n{% endtest %}"
+  const head = (p: string) => `{% test anomalies(\n    model,\n    days_back,\n    ${p},\n    sensitivity=3\n) %}\nselect 1\n{% endtest %}`
+  const diff = (p: string) => `@@ -2,3 +2,4 @@\n     model,\n     days_back,\n+    ${p},\n     sensitivity=3\n`
+  test("fires on the added parameter line of a test block", () => {
+    const fs = noDefault(diff("floor_value"), old, head("floor_value"))
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine).toBe(4)
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe("    floor_value,")
+  })
+  test("twin: the same parameter with `=none` is silent", () => {
+    expect(noDefault(diff("floor_value=none"), old, head("floor_value=none"))).toHaveLength(0)
+  })
+  test("a new macro, or a parameter that already existed, is not a new required parameter", () => {
+    expect(jinjaFindings({ path: "macros/m.sql", status: "added", diff: plus(head("floor_value")) }, undefined, head("floor_value")).filter((f) => f.rule === "dbt-project-rules:macro-param-no-default")).toHaveLength(0)
+    const renamedOnly = "@@ -1 +1 @@\n-{% macro m(a, b) %}\n+{% macro m(a, b) -%}\n"
+    expect(noDefault(renamedOnly, "{% macro m(a, b) %}{% endmacro %}", "{% macro m(a, b) -%}{% endmacro %}", "macros/m.sql")).toHaveLength(0)
+  })
+  test("an adapter variant gets every argument from its dispatcher: silent", () => {
+    const o = "{% macro snowflake__sat(a, b) %}{% endmacro %}"
+    const h = "{% macro snowflake__sat(a, b, skip_hwm) %}{% endmacro %}"
+    expect(noDefault(`@@ -1 +1 @@\n-${o}\n+${h}\n`, o, h, "macros/sat.sql")).toHaveLength(0)
+    const g = "{% macro sat(a, b, skip_hwm) %}{% endmacro %}"
+    expect(noDefault(`@@ -1 +1 @@\n-${o.replace("snowflake__", "")}\n+${g}\n`, o.replace("snowflake__", ""), g, "macros/sat.sql")).toHaveLength(1)
+  })
+  test("defaults holding calls and lists do not split the parameter list", () => {
+    const o = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp()) %}{% endmacro %}"
+    const h = "{% macro m(a, cols=['x', 'y'], ts=dbt.current_timestamp(), b) %}{% endmacro %}"
+    const fs = noDefault(`@@ -1 +1 @@\n-${o}\n+${h}\n`, o, h, "macros/m.sql")
+    expect(fs.map((f) => f.title)).toEqual(["m: new parameter `b` of `m` has no default"])
+  })
+})
+
+describe("adapter.dispatch keyword a variant does not take", () => {
+  const head = (variantParams: string, body = "select 1") =>
+    [
+      "{%- macro ghost(col, dtype, size=none, scale=none) -%}",
+      "{{ return(adapter.dispatch('ghost', 'pkg')(col=col,",
+      "                                            dtype=dtype,",
+      "                                            size=size,",
+      "                                            scale=scale)) }}",
+      "{%- endmacro -%}",
+      "",
+      "{%- macro default__ghost(col, dtype, size, scale=none) -%}select 1{%- endmacro -%}",
+      `{%- macro snowflake__ghost(${variantParams}) -%}${body}{%- endmacro -%}`,
+    ].join("\n")
+  const diff = "@@ -3,2 +3,3 @@\n                                             dtype=dtype,\n                                             size=size,\n+                                            scale=scale)) }}\n"
+  const run = (sql: string) => {
+    const f: ChangedFile = { path: "macros/ghost.sql", status: "modified", diff }
+    return dispatchKwargFindings(f, sql, (name) => dispatchVariants(sql, name))
+  }
+  test("a variant without the new keyword: fires on the added keyword line", () => {
+    const fs = run(head("col, dtype, size"))
+    expect(fs).toHaveLength(1)
+    expect(fs[0].rule).toBe("dbt-project-rules:dispatch-kwarg-not-in-variant")
+    expect(fs[0].startLine).toBe(5)
+    expect(fs[0].body).toContain("`snowflake__ghost`")
+    expect(fs[0].body).not.toContain("`default__ghost`")
+  })
+  test("twin: every variant takes the keyword", () => {
+    expect(run(head("col, dtype, size, scale=none"))).toHaveLength(0)
+  })
+  test("a variant that reads `kwargs` accepts any keyword", () => {
+    expect(run(head("col, dtype, size", "{{ kwargs.get('scale') }}"))).toHaveLength(0)
+  })
+  test("`varargs` or a `kwargs` mention in a comment or string does not accept keywords", () => {
+    expect(run(head("col, dtype, size", "{{ varargs }}"))).toHaveLength(1)
+    expect(run(head("col, dtype, size", "{# no kwargs here #}"))).toHaveLength(1)
+    expect(run(head("col, dtype, size", "{{ log('kwargs ignored') }}"))).toHaveLength(1)
+  })
+  test("a `{% test %}` block named like a variant is skipped, not a crash", () => {
+    const sql = head("col, dtype, size, scale=none") + "\n{% test bigquery__ghost(model) %}select 1{% endtest %}"
+    expect(dispatchVariants(sql, "ghost").map((v) => v.macro)).toEqual(["default__ghost", "snowflake__ghost"])
+  })
+  test("keywords on unchanged lines are not this change", () => {
+    const f: ChangedFile = { path: "macros/ghost.sql", status: "modified", diff: "@@ -9 +9 @@\n-x\n+y\n" }
+    const sql = head("col, dtype, size")
+    expect(dispatchKwargFindings(f, sql, (name) => dispatchVariants(sql, name))).toHaveLength(0)
+  })
+})
+
+describe("singular test lookback window shortened", () => {
+  const edit = (before: string, after: string) =>
+    testWindowFindings({ path: "tests/recent_rows.sql", status: "modified", diff: `@@ -5,3 +5,3 @@\n from t\n-${before}\n+${after}\n group by 1\n` })
+  test("1 day to 30 minutes: fires on the added line", () => {
+    const fs = edit(
+      "where event_at >= timestamp_sub(current_timestamp(), interval 1 day)",
+      "where event_at >= timestamp_sub(current_timestamp(), interval 30 minute)",
+    )
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine).toBe(6)
+    expect(fs[0].body).toContain("from 1 day to 30 minutes")
+  })
+  test("dbt.dateadd with a negative day count", () => {
+    expect(edit("where d >= {{ dbt.dateadd('day', -7, 'current_date') }}", "where d >= {{ dbt.dateadd('day', -3, 'current_date') }}")).toHaveLength(1)
+  })
+  test("twin: the same window written another way, or a longer window, is silent", () => {
+    expect(edit("where d >= current_date - interval 1 day", "where d >= current_date - interval 24 hour")).toHaveLength(0)
+    expect(edit("where d >= current_date - interval 1 day", "where d >= current_date - interval 2 day")).toHaveLength(0)
+  })
+  test("a shorter window that makes the test stricter is silent (future bound, or column below the clock)", () => {
+    expect(edit("where ts > current_timestamp + interval '2 day'", "where ts > current_timestamp + interval '1 day'")).toHaveLength(0)
+    expect(edit("where ts < {{ dbt.dateadd('day', -30, 'current_date') }}", "where ts < {{ dbt.dateadd('day', -7, 'current_date') }}")).toHaveLength(0)
+  })
+  test("clock on the left of `<=` is still a lookback", () => {
+    expect(edit("where current_date - interval 7 day <= d", "where current_date - interval 3 day <= d")).toHaveLength(1)
+  })
+  test("a rewritten filter (window replaced by a var) is not a literal shrink", () => {
+    expect(edit("where d >= timestamp_sub(ts, interval 1 hour)", "where d >= timestamp('{{ var(\"batch_start\") }}')")).toHaveLength(0)
+  })
+})
+
+/** A whole review over files given as head/base contents (diff = every head line added). */
+async function prReview(
+  files: { path: string; status?: ChangedFile["status"]; head?: string; base?: string; diff?: string }[],
+  extra: Partial<Parameters<typeof runReview>[0]> & { tree?: Record<string, string> } = {},
+) {
+  const runner: ReviewRunner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "A" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true, differences: [], confidence: "high" } as any
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  }
+  const byPath = new Map(files.map((f) => [f.path, f]))
+  const { tree = {}, ...rest } = extra
+  return runReview({
+    changedFiles: files.map((f) => ({ path: f.path, status: f.status ?? "modified", diff: f.diff ?? plus(f.head ?? "") })),
+    config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+    rubric: DEFAULT_RUBRIC,
+    mode: "comment",
+    runner,
+    forceTier: "full",
+    getContent: async (p, side) => (side === "old" ? byPath.get(p)?.base : (byPath.get(p)?.head ?? tree[p])),
+    ...rest,
+  })
+}
+const ruleIds = (fs: { rule?: string }[]) => fs.map((f) => f.rule)
+
+describe("YAML that stops parsing", () => {
+  const base = "supported_vars:\n  order_metadata:\n    type: dictionary\n    display_name: Customer\n"
+  const good = base + "\n  refund_metadata:\n    type: dictionary\n    display_name: Charge\n"
+  const bad = base + "\n    refund_metadata:\n    type: dictionary\n    display_name: Charge\n"
+  const f = (head: string): ChangedFile => ({ path: ".quickstart/quickstart.yml", status: "modified", diff: `@@ -4,0 +5,4 @@\n+\n+${head.split("\n").slice(5, 8).join("\n+")}\n` })
+  test("a key indented under the previous entry duplicates its keys: fires on the error line", () => {
+    const fs = yamlParseFindings(f(bad), base, bad)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].rule).toBe("dbt-project-rules:yaml-parse-error")
+    expect(fs[0].title).toContain("YAML key defined twice")
+    expect(fs[0].startLine).toBe(6)
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe("    refund_metadata:")
+  })
+  test("twin: the same key at the right indentation is silent", () => {
+    expect(yamlParseFindings(f(good), base, good)).toHaveLength(0)
+  })
+  test("a file that already failed at base is not this change", () => {
+    expect(yamlParseFindings(f(bad), bad, bad)).toHaveLength(0)
+  })
+  test("runs on a quickstart file the review otherwise doesn't classify, and lists it as reviewed", async () => {
+    const env = await prReview([{ path: ".quickstart/quickstart.yml", head: bad, base }])
+    expect(ruleIds(env.findings)).toContain("dbt-project-rules:yaml-parse-error")
+    expect((env.scope?.notReviewed ?? []).map((n) => n.path)).not.toContain(".quickstart/quickstart.yml")
+  })
+})
+
+describe("new model missing from the quickstart public_models", () => {
+  const qs = 'public_models: [\n  "crm__deals",\n  "crm__contacts",\n  "crm__companies"\n]\n'
+  const model = "select 1 as id"
+  test("a new crm__ model not listed: fires on the quickstart file", async () => {
+    const env = await prReview([
+      { path: ".quickstart/quickstart.yml", head: qs + "# touched\n", base: qs },
+      { path: "models/history/crm__daily_deal_history.sql", status: "added", head: model },
+      { path: "models/intermediate/int_crm__deal_spine.sql", status: "added", head: model },
+    ])
+    const f = env.findings.find((x) => x.rule === "dbt-project-rules:quickstart-public-model-missing")!
+    expect(f.file).toBe(".quickstart/quickstart.yml")
+    expect(f.body).toContain("`crm__daily_deal_history`")
+    expect(f.body).not.toContain("int_crm__deal_spine")
+  })
+  test("twin: the new model is listed", async () => {
+    const listed = qs.replace('"crm__companies"', '"crm__companies",\n  "crm__daily_deal_history"')
+    const env = await prReview([
+      { path: ".quickstart/quickstart.yml", head: listed, base: qs },
+      { path: "models/history/crm__daily_deal_history.sql", status: "added", head: model },
+    ])
+    expect(ruleIds(env.findings)).not.toContain("dbt-project-rules:quickstart-public-model-missing")
+  })
+  test("an unrelated duplicate key elsewhere in the quickstart file doesn't hide the list", () => {
+    const dup = qs + "table_variables:\n  crm_enabled:\n    - a\n  crm_enabled:\n    - b\n"
+    const m: ChangedFile = { path: "models/crm__new.sql", status: "added" }
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", dup, ["crm__new"])).toHaveLength(1)
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", dup, ["crm__deals"])).toHaveLength(0)
+  })
+  test("quickstart unchanged: the finding goes on the new model", () => {
+    const m: ChangedFile = { path: "models/crm__new.sql", status: "added" }
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["crm__new"])[0].file).toBe("models/crm__new.sql")
+    expect(quickstartModelFindings(m, ".quickstart/quickstart.yml", qs, ["other__new"])).toHaveLength(0)
+  })
+})
+
+describe("doc() reference with no docs block", () => {
+  const base = "models:\n  - name: stg_ads\n    columns:\n      - name: campaign_id\n        description: \"{{ doc('campaign_id') }}\"\n"
+  const head = (name: string) => base + `      - name: ${name}\n        description: "{{ doc('${name}') }}"\n`
+  const yml = (name: string): ChangedFile => ({
+    path: "models/staging/stg_ads.yml",
+    status: "modified",
+    diff: `@@ -5,0 +6,2 @@\n+      - name: ${name}\n+        description: "{{ doc('${name}') }}"\n`,
+  })
+  const defined = new Set(["campaign_id", "user_id"])
+  const exists = async (n: string) => defined.has(n)
+  test("a new doc() name no docs block defines: fires on its added line", async () => {
+    const fs = await docRefFindings(yml("audience_id"), base, head("audience_id"), exists)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].rule).toBe("dbt-project-rules:doc-block-missing")
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe(`        description: "{{ doc('audience_id') }}"`)
+  })
+  test("twin: a doc() name the project defines is silent", async () => {
+    expect(await docRefFindings(yml("user_id"), base, head("user_id"), exists)).toHaveLength(0)
+  })
+  test("no other doc() in the file resolves locally (docs may come from a package): silent", async () => {
+    expect(await docRefFindings(yml("audience_id"), base, head("audience_id"), async () => false)).toHaveLength(0)
+  })
+  test("end to end: the project's .md files are searched for the block", async () => {
+    const searched: string[] = []
+    const env = await prReview([{ path: "models/staging/stg_ads.yml", head: head("audience_id"), base, diff: yml("audience_id").diff }], {
+      grepProject: async (pattern, glob) => {
+        searched.push(`${pattern} ${glob}`)
+        return pattern === "docs campaign_id" ? [{ path: "models/docs.md", line: 3, text: "{% docs campaign_id %}" }] : []
+      },
+    })
+    expect(ruleIds(env.findings)).toContain("dbt-project-rules:doc-block-missing")
+    expect(searched).toContain("docs audience_id *.md")
+  })
+})
+
+describe("package-lock.yml added to a dbt package", () => {
+  const lock = "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\nsha1_hash: abc\n"
+  const run = (tree: Record<string, string>) =>
+    prReview([{ path: "package-lock.yml", status: "added", head: lock }], { tree })
+  test("a package (integration_tests project present): fires on the file's first line", async () => {
+    const env = await run({ "dbt_project.yml": "name: pkg\nprofile: dev\n", "integration_tests/dbt_project.yml": "name: pkg_tests\nprofile: ci\n" })
+    const f = env.findings.find((x) => x.rule === "dbt-project-rules:package-lock-in-package")!
+    expect(f.file).toBe("package-lock.yml")
+    expect((f.evidence!.result as { line?: string }).line).toBe("packages:")
+    expect((env.scope?.notReviewed ?? []).map((n) => n.path)).not.toContain("package-lock.yml")
+  })
+  test("a package whose integration project is nested under integration_tests/<name>/", async () => {
+    const env = await prReview([{ path: "package-lock.yml", status: "added", head: lock }], {
+      tree: { "dbt_project.yml": "name: pkg\nprofile: dev\n" },
+      grepProject: async (_p, glob) => (glob === "integration_tests/*dbt_project.yml" ? [{ path: "integration_tests/project/dbt_project.yml", line: 1, text: "name: pkg_tests" }] : []),
+    })
+    expect(ruleIds(env.findings)).toContain("dbt-project-rules:package-lock-in-package")
+  })
+  test("a package with no profile and no integration tests also counts", async () => {
+    expect(ruleIds((await run({ "dbt_project.yml": "name: pkg\n" })).findings)).toContain("dbt-project-rules:package-lock-in-package")
+  })
+  test("twin: an application project (profile, no integration_tests) commits its lock file", async () => {
+    expect(ruleIds((await run({ "dbt_project.yml": "name: app\nprofile: warehouse\n" })).findings)).not.toContain("dbt-project-rules:package-lock-in-package")
+  })
+  test("a lock file that was already committed (modified) is not this change", () => {
+    expect(packageLockFindings({ path: "package-lock.yml", status: "modified", diff: plus(lock) }, true)).toHaveLength(0)
+  })
+})
+
+describe("BigQuery incremental merge without incremental_predicates", () => {
+  const sql = (extra = "") =>
+    [
+      "{% set meta_config = {",
+      '    "materialized": "incremental",',
+      '    "unique_key": ["event_id"],',
+      '    "partition_by": {"field": "event_at", "data_type": "timestamp", "granularity": "month"}' + extra,
+      "} %}",
+      "{{ config(**meta_config) }}",
+      "select * from {{ ref('ops') }}",
+      "{% if is_incremental() %}",
+      "where event_at >= timestamp('{{ var(\"batch_start\") }}')",
+      "{% endif %}",
+    ].join("\n")
+  const predicates = (body: string, dialect = "bigquery") =>
+    modelConfigFindings(
+      { path: "models/marts/ops.sql", status: "modified", diff: "@@ -8,2 +8,3 @@\n+{% if is_incremental() %}\n+where event_at >= timestamp('{{ var(\"batch_start\") }}')\n" },
+      inlineConfigSplats(body),
+      dialect,
+    ).filter((f) => f.rule === "dbt-project-rules:merge-no-incremental-predicates")
+  test("partitioned merge with a unique_key and no predicates, incremental filter changed: fires", () => {
+    const fs = predicates(sql())
+    expect(fs).toHaveLength(1)
+    expect(fs[0].body).toContain("`event_at`")
+  })
+  test("a strategy set in dbt_project.yml (manifest config) counts", () => {
+    const run = (strategy: string) =>
+      modelConfigFindings(
+        { path: "models/marts/ops.sql", status: "modified", diff: "@@ -8,2 +8,3 @@\n+{% if is_incremental() %}\n+where event_at >= timestamp('{{ var(\"batch_start\") }}')\n" },
+        inlineConfigSplats(sql()),
+        "bigquery",
+        { incremental_strategy: strategy },
+      ).filter((f) => f.rule === "dbt-project-rules:merge-no-incremental-predicates")
+    expect(run("insert_overwrite")).toHaveLength(0)
+    expect(run("merge")).toHaveLength(1)
+  })
+  test("twin: incremental_predicates set", () => {
+    expect(predicates(sql(',\n    "incremental_predicates": ["DBT_INTERNAL_DEST.event_at >= current_date - 3"]'))).toHaveLength(0)
+  })
+  test("another engine is left to partition-not-in-merge-key", () => {
+    expect(predicates(sql(), "snowflake")).toHaveLength(0)
+  })
+})
+
+describe("SQL text concatenated in Jinja without a space", () => {
+  const seam = (line: string) => fires("jinja-concat-missing-space", line)
+  test("a SQL literal ending in a word right at `~`", () => {
+    expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(true)
+    expect(seam("{{ 'select id from' ~ relation }}")).toBe(true)
+  })
+  test("twin: the space is inside the string", () => {
+    expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id ' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(false)
+  })
+  test("identifier building is not SQL text", () => {
+    expect(seam("{{ ref('stg_' ~ source_name) }}")).toBe(false)
+    expect(seam("{% set rel = target.schema ~ '_staging' %}")).toBe(false)
+    expect(seam("{{ \"'\" ~ value ~ \"'\" }}")).toBe(false)
+  })
+  test("a Postgres regex match is not Jinja; messages are not SQL", () => {
+    expect(seam("where name ~ 'acme corp'")).toBe(false)
+    expect(seam("where {{ col }} ~ 'acme corp' and x = {{ var('y') }}")).toBe(false)
+    expect(seam("{{ log('Running model' ~ model.name, info=true) }}")).toBe(false)
+  })
+  test("a long line with an unclosed literal is scanned in linear time", () => {
+    const t = performance.now()
+    expect(seam("{{ x ~ 'a " + "x ".repeat(50_000))).toBe(false)
+    expect(seam("{{ 'a " + "x ".repeat(50_000))).toBe(false)
+    expect(performance.now() - t).toBeLessThan(200)
   })
 })
