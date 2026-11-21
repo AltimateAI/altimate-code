@@ -853,7 +853,7 @@ describe("ACP service sessions", () => {
     }),
   )
 
-  effectIt.effect("does not restore a reply whose parent row is outside the fetched page", () =>
+  effectIt.effect("restores a long agent turn whose prompt is outside the fetched page", () =>
     Effect.gen(function* () {
       const { service } = makeService([
         {
@@ -862,7 +862,7 @@ describe("ACP service sessions", () => {
         },
       ])
       const resumed = yield* service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] })
-      expect(select(resumed, "effort")?.currentValue).not.toBe("high")
+      expect(select(resumed, "effort")?.currentValue).toBe("high")
     }),
   )
 
