@@ -1,3 +1,6 @@
+// altimate_change start — clean up private validator state with its session
+import { ValidatorEnforcement } from "./validators/enforcement"
+// altimate_change end
 // altimate_change start — release session-owned scratch stores on deletion
 import { closeScratch } from "@/altimate/native/connections/scratch"
 // altimate_change end
@@ -675,8 +678,9 @@ export const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
-        // altimate_change start — release only the deleted session's scratch store
+        // altimate_change start — release the deleted session's scratch and advisory state
         yield* Effect.promise(() => closeScratch(sessionID))
+        yield* Effect.promise(() => ValidatorEnforcement.removeAdvisories(sessionID))
         // altimate_change end
         yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
         yield* events.remove(sessionID)

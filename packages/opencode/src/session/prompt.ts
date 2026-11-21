@@ -902,9 +902,10 @@ export namespace SessionPrompt {
     // altimate_change start — validator framework retry counter
     let validatorRetryCount = 0
     const validatorStrict = process.env.ALTIMATE_VALIDATORS_STRICT === "1"
-    const validatorAdvisoriesEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1" && !validatorStrict
-    const seenValidatorAdvisories = new Set<string>()
-    let pendingValidatorAdvisories: MessageV2.Assistant | undefined
+    const validatorAdvisories =
+      process.env.ALTIMATE_VALIDATORS_ENABLED === "1" && !validatorStrict
+        ? await ValidatorEnforcement.loadAdvisories(sessionID)
+        : undefined
     // altimate_change end
     let sessionAgentName = ""
     let sessionHadError = false
@@ -2234,20 +2235,11 @@ export namespace SessionPrompt {
       // altimate_change end
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
-      if (validatorAdvisoriesEnabled && modelSteps === 1) {
-        pendingValidatorAdvisories = ValidatorEnforcement.latestAdvisoryMessage(sessionID)
-        const shown = pendingValidatorAdvisories?.metadata?.validatorAdvisoriesShown
-        if (Array.isArray(shown)) {
-          for (const advisory of shown) seenValidatorAdvisories.add(advisory)
-        }
-      }
-      const validatorAdvisories = pendingValidatorAdvisories?.metadata?.validatorAdvisories
       const advisoryContext =
-        Array.isArray(validatorAdvisories) &&
-        validatorAdvisories.length > 0 &&
+        validatorAdvisories?.pending.length &&
         !echoCommittedAnswer &&
         msgs.some((message) => message.info.id === lastUser.id && UserRequest.requestID(message) !== undefined)
-          ? ["Completion checks that could not be verified (advisory only):", ...validatorAdvisories].join("\n")
+          ? ["Completion checks that could not be verified (advisory only):", ...validatorAdvisories.pending].join("\n")
           : undefined
       // altimate_change end
       const result = await processor.process({
@@ -2308,19 +2300,10 @@ export namespace SessionPrompt {
       })
 
       // altimate_change start — deliver advisory context at most once
-      if (
-        pendingValidatorAdvisories && advisoryContext && processor.message.finish &&
-        !processor.message.error && !abort.aborted
-      ) {
-        const { validatorAdvisories, ...metadata } = pendingValidatorAdvisories.metadata ?? {}
-        if (Array.isArray(validatorAdvisories)) {
-          for (const advisory of validatorAdvisories) seenValidatorAdvisories.add(advisory)
-        }
-        await Session.updateMessage({
-          ...pendingValidatorAdvisories,
-          metadata: { ...metadata, validatorAdvisories: [], validatorAdvisoriesShown: [...seenValidatorAdvisories] },
-        })
-        pendingValidatorAdvisories = undefined
+      if (validatorAdvisories && advisoryContext && processor.message.finish && !processor.message.error && !abort.aborted) {
+        validatorAdvisories.shown.push(...validatorAdvisories.pending.map(ValidatorEnforcement.advisoryFingerprint))
+        validatorAdvisories.pending = []
+        ValidatorEnforcement.saveAdvisories(sessionID, validatorAdvisories)
       }
       // altimate_change end
 
@@ -2587,17 +2570,15 @@ export namespace SessionPrompt {
             } as any)
           }
 
-          if (advisories.length > 0) {
-            const previous = pendingValidatorAdvisories?.metadata?.validatorAdvisories
-            const pending = [...new Set([...(Array.isArray(previous) ? previous : []), ...advisories])]
-              .filter((advisory) => !seenValidatorAdvisories.has(advisory))
-            processor.message.metadata = {
-              ...processor.message.metadata,
-              validatorAdvisories: pending,
-              validatorAdvisoriesShown: [...seenValidatorAdvisories],
+          if (validatorAdvisories) {
+            const additional = advisories.filter((note) =>
+              !validatorAdvisories.pending.includes(note) &&
+              !validatorAdvisories.shown.includes(ValidatorEnforcement.advisoryFingerprint(note)),
+            )
+            if (additional.length > 0) {
+              validatorAdvisories.pending.push(...new Set(additional))
+              ValidatorEnforcement.saveAdvisories(sessionID, validatorAdvisories)
             }
-            await Session.updateMessage(processor.message)
-            if (pending.length > 0) pendingValidatorAdvisories = processor.message
           }
 
           if (retry) {

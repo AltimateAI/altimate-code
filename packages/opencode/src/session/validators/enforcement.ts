@@ -1,6 +1,9 @@
-import { MessageTable } from "@opencode-ai/core/session/sql"
-import { Database, sql } from "../../storage/db"
-import type { MessageV2 } from "../message-v2"
+import { createHash } from "node:crypto"
+import { rm } from "node:fs/promises"
+import path from "node:path"
+import { Global } from "../../global"
+import { Filesystem } from "../../util/filesystem"
+import { Log } from "../../util/log"
 import type { SessionID } from "../schema"
 import type { Validator, ValidatorResult } from "./types"
 
@@ -35,17 +38,45 @@ export function decide(
   }
 }
 
-// Look up only the advisory record, independent of clean turns and history compaction.
-export function latestAdvisoryMessage(sessionID: SessionID): MessageV2.Assistant | undefined {
-  const row = Database.use((db) =>
-    db.select({ id: MessageTable.id, data: MessageTable.data })
-      .from(MessageTable)
-      .where(sql`${MessageTable.session_id} = ${sessionID} and json_type(${MessageTable.data}, '$.metadata.validatorAdvisories') = 'array'`)
-      .orderBy(sql`${MessageTable.time_created} desc, rowid desc`)
-      .limit(1)
-      .get(),
-  )
-  if (row?.data.role === "assistant") return { ...row.data, id: row.id, sessionID } as MessageV2.Assistant
+interface AdvisoryState {
+  pending: string[]
+  shown: string[]
+}
+
+const log = Log.create({ service: "validator-advisories" })
+
+export function advisoryFingerprint(text: string): string {
+  return createHash("sha256").update(text).digest("hex")
+}
+
+function advisoryFile(sessionID: SessionID): string {
+  return path.join(Global.Path.state, "validator-advisories", advisoryFingerprint(sessionID) + ".json")
+}
+
+// A local file avoids putting advisories in the conversation and share stream.
+export async function loadAdvisories(sessionID: SessionID): Promise<AdvisoryState> {
+  try {
+    const value = await Filesystem.readJson<AdvisoryState>(advisoryFile(sessionID))
+    if (
+      Array.isArray(value?.pending) && value.pending.every((entry) => typeof entry === "string") &&
+      Array.isArray(value?.shown) && value.shown.every((entry) => typeof entry === "string")
+    ) return value
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") log.warn("failed to read validator advisories")
+  }
+  return { pending: [], shown: [] }
+}
+
+export function saveAdvisories(sessionID: SessionID, state: AdvisoryState): void {
+  try {
+    Filesystem.writeJsonAtomic(advisoryFile(sessionID), state, 0o600)
+  } catch {
+    log.warn("failed to save validator advisories")
+  }
+}
+
+export async function removeAdvisories(sessionID: SessionID): Promise<void> {
+  await rm(advisoryFile(sessionID), { force: true }).catch(() => log.warn("failed to remove validator advisories"))
 }
 
 export * as ValidatorEnforcement from "./enforcement"

@@ -642,6 +642,9 @@ for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "str
           expect(requests[1]).toContain(note)
           expect(requests[2]).not.toContain(note)
           expect(requests[3]).not.toContain(note)
+          const storedConversation = JSON.stringify([...MessageV2.stream(chat.id)])
+          expect(storedConversation).not.toContain(note)
+          expect(storedConversation).not.toContain("validatorAdvisories")
         } else if (mode === "mixed") {
           expect(retries).toEqual([0, 1])
           expect(requests).toEqual(["", ""])
