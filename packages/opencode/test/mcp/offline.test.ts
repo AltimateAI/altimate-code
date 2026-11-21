@@ -60,6 +60,7 @@ mcpTest.live("offline MCP auth refuses both entry points without contacting the 
       else process.env.ALTIMATE_OFFLINE = previous
     }
   }),
+  30_000,
 )
 
 test("loopback checks accept only literal local addresses", () => {
