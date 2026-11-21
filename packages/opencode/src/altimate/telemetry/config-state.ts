@@ -81,9 +81,9 @@ async function hasWellKnownAuth(): Promise<boolean> {
     // reads it; anything else that does not parse (whitespace included) is unreadable there too.
     parsed = contents === "" ? {} : JSON.parse(contents)
   }
-  // Valid JSON that is not an object holds no entry: Auth uses inline content as is and reads such a file
-  // as an empty store, without marking the read failed.
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false
+  // Only a plain object is a store this probe can rule on. Anything else is unreadable (fail closed): some
+  // such values (null) fail Config's load outright, and it is not worth matching Auth case by case.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
   // Any well-known-typed entry counts: Auth passes OPENCODE_AUTH_CONTENT through without decoding it, so
   // Config can fetch remote config even for an entry the file path would reject (fail closed).
   return Object.values(parsed).some(
