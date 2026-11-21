@@ -1,7 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
 import { randomBytes } from "crypto"
-import path from "path"
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
@@ -79,20 +78,30 @@ const log = Log.create({ service: "altimate-plugin" })
 /** `directory`: the project the command acts on, whose config may opt out; the process's working
  * directory when the command has none (`auth login`). */
 export async function buildCliContext(machineIdPath?: string, directory?: string): Promise<string> {
-  // altimate_change start — apply the same opt-out to the auth URL’s machine ID
+  // altimate_change start — honour both telemetry opt-out gates, mirroring
+  // telemetry/index.ts::doInit:
+  //   1. the opt-out env vars (TelemetryConfig.disablingEnvironmentVariable)
+  //   2. config.telemetry.disabled; a config that cannot be fully resolved omits the id
   let disabled = Boolean(TelemetryConfig.disablingEnvironmentVariable())
   if (!disabled) {
-    const instance = TelemetryConfig.instanceDirectory()
-    const differentProject = instance && directory && path.resolve(directory) !== instance
-    const state = differentProject
-      ? undefined
-      : await TelemetryConfig.loadedState().catch(() => instance ? "unreadable" : undefined)
-    if (state) {
-      disabled = state !== "enabled"
+    // Server routes run inside Instance.provide(), so the full config resolves during an
+    // ordinary browser authorize().
+    const loaded = await TelemetryConfig.loadedState().catch(() => undefined)
+    if (loaded) {
+      disabled = loaded !== "enabled"
+    } else if (TelemetryConfig.instanceDirectory()) {
+      disabled = true
     } else {
-      const local = await TelemetryConfig.disabledState(directory)
-      if (local === "enabled") await Telemetry.init().catch(() => {})
-      disabled = local !== "enabled" || !Telemetry.isEnabled()
+      // The paths that skip instance bootstrap: `altimate auth login <url>` and the
+      // create-and-link hand-off of `altimate-code link`. Read `telemetry.disabled`
+      // from the config files directly: an opt-out there, or files that cannot be
+      // read (an opt-out may be behind them), omit the id. Only a config that
+      // readably leaves telemetry on defers to the telemetry module's own state
+      // (no sink, test runner).
+      const state = await TelemetryConfig.disabledState(directory)
+      if (state === "enabled") await Telemetry.init().catch(() => {})
+      disabled = state !== "enabled" || !Telemetry.isEnabled()
+      log.info("cli_context: no instance, read the opt-out from the files", { state, enabled: !disabled })
     }
   }
   let machineId = ""

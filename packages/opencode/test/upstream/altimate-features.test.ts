@@ -401,7 +401,7 @@ describe("altimate features: telemetry fail-safe init", () => {
   test("telemetry can resolve the opt-out before an Instance exists", async () => {
     const init = await readSrc("altimate", "telemetry", "index.ts")
     const config = await readSrc("altimate", "telemetry", "config-state.ts")
-    expect(init).toContain("await TelemetryConfig.resolve(scope, retry)")
+    expect(init).toContain("await TelemetryConfig.resolve(configDirectory")
     expect(config).toMatch(/try\s*\{\s*return await loadedState\(retry\)/)
     expect(config).toContain('return instanceDirectory() ? "unreadable" : disabledState(directory)')
     expect(config).toContain("ALTIMATE_TELEMETRY_DISABLED")

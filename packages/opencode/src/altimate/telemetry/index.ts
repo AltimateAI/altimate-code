@@ -15,7 +15,6 @@ import fs from "fs"
 import path from "path"
 import os from "os"
 import { fileLog } from "@/altimate/util/file-log"
-import { Filesystem } from "@/util/filesystem"
 
 const log = Log.create({ service: "telemetry" })
 
@@ -216,14 +215,6 @@ const PATH_RULES = {
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*[\\\\\\/]|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
 }
 // altimate_change end
-
-function telemetryWorkingDirectory(): string | undefined {
-  try {
-    return process.cwd()
-  } catch {
-    return undefined
-  }
-}
 
 export namespace Telemetry {
   const FLUSH_INTERVAL_MS = 5_000
@@ -2295,9 +2286,7 @@ export namespace Telemetry {
   }
 
   let enabled = false
-  let buffer: { event: Event; scope?: string | null; held?: boolean }[] = []
-  let configScope: string | undefined
-  let reinitScope: string | undefined
+  let buffer: Event[] = []
   let flushTimer: ReturnType<typeof setInterval> | undefined
   // altimate_change — who the machine is signed in as (backend user uuid + tenant), for the
   // funnel join with web events. Resolved off the stored credential in doInit(); see identity.ts.
@@ -2318,15 +2307,32 @@ export namespace Telemetry {
   // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
   const IDENTITY_RETRY_MS = 60_000
   let identityRetryAt = 0 // 0: no retry pending
+  // altimate_change start — process-wide opt-out gate. Events are tracked while the opt-out is
+  // unknown (CLI startup, before config can be read) but nothing leaves until an init resolves the
+  // config to enabled. An opt-out (env or config) makes it `disabled` for the rest of the process,
+  // so a later init never sends what an earlier one refused. Unlike `enabled`, it survives the
+  // per-session shutdown; it is never reset outside tests.
+  let gate: "pending" | "enabled" | "disabled" = "pending"
+  // While the config is unreadable, re-resolve it at most this often (each try reloads the config).
+  const CONFIG_RETRY_MS = 30_000
+  let configRetry: { at: number; instance: boolean } | undefined
+  /** Test seam: forget the process-wide opt-out decision and the events held for it. */
+  export function resetGateForTest() {
+    gate = "pending"
+    configRetry = undefined
+    buffer = []
+    droppedEvents = 0
+  }
+  /** Test seam: end the unreadable-config retry backoff so the next init() re-resolves. */
+  export function retryConfigNowForTest() {
+    if (configRetry) configRetry.at = 0
+  }
+  // altimate_change end
   // altimate_change — the project the command will run in, for reading the config without an
   // Instance: the CLI initialises telemetry before a command changes into its `--dir` or project.
   let configDirectory: string | undefined
   export function setConfigDirectory(directory: string | undefined) {
-    try {
-      configDirectory = directory === undefined ? undefined : Filesystem.resolve(directory)
-    } catch {
-      configDirectory = directory === undefined ? undefined : path.resolve(directory)
-    }
+    configDirectory = directory
   }
   let machineId = ""
   let sessionId = ""
@@ -2339,11 +2345,8 @@ export namespace Telemetry {
   let nextTurn = 0
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
-  // Remember evicted scopes without letting overflow accounting grow unbounded.
-  const droppedEvents = new Map<string | undefined, { count: number; held?: boolean }>()
+  let droppedEvents = 0
   let initPromise: Promise<void> | undefined
-  // altimate_change — unresolved config holds events for the next init call.
-  let configUnresolved = false
   let initDone = false
   // altimate_change — shutdown needs to cancel a flush already in flight, not just stop waiting
   // for it: `flush()` chains through inFlightFlush, so a timed-out drain still had its final
@@ -2352,7 +2355,6 @@ export namespace Telemetry {
   // cleared and ship them under the NEXT lifecycle.
   let activeFlushAbort: AbortController | undefined
   let shuttingDown = false
-  let retainPendingOnShutdown = false
   // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
   // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
   let shutdownPromise: Promise<void> | undefined
@@ -2501,17 +2503,9 @@ export namespace Telemetry {
   const DEFAULT_CONNECTION_STRING =
     "InstrumentationKey=5095f5e6-477e-4262-b7ae-2118de18550d;IngestionEndpoint=https://eastus-8.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus.livediagnostics.monitor.azure.com/;ApplicationId=6564474f-329b-4b7d-849e-e70cb4181294"
 
-  function resolveScope(processWide = false) {
-    const instance = TelemetryConfig.instanceDirectory()
-    const directory = instance ?? (processWide ? configScope : undefined) ?? configDirectory
-    return { instance, directory, scope: directory ?? telemetryWorkingDirectory() }
-  }
-
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
-    const { instance, scope } = resolveScope()
-    if (scope === undefined) return Promise.resolve()
     // altimate_change start — never re-init across an in-flight shutdown.
     //
     // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
@@ -2526,15 +2520,12 @@ export namespace Telemetry {
     // Chaining onto shutdownPromise keeps the generations separate: callers arriving mid-shutdown
     // wait for the new init rather than joining the dying one.
     if (shutdownPromise) {
-      if (reinitPromise && reinitScope !== scope) return reinitPromise.then(() => init())
       if (!reinitPromise) {
-        reinitScope = scope
         reinitPromise = shutdownPromise
           .catch(() => {})
-          .then(() => doInit(scope))
+          .then(doInit)
           .finally(() => {
             reinitPromise = undefined
-            reinitScope = undefined
           })
         // Publish it as initPromise too. Without this, a caller arriving after the shutdown had
         // settled — but before this chained doInit() finished — saw an empty initPromise and
@@ -2550,69 +2541,44 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
-    if (initPromise && configScope !== scope) {
-      return shutdown({ preservePending: true, timeoutMs: EXIT_FLUSH_BUDGET_MS }).then(() => init())
+    // While the config stays unreadable, retry at most every CONFIG_RETRY_MS. The first init inside
+    // an Instance is not throttled by an earlier one outside it: it reads the full config, which the
+    // instance-less probe could not.
+    if (!initPromise && gate === "pending" && configRetry && Date.now() < configRetry.at) {
+      if (configRetry.instance || !TelemetryConfig.instanceDirectory()) return Promise.resolve()
     }
-    if (!initDone && initPromise && instance) {
-      // A session can join the middleware init while its local probe is still running.
-      // Retry once from the session's context when the probe could not resolve config.
-      const pending = initPromise
-      return pending.then(() => {
-        if (initPromise !== pending) return initPromise
-        if (!shutdownPromise && configUnresolved) return init()
-      })
-    }
-    if (initDone && configUnresolved) {
-      initPromise = undefined
-      initDone = false
-    }
-    return (initPromise ??= doInit(scope))
+    return (initPromise ??= doInit())
     // altimate_change end
   }
 
-  function clearScope(scope: string | undefined) {
-    buffer = buffer.filter((entry) => entry.scope !== scope)
-    droppedEvents.delete(scope)
-  }
-
-  async function doInit(scope: string) {
-    // Events tracked before the CLI selects its config directory belong to the
-    // first scope it resolves. Later scopes must resolve their own opt-out.
-    for (const entry of buffer) {
-      if (entry.scope === undefined) entry.scope = scope
-    }
-    const earlyDrops = droppedEvents.get(undefined)
-    if (earlyDrops) {
-      const scopedDrops = droppedEvents.get(scope)
-      droppedEvents.delete(undefined)
-      droppedEvents.set(scope, { count: (scopedDrops?.count ?? 0) + earlyDrops.count, held: scopedDrops?.held || earlyDrops.held })
-    }
-    const retry = (configUnresolved && configScope === scope) ||
-      droppedEvents.get(scope)?.held ||
-      buffer.some((entry) => entry.scope === scope && entry.held)
-    configScope = scope
-    configUnresolved = false
+  async function doInit() {
+    // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
+    let unresolved = false
     try {
-      // altimate_change start — hold bounded startup events until the opt-out is resolved.
-      if (TelemetryConfig.disablingEnvironmentVariable()) {
+      // altimate_change start — resolve the opt-out before anything can be sent. Env vars first,
+      // then the config: the full one inside an Instance, the files on disk outside one.
+      if (gate === "disabled" || TelemetryConfig.disablingEnvironmentVariable()) {
+        gate = "disabled"
         buffer = []
-        droppedEvents.clear()
+        droppedEvents = 0
         return
       }
-      const state = await TelemetryConfig.resolve(scope, retry)
-      if (state === "unreadable") {
-        configUnresolved = true
-        const drops = droppedEvents.get(scope)
-        if (drops) drops.held = true
-        for (const entry of buffer) {
-          if (entry.scope === scope) entry.held = true
-        }
-        return
-      }
+      const instance = Boolean(TelemetryConfig.instanceDirectory())
+      const state = await TelemetryConfig.resolve(configDirectory, configRetry !== undefined)
       if (state === "disabled") {
-        clearScope(scope)
+        gate = "disabled"
+        buffer = []
+        droppedEvents = 0
         return
       }
+      if (state === "unreadable") {
+        // An opted-out user may be behind it: hold the buffer (capped) and send nothing.
+        unresolved = true
+        configRetry = { at: Date.now() + CONFIG_RETRY_MS, instance }
+        return
+      }
+      gate = "enabled"
+      configRetry = undefined
       // altimate_change end
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
       // The baked-in key is refused under a test runner so suites never ship to the production
@@ -2623,13 +2589,13 @@ export namespace Telemetry {
       // and active-machine metric by ~33%.
       const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       if (!explicit && isAutomatedRun()) {
-        clearScope(scope)
+        buffer = []
         return
       }
       const connectionString = explicit ?? DEFAULT_CONNECTION_STRING
       const cfg = parseConnectionString(connectionString)
       if (!cfg) {
-        clearScope(scope)
+        buffer = []
         return
       }
       appInsights = cfg
@@ -2656,14 +2622,15 @@ export namespace Telemetry {
       // altimate_change start — first-run health: drain anchor events that were tracked before init
       // finished (first_launch always is) instead of leaving them to the 5 s interval a startup freeze
       // would block. The stall watcher starts in `finally`, telemetry or not.
-      if (droppedEvents.has(scope) || buffer.some(({ event, scope: owner }) =>
-        owner === scope && (retry || ANCHOR_EVENTS.has(event.type)),
-      )) void Telemetry.flush().catch(() => {})
+      if (buffer.some((event) => ANCHOR_EVENTS.has(event.type))) void Telemetry.flush().catch(() => {})
       // altimate_change end
     } catch {
-      clearScope(scope)
+      buffer = []
     } finally {
-      initDone = true
+      // altimate_change start — unresolved: stay pre-init so events keep buffering and init() retries
+      if (unresolved) initPromise = undefined
+      initDone = !unresolved
+      // altimate_change end
       // altimate_change start — the stall watcher also writes each stall to opencode.log, which `debug bundle`
       // reads, so it runs whether or not telemetry is on; with telemetry off its events are dropped by `track`.
       startLoopMonitor()
@@ -2721,9 +2688,10 @@ export namespace Telemetry {
     const generation = ++identityGeneration
     identityStamp = TelemetryIdentity.credentialStamp()
     identityRetryAt = 0
+    // altimate_change — no account lookup (a backend request) once this lifecycle has ended
     return TelemetryIdentity.resolveWithOutcome({
       ...opts,
-      canSend: () => generation === identityGeneration && !shutdownPromise,
+      canSend: () => generation === identityGeneration && gate === "enabled" && !shutdownPromise,
     })
       .then(({ identity: resolved, outcome }) => {
         if (generation !== identityGeneration) return
@@ -2741,11 +2709,8 @@ export namespace Telemetry {
    * Does nothing while telemetry is disabled. */
   export async function refreshIdentity(): Promise<void> {
     // Opted out (or not initialised): no lookup; an enabled init resolves from the stored credential.
-    if (!isEnabled() || shutdownPromise) return
-    // A refresh queued behind a flush belongs to the init that started it.
-    const startedUnder = initPromise
+    if (!enabled) return
     await flush()
-    if (!isEnabled() || shutdownPromise || initPromise !== startedUnder) return
     identity = undefined
     await resolveIdentity({ refresh: true })
   }
@@ -2777,10 +2742,9 @@ export namespace Telemetry {
     return { sessionId, projectId }
   }
 
-  /** Returns true once telemetry is enabled for the calling project's config. */
+  /** Returns true only after init() has completed and telemetry is enabled. */
   export function isEnabled(): boolean {
-    if (!initDone || !enabled) return false
-    return configScope === resolveScope().scope
+    return initDone && enabled
   }
 
   // altimate_change start — first-run health instrumentation (see the startup_ready, event_loop_stall
@@ -2932,12 +2896,10 @@ export namespace Telemetry {
   // altimate_change end
 
   export function track(event: Event) {
-    // Membership is decided when events are tracked, never by whichever
-    // project happens to initialize before the next flush.
-    const caller = resolveScope(event.type === "event_loop_stall")
-    // Keep events from an inaccessible directory unassigned until exit.
-    const scope = caller.directory ?? (caller.scope === undefined ? null : configScope === undefined ? undefined : caller.scope)
-    if (scope === configScope && initDone && !enabled && !configUnresolved) return
+    // Before init completes: buffer (flushed once init enables, or cleared if disabled).
+    // After init completed and disabled telemetry: drop silently.
+    // altimate_change — opted out (env or config): drop. Unresolved config keeps initDone false, so it buffers.
+    if (gate === "disabled" || (initDone && !enabled)) return
     // altimate_change start — stamp the client trace of the turn the event's own session is
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
     // explicit per-event `session_id` is used — the process-global session can be another one.
@@ -2950,24 +2912,16 @@ export namespace Telemetry {
     // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
     // carries none. A process-wide or per-session fallback kept attributing cancelled turns' rows to
     // their replacements.
-    buffer.push({ event, scope, held: scope === configScope && configUnresolved })
+    buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
-      const dropped = buffer.shift()!
-      const owner = dropped.scope
-      if (owner !== null) {
-        const previous = droppedEvents.get(owner)
-        droppedEvents.delete(owner)
-        droppedEvents.set(owner, { count: (previous?.count ?? 0) + 1, held: previous?.held || dropped.held })
-        if (droppedEvents.size > MAX_BUFFER_SIZE) {
-          droppedEvents.delete(droppedEvents.keys().next().value)
-        }
-      }
+      buffer.shift()
+      droppedEvents++
     }
     // altimate_change start — anchor events flush immediately. A frozen-then-killed process otherwise
     // dies with its buffer: the 5 s interval cannot fire while the loop is blocked, and the stall
     // report itself would be the first thing lost.
     if (event.type === "first_launch" && !event.is_upgrade) freshInstall = true
-    if (scope === configScope && initDone && enabled && ANCHOR_EVENTS.has(event.type)) void Telemetry.flush().catch(() => {})
+    if (initDone && enabled && ANCHOR_EVENTS.has(event.type)) void Telemetry.flush().catch(() => {})
     // altimate_change end
   }
 
@@ -2998,7 +2952,7 @@ export namespace Telemetry {
     // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
     const who = identity
     const mid = machineId
-    if (enabled && !shuttingDown) {
+    if (enabled) {
       const stamp = TelemetryIdentity.credentialStamp()
       const retryDue = identityRetryAt !== 0 && Date.now() >= identityRetryAt
       if (stamp !== identityStamp || retryDue) {
@@ -3007,24 +2961,21 @@ export namespace Telemetry {
       }
     }
     // altimate_change end
-    if (!enabled || !appInsights) return
+    // altimate_change — nothing leaves until an init resolved the opt-out to enabled
+    if (gate !== "enabled" || !enabled || buffer.length === 0 || !appInsights) return
 
-    const scope = configScope
-    const events = buffer.filter((entry) => entry.scope === scope).map(({ event }) => event)
-    const dropped = droppedEvents.get(scope)?.count
-    if (events.length === 0 && !dropped) return
-    buffer = buffer.filter((entry) => entry.scope !== scope)
+    const events = buffer.splice(0, buffer.length)
 
-    droppedEvents.delete(scope)
-    if (dropped) {
+    if (droppedEvents > 0) {
       events.push({
         type: "error",
         timestamp: Date.now(),
         session_id: sessionId,
         error_name: "TelemetryBufferOverflow",
-        error_message: `${dropped} events dropped due to buffer overflow`,
+        error_message: `${droppedEvents} events dropped due to buffer overflow`,
         context: "telemetry",
       } as Event)
+      droppedEvents = 0
     }
 
     const controller = new AbortController()
@@ -3053,10 +3004,10 @@ export namespace Telemetry {
         }
       }
     } catch {
-      // altimate_change — only process exit drops unsent retries. A project handoff
-      // can retain them for the same scope without extending the transport deadline.
-      // They can retry when that scope is active again. Process exit clears any still queued.
-      if (shuttingDown && !retainPendingOnShutdown) return
+      // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
+      // regardless, so re-inserting here does not save these events; it only leaves them to be
+      // shipped by whatever lifecycle comes next, under a different launch id.
+      if (shuttingDown) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
       // altimate_change — a batch never attempted (an earlier one failed) keeps its retry.
@@ -3064,7 +3015,7 @@ export namespace Telemetry {
         if (attempted.has(e)) (e as any)._retried = true
       }
       const space = Math.max(0, MAX_BUFFER_SIZE - buffer.length)
-      buffer.unshift(...retriable.slice(0, space).map((event) => ({ event, scope })))
+      buffer.unshift(...retriable.slice(0, space))
     } finally {
       clearTimeout(timeout)
       if (activeFlushAbort === controller) activeFlushAbort = undefined
@@ -3099,7 +3050,7 @@ export namespace Telemetry {
   // `timeoutMs` bounds the flush from the inside. Racing shutdown() against an external timer
   // does NOT cancel it: the losing promise keeps running and resets module state after the
   // caller has already moved on. Exit paths pass a budget so the fetch itself is aborted.
-  export async function shutdown(opts?: { timeoutMs?: number; preservePending?: boolean }) {
+  export async function shutdown(opts?: { timeoutMs?: number }) {
     if (shutdownPromise) {
       // An earlier caller is mid-flush, possibly on the default 10s budget. Returning its promise
       // unchanged would silently ignore this caller's deadline and make the exit path wait past
@@ -3117,13 +3068,13 @@ export namespace Telemetry {
       if (timer) clearTimeout(timer)
       return
     }
-    shutdownPromise = doShutdown(opts?.timeoutMs, opts?.preservePending).finally(() => {
+    shutdownPromise = doShutdown(opts?.timeoutMs).finally(() => {
       shutdownPromise = undefined
     })
     return shutdownPromise
   }
 
-  async function doShutdown(timeoutMs?: number, preservePending?: boolean) {
+  async function doShutdown(timeoutMs?: number) {
     const initPromiseAtShutdown = initPromise
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
@@ -3146,7 +3097,6 @@ export namespace Telemetry {
     // in mid-request is not abandoned and cannot write back into a buffer we are about to clear.
     const deadline = Date.now() + (timeoutMs ?? REQUEST_TIMEOUT_MS)
     shuttingDown = true
-    retainPendingOnShutdown = Boolean(preservePending)
     if (inFlightFlush) {
       // Bounded: a flush already in flight uses the DEFAULT request timeout, so awaiting it
       // unbounded could burn 10s before the bounded flush below even starts — well past the 5s
@@ -3175,23 +3125,20 @@ export namespace Telemetry {
         await inFlightFlush.catch(() => {})
       }
     }
-    // Spend the remaining budget on a final flush if there is time. At process exit, reserve
-    // a small floor for the last attempt because there is no later lifecycle to retry it.
-    const remaining = deadline - Date.now()
-    if (!preservePending || remaining >= 250) await flush(Math.max(250, remaining))
+    // Whatever the drain left of the shared deadline, never below a floor that lets the request
+    // actually be made.
+    await flush(Math.max(250, deadline - Date.now()))
     inFlightFlush = undefined
     shuttingDown = false
-    retainPendingOnShutdown = false
     enabled = false
     appInsights = undefined
-    if (!preservePending) {
-      configUnresolved = false
-      configScope = undefined
+    // altimate_change start — while the opt-out is unresolved nothing was flushed: keep the events
+    // for a later init in this process to send or drop. At process exit they go with the process.
+    if (gate !== "pending") {
       buffer = []
-      droppedEvents.clear()
-    } else if (!configUnresolved) {
-      configScope = undefined
+      droppedEvents = 0
     }
+    // altimate_change end
     sessionId = ""
     projectId = ""
     machineId = ""

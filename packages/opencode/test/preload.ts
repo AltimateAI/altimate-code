@@ -158,6 +158,12 @@ let runningAtStart = new Set<Promise<unknown>>()
 beforeEach(() => {
   runningAtStart = new Set(runningSyncs().map(([, sync]) => sync))
 })
+// Telemetry's opt-out gate is process-wide and outlives shutdown(); files share a process, so each
+// test starts from a fresh launch's state.
+beforeEach(async () => {
+  const { Telemetry } = await import("../src/altimate/telemetry")
+  Telemetry.resetGateForTest()
+})
 afterEach(() => {
   const left = runningSyncs().filter(([, sync]) => !reportedSyncs.has(sync))
   if (left.length === 0) return

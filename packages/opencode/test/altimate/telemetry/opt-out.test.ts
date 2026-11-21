@@ -1,6 +1,6 @@
 import { Database as SQLite } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
 import { Database } from "@opencode-ai/core/database/database"
@@ -8,7 +8,8 @@ import { Auth } from "../../../src/auth"
 import { Config } from "../../../src/config/config"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
-import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
+import { Instance } from "../../../src/project/instance"
+import { tmpdir } from "../../fixture/fixture"
 
 const CS = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
 const ENV = [
@@ -39,6 +40,7 @@ describe("telemetry opt-out", () => {
 
   beforeEach(async () => {
     await Telemetry.shutdown()
+    Telemetry.resetGateForTest()
     home = mkdtempSync(path.join(os.tmpdir(), "telemetry-opt-out-"))
     mkdirSync(path.join(home, ".altimate"))
     // Simulate a previously signed-in installation with a machine ID.
@@ -70,6 +72,7 @@ describe("telemetry opt-out", () => {
 
   afterEach(async () => {
     await Telemetry.shutdown()
+    Telemetry.resetGateForTest()
     Telemetry.setConfigDirectory(undefined)
     fetchSpy.mockRestore()
     configSpy.mockRestore()
@@ -256,223 +259,137 @@ describe("telemetry opt-out", () => {
     const names: string[] = []
     fetchSpy.mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
       if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
-      for (const envelope of JSON.parse(String(request?.body))) names.push(envelope.data.baseData.name)
+      for (const envelope of JSON.parse(String(request?.body))) {
+        names.push(envelope.data.baseData.properties?.error_name ?? envelope.data.baseData.name)
+      }
       return new Response(null, { status: 204 })
     }, { preconnect: fetch.preconnect }))
     return names
   }
 
-  test("a later init sends held startup events exactly once", async () => {
+  function errorEvent(name: string) {
+    return { type: "error", timestamp: Date.now(), session_id: "", error_name: name, error_message: "test", context: "test" } as const
+  }
+
+  /** No signed-in account, so the only requests are ingestion. */
+  function signOut() {
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+  }
+
+  test("an unreadable config holds startup events; a later enabled init sends them once", async () => {
     const names = recordIngestion()
+    signOut()
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     trackStartup()
     await Telemetry.init()
-    await Telemetry.refreshIdentity()
     await Telemetry.flush()
+    expect(Telemetry.isEnabled()).toBe(false)
     expect(fetchSpy).not.toHaveBeenCalled()
 
-    rmSync(path.join(home, ".altimate", "altimate.json"))
-    configSpy.mockResolvedValue({ telemetry: { disabled: false } })
+    configSpy.mockResolvedValue({})
+    // While unreadable, init() re-resolves the config at most every 30 s.
+    const reads = configSpy.mock.calls.length
     await Telemetry.init()
+    expect(configSpy.mock.calls.length).toBe(reads)
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    Telemetry.retryConfigNowForTest()
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
     await Telemetry.flush()
     await Telemetry.shutdown()
     expect(names).toEqual(["startup_ready"])
   })
 
-  test("only the owning project can release a held startup event", async () => {
+  test("a session shutdown while unresolved keeps held events for a later init", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.shutdown()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    configSpy.mockResolvedValue({})
+    Telemetry.retryConfigNowForTest()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("an unreadable config that resolves to disabled sends nothing, then stays off for the process", async () => {
     const names = recordIngestion()
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     trackStartup()
     await Telemetry.init()
-    await Telemetry.shutdown({ preservePending: true })
-    expect(fetchSpy).not.toHaveBeenCalled()
-
-    const credentialsPath = path.join(home, ".altimate", "altimate.json")
-    const credentials = readFileSync(credentialsPath)
-    rmSync(credentialsPath)
-    const other = path.join(home, "other")
-    mkdirSync(other)
-    Telemetry.setConfigDirectory(other)
-    configSpy.mockResolvedValue({})
-    Telemetry.track({
-      type: "error",
-      timestamp: Date.now(),
-      error_name: "OtherProject",
-      error_message: "test",
-      context: "test",
-      session_id: "",
-    })
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
+    Telemetry.retryConfigNowForTest()
     await Telemetry.init()
     await Telemetry.flush()
-    expect(names).toEqual(["error"])
     await Telemetry.refreshIdentity()
-    const callsBeforeSwitch = fetchSpy.mock.calls.length
-
-    Telemetry.setConfigDirectory(home)
-    writeFileSync(credentialsPath, credentials)
     expect(Telemetry.isEnabled()).toBe(false)
-    const lookup = spyOn(TelemetryIdentity, "resolveWithOutcome").mockResolvedValue({ outcome: "none" })
-    try {
-      await Telemetry.refreshIdentity()
-      expect(lookup).not.toHaveBeenCalled()
-      expect(fetchSpy).toHaveBeenCalledTimes(callsBeforeSwitch)
-    } finally {
-      lookup.mockRestore()
-    }
-    rmSync(credentialsPath)
-    await Telemetry.shutdown({ preservePending: true })
+    expect(fetchSpy).not.toHaveBeenCalled()
 
+    // Another session of the same process whose config reads as enabled.
+    await Telemetry.shutdown()
+    signOut()
+    configSpy.mockResolvedValue({})
+    trackStartup()
     await Telemetry.init()
     await Telemetry.flush()
-    expect(names).toEqual(["error", "startup_ready"])
+    expect(names).toEqual([])
   })
 
-  test.each(["queued", "in-flight"] as const)("a timed-out handoff keeps the %s batch for its own project", async (state) => {
-    rmSync(path.join(home, ".altimate", "altimate.json"))
+  test("exit while unresolved sends nothing", async () => {
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    trackStartup()
+    await Telemetry.shutdown({ timeoutMs: Telemetry.EXIT_FLUSH_BUDGET_MS })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test("two opted-in projects in one process share one lifecycle and lose no events", async () => {
     const names = recordIngestion()
-    const ingest = fetchSpy.getMockImplementation()!
-    let timedOut = false
-    let notifyStarted!: () => void
-    const started = new Promise<void>((resolve) => { notifyStarted = resolve })
-    fetchSpy.mockImplementation(Object.assign(
-      (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
-        if (timedOut) return ingest(url, request)
-        notifyStarted()
-        return new Promise<Response>((_, reject) => {
-          request?.signal?.addEventListener("abort", () => {
-            timedOut = true
-            reject(new Error("ingestion timed out"))
-          }, { once: true })
-        })
+    signOut()
+    configSpy.mockResolvedValue({})
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const enabledDuringTurns: boolean[] = []
+    let releaseA!: () => void
+    const aMidTurn = new Promise<void>((resolve) => (releaseA = resolve))
+    let markAStarted!: () => void
+    const aStarted = new Promise<void>((resolve) => (markAStarted = resolve))
+
+    const turnA = Instance.provide({
+      directory: a.path,
+      fn: async () => {
+        await Telemetry.init()
+        Telemetry.track(errorEvent("A1"))
+        markAStarted()
+        await aMidTurn
+        // B's turn started meanwhile: A's telemetry is still on.
+        enabledDuringTurns.push(Telemetry.isEnabled())
+        Telemetry.track(errorEvent("A2"))
       },
-      { preconnect: fetch.preconnect },
-    ))
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
-    Telemetry.track({
-      type: "error",
-      timestamp: Date.now(),
-      error_name: "OutgoingProject",
-      error_message: "test",
-      context: "test",
-      session_id: "",
     })
-
-    if (state === "in-flight") {
-      void Telemetry.flush()
-      await started
-    }
-    const other = path.join(home, "other")
-    mkdirSync(other)
-    Telemetry.setConfigDirectory(other)
-    await Telemetry.init()
-    await Telemetry.flush()
-    expect(timedOut).toBe(true)
-    expect(names).toEqual([])
-
-    Telemetry.setConfigDirectory(home)
-    await Telemetry.init()
-    await Telemetry.flush()
-    expect(names).toEqual(["error"])
-  })
-
-  test("a missing working directory leaves telemetry unresolved without throwing", async () => {
-    const names = recordIngestion()
-    Telemetry.setConfigDirectory(undefined)
-    const cwd = spyOn(process, "cwd").mockImplementation(() => {
-      throw new Error("working directory deleted")
+    await aStarted
+    await Instance.provide({
+      directory: b.path,
+      fn: async () => {
+        await Telemetry.init()
+        enabledDuringTurns.push(Telemetry.isEnabled())
+        Telemetry.track(errorEvent("B1"))
+      },
     })
-    try {
-      trackStartup()
-      await Telemetry.init()
-      await Telemetry.flush()
-      expect(Telemetry.isEnabled()).toBe(false)
-      expect(fetchSpy).not.toHaveBeenCalled()
-    } finally {
-      cwd.mockRestore()
-    }
-
-    rmSync(path.join(home, ".altimate", "altimate.json"))
-    Telemetry.setConfigDirectory(home)
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
+    releaseA()
+    await turnA
     await Telemetry.flush()
-    expect(names).toEqual([])
-  })
 
-  test("even a fully evicted project keeps its own overflow count", async () => {
-    const names = recordIngestion()
-    process.env.OPENCODE_CONFIG_CONTENT = "{"
-    await Telemetry.init()
-    trackStartup()
-    await Telemetry.shutdown({ preservePending: true })
-
-    rmSync(path.join(home, ".altimate", "altimate.json"))
-    const other = path.join(home, "other")
-    mkdirSync(other)
-    Telemetry.setConfigDirectory(other)
-    for (let i = 0; i < 200; i++) trackStartup()
-    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
-    await Telemetry.init()
-    await Telemetry.flush()
-    expect(names).toEqual([])
-    await Telemetry.shutdown({ preservePending: true })
-
-    Telemetry.setConfigDirectory(home)
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
-    await Telemetry.flush()
-    expect(names).toEqual(["error"])
-    expect(String(fetchSpy.mock.calls.at(-1)?.[1]?.body)).toContain("TelemetryBufferOverflow")
-  })
-
-  test("a process-wide stall keeps the active scope outside its instance context", async () => {
-    const names = recordIngestion()
-    rmSync(path.join(home, ".altimate", "altimate.json"))
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
-
-    Telemetry.setConfigDirectory(undefined)
-    const stall = Telemetry.loopStallFor(1500, 0, 1000, "main")
-    expect(stall).toBeDefined()
-    Telemetry.track(stall!)
-    await Telemetry.flush()
-    expect(names).toEqual(["event_loop_stall"])
-  })
-
-  test("resolution to disabled discards held startup events", async () => {
-    const names = recordIngestion()
-    process.env.OPENCODE_CONFIG_CONTENT = "{"
-    trackStartup()
-    await Telemetry.init()
-    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
-    await Telemetry.init()
-    await Telemetry.flush()
-    await Telemetry.refreshIdentity()
-    expect(fetchSpy).not.toHaveBeenCalled()
-
-    await Telemetry.shutdown()
-    rmSync(path.join(home, ".altimate", "altimate.json"))
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
-    await Telemetry.flush()
-    expect(names).toEqual([])
-  })
-
-  test("exit while unresolved never sends and clears held events", async () => {
-    const names = recordIngestion()
-    process.env.OPENCODE_CONFIG_CONTENT = "{"
-    trackStartup()
-    await Telemetry.init()
-    trackStartup()
-    await Telemetry.shutdown()
-    expect(fetchSpy).not.toHaveBeenCalled()
-
-    rmSync(path.join(home, ".altimate", "altimate.json"))
-    configSpy.mockResolvedValue({})
-    await Telemetry.init()
-    await Telemetry.flush()
-    expect(names).toEqual([])
+    expect(enabledDuringTurns).toEqual([true, true])
+    // B joined the running lifecycle: no shutdown and re-init, so the config was resolved once.
+    expect(configSpy).toHaveBeenCalledTimes(1)
+    expect(names.sort()).toEqual(["A1", "A2", "B1"])
   })
 
   test("malformed auth prevents an otherwise loaded config from enabling telemetry", async () => {

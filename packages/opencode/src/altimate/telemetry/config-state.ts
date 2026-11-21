@@ -65,33 +65,33 @@ async function hasWellKnownAuth(): Promise<boolean> {
       throw error
     }
   }
-  const parsed = Auth.parseStore(contents)
-  if (!parsed || parsed.incomplete) throw new Error("Unresolved auth store")
-  return parsed.hasWellKnown
+  // Unparseable: a well-known entry may be behind it. `Config` would load without its remote config.
+  const parsed: unknown = JSON.parse(contents)
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
+  return Object.values(parsed).some(
+    (entry) => entry && typeof entry === "object" && (entry as { type?: unknown }).type === "wellknown",
+  )
 }
 
 export function instanceDirectory(): string | undefined {
   return Effect.runSync(attach(InstanceRef))?.directory
 }
 
+/** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
 export async function loadedState(retry = false): Promise<State> {
   const config = await Config.get(retry)
   if (Config.telemetryConfigUnresolved(config)) return "unreadable"
-  // Auth.all() can return an empty store when its read or parse fails.
-  try {
-    await hasWellKnownAuth()
-  } catch {
-    return "unreadable"
-  }
+  // Auth.all() returns an empty store when its read or parse fails, hiding well-known remote config.
+  await hasWellKnownAuth()
   return config.telemetry?.disabled ? "disabled" : "enabled"
 }
 
+/** The opt-out as the caller can best read it: the full config inside an Instance (a failed load can
+ * hide remote settings, so it is `unreadable`), the files on disk for commands that have none yet. */
 export async function resolve(directory?: string, retry = false): Promise<State> {
   try {
     return await loadedState(retry)
   } catch {
-    // A failed full load can hide remote settings. The local probe is only for
-    // commands that have no instance to load yet.
     return instanceDirectory() ? "unreadable" : disabledState(directory)
   }
 }

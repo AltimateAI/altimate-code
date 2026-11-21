@@ -67,31 +67,6 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Auth.cli") {}
 // altimate_change end
 
-// altimate_change start — Config needs to know when a tolerant auth read may hide remote config.
-const incompleteStores = new WeakSet<Record<string, Info>>()
-
-export function configSourcesUnresolved(store: Record<string, Info>): boolean {
-  return incompleteStores.has(store)
-}
-
-// Both the normal loader and the local telemetry probe need the same validation.
-const decodeWellKnown = Schema.decodeUnknownOption(WellKnown)
-export function parseStore(text: string) {
-  try {
-    const parsed: unknown = JSON.parse(text)
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return
-    const entries = parsed as Record<string, unknown>
-    const wellKnown = Object.values(entries).filter(
-      (entry) => entry && typeof entry === "object" && "type" in entry && entry.type === "wellknown",
-    )
-    const incomplete = wellKnown.some((entry) => decodeWellKnown(entry)._tag === "None")
-    return { entries, hasWellKnown: wellKnown.length > 0, incomplete }
-  } catch {
-    return
-  }
-}
-// altimate_change end
-
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -99,25 +74,14 @@ export const layer = Layer.effect(
     const decode = Schema.decodeUnknownOption(Info)
 
     const all = Effect.fn("Auth.all")(function* () {
-      // altimate_change start — preserve unreadable stores and invalid well-known entries for Config.
-      const inline = process.env.OPENCODE_AUTH_CONTENT
-      const provided = inline ? parseStore(inline) : undefined
-      if (provided) {
-        const store = provided.entries as Record<string, Info>
-        if (provided.incomplete) incompleteStores.add(store)
-        return store
+      if (process.env.OPENCODE_AUTH_CONTENT) {
+        try {
+          return JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
+        } catch (err) {}
       }
 
-      let incomplete = Boolean(inline)
-      const text = yield* fsys.readFileStringSafe(file).pipe(Effect.catch(() => {
-        incomplete = true
-        return Effect.succeed(undefined)
-      }))
-      const disk = text === undefined ? undefined : parseStore(text)
-      const store = Record.filterMap(disk?.entries ?? {}, (value) => Result.fromOption(decode(value), () => undefined))
-      if (incomplete || (text !== undefined && (!disk || disk.incomplete))) incompleteStores.add(store)
-      return store
-      // altimate_change end
+      const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
+      return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
     })
 
     const get = Effect.fn("Auth.get")(function* (providerID: string) {

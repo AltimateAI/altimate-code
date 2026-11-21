@@ -184,7 +184,7 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 `ALTIMATE_CLI_DISABLE_TELEMETRY` and its older spelling `OPENCODE_DISABLE_TELEMETRY` are also supported. Each variable accepts `1` or `true` (case-insensitive).
 
-When any of these variables or `telemetry.disabled: true` disables telemetry, the CLI makes zero usage telemetry requests. That includes startup, sessions, error reporting, shutdown, and the account lookup used to identify telemetry events. This applies even if the CLI has sent telemetry before. If startup cannot determine the config setting, it suppresses telemetry. This includes startup before a configured remote source that could set the flag has been loaded.
+When any of these variables or `telemetry.disabled: true` disables telemetry, the CLI makes zero usage telemetry requests. That includes startup, sessions, error reporting, shutdown, and the account lookup used to identify telemetry events. This applies even if the CLI has sent telemetry before. Until the CLI can read the setting (for example at startup, before the project config or a configured remote source that could set the flag has loaded), it sends nothing; see [Privacy](#privacy). Once a process reads the setting as disabled, that process sends nothing more, even for another project it serves.
 
 ### Test runs are excluded
 

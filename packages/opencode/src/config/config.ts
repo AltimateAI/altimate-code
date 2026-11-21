@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
+import { pathToFileURL } from "url"
 import os from "os"
 import { mergeDeep } from "remeda"
 // altimate_change - use fork-branded global paths so config loads from ~/.config/altimate-code
@@ -21,7 +22,7 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect" // altimate_change — classify retryable remote failures
+import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 // altimate_change start — upstream_fix: invalidate Config's per-instance cache after writes
 import { ScopedCache } from "effect"
 // altimate_change end
@@ -47,14 +48,12 @@ import { ConfigVariable } from "./variable"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 // altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
-import { attach, makeRuntime } from "@/effect/run-service"
-import { InstanceRef } from "@/effect/instance-ref"
+import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
-// altimate_change start — defer telemetry when any config layer was unavailable
-type UnresolvedTelemetrySources = { auth: boolean; global: boolean; organization: boolean }
-const configsWithUnresolvedTelemetry = new WeakMap<Info, UnresolvedTelemetrySources>()
-
+// altimate_change start — loaded configs whose organization remote config, which may set
+// `telemetry.disabled`, could not be read: the opt-out is unknown.
+const configsWithUnresolvedTelemetry = new WeakSet<Info>()
 export function telemetryConfigUnresolved(config: Info): boolean {
   return configsWithUnresolvedTelemetry.has(config)
 }
@@ -271,7 +270,7 @@ type State = {
 }
 
 export interface Interface {
-  readonly get: (retryTelemetry?: boolean) => Effect.Effect<Info> // altimate_change — retry partial telemetry config
+  readonly get: (retryTelemetry?: boolean) => Effect.Effect<Info> // altimate_change — reload an unresolved opt-out
   readonly getGlobal: () => Effect.Effect<Info>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
@@ -335,13 +334,6 @@ export const layer = Layer.effect(
     const env = yield* Env.Service
     const npmSvc = yield* Npm.Service
     const http = yield* HttpClient.HttpClient
-    // altimate_change start — preserve remote failure origin without changing the public error.
-    const remoteLoadFailures = new WeakSet<object>()
-    const recordRemoteFailure = (cause: Cause.Cause<unknown>) => Effect.sync(() => {
-      const failure = Cause.squash(cause)
-      if (failure && typeof failure === "object") remoteLoadFailures.add(failure)
-    })
-    // altimate_change end
 
     const readConfigFile = (filepath: string) => fs.readFileStringSafe(filepath).pipe(Effect.orDie)
 
@@ -438,10 +430,7 @@ export const layer = Layer.effect(
       return yield* loadConfig(text, { path: filepath }, env)
     })
 
-    // altimate_change — the legacy loader can return partial config after an unreadable TOML file.
-    const incompleteGlobals = new WeakSet<Info>()
-    // altimate_change — telemetry can recheck local files without migrating legacy config.
-    const loadGlobal = Effect.fnUntraced(function* (env?: Record<string, string>, migrateLegacy = true) {
+    const loadGlobal = Effect.fnUntraced(function* (env?: Record<string, string>) {
       let result: Info = {}
       // Seed the default global config with the schema for editor completion, but avoid writing when the user
       // explicitly routes config through env-provided paths or content.
@@ -465,31 +454,19 @@ export const layer = Layer.effect(
 
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {
-        // altimate_change — a failed migration can still leave the parsed configuration usable.
-        let parsedLegacy = false
         yield* Effect.promise(() =>
-          // altimate_change start — read again on retry so a repaired TOML file replaces a failed load.
-          fsNode.readFile(legacy, "utf8")
-            .then(async (text) => {
-              const legacyConfig = Bun.TOML.parse(text) as Omit<Info, "provider"> & { provider?: string }
-              const { provider, model, ...rest } = legacyConfig
-              // altimate_change end
+          import(pathToFileURL(legacy).href, { with: { type: "toml" } })
+            .then(async (mod) => {
+              const { provider, model, ...rest } = mod.default
               if (provider && model) result.model = `${provider}/${model}`
               // altimate_change start — altimate config schema URL
               result["$schema"] = "https://altimate.ai/config.json"
               // altimate_change end
               result = mergeConfig(result, rest)
-              // altimate_change — only read and parse failures leave the config unresolved.
-              parsedLegacy = true
-              if (!migrateLegacy) return
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
-            // altimate_change start — preserve the failure for the telemetry gate
-            .catch(() => {
-              if (!parsedLegacy) incompleteGlobals.add(result)
-            }),
-            // altimate_change end
+            .catch(() => {}),
         )
       }
 
@@ -501,13 +478,7 @@ export const layer = Layer.effect(
         Effect.tapError((error) =>
           Effect.logError("failed to load global config, using defaults", { error: String(error) }),
         ),
-        // altimate_change start — a global fallback can hide an opt-out
-        Effect.orElseSucceed((): Info => {
-          const fallback: Info = {}
-          incompleteGlobals.add(fallback)
-          return fallback
-        }),
-        // altimate_change end
+        Effect.orElseSucceed((): Info => ({})),
       ),
       Duration.infinity,
     )
@@ -596,10 +567,7 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(auth)) {
-          // altimate_change start — classify fetch, decode, and schema failures as remote for retry backoff.
-          if (value.type !== "wellknown") continue
-          yield* Effect.gen(function* () {
-            // altimate_change end
+          if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
             const wellknownURL = `${url}/.well-known/opencode`
@@ -644,9 +612,7 @@ export const layer = Layer.effect(
             )
             yield* merge(source, next, "global")
             yield* Effect.logDebug("loaded remote config from well-known", { url })
-            // altimate_change start — retain the original error for other config consumers.
-          }).pipe(Effect.tapCause(recordRemoteFailure))
-          // altimate_change end
+          }
         }
 
         const global = Object.keys(authEnv).length ? yield* loadGlobal(authEnv) : yield* getGlobal()
@@ -725,7 +691,7 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
-        // altimate_change start — preserve resolution status for the telemetry opt-out gate
+        // altimate_change start — an organization config that could not be read may opt out of telemetry
         let orgConfigUnresolved = false
         const activeAccount = Option.getOrUndefined(
           yield* accountSvc.active().pipe(
@@ -766,14 +732,13 @@ export const layer = Layer.effect(
             }
           }).pipe(
             Effect.withSpan("Config.loadActiveOrgConfig"),
-            // altimate_change start — telemetry must distinguish a partial config from a successful load
+            // altimate_change start — mark the config unresolved for the telemetry opt-out
             Effect.catch((err) => {
               orgConfigUnresolved = true
               return Effect.logDebug("failed to fetch remote account config", {
                 error: err instanceof Error ? err.message : String(err),
               })
             }),
-            Effect.tapCause(recordRemoteFailure),
             // altimate_change end
           )
         }
@@ -947,16 +912,8 @@ export const layer = Layer.effect(
         }
         // altimate_change end
 
-        // altimate_change start — associate the status with this resolved config object
-        const unresolved = {
-          auth: Auth.configSourcesUnresolved(auth),
-          global: incompleteGlobals.has(global),
-          organization: orgConfigUnresolved,
-        }
-        if (unresolved.auth || unresolved.global || unresolved.organization) {
-          configsWithUnresolvedTelemetry.set(result, unresolved)
-        }
-        // altimate_change end
+        // altimate_change — a source that could set `telemetry.disabled` was not read
+        if (orgConfigUnresolved) configsWithUnresolvedTelemetry.add(result)
 
         return {
           config: result,
@@ -989,54 +946,16 @@ export const layer = Layer.effect(
       }),
     )
 
-    // altimate_change start — back off only for the same unresolved remote-config result.
-    // A refreshed cache or a repaired local config can recover on the next call.
-    const telemetryRetryAt = new WeakMap<object, number>()
-    const TELEMETRY_RETRY_MS = 30_000
-    function remoteRetryKey(result: Exit.Exit<Info>): object | undefined {
-      if (Exit.isSuccess(result)) {
-        return configsWithUnresolvedTelemetry.get(result.value)?.organization ? result.value : undefined
-      }
-      const failure = Cause.squash(result.cause)
-      if (failure && typeof failure === "object" && remoteLoadFailures.has(failure)) return failure
-    }
-
-    const localTelemetrySourcesReady = Effect.fnUntraced(function* (sources: UnresolvedTelemetrySources) {
-      if (!sources.auth && !sources.global) return true
-
-      // Recheck local data before invalidating the merged result. An unreadable
-      // local layer cannot be repaired by fetching the remote configuration again.
-      const auth = yield* Effect.exit(authSvc.all())
-      if (Exit.isFailure(auth) || Auth.configSourcesUnresolved(auth.value)) return false
-      if (!sources.global) return true
-
-      const authEnv: Record<string, string> = {}
-      for (const value of Object.values(auth.value)) {
-        if (value.type === "wellknown") authEnv[value.key] = value.token
-      }
-      const global = yield* Effect.exit(loadGlobal(authEnv, false))
-      return Exit.isSuccess(global) && !incompleteGlobals.has(global.value)
-    })
-
+    // altimate_change start — `retryTelemetry`: reload a config whose telemetry opt-out could not be
+    // resolved (or that failed to load), so a source that has recovered is read. The caller throttles.
     const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {
       const read = InstanceState.use(state, (s) => s.config)
       if (!retryTelemetry || !(yield* InstanceState.has(state))) return yield* read
       const cached = yield* Effect.exit(read)
-      const sources = Exit.isSuccess(cached) ? configsWithUnresolvedTelemetry.get(cached.value) : undefined
-      if (Exit.isSuccess(cached) && (!sources || !(yield* localTelemetrySourcesReady(sources)))) return cached.value
-
-      const remote = remoteRetryKey(cached)
-      if (remote && performance.now() < (telemetryRetryAt.get(remote) ?? 0)) return yield* cached
-
-      // A failed local read can have come from the global cache. A known remote
-      // failure cannot, so keep a readable global cache in that case.
-      const reloadGlobal = Exit.isFailure(cached) ? !remote : sources?.global
-      if (reloadGlobal) yield* invalidateGlobal
+      if (Exit.isSuccess(cached) && !configsWithUnresolvedTelemetry.has(cached.value)) return cached.value
+      yield* invalidateGlobal
       yield* InstanceState.invalidate(state)
-      const retried = yield* Effect.exit(read)
-      const retryKey = remoteRetryKey(retried)
-      if (retryKey) telemetryRetryAt.set(retryKey, performance.now() + TELEMETRY_RETRY_MS)
-      return yield* retried
+      return yield* read
     })
     // altimate_change end
 
@@ -1146,9 +1065,8 @@ export const node = LayerNode.make(layer, () => [FSUtil.node, Auth.node, Account
 // call `await Config.get()` etc. The makeRuntime bridge's `attach()` reads WorkspaceContext +
 // the current fiber's InstanceRef, so these reads stay bound to the active workspace/instance.
 const { runPromise: runConfig } = makeRuntime(Service, defaultLayer)
+// altimate_change — `retryTelemetry`: see Service.get
 export async function get(retryTelemetry = false) {
-  // Reject before building the runtime and opening its database without an instance.
-  if (!Effect.runSync(attach(InstanceRef))) throw new Error("InstanceRef not provided")
   return runConfig((svc) => svc.get(retryTelemetry))
 }
 export async function getGlobal() {

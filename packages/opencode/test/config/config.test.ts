@@ -751,6 +751,7 @@ for (const failure of ["account", "organization"] as const) {
         Effect.promise(async () => {
           const events: string[] = []
           await Telemetry.shutdown()
+          Telemetry.resetGateForTest()
           Telemetry.setConfigDirectory(context.directory)
           const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(
             async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
@@ -778,7 +779,12 @@ for (const failure of ["account", "organization"] as const) {
             expect(telemetryCalls).toEqual([])
             expect(orgLoads).toBe(1)
 
+            // Retries are throttled while the config stays unreadable.
+            await Telemetry.init()
+            expect(orgLoads).toBe(1)
+
             recovered = true
+            Telemetry.retryConfigNowForTest()
             await Telemetry.init()
             await Telemetry.flush()
             expect(events).toEqual(["startup_ready", "startup_ready"])
@@ -792,118 +798,6 @@ for (const failure of ["account", "organization"] as const) {
         }),
       )
     }),
-  )
-}
-
-{
-  let loads = 0
-  let available = false
-  const account = Layer.mock(Account.Service)({
-    active: () => Effect.suspend(() => {
-      loads++
-      if (available) return Effect.succeed(Option.none())
-      return Effect.fail(new AccountServiceError({ message: "Organization unavailable" }))
-    }),
-  })
-  configIt({ account }).instance("repeated telemetry retries back off while account config remains unavailable", () =>
-    Effect.gen(function* () {
-      expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(true)
-      expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
-      expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
-      expect(loads).toBe(2)
-
-      available = true
-      yield* Config.use.invalidate()
-      expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(false)
-      expect(loads).toBe(3)
-    }),
-  )
-}
-
-for (const [format, body] of [
-  ["JSON", "{"],
-  ["schema", JSON.stringify({ config: { telemetry: { disabled: "invalid" } } })],
-]) {
-  let requests = 0
-  const client = HttpClient.make((request) => {
-    requests++
-    return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(body, {
-      headers: { "content-type": "application/json" },
-    })))
-  })
-  configIt({ auth: wellKnownAuth("https://config.example.invalid"), client }).instance(
-    `invalid well-known config ${format} backs off on repeated telemetry retries`,
-    () =>
-      Effect.gen(function* () {
-        expect(Exit.isFailure(yield* Config.use.get().pipe(Effect.exit))).toBe(true)
-        expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
-        expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
-        expect(requests).toBe(2)
-      }),
-  )
-}
-
-{
-  let requests = 0
-  const account = Layer.mock(Account.Service)({
-    active: () => Effect.succeed(Option.some({
-      id: AccountID.make("invalid-config-account"),
-      email: "user@example.com",
-      url: "https://control.example.invalid",
-      active_org_id: OrgID.make("org"),
-    })),
-    config: () => Effect.sync(() => {
-      requests++
-      return Option.some({ telemetry: { disabled: "invalid" } })
-    }),
-    token: () => Effect.succeed(Option.none()),
-  })
-  configIt({ account }).instance("invalid organization config schema backs off on repeated telemetry retries", () =>
-    Effect.gen(function* () {
-      expect(Exit.isFailure(yield* Config.use.get().pipe(Effect.exit))).toBe(true)
-      expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
-      expect(Exit.isFailure(yield* Config.use.get(true).pipe(Effect.exit))).toBe(true)
-      expect(requests).toBe(2)
-    }),
-  )
-}
-
-for (const localSource of ["auth", "global"] as const) {
-  let requests = 0
-  const account = Layer.mock(Account.Service)({
-    active: () => Effect.succeed(Option.some({
-      id: AccountID.make("local-config-account"),
-      email: "user@example.com",
-      url: "https://control.example.invalid",
-      active_org_id: OrgID.make("org"),
-    })),
-    config: () => Effect.sync(() => {
-      requests++
-      return Option.none()
-    }),
-    token: () => Effect.succeed(Option.none()),
-  })
-  configIt({ account, auth: Auth.defaultLayer }).instance(
-    `an unreadable ${localSource} source recovers without refetching org config until repaired`,
-    () =>
-      withGlobalConfig({}, ({ dir }) =>
-        withProcessEnv(
-          "OPENCODE_AUTH_CONTENT",
-          localSource === "auth" ? "{" : "{}",
-          Effect.gen(function* () {
-            const legacy = path.join(dir, "config")
-            if (localSource === "global") yield* FSUtil.use.writeWithDirs(legacy, "broken = [")
-            expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(true)
-            expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(true)
-            expect(requests).toBe(1)
-
-            if (localSource === "global") yield* FSUtil.use.writeWithDirs(legacy, "[telemetry]\ndisabled = false")
-            else process.env.OPENCODE_AUTH_CONTENT = "{}"
-            expect(Config.telemetryConfigUnresolved(yield* Config.use.get(true))).toBe(false)
-            expect(requests).toBe(2)
-          }),
-        ),
-      ),
   )
 }
 
