@@ -1,31 +1,35 @@
+// altimate_change - new file
+//
+// Offline mode: Altimate Code sends network requests only to the configured model endpoint.
+// It is on when ALTIMATE_OFFLINE is set or a config file has `"offline": true`. Startup requests (the model
+// catalog, workspace and registration checks) run before the configuration loads, so the CLI checks config files
+// for the setting first (`optedIn`). Without either, `start()` never runs and nothing changes.
 import fs from "node:fs/promises"
 import { isIP } from "node:net"
 import path from "node:path"
-import { parse } from "jsonc-parser"
-import * as Effect from "effect/Effect"
+import { Effect } from "effect"
 import { Flag, env, offlineModeEnabled as enabled } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Global } from "@/global"
-import { ConfigManaged } from "./managed"
 import { ConfigPaths } from "./paths"
-
-const configNames = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]
 
 export { enabled }
 
-async function localOptIn(directory: string) {
-  // The switch is an opt-in from any local config source. Read just this
-  // key so remote credentials and unrelated substitutions cannot affect it.
-  const optedIn = async (text: string | undefined, source: string | { source: string; dir: string }) => {
-    if (!text) return false
-    // Skip the substitution pass for text that can neither name nor produce the key.
-    if (!text.includes("offline") && !/\{env:|\$\{|\{file:|\\u/.test(text)) return false
-    if (parse(text)?.offline === true) return true
-    const config = await ConfigPaths.parseText(text, source, "empty", { track: false, expandFiles: false }).catch(() => undefined)
+const CONFIG_NAMES = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]
+
+/**
+ * Whether a config file the instance will load sets `"offline": true`. Only text that mentions the key, or could
+ * produce it by substitution, is parsed. Organisation-managed config is applied when the configuration loads.
+ */
+export async function optedIn(directory: string): Promise<boolean> {
+  const sets = async (text: string | undefined, source: string | { source: string; dir: string }) => {
+    if (!text || (!text.includes("offline") && !/\{env:|\$\{|\{file:/.test(text))) return false
+    const config = await ConfigPaths.parseText(text, source, "empty", { track: false }).catch(() => undefined)
     return config?.offline === true
   }
-  if (await optedIn(env("OPENCODE_CONFIG_CONTENT"), { source: "OPENCODE_CONFIG_CONTENT", dir: directory })) return true
+  if (await sets(env("OPENCODE_CONFIG_CONTENT"), { source: "OPENCODE_CONFIG_CONTENT", dir: directory })) return true
+  // Project config stops at the repository root, as the instance's does.
   let worktree = path.resolve(directory)
   while (!(await fs.stat(path.join(worktree, ".git")).catch(() => undefined))) {
     const parent = path.dirname(worktree)
@@ -39,148 +43,64 @@ async function localOptIn(directory: string) {
         : Effect.all([
             ConfigPaths.files("opencode", directory, worktree),
             ConfigPaths.files("altimate-code", directory, worktree),
-          ]).pipe(Effect.map((sources) => sources.flat())),
+          ]).pipe(Effect.map((found) => found.flat())),
       ConfigPaths.directories(directory, worktree),
     ]).pipe(Effect.provide(FSUtil.defaultLayer)),
   )
   const files = [
     ...projectFiles,
-    ...[...dirs, ConfigManaged.managedConfigDir()].flatMap((dir) => configNames.map((name) => path.join(dir, name))),
+    ...dirs.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, name))),
     path.join(Global.Path.config, "config.json"),
     Flag.OPENCODE_CONFIG,
   ]
   for (const file of files) {
-    if (file && (await optedIn(await fs.readFile(file, "utf8").catch(() => undefined), file))) return true
+    if (file && (await sets(await fs.readFile(file, "utf8").catch(() => undefined), file))) return true
   }
-  // The legacy global TOML file is converted to config.json only after startup, so read it here too.
-  const legacy = await fs.readFile(path.join(Global.Path.config, "config"), "utf8").catch(() => undefined)
-  if (legacy !== undefined) {
-    try {
-      if ((Bun.TOML.parse(legacy) as { offline?: unknown }).offline === true) return true
-    } catch {
-      // An unparseable file still counts when it plainly requests offline mode.
-      if (/^\s*offline\s*=\s*true\b/m.test(legacy)) return true
-    }
-  }
-  const managed = await ConfigManaged.readManagedPreferences().catch(() => undefined)
-  return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false
+  return false
 }
 
-/**
- * Environment for an app-owned helper program whose only network use is optional (for example dbt's
- * version lookup): every proxy points at a closed loopback port, so its requests fail on this machine.
- */
-export const CLOSED_PROXY_ENV: Record<string, string> = {
-  HTTP_PROXY: "http://127.0.0.1:9",
-  HTTPS_PROXY: "http://127.0.0.1:9",
-  ALL_PROXY: "http://127.0.0.1:9",
-  http_proxy: "http://127.0.0.1:9",
-  https_proxy: "http://127.0.0.1:9",
-  all_proxy: "http://127.0.0.1:9",
-  NO_PROXY: "",
-  no_proxy: "",
-}
-
-export const SHARE_REFUSAL = "Sharing sessions requires an online run."
-export const UNSHARE_REFUSAL = "Offline mode cannot revoke a share. Run unshare while online."
-
-/** A refusal by the offline policy. Servers report it to the client as a 400 with this message. */
-export class OfflinePolicyError extends Error {
-  override name = "OfflinePolicyError"
-}
-
-/** The policy refusal behind an error, following `cause` links that runtimes add when they wrap it. */
-export function policyError(error: unknown): OfflinePolicyError | undefined {
-  for (let current = error, depth = 0; current && depth < 8; depth++) {
-    if (current instanceof OfflinePolicyError) return current
-    current = (current as { cause?: unknown }).cause
-  }
-  return undefined
-}
-
-export async function assertStartupPolicy(directory: string) {
-  if (!enabled() && (await localOptIn(directory))) {
-    throw new OfflinePolicyError(
-      "This project requests offline mode. Start Altimate Code from the project to apply its offline policy.",
-    )
-  }
-}
+/** Hosts the fetch guard accepts as this machine. Bun matches only these exact names in NO_PROXY. */
+const LOCAL_FETCH_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
 
 let networkFetch: typeof fetch | undefined
 
-const USER_PROXY = "ALTIMATE_OFFLINE_USER_PROXY"
-
 /**
- * Environment for programs the user runs or configures (shell commands, language servers,
- * stdio MCP servers). Offline mode does not police their network access, so they get the
- * user's original proxy exclusions back instead of the process-wide bypass.
+ * Turn offline mode on for the rest of this process and the workers and programs it starts.
+ * Installs a fetch guard that allows only loopback requests; model requests use `modelFetch`.
  */
-export function userEnv<T extends Record<string, string | undefined>>(env: T): T {
-  // The session's model choice is internal; a program the user runs (even a nested altimate-code) chooses its own.
-  delete env.ALTIMATE_OFFLINE_MODEL
-  const saved = env[USER_PROXY] ?? process.env[USER_PROXY]
-  if (saved === undefined) return env
-  delete env[USER_PROXY]
-  try {
-    const original = JSON.parse(saved) as Record<string, unknown>
-    for (const key of ["NO_PROXY", "no_proxy"] as const) {
-      // Only the inherited bypass is replaced; a value the program's own config set stays. An absent key is
-      // treated as inherited too, since a copied environment may not carry it.
-      if (env[key] !== undefined && env[key] !== process.env[key]) continue
-      const value = original[key]
-      if (typeof value === "string") (env as Record<string, string | undefined>)[key] = value
-      else delete env[key]
-    }
-  } catch {}
-  return env
-}
-
-export async function start(directory: string, model?: string) {
-  if (!enabled() && !(await localOptIn(directory))) return
-  // Workers and core services must see the same policy before constructing
-  // their layers. Once enabled, keep it for the lifetime of the process.
+export function start() {
+  // Workers and child processes inherit the switch. Shell commands see it too, so a nested
+  // altimate-code is offline as well.
   process.env.ALTIMATE_OFFLINE = "1"
-  // Bun consults proxy environment variables even when fetch sets proxy: "".
-  // Offline traffic must go directly to the one configured endpoint. The user's own
-  // values are kept (and inherited by workers) so their programs get them back: see userEnv.
-  if (process.env[USER_PROXY] === undefined)
-    process.env[USER_PROXY] = JSON.stringify({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy })
-  process.env.NO_PROXY = "*"
-  process.env.no_proxy = "*"
-  if (model) process.env.ALTIMATE_OFFLINE_MODEL = model
   if (networkFetch) return
+  // Bun sends even loopback requests through HTTP(S)_PROXY. Exclude only the loopback hosts so a
+  // local request cannot leave the machine through a proxy; model requests still use the proxy.
+  for (const key of ["NO_PROXY", "no_proxy"]) {
+    const current = process.env[key]
+    if (current === "*") continue
+    const entries = (current ?? "").split(",").map((entry) => entry.trim()).filter(Boolean)
+    process.env[key] = [...entries, ...LOCAL_FETCH_HOSTS.filter((host) => !entries.includes(host))].join(",")
+  }
   networkFetch = globalThis.fetch
   globalThis.fetch = Object.assign(
-    async (...args: Parameters<typeof fetch>) => {
-      const [input] = args
-      if (isLocalURL(input instanceof Request ? input.url : input.toString())) return localFetch()(...args)
-      throw new Error("Offline mode allows network requests only to the configured model endpoint or loopback services.")
+    async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (!isLocalURL(input instanceof Request ? input.url : input.toString()))
+        throw new Error("Offline mode allows network requests only to the configured model endpoint.")
+      // A local endpoint must not redirect to a remote host.
+      return networkFetch!(input, { ...init, redirect: "error" })
     },
     { preconnect: () => {} },
   )
 }
 
-type ModelConfig = Pick<ConfigV1.Info, "model" | "provider" | "enabled_providers" | "disabled_providers">
+type ModelConfig = Pick<ConfigV1.Info, "provider" | "enabled_providers" | "disabled_providers">
 
-function configuredBaseURL(config: ModelConfig, providerID: string) {
+/** The provider's explicitly configured base URL: the only model endpoint offline mode uses. */
+export function endpoint(config: ModelConfig, providerID: string) {
+  if (config.enabled_providers && !config.enabled_providers.includes(providerID)) return undefined
+  if (config.disabled_providers?.includes(providerID)) return undefined
   const url = config.provider?.[providerID]?.options?.baseURL
   return typeof url === "string" && url.trim() ? url : undefined
-}
-
-function provider(config: ModelConfig) {
-  const model = process.env.ALTIMATE_OFFLINE_MODEL ?? config.model
-  if (model) return model.split("/")[0]
-  const candidates = Object.keys(config.provider ?? {}).filter(
-    (id) =>
-      configuredBaseURL(config, id) !== undefined &&
-      (!config.enabled_providers || config.enabled_providers.includes(id)) &&
-      !config.disabled_providers?.includes(id),
-  )
-  return candidates.length === 1 ? candidates[0] : undefined
-}
-
-export function endpoint(config: ModelConfig, providerID: string) {
-  return provider(config) === providerID ? configuredBaseURL(config, providerID) : undefined
 }
 
 const httpSDKs = new Set(["@ai-sdk/openai-compatible", "@ai-sdk/openai", "@ai-sdk/anthropic"])
@@ -189,21 +109,18 @@ export function supportsSDK(npm: string) {
   return httpSDKs.has(npm)
 }
 
+/** Fetch for model requests: only below the configured base URL, never redirected, through the user's proxy. */
 export function modelFetch(baseURL: string | undefined): typeof fetch {
   if (!baseURL) throw new Error("Offline mode requires a model provider with an explicit baseURL.")
-  const endpoint = new URL(baseURL)
-  if (!["http:", "https:"].includes(endpoint.protocol))
-    throw new Error("Offline mode requires an HTTP(S) model endpoint.")
-  const basePath = endpoint.pathname.replace(/\/+$/, "")
+  const base = new URL(baseURL)
+  if (!["http:", "https:"].includes(base.protocol)) throw new Error("Offline mode requires an HTTP(S) model endpoint.")
+  const basePath = base.pathname.replace(/\/+$/, "")
   return Object.assign(
     async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       const target = new URL(input instanceof Request ? input.url : input.toString())
-      if (
-        target.origin !== endpoint.origin ||
-        (target.pathname !== basePath && !target.pathname.startsWith(basePath + "/"))
-      )
+      if (target.origin !== base.origin || (target.pathname !== basePath && !target.pathname.startsWith(basePath + "/")))
         throw new Error("Offline mode blocked a request outside the configured model endpoint.")
-      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: undefined })
+      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error" })
     },
     { preconnect: () => {} },
   )
@@ -213,16 +130,14 @@ export function modelFetch(baseURL: string | undefined): typeof fetch {
 export function isLoopbackHost(value: unknown): boolean {
   if (typeof value !== "string") return false
   const host = value.toLowerCase().replace(/^\[|\]$/g, "")
-  // Wildcard bind addresses (0.0.0.0, ::) are reached on this machine when used as a destination.
-  return host === "localhost" || host === "localhost." || host === "::1" || host === "::" || host === "0.0.0.0" ||
-    (isIP(host) === 4 && host.startsWith("127."))
+  return host === "localhost" || host === "::1" || (isIP(host) === 4 && host.startsWith("127."))
 }
 
-// Validate the URL before any offline loopback HTTP request.
+/** An HTTP(S) URL the fetch guard sends directly to this machine. */
 export function isLocalURL(value: string | URL) {
   try {
     const url = new URL(value)
-    return ["http:", "https:"].includes(url.protocol) && isLoopbackHost(url.hostname)
+    return ["http:", "https:"].includes(url.protocol) && LOCAL_FETCH_HOSTS.includes(url.hostname.toLowerCase())
   } catch {
     return false
   }
@@ -230,44 +145,7 @@ export function isLocalURL(value: string | URL) {
 
 export function assertLocalMcp(config: { type: string; url?: string }) {
   if (enabled() && config.type === "remote" && !isLocalURL(config.url ?? ""))
-    throw new Error("Offline mode allows only stdio or localhost/loopback HTTP(S) MCP servers.")
-}
-
-export function localFetch(): typeof fetch {
-  return Object.assign(
-    async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-      const target = input instanceof Request ? input.url : input.toString()
-      if (!isLocalURL(target)) throw new Error("Offline mode blocked a non-local request.")
-      // Never follow redirects: a local endpoint must not grant access to a remote host.
-      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: undefined })
-    },
-    { preconnect: () => {} },
-  )
-}
-
-let warned = false
-
-export async function announce(hasSnapshot: boolean, knownEmpty = false) {
-  if (warned) return
-  warned = true
-  let delivered = false
-  try {
-    const message = hasSnapshot
-      ? "Using cached workspace skills."
-      : knownEmpty
-        ? "This workspace has no custom skills."
-        : "No usable workspace skill snapshot. To use workspace skills, run altimate-code workspace refresh while online."
-    const { isHeadless } = await import("@/altimate/workspace/engine-seams")
-    const { notify, printLine } = await import("@/altimate/workspace/engine-probes")
-    if (isHeadless()) {
-      printLine(`Offline mode: ${message}`)
-      delivered = true
-    } else {
-      delivered = await notify({ title: "Offline mode", message, variant: hasSnapshot || knownEmpty ? "info" : "warning" })
-    }
-  } finally {
-    if (!delivered) warned = false
-  }
+    throw new Error("Offline mode allows only stdio MCP servers or ones at localhost, 127.0.0.1 or [::1].")
 }
 
 export * as Offline from "./offline"

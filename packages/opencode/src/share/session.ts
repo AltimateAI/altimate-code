@@ -1,6 +1,3 @@
-// altimate_change start — offline mode
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
 import { SessionID } from "@/session/schema"
@@ -27,9 +24,6 @@ export const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
 
     const share = Effect.fn("SessionShare.share")(function* (sessionID: SessionID) {
-      // altimate_change start — offline mode refuses sharing with its own message, before the config check
-      if (Offline.enabled()) return yield* new Session.OfflinePolicyError({ message: Offline.SHARE_REFUSAL })
-      // altimate_change end
       const conf = yield* cfg.get()
       if (conf.share === "disabled") throw new Error("Sharing is disabled in configuration")
       const result = yield* shareNext.create(sessionID)
@@ -38,10 +32,6 @@ export const layer = Layer.effect(
     })
 
     const unshare = Effect.fn("SessionShare.unshare")(function* (sessionID: SessionID) {
-      // altimate_change start — offline mode cannot revoke a share; typed refusal, local state kept
-      if (Offline.enabled())
-        return yield* new Session.OfflinePolicyError({ message: Offline.UNSHARE_REFUSAL })
-      // altimate_change end
       yield* shareNext.remove(sessionID)
       yield* session.setShare({ sessionID, share: undefined })
     })

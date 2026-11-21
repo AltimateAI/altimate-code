@@ -1,8 +1,10 @@
-import { expect, test } from "bun:test"
+import { afterAll, beforeAll, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
+import { gitCommandUsesNetwork } from "@opencode-ai/core/git"
 
 const CLI = path.resolve(import.meta.dir, "../../../src/index.ts")
 const MODEL_ENDPOINT = "http://model.test:9000/v1"
@@ -10,6 +12,47 @@ const API = "https://workspace.test"
 const TENANT = "offline-fixture"
 const KEY = "fixture-key"
 const SKILL = "This unique statement came from the cached offline skill."
+
+// Egress that does not go through fetch: every proxy variable points at a proxy that records and refuses each
+// request, and PATH shims record each run of a program that can reach the network.
+const proxyHits: string[] = []
+let denyProxy: net.Server
+let PROXY = ""
+const SHIMMED = ["git", "npm", "npx", "pnpm", "yarn", "dbt", "pip", "pip3", "uv", "curl", "wget", "ssh", "gh"]
+const REAL = Object.fromEntries(SHIMMED.map((name) => [name, Bun.which(name)]))
+
+beforeAll(async () => {
+  denyProxy = net.createServer((socket) => {
+    socket.once("data", (chunk) => {
+      proxyHits.push(chunk.toString("latin1").split("\r\n")[0])
+      socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n")
+    })
+  })
+  await new Promise<void>((resolve) => denyProxy.listen(0, "127.0.0.1", resolve))
+  PROXY = `http://127.0.0.1:${(denyProxy.address() as net.AddressInfo).port}`
+})
+afterAll(() => denyProxy?.close())
+
+async function writeShims(dir: string, log: string) {
+  await fs.mkdir(dir, { recursive: true })
+  for (const name of SHIMMED) {
+    const real = REAL[name]
+    await Bun.write(
+      path.join(dir, name),
+      `#!/bin/sh\nprintf "%s\\n" "${name} $*" >> "${log}"\n${real ? `exec "${real}" "$@"` : "exit 127"}\n`,
+    )
+    await fs.chmod(path.join(dir, name), 0o755)
+  }
+}
+
+/** Programs that reached the network: any non-git network tool, or a git command that uses a remote. */
+async function networkSpawns(log: string) {
+  const lines = (await fs.readFile(log, "utf8").catch(() => "")).split("\n").filter(Boolean)
+  return lines.filter((line) => {
+    const [name, ...args] = line.split(" ")
+    return name !== "git" || gitCommandUsesNetwork(args)
+  })
+}
 
 async function fixture(
   snapshot: boolean,
@@ -24,6 +67,9 @@ async function fixture(
   const calls = path.join(root, "calls.jsonl")
   const preload = path.join(root, "preload.ts")
   const blocked = path.join(root, "blocked.jsonl")
+  const shims = path.join(root, "shims")
+  const spawns = path.join(root, "spawns.log")
+  await writeShims(shims, spawns)
   await Promise.all([fs.mkdir(project), fs.mkdir(config, { recursive: true }), fs.mkdir(data, { recursive: true })])
   await Bun.write(
     path.join(config, "altimate-code.json"),
@@ -96,7 +142,7 @@ async function fixture(
               index: 0, id: "call_shell", type: "function", function: {
                 name: "bash",
                 arguments: JSON.stringify({
-                  command: 'printf "shell-ran:%s" "$NO_PROXY" > shell-marker',
+                  command: 'printf "shell-ran:%s|%s|%s" "$NO_PROXY" "$HTTPS_PROXY" "$ALTIMATE_OFFLINE" > shell-marker',
                   description: "Write a local marker",
                   workdir: process.cwd(),
                   timeout: 5000,
@@ -127,7 +173,10 @@ async function fixture(
   `,
   )
   const env = {
-    PATH: process.env.PATH,
+    PATH: `${shims}${path.delimiter}${process.env.PATH}`,
+    ...Object.fromEntries(
+      ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].map((key) => [key, PROXY]),
+    ),
     HOME: root,
     OPENCODE_TEST_HOME: root,
     OPENCODE_TEST_MANAGED_CONFIG_DIR: path.join(root, "managed"),
@@ -149,7 +198,7 @@ async function fixture(
     ALTIMATE_RUN_STDIN_WAIT_MS: "0",
     NO_COLOR: "1",
   }
-  return { root, project, preload, env, calls, blocked, manifest, skill }
+  return { root, project, preload, env, calls, blocked, manifest, skill, shims, spawns }
 }
 
 for (const { scenario, snapshot, configMode, disableWorkspace } of [
@@ -169,12 +218,13 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
 ]) {
   test(`offline ${scenario} keeps network traffic on the model endpoint`, async () => {
     const f = await fixture(snapshot, configMode, disableWorkspace, snapshot ? "offline-test" : "openai")
+    proxyHits.length = 0
     try {
       const before = snapshot ? await fs.readFile(f.manifest, "utf8") : undefined
       const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "Hello"], {
         cwd: f.project,
-        // The snapshot must work on a cold host where ripgrep is absent.
-        env: snapshot ? { ...f.env, PATH: path.join(f.root, "empty-path") } : f.env,
+        // The snapshot must work on a cold host where ripgrep is absent: PATH holds only the shims.
+        env: snapshot ? { ...f.env, PATH: f.shims } : f.env,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -197,10 +247,9 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
       expect(calls.length).toBeGreaterThan(0)
       expect(calls.some((call) => call.hasSkill)).toBe(snapshot)
       expect(stderr).not.toContain("Workspace skills not synced")
-      // The fixture without a snapshot has no workspace link, so it gets no workspace notice at all.
-      if (!snapshot) expect(stderr).not.toContain("Offline mode:")
-      else {
-        expect(stderr.match(/Offline mode:/g)).toHaveLength(1)
+      // Nothing left through a proxy or a network program either.
+      expect({ proxyHits, spawns: await networkSpawns(f.spawns) }).toEqual({ proxyHits: [], spawns: [] })
+      if (snapshot) {
         expect(await fs.readFile(f.manifest, "utf8")).toBe(before!)
         expect(await fs.readFile(f.skill, "utf8")).toContain(SKILL)
       }
@@ -215,7 +264,7 @@ test("offline model can execute a local bash command", async () => {
   try {
     const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "--yolo", "Run the local shell command"], {
       cwd: f.project,
-      // The user's proxy exclusions reach their own commands; the offline bypass does not.
+      // The user's proxy settings reach their own commands; offline mode only adds the loopback hosts.
       env: { ...f.env, OFFLINE_TEST_BASH: "1", ALTIMATE_CLI_YOLO: "true", NO_PROXY: "corp.example" },
       stdin: "ignore",
       stdout: "pipe",
@@ -229,7 +278,7 @@ test("offline model can execute a local bash command", async () => {
     ])
     expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
     const marker = await Bun.file(path.join(f.project, "shell-marker")).text().catch(() => "")
-    expect({ marker, stdout, stderr }).toMatchObject({ marker: "shell-ran:corp.example" })
+    expect({ marker, stdout, stderr }).toMatchObject({ marker: `shell-ran:corp.example,localhost,127.0.0.1,[::1]|${PROXY}|1` })
     expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })
@@ -292,7 +341,7 @@ test("offline SQL tool refuses a warehouse whose host is not loopback", async ()
     ], { cwd: f.project, env: f.env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(25_000) })
     const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
     await proc.exited
-    expect(stdout + stderr).toContain("Offline mode allows only local file databases and loopback warehouse connections.")
+    expect(stdout + stderr).toContain("Offline mode allows only local file databases and warehouses at a loopback host.")
     expect(await fs.readFile(f.calls, "utf8").catch(() => "")).toBe("")
     expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
   } finally {
@@ -327,116 +376,6 @@ test("offline attach accepts a server on this machine and refuses a remote one",
     await fs.rm(f.root, { recursive: true, force: true })
   }
 }, 45_000)
-
-test("attach --dir applies that project's offline setting when launched elsewhere", async () => {
-  // configMode without a snapshot: the project's own config turns offline mode on; the env switch is off.
-  const f = await fixture(false, true, false)
-  try {
-    const proc = Bun.spawn(
-      [process.execPath, "--preload", f.preload, CLI, "attach", "https://remote-server.test", "--dir", f.project],
-      { cwd: f.root, env: f.env, stdin: "ignore", stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(20_000) },
-    )
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
-    await proc.exited
-    expect(stdout + stderr).toContain("This command requires network access")
-    // From inside that project, a --dir that exists only on the remote server keeps the project's setting.
-    const remote = Bun.spawn(
-      [process.execPath, "--preload", f.preload, CLI, "attach", "https://remote-server.test", "--dir", "/srv/remote-only"],
-      { cwd: f.project, env: f.env, stdin: "ignore", stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(20_000) },
-    )
-    const [out2, err2] = await Promise.all([new Response(remote.stdout).text(), new Response(remote.stderr).text()])
-    await remote.exited
-    expect(out2 + err2).toContain("This command requires network access")
-  } finally {
-    await fs.rm(f.root, { recursive: true, force: true })
-  }
-}, 45_000)
-
-test("offline model transport bypasses proxy settings and refuses redirects", async () => {
-  let proxyCalls = 0
-  const proxy = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch() {
-      proxyCalls++
-      return new Response("unexpected proxy")
-    },
-  })
-  const model = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request) {
-      if (new URL(request.url).pathname === "/redirect") return Response.redirect(proxy.url, 302)
-      return new Response("direct model response")
-    },
-  })
-  try {
-    const source = path.resolve(import.meta.dir, "../../../src/config/offline.ts")
-    const proc = Bun.spawn(
-      [
-        process.execPath,
-        "-e",
-        `
-          import { Offline } from ${JSON.stringify(source)}
-          await Offline.start(process.cwd())
-          const request = Offline.modelFetch(process.env.OFFLINE_TEST_MODEL)
-          console.log(await (await request(process.env.OFFLINE_TEST_MODEL)).text())
-          try {
-            await request(process.env.HTTP_PROXY)
-            throw new Error("cross-origin request was accepted")
-          } catch (error) {
-            if (!error.message.includes("outside the configured model endpoint")) throw error
-            console.log("cross-origin request refused")
-          }
-          try {
-            const modelScoped = Offline.modelFetch(new URL("/v1", process.env.OFFLINE_TEST_MODEL).href)
-            await modelScoped(new URL("/v10/admin", process.env.OFFLINE_TEST_MODEL))
-            throw new Error("different endpoint path was accepted")
-          } catch (error) {
-            if (!error.message.includes("outside the configured model endpoint")) throw error
-            console.log("other model host path refused")
-          }
-          try {
-            await request(new URL("/redirect", process.env.OFFLINE_TEST_MODEL))
-            throw new Error("redirect was accepted")
-          } catch (error) {
-            if (error.message === "redirect was accepted") throw error
-            console.log("redirect refused")
-          }
-        `,
-      ],
-      {
-        cwd: path.resolve(import.meta.dir, "../../.."),
-        env: {
-          ...process.env,
-          ALTIMATE_OFFLINE: "1",
-          OFFLINE_TEST_MODEL: model.url.href,
-          HTTP_PROXY: proxy.url.href,
-          http_proxy: proxy.url.href,
-          NO_PROXY: "",
-          no_proxy: "",
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-        signal: AbortSignal.timeout(15_000),
-      },
-    )
-    const [code, stdout, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ])
-    expect({ code, stdout, stderr }).toEqual({
-      code: 0,
-      stdout: "direct model response\ncross-origin request refused\nother model host path refused\nredirect refused\n",
-      stderr: "",
-    })
-    expect(proxyCalls).toBe(0)
-  } finally {
-    model.stop(true)
-    proxy.stop(true)
-  }
-})
 
 test("offline skill install refuses a remote repository before running git clone", async () => {
   const f = await fixture(false, false, false)
@@ -636,3 +575,117 @@ test("standalone MCP initializes offline over stdio without network requests", a
     await fs.rm(f.root, { recursive: true, force: true })
   }
 }, 35_000)
+
+test("with offline mode off, fetch, proxy settings and the shell environment stay as they were", async () => {
+  // configMode leaves ALTIMATE_OFFLINE empty; removing the project file leaves no offline setting anywhere.
+  const f = await fixture(false, true, false)
+  try {
+    await fs.rm(path.join(f.project, "opencode.jsonc"))
+    await fs.rm(path.join(f.root, "data", "altimate-code", "auth.json"))
+    const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "--yolo", "Run the local shell command"], {
+      cwd: f.project,
+      // Online startup work the fixture cannot answer is switched off with the existing switches.
+      env: {
+        ...f.env,
+        OFFLINE_TEST_BASH: "1",
+        ALTIMATE_CLI_YOLO: "true",
+        NO_PROXY: "corp.example",
+        OPENCODE_DISABLE_MODELS_FETCH: "1",
+        OPENCODE_DISABLE_AUTOUPDATE: "1",
+        ALTIMATE_TELEMETRY_DISABLED: "1",
+        ALTIMATE_DISABLE_WORKSPACE: "1",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(25_000),
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
+    const marker = await Bun.file(path.join(f.project, "shell-marker")).text().catch(() => "")
+    expect({ marker, stderr }).toMatchObject({ marker: `shell-ran:corp.example|${PROXY}|` })
+    // The preload records every replacement of globalThis.fetch: none happened.
+    expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test.skipIf(process.platform === "win32" || !Bun.which("openssl"))(
+  "offline model requests reach an HTTPS endpoint through HTTPS_PROXY, and nothing else does",
+  async () => {
+    const f = await fixture(false, false, false)
+    const tunnels: string[] = []
+    let proxy: net.Server | undefined
+    let model: ReturnType<typeof Bun.serve> | undefined
+    try {
+      const key = path.join(f.root, "key.pem")
+      const cert = path.join(f.root, "cert.pem")
+      const made = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
+        "-days", "1", "-subj", "/CN=model.test", "-addext", "subjectAltName=DNS:model.test"], { stderr: "pipe" })
+      expect(made.exitCode).toBe(0)
+      model = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        tls: { key: Bun.file(key), cert: Bun.file(cert) },
+        fetch: () =>
+          new Response(
+            [
+              { choices: [{ index: 0, delta: { role: "assistant", content: "proxied reply" }, finish_reason: null }] },
+              { choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 2 } },
+            ].map((chunk) => "data: " + JSON.stringify(chunk) + "\n\n").join("") + "data: [DONE]\n\n",
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      })
+      // A CONNECT proxy that tunnels model.test to the local TLS server and refuses everything else.
+      proxy = net.createServer((client) => {
+        client.once("data", (chunk) => {
+          const line = chunk.toString("latin1").split("\r\n")[0]
+          tunnels.push(line)
+          if (!line.startsWith("CONNECT model.test:443 ")) return client.end("HTTP/1.1 403 Forbidden\r\n\r\n")
+          const upstream = net.connect(Number(model!.port), "127.0.0.1", () => {
+            client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+            client.pipe(upstream).pipe(client)
+          })
+          upstream.on("error", () => client.destroy())
+        })
+      })
+      await new Promise<void>((resolve) => proxy!.listen(0, "127.0.0.1", resolve))
+      const proxyURL = `http://127.0.0.1:${(proxy.address() as net.AddressInfo).port}`
+      const configFile = path.join(f.root, "config", "altimate-code", "altimate-code.json")
+      const config = await Bun.file(configFile).json()
+      config.provider["offline-test"].options.baseURL = "https://model.test/v1"
+      await Bun.write(configFile, JSON.stringify(config))
+      // No fetch-replacing preload: the CLI uses the real fetch.
+      const proc = Bun.spawn([process.execPath, CLI, "run", "Hello"], {
+        cwd: f.project,
+        env: {
+          ...f.env,
+          ...Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].map((k) => [k, proxyURL])),
+          NODE_EXTRA_CA_CERTS: cert,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        signal: AbortSignal.timeout(30_000),
+      })
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("proxied reply") })
+      expect(tunnels.length).toBeGreaterThan(0)
+      expect(tunnels.filter((line) => !line.startsWith("CONNECT model.test:443 "))).toEqual([])
+    } finally {
+      proxy?.close()
+      model?.stop(true)
+      await fs.rm(f.root, { recursive: true, force: true })
+    }
+  },
+  40_000,
+)

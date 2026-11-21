@@ -203,16 +203,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const remove = Effect.fn("SessionHttpApi.remove")(function* (ctx: { params: { sessionID: SessionID } }) {
-      // altimate_change start — the declared offline refusal passes through as a 400 with its message
-      yield* session
-        .remove(ctx.params.sessionID)
-        .pipe(
-          Effect.catchIf(
-            (error): error is Session.NotFound => !(error instanceof Session.OfflinePolicyError),
-            (error) => SessionError.mapStorageNotFound(Effect.fail(error)),
-          ),
-        )
-      // altimate_change end
+      yield* SessionError.mapStorageNotFound(session.remove(ctx.params.sessionID))
       return true
     })
 
@@ -294,25 +285,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     // every failure to a 400 BadRequest.
     const share = Effect.fn("SessionHttpApi.share")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* shareSvc.share(ctx.params.sessionID).pipe(
-        // altimate_change start — the declared offline refusal passes through as a 400 with its message
-        Effect.mapError((error) =>
-          error instanceof Session.OfflinePolicyError ? error : new HttpApiError.InternalServerError({}),
-        ),
-        // altimate_change end
-      )
+      yield* shareSvc.share(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))
       return yield* requireSession(ctx.params.sessionID)
     })
 
     const unshare = Effect.fn("SessionHttpApi.unshare")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* shareSvc.unshare(ctx.params.sessionID).pipe(
-        // altimate_change start — the declared offline refusal passes through as a 400 with its message
-        Effect.mapError((error) =>
-          error instanceof Session.OfflinePolicyError ? error : new HttpApiError.InternalServerError({}),
-        ),
-        // altimate_change end
-      )
+      yield* shareSvc
+        .unshare(ctx.params.sessionID)
+        .pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))
       return yield* requireSession(ctx.params.sessionID)
     })
 

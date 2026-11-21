@@ -808,67 +808,6 @@ describe("workspace CRUD", () => {
     { git: true },
   )
 
-  // altimate_change start — offline removal refuses a workspace holding a shared session, removing nothing
-  it.instance(
-    "offline remove refuses a workspace with a shared session and keeps everything",
-    () =>
-      Effect.gen(function* () {
-        const { directory: dir } = yield* TestInstance
-        const instance = yield* requireInstance
-        const workspace = yield* Workspace.Service
-        const sessionSvc = yield* SessionNs.Service
-        const type = unique("remove-offline-shared")
-        const recorded = localAdapter(path.join(dir, "remove-offline-shared"))
-        registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
-        const info = yield* workspace.create({ type, branch: null, projectID: ProjectV2.ID.make(instance.project.id), extra: null })
-        const plain = yield* sessionSvc.create({})
-        const shared = yield* sessionSvc.create({})
-        yield* attachSessionToWorkspace(plain.id, info.id)
-        yield* attachSessionToWorkspace(shared.id, info.id)
-        const { db } = yield* Database.Service
-        yield* db
-          .update(SessionTable)
-          .set({ share_url: "https://share.example/s/ws" })
-          .where(eq(SessionTable.id, shared.id))
-          .run()
-          .pipe(Effect.orDie)
-        const previous = process.env.ALTIMATE_OFFLINE
-        process.env.ALTIMATE_OFFLINE = "1"
-        try {
-          expectExitContains(yield* Effect.exit(workspace.remove(info.id)), "This workspace has a shared session")
-        } finally {
-          if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-          else process.env.ALTIMATE_OFFLINE = previous
-        }
-        expect(yield* workspace.get(info.id)).toEqual(info)
-        expect(recorded.calls.remove).toEqual([])
-        const kept = yield* db
-          .select({ id: SessionTable.id })
-          .from(SessionTable)
-          .where(eq(SessionTable.workspace_id, info.id))
-          .all()
-          .pipe(Effect.orDie)
-        expect(kept.map((row) => row.id).sort()).toEqual([plain.id, shared.id].sort())
-        yield* db.update(SessionTable).set({ share_url: null }).where(eq(SessionTable.id, shared.id)).run().pipe(Effect.orDie)
-        // A shared subagent session carries only a parent id; the check still finds it before removing anything.
-        const sub = yield* sessionSvc.create({ parentID: plain.id })
-        yield* db.update(SessionTable).set({ share_url: "https://share.example/s/sub", workspace_id: null }).where(eq(SessionTable.id, sub.id)).run().pipe(Effect.orDie)
-        process.env.ALTIMATE_OFFLINE = "1"
-        try {
-          expectExitContains(yield* Effect.exit(workspace.remove(info.id)), "This workspace has a shared session")
-        } finally {
-          if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-          else process.env.ALTIMATE_OFFLINE = previous
-        }
-        expect(yield* workspace.get(info.id)).toEqual(info)
-        expect((yield* sessionSvc.get(plain.id)).id).toBe(plain.id)
-        yield* db.update(SessionTable).set({ share_url: null }).where(eq(SessionTable.id, sub.id)).run().pipe(Effect.orDie)
-        yield* workspace.remove(info.id)
-      }),
-    { git: true },
-  )
-  // altimate_change end
-
   it.instance(
     "remove still deletes the row when the adapter cannot remove resources",
     () =>

@@ -21,8 +21,7 @@ function isSafeSegment(value: string) {
   )
 }
 
-// altimate_change — share cache path validation with the CLI skill loader
-export function isSafeRelativePath(value: string) {
+function isSafeRelativePath(value: string) {
   const segments = value.split("/")
   return (
     value.length > 0 &&

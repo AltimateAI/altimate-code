@@ -1,6 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
-import { mkdir, rm } from "node:fs/promises"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Result } from "effect"
@@ -106,58 +105,6 @@ describe("Worktree", () => {
     }),
     { git: true },
   )
-
-  // altimate_change start — offline reset with a submodule this worktree never checked out
-  it.instance(
-    "resets an offline worktree whose repository has a submodule it never checked out",
-    Effect.gen(function* () {
-      const { directory } = yield* TestInstance
-      const run = (cwd: string, args: string[]) => {
-        const result = Bun.spawnSync(["git", "-c", "protocol.file.allow=always", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
-        if (result.exitCode !== 0) throw new Error(result.stderr.toString())
-      }
-      // A path with a space checks that submodule paths are kept whole.
-      const lib = path.join(path.dirname(directory), `${path.basename(directory)}-lib`)
-      const previous = process.env.ALTIMATE_OFFLINE
-      try {
-        yield* Effect.promise(() => mkdir(lib, { recursive: true }))
-        for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "lib"]])
-          run(lib, args)
-        run(directory, ["submodule", "add", "-q", lib, "vendor lib"])
-        run(directory, ["commit", "-q", "-m", "add submodule"])
-        // A second lib commit, recorded in the main repo as the newer submodule commit; the test rewinds the
-        // worktree's submodule to the older one below.
-        const older = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: lib, stdout: "pipe" }).stdout.toString().trim()
-        run(lib, ["commit", "-q", "--allow-empty", "-m", "lib 2"])
-        run(path.join(directory, "vendor lib"), ["fetch", "-q", "origin"])
-        run(path.join(directory, "vendor lib"), ["checkout", "-q", "origin/HEAD"])
-        const newer = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: lib, stdout: "pipe" }).stdout.toString().trim()
-        run(directory, ["add", "vendor lib"])
-        run(directory, ["commit", "-q", "-m", "bump submodule"])
-        process.env.ALTIMATE_OFFLINE = "1"
-        const svc = yield* Worktree.Service
-        yield* withCreatedWorktree({ name: "offline-submodule" }, ({ info }) =>
-          Effect.gen(function* () {
-            // Unpopulated submodule: the offline reset skips it instead of trying to clone it.
-            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
-            // Populated submodule whose path has a space, checked out at the older commit: the offline reset
-            // moves it to the recorded commit from objects already on disk.
-            run(info.directory, ["submodule", "update", "--init"])
-            run(path.join(info.directory, "vendor lib"), ["checkout", "-q", older])
-            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
-            const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: path.join(info.directory, "vendor lib"), stdout: "pipe" })
-            expect(head.stdout.toString().trim()).toBe(newer)
-          }),
-        )
-      } finally {
-        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-        else process.env.ALTIMATE_OFFLINE = previous
-        yield* Effect.promise(() => rm(lib, { recursive: true, force: true }))
-      }
-    }),
-    { git: true },
-  )
-  // altimate_change end
 
   describe("makeWorktreeInfo", () => {
     it.instance(

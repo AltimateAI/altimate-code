@@ -21,38 +21,6 @@ const readResponse = Effect.fnUntraced(function* (input: { path: string; directo
 })
 
 describe("mcp HttpApi", () => {
-  it.instance("returns a client error when adding or connecting a remote MCP server offline", () =>
-    Effect.gen(function* () {
-      const tmp = yield* TestInstance
-      const previous = process.env.ALTIMATE_OFFLINE
-      process.env.ALTIMATE_OFFLINE = "1"
-      try {
-        const response = yield* request(McpPaths.status, tmp.directory, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: "remote", config: { type: "remote", url: "https://example.com/mcp" } }),
-        })
-        expect(response.status).toBe(400)
-        expect(yield* json(response)).toMatchObject({
-          _tag: "MCP.OfflinePolicyError",
-          message: expect.stringContaining("Offline mode"),
-        })
-        const connect = yield* request("/mcp/configured-remote/connect", tmp.directory, { method: "POST" })
-        expect(connect.status).toBe(400)
-        expect(yield* json(connect)).toMatchObject({ _tag: "MCP.OfflinePolicyError" })
-      } finally {
-        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-        else process.env.ALTIMATE_OFFLINE = previous
-      }
-    }),
-    {
-      config: {
-        experimental: { auto_mcp_discovery: false },
-        mcp: { "configured-remote": { type: "remote", url: "https://example.com/mcp", enabled: false } },
-      },
-    },
-  )
-
   it.instance(
     "serves status endpoint",
     () =>
@@ -65,7 +33,6 @@ describe("mcp HttpApi", () => {
       }),
     {
       config: {
-        experimental: { auto_mcp_discovery: false },
         mcp: {
           demo: {
             type: "local",

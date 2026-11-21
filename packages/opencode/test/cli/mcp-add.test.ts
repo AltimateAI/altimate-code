@@ -164,10 +164,10 @@ test("offline MCP add refuses remote configuration before writing it", () => {
     writeFileSync(configPath, original)
     const result = run(["mcp", "add", "--name", "remote", "--url", "https://example.com/mcp", "--global"])
     expect(result.status).not.toBe(0)
-    expect(`${result.stdout}${result.stderr}`).toContain("localhost/loopback")
-    expect(readFileSync(configPath, "utf8")).toBe(original)
+    expect(`${result.stdout}${result.stderr}`).toContain("localhost, 127.0.0.1 or [::1]")
+    expect(readJson(configPath).mcp).toEqual({})
   }, true)
-})
+}, 30_000)
 
 test("offline MCP add permits stdio and loopback configuration", () => {
   withIsolatedCli(({ configDir, run }) => {
@@ -177,4 +177,4 @@ test("offline MCP add permits stdio and loopback configuration", () => {
     expect(config.mcp.loopback.url).toBe("http://127.0.0.1:9000/mcp")
     expect(config.mcp.stdio.command).toEqual(["local-server"])
   }, true)
-})
+}, 30_000)

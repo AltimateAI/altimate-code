@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect } from "bun:test"
 import { Effect, Exit, Layer, Option } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -10,7 +10,7 @@ import { AccessToken, AccountID, OrgID, RefreshToken } from "../../src/account/s
 import { AccountRepo } from "../../src/account/repo"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Session } from "@/session/session"
-import { SessionID } from "../../src/session/schema"
+import type { SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { AccountStateTable, AccountTable } from "@opencode-ai/core/account/sql"
@@ -112,36 +112,6 @@ beforeEach(async () => {
 })
 
 describe("ShareNext", () => {
-  test("offline share creation fails without making a fetch call", async () => {
-    const prior = process.env.ALTIMATE_OFFLINE
-    process.env.ALTIMATE_OFFLINE = "1"
-    installFetchMock(() => new Response(null, { status: 200 }))
-    try {
-      await expect(ShareNext.create(SessionID.make("ses_offline_share"))).rejects.toThrow(
-        "Sharing sessions requires an online run.",
-      )
-      expect(fetchRecords).toEqual([])
-    } finally {
-      if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
-      else process.env.ALTIMATE_OFFLINE = prior
-    }
-  })
-
-  test("offline share revocation fails so unshare retains the local share state", async () => {
-    const prior = process.env.ALTIMATE_OFFLINE
-    process.env.ALTIMATE_OFFLINE = "1"
-    installFetchMock(() => new Response(null, { status: 200 }))
-    try {
-      await expect(ShareNext.remove(SessionID.make("ses_offline_share"))).rejects.toThrow(
-        "Offline mode cannot revoke a share. Run unshare while online.",
-      )
-      expect(fetchRecords).toEqual([])
-    } finally {
-      if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
-      else process.env.ALTIMATE_OFFLINE = prior
-    }
-  })
-
   it.live("request uses legacy share API without active org account", () =>
     provideTmpdirInstance(
       () =>

@@ -205,29 +205,24 @@ Plugins:
   })
 })
 
-// altimate_change start — offline dbt detection sends dbt's PyPI lookup to a closed loopback proxy
-test.skipIf(process.platform === "win32")("offline detection runs dbt --version behind a closed loopback proxy", async () => {
+// altimate_change start — offline mode does not run `dbt --version`, which asks PyPI for the latest release
+test.skipIf(process.platform === "win32")("offline detection finds dbt without running it", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "offline-dbt-detect-"))
-  const previous = process.env.ALTIMATE_OFFLINE
+  const previous = { offline: process.env.ALTIMATE_OFFLINE, dbt: process.env.ALTIMATE_DBT_PATH }
   try {
-    const seen = path.join(dir, "proxy")
-    fs.writeFileSync(
-      path.join(dir, "dbt"),
-      `#!/bin/sh\nprintf "%s|%s" "$HTTPS_PROXY" "$NO_PROXY" > "${seen}"\nprintf "Core:\\n  - installed: 1.9.3\\nPlugins:\\n  - duckdb: 1.9.0\\n"\n`,
-      { mode: 0o755 },
-    )
+    const ran = path.join(dir, "ran")
+    fs.writeFileSync(path.join(dir, "dbt"), `#!/bin/sh\ntouch "${ran}"\n`, { mode: 0o755 })
     process.env.ALTIMATE_DBT_PATH = path.join(dir, "dbt")
     process.env.ALTIMATE_OFFLINE = "1"
     _resetDbtRuntimeCacheForTests()
-    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true, dbtCoreVersion: "1.9.3" })
-    expect(fs.readFileSync(seen, "utf8")).toBe("http://127.0.0.1:9|")
-    // A probe that prints the versions and then exits non-zero still finds dbt offline.
-    fs.writeFileSync(path.join(dir, "dbt"), `#!/bin/sh\nprintf "Core:\\n  - installed: 1.9.3\\n"\nexit 1\n`, { mode: 0o755 })
-    _resetDbtRuntimeCacheForTests()
-    expect(await detectDbtRuntime({ force: true })).toMatchObject({ hasDbt: true, dbtCoreVersion: "1.9.3" })
+    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: false })
+    expect(fs.existsSync(ran)).toBe(false)
   } finally {
-    if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-    else process.env.ALTIMATE_OFFLINE = previous
+    for (const [key, value] of [["ALTIMATE_OFFLINE", previous.offline], ["ALTIMATE_DBT_PATH", previous.dbt]] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    _resetDbtRuntimeCacheForTests()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

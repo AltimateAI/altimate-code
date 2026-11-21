@@ -1,7 +1,6 @@
 // altimate_change start — validate offline dbt targets before spawning dbt
 import { Offline } from "@/config/offline"
 import { assertLocalDbt } from "./offline"
-import { dropLibpqDestinationVars } from "../../../../../dbt-tools/src/offline-env"
 // altimate_change end
 /**
  * dbt CLI wrapper — spawn dbt commands as subprocesses.
@@ -49,10 +48,8 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
             ...(params.args ?? []),
             ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
           ])
-      const inherited = { ...process.env }
-      dropLibpqDestinationVars(inherited)
       offlineEnv = {
-        ...inherited,
+        ...process.env,
         ...(checked ? { DBT_PROFILES_DIR: checked.profilesDir } : {}),
         DBT_SEND_ANONYMOUS_USAGE_STATS: "false",
         DO_NOT_TRACK: "1",

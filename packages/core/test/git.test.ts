@@ -1,10 +1,9 @@
 import { describe, expect } from "bun:test"
 import { $ } from "bun"
 import fs from "fs/promises"
-import os from "os"
 import path from "path"
 import { Effect } from "effect"
-import { Git, localGitEnv } from "@opencode-ai/core/git"
+import { Git } from "@opencode-ai/core/git"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { branch, commit, gitRemote } from "./fixture/git"
 import { tmpdir } from "./fixture/tmpdir"
@@ -50,76 +49,6 @@ describe("Git", () => {
         }
       }),
     ),
-  )
-
-  it.live("offline LFS override is read after inherited -c parameters", () =>
-    Effect.sync(() => {
-      const previous = { offline: process.env.ALTIMATE_OFFLINE, parameters: process.env.GIT_CONFIG_PARAMETERS }
-      process.env.ALTIMATE_OFFLINE = "1"
-      process.env.GIT_CONFIG_PARAMETERS = "'lfs.url'='https://inherited.example/'"
-      try {
-        const env = localGitEnv()!
-        expect(env.GIT_CONFIG_PARAMETERS).toBe("'lfs.url'='https://inherited.example/' 'lfs.url=http://127.0.0.1:9/'")
-        // Git reads the last value of a key, so the closed loopback endpoint wins.
-        const read = Bun.spawnSync(["git", "config", "--get", "lfs.url"], { env: { ...process.env, ...env }, stdout: "pipe" })
-        expect(read.stdout.toString().trim()).toBe("http://127.0.0.1:9/")
-      } finally {
-        if (previous.offline === undefined) delete process.env.ALTIMATE_OFFLINE
-        else process.env.ALTIMATE_OFFLINE = previous.offline
-        if (previous.parameters === undefined) delete process.env.GIT_CONFIG_PARAMETERS
-        else process.env.GIT_CONFIG_PARAMETERS = previous.parameters
-      }
-    }),
-  )
-
-  // Offline Git must not download LFS objects, but objects already in the local cache still check out.
-  const hasLfs = Bun.spawnSync(["git", "lfs", "version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
-  const liveIfLfs = hasLfs ? it.live : it.live.skip
-  liveIfLfs("offline checkout keeps cached LFS content and refuses uncached objects", () =>
-    Effect.gen(function* () {
-      const tmp = yield* Effect.acquireRelease(
-        Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "offline-lfs-"))),
-        (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
-      )
-      // Repository-location variables inherited from a caller would redirect these commands away from tmp.
-      const base = Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([key]) => !["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"].includes(key),
-        ),
-      )
-      const gitIn = (args: string[], env?: Record<string, string>) =>
-        Bun.spawnSync(["git", ...args], { cwd: tmp, env: { ...base, ...env }, stderr: "pipe", stdout: "pipe" })
-      for (const args of [
-        ["init", "-q"],
-        ["config", "commit.gpgsign", "false"],
-        ["config", "user.email", "t@example.com"],
-        ["config", "user.name", "t"],
-        ["lfs", "install", "--local"],
-        ["lfs", "track", "*.bin"],
-        ["remote", "add", "origin", "https://example.invalid/repo.git"],
-      ]) expect(gitIn(args).exitCode).toBe(0)
-      yield* Effect.promise(() => fs.writeFile(path.join(tmp, "a.bin"), "cached-content"))
-      expect(gitIn(["add", ".gitattributes", "a.bin"]).exitCode).toBe(0)
-      expect(gitIn(["commit", "-qm", "lfs"]).exitCode).toBe(0)
-
-      const previous = process.env.ALTIMATE_OFFLINE
-      process.env.ALTIMATE_OFFLINE = "1"
-      try {
-        const env = localGitEnv()!
-        yield* Effect.promise(() => fs.rm(path.join(tmp, "a.bin")))
-        expect(gitIn(["checkout", "--", "a.bin"], env).exitCode).toBe(0)
-        expect(yield* Effect.promise(() => fs.readFile(path.join(tmp, "a.bin"), "utf8"))).toBe("cached-content")
-
-        yield* Effect.promise(() => fs.rm(path.join(tmp, "a.bin")))
-        yield* Effect.promise(() => fs.rm(path.join(tmp, ".git", "lfs", "objects"), { recursive: true, force: true }))
-        const missing = gitIn(["checkout", "--", "a.bin"], env)
-        expect(missing.exitCode).not.toBe(0)
-        expect(missing.stderr.toString()).toContain("127.0.0.1:9")
-      } finally {
-        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
-        else process.env.ALTIMATE_OFFLINE = previous
-      }
-    }),
   )
 
   it.live("fetches, checks out, and resets remote changes", () =>

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
-import { Offline } from "@/config/offline"
+// altimate_change — offline mode
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
 // Direct cross-workspace import — `@altimateai/dbt-tools`'s `src/index.ts` is
 // a CLI entry (runs on import), so we bypass the package entrypoint and
 // consume the resolver from its file directly. This is the same pattern
@@ -86,9 +87,10 @@ async function probe(): Promise<DbtRuntime> {
   // + PATH + explicit override via ALTIMATE_DBT_PATH). Returns the first
   // candidate that exists.
   const resolved = resolveDbt()
-  // `dbt --version` asks PyPI for the latest release whatever DBT_VERSION_CHECK says. Offline, that
-  // lookup goes to a closed loopback proxy and fails locally; dbt still prints the installed versions.
-  const env = Offline.enabled() ? { ...buildDbtEnv(resolved), ...Offline.CLOSED_PROXY_ENV } : buildDbtEnv(resolved)
+  // altimate_change start — `dbt --version` asks PyPI for the latest release, so offline mode does not run it
+  if (offlineModeEnabled()) return { hasDbt: !resolved.source.startsWith("fallback"), hasDbtDuckdb: false }
+  // altimate_change end
+  const env = buildDbtEnv(resolved)
 
   // Async --version invocation. Reads BOTH stdout AND stderr (some dbt 1.x
   // builds write --version output to stderr with color codes). If it fails,
@@ -104,12 +106,7 @@ async function probe(): Promise<DbtRuntime> {
   if (!out.ok && process.platform === "win32") {
     out = await runDbtVia(env, "cmd.exe", ["/c", "dbt", "--version"])
   }
-  const combined = `${out.stdout}\n${out.stderr}`
-  const versionMatch =
-    combined.match(/-\s*installed:\s*([0-9]+\.[0-9]+\.[0-9]+\S*)/) ??
-    combined.match(/core=([0-9]+\.[0-9]+\.[0-9]+\S*)/)
-  // Offline, a probe that timed out or exited non-zero still counts when it printed dbt's version.
-  if (!out.ok && !(Offline.enabled() && versionMatch)) return { hasDbt: false, hasDbtDuckdb: false }
+  if (!out.ok) return { hasDbt: false, hasDbtDuckdb: false }
 
   // dbt --version on 1.x prints:
   //   Core:
@@ -118,7 +115,12 @@ async function probe(): Promise<DbtRuntime> {
   //     - duckdb: 1.11.4 - Update available!
   // Match the plugin line specifically ("- duckdb:") — a generic "duckdb"
   // substring would false-positive on an "install dbt-duckdb" upgrade hint.
+  const combined = `${out.stdout}\n${out.stderr}`
   const hasDbtDuckdb = /^\s*-\s*duckdb:/m.test(combined)
+
+  const versionMatch =
+    combined.match(/-\s*installed:\s*([0-9]+\.[0-9]+\.[0-9]+\S*)/) ??
+    combined.match(/core=([0-9]+\.[0-9]+\.[0-9]+\S*)/)
   return {
     hasDbt: true,
     hasDbtDuckdb,

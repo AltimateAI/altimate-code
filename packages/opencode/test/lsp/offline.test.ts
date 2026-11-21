@@ -41,27 +41,3 @@ test.skipIf(process.platform === "win32")("offline LSP spawns an npm-cached serv
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
-
-test.skipIf(process.platform === "win32")("offline language servers get the user's proxy exclusions back", async () => {
-  const { spawn } = await import("../../src/lsp/launch")
-  const keys = ["ALTIMATE_OFFLINE", "NO_PROXY", "no_proxy", "ALTIMATE_OFFLINE_USER_PROXY"]
-  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
-  try {
-    // The state Offline.start leaves: the bypass, plus the user's original values.
-    process.env.ALTIMATE_OFFLINE = "1"
-    process.env.ALTIMATE_OFFLINE_USER_PROXY = JSON.stringify({ NO_PROXY: "corp.example" })
-    process.env.NO_PROXY = process.env.no_proxy = "*"
-    for (const opts of [{}, { env: { ...process.env } }]) {
-      const proc = spawn("sh", ["-c", 'printf "%s|%s|%s" "$NO_PROXY" "$no_proxy" "$ALTIMATE_OFFLINE_USER_PROXY"'], opts)
-      const exited = proc.exited
-      const out = await new Response(proc.stdout as any).text()
-      await exited
-      expect(out).toBe("corp.example||")
-    }
-  } finally {
-    for (const key of keys) {
-      if (saved[key] === undefined) delete process.env[key]
-      else process.env[key] = saved[key]
-    }
-  }
-})

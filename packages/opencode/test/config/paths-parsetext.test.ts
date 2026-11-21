@@ -311,14 +311,6 @@ describe("ConfigPaths.parseText: ${VAR} substitution (shell/dotenv alias)", () =
 })
 
 describe("ConfigPaths.parseText: {file:path} substitution", () => {
-  test("expandFiles=false preserves existing and missing file tokens", async () => {
-    await using tmp = await tmpdir()
-    await fs.writeFile(path.join(tmp.path, "secret.txt"), "do-not-expand")
-    const text = '{"existing":"{file:secret.txt}","missing":"{file:missing.txt}"}'
-    expect(await ConfigPaths.parseText(text, path.join(tmp.path, "config.json"), "error", { expandFiles: false }))
-      .toEqual({ existing: "{file:secret.txt}", missing: "{file:missing.txt}" })
-  })
-
   test("substitutes {file:path} with file contents (trimmed)", async () => {
     await using tmp = await tmpdir()
     const secretPath = path.join(tmp.path, "secret.txt")

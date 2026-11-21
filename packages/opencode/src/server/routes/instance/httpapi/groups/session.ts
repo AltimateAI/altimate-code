@@ -318,9 +318,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Successfully deleted session"),
-          // altimate_change start — offline refusal is a declared client error
-          error: [HttpApiError.BadRequest, ApiNotFoundError, Session.OfflinePolicyError],
-          // altimate_change end
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.delete",
@@ -384,9 +382,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Session.Info, "Successfully shared session"),
-          // altimate_change start — offline refusal is a declared client error
-          error: [HttpApiError.InternalServerError, ApiNotFoundError, Session.OfflinePolicyError],
-          // altimate_change end
+          error: [HttpApiError.InternalServerError, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.share",
@@ -398,9 +394,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Session.Info, "Successfully unshared session"),
-          // altimate_change start — offline refusal is a declared client error
-          error: [HttpApiError.InternalServerError, ApiNotFoundError, Session.OfflinePolicyError],
-          // altimate_change end
+          error: [HttpApiError.InternalServerError, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.unshare",

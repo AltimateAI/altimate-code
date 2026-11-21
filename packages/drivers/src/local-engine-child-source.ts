@@ -101,10 +101,8 @@ async function open(p) {
     temp_directory: process.env.TMPDIR + "/duckdb-" + process.pid,
     ...(p.accessMode ? { access_mode: p.accessMode } : {}),
     ...(p.extensionDirectory ? { extension_directory: p.extensionDirectory } : {}),
-    // altimate_change — ordinary offline connections keep local file access
-    // Network-capable extensions such as httpfs may already be installed, so
-    // restricting downloads alone cannot prevent automatic remote I/O.
-    ...(p.offline ? { autoinstall_known_extensions: "false", autoload_known_extensions: "false" } : {}),
+    // altimate_change — offline mode never downloads extensions; installed ones still load
+    ...(p.offline ? { autoinstall_known_extensions: "false" } : {}),
   };
   let instance;
   await new Promise((resolve, reject) => {

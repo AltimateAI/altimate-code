@@ -111,14 +111,6 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
   name: Schema.String,
 }) {}
 
-// altimate_change start — offline policy refusals are client errors
-export class OfflinePolicyError extends Schema.TaggedErrorClass<OfflinePolicyError>()(
-  "MCP.OfflinePolicyError",
-  { message: Schema.String },
-  { httpApiStatus: 400 },
-) {}
-// altimate_change end
-
 type MCPClient = Client
 
 function createClient(directory: string) {
@@ -332,10 +324,8 @@ export interface Interface {
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   // altimate_change end
-  // altimate_change start — offline policy refusals
-  readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }, OfflinePolicyError>
-  readonly connect: (name: string) => Effect.Effect<void, NotFoundError | OfflinePolicyError>
-  // altimate_change end
+  readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
+  readonly connect: (name: string) => Effect.Effect<void, NotFoundError>
   readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
   // altimate_change start — MCP.remove: full runtime teardown + ToolsChanged (merge dropped it)
   readonly remove: (name: string) => Effect.Effect<void>
@@ -349,12 +339,10 @@ export interface Interface {
     clientName: string,
     resourceUri: string,
   ) => Effect.Effect<Awaited<ReturnType<MCPClient["readResource"]>> | undefined>
-  // altimate_change start — offline refusal is a typed error
   readonly startAuth: (
     mcpName: string,
-  ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError | OfflinePolicyError>
-  readonly authenticate: (mcpName: string) => Effect.Effect<Status, NotFoundError | OfflinePolicyError>
-  // altimate_change end
+  ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError>
+  readonly authenticate: (mcpName: string) => Effect.Effect<Status, NotFoundError>
   readonly finishAuth: (mcpName: string, authorizationCode: string) => Effect.Effect<Status, NotFoundError>
   readonly removeAuth: (mcpName: string) => Effect.Effect<void>
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
@@ -439,7 +427,7 @@ export const layer = Layer.effect(
       if (Offline.enabled() && !Offline.isLocalURL(mcp.url)) {
         return {
           client: undefined as MCPClient | undefined,
-          status: { status: "failed" as const, error: "Offline mode blocks remote MCP servers; use stdio or localhost/loopback HTTP(S)." },
+          status: { status: "failed" as const, error: "Offline mode allows only stdio MCP servers or ones at localhost, 127.0.0.1 or [::1]." },
           transport: undefined as TransportLabel | undefined,
         }
       }
@@ -515,7 +503,6 @@ export const layer = Layer.effect(
           transport: new StreamableHTTPClientTransport(url, {
             authProvider,
             requestInit,
-            fetch: Offline.enabled() ? Offline.localFetch() : undefined,
           }),
         },
         {
@@ -523,7 +510,6 @@ export const layer = Layer.effect(
           transport: new SSEClientTransport(url, {
             authProvider,
             requestInit,
-            fetch: Offline.enabled() ? Offline.localFetch() : undefined,
           }),
         },
       ]
@@ -631,9 +617,7 @@ export const layer = Layer.effect(
         args,
         cwd,
         env: {
-          // altimate_change start — offline mode keeps the user's proxy settings; the server's own environment still wins
-          ...Offline.userEnv({ ...process.env }),
-          // altimate_change end
+          ...process.env,
           // altimate_change start — brand: BUN_BE_BUN for altimate/altimate-code self-spawn
           ...(cmd === "opencode" || cmd === "altimate" || cmd === "altimate-code" ? { BUN_BE_BUN: "1" } : {}),
           // altimate_change end
@@ -1091,17 +1075,7 @@ export const layer = Layer.effect(
       // altimate_change end
     })
 
-    // altimate_change start — report policy refusals as client errors
-    const enforceOfflinePolicy = (mcp: ConfigMCPV1.Info) => Effect.try({
-      try: () => Offline.assertLocalMcp(mcp),
-      catch: (error) => new OfflinePolicyError({ message: error instanceof Error ? error.message : String(error) }),
-    })
-    // altimate_change end
-
-    // altimate_change start — offline policy refusal
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
-      yield* enforceOfflinePolicy(mcp)
-    // altimate_change end
       // altimate_change start — see claim
       const seq = ++lifecycleSeq
       // altimate_change end
@@ -1126,8 +1100,6 @@ export const layer = Layer.effect(
       const token = claim(s, name, seq)
       // altimate_change end
       const mcp = yield* requireMcpConfig(name)
-      // altimate_change — reject before persisting enabled:true for an offline remote server
-      yield* enforceOfflinePolicy(mcp)
       // altimate_change start — see createAndStore
       yield* createAndStore(name, { ...mcp, enabled: true }, token)
       // altimate_change end
@@ -1415,8 +1387,6 @@ export const layer = Layer.effect(
     })
 
     const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
-      // Offline refusal is a client error, not a crash.
-      if (Offline.enabled()) return yield* new OfflinePolicyError({ message: "Authenticate MCP servers while online." })
       const lifecycle = yield* InstanceState.get(state)
       // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)

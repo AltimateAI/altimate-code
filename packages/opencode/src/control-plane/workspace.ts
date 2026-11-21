@@ -1,6 +1,3 @@
-// altimate_change start — offline mode
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { Context, Effect, FiberMap, Iterable, Layer, Schema, Stream } from "effect"
@@ -808,30 +805,11 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.workspace_id, id))
         .all()
         .pipe(Effect.orDie)
-      // altimate_change start — one root list for the offline share check and the removal below
       const sessionIDs = new Set(sessions.map((sessionInfo) => sessionInfo.id))
-      const roots = sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID))
-      // Offline mode cannot revoke a public share, so it refuses before removing anything. The session service's
-      // tree check covers subagent sessions, which carry only a parent id.
-      if (Offline.enabled()) {
-        for (const root of roots) {
-          const shared = yield* session.sharedInTree(root.id).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(false)))
-          if (shared)
-            return yield* Effect.die(
-              new Offline.OfflinePolicyError("This workspace has a shared session. Remove it while online so the share can be revoked."),
-            )
-        }
-      }
       yield* Effect.forEach(
-        roots,
-        // altimate_change end
+        sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID)),
         (sessionInfo) =>
-          session.remove(sessionInfo.id).pipe(
-            Effect.catchIf(NotFoundError.isInstance, () => Effect.void),
-            // altimate_change start — a share created since the check above: refuse rather than half-remove
-            Effect.catchTag("Session.OfflinePolicyError", (error) => Effect.die(new Offline.OfflinePolicyError(error.message))),
-            // altimate_change end
-          ),
+          session.remove(sessionInfo.id).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.void)),
         { discard: true },
       )
 

@@ -2,74 +2,48 @@
 import { isLocalFilePath, normalizeConfig, type ConnectionConfig } from "@altimateai/drivers"
 import { isLoopbackHost } from "@/config/offline"
 
-function localStore(value: unknown): boolean {
-  // dbt renders Jinja (expressions, statements, comments) after this check, so only a literal path is local.
-  if (typeof value !== "string" || /\{[{%#]/.test(value)) return false
-  if (value === ":memory:" || value === "") return true
-  // UNC shares are network locations, even though they look like paths.
-  if (/^(?:\\\\|\/\/)/.test(value)) return false
-  if (/^file:/i.test(value)) {
-    try {
-      const url = new URL(value)
-      return (!url.hostname || url.hostname === "localhost") && !decodeURIComponent(url.pathname).startsWith("//")
-    } catch { return false }
-  }
+const DENIED = "Offline mode allows only local file databases and warehouses at a loopback host."
+
+/** A local file path. Templates are rendered later, so they cannot be judged; UNC paths are network shares. */
+export function isLocalPath(value: unknown): boolean {
+  if (typeof value !== "string" || /\{[{%#]/.test(value) || /^(?:\\\\|\/\/)/.test(value)) return false
+  if (value === "" || value === ":memory:") return true
+  if (/^file:/i.test(value)) return URL.canParse(value) && ["", "localhost"].includes(new URL(value).hostname)
+  // Rejects scheme:// URLs (s3, gcs, http and so on) and DuckDB's non-slash remote schemes such as md:.
   return isLocalFilePath(value)
 }
 
-/** Guard app-owned connection setup; SQL and project macros are user-controlled code. */
+/** Refuse a warehouse connection that does not stay on this machine. */
 export function assertLocalConnection(raw: ConnectionConfig): void {
   const config = normalizeConfig(raw)
-  const type = config.type.toLowerCase()
-  const deny = () => { throw new Error("Offline mode allows only local file databases and loopback warehouse connections.") }
-  if (config.ssh_host || config.replica_set) deny()
-  // A Unix socket is a local file; a Windows named pipe or other value is not checked here.
-  if (config.socketPath && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/"))) deny()
+  const type = String(config.type).toLowerCase()
   if (type === "duckdb" || type === "sqlite") {
-    if (!localStore(config.path)) deny()
+    if (!isLocalPath(config.path)) throw new Error(DENIED)
     return
   }
-  if (!["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "oracle", "redshift", "clickhouse", "trino", "mongodb", "mongo"].includes(type)) deny()
-  // Cloud authentication may contact an identity provider even for a loopback host.
-  if (config.authentication && !["sql", "ntlm"].includes(String(config.authentication).toLowerCase())) deny()
-  const mongo = type === "mongodb" || type === "mongo"
-  if (mongo && config.direct_connection !== undefined && config.direct_connection !== true) deny()
+  if (config.ssh_host) throw new Error(DENIED)
+  // A Unix socket is a local file.
+  if (config.socketPath !== undefined && !(typeof config.socketPath === "string" && config.socketPath.startsWith("/")))
+    throw new Error(DENIED)
   // Postgres accepts a socket directory as its host.
-  const postgres = ["postgres", "postgresql", "redshift"].includes(type)
-  const socketHost = typeof config.host === "string" && config.host.startsWith("/") && postgres
-  // SQL Server names an instance as host\instance.
-  const host = typeof config.host === "string" && ["sqlserver", "mssql"].includes(type) ? config.host.split("\\")[0] : config.host
-  if (host !== undefined && !socketHost && !isLoopbackHost(host)) deny()
-  // dbt-mysql and others name the host `server`; Trino's `server` is a URL checked below.
-  if (type !== "trino" && config.server !== undefined && !isLoopbackHost(config.server)) deny()
-  // Trino and ClickHouse build `${protocol}://${host}` URLs, so a protocol value can carry its own authority.
-  if ((type === "trino" || type === "clickhouse") && config.protocol !== undefined &&
-    !["http", "https"].includes(String(config.protocol).trim().toLowerCase())) deny()
-  const connectionString = type === "trino"
-    ? config.connection_string ?? config.server ?? config.url
-    : config.connection_string
-  if (type === "oracle" && typeof connectionString === "string" && !connectionString.includes("://")) {
-    // Easy Connect: host[:port][/service]. Descriptors and TNS aliases name hosts this check cannot see.
-    const easy = /^(?:\/\/)?(\[[^\]]+\]|[^:/\s()]+)(?::\d+)?(?:\/[^\s()]*)?$/.exec(connectionString.trim())
-    if (!easy || !isLoopbackHost(easy[1])) deny()
-  } else if (connectionString) {
+  const hosts = [config.host, config.server].filter((value) => value !== undefined)
+  for (const host of hosts) {
+    if (typeof host === "string" && host.startsWith("/")) continue
+    if (!isLoopbackHost(host)) throw new Error(DENIED)
+  }
+  const url = config.connection_string ?? config.url
+  if (url !== undefined) {
+    let hostname: string
     try {
-      const url = new URL(String(connectionString))
-      if ((type === "trino" || type === "clickhouse") && !["http:", "https:"].includes(url.protocol)) deny()
-      const query = new Map([...url.searchParams].map(([key, value]) => [key.toLowerCase(), value.toLowerCase()]))
-      // postgresql:///db?host=/run/postgresql connects through a local Unix socket.
-      // Exactly one lowercase host parameter, naming a socket directory; drivers read only that exact key.
-      const hostParams = [...url.searchParams.keys()].filter((key) => key.toLowerCase() === "host")
-      const socketURL = postgres && !url.hostname && hostParams.length === 1 && hostParams[0] === "host" &&
-        url.searchParams.get("host")!.startsWith("/") && !query.has("hostaddr")
-      if ((!socketURL && !isLoopbackHost(url.hostname)) || url.protocol === "mongodb+srv:") deny()
-      if (mongo && config.direct_connection !== true && query.get("directconnection") !== "true") deny()
-      if (mongo && ["mongodb-aws", "mongodb-oidc", "gssapi"].includes(query.get("authmechanism") ?? "")) deny()
-      // Drivers can override the authority via URL parameters or discover replica peers.
-      for (const key of url.searchParams.keys()) {
-        if (socketURL && key === "host") continue
-        if (["host", "hostaddr", "server", "replicaset", "service"].includes(key.toLowerCase())) deny()
-      }
-    } catch { deny() }
-  } else if (mongo && config.direct_connection !== true) deny()
+      hostname = new URL(String(url)).hostname
+    } catch {
+      throw new Error(DENIED)
+    }
+    if (!isLoopbackHost(hostname)) throw new Error(DENIED)
+  }
+  // Without a host these drivers connect to localhost; any other type names its server some other way.
+  if (hosts.length === 0 && url === undefined && config.socketPath === undefined && !LOCALHOST_BY_DEFAULT.has(type))
+    throw new Error(DENIED)
 }
+
+const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo"])

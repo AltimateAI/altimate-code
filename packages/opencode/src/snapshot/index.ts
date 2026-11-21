@@ -1,6 +1,3 @@
-// altimate_change start — disable Git transport when working with local snapshots
-import { localGitEnv } from "@/git"
-// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Duration, Effect, Layer, Schedule, Schema, Semaphore, Context } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -93,9 +90,7 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
         const git = Effect.fnUntraced(
           function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string>; stdin?: string }) {
             const result = yield* appProcess.run(
-              // altimate_change start — offline Git transport policy
-              ChildProcess.make("git", cmd, { cwd: opts?.cwd, env: localGitEnv(opts?.env), extendEnv: true }),
-              // altimate_change end
+              ChildProcess.make("git", cmd, { cwd: opts?.cwd, env: opts?.env, extendEnv: true }),
               { stdin: opts?.stdin },
             )
             return {
@@ -611,9 +606,6 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
                   const batch = yield* appProcess.run(
                     ChildProcess.make("git", [...cfg, ...args(["cat-file", "--batch"])], {
                       cwd: state.directory,
-                      // altimate_change start — offline Git transport policy
-                      env: localGitEnv(),
-                      // altimate_change end
                       extendEnv: true,
                     }),
                     { stdin: refs.map((item) => item.ref).join("\n") + "\n" },

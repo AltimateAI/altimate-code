@@ -62,12 +62,7 @@ export const SessionDeleteCommand = effectCmd({
     const sessionID = SessionID.make(args.sessionID)
     yield* svc
       .remove(sessionID)
-      .pipe(
-        Effect.catchIf(NotFoundError.isInstance, () => fail(`Session not found: ${args.sessionID}`)),
-        // altimate_change start — offline mode keeps a shared session until its share can be revoked
-        Effect.catchTag("Session.OfflinePolicyError", (error) => fail(error.message)),
-        // altimate_change end
-      )
+      .pipe(Effect.catchIf(NotFoundError.isInstance, () => fail(`Session not found: ${args.sessionID}`)))
     UI.println(UI.Style.TEXT_SUCCESS_BOLD + `Session ${args.sessionID} deleted` + UI.Style.TEXT_NORMAL)
   }),
 })

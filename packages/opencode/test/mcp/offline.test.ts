@@ -1,72 +1,46 @@
 // altimate_change - new file
 import { expect, test } from "bun:test"
+import path from "node:path"
 import { Offline } from "../../src/config/offline"
 
-test("offline MCP URL policy accepts only HTTP(S) localhost and loopback", () => {
-  for (const url of ["http://localhost:3000/mcp", "https://localhost./mcp", "http://127.2.3.4/mcp", "http://[::1]:3000/mcp", "http://0.0.0.0:4096", "http://[::]:4096"])
+test("loopback checks accept only literal local addresses", () => {
+  for (const url of ["http://localhost:3000/mcp", "https://127.0.0.1/mcp", "http://[::1]:3000/mcp"])
     expect(Offline.isLocalURL(url)).toBe(true)
   for (const url of ["https://example.com/mcp", "http://localhost.example.com", "http://192.168.0.1/mcp", "file://localhost/mcp", "http://localhost@evil.test/mcp", "invalid"])
     expect(Offline.isLocalURL(url)).toBe(false)
+  for (const host of ["localhost", "127.4.5.6", "::1", "[::1]"]) expect(Offline.isLoopbackHost(host)).toBe(true)
+  for (const host of ["localhost.evil.test", "10.0.0.1", "0.0.0.0", "", undefined]) expect(Offline.isLoopbackHost(host)).toBe(false)
 })
 
-test("offline local MCP fetch rejects remote requests and redirects before remote egress", async () => {
-  // Bun applies HTTP(S)_PROXY to loopback too unless NO_PROXY covers it; keep an ambient proxy out of this test.
-  const proxyKeys = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]
-  const savedProxy = Object.fromEntries(proxyKeys.map((key) => [key, process.env[key]]))
-  for (const key of proxyKeys) delete process.env[key]
-  process.env.NO_PROXY = process.env.no_proxy = "127.0.0.1,localhost"
-  let calls = 0
-  let server: ReturnType<typeof Bun.serve> | undefined
-  try {
-    server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch(request) {
-        calls++
-        return new URL(request.url).pathname === "/redirect"
-          ? Response.redirect("https://example.com/mcp")
-          : new Response("local MCP")
-      },
-    })
-    const fetch = Offline.localFetch()
-    expect(await (await fetch(server.url)).text()).toBe("local MCP")
-    await expect(fetch(new URL("/redirect", server.url))).rejects.toThrow()
-    await expect(fetch("https://example.com/mcp")).rejects.toThrow("non-local request")
-    expect(calls).toBe(2)
-  } finally {
-    server?.stop(true)
-    for (const key of proxyKeys) {
-      if (savedProxy[key] === undefined) delete process.env[key]
-      else process.env[key] = savedProxy[key]
-    }
-  }
+// start() replaces the process-wide fetch, so it runs in its own process.
+test("the fetch guard allows loopback, refuses everything else and keeps the user's proxy settings", async () => {
+  const module = path.resolve(import.meta.dir, "../../src/config/offline.ts")
+  const script = `
+    const { Offline } = await import(${JSON.stringify(module)})
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("local") })
+    Offline.start()
+    const local = await (await fetch(server.url)).text()
+    const remote = await fetch("https://example.com/").then(() => "sent", (error) => error.message)
+    server.stop(true)
+    console.log(JSON.stringify({ local, remote, env: [process.env.ALTIMATE_OFFLINE, process.env.HTTPS_PROXY, process.env.NO_PROXY] }))`
+  const proc = Bun.spawn([process.execPath, "-e", script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, HTTPS_PROXY: "http://proxy.example:3128", NO_PROXY: "corp.example" },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+  expect({ code: await proc.exited, stderr }).toMatchObject({ code: 0 })
+  expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({
+    local: "local",
+    remote: "Offline mode allows network requests only to the configured model endpoint.",
+    env: ["1", "http://proxy.example:3128", "corp.example,localhost,127.0.0.1,[::1]"],
+  })
 })
 
-test("user programs get their own proxy exclusions back, not the offline bypass", () => {
-  const keys = ["NO_PROXY", "no_proxy", "ALTIMATE_OFFLINE_USER_PROXY"]
-  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
-  try {
-    // What Offline.start leaves behind: the bypass, plus the user's original values.
-    process.env.ALTIMATE_OFFLINE_USER_PROXY = JSON.stringify({ NO_PROXY: "corp.example" })
-    process.env.NO_PROXY = process.env.no_proxy = "*"
-    const env: Record<string, string | undefined> = Offline.userEnv({ ...process.env, PATH: "/bin" })
-    expect(env.NO_PROXY).toBe("corp.example")
-    expect(env.no_proxy).toBeUndefined()
-    expect(env.ALTIMATE_OFFLINE_USER_PROXY).toBeUndefined()
-    expect(Offline.userEnv({ ...process.env, ALTIMATE_OFFLINE_MODEL: "local/main" }).ALTIMATE_OFFLINE_MODEL).toBeUndefined()
-    expect(env.PATH).toBe("/bin")
-    // A copied env that lacks the key (Bun omits variables assigned after startup) still gets the saved value.
-    const copy: Record<string, string | undefined> = { PATH: "/bin" }
-    expect(Offline.userEnv(copy).NO_PROXY).toBe("corp.example")
-    // A value the program's own configuration set is kept.
-    expect(Offline.userEnv({ ...process.env, NO_PROXY: "mcp.local" }).NO_PROXY).toBe("mcp.local")
-    // Without offline state, the environment is unchanged.
-    delete process.env.ALTIMATE_OFFLINE_USER_PROXY
-    expect(Offline.userEnv({ NO_PROXY: "*" }).NO_PROXY).toBe("*")
-  } finally {
-    for (const key of keys) {
-      if (saved[key] === undefined) delete process.env[key]
-      else process.env[key] = saved[key]
-    }
-  }
+test("model fetch stays below the configured base URL", async () => {
+  const fetch = Offline.modelFetch("http://model.test:9000/v1")
+  for (const url of ["http://model.test:9000/v2/chat", "http://model.test:9000/v1beta", "https://model.test:9000/v1/chat", "http://other.test:9000/v1/chat"])
+    await expect(fetch(url)).rejects.toThrow("Offline mode blocked a request outside the configured model endpoint.")
+  expect(() => Offline.modelFetch(undefined)).toThrow("explicit baseURL")
+  expect(() => Offline.modelFetch("file:///tmp/model")).toThrow("HTTP(S)")
 })

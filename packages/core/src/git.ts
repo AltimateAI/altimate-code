@@ -7,32 +7,10 @@ import { AbsolutePath } from "./schema"
 import { FSUtil } from "./fs-util"
 import { AppProcess } from "./process"
 import { LayerNode } from "./effect/layer-node"
-// altimate_change — offline transport policy
+// altimate_change start — offline mode refuses Git commands that use the network
 import { offlineModeEnabled } from "./flag/flag"
 
-// altimate_change start — prevent Git from starting a transport offline
 const remoteCommands = new Set(["clone", "fetch", "pull", "push", "ls-remote", "send-pack", "fetch-pack", "submodule--helper"])
-
-// Git LFS reads cached objects locally and contacts its endpoint only for missing ones.
-// Pointing that endpoint at a closed loopback port keeps cached content and fails on the rest.
-const OFFLINE_LFS_URL = "http://127.0.0.1:9/"
-
-export function localGitEnv(env?: Record<string, string>) {
-  if (!offlineModeEnabled()) return env
-  const inherited = Number(env?.GIT_CONFIG_COUNT ?? process.env.GIT_CONFIG_COUNT ?? 0)
-  const index = Number.isInteger(inherited) && inherited > 0 ? inherited : 0
-  // Inherited `-c` parameters are read after GIT_CONFIG_COUNT entries, so the override is appended there as well.
-  const parameters = env?.GIT_CONFIG_PARAMETERS ?? process.env.GIT_CONFIG_PARAMETERS
-  return {
-    ...env,
-    GIT_ALLOW_PROTOCOL: "",
-    GIT_NO_LAZY_FETCH: "1",
-    GIT_CONFIG_COUNT: String(index + 1),
-    [`GIT_CONFIG_KEY_${index}`]: "lfs.url",
-    [`GIT_CONFIG_VALUE_${index}`]: OFFLINE_LFS_URL,
-    ...(parameters ? { GIT_CONFIG_PARAMETERS: `${parameters} 'lfs.url=${OFFLINE_LFS_URL}'` } : {}),
-  }
-}
 
 export function gitCommandUsesNetwork(args: string[]) {
   let index = 0
@@ -40,11 +18,14 @@ export function gitCommandUsesNetwork(args: string[]) {
     index += ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(args[index]) ? 2 : 1
   }
   const [command, operation, ...rest] = args.slice(index)
-  return remoteCommands.has(command) ||
+  return (
+    remoteCommands.has(command) ||
     (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n"))))
+  )
 }
-// altimate_change end
 
+export const GIT_OFFLINE_REFUSAL = "Git remote operations require an online run."
+// altimate_change end
 
 export interface Repo {
   /**
@@ -289,9 +270,6 @@ export const layer = Layer.effect(
         .run(
           ChildProcess.make("git", ["apply", "-"], {
             cwd: input.directory,
-            // altimate_change start — apply the offline transport policy to patch application
-            env: localGitEnv(),
-            // altimate_change end
             extendEnv: true,
             stdin: Stream.make(new TextEncoder().encode(input.patch)),
           }),
@@ -375,9 +353,7 @@ export const layer = Layer.effect(
       cwd = repo.directory,
     ) {
       const result = yield* proc
-        // altimate_change start — apply offline transport policy to worktree commands
-        .run(ChildProcess.make("git", args, { cwd, env: localGitEnv(), extendEnv: true, stdin: "ignore" }))
-        // altimate_change end
+        .run(ChildProcess.make("git", args, { cwd, extendEnv: true, stdin: "ignore" }))
         .pipe(
           Effect.mapError(
             (cause) => new WorktreeError({ operation, directory: worktreeDirectory, message: cause.message, cause }),
@@ -457,17 +433,16 @@ function run(cwd: string, proc: AppProcess.Interface) {
     execute(cwd, proc)(args).pipe(Effect.catch(() => Effect.succeed({ exitCode: 1, text: "", stderr: "" })))
 }
 
-// altimate_change start — enforce offline Git transport policy at the spawn boundary
 function execute(cwd: string, proc: AppProcess.Interface) {
-  return (args: string[]) => {
-    if (offlineModeEnabled() && gitCommandUsesNetwork(args)) {
-      return Effect.succeed({ exitCode: 1, text: "", stderr: "Git remote operations require an online run." })
-    }
-    return proc
+  return (args: string[]) =>
+    // altimate_change start — offline mode refuses Git commands that use the network
+    offlineModeEnabled() && gitCommandUsesNetwork(args)
+      ? Effect.succeed({ exitCode: 1, text: "", stderr: GIT_OFFLINE_REFUSAL } satisfies Result)
+      : // altimate_change end
+    proc
       .run(
         ChildProcess.make("git", args, {
           cwd,
-          env: localGitEnv(),
           extendEnv: true,
           stdin: "ignore",
         }),
@@ -482,9 +457,7 @@ function execute(cwd: string, proc: AppProcess.Interface) {
             }) satisfies Result,
         ),
       )
-  }
 }
-// altimate_change end
 
 function resolvePath(cwd: string, value: string) {
   const trimmed = value.replace(/[\r\n]+$/, "")

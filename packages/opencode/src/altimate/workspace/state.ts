@@ -1,5 +1,4 @@
 // altimate_change - new file
-import { Offline } from "@/config/offline"
 //
 // Local binding cache — offline fallback for the server-authoritative
 // pre-check. Scoped to (tenant, apiUrl, account) at the top level so a
@@ -765,7 +764,7 @@ export async function resolvePinnedBindingForRouting(
 ): Promise<BindingOutcome | null> {
   const pin = readPinLogged()
   if (pin.kind === "absent") return null
-  if (Offline.enabled() || pin.kind === "invalid") return { status: "unknown" }
+  if (pin.kind === "invalid") return { status: "unknown" }
   return resolvePinnedBinding(directory, pin)
 }
 
@@ -862,10 +861,6 @@ export function endTurnBinding(sessionID: string): void {
 }
 
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
-  if (Offline.enabled()) {
-    const local = readPinLogged().kind === "absent" ? await readLocalBinding(directory).catch(() => null) : null
-    return local ? { status: "bound", binding: local, stale: true } : { status: "unknown" }
-  }
   // altimate_change — the IDE extension's selection outranks whatever binding this project carries.
   // Checked before the local cache and before any server lookup: the whole point is that the panel,
   // not the project's history, decides which workspace this `serve` process works against.

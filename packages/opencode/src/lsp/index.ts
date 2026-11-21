@@ -1,6 +1,3 @@
-// altimate_change start — offline mode user environment
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import { Log } from "../util/log"
@@ -137,12 +134,10 @@ export namespace LSP {
               process: spawn(item.command[0], item.command.slice(1), {
                 cwd: root,
                 windowsHide: true,
-                // altimate_change start — offline mode keeps the user's proxy settings for custom language servers
                 env: {
-                  ...Offline.userEnv({ ...process.env }),
+                  ...process.env,
                   ...item.env,
                 },
-                // altimate_change end
               }),
               initialization: item.initialization,
             }

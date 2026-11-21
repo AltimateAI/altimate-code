@@ -68,7 +68,6 @@ import {
   credentialDigest,
   currentScope,
   readLocalBinding,
-  readLocalBindingScopedStrict,
   resolveBindingOutcome,
   type AccountKey,
   type CachedBinding,
@@ -189,20 +188,7 @@ export async function ownManifest(directory: string): Promise<Manifest | null> {
       manifest.tenant === creds.altimateInstanceName &&
       manifest.apiUrl === creds.altimateUrl &&
       manifest.account === credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
-    if (!ours) return null
-    // altimate_change — hide a stale workspace snapshot offline without removing it
-    if (Offline.enabled()) {
-      // A serve pin outranks the project's link, as in resolveBindingOutcome; a broken pin fails closed.
-      const raw = readPin()
-      // A pin covers only the tree serve was launched for.
-      const pin = raw.kind === "valid" && resolveWithinRoot(directory, raw.root) === null ? { kind: "absent" as const } : raw
-      if (pin.kind === "invalid" || (pin.kind === "valid" && pin.datamateId !== manifest.datamateId)) return null
-      // A matching pin decides on its own; the project's link is consulted only without one.
-      if (pin.kind === "valid") return manifest
-      const { binding: local } = await readLocalBindingScopedStrict(directory)
-      if (local && local.datamateId !== manifest.datamateId) return null
-    }
-    return manifest
+    return ours ? manifest : null
   } catch {
     return null
   }
@@ -521,13 +507,7 @@ async function registryIdentity(canon: string): Promise<string> {
   } catch {
     /* no credentials resolved; the empty account is the honest answer */
   }
-  // altimate_change — a changed local binding can hide a snapshot without changing its files
-  const binding = Offline.enabled()
-    ? await readLocalBindingScopedStrict(canon)
-        .then(({ binding }) => binding?.datamateId ?? "")
-        .catch(() => "unreadable")
-    : ""
-  return `${snapshotFingerprint(canon)}\u0000${account}\u0000${binding}`
+  return `${snapshotFingerprint(canon)}\u0000${account}`
 }
 
 /** Does the skill registry still reflect a different snapshot, or a different
@@ -1261,6 +1241,7 @@ class SupersededRunError extends Error {
  * failure path leaves whatever is already on disk in place, except the
  * deliberate purge described below. */
 export async function syncSkills(directory: string): Promise<SyncResult> {
+  // altimate_change — offline mode keeps the snapshot on disk as it is
   if (Offline.enabled()) return { changed: false, skipped: [], error: "Run workspace refresh while online." }
   const canon = path.resolve(directory)
   // Joined BEFORE the flag is read, so the opt-out purge is serialised against

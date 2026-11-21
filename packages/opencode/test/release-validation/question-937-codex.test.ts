@@ -365,8 +365,7 @@ describe("release validation PR #937 source-level env plumbing", () => {
   test("bash tool strips ALTIMATE_NON_INTERACTIVE from child process env but keeps auto-answer env untouched", async () => {
     const source = await Bun.file(new URL("../../src/tool/bash.ts", import.meta.url)).text()
 
-    // Offline mode restores the user's proxy settings on the inherited environment before plugin overrides.
-    expect(source).toContain('const mergedEnv: Record<string, string | undefined> = { ...Offline.userEnv({ ...process.env }), ...shellEnv.env }')
+    expect(source).toContain('const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }')
     // The stripping moved into `stripHostMarkers` (shared with the shell tool in v0.12.1);
     // the contract is behavioural now: the non-interactive marker goes, auto-answer stays.
     expect(source).toContain("stripHostMarkers(mergedEnv)")

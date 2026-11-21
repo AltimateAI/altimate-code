@@ -162,28 +162,31 @@ Control how context is managed when conversations grow long:
 
 ## Offline / air-gapped mode
 
-Offline mode is for running Altimate Code against a local or self-hosted model with no other network access. It stops the network requests Altimate Code itself makes. It does not stop local work: tools, shell commands, local databases and local Git keep working.
+Offline mode is for running Altimate Code against a local or self-hosted model with no other network access. Altimate Code then sends network requests only to the configured model endpoint. Local work keeps running: tools, shell commands, local databases, language servers, local MCP servers and local Git.
+
+With offline mode off, nothing on this page applies and Altimate Code behaves exactly as before.
 
 ### Turn it on
 
-Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file. The setting covers the process and its workers. A project that requests offline mode is refused by a shared server started without it; start Altimate Code from that project instead.
+Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file (or `OPENCODE_CONFIG_CONTENT`). Altimate Code checks those files for the setting when it starts, so startup requests are covered too. Organisation-managed configuration and remote (well-known) configuration apply the setting only once they load, after some startup requests; use `ALTIMATE_OFFLINE=1` there. Once on, offline mode lasts for the rest of the process, including any server that loaded the project.
 
-Configure a provider with an explicit HTTP(S) `options.baseURL` and select one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Requests to that endpoint are the only requests Altimate Code sends off the machine. They go directly to the endpoint, not through `HTTP_PROXY` or `HTTPS_PROXY`, so the endpoint must be reachable without a proxy. A `small_model` is used only if it belongs to the same provider; otherwise the main model handles those tasks.
+Configure a provider with an explicit HTTP(S) `options.baseURL` and use one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Model requests go only to a provider's explicit `baseURL`, never to a catalog URL, and are not redirected. They respect `HTTPS_PROXY` and `HTTP_PROXY`. A `small_model` is used only if its provider also has an explicit `baseURL`.
 
 ### Before going offline
 
 While still online:
 
-- Run `altimate-code workspace refresh` to save the workspace skill snapshot. Offline runs use it without refreshing or deleting it, as long as your local credentials belong to the same workspace account.
+- Run `altimate-code workspace refresh` to save the workspace skill snapshot. Offline runs use it as it is, without refreshing it.
 - Install the warehouse drivers you need (the `warehouse_install_driver` tool), any language servers, and ripgrep.
-- Run `dbt deps` for dbt projects.
+- Run `dbt deps` for dbt projects, and install any DuckDB extensions your profiles use.
 
 ### What keeps working
 
-- Local warehouses: DuckDB and SQLite files, and warehouses reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. The SQL and schema tools run against them.
-- dbt commands, when the selected profile and target point at a local database.
-- The shell tool, installed language servers, and MCP servers that use stdio or a loopback HTTP(S) URL.
-- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and submodule commits. Git LFS files check out from the local LFS cache; a file whose content is not cached fails with a clear error instead of downloading.
+- Local warehouses: DuckDB and SQLite files, and warehouses reached through a Unix socket or a host of `localhost`, `::1` or `127.x.x.x`. A host that is not one of these, or a connection string that cannot be parsed, is refused.
+- dbt commands whose selected profile and target are local. dbt-duckdb profiles can use installed extensions, local attachments and plugins; settings that point at remote storage or a remote server (`s3://`, `https://`, `gcs://`, `md:` and similar) are refused.
+- DuckDB loads extensions that are already installed; it does not download new ones.
+- The shell tool, installed language servers, stdio MCP servers and MCP servers at `localhost`, `127.0.0.1` or `[::1]`, including `tool run --daemon`.
+- Git diffs, session snapshots and revert, and worktree create, remove and reset (reset uses the locally cached base branch).
 - `attach` and `run --attach` to a server on this machine. The attached server applies its own policy, so start it with offline mode too.
 
 ### What is blocked
@@ -192,18 +195,17 @@ Each of these fails with a one-line message or is skipped:
 
 - telemetry, account and remote configuration requests;
 - model catalog downloads and update checks;
-- workspace and workspace engine sync;
-- session sharing;
+- workspace and workspace engine sync, and session sharing;
 - the web fetch, web search, code search, `datamate_manager`, feedback and memory refresh tools;
-- MCP servers at non-loopback URLs, and MCP sign-in;
+- MCP servers at other URLs, and MCP sign-in;
 - automatic installs of warehouse drivers, language servers, plugins and ripgrep;
-- warehouse connections whose host is not loopback, SSH tunnels, and cloud sign-in methods;
-- `dbt deps`, dbt's own usage reporting and version check, and dbt-duckdb profiles that use remote storage or a remote server;
-- Git fetch, pull, push, clone and other remote operations;
-- commands that need a remote service, such as `github`, `pr`, `web`, `review --post` and `attach` to another machine.
+- warehouse connections to other hosts, SSH tunnels, and cloud sign-in methods for dbt;
+- `dbt deps` and dbt's usage reporting and version check;
+- `git clone`, `fetch`, `pull`, `push` and other Git commands that use a remote;
+- commands that need a remote service, such as `github`, `pr`, `web`, `upgrade`, `review --post` and `attach` to another machine.
 
 ### What offline mode does not police
 
-Programs you run or configure yourself keep their own network access: shell commands, language servers, local MCP servers and their child processes. They also keep your proxy settings. Offline mode does not sandbox them.
+Programs you run or configure yourself keep their own network access and proxy settings: shell commands, language servers, local MCP servers and their child processes. Offline mode does not sandbox them. They inherit `ALTIMATE_OFFLINE=1`, so an `altimate-code` started from the shell is offline too, and `NO_PROXY` gains `localhost,127.0.0.1,[::1]` so that local requests do not go through a proxy.
 
-DuckDB connections do not install or load extensions automatically offline. SQL that explicitly runs `INSTALL` or `LOAD` (for example for `httpfs`) and then reads a remote path is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs, usage reporting and version check.
+SQL that loads an installed network extension (such as `httpfs`) and reads a remote path is not blocked. The `altimate-dbt` command runs through the shell tool and is not policed either, although it turns off its own dependency installs and usage reporting.

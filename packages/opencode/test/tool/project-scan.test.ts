@@ -1023,27 +1023,17 @@ describe("safeSpawnSync", () => {
   })
 })
 
-// altimate_change start — offline dbt detection sends dbt's PyPI lookup to a closed loopback proxy
-test.skipIf(process.platform === "win32")("offline data tool detection runs dbt behind a closed loopback proxy", async () => {
+// altimate_change start — offline mode does not run `dbt --version`, which asks PyPI for the latest release
+test.skipIf(process.platform === "win32")("offline data tool detection finds dbt on PATH without running it", async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "offline-scan-"))
   const previous = { path: process.env.PATH, offline: process.env.ALTIMATE_OFFLINE }
   try {
-    const seen = path.join(dir, "proxy")
-    await fsp.writeFile(path.join(dir, "dbt"), `#!/bin/sh\nprintf "%s" "$HTTPS_PROXY" > "${seen}"\necho "dbt 1.9.3"\n`, { mode: 0o755 })
+    const ran = path.join(dir, "ran")
+    await fsp.writeFile(path.join(dir, "dbt"), `#!/bin/sh\ntouch "${ran}"\necho "dbt 1.9.3"\n`, { mode: 0o755 })
     process.env.PATH = `${dir}${path.delimiter}${previous.path}`
     process.env.ALTIMATE_OFFLINE = "1"
-    const tools = await detectDataTools(false)
-    expect(tools.find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.3" })
-    expect(await fsp.readFile(seen, "utf8")).toBe("http://127.0.0.1:9")
-    // A probe that prints dbt's real version lines and then exits non-zero still reports the version offline.
-    await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nprintf 'Core:\\n  - installed: 1.9.3\\n'\nexit 1\n", { mode: 0o755 })
-    expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.3" })
-    // Some dbt builds print --version to stderr.
-    await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nprintf 'Core:\\n  - installed: 1.9.4\\n' >&2\nexit 1\n", { mode: 0o755 })
-    expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.4" })
-    // A probe that prints nothing falls back to finding dbt on PATH.
-    await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nexit 1\n", { mode: 0o755 })
     expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true })
+    expect(await fsp.stat(ran).then(() => true, () => false)).toBe(false)
   } finally {
     process.env.PATH = previous.path
     if (previous.offline === undefined) delete process.env.ALTIMATE_OFFLINE

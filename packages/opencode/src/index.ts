@@ -1,5 +1,4 @@
 // altimate_change start — offline mode
-import { existsSync } from "node:fs"
 import { Offline } from "@/config/offline"
 // altimate_change end
 import yargs from "yargs"
@@ -173,38 +172,26 @@ let cli = yargs(args)
     if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end
 
-    // altimate_change start — skip network work in offline mode
+    // altimate_change start — offline mode: install the fetch guard and refuse commands that need a remote service
     const command = String(opts._[0] ?? "")
-    const args = opts as {
-      dir?: string
-      cwd?: string
-      directory?: string
-      project?: string
-      attach?: string
-      url?: string
-      model?: string
+    // `attach --dir` names a directory on the server, so attach reads the invoking project's setting.
+    const offlineTarget = command === "attach" ? undefined : (opts.dir ?? opts.cwd ?? opts.directory)
+    const offlineDir = typeof offlineTarget === "string" ? path.resolve(offlineTarget) : resolveThreadDirectory(opts.project as string | undefined)
+    if (Offline.enabled() || (await Offline.optedIn(offlineDir))) {
+      Offline.start()
+      const sub = String(opts._[1] ?? "")
+      const attach = command === "attach" ? opts.url : command === "run" ? opts.attach : undefined
+      if (
+        ["github", "gitlab", "pr", "link", "workspace-client", "web", "integrations", "upgrade"].includes(command) ||
+        (command === "review" && opts.post === true) ||
+        (command === "learn" && sub === "import-reviews") ||
+        (command === "console" && sub === "open") ||
+        (["providers", "auth", "console"].includes(command) && sub === "login") ||
+        (command === "mcp" && sub === "auth") ||
+        (typeof attach === "string" && attach !== "" && !Offline.isLocalURL(attach))
+      )
+        throw new Error("This command requires network access. Run it while online.")
     }
-    const offlineTarget = (command === "run" && !args.attach ? args.dir : undefined)
-      ?? (command === "acp" ? args.cwd : undefined)
-      ?? (command === "workspace" ? args.directory : undefined)
-    const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
-    await Offline.start(directory, args.model)
-    // attach: the invoking project's setting applies, and so does --dir's when it is a local directory.
-    if (command === "attach" && args.dir && existsSync(path.resolve(args.dir))) await Offline.start(path.resolve(args.dir), args.model)
-    // Attaching to a server on this machine is local; any other server is a network peer.
-    const attachURL = command === "attach" ? args.url : command === "run" ? args.attach || undefined : undefined
-    if (Offline.enabled() && (
-      ["github", "gitlab", "pr", "link", "workspace-client", "web", "integrations"].includes(command) ||
-      // A local review runs offline; posting it to GitHub does not.
-      (command === "review" && (opts as { post?: boolean }).post === true) ||
-      (attachURL !== undefined && !Offline.isLocalURL(attachURL)) ||
-      (command === "learn" && opts._[1] === "import-reviews") ||
-      (command === "console" && opts._[1] === "open") ||
-      (["providers", "auth", "console"].includes(command) && opts._[1] === "login") ||
-      (command === "mcp" && opts._[1] === "auth")
-    )) throw new Error("This command requires network access. Run it while online.")
-    if (Offline.enabled() && attachURL)
-      process.stderr.write("Offline mode: the attached server applies its own network policy; start it with offline mode too.\n")
     // altimate_change end
 
     Heap.start()

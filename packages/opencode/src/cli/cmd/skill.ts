@@ -424,7 +424,7 @@ const SkillTestCommand = cmd({
             try {
               const worktreeDir = Instance.worktree !== "/" ? Instance.worktree : projectDir
               const toolEnv = {
-                ...Offline.userEnv({ ...process.env }),
+                ...process.env,
                 PATH: [
                   process.env.ALTIMATE_BIN_DIR,
                   path.join(worktreeDir, ".opencode", "tools"),
@@ -658,12 +658,9 @@ const SkillInstallCommand = cmd({
       }),
   async handler(args) {
     let source = (args.source as string).trim().replace(/\.git$/, "")
-    const githubShorthand = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/
-    const offlineLocal = Offline.enabled() && githubShorthand.test(source) &&
-      (await fs.stat(path.resolve(source)).catch(() => undefined))?.isDirectory()
-    if (Offline.enabled() && !offlineLocal && (/^https?:\/\//.test(source) || githubShorthand.test(source))) {
+    // Offline mode: a URL or owner/repo shorthand is fetched from GitHub. A local directory such as ./owner/repo is fine.
+    if (Offline.enabled() && (/^https?:\/\//.test(source) || /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(source)))
       throw new Error("Install remote skills while online, or install a local skill directory.")
-    }
     const isGlobal = args.global as boolean
 
     if (!source) {
@@ -700,7 +697,7 @@ const SkillInstallCommand = cmd({
           process.exit(1)
         }
         skillDir = tmpDir
-      } else if (!offlineLocal && githubShorthand.test(source)) {
+      } else if (source.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
         // GitHub shorthand: owner/repo
         const url = `https://github.com/${source}.git`
         process.stdout.write(`Fetching from github.com/${source}...` + EOL)

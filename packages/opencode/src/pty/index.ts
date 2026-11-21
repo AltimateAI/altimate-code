@@ -1,6 +1,3 @@
-// altimate_change start — offline mode user environment
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 // altimate_change start — upstream moved the pty spawn backend into @opencode-ai/core
@@ -135,15 +132,13 @@ export namespace Pty {
 
     const cwd = input.cwd || Instance.directory
     const shellEnv = await Plugin.trigger("shell.env", { cwd }, { env: {} })
-    // altimate_change start — offline mode leaves the user's terminal with their proxy settings
     const env = {
-      ...Offline.userEnv({ ...process.env }),
+      ...process.env,
       ...input.env,
       ...shellEnv.env,
       TERM: "xterm-256color",
       OPENCODE_TERMINAL: "1",
     } as Record<string, string>
-    // altimate_change end
 
     // altimate_change start — prepend user tools dirs to PATH in terminal sessions
     const sep = process.platform === "win32" ? ";" : ":"

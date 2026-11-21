@@ -502,9 +502,6 @@ export const layer = Layer.effect(
 
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
-        // altimate_change start — skip network work in offline mode
-        yield* Effect.promise(() => Offline.assertStartupPolicy(ctx.directory))
-        // altimate_change end
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
         let result: Info = {}
@@ -692,6 +689,8 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
+        // altimate_change — `"offline": true` in a local config turns offline mode on before the account request
+        if (result.offline === true) Offline.start()
         const activeAccount = Option.getOrUndefined(
           yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
         )
@@ -783,6 +782,8 @@ export const layer = Layer.effect(
         // altimate_change start — upstream_fix: decide installs only after every config source has
         // merged. Inline, account, managed, and later-directory configs can declare a file plugin
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
+        // altimate_change — managed config can turn offline mode on too
+        if (result.offline === true) Offline.start()
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
           if (!Offline.enabled() && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {

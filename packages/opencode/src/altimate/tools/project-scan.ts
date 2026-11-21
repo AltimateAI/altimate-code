@@ -3,7 +3,8 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
-import { Offline } from "@/config/offline"
+// altimate_change — offline mode
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
 import { Telemetry } from "@/telemetry"
 // altimate_change — onboarding funnel: environment_scan_completed
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
@@ -95,14 +96,12 @@ export interface ConfigFileInfo {
  */
 export function safeSpawnSync(
   args: string[],
-  opts?: { timeout?: number; env?: Record<string, string | undefined> },
+  opts?: { timeout?: number },
 ): { exitCode: number; stdout: string; stderr: string } | null {
   try {
     const result = Bun.spawnSync(args, {
       stdout: "pipe",
       stderr: "pipe",
-      // altimate_change — offline dbt probe environment
-      ...(opts?.env && { env: opts.env }),
       ...(opts?.timeout !== undefined && { timeout: opts.timeout }),
     })
     return {
@@ -487,20 +486,9 @@ export async function detectDataTools(skip: boolean): Promise<DataToolInfo[]> {
   // non-zero" (binary present but the version check failed).
   const results = await Promise.all(
     DATA_TOOL_NAMES.map(async (tool): Promise<DataToolInfo> => {
-      // `dbt --version` asks PyPI for the latest release; offline, that lookup goes to a closed loopback proxy.
-      const env = tool === "dbt" && Offline.enabled() ? { ...process.env, ...Offline.CLOSED_PROXY_ENV } : undefined
-      const result = safeSpawnSync([tool, "--version"], { timeout: 5000, env })
-      // Offline, a probe that did not finish still shows dbt is installed: use what it printed, else PATH.
-      if (env && !(result && result.exitCode === 0)) {
-        // dbt 1.x prints "Core:" then "  - installed: <version>"; older output leads with the version.
-        // Some dbt builds print --version to stderr.
-        const output = result ? `${result.stdout}\n${result.stderr}` : ""
-        const version = result
-          ? (output.match(/-\s*installed:\s*([0-9]+\.[0-9]+\.[0-9]+\S*)/)?.[1] ?? parseToolVersion(output.trim()))
-          : undefined
-        const installed = version !== undefined || Bun.which(tool, { PATH: process.env.PATH ?? "" }) !== null
-        return { name: tool, installed, ...(version ? { version } : {}) }
-      }
+      // altimate_change — `dbt --version` asks PyPI for the latest release, so offline mode only checks PATH
+      if (tool === "dbt" && offlineModeEnabled()) return { name: tool, installed: Bun.which(tool) !== null }
+      const result = safeSpawnSync([tool, "--version"], { timeout: 5000 })
       if (result && result.exitCode === 0) {
         return {
           name: tool,
