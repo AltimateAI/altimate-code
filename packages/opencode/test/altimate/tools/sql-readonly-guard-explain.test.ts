@@ -192,6 +192,8 @@ describe("explainWrite", () => {
 
   test("an UNKNOWN statement type is named by its first keyword", () => {
     expect(explainWrite("ATTACH 'x.db' AS other", "duckdb").reason).not.toContain("UNKNOWN")
+    // Only known keywords are named; any other first word is the user's text.
+    expect(explainWrite("acme_secret SELECT 1", "clickhouse").reason).not.toMatch(/ACME_SECRET/i)
   })
 
   test("names a SQL Server batch keyword", () => {

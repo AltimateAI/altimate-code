@@ -68,11 +68,20 @@ describe("reads are classified as reads in every dialect", () => {
     "parenthesized query": "(SELECT 1) UNION ALL (SELECT 2)",
     "two reads": "SELECT 1; SELECT 2",
   }
+  // The bundled ClickHouse parser accepts trailing text, so its keyword scan stays strict for dotted names.
+  const STRICT_DOTTED = new Set(["qualified columns named like write keywords", "three-part names ending in a write keyword"])
   for (const [name, sql] of Object.entries(reads)) {
     test(name, () => {
-      expect(DIALECTS.filter((dialect) => !isRead(sql, dialect))).toEqual([])
+      const dialects = STRICT_DOTTED.has(name) ? DIALECTS.filter((d) => d !== "clickhouse") : DIALECTS
+      expect(dialects.filter((dialect) => !isRead(sql, dialect))).toEqual([])
     })
   }
+
+  test("ClickHouse keeps dotted write keywords as writes, since its parser accepts trailing text", () => {
+    for (const sql of ["SELECT * FROM a.INTO OUTFILE '/tmp/x'", "SELECT a FROM t x.UPDATE t SET a = 1"]) {
+      expect(isRead(sql, "clickhouse")).toBe(false)
+    }
+  })
 
   test("DESCRIBE, SHOW and PRAGMA metadata reads", () => {
     for (const sql of ["DESCRIBE orders", "SHOW TABLES", "SHOW COLUMNS FROM orders"]) expect(isRead(sql, "duckdb")).toBe(true)

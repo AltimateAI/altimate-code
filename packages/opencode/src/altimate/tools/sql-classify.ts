@@ -92,6 +92,8 @@ function hasQueryWriteClause(sql: string, dialect?: string): boolean {
   // must be a whole unquoted identifier directly before the dot: `1. INTO t` and `0x1.INTO t` are a
   // number followed by SELECT INTO, and anything else stays a write. The lookbehind runs only where a
   // keyword matched, so long masked literals are not rescanned at every position.
+  // The bundled ClickHouse parser accepts trailing text it cannot read, so there every keyword counts.
+  if (dialect?.toLowerCase() === "clickhouse") return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked)
   return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<!(?:^|[^\w$.])[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*\.(?:INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
 }
 
@@ -581,6 +583,13 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
   return result.queryType === "read" && !result.blocked ? labels.join("`, `") : undefined
 }
 
+// Statement keywords that may name an UNKNOWN statement in a refusal.
+const STATEMENT_KEYWORDS = new Set([
+  "ATTACH", "DETACH", "INSTALL", "LOAD", "SET", "RESET", "PRAGMA", "COPY", "CALL", "EXEC", "EXECUTE", "GRANT", "REVOKE",
+  "VACUUM", "ANALYZE", "EXPORT", "IMPORT", "USE", "BEGIN", "COMMIT", "ROLLBACK", "CHECKPOINT", "OPTIMIZE", "SYSTEM",
+  "KILL", "RENAME", "COMMENT", "REFRESH", "UNLOAD", "PUT", "GET", "REMOVE", "LIST",
+])
+
 /** The parser's position and the kind of error only: everything from the first quoted or named token
  * (`got`, `found`, `near`, a parenthesis, a quote, a colon after the kind) is cut, since telemetry records
  * this error and its masking does not cover every token the parser prints. */
@@ -642,11 +651,15 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
       parsed = undefined
     }
     const reported = String(parsed?.statement_type ?? "").toUpperCase()
-    // An UNKNOWN type is named by the statement's first keyword instead.
+    // An UNKNOWN type is named by its first word only when that is a known statement keyword: any other
+    // word is the user's text, which telemetry would record.
+    const first = (/^\s*([A-Za-z_]+)/.exec(maskSql(tokenizeSql(statement, dialect).tokens))?.[1] ?? "").toUpperCase()
     const type =
       reported && reported !== "UNKNOWN"
         ? reported
-        : (/^\s*([A-Za-z_]+)/.exec(maskSql(tokenizeSql(statement, dialect).tokens))?.[1] ?? "statement").toUpperCase()
+        : STATEMENT_KEYWORDS.has(first)
+          ? first
+          : "an unrecognized statement"
     const tokens = tokenizeSql(statement, dialect).tokens
     const masked = maskSql(tokens)
     if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
