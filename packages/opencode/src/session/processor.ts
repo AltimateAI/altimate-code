@@ -463,7 +463,7 @@ export namespace SessionProcessor {
         // after compaction would silently never see the breaker/loop nudge.
         let effectiveStreamInput = streamInput
         // altimate_change start — kept so a pre-send refusal can hand the directive to the retry
-        let takenDirective: ReturnType<typeof NudgeArbiter.take>
+        let takenDirective: ReturnType<typeof NudgeArbiter.take> = undefined
         // altimate_change end
         if (runMode && !input.assistantMessage.summary) {
           const directive = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)
@@ -1372,14 +1372,15 @@ export namespace SessionProcessor {
                 // Nothing was sent: the directive this request carried belongs to the retry.
                 if (takenDirective) NudgeArbiter.register(input.sessionID, takenDirective, input.nudgeGeneration)
               }
-              const error = refusedBeforeSend
-                ? new MessageV2.ContextOverflowError(
-                    { message: "The request would not fit the model's context window; compacting the conversation and retrying." },
-                    { cause: e },
-                  ).toObject()
-                : echoRecovery && isContextBudgetError(e)
-                  ? new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
-                  : MessageV2.fromError(e, { providerID: input.model.providerID })
+              let error = MessageV2.fromError(e, { providerID: input.model.providerID })
+              if (refusedBeforeSend) {
+                error = new MessageV2.ContextOverflowError(
+                  { message: "The request would not fit the model's context window; compacting the conversation and retrying." },
+                  { cause: e },
+                ).toObject()
+              } else if (echoRecovery && isContextBudgetError(e)) {
+                error = new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+              }
               // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
               if (
