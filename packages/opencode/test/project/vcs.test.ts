@@ -157,6 +157,35 @@ describe("Vcs", () => {
 })
 
 describe("Vcs diff", () => {
+  worktreeIt.instance(
+    "offline VCS status and diff do not execute Git working-tree filters",
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      const marker = path.join(directory, "filter-ran")
+      yield* write(path.join(directory, ".gitattributes"), "*.txt filter=offline-fixture\n")
+      yield* write(path.join(directory, "data.txt"), "before\n")
+      yield* git(directory, ["add", "."])
+      yield* git(directory, ["commit", "-m", "test filter fixture"])
+      yield* git(directory, ["config", "filter.offline-fixture.clean",
+        `printf 'filter ran' > '${marker.replaceAll("\\", "/")}'; cat`])
+      yield* write(path.join(directory, "data.txt"), "after\n")
+      const prior = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        const vcs = yield* Vcs.Service
+        const state = yield* vcs.status()
+        const diff = yield* vcs.diff("git")
+        expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(marker))).toBe(false)
+        expect(state).toEqual([])
+        expect(diff).toEqual([])
+      } finally {
+        if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = prior
+      }
+    }),
+    { git: true },
+  )
+
   afterEach(async () => {
     await disposeAllInstances()
   })

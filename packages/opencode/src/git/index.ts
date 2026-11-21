@@ -1,3 +1,6 @@
+// altimate_change start — skip working-tree Git operations that can run filters
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
 import { Effect, Layer, Context, Stream } from "effect"
@@ -109,6 +112,10 @@ export const layer = Layer.effect(
 
     const run = Effect.fn("Git.run")(
       function* (args: string[], opts: Options) {
+        // altimate_change start — Git can launch filters independently of its network transport
+        if (offlineModeEnabled() && ["diff", "status", "apply"].includes(args[0]))
+          return fail(new Error("Git working-tree operations require an online run."))
+        // altimate_change end
         const result = yield* appProcess.run(
           ChildProcess.make("git", [...cfg, ...args], {
             cwd: opts.cwd,
