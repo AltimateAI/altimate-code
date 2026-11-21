@@ -113,11 +113,11 @@ describe("budget finalization accounting", () => {
     expect(accounting.turnCount).toBe(1)
     expect(accounting.fatal).toBe(true)
 
-    expect(accounting.turnBudgetStop(2)).toBeUndefined()
+    expect(accounting.turnBudgetReached(2)).toBe(false)
     accounting.onText("finalization", "The supported result is available; verification is incomplete.")
     accounting.onStepFinish("finalization", "stop")
     expect(accounting.turnCount).toBe(2)
-    expect(accounting.turnBudgetStop(2)).toBeDefined()
+    expect(accounting.turnBudgetReached(2)).toBe(true)
     expect(accounting.termination()).toEqual({
       why_model_stopped: "stop",
       why_harness_stopped: "budget-exhausted",

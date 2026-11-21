@@ -36,27 +36,20 @@ describe("RunAccounting turn accounting", () => {
     // Attempt 1 started and its stream broke, so it wrote no step-finish. The
     // retry's start is checked against completed steps only, so a one-turn
     // budget still lets it run.
-    acc.onStepAttempt("msg_1")
     expect(acc.turnCount).toBe(0)
-    expect(acc.turnBudgetStop(1)).toBeUndefined()
-    acc.onStepAttempt("msg_1")
-    expect(acc.turnBudgetStop(1)).toBeUndefined()
+    expect(acc.turnBudgetReached(1)).toBe(false)
     acc.onStepFinish("msg_1", "stop")
     expect(acc.turnCount).toBe(1)
-    expect(acc.turnBudgetStop(1)).toBeDefined()
+    expect(acc.turnBudgetReached(1)).toBe(true)
   })
 
   test("a session error with no completed step charges no turn and stays fatal", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
     // Every attempt the processor allows failed before finishing.
-    for (let i = 0; i < RunAccounting.ATTEMPTS_PER_TURN; i++) acc.onStepAttempt("msg_1")
     acc.onSessionError("APIError", "upstream stream reset")
     expect(acc.turnCount).toBe(0)
-    // No turn was charged. The processor makes no seventh attempt; if anything
-    // did start another step, the attempt backstop would stop it.
-    expect(acc.turnBudgetStop(1)).toBe("attempts")
-    expect(acc.turnBudgetStop(2)).toBeUndefined()
+    expect(acc.turnBudgetReached(1)).toBe(false)
     expect(acc.fatal).toBe(true)
     expect(acc.termination().why_harness_stopped).toBe("error")
   })
@@ -64,62 +57,25 @@ describe("RunAccounting turn accounting", () => {
   test("the budget is reached only after maxTurns steps complete", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    expect(acc.turnBudgetStop(1)).toBeUndefined()
+    expect(acc.turnBudgetReached(1)).toBe(false)
     acc.onStepFinish("msg_1", "tool-calls")
-    expect(acc.turnBudgetStop(1)).toBeDefined()
-    expect(acc.turnBudgetStop(2)).toBeUndefined()
-    expect(acc.turnBudgetStop(undefined)).toBeUndefined()
-  })
-
-  test("attempts that never finish stop the budget once they exceed what N steps' retries allow", () => {
-    const acc = RunAccounting.create()
-    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
-    // Compaction attempts never count toward the backstop.
-    for (let i = 0; i < 20; i++) acc.onStepAttempt("msg_compact")
-    for (let i = 0; i < RunAccounting.ATTEMPTS_PER_TURN - 1; i++) acc.onStepAttempt("msg_1")
-    expect(acc.turnBudgetStop(1)).toBeUndefined()
-    acc.onStepAttempt("msg_1")
-    expect(acc.turnCount).toBe(0)
-    expect(acc.turnBudgetStop(1)).toBe("attempts")
-    expect(acc.turnBudgetStop(2)).toBeUndefined()
-    expect(acc.turnBudgetStop(undefined)).toBeUndefined()
-    // Completed steps take precedence in the reported reason.
-    acc.onStepFinish("msg_1", "stop")
-    expect(acc.turnBudgetStop(1)).toBe("completed")
-  })
-
-  test("the budget message names the limit, and the attempt backstop says why", () => {
-    expect(RunAccounting.turnBudgetMessage(3, "completed")).toBe("Budget exceeded: reached 3 assistant turns limit")
-    expect(RunAccounting.turnBudgetMessage(1, "completed")).toBe("Budget exceeded: reached 1 assistant turn limit")
-    expect(RunAccounting.turnBudgetMessage(1, "attempts")).toBe(
-      `Budget exceeded: ${RunAccounting.ATTEMPTS_PER_TURN} step attempts started under the 1 assistant turn limit without enough of them completing`,
-    )
+    expect(acc.turnBudgetReached(1)).toBe(true)
+    expect(acc.turnBudgetReached(2)).toBe(false)
+    expect(acc.turnBudgetReached(undefined)).toBe(false)
   })
 
   test("a step cut short by context overflow still costs its turn, once", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    // An overflow reported before any step started is not charged a turn.
+    // An overflow reported before any step started is not charged.
     acc.onSessionError("ContextOverflowError", "too long")
     expect(acc.turnCount).toBe(0)
     acc.onStepAttempt("msg_1")
-    acc.onSessionError("ContextOverflowError", "too long")
-    // The same overflow reported again on the prompt channel is not charged twice.
+    // The prompt result may report it before the session event; only the event charges.
     acc.onPromptResult({ error: { name: "ContextOverflowError" } })
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onSessionError("ContextOverflowError", "too long")
     expect(acc.turnCount).toBe(1)
-    expect(acc.turnBudgetStop(1)).toBe("completed")
-  })
-
-  test("overflows rejected before any step started count toward the attempt backstop", () => {
-    const acc = RunAccounting.create()
-    for (let i = 0; i < RunAccounting.ATTEMPTS_PER_TURN - 1; i++) acc.onSessionError("ContextOverflowError", "too long")
-    // The prompt channel repeating an overflow does not count it again.
-    acc.onPromptResult({ error: { name: "ContextOverflowError" } })
-    expect(acc.turnBudgetStop(1)).toBeUndefined()
-    acc.onSessionError("ContextOverflowError", "too long")
-    expect(acc.turnCount).toBe(0)
-    expect(acc.turnBudgetStop(1)).toBe("attempts")
   })
 
   test("a compaction step's overflow is not charged to an earlier unfinished step", () => {

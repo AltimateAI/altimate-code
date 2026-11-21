@@ -17,9 +17,6 @@
 //     idle-done challenge bookkeeping; DONE detection delegates to the
 //     SessionTermination completion-token contract.
 import { SessionTermination } from "../../session/termination"
-// altimate_change start — the retry cap sizes the attempt backstop
-import { SessionRetry } from "../../session/retry"
-// altimate_change end
 
 export type WhyModelStopped = "stop" | "tool-call" | "explicit-done" | "unknown"
 export type WhyHarnessStopped = "budget-exhausted" | "timeout" | "error" | "idle-done" | "none"
@@ -94,25 +91,10 @@ export function createRecoverableOverflowTraceErrors() {
 // the single detector shared with the processor stop-path and the idle-done
 // challenge, so instruction and detection can never drift apart.
 
-// altimate_change start — the turn budget's backstop for steps that never finish
-/** The most attempts one step can start: the first try plus every processor retry. */
-export const ATTEMPTS_PER_TURN = SessionRetry.RETRY_MAX_ATTEMPTS + 1
-export type TurnBudgetStop = "completed" | "attempts"
-
-/** The user-facing reason a `--max-turns` budget stopped the run. */
-export function turnBudgetMessage(maxTurns: number, stop: TurnBudgetStop): string {
-  const turns = `${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""}`
-  if (stop === "completed") return `Budget exceeded: reached ${turns} limit`
-  return `Budget exceeded: ${maxTurns * ATTEMPTS_PER_TURN} step attempts started under the ${turns} limit without enough of them completing`
-}
-// altimate_change end
-
 export function create() {
   const summaryMessages = new Set<string>()
   let turnCount = 0
-  // altimate_change start — started non-compaction step attempts, finished or not
-  let attemptCount = 0
-  // A started non-compaction step that has not finished yet.
+  // altimate_change start — the non-compaction step streaming now, until it finishes
   let openAttempt = false
   // altimate_change end
   // altimate_change start — track the active request's committed echo turn allowance
@@ -194,36 +176,25 @@ export function create() {
     // (up to SessionRetry.RETRY_MAX_ATTEMPTS per step), and each retry streams
     // its own step-start but only the attempt that completes streams a
     // step-finish. Charging on start billed every failed attempt as a turn.
+    // A step that ends without a step-finish is free (a failed or retried
+    // attempt, a soft-deadline interrupt), except one cut short by context
+    // overflow: it hands off to compaction and is still charged, as before, so
+    // overflow-and-compact cycles stay bounded by --max-turns. The processor's
+    // retry cap bounds retried attempts.
     // `turnCount` is therefore the number of COMPLETED non-compaction steps;
     // harness-injected generations (idle-done challenge, continuation,
     // silent-turn reply) are real assistant steps and are charged the same way.
-    // A step that ends without a step-finish is free (a failed or retried
-    // attempt, a soft-deadline interrupt), except one cut short by context
-    // overflow, which is still charged (see onSessionError). So that free
-    // steps cannot repeat forever, the budget also stops a run once
-    // `maxTurns * ATTEMPTS_PER_TURN` attempts started, the most N steps can
-    // use when every one exhausts its retries. The one budget finalization is
-    // exempt from that backstop (the caller skips it); its own timeout bounds it.
-    /** Record a started non-compaction step attempt (it is charged a turn only if it finishes). */
+    /** Track the step now streaming; a compaction step closes any unfinished one. */
     onStepAttempt(messageID: string) {
-      // A compaction step supersedes any unfinished step; its overflow is not that step's.
-      if (isCompactionStep(messageID)) {
-        openAttempt = false
-        return
-      }
-      attemptCount++
-      openAttempt = true
+      openAttempt = !isCompactionStep(messageID)
     },
     /** Completed non-compaction assistant steps. */
     get turnCount() {
       return turnCount
     },
-    /** Why no further step may start under `maxTurns`, or undefined while one may. */
-    turnBudgetStop(maxTurns: number | undefined): TurnBudgetStop | undefined {
-      if (maxTurns === undefined || maxTurns <= 0) return undefined
-      if (turnCount >= maxTurns) return "completed"
-      if (attemptCount >= maxTurns * ATTEMPTS_PER_TURN) return "attempts"
-      return undefined
+    /** True when `maxTurns` completed steps already ran, so no further step may start. */
+    turnBudgetReached(maxTurns: number | undefined): boolean {
+      return maxTurns !== undefined && maxTurns > 0 && turnCount >= maxTurns
     },
     onStepFinish(messageID: string, reason: string | undefined) {
       if (isCompactionStep(messageID)) return
@@ -275,15 +246,11 @@ export function create() {
       if (errorName === "ContextOverflowError") {
         pendingContextOverflow = true
         // altimate_change start — a step cut short by context overflow still costs its turn
-        // The overflow hands off to compaction and a fresh step, so charging it keeps
-        // repeated overflow-and-compact cycles bounded by --max-turns, as before.
-        if (openAttempt) {
+        // Counted from the session event only, so the prompt result repeating the
+        // same overflow cannot charge it again.
+        if (openAttempt && source === "event") {
           turnCount++
           openAttempt = false
-        } else if (source === "event") {
-          // Rejected before any step started: no step-start will ever check the
-          // budget, so the attempt is counted here and the caller enforces it.
-          attemptCount++
         }
         // altimate_change end
         return
