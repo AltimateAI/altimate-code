@@ -263,6 +263,30 @@ describe("opencode run: --max-turns charges completed steps only", () => {
   )
 
   cliIt.concurrent(
+    "attempts that keep restarting without completing are stopped by --max-turns alone",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const { server, sessionID, counts } = yield* attached("endless-attempts")
+        const result = yield* opencode.run("Answer once.", {
+          format: "json",
+          extraArgs: ["--attach", server.url.toString(), "--session", sessionID, "--max-turns", "1", "--no-trace"],
+          timeoutMs: 20_000,
+          bunRun: true,
+        })
+        opencode.expectExit(result, 1)
+        const events = opencode.parseJsonEvents(result.stdout)
+        const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
+        expect(events[budgetIndex]).toMatchObject({ limit: 1 })
+        // Exactly one step's worth of attempts ran before the backstop stopped the next.
+        expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(
+          SessionRetry.RETRY_MAX_ATTEMPTS + 1,
+        )
+        expect(counts.aborts).toBe(1)
+      }),
+    30_000,
+  )
+
+  cliIt.concurrent(
     "attempts that keep restarting without completing are still bounded by --time-budget",
     ({ opencode }) =>
       Effect.gen(function* () {
@@ -274,8 +298,6 @@ describe("opencode run: --max-turns charges completed steps only", () => {
             server.url.toString(),
             "--session",
             sessionID,
-            "--max-turns",
-            "1",
             "--time-budget",
             "5",
             "--no-trace",
@@ -284,7 +306,7 @@ describe("opencode run: --max-turns charges completed steps only", () => {
           bunRun: true,
         })
         const events = opencode.parseJsonEvents(result.stdout)
-        // The turn budget never fires (no attempt completed); the wall-clock budget ends the work.
+        // Without a turn budget, the wall-clock budget ends the work.
         expect(events.filter((event) => event.type === "budget_exhausted")).toEqual([
           expect.objectContaining({ limit_seconds: 5 }),
         ])

@@ -64,6 +64,36 @@ describe("RunAccounting turn accounting", () => {
     expect(acc.turnBudgetReached(undefined)).toBe(false)
   })
 
+  test("attempts that never finish stop the budget once they exceed what N steps' retries allow", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
+    // Compaction attempts never count toward the backstop.
+    for (let i = 0; i < 20; i++) acc.onStepAttempt("msg_compact")
+    for (let i = 0; i < RunAccounting.ATTEMPTS_PER_TURN - 1; i++) acc.onStepAttempt("msg_1")
+    expect(acc.turnBudgetStop(1)).toBeUndefined()
+    acc.onStepAttempt("msg_1")
+    expect(acc.turnCount).toBe(0)
+    expect(acc.turnBudgetStop(1)).toBe("attempts")
+    expect(acc.turnBudgetStop(2)).toBeUndefined()
+    expect(acc.turnBudgetStop(undefined)).toBeUndefined()
+    // A budget abort's one finalization step still gets a full step's attempts.
+    acc.onBudgetExhausted()
+    expect(acc.takeBudgetFinalizationAllowance()).toBe(1)
+    expect(acc.turnBudgetStop(1)).toBeUndefined()
+    // Completed steps take precedence in the reported reason.
+    acc.onStepFinish("msg_1", "stop")
+    expect(acc.turnBudgetStop(1)).toBe("completed")
+  })
+
+  test("the budget message names the limit, and the attempt backstop says why", () => {
+    expect(RunAccounting.turnBudgetMessage(3, "completed")).toBe("Budget exceeded: reached 3 assistant turns limit")
+    expect(RunAccounting.turnBudgetMessage(1, "completed")).toBe("Budget exceeded: reached 1 assistant turn limit")
+    expect(RunAccounting.turnBudgetMessage(1, "attempts")).toBe(
+      `Budget exceeded: reached 1 assistant turn limit (${RunAccounting.ATTEMPTS_PER_TURN} step attempts started without enough of them completing)`,
+    )
+  })
+
   test("excludes compaction-machinery steps from turnCount", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })

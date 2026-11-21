@@ -1157,16 +1157,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // than maxTurns steps have completed, so a retried attempt is free.
               const requestID = requestOwnership.ownerOf(part.messageID)
               const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
+              const budgetStop = compactionStep ? undefined : accounting.turnBudgetStop(maxTurns)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                !compactionStep && accounting.turnBudgetReached(maxTurns) && !committedAnswer && !budgetAborted &&
+                maxTurns && budgetStop && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
                 // altimate_change end
                 budgetAborted = true
                 accounting.onBudgetExhausted()
-                error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
+                error = RunAccounting.turnBudgetMessage(maxTurns, budgetStop)
                 if (!emit("budget_exhausted", { limit: maxTurns })) {
                   UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
                 }
@@ -1174,6 +1175,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 // Drain the ordered abort/error/idle tail before starting another phase.
                 continue
               }
+              accounting.onStepAttempt(part.messageID)
               // altimate_change end
               if (emit("step_start", { part })) continue
             }
@@ -2054,10 +2056,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // A silent stop exactly at the work limit has no in-flight generation to
       // abort. Enter finalization directly instead of spending a reply just to
       // discover that it exceeds the same budget.
-      // The same completed-step count the in-loop budget check uses.
-      if (!answered() && assistantStarted && !accounting.fatal && accounting.turnBudgetReached(args.maxTurns)) {
+      // The same budget check the event loop uses.
+      const finalBudgetStop = accounting.turnBudgetStop(args.maxTurns)
+      if (!answered() && assistantStarted && !accounting.fatal && args.maxTurns && finalBudgetStop) {
         accounting.onBudgetExhausted()
-        error = `Budget exceeded: reached ${args.maxTurns} assistant turn${args.maxTurns !== 1 ? "s" : ""} limit`
+        error = RunAccounting.turnBudgetMessage(args.maxTurns, finalBudgetStop)
         if (!emit("budget_exhausted", { limit: args.maxTurns })) {
           UI.println(UI.Style.TEXT_WARNING_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Requesting a final reply.`)
         }
