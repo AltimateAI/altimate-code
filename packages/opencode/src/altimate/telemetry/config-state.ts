@@ -1,9 +1,12 @@
+import { Database as SQLite } from "bun:sqlite"
 import path from "path"
 import fs from "fs/promises"
 import { existsSync } from "fs"
 import * as Effect from "effect/Effect"
 import { Flag, env as flagEnv } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Database } from "@opencode-ai/core/database/database"
+import { Auth } from "@/auth"
 import { Global } from "../../global"
 import { ConfigPaths } from "@/config/paths"
 import { ConfigManaged } from "@/config/managed"
@@ -13,20 +16,20 @@ import { validateLoaded } from "@/config/config"
  * Whether the user config turns telemetry off, read without an Instance.
  *
  * `Config.get()` needs an Instance, and the CLI's main thread initialises telemetry in middleware
- * before one exists, so there it throws. Treating that as "enabled" let an opted-out user's main
- * thread clear the opt-out marker and resolve their identity. This reads the same files `Config`
+ * before one exists, so there it throws. This reads the same files `Config`
  * merges, in the same order (a later source overrides an earlier one), straight from disk:
  * the global config files (the legacy TOML `config` file included), `OPENCODE_CONFIG`, the project
  * files and `.altimate-code`/`.opencode` directories found from `directory`, the inline
  * `OPENCODE_CONFIG_CONTENT`, the managed config directory and macOS managed preferences. Remote and
- * account configs are not read (they need the network). The read emits no telemetry of its own: it
- * runs before telemetry knows whether it may.
+ * account configs are not fetched here. If either could still opt out, the answer is unknown.
+ * The read runs before telemetry knows whether it may send.
  *
  * - `disabled`: the last source that sets `telemetry.disabled` sets it to `true`.
  * - `enabled`: no source turns it off.
  * - `unreadable`: some source could not be read, parsed or validated as `Config` does (a missing
  *   `{file:}` reference, a value its schema rejects). `Config` would fail to load at all, so the
- *   answer is unknown. Callers fail closed for anything an opt-out forbids.
+ *   answer is unknown. A configured remote source that could still opt out is also unknown.
+ *   Callers fail closed for anything an opt-out forbids.
  */
 export type State = "disabled" | "enabled" | "unreadable"
 
@@ -41,6 +44,33 @@ function worktreeOf(directory: string): string | undefined {
     const parent = path.dirname(dir)
     if (parent === dir) return undefined
     dir = parent
+  }
+}
+
+// The well-known config merges before local files, while an active organization's config can
+// override them. Inspect only local credentials and account state; never fetch config here.
+async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
+  if (local === undefined && Object.values(await Auth.all()).some((entry) => entry?.type === "wellknown")) {
+    return true
+  }
+
+  // No on-disk account state to inspect. Avoid opening or creating a database on a fresh install.
+  const dbPath = Database.path()
+  if (dbPath === ":memory:") return false
+  try {
+    await fs.stat(dbPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false
+    throw error
+  }
+  // Use a read-only connection so this check cannot run migrations or initialize account storage.
+  const db = new SQLite(dbPath, { readonly: true })
+  try {
+    return db.query(`SELECT 1 FROM account_state
+      JOIN account ON account.id = account_state.active_account_id
+      WHERE account_state.id = 1 AND account_state.active_org_id IS NOT NULL`).get() !== null
+  } finally {
+    db.close()
   }
 }
 
@@ -118,7 +148,8 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     if (managed) await readText(managed.text, managed.source, path.dirname(managed.source))
 
     if (unknown) return "unreadable"
-    return value ? "disabled" : "enabled"
+    if (value === true) return "disabled"
+    return (await remoteMayDisable(value)) ? "unreadable" : "enabled"
   } catch {
     return "unreadable"
   }

@@ -357,6 +357,23 @@ describe("telemetry identity", () => {
     expect(Telemetry.identityForTest()).toBeUndefined()
   })
 
+  test("a queued identity refresh cannot cross into an opted-out init", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    writeCreds()
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await until(() => Telemetry.identityForTest()?.user_id === UUID)).toBe(true)
+
+    const refresh = Telemetry.refreshIdentity()
+    const shutdown = Telemetry.shutdown()
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Promise.all([refresh, shutdown, Telemetry.init()])
+
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(meCalls()).toHaveLength(1)
+  })
+
   test("a rejected key is not polled; only a new credential is looked up again", async () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
       "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
