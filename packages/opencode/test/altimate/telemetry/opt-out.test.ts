@@ -190,6 +190,29 @@ describe("telemetry opt-out", () => {
     }
   })
 
+  test("a later init can enable telemetry after the startup config resolves", async () => {
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    configSpy.mockResolvedValue({ telemetry: { disabled: false } } as Awaited<ReturnType<typeof Config.get>>)
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
+    Telemetry.track({
+      type: "startup_ready",
+      timestamp: Date.now(),
+      session_id: "",
+      command: "test",
+      surface: "test",
+      duration_ms: 1,
+      fresh_install: false,
+    })
+    await Telemetry.flush()
+    expect(fetchSpy.mock.calls.some(([url]) => url === "https://ingest.example.invalid/v2/track")).toBe(true)
+    await Telemetry.refreshIdentity()
+  })
+
   test("an unreadable config suppresses all requests", async () => {
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     await expectSilentLifecycle()

@@ -2327,6 +2327,8 @@ export namespace Telemetry {
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
+  // altimate_change — a pre-instance config read can defer this lifecycle until the next init call.
+  let startupConfigUnresolved = false
   let initDone = false
   // altimate_change — shutdown needs to cancel a flush already in flight, not just stop waiting
   // for it: `flush()` chains through inFlightFlush, so a timed-out drain still had its final
@@ -2521,6 +2523,11 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
+    if (startupConfigUnresolved) {
+      startupConfigUnresolved = false
+      initDone = false
+      return (initPromise = doInit())
+    }
     return (initPromise ??= doInit())
     // altimate_change end
   }
@@ -2541,7 +2548,9 @@ export namespace Telemetry {
         const userConfig = (await Config.get())
         disabled = userConfig.telemetry?.disabled === true || Config.telemetryConfigUnresolved(userConfig)
       } catch {
-        disabled = (await TelemetryConfig.disabledState(configDirectory)) !== "enabled"
+        const state = await TelemetryConfig.disabledState(configDirectory)
+        startupConfigUnresolved = state === "unreadable"
+        disabled = state !== "enabled"
       }
       if (disabled) {
         buffer = []
@@ -3093,6 +3102,7 @@ export namespace Telemetry {
     inFlightFlush = undefined
     shuttingDown = false
     enabled = false
+    startupConfigUnresolved = false
     appInsights = undefined
     buffer = []
     droppedEvents = 0
