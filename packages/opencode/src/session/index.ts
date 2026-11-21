@@ -429,7 +429,7 @@ export namespace Session {
 
   export const share = fn(SessionID.zod, async (id) => {
     // altimate_change start — offline mode refuses sharing with its own message, before the config check
-    if (Offline.enabled()) throw new Offline.OfflinePolicyError("Sharing sessions requires an online run.")
+    if (Offline.enabled()) throw new Offline.OfflinePolicyError(Offline.SHARE_REFUSAL)
     // altimate_change end
     const cfg = await Config.get()
     if (cfg.share === "disabled") {

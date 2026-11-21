@@ -28,7 +28,7 @@ export const layer = Layer.effect(
 
     const share = Effect.fn("SessionShare.share")(function* (sessionID: SessionID) {
       // altimate_change start — offline mode refuses sharing with its own message, before the config check
-      if (Offline.enabled()) return yield* new Session.OfflinePolicyError({ message: "Sharing sessions requires an online run." })
+      if (Offline.enabled()) return yield* new Session.OfflinePolicyError({ message: Offline.SHARE_REFUSAL })
       // altimate_change end
       const conf = yield* cfg.get()
       if (conf.share === "disabled") throw new Error("Sharing is disabled in configuration")
@@ -40,7 +40,7 @@ export const layer = Layer.effect(
     const unshare = Effect.fn("SessionShare.unshare")(function* (sessionID: SessionID) {
       // altimate_change start — offline mode cannot revoke a share; typed refusal, local state kept
       if (Offline.enabled())
-        return yield* new Session.OfflinePolicyError({ message: "Offline mode cannot revoke a share. Run unshare while online." })
+        return yield* new Session.OfflinePolicyError({ message: Offline.UNSHARE_REFUSAL })
       // altimate_change end
       yield* shareNext.remove(sessionID)
       yield* session.setShare({ sessionID, share: undefined })

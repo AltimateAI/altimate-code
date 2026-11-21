@@ -33,6 +33,9 @@ describe("session HttpApi offline", () => {
         const removed = yield* requestInDirectory(`/session/${session.id}`, tmp.directory, { method: "DELETE" })
         expect(removed.status).toBe(400)
         expect(yield* removed.json).toMatchObject({ _tag: "Session.OfflinePolicyError", message: expect.stringContaining("shared") })
+        // The refusal happens before anything is deleted.
+        const kept = yield* requestInDirectory(`/session/${session.id}`, tmp.directory)
+        expect(kept.status).toBe(200)
       } finally {
         if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
         else process.env.ALTIMATE_OFFLINE = previous

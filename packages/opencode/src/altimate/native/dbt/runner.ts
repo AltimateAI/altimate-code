@@ -50,7 +50,9 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
             ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
           ])
       const inherited = { ...process.env }
-      for (const name of LIBPQ_DESTINATION_VARS) delete inherited[name]
+      // Environment names are case-insensitive on Windows.
+      for (const key of Object.keys(inherited))
+        if ((LIBPQ_DESTINATION_VARS as readonly string[]).includes(key.toUpperCase())) delete inherited[key]
       offlineEnv = {
         ...inherited,
         ...(checked ? { DBT_PROFILES_DIR: checked.profilesDir } : {}),

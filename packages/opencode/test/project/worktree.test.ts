@@ -125,15 +125,27 @@ describe("Worktree", () => {
           run(lib, args)
         run(directory, ["submodule", "add", "-q", lib, "vendor lib"])
         run(directory, ["commit", "-q", "-m", "add submodule"])
+        // A second lib commit, recorded in the main repo: the worktree's checkout starts at the older one.
+        const older = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: lib, stdout: "pipe" }).stdout.toString().trim()
+        run(lib, ["commit", "-q", "--allow-empty", "-m", "lib 2"])
+        run(path.join(directory, "vendor lib"), ["fetch", "-q", "origin"])
+        run(path.join(directory, "vendor lib"), ["checkout", "-q", "origin/HEAD"])
+        const newer = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: lib, stdout: "pipe" }).stdout.toString().trim()
+        run(directory, ["add", "vendor lib"])
+        run(directory, ["commit", "-q", "-m", "bump submodule"])
         process.env.ALTIMATE_OFFLINE = "1"
         const svc = yield* Worktree.Service
         yield* withCreatedWorktree({ name: "offline-submodule" }, ({ info }) =>
           Effect.gen(function* () {
             // Unpopulated submodule: the offline reset skips it instead of trying to clone it.
             expect(yield* svc.reset({ directory: info.directory })).toBe(true)
-            // Populated submodule whose path has a space: the offline reset updates it from local objects.
+            // Populated submodule whose path has a space, checked out at the older commit: the offline reset
+            // moves it to the recorded commit from objects already on disk.
             run(info.directory, ["submodule", "update", "--init"])
+            run(path.join(info.directory, "vendor lib"), ["checkout", "-q", older])
             expect(yield* svc.reset({ directory: info.directory })).toBe(true)
+            const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: path.join(info.directory, "vendor lib"), stdout: "pipe" })
+            expect(head.stdout.toString().trim()).toBe(newer)
           }),
         )
       } finally {

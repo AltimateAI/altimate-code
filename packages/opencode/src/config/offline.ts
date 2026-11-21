@@ -66,6 +66,9 @@ async function localOptIn(directory: string) {
   return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false
 }
 
+export const SHARE_REFUSAL = "Sharing sessions requires an online run."
+export const UNSHARE_REFUSAL = "Offline mode cannot revoke a share. Run unshare while online."
+
 /** A refusal by the offline policy. Servers report it to the client as a 400 with this message. */
 export class OfflinePolicyError extends Error {
   override name = "OfflinePolicyError"
