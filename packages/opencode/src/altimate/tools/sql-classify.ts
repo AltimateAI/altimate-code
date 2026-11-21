@@ -186,6 +186,10 @@ function hardDenyLabel(match: string): string {
   return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
 }
 
+// Parse errors that mean the installation, not the SQL, is at fault; explainWrite reports them as such.
+const PARSER_UNAVAILABLE = "SQL parser is unavailable"
+const PARSER_INVALID_RESULT = "SQL parser returned an invalid statement list"
+
 /**
  * Fail closed when the parser is unavailable or rejects the input. Lexical
  * statement boundaries still enforce hard denies without reading quoted text.
@@ -512,11 +516,11 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
   if (!lexical.complete) {
     return { ...classifyFallback(sql, dialect), parseError: "SQL contains unterminated or unsupported quoted text or comments" }
   }
-  if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: "SQL parser is unavailable" }
+  if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: PARSER_UNAVAILABLE }
   try {
     const result = getStatementTypes(parserSql(sql, dialect), dialect)
     if (!Array.isArray(result?.statements) || result.statement_count !== result.statements.length) {
-      return { ...classifyFallback(sql, dialect), parseError: "SQL parser returned an invalid statement list" }
+      return { ...classifyFallback(sql, dialect), parseError: PARSER_INVALID_RESULT }
     }
 
     // A generic parser can treat MySQL arithmetic (--2) as a comment and omit
@@ -680,7 +684,7 @@ export function explainWrite(
     // Where statements need no separator, a statement keyword is the real reason, even if it breaks the parse.
     const batchKeyword = batchedStatement(maskSql(tokenizeSql(statement, dialect).tokens), dialect)
     // The classifier itself could not run: no rewrite of the SQL can help.
-    if (result.parseError === "SQL parser is unavailable" || result.parseError === "SQL parser returned an invalid statement list") {
+    if (result.parseError === PARSER_UNAVAILABLE || result.parseError === PARSER_INVALID_RESULT) {
       return {
         reason: "the SQL classifier is unavailable in this installation, so no query can be proven read-only",
         unreadable: false,

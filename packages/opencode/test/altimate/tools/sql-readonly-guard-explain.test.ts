@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { classifyAndCheck, explainWrite, shellResidue } from "../../../src/altimate/tools/sql-classify"
-import { hardBlockRefusal, readSql, writeReason } from "../../../src/altimate/tools/read-only-sql"
+import { hardBlockRefusal, readSql, requireReadOnlyQuery, writeReason } from "../../../src/altimate/tools/read-only-sql"
 
 describe("shellResidue", () => {
   const cases: Record<string, string> = {
@@ -228,6 +228,17 @@ test("unavailable", async () => {
     const reason = writeReason(sql, "postgres")
     expect(reason).toContain(cause)
     expect(reason).toContain("send a single SELECT or WITH query")
+  })
+
+  test("data_diff's embedded-query check names its reason too", () => {
+    expect(() => requireReadOnlyQuery("SELECT 1; DELETE FROM t", "postgres")).toThrow("statement 2 of 2 is not a read (DELETE)")
+    expect(() => requireReadOnlyQuery("SELECT 1; SELECT 2", "postgres")).toThrow("more than one statement")
+  })
+
+  test("SQL Server's XML .query() takes XQuery, so the read is accepted, as in the classifier", () => {
+    const sql = "SELECT x.query('/a/b') AS v FROM t"
+    expect(readSql(sql, "sqlserver")).toBe(sql)
+    expect(writeReason(sql, "sqlserver")).toBe("")
   })
 
   test("a single read calling query() is refused for the function", () => {

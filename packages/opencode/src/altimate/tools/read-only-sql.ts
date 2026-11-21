@@ -22,8 +22,10 @@ function embeddable(sql: string, dialect?: string): { masked: string; body: stri
   const masked = maskSql(tokens)
   // All calls use real code '(' tokens.
   const calls = sqlFunctionCalls(sql, dialect)
-  if (calls.some((call) => call.name === "query")) {
-    return { refused: "it calls query(), whose argument this check cannot verify; query the tables directly" }
+  // SQL Server's XML .query() takes XQuery, not SQL, as in the classifier; elsewhere query() runs SQL text.
+  const sqlServer = /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
+  if (!sqlServer && calls.some((call) => call.name === "query")) {
+    return { refused: "it calls query(), which runs SQL text that cannot be checked; query the tables directly" }
   }
   if (calls.some((call) => call.escaped)) return { refused: "it has an escaped function call, which cannot be checked" }
   if (calls.some((call) => hasSideEffectFunction(call.name))) {
@@ -47,7 +49,7 @@ function embeddable(sql: string, dialect?: string): { masked: string; body: stri
 /** Throws unless sql is one read-only query that is safe to embed in a larger query. */
 export function requireReadOnlyQuery(sql: string, dialect?: string): void {
   if (readOnlyBody(sql, dialect) === undefined)
-    throw new Error("Only a single read-only query is accepted here; it never writes data.")
+    throw new Error(`Only a single read-only query is accepted here; it never writes data.${writeReason(sql, dialect)}`)
 }
 
 // Statement words refused anywhere in a read handed to sql_check. A column qualified by a whole
@@ -89,7 +91,7 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
  * made a word count, then the reason. */
 export function hardBlockRefusal(head: string, sql: string, dialect?: string): string {
   const unreadable = !tokenizeSql(sql, dialect).complete && !hasExecutableComment(sql, dialect)
-  return `${head}${unreadable ? "" : " This cannot be overridden."}${writeReason(sql, dialect)}`
+  return `${head}${unreadable ? "" : " This cannot be overridden by any rule."}${writeReason(sql, dialect)}`
 }
 
 /** Why sql is refused as a read, as a sentence to append to a refusal: a hard block, the classifier's reason for a write,
@@ -102,7 +104,7 @@ export function writeReason(sql: string, dialect?: string): string {
     const index = statements.length > 1 ? statements.findIndex((statement) => classifyAndCheck(statement, dialect).blocked) : -1
     const where = index >= 0 ? `statement ${index + 1} of ${statements.length} is` : "it holds"
     const cause = hardBlockCause(index >= 0 ? statements[index] : sql, dialect)
-    const hard = ` It is refused because ${where} a hard-blocked statement (${cause}); hard-blocked statements never run, regardless of permission.`
+    const hard = ` It is refused because ${where} a hard-blocked statement (${cause}); hard-blocked statements never run, whatever the rules allow.`
     // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone, inside the
     // unreadable text or outside it: name the unreadable text first, since fixing it may be the whole fix.
     const untilClosed =

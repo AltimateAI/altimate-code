@@ -9,7 +9,7 @@
 
 import type { DataDiffParams, DataDiffResult, PartitionDiffResult } from "../types"
 import * as Registry from "./registry"
-import { requireReadOnlyQuery } from "../../tools/read-only-sql"
+import { requireReadOnlyQuery, writeReason } from "../../tools/read-only-sql"
 import { classifyAndCheck } from "../../tools/sql-classify"
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ async function executeQuery(sql: string, warehouseName: string | undefined, meta
   const dialect = warehouseTypeToDialect(Registry.getConfig(warehouseName)?.type ?? "generic")
   if (metadata) {
     const check = classifyAndCheck(sql, dialect)
-    if (check.blocked || check.queryType !== "read") throw new Error("Data diff metadata must be read-only")
+    if (check.blocked || check.queryType !== "read") throw new Error(`Data diff metadata must be read-only.${writeReason(sql, dialect)}`)
   } else {
     requireReadOnlyQuery(sql, dialect)
   }
