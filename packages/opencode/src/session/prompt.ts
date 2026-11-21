@@ -30,13 +30,6 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
-// altimate_change start — the context measure shared by compaction and the pre-send budget guard
-import {
-  attachmentTokenAllowance,
-  estimateTextTokens,
-  reportedContextTokens,
-} from "@/provider/output-token-budget"
-// altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
@@ -210,19 +203,6 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
-// altimate_change start — assistant-message metadata for request calibration
-const SENT_WITHOUT_TOOLS = "sent_without_tools"
-const REQUEST_OVERHEAD_TOKENS = "request_overhead_tokens"
-
-/** Whether a deadline has disabled tools for this session, inherited from a live ancestor run (as llm.ts applies it). */
-async function runToolsDisabled(sessionID: string): Promise<boolean> {
-  const run = await RunBudgetEffort.inheritedRun(
-    sessionID,
-    async (id) => (await Session.get(SessionID.make(id)).catch(() => undefined))?.parentID,
-  )
-  return run !== undefined && RunBudgetEffort.toolsDisabled(run)
-}
-// altimate_change end
 // altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
 const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
 // altimate_change end
@@ -2257,75 +2237,40 @@ export namespace SessionPrompt {
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
       // altimate_change end
-      // altimate_change start — the pre-send guard measures this request the way isOverflow does
-      // (provider-reported usage of the last turn on this model plus the estimated tail), and a
-      // guard refusal compacts whenever the proactive check above could have compacted.
-      // The reported usage applies only to a tool-calling step of the same model and agent (same
-      // tokenizer), and only when it counts input: a provider reporting none,
-      // or only output tokens, leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
+      // altimate_change start — calibrate from the last measured request and protect unseen media
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
-      const measuredOverheadTokens = measured?.metadata?.[REQUEST_OVERHEAD_TOKENS]
-      // One pass over what the provider has not counted yet (the last measured step and later):
-      // attachments are added to the reported measure at the guard's own allowance. Compaction drops
-      // images and PDFs (replay swaps them for a placeholder, summaries strip them), so one the model
-      // has not seen yet (a user attachment or tool result since the last measured step) keeps a
-      // refusal the budget error rather than continue without it. Media already seen does not.
-      let attachmentTokens = 0
-      let unseenMedia = false
-      for (const msg of msgs) {
-        if (msg.info.id !== measuredID && !isAfterMeasured(msg.info.id)) continue
-        for (const part of msg.parts) {
-          // text/plain files and directories arrive as text parts, already in the tail estimate.
-          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
-            attachmentTokens += attachmentTokenAllowance(part.mime, part.url)
-            if (MessageV2.isMedia(part.mime)) unseenMedia = true
-          }
-          if (part.type !== "tool" || part.state.status !== "completed") continue
-          for (const attachment of part.state.attachments ?? []) {
-            attachmentTokens += attachmentTokenAllowance(attachment.mime, attachment.url)
-            if (MessageV2.isMedia(attachment.mime)) unseenMedia = true
-          }
-        }
-      }
+      const recordedEstimate = measured?.metadata?.request_estimate_tokens
+      // Compaction drops images and PDFs, so keep a refusal as a budget error if the
+      // current request includes media the model has not seen yet.
+      const unseenMedia = msgs.some(
+        (msg) =>
+          (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
+          msg.parts.some(
+            (part) =>
+              (part.type === "file" && MessageV2.isMedia(part.mime)) ||
+              (part.type === "tool" &&
+                part.state.status === "completed" &&
+                part.state.attachments?.some((attachment) => MessageV2.isMedia(attachment.mime))),
+          ),
+      )
       const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
-      // Usage from a tool-less final step or a message without recorded overhead cannot calibrate.
-      const reportedInputTokens =
+      const measuredInputTokens =
         measured &&
-        measured.metadata?.[SENT_WITHOUT_TOOLS] !== true &&
-        typeof measuredOverheadTokens === "number" &&
-        Number.isFinite(measuredOverheadTokens) &&
+        typeof recordedEstimate === "number" &&
+        Number.isFinite(recordedEstimate) &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
-          ? (() => {
-              // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
-              // estimator, so the discount applies only to what the provider has counted.
-              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens, true)
-              return (
-                reportedContextTokens({
-                  tokens: measured.tokens,
-                  estimatedTokens: guardTail,
-                  fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
-                }) +
-                attachmentTokens
-              )
-            })()
+          ? measured.tokens.input + measured.tokens.cache.read + measured.tokens.cache.write
           : undefined
       // altimate_change end
-      // altimate_change start — mark echo, final, and deadline steps sent without tools
-      const sentWithoutTools = echoCommittedAnswer || textFinalStep || (await runToolsDisabled(sessionID))
-      processor.message.metadata = {
-        ...processor.message.metadata,
-        ...(sentWithoutTools ? { [SENT_WITHOUT_TOOLS]: true } : {}),
-      }
-      // altimate_change end
       const result = await processor.process({
-        // altimate_change start — see reportedInputTokens above
+        // altimate_change start — pass the measured input usage and its matching estimate
         compactable,
-        reportedInputTokens,
-        measuredOverheadTokens: typeof measuredOverheadTokens === "number" ? measuredOverheadTokens : undefined,
+        measuredInputTokens,
+        measuredEstimateTokens: typeof recordedEstimate === "number" ? recordedEstimate : undefined,
         // altimate_change end
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
@@ -3867,9 +3812,6 @@ export namespace SessionPrompt {
     msgs: MessageV2.WithParts[],
     lastFinishedID: MessageID | undefined,
     isAfter: (id: MessageID) => boolean = (id) => id > lastFinishedID!,
-    estimate: (text: string) => number = Token.estimate,
-    // Also count the tool-call inputs of later steps (sent back with the history); the pre-send guard does.
-    countToolInput = false,
   ): number {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
@@ -3888,7 +3830,7 @@ export namespace SessionPrompt {
     }
     let tokens = 0
     for (const part of lastFinished.parts) {
-      if (part.type === "tool") tokens += estimate(toolText(part))
+      if (part.type === "tool") tokens += Token.estimate(toolText(part))
     }
     // filterCompacted deliberately reorders retained-tail and summary messages,
     // so array position is not chronology. Select genuinely newer messages by
@@ -3896,9 +3838,8 @@ export namespace SessionPrompt {
     for (const m of msgs) {
       if (m.info.id === lastFinishedID || !isAfter(m.info.id)) continue
       for (const part of m.parts) {
-        if (part.type === "text") tokens += estimate(part.text ?? "")
-        if (part.type === "tool") tokens += estimate(toolText(part))
-        if (part.type === "tool" && countToolInput) tokens += estimate(JSON.stringify(part.state.input ?? {}))
+        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+        if (part.type === "tool") tokens += Token.estimate(toolText(part))
       }
     }
     return tokens

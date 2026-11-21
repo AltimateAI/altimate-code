@@ -83,10 +83,10 @@ export namespace LLM {
     retries?: number
     toolChoice?: "auto" | "required" | "none"
     // altimate_change start — calibrate from a measured step and the finalized request
-    /** Prior reported usage plus the unmeasured conversation tail and attachments. */
-    reportedInputTokens?: number
-    measuredOverheadTokens?: number
-    onRequestOverhead?: (tokens: number) => void
+    /** Provider-reported input usage for the measured request, including cache reads and writes. */
+    measuredInputTokens?: number
+    measuredEstimateTokens?: number
+    onRequestEstimate?: (tokens: number) => void
     // altimate_change end
   }
 
@@ -349,15 +349,17 @@ export namespace LLM {
     // altimate_change end
 
     // altimate_change start — clamp after every context-affecting request field is finalized.
-    // Tool schemas and provider instructions consume the shared context window, while encoded
-    // media bytes do not count as literal text. The history estimate runs lazily. Known context
-    // beta headers widen the catalog limit before the clamp.
-    const overhead = estimateInputTokens({ system, messages: [], tools, instructions: params.options.instructions })
-    input.onRequestOverhead?.(overhead)
-    const measuredOverhead = input.measuredOverheadTokens
-    const reported =
-      input.reportedInputTokens !== undefined && measuredOverhead !== undefined && Number.isFinite(measuredOverhead)
-        ? input.reportedInputTokens + Math.max(0, overhead - measuredOverhead)
+    const estimateNow = estimateInputTokens({
+      system,
+      messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+      tools,
+      instructions: params.options.instructions,
+    })
+    input.onRequestEstimate?.(estimateNow)
+    const measuredEstimate = input.measuredEstimateTokens
+    const calibrated =
+      input.measuredInputTokens !== undefined && measuredEstimate !== undefined && Number.isFinite(measuredEstimate)
+        ? input.measuredInputTokens + Math.max(0, estimateNow - measuredEstimate)
         : undefined
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
@@ -367,18 +369,7 @@ export namespace LLM {
         // Provider defaults are lower precedence than the exact case-normalized outgoing record.
         headerSources: [provider.options, requestHeaders],
       }),
-      // The character estimate runs high on SQL/JSON; the provider-reported size of the same
-      // conversation (when known) keeps this guard on the measure the compaction trigger uses.
-      inputTokens: () =>
-        calibratedInputTokens(
-          estimateInputTokens({
-            system,
-            messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-            tools,
-            instructions: params.options.instructions,
-          }),
-          reported,
-        ),
+      inputTokens: calibratedInputTokens(estimateNow, calibrated),
     })
     // Deadline effort wins configured variants and plugin overrides.
     const requestOptions = clampReasoningBudget(

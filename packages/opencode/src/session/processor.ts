@@ -541,10 +541,10 @@ export namespace SessionProcessor {
                   await LLM.stream({
                     ...effectiveStreamInput,
                     abort: signal,
-                    onRequestOverhead: (tokens) => {
+                    onRequestEstimate: (tokens) => {
                       input.assistantMessage.metadata = {
                         ...input.assistantMessage.metadata,
-                        request_overhead_tokens: tokens,
+                        request_estimate_tokens: tokens,
                       }
                     },
                   })

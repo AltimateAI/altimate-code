@@ -284,11 +284,6 @@ function mediaTokenAllowance(part: JsonRecord): number {
   return MEDIA_TOKEN_ALLOWANCE
 }
 
-/** The allowance the guard charges for one attachment, for callers sizing unmeasured attachments. */
-export function attachmentTokenAllowance(mime: string, url: string): number {
-  return mediaTokenAllowance({ type: "file", mediaType: mime, data: url })
-}
-
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
 function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
   const result = new WeakMap<object, number>()
@@ -415,8 +410,7 @@ export type ReportedUsage = {
 
 /**
  * The context size the compaction trigger compares against its threshold: provider-reported usage
- * (exact) plus an estimated uncounted tail inflated by 1/fraction. The pre-send guard builds on the
- * same measure (with a more conservative tail estimator) instead of the bare character estimate.
+ * plus an estimated uncounted tail inflated by 1/fraction.
  */
 export function reportedContextTokens(input: {
   readonly tokens: ReportedUsage

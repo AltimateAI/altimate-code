@@ -8,7 +8,6 @@
  * "Context budget exceeded before the request was sent" without compaction ever running.
  */
 import { describe, expect, test } from "bun:test"
-import * as RunBudgetEffort from "../../src/altimate/session/run-budget-effort"
 import { MessageV2 } from "../../src/session/message-v2"
 import path from "node:path"
 import { Effect, Layer } from "effect"
@@ -31,7 +30,6 @@ import {
   InputTokenBudgetError,
   OutputTokenBudgetError,
   ReasoningTokenBudgetError,
-  attachmentTokenAllowance,
   calibratedInputTokens,
   clampReasoningBudget,
   estimateInputTokens,
@@ -210,10 +208,8 @@ type Seeded = {
     toolOutput?: string
     /** Attach an image to the step's tool result. */
     toolImage?: boolean
-    /** The step's request was sent without tools (an echo or final step). */
-    sentWithoutTools?: boolean
-    /** Null represents a message persisted before overhead was recorded. */
-    requestOverheadTokens?: number | null
+    /** Override the seeded request estimate. Null represents a message without one. */
+    requestEstimateTokens?: number | null
   }
   /** An image attached to the `next` user turn. */
   nextFile?: boolean
@@ -244,7 +240,13 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, type: "text", text } as any)
       return msg
     })
-    const answer = Effect.fnUntraced(function* (parentID: MessageID, usage: number, last: Seeded["last"] = {}) {
+    const answerText = "The top customers by paid revenue are listed above."
+    const answer = Effect.fnUntraced(function* (
+      parentID: MessageID,
+      usage: number,
+      requestEstimateTokens: number | null,
+      last: Seeded["last"] = {},
+    ) {
       const msg = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "assistant",
@@ -259,17 +261,14 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         parentID,
         finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
-        metadata: {
-          ...(last.sentWithoutTools ? { sent_without_tools: true } : {}),
-          ...(last.requestOverheadTokens === null ? {} : { request_overhead_tokens: last.requestOverheadTokens ?? 0 }),
-        },
+        metadata: requestEstimateTokens === null ? undefined : { request_estimate_tokens: requestEstimateTokens },
       } as any)
       yield* sessions.updatePart({
         id: PartID.ascending(),
         messageID: msg.id,
         sessionID,
         type: "text",
-        text: last.text ?? "The top customers by paid revenue are listed above.",
+        text: last.text ?? answerText,
       } as any)
       if (last.toolOutput !== undefined) {
         yield* sessions.updatePart({
@@ -316,12 +315,21 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         url: `data:image/png;base64,${PNG_BASE64}`,
       } as any)
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
+    // Estimate the seeded history as it was before the measured assistant answered.
+    const history: { role: "user" | "assistant"; content: { type: "text"; text: string }[] }[] = []
     for (const [index, text] of turns.entries()) {
       const msg = yield* user(text)
+      history.push({ role: "user", content: [{ type: "text", text }] })
       const last = index === turns.length - 1
       if (last && seeded.userFile) yield* attachImage(msg.id)
-      if (!last) yield* answer(msg.id, 0)
-      else if (seeded.assistantUsage !== undefined) yield* answer(msg.id, seeded.assistantUsage, seeded.last)
+      if (!last) {
+        yield* answer(msg.id, 0, null)
+        history.push({ role: "assistant", content: [{ type: "text", text: answerText }] })
+      } else if (seeded.assistantUsage !== undefined) {
+        const override = seeded.last?.requestEstimateTokens
+        const estimate = override === undefined ? estimateInputTokens({ system: [], messages: history }) : override
+        yield* answer(msg.id, seeded.assistantUsage, estimate, seeded.last)
+      }
     }
     if (seeded.next !== undefined) {
       const next = yield* user(seeded.next, seeded.nextSystem)
@@ -367,8 +375,14 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: history,
           assistantUsage: reported,
-          // The preceding request included the finalized system and tool overhead of the same agent.
-          last: { requestOverheadTokens: 5_000 },
+          last: {
+            // Include the stable instructions from the hypothetical preceding request.
+            requestEstimateTokens:
+              estimateInputTokens({
+                system: [],
+                messages: [{ role: "user", content: [{ type: "text", text: history }] }],
+              }) + 7_000,
+          },
           next: "Summarize the revenue concentration.",
         })
 
@@ -393,7 +407,6 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: sqlJsonTurns(130_000),
           assistantUsage: 108_000,
-          last: { requestOverheadTokens: 10 },
           next: "Summarize the revenue concentration.",
           nextSystem: sqlJsonHistory(40_000),
         })
@@ -408,7 +421,7 @@ it.live(
 )
 
 it.live(
-  "growth in finalized provider instructions forces compaction and is recorded on the retried request",
+  "a rewrite of already-measured history grows the estimate and forces compaction",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
@@ -417,7 +430,8 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: sqlJsonTurns(130_000),
           assistantUsage: 108_000,
-          last: { requestOverheadTokens: 5_000 },
+          // Simulate a history transform expanding content present in the measured request.
+          last: { requestEstimateTokens: 100_000 },
           next: "Answer the follow-up question.",
         })
 
@@ -426,21 +440,14 @@ it.live(
         expect(result.hits.length).toBe(2)
         expect(JSON.stringify(result.hits[0]!.body)).not.toContain("Answer the follow-up question.")
         expect(JSON.stringify(result.hits[1]!.body)).toContain("Answer the follow-up question.")
-        const answer = result.messages.at(-1)?.info
-        expect(answer?.role === "assistant" ? answer.metadata?.request_overhead_tokens : undefined).toBeGreaterThan(
-          40_000,
-        )
       }),
-      {
-        git: true,
-        config: providerCfg(LARGE_WINDOW, { modelOptions: { instructions: sqlJsonHistory(40_000) } }),
-      },
+      { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
   { timeout: 120_000 },
 )
 
 it.live(
-  "a measured step without recorded request overhead cannot calibrate the guard",
+  "a measured step without a recorded request estimate cannot calibrate the guard",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
@@ -449,7 +456,7 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: sqlJsonTurns(130_000),
           assistantUsage: 108_000,
-          last: { requestOverheadTokens: null },
+          last: { requestEstimateTokens: null },
           next: "Summarize the revenue concentration.",
         })
 
@@ -520,24 +527,47 @@ it.live(
 )
 
 it.live(
-  "a final step sent without tools is tagged so its usage never calibrates the guard",
+  "the processor records the full request estimate on the sent assistant message",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        // steps: 1 makes the first request the final step, sent without tools.
-        yield* llm.text("Revenue is concentrated in the top ten customers.")
-        const result = yield* runSession(dir, llm, { user: "Summarize the revenue concentration." })
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, { user: sqlJsonHistory(20_000) })
 
-        const answer = result.messages.find((m) => m.info.role === "assistant")?.info as any
-        expect(answer?.metadata?.sent_without_tools).toBe(true)
+        expect(result.errors).toEqual([])
+        expect(result.hits.length).toBe(1)
+        const answer = result.messages.at(-1)?.info
+        expect(answer?.role === "assistant" ? answer.metadata?.request_estimate_tokens : undefined).toBeGreaterThan(
+          20_000,
+        )
       }),
-      {
-        git: true,
-        config: (url: string) => ({
-          ...providerCfg(LARGE_WINDOW, { tools: true })(url),
-          agent: { build: { steps: 1 } },
-        }),
-      },
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "history added since the measured request reduces the output reservation",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(130_000),
+          assistantUsage: 108_000,
+          last: { text: sqlJsonHistory(12_000) },
+          next: "Answer the follow-up question.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.compactions).toHaveLength(0)
+        expect(result.hits).toHaveLength(1)
+        // The assistant's last output was absent from the measured request and now
+        // consumes enough context to squeeze the reservation without forcing compaction.
+        expect(result.hits[0]!.body.max_tokens).toBeGreaterThan(1_024)
+        expect(result.hits[0]!.body.max_tokens).toBeLessThan(LARGE_WINDOW.output)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
   { timeout: 120_000 },
 )
@@ -588,7 +618,6 @@ it.live(
         const result = yield* runSession(dir, llm, {
           user: sqlJsonTurns(13_000),
           assistantUsage: 14_500,
-          last: { requestOverheadTokens: 6_000 },
           next: "Answer the follow-up question.",
         })
 
@@ -635,12 +664,10 @@ it.live(
 )
 
 // Usage counted for another model (different tokenizer), another agent (different system prompt and
-// tools) or a step sent without tools (an echo or final step) does not describe this request: the estimate
-// decides, trips, and the session compacts.
+// tools) falls back to the full estimate, which forces compaction.
 for (const [name, last] of [
   ["another model", { ...TOOL_STEP, modelID: "another-model" }],
   ["another agent", { ...TOOL_STEP, agent: "plan" }],
-  ["a step sent without tools", { sentWithoutTools: true }],
 ] as const) {
   it.live(
     `usage reported by ${name} is not trusted: the guard trips and the session compacts`,
@@ -884,64 +911,12 @@ describe("guard calibration", () => {
   })
 })
 
-describe("attachment allowance", () => {
-  test("charges an unmeasured attachment what the guard's own estimate charges it", () => {
-    const png = `data:image/png;base64,${PNG_BASE64}`
-    const viaEstimate =
-      estimateInputTokens({
-        system: [],
-        messages: [{ role: "user", content: [{ type: "file", mediaType: "image/png", data: png }] }],
-      }) - estimateInputTokens({ system: [], messages: [{ role: "user", content: [] }] })
-    expect(attachmentTokenAllowance("image/png", png)).toBe(2_048)
-    expect(viaEstimate).toBeGreaterThanOrEqual(2_048)
-    expect(attachmentTokenAllowance("application/pdf", "https://example.com/report.pdf")).toBeGreaterThanOrEqual(32_768)
-  })
-})
-
-describe("calibration tail", () => {
+describe("proactive compaction tail", () => {
   const text = (id: string, role: "user" | "assistant", body: string) =>
     ({
       info: { id, sessionID: "s", role, time: { created: 1 } },
       parts: [{ id: `${id}-p`, sessionID: "s", messageID: id, type: "text", text: body }],
     }) as unknown as MessageV2.WithParts
-
-  test("unmeasured multilingual text is sized with the guard's conservative estimator", () => {
-    const cjk = "\u6536\u5165\u96c6\u4e2d\u5728\u524d\u5341\u540d\u5ba2\u6237".repeat(5_000)
-    const msgs = [text("m1", "user", "task"), text("m2", "assistant", "done"), text("m3", "user", cjk)]
-    const plain = SessionPrompt.estimateUncountedTail(msgs, "m2" as any)
-    const guard = SessionPrompt.estimateUncountedTail(msgs, "m2" as any, undefined, estimateTextTokens)
-    expect(plain).toBe(Token.estimate(cjk))
-    // At least one token per non-ASCII character, where the plain ratio gives ~1 per 3.7.
-    expect(guard).toBeGreaterThanOrEqual(cjk.length)
-  })
-
-  test("the guard's tail also counts tool-call inputs of later steps", () => {
-    const step = {
-      info: { id: "m3", sessionID: "s", role: "assistant", time: { created: 1 } },
-      parts: [
-        {
-          id: "m3-t",
-          sessionID: "s",
-          messageID: "m3",
-          type: "tool",
-          tool: "bash",
-          callID: "c",
-          state: {
-            status: "completed",
-            input: { query: "q".repeat(4_000) },
-            output: "ok",
-            title: "t",
-            metadata: {},
-            time: { start: 1, end: 2 },
-          },
-        },
-      ],
-    } as unknown as MessageV2.WithParts
-    const msgs = [text("m1", "user", "task"), text("m2", "assistant", "done"), step]
-    const plain = SessionPrompt.estimateUncountedTail(msgs, "m2" as any)
-    const withInput = SessionPrompt.estimateUncountedTail(msgs, "m2" as any, undefined, undefined, true)
-    expect(withInput - plain).toBeGreaterThanOrEqual(Token.estimate(JSON.stringify({ query: "q".repeat(4_000) })))
-  })
 
   test("follows the caller's stored order, not lexical IDs", () => {
     // A later message with a lexically smaller caller-supplied ID.
@@ -951,18 +926,4 @@ describe("calibration tail", () => {
       Token.estimate("y".repeat(9_000)),
     )
   })
-})
-
-test("the deadline tag follows the run a task child inherits from its ancestors", async () => {
-  const parents: Record<string, string | undefined> = { child: "parent", parent: "root", root: undefined }
-  const parentOf = async (id: string) => parents[id]
-  const end = RunBudgetEffort.begin("parent", true)
-  try {
-    expect(await RunBudgetEffort.inheritedRun("child", parentOf)).toBe("parent")
-    expect(RunBudgetEffort.toolsDisabled((await RunBudgetEffort.inheritedRun("child", parentOf))!)).toBe(true)
-    expect(await RunBudgetEffort.inheritedRun("root", parentOf)).toBeUndefined()
-  } finally {
-    end()
-  }
-  expect(await RunBudgetEffort.inheritedRun("child", parentOf)).toBeUndefined()
 })
