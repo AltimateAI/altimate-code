@@ -69,6 +69,22 @@ describe("sql_execute result guidance", () => {
     expect(output.output).toContain("Hint: only 1 row(s).")
   })
 
+  test("suggests the dbt profile when a named connection is missing from an empty registry", async () => {
+    dispatch.mockRestore()
+    registerAll()
+    const getConfig = spyOn(Registry, "getConfig").mockReturnValue(undefined)
+    const get = spyOn(Registry, "get").mockRejectedValue(new Error('Connection "missing" not found. Available: (none)'))
+    try {
+      const tool = await initTool(SqlExecuteTool)
+      const output = await tool.execute({ query: "SELECT 1", warehouse: "missing" }, ctx)
+      expect(output.output).toContain("altimate-dbt execute --query")
+      expect(output.output).toContain("dbt profile")
+    } finally {
+      get.mockRestore()
+      getConfig.mockRestore()
+    }
+  })
+
   test("preserves binder errors without dispatcher startup advice", async () => {
     const error = 'Binder Error: Referenced column "missing" not found'
     dispatch.mockResolvedValue({ columns: [], rows: [], row_count: 0, truncated: false, error } as never)

@@ -1,6 +1,8 @@
 import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
 import { recordManifest } from "./stale-manifest"
+import { retryParseManifest } from "./manifest-retry"
+import { dbtDepsInstaller, ensurePackages, PackageLockTimeoutError, trackedExplicitInstaller } from "./packages"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
@@ -52,7 +54,10 @@ function configuration(cfg: Config): DBTConfiguration {
     getQueryLimit: () => cfg.queryLimit ?? DEFAULT_CONFIGURATION_VALUES.queryLimit,
     getEnableNotebooks: () => DEFAULT_CONFIGURATION_VALUES.enableNotebooks,
     getDisableQueryHistory: () => DEFAULT_CONFIGURATION_VALUES.disableQueryHistory,
-    getInstallDepsOnProjectInitialization: () => DEFAULT_CONFIGURATION_VALUES.installDepsOnProjectInitialization,
+    // altimate-dbt installs packages itself (packages.ts: only when missing or out of date,
+    // under a cross-process lock). The library's own install runs `dbt deps` unconditionally
+    // from every process, and concurrent runs corrupt dbt_packages.
+    getInstallDepsOnProjectInitialization: () => false,
     getDisableDepthsCalculation: () => true,
     getWorkingDirectory: () => cfg.projectRoot,
     getAltimateUrl: () => "",
@@ -92,6 +97,7 @@ export type CreateOptions = {
    * would take the compiled SQL of every other model away from whoever reads that manifest.
    */
   targetPath?: string
+  onPackagesInstalled?: () => void
 }
 
 function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
@@ -126,6 +132,20 @@ export async function create(cfg: Config, options: CreateOptions = {}): Promise<
     onEnvironmentChanged: () => () => {},
   }
   const exec = new CommandProcessExecutionFactory(term)
+  const createExecution = exec.createCommandProcessExecution.bind(exec)
+  exec.createCommandProcessExecution = (options) => {
+    const execution = createExecution(options)
+    const install = trackedExplicitInstaller(options)
+    if (install) {
+      execution.complete = () => install()
+      execution.completeWithTerminalOutput = () => install((text) => {
+        const formatted = execution.formatText(text)
+        term.log(formatted)
+        return formatted
+      })
+    }
+    return execution
+  }
   const infra = new DBTCommandExecutionInfrastructure(runtime, term)
   const python = new PythonDBTCommandExecutionStrategy(exec, runtime, term, config)
   const cli = (cwd: string, path: string) => new CLIDBTCommandExecutionStrategy(exec, runtime, term, cwd, path)
@@ -229,9 +249,23 @@ export async function create(cfg: Config, options: CreateOptions = {}): Promise<
     new SemanticModelParser(term),
   )
 
+  // The library's own install is off (see `getInstallDepsOnProjectInitialization`), so every
+  // caller of `create` gets packages from here: only when missing or out of date, under a
+  // cross-process lock. Other failures are not fatal: the manifest parse reports a missing
+  // package with dbt's own error and the next call retries. Waiting too long for another
+  // process's install is fatal: continuing would read packages that are being rewritten.
+  try {
+    const packages = await ensurePackages(cfg.projectRoot, dbtDepsInstaller(cfg))
+    if (packages.action === "installed") options.onPackagesInstalled?.()
+  } catch (err) {
+    if (err instanceof PackageLockTimeoutError) throw err
+    bufferLog(`[dbt-tools] package install check failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
   // Before `initialize`, whose parse is the one the commands answer from.
   adapter.on(DBTProjectIntegrationAdapterEvents.MANIFEST_PARSED, recordManifest)
   try {
+    retryParseManifest(adapter, { shouldRetry: () => adapter.getTargetPath() !== undefined })
     await adapter.initialize()
   } catch (e) {
     // initialize() can fail after the integration started a Python bridge; stop it.

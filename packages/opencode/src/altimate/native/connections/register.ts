@@ -688,7 +688,12 @@ register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlEx
         duration_ms: Date.now() - startTime,
       })
     } catch {}
-    return { columns: [], rows: [], row_count: 0, truncated: false, error: errorMsg } as SqlExecuteResult & { error: string }
+    // altimate_change start — guide dbt projects when no native connection is configured
+    const error = /Connection ".+" not found\. Available: \(none\)$/.test(errorMsg)
+      ? errorMsg + " For a dbt project, run `altimate-dbt execute --query <sql>` or check the project's dbt profile."
+      : errorMsg
+    return { columns: [], rows: [], row_count: 0, truncated: false, error } as SqlExecuteResult & { error: string }
+    // altimate_change end
   }
 })
 

@@ -7,7 +7,8 @@
  *   - Concurrent validator invocations
  *   - Validator timeouts vs subprocess wall time
  */
-import { describe, expect, test, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, afterEach } from "bun:test"
+import { useDbtTestHome } from "./dbt-test-home.helper"
 import { promises as fs, existsSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
@@ -35,10 +36,12 @@ const E2E_TIMEOUT = 90_000
 
 let dir = ""
 let originalPath = ""
+let isolateHome: (dir: string) => void
 
 async function setupProject(): Promise<string> {
   dir = await fs.mkdtemp(join(tmpdir(), "e2e-real-2-"))
   originalPath = process.env.PATH ?? ""
+  isolateHome(dir)
   process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
 
   await fs.writeFile(join(dir, "dbt_project.yml"), `name: e2e
@@ -71,7 +74,6 @@ async function writeModel(name: string, sql: string): Promise<void> {
 
 async function teardown(): Promise<void> {
   process.env.PATH = originalPath
-  delete process.env.DBT_PROFILES_DIR
   if (dir) await fs.rm(dir, { recursive: true, force: true })
   dir = ""
 }
@@ -85,9 +87,7 @@ const ctx = (): ValidatorContext => ({
 })
 
 describe("E2E wave 2: real dbt-duckdb scenarios", () => {
-  beforeEach(async () => {
-    if (!ENABLE_E2E) return
-  })
+  isolateHome = useDbtTestHome()
   afterEach(async () => {
     if (dir) await teardown()
   })
@@ -98,7 +98,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     await writeModel("foo", "select 1 as id")
     // Invalid YAML — unclosed bracket
     await fs.writeFile(join(dir, "models", "schema.yml"), "version: 2\nmodels:\n  - name: foo\n    columns: [unclosed")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Should fail closed: schema.yml is broken.
     expect(r.ok).toBe(false)
@@ -108,8 +108,8 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "﻿select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     // BOM may break dbt parser.
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
@@ -118,8 +118,8 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select 1 as id\r\nunion all\r\nselect 2 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -129,7 +129,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     // Build a large UNION ALL SQL
     const unions = Array.from({ length: 5000 }, (_, i) => `select ${i} as id`).join(" union all\n")
     await writeModel("foo", unions)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.details?.models_touched).toBeGreaterThan(0)
   }, E2E_TIMEOUT)
@@ -138,8 +138,8 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select 'it''s alive' as msg")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -147,8 +147,8 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", `select 1 as "id_😀"`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -156,7 +156,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select 1 as id where {{ undefined_macro() }}")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(false)
   }, E2E_TIMEOUT)
@@ -165,7 +165,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "select * from {{ source('no_source', 'no_table') }}")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(false)
   }, E2E_TIMEOUT)
@@ -174,7 +174,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "this is not sql at all")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(false)
   }, E2E_TIMEOUT)
@@ -183,7 +183,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Empty model: dbt build fails. Validator should fail closed.
     expect(r.ok).toBe(false)
@@ -195,8 +195,8 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     // "select" is a reserved word — duckdb may quote-escape it but dbt's
     // ref() resolution may behave differently.
     await writeModel("select_model", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "select_model"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "select_model"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
   }, E2E_TIMEOUT)
 
@@ -204,8 +204,8 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("bad-name", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "bad-name"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "bad-name"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     // dbt rejects hyphens in model names. Build should fail.
     expect(buildResult.status).not.toBe(0)
     const r = await DbtSchemaVerifyValidator.check(ctx())
@@ -216,7 +216,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", "{{ config(enabled=false) }}\nselect 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Disabled models shouldn't be verified — they don't exist in db.
     // The validator finds the .sql file though. Behavior is ambiguous.
@@ -228,7 +228,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     await setupProject()
     // `dbt` is a reserved name? Test with something close to internals.
     await writeModel("manifest", "select 1 as id")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtTestsPassValidator.check(ctx())
     expect(typeof r.ok).toBe("boolean")
   }, E2E_TIMEOUT)
@@ -237,7 +237,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     await setupProject()
     await writeModel("foo", `{{ config(materialized='invalid_materialization_type') }}\nselect 1 as id`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Invalid materialization → build error.
     expect(r.ok).toBe(false)
@@ -248,7 +248,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     await setupProject()
     // dbt 1.8 might not have all features; test with a hypothetical
     await writeModel("foo", `{{ config(materialized='view', tags=['e2e'], on_schema_change='sync_all_columns') }}\nselect 1 as id`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(typeof r.ok).toBe("boolean")
   }, E2E_TIMEOUT)
@@ -294,7 +294,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     await writeModel("foo", "select 1 as id")
     // YAML forbids tabs in indentation.
     await fs.writeFile(join(dir, "models", "schema.yml"), "version: 2\nmodels:\n\t- name: foo")
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(false)
   }, E2E_TIMEOUT)
@@ -303,6 +303,7 @@ describe("E2E wave 2: real dbt-duckdb scenarios", () => {
     if (!ENABLE_E2E) return
     dir = await fs.mkdtemp(join(tmpdir(), "e2e-real-2-mixed-"))
     originalPath = process.env.PATH ?? ""
+    isolateHome(dir)
     process.env.PATH = `${join(REPO_ROOT, "packages", "dbt-tools", "bin")}:${originalPath}`
     await fs.writeFile(join(dir, "dbt_project.yml"), `name: e2e
 version: '1.0'
@@ -368,8 +369,8 @@ target-path: target
     await setupProject()
     await writeModel("foo", `{{ config(materialized='incremental', unique_key='id') }}
 select 1 as id`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
-    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
+    const buildResult = spawnSync(ALTIMATE_DBT_BIN, ["build", "--model", "foo"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 60_000 })
     expect(buildResult.status).toBe(0)
     const r = await DbtSchemaVerifyValidator.check(ctx())
     expect(r.ok).toBe(true)
@@ -380,7 +381,7 @@ select 1 as id`)
     await setupProject()
     await writeModel("foo", `{{ config(materialized='ephemeral') }}
 select 1 as id`)
-    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, env: process.env, encoding: "utf8", timeout: 30_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
     // Ephemeral models don't materialize. Schema-verify can't compare actual.
     expect(r.ok).toBe(false)

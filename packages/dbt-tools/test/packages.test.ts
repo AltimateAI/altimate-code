@@ -1,0 +1,678 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { spawn, spawnSync } from "child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
+import {
+  ensurePackages,
+  PackageLockTimeoutError,
+  installPackagesLocked,
+  packagesSatisfied,
+  withPackagesLock,
+  withUnverifiedPackagesLock,
+} from "../src/packages"
+
+const WORKER = join(import.meta.dir, "fixture", "packages-worker.ts")
+const PKG = "mypkg"
+
+let root = ""
+
+function writeProject(opts: { lock?: string; packages?: string } = {}) {
+  writeFileSync(join(root, "dbt_project.yml"), "name: proj\nversion: '1.0'\nconfig-version: 2\nprofile: proj\n")
+  writeFileSync(join(root, "packages.yml"), opts.packages ?? `packages:\n  - package: acme/${PKG}\n    version: 1.0.0\n`)
+  if (opts.lock) writeFileSync(join(root, "package-lock.yml"), opts.lock)
+}
+
+function lockFor(version: string) {
+  return `packages:\n- package: acme/${PKG}\n  version: ${version}\nsha1_hash: abc\n`
+}
+
+/** What `dbt deps` leaves behind for a healthy install. */
+function installPackage(version = "1.0.0", name = PKG) {
+  const dir = join(root, "dbt_packages", name)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, "dbt_project.yml"), `name: ${name}\nversion: '${version}'\n`)
+}
+
+function counter() {
+  let calls = 0
+  return {
+    install: async () => {
+      calls++
+      installPackage()
+    },
+    get calls() {
+      return calls
+    },
+  }
+}
+
+const stateDir = () => join(root, "target", ".altimate-dbt")
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "dbt-pkgs-"))
+})
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true })
+})
+
+describe("packagesSatisfied / ensurePackages: when to install", () => {
+  test("no packages declared: nothing to do, installer never called", async () => {
+    writeFileSync(join(root, "dbt_project.yml"), "name: proj\n")
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("none")
+    expect(c.calls).toBe(0)
+  })
+
+  test("declared but not installed: installs once, then skips", async () => {
+    writeProject()
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect(c.calls).toBe(1)
+  })
+
+  test("packages already installed by something else and matching the lock: not reinstalled", async () => {
+    // e.g. an image built with `dbt deps`: no stamp from us, but the install is current.
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage("1.0.0")
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect(c.calls).toBe(0)
+  })
+
+  test("changed declarations invalidate an older install without a lock or stamp", async () => {
+    writeProject()
+    installPackage("1.0.0")
+    writeProject({ packages: `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n` })
+    const now = Date.now()
+    utimesSync(join(root, "dbt_packages"), new Date(now - 250), new Date(now - 250))
+    utimesSync(join(root, "packages.yml"), new Date(now), new Date(now))
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("a recent lock does not hide a newly declared package", async () => {
+    writeProject({
+      lock: lockFor("1.0.0"),
+      packages: `packages:\n  - package: acme/${PKG}\n    version: 1.0.0\n  - package: acme/new_package\n    version: 1.0.0\n`,
+    })
+    installPackage()
+    const sameTime = new Date()
+    utimesSync(join(root, "packages.yml"), sameTime, sameTime)
+    utimesSync(join(root, "package-lock.yml"), sameTime, sameTime)
+    let calls = 0
+    expect((await ensurePackages(root, async () => {
+      calls++
+      installPackage("1.0.0", "new_package")
+    })).action).toBe("installed")
+    expect(calls).toBe(1)
+  })
+
+  test("a newly checked out lock invalidates an older preinstalled directory", async () => {
+    writeProject({ lock: lockFor("2.0.0"), packages: `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n` })
+    installPackage("1.0.0")
+    const older = new Date(Date.now() - 60_000)
+    utimesSync(join(root, "dbt_packages"), older, older)
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("a preinstalled environment-dependent package is refreshed once to record its inputs", async () => {
+    writeProject({ packages: `packages:\n  - local: "{{ env_var('TEST_ALTIMATE_PREINSTALLED_PACKAGE', '../local_pkg') }}"\n` })
+    installPackage()
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect(c.calls).toBe(1)
+  })
+
+  test("a changed environment-dependent dependency invalidates the install stamp", async () => {
+    const variable = "TEST_ALTIMATE_LOCAL_PACKAGE"
+    const saved = process.env[variable]
+    try {
+      writeProject({ packages: `packages:\n  - local: "{{ env_var ('${variable}') }}"\n` })
+      process.env[variable] = "../package_v1"
+      const c = counter()
+      expect((await ensurePackages(root, c.install)).action).toBe("installed")
+      expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+      process.env[variable] = "../package_v2"
+      expect((await ensurePackages(root, c.install)).action).toBe("installed")
+      expect(c.calls).toBe(2)
+      expect(readFileSync(join(stateDir(), "packages.stamp.json"), "utf8")).not.toContain("../package_v2")
+    } finally {
+      if (saved === undefined) delete process.env[variable]
+      else process.env[variable] = saved
+    }
+  })
+
+  test("an env_var package path is stamped and does not get reset on the next command", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ env_var('TEST_ALTIMATE_PACKAGE_PATH', 'custom_packages') }}"\n`)
+    const installPath = join(root, "custom_packages", PKG)
+    let calls = 0
+    const install = async () => {
+      calls++
+      mkdirSync(installPath, { recursive: true })
+      writeFileSync(join(installPath, "dbt_project.yml"), `name: ${PKG}\n`)
+    }
+    expect((await ensurePackages(root, install)).action).toBe("installed")
+    expect((await ensurePackages(root, install)).action).toBe("skipped")
+    expect(calls).toBe(1)
+  })
+
+  test("a compound Jinja package path falls back to installing under the lock", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ env_var('BUILD_ROOT') }}/dbt_packages"\n`)
+    const installPath = join(root, "build", "dbt_packages", PKG)
+    const result = await ensurePackages(root, async () => {
+      expect(existsSync(join(stateDir(), "packages.lock"))).toBe(true)
+      mkdirSync(installPath, { recursive: true })
+      writeFileSync(join(installPath, "dbt_project.yml"), `name: ${PKG}\n`)
+    })
+    expect(result.action).toBe("installed")
+    expect(existsSync(join(installPath, "dbt_project.yml"))).toBe(true)
+    expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+  })
+
+  test("an unverified package path stays locked while the command reads the packages", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_project.yml"), `name: proj\npackages-install-path: "{{ env_var('BUILD_ROOT') }}/dbt_packages"\n`)
+    const reading = Promise.withResolvers<void>()
+    const done = Promise.withResolvers<void>()
+    const c = counter()
+    const reader = withUnverifiedPackagesLock(root, async () => {
+      await ensurePackages(root, c.install)
+      reading.resolve()
+      await done.promise
+    })
+    try {
+      await Promise.race([reading.promise, reader])
+      await expect(ensurePackages(root, c.install, { maxWaitMs: 100 })).rejects.toBeInstanceOf(PackageLockTimeoutError)
+      expect(c.calls).toBe(1)
+    } finally {
+      done.resolve()
+      await reader
+    }
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(2)
+  })
+
+  test("an unreadable install destination falls back to running dbt", async () => {
+    writeProject()
+    writeFileSync(join(root, "dbt_packages"), "not a directory")
+    const c = counter()
+    const result = await ensurePackages(root, async () => {
+      rmSync(join(root, "dbt_packages"))
+      await c.install()
+    })
+    expect(result.action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("the version inside an installed hub package is not compared with the lock (hub packages report stale versions)", async () => {
+    // dbt_utils locked at 1.3.0 installs with `version: 0.1.0` in its dbt_project.yml.
+    writeProject({ lock: lockFor("1.3.0") })
+    installPackage("0.1.0")
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect(c.calls).toBe(0)
+  })
+
+  test("a declared hub package whose directory is missing: reinstalls", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage("1.0.0", "other")
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("package directory without dbt_project.yml: reinstalls", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage()
+    const c = counter()
+    await ensurePackages(root, c.install) // stamps a good install
+    rmSync(join(root, "dbt_packages", PKG, "dbt_project.yml"))
+    expect(packagesSatisfied(root).ok).toBe(false)
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(existsSync(join(root, "dbt_packages", PKG, "dbt_project.yml"))).toBe(true)
+  })
+
+  test("a changed packages-install-path invalidates the stamp", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const c = counter()
+    await ensurePackages(root, c.install)
+    writeFileSync(join(root, "dbt_project.yml"), "name: proj\nversion: '1.0'\nconfig-version: 2\nprofile: proj\npackages-install-path: other_dir\n")
+    mkdirSync(join(root, "other_dir", PKG), { recursive: true })
+    writeFileSync(join(root, "other_dir", PKG, "dbt_project.yml"), `name: ${PKG}\nversion: '1.0.0'\n`)
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("the same project reached through a symlink keeps its stamp", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const c = counter()
+    await ensurePackages(root, c.install)
+    const link = `${root}-link`
+    symlinkSync(root, link)
+    try {
+      expect((await ensurePackages(link, c.install)).action).toBe("skipped")
+      expect(c.calls).toBe(1)
+    } finally {
+      rmSync(link, { force: true })
+    }
+  })
+
+  test("a truncated dbt_project.yml is not a complete package", () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage()
+    writeFileSync(join(root, "dbt_packages", PKG, "dbt_project.yml"), "")
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("an empty package-lock.yml does not hide the packages in packages.yml", async () => {
+    writeProject({ lock: "packages: []\nsha1_hash: abc\n" })
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("a declaration changed during installation is not stamped as installed", async () => {
+    writeProject()
+    await ensurePackages(root, async () => {
+      installPackage("1.0.0")
+      writeFileSync(join(root, "packages.yml"), `packages:\n  - package: acme/${PKG}\n    version: 2.0.0\n`)
+    })
+    expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+    expect(packagesSatisfied(root).ok).toBe(false)
+
+    let repairs = 0
+    const repair = async () => {
+      repairs++
+      installPackage("2.0.0")
+    }
+    expect((await ensurePackages(root, repair)).action).toBe("installed")
+    expect((await ensurePackages(root, repair)).action).toBe("skipped")
+    expect(repairs).toBe(1)
+  })
+
+  test("declarations changed since the last install: reinstalls", async () => {
+    writeProject()
+    const c = counter()
+    await ensurePackages(root, c.install)
+    writeFileSync(join(root, "packages.yml"), `packages:\n  - package: acme/${PKG}\n    version: 1.1.0\n`)
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(2)
+  })
+
+  test("non-hub packages are verified by count before an install and by name from the stamp afterwards", async () => {
+    writeProject({ packages: "packages:\n  - local: ../elsewhere\n" })
+    const pkg = join(root, "dbt_packages", "elsewhere")
+    const stamp = join(stateDir(), "packages.stamp.json")
+    expect(packagesSatisfied(root).ok).toBe(false)
+    installPackage("0.1.0", "elsewhere")
+    expect(packagesSatisfied(root).ok).toBe(true)
+    expect(existsSync(stamp)).toBe(false)
+
+    const install = async () => installPackage("0.1.0", "elsewhere")
+    rmSync(pkg, { recursive: true })
+    expect((await ensurePackages(root, install)).action).toBe("installed")
+    expect(existsSync(stamp)).toBe(true)
+    expect((await ensurePackages(root, install)).action).toBe("skipped")
+
+    rmSync(pkg, { recursive: true })
+    installPackage("0.1.0", "another_package")
+    expect(packagesSatisfied(root).reason).toContain("installed package missing: elsewhere")
+    expect((await ensurePackages(root, install)).action).toBe("installed")
+    expect(existsSync(join(pkg, "dbt_project.yml"))).toBe(true)
+  })
+
+  test("honours packages-install-path from dbt_project.yml", async () => {
+    writeProject()
+    writeFileSync(
+      join(root, "dbt_project.yml"),
+      "name: proj\nconfig-version: 2\nprofile: proj\npackages-install-path: deps_here\n",
+    )
+    const dir = join(root, "deps_here", PKG)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "dbt_project.yml"), "name: mypkg\nversion: '1.0.0'\n")
+    expect(packagesSatisfied(root).ok).toBe(true)
+  })
+})
+
+describe("crash and failure recovery", () => {
+  test("an install that throws leaves the project marked unfinished; the next call repairs it", async () => {
+    writeProject()
+    await expect(
+      ensurePackages(root, async () => {
+        mkdirSync(join(root, "dbt_packages", PKG), { recursive: true }) // half-installed
+        throw new Error("network down")
+      }),
+    ).rejects.toThrow("network down")
+    expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(true)
+    expect(packagesSatisfied(root).ok).toBe(false)
+
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(false)
+    expect(packagesSatisfied(root).ok).toBe(true)
+  })
+
+  test("dirty marker forces a reinstall even when every package directory looks complete", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage("1.0.0")
+    mkdirSync(stateDir(), { recursive: true })
+    writeFileSync(join(stateDir(), "packages.dirty"), "{}")
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("a deps run that finishes with an empty or incomplete package directory is not recorded as good", async () => {
+    writeProject()
+    await expect(ensurePackages(root, async () => {})).rejects.toThrow("incomplete")
+    expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+    expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(true)
+  })
+})
+
+describe("lock", () => {
+  test("is exclusive and released afterwards", async () => {
+    writeProject()
+    const order: string[] = []
+    const a = withPackagesLock(root, async () => {
+      order.push("a-start")
+      await new Promise((r) => setTimeout(r, 200))
+      order.push("a-end")
+    })
+    await new Promise((r) => setTimeout(r, 50))
+    const b = withPackagesLock(root, async () => {
+      order.push("b-start")
+    })
+    await Promise.all([a, b])
+    expect(order).toEqual(["a-start", "a-end", "b-start"])
+    expect(existsSync(join(stateDir(), "packages.lock"))).toBe(false)
+  })
+
+  test("a lock left by a process that no longer exists is broken immediately", async () => {
+    writeProject()
+    const lockDir = join(stateDir(), "packages.lock")
+    mkdirSync(lockDir, { recursive: true })
+    // A pid that is certainly not running: spawn and reap a child.
+    const dead = spawn(process.execPath, ["-e", "0"])
+    await new Promise((r) => dead.on("close", r))
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ pid: dead.pid, host: require("os").hostname(), token: "x", startedAt: Date.now() }),
+    )
+    const started = Date.now()
+    await withPackagesLock(root, async () => {}, { staleMs: 60_000 })
+    expect(Date.now() - started).toBeLessThan(2_000)
+  })
+
+  test("a live installer keeps an abandoned lock until the installer exits", async () => {
+    writeProject()
+    const lockDir = join(stateDir(), "packages.lock")
+    mkdirSync(lockDir, { recursive: true })
+    const parent = spawn(process.execPath, ["-e", "0"])
+    await new Promise((resolve) => parent.once("close", resolve))
+    const installer = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"])
+    const finished = new Promise((resolve) => installer.once("close", resolve))
+    try {
+      writeFileSync(
+        join(lockDir, "owner.json"),
+        JSON.stringify({ pid: parent.pid, installerPid: installer.pid, host: require("os").hostname(), token: "x" }),
+      )
+      const old = new Date(Date.now() - 10_000)
+      utimesSync(lockDir, old, old)
+      const c = counter()
+      await expect(ensurePackages(root, c.install, { staleMs: 1, maxWaitMs: 100 })).rejects.toBeInstanceOf(PackageLockTimeoutError)
+      expect(c.calls).toBe(0)
+    } finally {
+      installer.kill()
+      await finished
+    }
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  const canReadProcessIdentity = process.platform === "linux" || (
+    process.platform === "darwin" && spawnSync("/bin/ps", ["-p", String(process.pid)]).status === 0
+  )
+  test.skipIf(!canReadProcessIdentity)("reclaims a lock when the installer PID belongs to a different process", async () => {
+    writeProject()
+    const lockDir = join(stateDir(), "packages.lock")
+    mkdirSync(lockDir, { recursive: true })
+    const parent = spawn(process.execPath, ["-e", "0"])
+    await new Promise((resolve) => parent.once("close", resolve))
+    writeFileSync(join(lockDir, "owner.json"), JSON.stringify({
+      pid: parent.pid,
+      installerPid: process.pid,
+      installerStarted: "previous installer",
+      host: require("os").hostname(),
+      token: "x",
+    }))
+    const c = counter()
+    expect((await ensurePackages(root, c.install, { maxWaitMs: 500 })).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
+  test("a lock whose owner is alive but has stopped heartbeating is broken after staleMs", async () => {
+    writeProject()
+    const lockDir = join(stateDir(), "packages.lock")
+    mkdirSync(lockDir, { recursive: true })
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ pid: process.pid + 1, host: "some-other-host", token: "x", startedAt: 0 }),
+    )
+    const old = new Date(Date.now() - 10_000)
+    utimesSync(lockDir, old, old)
+    await withPackagesLock(root, async () => {}, { staleMs: 1_000 })
+  })
+
+  test("a live, heartbeating owner is waited for, not broken", async () => {
+    writeProject()
+    let holderDone = false
+    const holder = withPackagesLock(
+      root,
+      async () => {
+        await new Promise((r) => setTimeout(r, 600)) // longer than staleMs: only the heartbeat keeps it alive
+        holderDone = true
+      },
+      { staleMs: 300, heartbeatMs: 50 },
+    )
+    await new Promise((r) => setTimeout(r, 100))
+    let waiterSawHolderDone = false
+    await withPackagesLock(root, async () => (waiterSawHolderDone = holderDone), { staleMs: 300, heartbeatMs: 50 })
+    await holder
+    expect(waiterSawHolderDone).toBe(true)
+  })
+
+  test("gives up with a clear error when the lock is never released", async () => {
+    writeProject()
+    const lockDir = join(stateDir(), "packages.lock")
+    mkdirSync(lockDir, { recursive: true })
+    writeFileSync(join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, host: "h", token: "x", startedAt: 0 }))
+    await expect(withPackagesLock(root, async () => {}, { staleMs: 60_000, maxWaitMs: 300 })).rejects.toThrow(
+      "timed out",
+    )
+  })
+
+  test("explicit install (altimate-dbt deps) runs under the lock, clears the dirty marker and does not claim success", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const install = counter()
+    await withPackagesLock(root, async () => {
+      await expect(installPackagesLocked(root, install.install, { maxWaitMs: 100 })).rejects.toThrow("timed out")
+      expect(install.calls).toBe(0)
+    })
+    await installPackagesLocked(root, async () => installPackage())
+    expect(packagesSatisfied(root).ok).toBe(true)
+    expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(false)
+    expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
+  })
+
+  test("successful explicit deps stamps an environment-dependent installation", async () => {
+    writeProject({ packages: `packages:\n  - local: "{{ env_var('TEST_ALTIMATE_EXPLICIT_PACKAGE', '../local_pkg') }}"\n` })
+    const setup = counter()
+    await installPackagesLocked(root, async () => {
+      await setup.install()
+      return { exitCode: 0, stdout: "Installed package", stderr: "Progress logged to stderr" }
+    })
+    const unexpected = counter()
+    expect((await ensurePackages(root, unexpected.install)).action).toBe("skipped")
+    expect(unexpected.calls).toBe(0)
+  })
+
+  test("a failed explicit install leaves repair pending even when package YAML looks complete", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const failed = { stdout: "dbt could not finish extraction", stderr: "", exitCode: 1 }
+    await expect(installPackagesLocked(root, async () => {
+      installPackage()
+      return failed
+    })).resolves.toBe(failed)
+    expect(packagesSatisfied(root).ok).toBe(false)
+    const repair = counter()
+    expect((await ensurePackages(root, repair.install)).action).toBe("installed")
+    expect(repair.calls).toBe(1)
+  })
+
+  test("an explicit install whose dbt deps failed on an empty directory returns dbt's result and leaves the dirty marker", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const failed = { stderr: "Runtime Error: could not reach hub.getdbt.com" }
+    const result = await installPackagesLocked(root, async () => failed)
+    expect(result).toBe(failed)
+    expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(true)
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("a plain file in the install path is not an incomplete package", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage("1.0.0")
+    writeFileSync(join(root, "dbt_packages", "README.md"), "notes")
+    expect(packagesSatisfied(root).ok).toBe(true)
+  })
+
+  test("a packages.yml edited after the lock was written is not satisfied by the old install", () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage("1.0.0")
+    expect(packagesSatisfied(root).ok).toBe(true)
+    const later = new Date(Date.now() + 10_000)
+    utimesSync(join(root, "packages.yml"), later, later)
+    expect(packagesSatisfied(root)).toMatchObject({ ok: false, reason: expect.stringContaining("newer") })
+  })
+})
+
+describe("concurrent callers", () => {
+  test("many in-process callers install exactly once and all return with packages complete", async () => {
+    writeProject()
+    let installs = 0
+    const seen: boolean[] = []
+    const slow = async () => {
+      installs++
+      const dir = join(root, "dbt_packages", PKG)
+      mkdirSync(dir, { recursive: true })
+      await new Promise((r) => setTimeout(r, 150))
+      writeFileSync(join(dir, "dbt_project.yml"), "name: mypkg\nversion: '1.0.0'\n")
+    }
+    await Promise.all(
+      Array.from({ length: 8 }, async () => {
+        await ensurePackages(root, slow)
+        seen.push(existsSync(join(root, "dbt_packages", PKG, "dbt_project.yml")))
+      }),
+    )
+    expect(installs).toBe(1)
+    expect(seen).toEqual(Array(8).fill(true))
+  })
+
+  function runWorker(mode?: "crash") {
+    const logFile = join(root, "worker.log")
+    return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      const c = spawn(process.execPath, [WORKER, root, logFile, PKG, ...(mode ? [mode] : [])], { stdio: "ignore" })
+      c.on("close", (code, signal) => resolve({ code, signal }))
+    })
+  }
+  const readLog = () => (existsSync(join(root, "worker.log")) ? readFileSync(join(root, "worker.log"), "utf-8").trim().split("\n") : [])
+
+  test("separate processes started together: one install, nobody sees a broken package directory", async () => {
+    writeProject()
+    const results = await Promise.all(Array.from({ length: 8 }, () => runWorker()))
+    expect(results.every((r) => r.code === 0)).toBe(true)
+    const lines = readLog()
+    expect(lines.filter((l) => l.startsWith("install")).length).toBe(1)
+    expect(lines.filter((l) => l.startsWith("ready")).length).toBe(8)
+    expect(lines.filter((l) => l.startsWith("BROKEN")).length).toBe(0)
+  }, 30_000)
+
+  test.skipIf(process.platform === "win32").each(["dbt", "explicit"])("killing the %s caller does not unlock its live installer", async (mode) => {
+    writeProject()
+    const shim = join(root, "dbt")
+    const ready = join(root, "installer.pid")
+    writeFileSync(shim, '#!/bin/sh\necho "$$" > installer.pid\nexec sleep 10\n')
+    chmodSync(shim, 0o755)
+    const parent = spawn(process.execPath, [WORKER, root, join(root, "worker.log"), PKG, mode], {
+      env: { ...process.env, ALTIMATE_DBT_PATH: shim },
+      stdio: "ignore",
+    })
+    const stopped = new Promise((resolve) => parent.once("close", (_code, signal) => resolve(signal)))
+    try {
+      const lockDir = join(stateDir(), "packages.lock")
+      const deadline = Date.now() + 3_000
+      while ((!existsSync(ready) || !readFileSync(ready, "utf8").trim()) && Date.now() < deadline) {
+        await Bun.sleep(10)
+      }
+      const pid = Number(readFileSync(ready, "utf8"))
+      // Wait for the parent to finish publishing the recorded installer PID.
+      const owner = join(lockDir, "owner.json")
+      while (JSON.parse(readFileSync(owner, "utf8")).installerPid === null && Date.now() < deadline) {
+        await Bun.sleep(10)
+      }
+      expect(JSON.parse(readFileSync(owner, "utf8")).installerPid).toBe(pid)
+      parent.kill("SIGKILL")
+      expect(await stopped).toBe("SIGKILL")
+      const c = counter()
+      await expect(ensurePackages(root, c.install, { staleMs: 1, maxWaitMs: 100 })).rejects.toBeInstanceOf(PackageLockTimeoutError)
+      expect(c.calls).toBe(0)
+    } finally {
+      parent.kill("SIGKILL")
+      await stopped
+      const pid = existsSync(ready) ? Number(readFileSync(ready, "utf8")) : 0
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+    }
+  }, 10_000)
+
+  test("a process killed in the middle of an install does not poison the project", async () => {
+    writeProject()
+    const crashed = await runWorker("crash")
+    expect(crashed.signal).toBe("SIGKILL")
+    // Package directory exists but is incomplete, lock and dirty marker are left behind.
+    expect(existsSync(join(root, "dbt_packages", PKG))).toBe(true)
+    expect(existsSync(join(root, "dbt_packages", PKG, "dbt_project.yml"))).toBe(false)
+    expect(existsSync(join(stateDir(), "packages.lock"))).toBe(true)
+
+    // Recovery: several processes arrive at once; the dead owner's lock is broken, the install repeats once.
+    const results = await Promise.all(Array.from({ length: 4 }, () => runWorker()))
+    expect(results.every((r) => r.code === 0)).toBe(true)
+    const lines = readLog()
+    expect(lines.filter((l) => l.startsWith("BROKEN")).length).toBe(0)
+    expect(lines.filter((l) => l.startsWith("ready")).length).toBe(4)
+    expect(lines.filter((l) => l.startsWith("install")).length).toBe(2) // the crashed one + one repair
+    expect(packagesSatisfied(root).ok).toBe(true)
+  }, 30_000)
+})
+
+describe("adapter wiring", () => {
+  test("the dbt integration library is told not to run `dbt deps` itself", () => {
+    // adapter.ts cannot be imported under bun (python-bridge), so assert on the source. The
+    // library default is true; leaving it on reintroduces the unsynchronised install from
+    // every process. The behavioural check is test/packages-real-dbt.test.ts.
+    const src = readFileSync(join(import.meta.dir, "..", "src", "adapter.ts"), "utf-8")
+    expect(src).toMatch(/getInstallDepsOnProjectInitialization:\s*\(\)\s*=>\s*false/)
+  })
+})

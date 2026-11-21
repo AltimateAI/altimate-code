@@ -242,6 +242,37 @@ export async function runWithConcurrencyLimit<In, Out>(
   return results
 }
 
+const MAX_SERIAL_RETRIES = 4
+
+/**
+ * Retry a bounded number of errors that could clear once dbt has the warehouse to itself.
+ *
+ * Several `altimate-dbt` processes against one single-writer warehouse (DuckDB
+ * in particular) contend for it, and the loser reports an error that says
+ * nothing about the model. A serial retry can clear contention from this or
+ * another invocation. Deterministic compile and parse errors, timeouts, and
+ * spawn failures keep their original diagnostics.
+ */
+export async function retryErroredSerially<Out>(
+  items: string[],
+  outputs: Array<Out | null>,
+  run: (item: string) => Promise<Out | null>,
+  errorOf: (out: Out) => string | undefined,
+): Promise<{ outputs: Array<Out | null>; retried: number }> {
+  const next = [...outputs]
+  let retried = 0
+  for (let i = 0; i < items.length && retried < MAX_SERIAL_RETRIES; i++) {
+    const out = outputs[i]
+    if (out === null || out === undefined) continue
+    const err = errorOf(out)
+    if (!err || /^(?:timed out|spawn failed)|\b(?:Compilation|Parsing) Error\b|Could not find profile named/i.test(err)) continue
+    retried++
+    // A retry that cannot start (null) keeps the first error rather than erasing it.
+    next[i] = (await run(items[i]!)) ?? out
+  }
+  return { outputs: next, retried }
+}
+
 /** Maximum simultaneous altimate-dbt subprocesses per validator run. */
 export const VALIDATOR_CONCURRENCY =
   (() => {

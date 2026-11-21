@@ -1,0 +1,205 @@
+// Real dbt + real built altimate-dbt (dist/index.js): concurrent invocations must
+// not each run `dbt deps`. Skipped when dist/ is not built or dbt-duckdb is not
+// installed. Uses a local package, so it needs no network.
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { spawn, spawnSync } from "child_process"
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
+import { tmpdir } from "os"
+import { dirname, join } from "path"
+import { findRealDbt } from "./fixture/find-real-dbt"
+
+const DIST = process.env.ALTIMATE_DBT_DIST ?? join(import.meta.dir, "..", "dist", "index.js")
+
+const REAL_DBT = existsSync(DIST) ? findRealDbt() : undefined
+const suite = REAL_DBT ? describe : describe.skip
+
+let work = ""
+let proj = ""
+let shim = ""
+let log = ""
+let env: Record<string, string> = {}
+
+const CONCURRENCY = 4
+
+function dbtSync(args: string[]) {
+  return spawnSync(REAL_DBT!, args, { cwd: proj, encoding: "utf-8", env: { ...process.env, ...env }, timeout: 120_000 })
+}
+
+function runAltimateDbt(i: number, args = ["schema-verify", "--model", "m"], overrides: Record<string, string> = {}) {
+  return new Promise<{ code: number | null; out: string }>((resolve) => {
+    const c = spawn(
+      "node",
+      [DIST, ...args],
+      { cwd: proj, env: { ...process.env, ...env, E2E_DB: join(proj, `db${i}.duckdb`), BUILD_ROOT: "build", ...overrides } },
+    )
+    let out = ""
+    c.stdout.on("data", (d) => (out += d))
+    c.stderr.on("data", (d) => (out += d))
+    c.on("close", (code) => resolve({ code, out }))
+  })
+}
+
+const depsCalls = () =>
+  existsSync(log) ? readFileSync(log, "utf-8").split("\n").filter((l) => l.split(" ")[0] === "deps").length : 0
+
+const packageHealthy = () => existsSync(join(proj, "dbt_packages", "localpkg", "dbt_project.yml"))
+
+suite("real dbt: concurrent altimate-dbt invocations and `dbt deps`", () => {
+  beforeAll(() => {
+    work = mkdtempSync(join(tmpdir(), "dbt-pkgs-real-"))
+    proj = join(work, "proj")
+    const pkg = join(work, "localpkg")
+    mkdirSync(join(pkg, "macros"), { recursive: true })
+    writeFileSync(join(pkg, "dbt_project.yml"), "name: localpkg\nversion: '0.1.0'\nconfig-version: 2\n")
+    writeFileSync(join(pkg, "macros", "one.sql"), "{% macro one() %}1{% endmacro %}\n")
+    mkdirSync(join(proj, "models"), { recursive: true })
+    mkdirSync(join(proj, "seeds"), { recursive: true })
+    writeFileSync(join(proj, "dbt_project.yml"), "name: proj\nversion: '1.0'\nconfig-version: 2\nprofile: proj\n")
+    writeFileSync(
+      join(proj, "profiles.yml"),
+      "proj:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: \"{{ env_var('E2E_DB', 'e2e.duckdb') }}\"\n      threads: 1\n",
+    )
+    writeFileSync(join(proj, "packages.yml"), "packages:\n  - local: ../localpkg\n")
+    writeFileSync(join(proj, "seeds", "raw.csv"), "id,name\n1,a\n2,b\n")
+    writeFileSync(join(proj, "models", "m.sql"), "select id, name, {{ localpkg.one() }} as one from {{ ref('raw') }}\n")
+    writeFileSync(join(proj, "models", "m.yml"), "version: 2\nmodels:\n  - name: m\n    columns:\n      - name: id\n")
+
+    // A `dbt` that records its subcommand, then runs the real one. Both the dbt-tools resolver
+    // (ALTIMATE_DBT_PATH) and the integration library (PATH) will find it.
+    log = join(work, "dbt-calls.log")
+    const bin = join(work, "bin")
+    mkdirSync(bin)
+    shim = join(bin, "dbt")
+    writeFileSync(shim, `#!/bin/sh\necho "$@" >> "${log}"\nexec "${REAL_DBT}" "$@"\n`)
+    chmodSync(shim, 0o755)
+    const home = join(work, "home")
+    mkdirSync(home)
+    env = {
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+      DBT_PROFILES_DIR: proj,
+      PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+      ALTIMATE_DBT_PATH: shim,
+    }
+    // The library looks for dbt next to the configured python, so point it at a directory
+    // whose `dbt` is the recording shim.
+    const venvBin = join(work, "venv", "bin")
+    mkdirSync(venvBin, { recursive: true })
+    copyFileSync(shim, join(venvBin, "dbt"))
+    chmodSync(join(venvBin, "dbt"), 0o755)
+    const realPython = join(dirname(REAL_DBT!), "python3")
+    // A wrapper, not a symlink: python finds its site-packages relative to the real executable.
+    writeFileSync(join(venvBin, "python3"), `#!/bin/sh\nexec "${existsSync(realPython) ? realPython : "python3"}" "$@"\n`)
+    chmodSync(join(venvBin, "python3"), 0o755)
+    const init = spawnSync("node", [DIST, "init", "--project-root", proj, "--python-path", join(venvBin, "python3")], {
+      env: { ...process.env, ...env },
+      encoding: "utf-8",
+    })
+    expect(init.status).toBe(0)
+
+    // Prepare a built project (the shim records these calls too; the log is cleared below).
+    expect(dbtSync(["deps"]).status).toBe(0)
+    expect(dbtSync(["build"]).status).toBe(0)
+    for (let i = 0; i < CONCURRENCY; i++) copyFileSync(join(proj, "e2e.duckdb"), join(proj, `db${i}.duckdb`))
+  }, 180_000)
+
+  afterAll(() => {
+    if (work) rmSync(work, { recursive: true, force: true })
+  })
+
+  test("packages already installed: concurrent invocations run `dbt deps` zero times", async () => {
+    writeFileSync(log, "")
+    expect(packageHealthy()).toBe(true)
+    const runs = await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => runAltimateDbt(i)))
+    expect(runs.every((r) => r.code === 0 && !/No dbt_project\.yml found/.test(r.out))).toBe(true)
+    expect(depsCalls()).toBe(0)
+    expect(packageHealthy()).toBe(true)
+  }, 120_000)
+
+  test("packages missing: concurrent invocations install exactly once and leave a healthy directory", async () => {
+    rmSync(join(proj, "dbt_packages"), { recursive: true, force: true })
+    rmSync(join(proj, "target", ".altimate-dbt"), { recursive: true, force: true })
+    writeFileSync(log, "")
+    const runs = await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => runAltimateDbt(i)))
+    expect(runs.every((r) => r.code === 0 && !/No dbt_project\.yml found/.test(r.out))).toBe(true)
+    expect(depsCalls()).toBe(1)
+    expect(packageHealthy()).toBe(true)
+  }, 120_000)
+
+  test("a package directory left without dbt_project.yml is repaired by the next invocation", async () => {
+    rmSync(join(proj, "dbt_packages", "localpkg"), { recursive: true, force: true })
+    mkdirSync(join(proj, "dbt_packages", "localpkg"), { recursive: true }) // present but empty
+    writeFileSync(log, "")
+    expect((await runAltimateDbt(0)).code).toBe(0)
+    expect(depsCalls()).toBe(1)
+    expect(packageHealthy()).toBe(true)
+  }, 120_000)
+  test("explicit deps succeeds with the integration's selected command under the lock", async () => {
+    const result = await runAltimateDbt(0, ["deps"])
+    expect(result.code, result.out).toBe(0)
+    expect(packageHealthy()).toBe(true)
+    expect(existsSync(join(proj, "target", ".altimate-dbt", "packages.lock"))).toBe(false)
+  }, 120_000)
+
+  test("Python Core explicit deps publishes the PID of the selected installer", async () => {
+    const home = join(work, "core-home")
+    const cfg = join(home, ".altimate-code")
+    mkdirSync(cfg, { recursive: true })
+    const ready = join(work, "explicit-installer.pid")
+    const proceed = join(work, "continue-explicit-install")
+    const python = join(work, "tracked-python")
+    const interpreter = join(work, "venv", "bin", "python3")
+    writeFileSync(python, `#!/bin/sh
+case "$2" in
+  *'dbt_cli.invoke([r"""deps"""'*)
+    echo "$$" > "${ready}"
+    i=0
+    while [ ! -f "${proceed}" ] && [ "$i" -lt 400 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    ;;
+esac
+exec "${interpreter}" "$@"
+`)
+    chmodSync(python, 0o755)
+    writeFileSync(join(cfg, "dbt.json"), JSON.stringify({ projectRoot: proj, pythonPath: python, dbtIntegration: "core" }))
+    const ownerFile = join(proj, "target", ".altimate-dbt", "packages.lock", "owner.json")
+    const run = runAltimateDbt(0, ["deps"], { HOME: home, XDG_CONFIG_HOME: join(home, ".config") })
+    try {
+      const deadline = Date.now() + 15_000
+      let tracked = false
+      while (!tracked && Date.now() < deadline) {
+        if (existsSync(ready) && existsSync(ownerFile)) {
+          const pid = Number(readFileSync(ready, "utf-8"))
+          tracked = pid > 0 && JSON.parse(readFileSync(ownerFile, "utf-8")).installerPid === pid
+        }
+        if (!tracked) await Bun.sleep(25)
+      }
+      expect(tracked).toBe(true)
+    } finally {
+      writeFileSync(proceed, "")
+      const result = await run
+      expect(result.code, result.out).toBe(0)
+    }
+    expect(packageHealthy()).toBe(true)
+  }, 120_000)
+
+  test("concurrent commands install and read a compound Jinja package path without overlap", async () => {
+    const config = join(proj, "dbt_project.yml")
+    const original = readFileSync(config, "utf-8")
+    const buildRoot = join(proj, "build")
+    try {
+      writeFileSync(config, original + `packages-install-path: "{{ env_var('BUILD_ROOT') }}/dbt_packages"\n`)
+      writeFileSync(log, "")
+      const runs = await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => runAltimateDbt(i)))
+      for (const result of runs) expect(result.code, result.out).toBe(0)
+      expect(depsCalls()).toBe(CONCURRENCY)
+      expect(existsSync(join(buildRoot, "dbt_packages", "localpkg", "dbt_project.yml"))).toBe(true)
+    } finally {
+      writeFileSync(config, original)
+      rmSync(buildRoot, { recursive: true, force: true })
+    }
+  }, 120_000)
+
+})
