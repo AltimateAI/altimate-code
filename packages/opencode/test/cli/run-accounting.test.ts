@@ -95,8 +95,34 @@ describe("RunAccounting turn accounting", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
     acc.onStepAttempt("msg_1") // soft-deadline interrupt: no step-finish
-    acc.onIdle()
+    acc.closeOpenStep()
     acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(0)
+  })
+
+  test("an overflow after a finished step is not charged again", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1")
+    acc.onStepFinish("msg_1", "tool-calls")
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(1)
+  })
+
+  test("an overflow reported only on the prompt result charges nothing", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1")
+    acc.onPromptResult({ error: { name: "ContextOverflowError" } })
+    expect(acc.turnCount).toBe(0)
+  })
+
+  test("once a retry begins, a later pre-step overflow is not charged to the failed attempt", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1") // fails mid-stream
+    acc.closeOpenStep() // retry status
+    acc.onSessionError("ContextOverflowError", "too long") // retry rejected before streaming
     expect(acc.turnCount).toBe(0)
   })
 

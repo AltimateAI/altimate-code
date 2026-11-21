@@ -63,12 +63,14 @@ describe("opencode run: --max-turns charges completed steps only", () => {
         stream?.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`))
       const startAttempt = (messageID: string) => {
         counts.attempts++
+        // As in the processor, a retry status precedes every attempt after the first.
+        if (counts.attempts > 1)
+          publish("session.status", {
+            sessionID,
+            status: { type: "retry", attempt: counts.attempts - 1, message: "rate limit exceeded", next: Date.now() + 10 },
+          })
         publish("message.part.updated", {
           part: { id: `${messageID}_start_${counts.attempts}`, messageID, sessionID, type: "step-start" },
-        })
-        publish("session.status", {
-          sessionID,
-          status: { type: "retry", attempt: counts.attempts, message: "rate limit exceeded", next: Date.now() + 10 },
         })
       }
       const server = yield* Effect.acquireRelease(

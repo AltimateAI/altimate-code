@@ -417,7 +417,7 @@ export const RunCommand = cmd({
         .option("max-turns", {
           type: "number",
           describe:
-            "maximum completed assistant work turns (a failed or retried attempt is not counted); allows one committed-answer echo, or one best-effort reply after a budget abort",
+            "maximum completed assistant work turns, including harness follow-up turns (a failed or retried attempt is not counted); allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
@@ -1359,6 +1359,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
           }
           // altimate_change end
 
+          // altimate_change start — a retry begins: the failed attempt is over and stays uncharged
+          if (
+            event.type === "session.status" &&
+            event.properties.sessionID === sessionID &&
+            event.properties.status.type === "retry"
+          )
+            accounting.closeOpenStep()
+          // altimate_change end
           if (
             event.type === "session.status" &&
             event.properties.sessionID === sessionID &&
@@ -1369,7 +1377,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
             // altimate_change start — idle gaps are not active work; continuations retain the same start time
             workActive = false
-            accounting.onIdle()
+            accounting.closeOpenStep()
             // altimate_change end
             break
           }
