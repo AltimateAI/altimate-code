@@ -12,12 +12,18 @@ export function modelNotFoundHint(providerID: string | undefined, providerMissin
   return "The Anthropic provider needs an API key. For a Claude Pro or Max plan, run /connect and pick Claude subscription."
 }
 
+// Sources that name a config setting end in "config (model)"; others (a flag, a request, session
+// history) have no setting to correct.
+export function isConfigSource(source: string | undefined) {
+  return source?.endsWith("config (model)") === true
+}
+
 export function modelNotFoundMessage(providerID: string | undefined, modelID: string | undefined, source?: string) {
   const sourceHint = source ? ` (from ${source})` : ""
   if (!modelID) {
     const empty = providerID ? `Empty model name in "${providerID}/"${sourceHint}` : `Empty model value${sourceHint}`
     // An environment variable that is not set substitutes to "", the usual cause of an empty config value.
-    if (source?.includes("config"))
+    if (isConfigSource(source))
       return `${empty}: the model key is incomplete. If it references an environment variable such as "\${ALTIMATE_MODEL}", check that the variable is set; otherwise set a provider/model-name value or remove the key.`
     return `${empty}. Use a provider/model-name value.`
   }
@@ -36,5 +42,7 @@ export function modelSelectionErrorText(data: {
   const message = modelNotFoundMessage(data.providerID, data.modelID, data.source)
   const hint = data.suggestions?.length ? ` Did you mean: ${data.suggestions.join(", ")}?` : ""
   const guidance = modelNotFoundHint(data.providerID, data.providerMissing)
-  return `${message.endsWith(".") ? message : message + "."}${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`
+  // Where to correct the setting applies only when a config setting chose the model (or the source is unknown).
+  const where = data.source === undefined || isConfigSource(data.source) ? ` ${modelConfigHint}` : ""
+  return `${message.endsWith(".") ? message : message + "."}${hint}${guidance ? ` ${guidance}` : ""}${where}`
 }

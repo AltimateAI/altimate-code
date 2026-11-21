@@ -15,6 +15,9 @@ import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
+// altimate_change start — unknown-agent errors are marked reported so prompt_async does not publish twice
+import { ModelMetadata } from "../../src/altimate/session/model-metadata"
+// altimate_change end
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
@@ -3407,6 +3410,9 @@ noLLMServer.instance(
         if (NamedError.Unknown.isInstance(err)) {
           expect(err.data.message).toContain('Agent not found: "nonexistent-agent-xyz"')
         }
+        // altimate_change start — already published here, so prompt_async must not publish it again
+        expect(ModelMetadata.wasReported(err)).toBe(true)
+        // altimate_change end
       }
     }),
   30_000,

@@ -11,10 +11,10 @@ import { ModelMetadata } from "./model-metadata"
 export function reportModelSelectionError(sessionID: SessionID, error: unknown) {
   if (!Provider.ModelNotFoundError.isInstance(error)) return
   ModelMetadata.markReported(error)
-  Bus.publish(Session.Event.Error, {
+  void Bus.publish(Session.Event.Error, {
     sessionID,
     error: new NamedError.Unknown({ message: modelSelectionErrorText(error.data) }).toObject(),
-  })
+  }).catch(() => undefined)
 }
 
 // Validate a selected model, publishing guided text once and rethrowing the same error instance.

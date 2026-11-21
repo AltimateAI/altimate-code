@@ -1211,13 +1211,13 @@ export function Prompt(props: PromptProps) {
         deferredSubmit.defer()
         return false
       }
-      // The draft stays and the picker opens; a pick applies to this conversation only.
       const origin = resolveSubmissionModel({
         command,
         commandAgent,
         current: chatModel,
         currentSource: local.model.source(),
       })
+      // The draft stays; the picker opens when a pick (for this conversation only) can replace the model.
       const accepted = acceptSubmissionModel({
         model: selection.model,
         source: origin.source,

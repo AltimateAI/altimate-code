@@ -376,7 +376,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const key = JSON.stringify([model.providerID, model.modelID])
       if (passive && reportedInvalidModel === key) return false
       const from = source ? ` (from ${source})` : ""
-      const fromConfig = source?.includes("config") === true
+      const fromConfig = source?.endsWith("config (model)") === true
       const empty = model.providerID ? `Empty model name in "${model.providerID}/"${from}` : `Empty model value${from}`
       const problem =
         !model.modelID
