@@ -692,16 +692,17 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
-        // altimate_change start — skip account network config in offline mode
-        const activeAccount = Offline.enabled()
-          ? undefined
-          : Option.getOrUndefined(yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))))
-        // altimate_change end
+        const activeAccount = Option.getOrUndefined(
+          yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
+        )
         if (activeAccount?.active_org_id) {
           const accountID = activeAccount.id
           const orgID = activeAccount.active_org_id
           const url = activeAccount.url
           yield* Effect.gen(function* () {
+            // altimate_change start — skip the remote account config and token lookup offline
+            if (Offline.enabled()) return
+            // altimate_change end
             const [configOpt, tokenOpt] = yield* Effect.all(
               [accountSvc.config(accountID, orgID), accountSvc.token(accountID)],
               { concurrency: 2 },
