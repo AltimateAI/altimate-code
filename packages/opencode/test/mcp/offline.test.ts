@@ -53,6 +53,7 @@ test("user programs get their own proxy exclusions back, not the offline bypass"
     expect(env.NO_PROXY).toBe("corp.example")
     expect(env.no_proxy).toBeUndefined()
     expect(env.ALTIMATE_OFFLINE_USER_PROXY).toBeUndefined()
+    expect(Offline.userEnv({ ...process.env, ALTIMATE_OFFLINE_MODEL: "local/main" }).ALTIMATE_OFFLINE_MODEL).toBeUndefined()
     expect(env.PATH).toBe("/bin")
     // A copied env that lacks the key (Bun omits variables assigned after startup) still gets the saved value.
     const copy: Record<string, string | undefined> = { PATH: "/bin" }

@@ -119,6 +119,8 @@ export function userEnv<T extends Record<string, string | undefined>>(env: T): T
   const saved = env[USER_PROXY] ?? process.env[USER_PROXY]
   if (saved === undefined) return env
   delete env[USER_PROXY]
+  // The session's model choice is internal; a program the user runs (even a nested altimate-code) chooses its own.
+  delete env.ALTIMATE_OFFLINE_MODEL
   try {
     const original = JSON.parse(saved) as Record<string, unknown>
     for (const key of ["NO_PROXY", "no_proxy"] as const) {
