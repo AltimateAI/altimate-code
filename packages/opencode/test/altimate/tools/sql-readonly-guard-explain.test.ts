@@ -122,7 +122,7 @@ describe("other read-only refusals carry the reason", () => {
   })
 
   test("a hard-blocked statement is named as such", () => {
-    expect(writeReason("SELECT 1; DROP DATABASE prod", "postgres")).toContain("hard-blocked statement")
+    expect(writeReason("SELECT 1; DROP DATABASE prod", "postgres")).toContain("statement 2 of 2 is a hard-blocked statement")
     // An unclosed quote holding a blocked word names the quote first.
     const reason = writeReason("SELECT a FROM t WHERE n = 'do not truncate", "postgres")
     expect(reason.indexOf("unterminated")).toBeGreaterThan(-1)

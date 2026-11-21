@@ -1,5 +1,5 @@
 import { EXECUTABLE_COMMENT, UNAVAILABLE_NEXT_STEP, classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
-import { maskSql, tokenizeSql } from "./sql-tokenize"
+import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls } from "./sql-functions"
 import { hasSideEffectFunction } from "./sql-function-policy"
 
@@ -84,9 +84,13 @@ export function writeReason(sql: string, dialect?: string): string {
   if (blocked) {
     // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone: name
     // the unreadable text first, since fixing it may be the whole fix.
+    // Name the first statement that is blocked on its own, by position only (no SQL text is quoted back).
+    const statements = tokenizeSql(sql, dialect).complete ? statementsOf(sql, dialect) : []
+    const index = statements.length > 1 ? statements.findIndex((statement) => classifyAndCheck(statement, dialect).blocked) : -1
+    const where = index >= 0 ? `statement ${index + 1} of ${statements.length} is` : "it holds"
     const hard =
-      " It holds a hard-blocked statement, such as DROP DATABASE, DROP SCHEMA, TRUNCATE, SQL run from a string" +
-      " literal or an executable comment; those never run and cannot be allowed."
+      ` It is refused because ${where} a hard-blocked statement, such as DROP DATABASE, DROP SCHEMA, TRUNCATE, SQL run` +
+      " from a string literal or an executable comment; those never run and cannot be allowed."
     const untilClosed =
       " Until that quoted text or comment can be read, words inside it such as DROP DATABASE or TRUNCATE count as a" +
       " hard-blocked statement, which never runs."
