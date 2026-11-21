@@ -71,14 +71,29 @@ test("command agent resolution prefers exact build, then the builder compatibili
 
 test("a later submit stage detects edits to text, mode, and attachments", () => {
   const draft = { input: "/report", mode: "normal", parts: [{ type: "file", url: "file:///first" }] }
-  const changed = captureDraftRevision(() => draft)
-  expect(changed()).toBe(false)
+  const revision = captureDraftRevision(() => draft)
+  expect(revision.changed()).toBe(false)
   draft.input = "/another"
-  expect(changed()).toBe(true)
+  expect(revision.changed()).toBe(true)
   draft.input = "/report"
   draft.mode = "shell"
-  expect(changed()).toBe(true)
+  expect(revision.changed()).toBe(true)
   draft.mode = "normal"
   draft.parts[0].url = "file:///updated"
-  expect(changed()).toBe(true)
+  expect(revision.changed()).toBe(true)
+})
+
+
+test("the production session-setup guard detects an edit made while creation is pending", async () => {
+  const draft = { input: "Original draft", mode: "normal", parts: [] }
+  const revision = captureDraftRevision(() => draft)
+  const creation = Promise.withResolvers<string>()
+  const pending = revision.after(creation.promise)
+
+  draft.input = "Edited draft"
+  draft.mode = "shell"
+  creation.resolve("ses_created")
+
+  expect(await pending).toEqual({ result: "ses_created", changed: true })
+  expect(draft).toEqual({ input: "Edited draft", mode: "shell", parts: [] })
 })

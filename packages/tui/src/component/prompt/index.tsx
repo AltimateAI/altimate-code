@@ -1136,7 +1136,7 @@ export function Prompt(props: PromptProps) {
     // creation; preserve the draft so choosing an available model is enough to retry.
     const currentMode = store.mode
     const draftText = store.prompt.input
-    const draftChanged = captureDraftRevision(() => ({
+    const draft = captureDraftRevision(() => ({
       input: input.isDestroyed ? store.prompt.input : input.plainText,
       mode: store.mode,
       parts: unwrap(store.prompt.parts),
@@ -1249,6 +1249,9 @@ export function Prompt(props: PromptProps) {
     const variant = local.model.variant.current()
     let sessionID = props.sessionID
     let finishMoveProgress = false
+    // altimate_change start — track whether the submitted revision survived asynchronous creation
+    let changedDuringCreation = false
+    // altimate_change end
     if (sessionID == null) {
       const selectedWorkspace = workspace.selection()
       const workspaceID = selectedWorkspace?.type === "existing" ? selectedWorkspace.workspaceID : undefined
@@ -1257,13 +1260,14 @@ export function Prompt(props: PromptProps) {
       if (move.pending() && !directory) return false
       finishMoveProgress = Boolean(move.progress())
       // altimate_change start — keep edits made while selecting a workspace
-      if (draftChanged() || input.isDestroyed) {
+      if (draft.changed() || input.isDestroyed) {
         if (finishMoveProgress) move.finishSubmit()
         return false
       }
       // altimate_change end
 
-      const res = await sdk.client.session.create({
+      // altimate_change start — check the submitted revision when creation returns
+      const { result: res, changed } = await draft.after(sdk.client.session.create({
         directory,
         workspace: workspaceID,
         agent: agent.name,
@@ -1276,7 +1280,9 @@ export function Prompt(props: PromptProps) {
             }
           : undefined,
         // altimate_change end
-      })
+      }))
+      changedDuringCreation = changed
+      // altimate_change end
 
       if (res.error) {
         if (finishMoveProgress) move.finishSubmit()
@@ -1317,7 +1323,7 @@ export function Prompt(props: PromptProps) {
       }
       return false
     }
-    if (draftChanged() || input.isDestroyed) return keepEditedDraft()
+    if (changedDuringCreation || draft.changed() || input.isDestroyed) return keepEditedDraft()
     // altimate_change end
 
     // altimate_change start — restore auto-enhance-before-submit for normal prompts
@@ -1332,7 +1338,7 @@ export function Prompt(props: PromptProps) {
       const original = inputText
       toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
       const enhanced = await requestAutoEnhancedPrompt(sdk, original)
-      if (draftChanged() || input.isDestroyed) return keepEditedDraft()
+      if (draft.changed() || input.isDestroyed) return keepEditedDraft()
       if (enhanced !== original) {
         inputText = enhanced
         setStore("prompt", "input", enhanced)

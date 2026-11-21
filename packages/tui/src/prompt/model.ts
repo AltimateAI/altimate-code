@@ -40,5 +40,12 @@ export function resolveCommandAgent<T extends { name: string }>(agents: readonly
 
 export function captureDraftRevision(readDraft: () => { input: string; mode: string; parts: readonly unknown[] }) {
   const initial = JSON.stringify(readDraft())
-  return () => JSON.stringify(readDraft()) !== initial
+  const changed = () => JSON.stringify(readDraft()) !== initial
+  return {
+    changed,
+    async after<T>(operation: Promise<T>) {
+      const result = await operation
+      return { result, changed: changed() }
+    },
+  }
 }
