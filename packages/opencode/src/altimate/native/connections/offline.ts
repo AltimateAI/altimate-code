@@ -38,7 +38,7 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   if (!HOST_ADDRESSED.has(type) || config.replica_set) throw new Error(DENIED)
   const { port } = config
   if (port !== undefined) {
-    const numeric = typeof port === "string" && port.length > 0 && !/\D/.test(port) ? Number(port) : port
+    const numeric = typeof port === "string" && !/\D/.test(port) ? Number(port) : port
     if (typeof numeric !== "number" || !Number.isInteger(numeric) || numeric < 1 || numeric > 65535)
       throw new Error(DENIED)
   }
