@@ -795,19 +795,25 @@ export function deniedWriteMessage(input: {
   if (input.mongo) {
     return `${head} it is a MongoDB write (a write command, or an aggregate with a $out or $merge stage). Use a read command (find, aggregate, countDocuments, distinct) instead.`
   }
-  // Prefer a dialect that reads the text and names a concrete write over one that cannot parse it.
-  const writing = input.dialects.filter((d) => classifyAndCheck(input.sql, d).queryType === "write")
-  const dialect = writing.find((d) => !explainWrite(input.sql, d).unreadable) ?? writing[0]
-  const { reason, unreadable, unavailable } = explainWrite(input.sql, dialect)
-  // Without a warehouse, a query that only some reachable dialects call a write may be a read in the real one.
-  const someRead = input.dialects.some((d) => {
-    const result = classifyAndCheck(input.sql, d)
-    return result.queryType === "read" && !result.blocked
-  })
+  // Classify once per dialect. Prefer a dialect that reads the text and names a concrete write over one that
+  // cannot parse it.
+  const results = input.dialects.map((d) => ({ dialect: d, ...classifyAndCheck(input.sql, d) }))
+  const writing = results
+    .filter((result) => result.queryType === "write")
+    .map((result) => ({ dialect: result.dialect, explained: explainWrite(input.sql, result.dialect) }))
+  const chosen = writing.find((entry) => !entry.explained.unreadable) ?? writing[0]
+  const { reason, unreadable, unavailable } = chosen?.explained ?? explainWrite(input.sql, undefined)
+  // Without a warehouse (and off the dbt route, where a warehouse also moves the query off dbt), a query the
+  // reachable dialects disagree on, or cannot read, may be fine in the real warehouse's dialect.
+  const disagree = results.some((result) => result.queryType === "read" && !result.blocked)
   const dialectHint =
-    !input.warehouseGiven && !input.dbt && input.dialects.length > 1 && (unreadable || someRead)
-      ? " No warehouse was given, so the query was read in every dialect it could reach; pass warehouse to read it in that warehouse's dialect only."
-      : ""
+    input.warehouseGiven || input.dbt || input.dialects.length < 2
+      ? ""
+      : disagree
+        ? " No warehouse was given and the reachable dialects disagree on whether this is a write; pass warehouse to check it in that warehouse's dialect only."
+        : unreadable
+          ? " No warehouse was given, so the query was checked in every dialect it could reach; pass warehouse to check it in that warehouse's dialect only."
+          : ""
   const next = unavailable
     ? UNAVAILABLE_NEXT_STEP
     : unreadable

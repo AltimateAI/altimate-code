@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { classifyAndCheck, explainWrite, shellResidue } from "../../../src/altimate/tools/sql-classify"
 import { hardBlockRefusal, readSql, writeReason } from "../../../src/altimate/tools/read-only-sql"
 
@@ -175,6 +178,39 @@ describe("other read-only refusals carry the reason", () => {
     expect(open).not.toContain("cannot be overridden")
     expect(open).toContain("write a single quote as ''")
   })
+
+  test("a missing parser is reported as unavailable, not as a syntax error", async () => {
+    // The parser binding is read once at import, so stub it in a fresh process run outside the package
+    // (its test preload loads the classifier first; mock.module also leaks across files in one process).
+    const dir = mkdtempSync(join(tmpdir(), "guard-unavailable-"))
+    const src = join(import.meta.dir, "../../../src/altimate/tools")
+    writeFileSync(
+      join(dir, "unavailable.test.ts"),
+      `import { expect, mock, test } from "bun:test"
+mock.module("@altimateai/altimate-core", () => ({}))
+test("unavailable", async () => {
+  const { explainWrite, UNAVAILABLE_NEXT_STEP } = await import(${JSON.stringify(join(src, "sql-classify"))})
+  const { writeReason } = await import(${JSON.stringify(join(src, "read-only-sql"))})
+  const explained = explainWrite("SELECT 1", "postgres")
+  expect(explained.unavailable).toBe(true)
+  expect(explained.reason).not.toContain("could not read")
+  expect(writeReason("SELECT 1", "postgres")).toContain(UNAVAILABLE_NEXT_STEP)
+})
+`,
+    )
+    try {
+      const run = Bun.spawnSync(["bun", "test", "./unavailable.test.ts"], {
+        cwd: dir,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const output = run.stdout.toString() + run.stderr.toString()
+      expect(output).toContain("1 pass")
+      expect(run.exitCode).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
 
   test("a refusal that is not about writing stays as it was", () => {
     expect(writeReason("SELECT 1", "postgres")).toBe("")

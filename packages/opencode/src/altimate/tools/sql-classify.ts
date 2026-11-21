@@ -211,7 +211,7 @@ function classifyFallback(
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     // Escapes decoded too: dynamic SQL may run a literal such as '\x44ROP SCHEMA s'.
-    if (mentionsHardDenyAnywhere(sql)) cause ??= "DROP DATABASE, DROP SCHEMA or TRUNCATE words in text that cannot be fully read"
+    if (mentionsHardDenyAnywhere(sql)) cause ??= "hard-blocked words (such as DROP DATABASE or TRUNCATE) in text that cannot be fully read"
   } else {
     // Read with certainty: the statement words in code (literals and comments masked, each quoted
     // identifier a placeholder name, so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
@@ -232,7 +232,7 @@ function classifyFallback(
     // "exec"('...') and [exec]('...') count as calls.
     const dynamic = DYNAMIC_SQL.test(maskSql(lexical.tokens)) || DYNAMIC_SQL.test(maskSql(lexical.tokens, true))
     if (dynamic && mentionsHardDenyAnywhere(sql))
-      cause ??= "dynamic SQL (EXEC, PREPARE or DO) with DROP DATABASE, DROP SCHEMA or TRUNCATE in its text"
+      cause ??= "dynamic SQL (EXEC, PREPARE or DO) with hard-blocked words (such as DROP DATABASE or TRUNCATE) in its text"
   }
   return { queryType: "write", blocked: cause !== undefined, ...(cause && { cause }) }
 }

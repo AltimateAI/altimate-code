@@ -316,7 +316,7 @@ describe("denied write message branches", () => {
 
   test("a write in only one reachable dialect suggests passing a warehouse", () => {
     const split = { ...base, sql: "SELECT t.update FROM t", dialects: ["postgres", "clickhouse"], warehouseGiven: false }
-    expect(deniedWriteMessage(split)).toContain("pass warehouse")
+    expect(deniedWriteMessage(split)).toContain("reachable dialects disagree on whether this is a write; pass warehouse")
     expect(deniedWriteMessage({ ...split, warehouseGiven: true })).not.toContain("pass warehouse")
     // A write in every dialect gets no hint, and on the dbt route a warehouse would also move the query off dbt.
     expect(deniedWriteMessage({ ...split, sql: "DELETE FROM t" })).not.toContain("pass warehouse")
