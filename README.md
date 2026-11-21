@@ -88,7 +88,7 @@ altimate. Install the CLI above first — the plugins run it, they do not instal
 
 ```bash
 # Claude Code — from Altimate's marketplace, which has the current plugin
-# (the copy in Anthropic's plugin directory is an older pin)
+# (the copy in Anthropic's plugin directory is pinned at 1.0.0)
 claude plugin marketplace add AltimateAI/altimate-claude-plugin
 claude plugin install altimate-code@altimate-claude-plugin
 
