@@ -3,8 +3,9 @@ import { Bus } from "@/bus"
 import { Session } from "."
 import { SessionID, MessageID, PartID } from "./schema"
 import { Instance } from "../project/instance"
-// altimate_change — validateModelSelection names where an unavailable model came from
-import { Provider, validateModelSelection } from "../provider/provider"
+import { Provider } from "../provider/provider"
+// altimate_change — report an unavailable compaction model with its source
+import { ModelReport } from "../altimate/session/model-report"
 import { MessageV2 } from "./message-v2"
 import z from "zod"
 import { Token } from "../util/token"
@@ -1650,7 +1651,8 @@ export namespace SessionCompaction {
     const model = agent.model
       ? // altimate_change start — re-brand core ProviderV2.ID/ModelV2.ID to fork ProviderID/ModelID; name the
         // compaction agent's config when its model is unavailable or empty
-        await validateModelSelection(
+        await ModelReport.validateOrReport(
+          input.sessionID,
           { providerID: ProviderID.make(agent.model.providerID), modelID: ModelID.make(agent.model.modelID) },
           'agent "compaction" config (model)',
         )

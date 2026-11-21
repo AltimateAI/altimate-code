@@ -377,11 +377,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       if (passive && reportedInvalidModel === key) return false
       const from = source ? ` (from ${source})` : ""
       const fromConfig = source?.includes("config") === true
+      const empty = model.providerID ? `Empty model name in "${model.providerID}/"${from}` : `Empty model value${from}`
       const problem =
-        !model.providerID && !model.modelID
+        !model.modelID
           ? fromConfig
-            ? `Empty model value${from}: the model key is set to "". If it references an environment variable, check that the variable is set, or remove the key`
-            : `Empty model value${from}`
+            ? `${empty}: the model key is incomplete. If it references an environment variable, check that the variable is set, or remove the key`
+            : empty
           : `Model ${model.providerID}/${model.modelID} is not available${from}`
       const advice = fromConfig
         ? "Choose an available model with /models for this conversation; picking one does not change your config, so update that setting to make it permanent"

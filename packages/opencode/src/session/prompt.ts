@@ -25,7 +25,7 @@ import { ModelID, ProviderID } from "../provider/schema"
 // altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
 import { FreeTier } from "../altimate/free/client"
 // altimate_change — explain a missing Anthropic provider (Claude Pro/Max sign-in removed)
-import { modelSelectionErrorText } from "../altimate/provider/model-hint"
+import { ModelReport } from "../altimate/session/model-report"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -223,27 +223,7 @@ const RequestContinued = BusEvent.define(
 // altimate_change end
 
 // altimate_change start — share model-error guidance across session entry points
-function reportModelSelectionError(sessionID: SessionID, error: unknown) {
-  if (!Provider.ModelNotFoundError.isInstance(error)) return
-  ModelMetadata.markReported(error)
-  Bus.publish(Session.Event.Error, {
-    sessionID,
-    error: new NamedError.Unknown({ message: modelSelectionErrorText(error.data) }).toObject(),
-  })
-}
-
-// Validate a selected model, publishing guided text once and rethrowing the same error instance
-// so the async prompt route can recognize it as reported.
-export async function validateOrReport(
-  sessionID: SessionID,
-  model: { providerID: ProviderID; modelID: ModelID },
-  source: string,
-) {
-  return validateModelSelection(model, source).catch((error) => {
-    reportModelSelectionError(sessionID, error)
-    throw error
-  })
-}
+const { reportModelSelectionError, validateOrReport } = ModelReport
 // altimate_change end
 
 export namespace SessionPrompt {
@@ -3308,7 +3288,11 @@ export namespace SessionPrompt {
         agents.filter((a: any) => !a.hidden).map((a: any) => a.name),
       )
       const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-      throw new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
+      // altimate_change start — publish the failure so a synchronous prompt's empty reply is not silent
+      const unknown = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
+      Bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: unknown.toObject() })
+      throw unknown
+      // altimate_change end
     }
 
     // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)

@@ -8,8 +8,8 @@ import {
   acceptSubmissionModel,
   isServerReportedModelError,
   resolveCommandAgent,
+  resolveSubmissionModel,
   submissionModel,
-  submissionModelSource,
 } from "../../src/prompt/model"
 
 const current = { providerID: "local", modelID: "chat" }
@@ -200,15 +200,16 @@ test("an unavailable configured model shows the error with its source and opens 
   ).toBe(true)
 })
 
-test("each submission model source is named for the error and picker trigger", () => {
-  expect(submissionModelSource({ command: { name: "review", model: "x/y" }, currentSource: "CLI --model" })).toBe(
-    'command "/review" config (model)',
-  )
-  expect(submissionModelSource({ command: { name: "review", model: "" } })).toBe('command "/review" config (model)')
+test("each submission model source is named, and only chat-model sources let a pick override", () => {
+  const current = { providerID: "chat", modelID: "model" }
+  expect(resolveSubmissionModel({ command: { name: "review", model: "x/y" }, current, currentSource: "CLI --model" })).toEqual({
+    model: { providerID: "x", modelID: "y" },
+    source: 'command "/review" config (model)',
+    pickerCanOverride: false,
+  })
   expect(
-    submissionModelSource({ command: { name: "review" }, commandAgent: { name: "explore", model: { providerID: "x", modelID: "y" } } }),
-  ).toBe('agent "explore" config (model)')
+    resolveSubmissionModel({ command: { name: "review" }, commandAgent: { name: "explore", model: { providerID: "a", modelID: "b" } }, current }),
+  ).toEqual({ model: { providerID: "a", modelID: "b" }, source: 'agent "explore" config (model)', pickerCanOverride: false })
   for (const source of ["CLI --model", 'agent "builder" config (model)', "session history", "project or global config (model)"])
-    expect(submissionModelSource({ currentSource: source })).toBe(source)
-  expect(submissionModelSource({})).toBeUndefined()
+    expect(resolveSubmissionModel({ current, currentSource: source })).toEqual({ model: current, source, pickerCanOverride: true })
 })

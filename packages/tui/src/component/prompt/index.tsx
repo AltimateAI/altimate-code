@@ -6,7 +6,7 @@ import {
   isModelMetadataOnly,
   acceptSubmissionModel,
   isServerReportedModelError,
-  submissionModelSource,
+  resolveSubmissionModel,
   resolveCommandAgent,
   submissionModel,
 } from "../../prompt/model"
@@ -1212,10 +1212,16 @@ export function Prompt(props: PromptProps) {
         return false
       }
       // The draft stays and the picker opens; a pick applies to this conversation only.
+      const origin = resolveSubmissionModel({
+        command,
+        commandAgent,
+        current: chatModel,
+        currentSource: local.model.source(),
+      })
       const accepted = acceptSubmissionModel({
         model: selection.model,
-        source: submissionModelSource({ command, commandAgent, currentSource: local.model.source() }),
-        pickerCanOverride: command?.model === undefined && !commandAgent?.model,
+        source: origin.source,
+        pickerCanOverride: origin.pickerCanOverride,
         validate: (model, source) => local.model.validate(model, source),
         openPicker: () => {
           // Readiness is unknown while kv hydrates; retry once it settles instead of guessing.

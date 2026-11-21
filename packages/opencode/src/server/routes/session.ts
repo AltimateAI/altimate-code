@@ -955,7 +955,6 @@ export const SessionRoutes = lazy(() =>
           // the turn runs keeps main's empty 200 and reaches the client through the session error event.
           if (
             Provider.ModelNotFoundError.isInstance(error) ||
-            error instanceof StorageNotFoundError ||
             error instanceof Session.BusyError ||
             (error instanceof Error && error.name === "NotFoundError")
           )

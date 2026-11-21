@@ -106,7 +106,8 @@ const FREE_TIER_HEADER_TIMEOUT_MIN = 1_000
 
 // altimate_change start — retain selection provenance in model lookup errors
 export async function validateModelSelection(model: { providerID: ProviderID; modelID: ModelID }, source: string) {
-  if (!model.providerID && !model.modelID) throw new Provider.ModelNotFoundError({ ...model, source })
+  // An unset variable in "provider/${VAR}" leaves the model id empty; report it as an empty value.
+  if (!model.modelID) throw new Provider.ModelNotFoundError({ ...model, source })
   try {
     return await Provider.getModel(model.providerID, model.modelID)
   } catch (error) {

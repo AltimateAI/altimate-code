@@ -14,11 +14,12 @@ export function modelNotFoundHint(providerID: string | undefined, providerMissin
 
 export function modelNotFoundMessage(providerID: string | undefined, modelID: string | undefined, source?: string) {
   const sourceHint = source ? ` (from ${source})` : ""
-  if (providerID === "" && modelID === "") {
+  if (!modelID) {
+    const empty = providerID ? `Empty model name in "${providerID}/"${sourceHint}` : `Empty model value${sourceHint}`
     // An environment variable that is not set substitutes to "", the usual cause of an empty config value.
     if (source?.includes("config"))
-      return `Empty model value${sourceHint}: the model key is set to "". If it references an environment variable such as "\${ALTIMATE_MODEL}", check that the variable is set; otherwise set a provider/model-name value or remove the key.`
-    return `Empty model value${sourceHint}. Use a provider/model-name value.`
+      return `${empty}: the model key is incomplete. If it references an environment variable such as "\${ALTIMATE_MODEL}", check that the variable is set; otherwise set a provider/model-name value or remove the key.`
+    return `${empty}. Use a provider/model-name value.`
   }
   return `Model not found: ${providerID}/${modelID}${sourceHint}`
 }

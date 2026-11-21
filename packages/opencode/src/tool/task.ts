@@ -38,7 +38,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change start — name an agent's configured model as the source of an unavailable-model error
 import { Provider } from "@/provider/provider"
 import { modelSelectionErrorText } from "@/altimate/provider/model-hint"
-import { validateOrReport } from "../session/prompt"
+import { ModelReport } from "../altimate/session/model-report"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -463,6 +463,18 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         // altimate_change end
       }
       // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
+      // altimate_change start — report an agent's unavailable model against its config on the child session
+      // before any child prompt runs, foreground or background
+      if (ctx.extra?.useRecordedModel !== true && agent.model)
+        await ModelReport.validateOrReport(
+          session.id,
+          { providerID: ProviderID.make(model.providerID), modelID: ModelID.make(model.modelID) },
+          `agent "${agent.name}" config (model)`,
+        ).catch((error) => {
+          if (Provider.ModelNotFoundError.isInstance(error)) throw new Error(modelSelectionErrorText(error.data))
+          throw error
+        })
+      // altimate_change end
       const run = async (): Promise<TaskResult> => {
         ctx.abort.addEventListener("abort", cancel)
         using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
@@ -488,18 +500,6 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         }
         // altimate_change start — keep the inherited query cutoff scoped to this child prompt
         using queryBudget = defer(RunBudget.registerQueryDeadline(session.id, RunBudget.queryDeadline(ctx.sessionID)))
-        // altimate_change end
-        // altimate_change start — report an agent's unavailable model against its config on the child session,
-        // before its prompt would label it as a session request
-        if (ctx.extra?.useRecordedModel !== true && agent.model)
-          await validateOrReport(
-            session.id,
-            { providerID: ProviderID.make(model.providerID), modelID: ModelID.make(model.modelID) },
-            `agent "${agent.name}" config (model)`,
-          ).catch((error) => {
-            if (Provider.ModelNotFoundError.isInstance(error)) throw new Error(modelSelectionErrorText(error.data))
-            throw error
-          })
         // altimate_change end
         // altimate_change start — upstream_fix: return partial child findings after cancellation, even if its last turn is empty.
         let partialOutput: string | undefined

@@ -1,5 +1,28 @@
 import { parseModel, type ModelRef } from "../context/local"
 
+// One precedence for the submitted model, its source label and whether a conversation pick can
+// replace it, aligned with session.command: command model, then command agent, then the chat model.
+export function resolveSubmissionModel(input: {
+  command?: { name: string; model?: string }
+  commandAgent?: { name: string; model?: ModelRef }
+  current?: ModelRef
+  currentSource?: string
+}): { model?: ModelRef; source?: string; pickerCanOverride: boolean } {
+  if (input.command?.model !== undefined)
+    return {
+      model: parseModel(input.command.model),
+      source: `command "/${input.command.name}" config (model)`,
+      pickerCanOverride: false,
+    }
+  if (input.commandAgent?.model)
+    return {
+      model: input.commandAgent.model,
+      source: `agent "${input.commandAgent.name}" config (model)`,
+      pickerCanOverride: false,
+    }
+  return { model: input.current, source: input.currentSource, pickerCanOverride: true }
+}
+
 // Keep command overrides aligned with session.command's model precedence.
 export function submissionModel(input: {
   shell: boolean
@@ -16,8 +39,11 @@ export function submissionModel(input: {
     required: true,
     ...((input.command?.subtask === true || (input.commandAgentMode === "subagent" && input.command?.subtask !== false))
       ? { subtask: true, parent: input.current } : {}),
-    model:
-      input.command?.model !== undefined ? parseModel(input.command.model) : (input.commandAgentModel ?? input.current),
+    model: resolveSubmissionModel({
+      command: input.command,
+      commandAgent: input.commandAgentModel ? { name: "", model: input.commandAgentModel } : undefined,
+      current: input.current,
+    }).model,
   }
 }
 
@@ -95,13 +121,3 @@ export function acceptSubmissionModel<Model>(input: {
   return false
 }
 
-// Names where a submission's model came from, matching session.command's precedence.
-export function submissionModelSource(input: {
-  command?: { name: string; model?: string }
-  commandAgent?: { name: string; model?: unknown }
-  currentSource?: string
-}) {
-  if (input.command?.model !== undefined) return `command "/${input.command.name}" config (model)`
-  if (input.commandAgent?.model) return `agent "${input.commandAgent.name}" config (model)`
-  return input.currentSource
-}
