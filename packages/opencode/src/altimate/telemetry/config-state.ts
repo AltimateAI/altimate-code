@@ -2,6 +2,7 @@ import { Database as SQLite } from "bun:sqlite"
 import path from "path"
 import fs from "fs/promises"
 import { existsSync } from "fs"
+import { pathToFileURL } from "url"
 import * as Effect from "effect/Effect"
 import { InstanceRef } from "@/effect/instance-ref"
 import { attach } from "@/effect/run-service"
@@ -124,7 +125,7 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
   // no writer is attached, so read it as immutable (which reports its journal mode as "delete").
   const immutable = !existsSync(`${dbPath}-wal`)
   const db = immutable
-    ? new SQLite(`file:${dbPath}?immutable=1`, { readonly: true })
+    ? new SQLite(`${pathToFileURL(dbPath).href}?immutable=1`, { readonly: true }) // escapes `#`, `?`, `%`
     : new SQLite(dbPath, { readonly: true })
   try {
     db.exec("PRAGMA busy_timeout = 0")

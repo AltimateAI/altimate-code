@@ -495,6 +495,59 @@ describe("telemetry opt-out", () => {
     expect(names).toEqual([])
   })
 
+  test("a later opt-out from the worker stops telemetry this thread already enabled", async () => {
+    const names = recordIngestion()
+    signOut()
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
+    await Telemetry.adoptOptOut("disabled")
+    trackStartup()
+    await Telemetry.flush()
+    await Telemetry.shutdown()
+    expect(Telemetry.isEnabled()).toBe(false)
+    expect(names).toEqual([])
+  })
+
+  test("the first init inside a project is not held back by an earlier unreadable read outside one", async () => {
+    const names = recordIngestion()
+    signOut()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    expect(Telemetry.optOutState()).toBe("pending")
+
+    // Within the 30 s backoff: a read outside a project is throttled, one inside a project is not.
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    expect(Telemetry.optOutState()).toBe("pending")
+    await using dir = await tmpdir({ git: true })
+    await Instance.provide({ directory: dir.path, fn: () => Telemetry.init() })
+    expect(Telemetry.optOutState()).toBe("enabled")
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("an unresolved init settling during a shutdown leaves the re-init published", async () => {
+    signOut()
+    let release!: (value: Awaited<ReturnType<typeof Config.get>>) => void
+    configSpy.mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    void Telemetry.init()
+    await Bun.sleep(10)
+    const shutdown = Telemetry.shutdown()
+    const reinit = Telemetry.init()
+    // The first read now comes back unreadable while the shutdown waits for it.
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+    configSpy.mockResolvedValue({})
+    release({})
+    await shutdown
+    unresolved.mockRestore()
+    // A caller arriving now joins the re-init instead of starting a second one.
+    expect(Telemetry.init()).toBe(reinit)
+    await reinit
+    expect(Telemetry.optOutState()).toBe("enabled")
+  })
+
   test("the retry throttle still applies after an earlier session enabled telemetry", async () => {
     recordIngestion()
     signOut()

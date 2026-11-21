@@ -2342,13 +2342,19 @@ export namespace Telemetry {
    * so where its own probe cannot read the config (a remote or organization config) it uses the
    * worker's answer. Does nothing once this thread has decided, or while the other has not. */
   export function adoptOptOut(state: "pending" | "enabled" | "disabled"): Promise<void> {
-    if (gate !== "pending" || state === "pending") return Promise.resolve()
+    if (state === "pending" || gate === "disabled") return Promise.resolve()
     if (state === "disabled") {
+      // An opt-out wins even after this thread enabled telemetry (a config reload in the worker):
+      // stop the running lifecycle too, so nothing more is sent from this process.
       decide("disabled")
       buffer = []
       droppedEvents = 0
+      enabled = false
+      if (flushTimer) clearInterval(flushTimer)
+      flushTimer = undefined
       return Promise.resolve()
     }
+    if (gate !== "pending") return Promise.resolve()
     adopted = "enabled"
     return (initPromise ?? Promise.resolve()).catch(() => {}).then(() => init())
   }
@@ -2564,12 +2570,14 @@ export namespace Telemetry {
     // wait for the new init rather than joining the dying one.
     if (shutdownPromise) {
       if (!reinitPromise) {
-        reinitPromise = shutdownPromise
+        const chained: Promise<void> = shutdownPromise
           .catch(() => {})
           .then(doInit)
+          .then(() => releaseUnresolved(chained)) // altimate_change — see releaseUnresolved
           .finally(() => {
             reinitPromise = undefined
           })
+        reinitPromise = chained
         // Publish it as initPromise too. Without this, a caller arriving after the shutdown had
         // settled — but before this chained doInit() finished — saw an empty initPromise and
         // started a SECOND one, replacing the flush timer and racing over the buffer.
@@ -2591,9 +2599,20 @@ export namespace Telemetry {
     if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at) {
       if (configRetry.instance || !TelemetryConfig.instanceDirectory()) return Promise.resolve()
     }
-    return (initPromise ??= doInit())
+    if (!initPromise) {
+      const started: Promise<void> = doInit().then(() => releaseUnresolved(started))
+      initPromise = started
+    }
+    return initPromise
     // altimate_change end
   }
+
+  // altimate_change start — an init left unresolved stays pre-init so the next init() retries; only
+  // the init that still owns initPromise unpublishes it (not a re-init published during a shutdown)
+  function releaseUnresolved(owner: Promise<void>) {
+    if (!initDone && initPromise === owner) initPromise = undefined
+  }
+  // altimate_change end
 
   async function doInit() {
     // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
@@ -2620,6 +2639,7 @@ export namespace Telemetry {
         // An opted-out user may be behind it: hold the buffer (capped) and send nothing.
         unresolved = true
         configRetry = { at: Date.now() + CONFIG_RETRY_MS, instance }
+        log.info("telemetry held: opt-out unresolved", { instance })
         return
       }
       decide("enabled")
@@ -2673,7 +2693,6 @@ export namespace Telemetry {
       buffer = []
     } finally {
       // altimate_change start — unresolved: stay pre-init so events keep buffering and init() retries
-      if (unresolved) initPromise = undefined
       initDone = !unresolved
       // altimate_change end
       // altimate_change start — the stall watcher also writes each stall to opencode.log, which `debug bundle`
