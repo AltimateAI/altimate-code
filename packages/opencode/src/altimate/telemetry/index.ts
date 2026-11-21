@@ -15,6 +15,7 @@ import fs from "fs"
 import path from "path"
 import os from "os"
 import { fileLog } from "@/altimate/util/file-log"
+import { Global } from "../../global" // altimate_change — test-isolated home for the legacy marker cleanup
 
 const log = Log.create({ service: "telemetry" })
 
@@ -2352,6 +2353,7 @@ export namespace Telemetry {
       enabled = false
       if (flushTimer) clearInterval(flushTimer)
       flushTimer = undefined
+      activeFlushAbort?.abort() // a batch already taken must not post after the opt-out
       return Promise.resolve()
     }
     if (gate !== "pending") return Promise.resolve()
@@ -2624,7 +2626,7 @@ export namespace Telemetry {
     legacyMarkersRemoved = true
     for (const name of ["telemetry-opted-out", "telemetry-opted-out.sending"]) {
       try {
-        fs.rmSync(path.join(os.homedir(), ".altimate", name), { force: true, recursive: true })
+        fs.rmSync(path.join(Global.Path.home, ".altimate", name), { force: true, recursive: true })
       } catch {
         // Best effort: a leftover marker is harmless.
       }
@@ -2992,7 +2994,7 @@ export namespace Telemetry {
     if (operationId) (event as any)._operation_id = operationId
     // An event held while the opt-out is unknown can outlive this session: it keeps the session and
     // project it was tracked under instead of taking the next one's at flush.
-    if (gate === "pending") {
+    if (!initDone) {
       const held = event as { session_id?: unknown; project_id?: unknown }
       if (held.session_id === undefined && sessionId) held.session_id = sessionId
       if (held.project_id === undefined && projectId) held.project_id = projectId
@@ -3221,10 +3223,9 @@ export namespace Telemetry {
     shuttingDown = false
     enabled = false
     appInsights = undefined
-    // altimate_change start — while the opt-out is unresolved (no decision yet, or this session's read
-    // failed) nothing was flushed: keep the events for a later init in this process to send or drop.
-    // At process exit they go with the process.
-    if (gate !== "pending" && !configRetry) {
+    // altimate_change start — while the opt-out is undecided nothing was flushed: keep the events for a
+    // later init in this process to send or drop. At process exit they go with the process.
+    if (gate !== "pending") {
       buffer = []
       droppedEvents = 0
     }

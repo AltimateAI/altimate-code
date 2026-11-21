@@ -157,9 +157,13 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     // Any source that fails to read, parse or validate fails Config's whole load, so the answer
     // is unknown however the other sources set it.
     let unknown = false
+    // Managed config is merged after the remote and organization configs, so a setting there wins.
+    let readingManaged = false
+    let managedSetting = false
     const take = (data: unknown) => {
       const disabled = (data as { telemetry?: { disabled?: unknown } } | undefined)?.telemetry?.disabled
       if (disabled === undefined) return
+      if (readingManaged) managedSetting = true
       if (typeof disabled !== "boolean") unknown = true
       else value = disabled
     }
@@ -216,6 +220,7 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     const inline = flagEnv("OPENCODE_CONFIG_CONTENT")
     if (inline) await readText(inline, "OPENCODE_CONFIG_CONTENT", directory)
 
+    readingManaged = true
     const managedDir = ConfigManaged.managedConfigDir()
     if (existsSync(managedDir)) for (const file of DIR_FILES) await readFile(path.join(managedDir, file))
     const managed = await ConfigManaged.readManagedPreferences().catch(() => {
@@ -225,7 +230,7 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     if (managed) await readText(managed.text, managed.source, path.dirname(managed.source))
 
     if (unknown) return "unreadable"
-    if (await remoteMayDisable(value)) return "unreadable"
+    if (!managedSetting && (await remoteMayDisable(value))) return "unreadable"
     return value === true ? "disabled" : "enabled"
   } catch {
     return "unreadable"

@@ -779,7 +779,7 @@ for (const failure of ["account", "organization"] as const) {
             expect(telemetryCalls).toEqual([])
             expect(orgLoads).toBe(1)
 
-            // Retries are throttled while the config stays unreadable.
+            // A repeat init inside the Instance reads its cached config: no second org fetch.
             await Telemetry.init()
             expect(orgLoads).toBe(1)
 

@@ -6,6 +6,7 @@ import path from "path"
 import { Database } from "@opencode-ai/core/database/database"
 import { Auth } from "../../../src/auth"
 import { Config } from "../../../src/config/config"
+import { ConfigManaged } from "../../../src/config/managed"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
 import { Instance } from "../../../src/project/instance"
@@ -575,6 +576,87 @@ describe("telemetry opt-out", () => {
     } finally {
       unresolved.mockRestore()
     }
+  })
+
+  test("a project whose opt-out never resolved does not have its events sent under another project", async () => {
+    const names = recordIngestion()
+    signOut()
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const unresolvedConfig = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockImplementation(async () => (TelemetryConfig.instanceDirectory() === b.path ? unresolvedConfig : {}))
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockImplementation((config) => config === unresolvedConfig)
+    try {
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.shutdown()
+      await Instance.provide({
+        directory: b.path,
+        fn: async () => {
+          await Telemetry.init()
+          Telemetry.track(errorEvent("B"))
+        },
+      })
+      await Telemetry.shutdown()
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.flush()
+      expect(names).toEqual([])
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("a managed telemetry setting settles the startup read even with an organization selected", async () => {
+    const dbPath = path.join(home, "account.db")
+    const db = new SQLite(dbPath)
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE account (id TEXT PRIMARY KEY);
+      CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT);
+      INSERT INTO account VALUES ('account');
+      INSERT INTO account_state VALUES (1, 'account', 'org');
+    `)
+    db.close()
+    databaseSpy.mockReturnValue(dbPath)
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+
+    const managed = path.join(home, "managed")
+    mkdirSync(managed)
+    const managedDir = spyOn(ConfigManaged, "managedConfigDir").mockReturnValue(managed)
+    try {
+      writeFileSync(path.join(managed, "altimate-code.json"), '{ "telemetry": { "disabled": false } }')
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+      writeFileSync(path.join(managed, "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
+      expect(await TelemetryConfig.disabledState(home)).toBe("disabled")
+    } finally {
+      managedDir.mockRestore()
+    }
+  })
+
+  test("an opt-out adopted mid-flush aborts the batch already in flight", async () => {
+    signOut()
+    let aborted = false
+    let started!: () => void
+    const inFlight = new Promise<void>((resolve) => (started = resolve))
+    fetchSpy.mockImplementation(Object.assign(
+      (_url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+        started()
+        return new Promise<Response>((_, reject) => {
+          request?.signal?.addEventListener("abort", () => {
+            aborted = true
+            reject(new Error("aborted"))
+          }, { once: true })
+        })
+      },
+      { preconnect: fetch.preconnect },
+    ))
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    trackStartup()
+    const flushing = Telemetry.flush()
+    await inFlight
+    await Telemetry.adoptOptOut("disabled")
+    await flushing
+    expect(aborted).toBe(true)
   })
 
   test("the opt-out marker files earlier versions wrote are removed", async () => {
