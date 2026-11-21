@@ -457,6 +457,8 @@ export const layer = Layer.effect(
 
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {
+        // altimate_change — a failed migration can still leave the parsed configuration usable.
+        let parsedLegacy = false
         yield* Effect.promise(() =>
           import(pathToFileURL(legacy).href, { with: { type: "toml" } })
             .then(async (mod) => {
@@ -466,12 +468,14 @@ export const layer = Layer.effect(
               result["$schema"] = "https://altimate.ai/config.json"
               // altimate_change end
               result = mergeConfig(result, rest)
+              // altimate_change — only read and parse failures leave the config unresolved.
+              parsedLegacy = true
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
             // altimate_change start — preserve the failure for the telemetry gate
             .catch(() => {
-              incompleteGlobals.add(result)
+              if (!parsedLegacy) incompleteGlobals.add(result)
             }),
             // altimate_change end
         )
@@ -964,12 +968,13 @@ export const layer = Layer.effect(
 
     // altimate_change start — reload partial config for the current instance on telemetry retry
     const get = Effect.fn("Config.get")(function* (retryTelemetry = false) {
-      const cached = retryTelemetry && (yield* InstanceState.has(state))
-      const config = yield* InstanceState.use(state, (s) => s.config)
-      if (!cached || !telemetryConfigUnresolved(config)) return config
+      const read = InstanceState.use(state, (s) => s.config)
+      if (!retryTelemetry || !(yield* InstanceState.has(state))) return yield* read
+      const cached = yield* Effect.exit(read)
+      if (Exit.isSuccess(cached) && !telemetryConfigUnresolved(cached.value)) return cached.value
       yield* invalidateGlobal
       yield* InstanceState.invalidate(state)
-      return yield* InstanceState.use(state, (s) => s.config)
+      return yield* read
     })
     // altimate_change end
 

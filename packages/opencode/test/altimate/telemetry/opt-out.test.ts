@@ -11,6 +11,10 @@ import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
 
 const CS = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
 const ENV = [
+  "NODE_ENV",
+  "BUN_TEST",
+  "VITEST",
+  "JEST_WORKER_ID",
   "OPENCODE_TEST_HOME",
   "APPLICATIONINSIGHTS_CONNECTION_STRING",
   "ALTIMATE_TELEMETRY_DISABLED",
@@ -49,6 +53,8 @@ describe("telemetry opt-out", () => {
       saved[key] = process.env[key]
       delete process.env[key]
     }
+    // Exercise the production opt-out behavior with both transports intercepted.
+    process.env.NODE_ENV = "production"
     process.env.OPENCODE_TEST_HOME = home
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = CS
     Telemetry.setConfigDirectory(home)
@@ -138,6 +144,7 @@ describe("telemetry opt-out", () => {
 
   test("opt-out takes precedence over the test force flag and explicit sink", async () => {
     process.env.ALTIMATE_TELEMETRY_DISABLED = "TRUE"
+    process.env.NODE_ENV = "test"
     process.env.ALTIMATE_TELEMETRY_FORCE = "true"
     await expectSilentLifecycle()
   })

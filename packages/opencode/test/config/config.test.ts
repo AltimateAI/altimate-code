@@ -723,9 +723,11 @@ test("telemetry sends held events after an organization config fetch recovers", 
   const directory = await tmpdir()
   const savedSink = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
   const savedOptOut = process.env.ALTIMATE_TELEMETRY_DISABLED
+  const savedLegacyOptOut = process.env.OPENCODE_DISABLE_TELEMETRY
   process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
     "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/"
   delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  delete process.env.OPENCODE_DISABLE_TELEMETRY
   let recovered = false
   let orgLoads = 0
   const account = Layer.mock(Account.Service)({
@@ -791,9 +793,25 @@ test("telemetry sends held events after an organization config fetch recovers", 
     else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedSink
     if (savedOptOut === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
     else process.env.ALTIMATE_TELEMETRY_DISABLED = savedOptOut
+    if (savedLegacyOptOut === undefined) delete process.env.OPENCODE_DISABLE_TELEMETRY
+    else process.env.OPENCODE_DISABLE_TELEMETRY = savedLegacyOptOut
     await directory[Symbol.asyncDispose]()
   }
 })
+
+it.instance("a telemetry retry reloads a repaired config after a cached load failure", () =>
+  Effect.gen(function* () {
+    const { directory } = yield* TestInstance
+    const configPath = path.join(directory, "opencode.json")
+    yield* FSUtil.use.writeWithDirs(configPath, "{")
+    const failed = yield* Config.use.get().pipe(Effect.exit)
+    expect(Exit.isFailure(failed)).toBe(true)
+
+    yield* FSUtil.use.writeWithDirs(configPath, JSON.stringify({ telemetry: { disabled: true } }))
+    const recovered = yield* Config.use.get(true)
+    expect(recovered.telemetry?.disabled).toBe(true)
+  }),
+)
 
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {
