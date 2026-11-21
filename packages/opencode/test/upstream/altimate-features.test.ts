@@ -407,6 +407,14 @@ describe("altimate features: telemetry fail-safe init", () => {
     expect(config).toContain("ALTIMATE_TELEMETRY_DISABLED")
   })
 
+  test("both CLI project loaders settle an opt-out the startup read left open", async () => {
+    // Behaviour is tested in opt-out.test.ts through bootstrap(); this pins the effectCmd loader too.
+    const bootstrap = await readSrc("cli", "bootstrap.ts")
+    const effectCmd = await readSrc("cli", "effect-cmd.ts")
+    expect(bootstrap).toMatch(/Instance\.restore\(ctx, async \(\) => \{\s*await Telemetry\.settleInProject\(\)\s*return cb\(\)/)
+    expect(effectCmd).toMatch(/Instance\.restore\(ctx, async \(\) => \{\s*await Telemetry\.settleInProject\(\)\s*return AppRuntime\.runPromise\(opts\.handler/)
+  })
+
   test("the TUI main thread adopts the worker's resolved opt-out", async () => {
     const tui = await readSrc("cli", "cmd", "tui.ts")
     const worker = await readSrc("cli", "tui", "worker.ts")

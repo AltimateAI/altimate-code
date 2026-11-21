@@ -2336,6 +2336,13 @@ export namespace Telemetry {
   export function awaitingConfig() {
     return gate === "pending" && configRetry !== undefined
   }
+  /** For a CLI command that has just loaded its project: the startup init ran before the project
+   * existed, and if it could not settle the opt-out (a remote or organization config), read it now
+   * from the full config, so a command that starts no session neither drops nor leaks those events. */
+  export async function settleInProject(): Promise<void> {
+    await settledOptOutState() // the startup init is not awaited; let it finish first
+    if (awaitingConfig()) await init().catch(() => {})
+  }
   /** Called each time this thread decides the opt-out, for another thread to adopt. */
   export function onOptOutDecided(listener: (state: "enabled" | "disabled") => void): () => void {
     decisionListeners.add(listener)
@@ -2384,8 +2391,8 @@ export namespace Telemetry {
     return buffer.length
   }
   // The test preload resets the gate between tests through this, without importing this module. Only
-  // under a test runner: in a shipped process nothing else can reopen a decided opt-out.
-  if (process.env.NODE_ENV === "test" || process.env.BUN_TEST) {
+  // when that preload asked for it: in a shipped process nothing else can reopen a decided opt-out.
+  if (process.env.ALTIMATE_TELEMETRY_TEST_HOOKS === "1") {
     ;(globalThis as Record<symbol, unknown>)[Symbol.for("altimate.telemetry.resetGateForTest")] = resetGateForTest
   }
   /** Test seam: end the unreadable-config retry backoff so the next init() re-resolves. */

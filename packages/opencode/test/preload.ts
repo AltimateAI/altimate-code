@@ -9,6 +9,9 @@ import { afterAll } from "bun:test"
 import { afterEach, beforeEach } from "bun:test"
 // altimate_change end
 
+// altimate_change — telemetry exposes its between-test gate reset only when this is set (see below)
+process.env.ALTIMATE_TELEMETRY_TEST_HOOKS = "1"
+
 // Set XDG env vars FIRST, before any src/ imports
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
 await fs.mkdir(dir, { recursive: true })
