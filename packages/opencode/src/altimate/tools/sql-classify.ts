@@ -92,7 +92,7 @@ function hasQueryWriteClause(sql: string, dialect?: string): boolean {
   // must be a whole unquoted identifier directly before the dot: `1. INTO t` and `0x1.INTO t` are a
   // number followed by SELECT INTO, and anything else stays a write. The lookbehind runs only where a
   // keyword matched, so long masked literals are not rescanned at every position.
-  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<!(?:^|[^\w$])[A-Za-z_][\w$]*\.(?:INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
+  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<!(?:^|[^\w$.])[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*\.(?:INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
 }
 
 const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*)$/i
@@ -226,8 +226,12 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
  * engine would run `SELECT ... DELETE FROM t` as two statements however a parser reads it. */
 function batchedStatement(masked: string, dialect?: string): string | undefined {
   if (!/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return undefined
-  // A name qualified by a whole unquoted identifier (t.update, t.into) cannot start a statement.
-  return BATCH_STATEMENT.exec(masked.replace(/((?:^|[^\w$])[A-Za-z_][\w$]*\.)[A-Za-z_][\w$]*/g, "$1_"))?.[0]
+  // A name qualified by a whole unquoted identifier (t.update, s.t.into) cannot start a statement:
+  // every part after the first of a dotted name (s.t.update) is a name.
+  const names = masked.replace(/((?:^|[^\w$.])[A-Za-z_][\w$]*)((?:\.[A-Za-z_][\w$]*)+)/g, (_, head: string, rest: string) =>
+    head + rest.replace(/[A-Za-z_][\w$]*/g, "_"),
+  )
+  return BATCH_STATEMENT.exec(names)?.[0]
 }
 
 // T-SQL statements that can follow a read in the same batch. Words that are also common column names

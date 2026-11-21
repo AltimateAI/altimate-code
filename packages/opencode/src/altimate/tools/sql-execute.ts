@@ -221,7 +221,8 @@ export const SqlExecuteTool = Tool.define(
               })
             }
             // altimate_change start - SQL write access control
-            // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
+            // Permission checks OUTSIDE the execution try/catch: a rule denial of sql_execute_write is rethrown
+            // with its reason below, and every other permission error propagates unchanged
             // MongoDB warehouses take JSON command documents; the SQL classifier would read
             // every one as a write. Dispatch the normalized `{command, collection}` form.
             const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
@@ -742,7 +743,7 @@ function classifyEvery(sql: string, dialects: (string | undefined)[]) {
 // altimate_change start — a denied write says why and how to proceed
 /** The error a read-only agent gets when its query counts as a write: the reason, then what to do next,
  * so the agent fixes the query instead of resending it. */
-function deniedWriteMessage(input: {
+export function deniedWriteMessage(input: {
   sql: string
   dialects: (string | undefined)[]
   jinja: boolean

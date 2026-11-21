@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { PermissionNext } from "../../../src/permission/next"
 import { SessionID, MessageID } from "../../../src/session/schema"
-import { SqlExecuteTool } from "../../../src/altimate/tools/sql-execute"
+import { SqlExecuteTool, deniedWriteMessage } from "../../../src/altimate/tools/sql-execute"
 import { classifyAndCheck, isScratchSafeWrite } from "../../../src/altimate/tools/sql-classify"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
@@ -57,6 +57,7 @@ describe("reads are classified as reads in every dialect", () => {
     "string literal with write words": "SELECT * FROM orders WHERE status = 'DELETED' OR note = 'insert into x'",
     "identifiers containing write words": "SELECT update_ts, created_by, deleted_at FROM orders",
     "qualified columns named like write keywords": "SELECT o.update, o.delete, o.insert, o.merge FROM orders o",
+    "three-part names ending in a write keyword": "SELECT s.o.update FROM s.o",
     "CTE": "WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM a) SELECT * FROM b",
     "EXPLAIN of a read": "EXPLAIN SELECT * FROM orders",
     "leading whitespace": "\n\n   SELECT 1",
@@ -94,6 +95,7 @@ describe("writes stay writes", () => {
     "SELECT INTO after a column and a number ending in a dot": "SELECT o.a, 2. INTO copy_of_orders FROM orders o",
     "SELECT INTO after a hex number ending in a dot": "SELECT 0x1.INTO copy_of_orders FROM orders",
     "SELECT INTO after a spaced qualifier": "SELECT o. INTO copy_of_orders FROM orders o",
+    "SELECT INTO after a float with an exponent letter": "SELECT 1.e.INTO copy_of_orders FROM orders",
     "write followed by shell residue": "DELETE FROM orders 2>/dev/null",
     "unparseable text": "SELECT FROM WHERE (((",
   }
@@ -181,5 +183,23 @@ describe("sql_execute on a read-only agent", () => {
     await expect(tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any)).rejects.toThrow(
       "rejected by test",
     )
+  })
+})
+
+describe("denied write message branches", () => {
+  const base = { sql: "SELECT 1", dialects: ["postgres"], jinja: false, mongo: false, scratch: false, warehouseGiven: true }
+
+  test("Jinja asks for plain SQL", () => {
+    expect(deniedWriteMessage({ ...base, sql: "SELECT * FROM {{ ref('x') }}", jinja: true })).toContain("Send plain SQL without Jinja")
+  })
+
+  test("a MongoDB write asks for a read command", () => {
+    expect(deniedWriteMessage({ ...base, sql: '{"command":"insertOne"}', mongo: true })).toContain("Use a read command")
+  })
+
+  test("an unreadable query without a warehouse suggests passing one", () => {
+    const message = deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((", dialects: ["postgres", "snowflake"], warehouseGiven: false })
+    expect(message).toContain("pass warehouse")
+    expect(deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((" })).not.toContain("pass warehouse")
   })
 })
