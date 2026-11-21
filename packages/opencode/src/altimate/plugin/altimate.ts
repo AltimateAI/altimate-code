@@ -2,6 +2,7 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
 import { randomBytes } from "crypto"
 import path from "path" // altimate_change — compare the handoff project with the Instance
+import { Filesystem } from "@/util/filesystem" // altimate_change — canonicalize as Instance.provide does
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
@@ -76,6 +77,15 @@ const log = Log.create({ service: "altimate-plugin" })
 // and `cli_version` are strings, treat `cli_version: "local"` as a valid dev
 // build, and treat the payload as untrusted (anyone can craft a URL). An absent
 // `machine_id` means "do not attribute" — it must never be aliased on.
+// altimate_change — the Instance's directory is canonical (symlinks resolved); compare like with like
+function canonicalDirectory(directory: string): string {
+  try {
+    return Filesystem.resolve(directory)
+  } catch {
+    return path.resolve(directory)
+  }
+}
+
 /** `directory`: the project the command acts on, whose config may opt out; the process's working
  * directory when the command has none (`auth login`). */
 export async function buildCliContext(machineIdPath?: string, directory?: string): Promise<string> {
@@ -92,7 +102,7 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
     const instance = TelemetryConfig.instanceDirectory()
     // A handoff for another project than the one this Instance serves: that project's own files
     // may opt out, so they must allow it too.
-    const otherProject = Boolean(instance && directory && path.resolve(directory) !== instance)
+    const otherProject = Boolean(instance && directory && canonicalDirectory(directory) !== instance)
     if (loaded) {
       disabled = loaded !== "enabled" || (otherProject && (await TelemetryConfig.disabledState(directory)) !== "enabled")
     } else if (instance) {

@@ -162,7 +162,9 @@ describe("buildCliContext", () => {
     })
 
     test("inside a project, omits machine_id for another project whose own files opt out", async () => {
-      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      for (const key of ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"]) {
+        if (process.env[key] !== undefined) return // an inherited env opt-out would short-circuit before this branch
+      }
       await using current = await tmpdir({ git: true })
       await using other = await tmpdir({ git: true })
       fs.mkdirSync(path.join(other.path, ".altimate-code"))
@@ -170,6 +172,9 @@ describe("buildCliContext", () => {
       await using dir = await tmpdir()
       const idPath = path.join(dir.path, "machine-id")
       fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      // The same call for the Instance's own project keeps the id, so the omission comes from the new branch.
+      const own = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, current.path) })
+      expect(Object.prototype.hasOwnProperty.call(JSON.parse(Buffer.from(own, "base64url").toString("utf8")), "machine_id")).toBe(true)
       const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) })
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
