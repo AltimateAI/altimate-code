@@ -127,7 +127,16 @@ describe("other read-only refusals carry the reason", () => {
   })
 
   test("a hard-blocked statement is named as such", () => {
-    expect(writeReason("SELECT 1; DROP DATABASE prod", "postgres")).toContain("statement 2 of 2 is a hard-blocked statement")
+    expect(writeReason("SELECT 1; DROP DATABASE prod", "postgres")).toContain(
+      "statement 2 of 2 is a hard-blocked statement (DROP DATABASE)",
+    )
+    // The matched rule is named by a fixed label, never with SQL text.
+    expect(writeReason("SELECT 1; TRUNCATE TABLE secret_t", "postgres")).toContain("(TRUNCATE)")
+    expect(writeReason("DROP SCHEMA s", "postgres")).toContain("it holds a hard-blocked statement (DROP SCHEMA)")
+    expect(writeReason("SELECT 1 /*! + 1 */", "mysql")).toContain("(an executable comment)")
+    const nested = writeReason("SELECT * FROM query('DROP SCHEMA secret_s')", "duckdb")
+    expect(nested).toContain("(SQL run from a string literal)")
+    expect(nested).not.toContain("secret_s")
     // An unclosed quote holding a blocked word names the quote first.
     const reason = writeReason("SELECT a FROM t WHERE n = 'do not truncate", "postgres")
     expect(reason.indexOf("unterminated")).toBeGreaterThan(-1)
@@ -135,6 +144,17 @@ describe("other read-only refusals carry the reason", () => {
     expect(reason).not.toContain("cannot be allowed")
     // A real hard block outside the open quote is not described as sitting inside it.
     expect(writeReason("DROP DATABASE x; SELECT 'abc", "postgres")).toContain("inside that quoted text or outside it")
+  })
+
+  test("a SELECT ... INTO the parser cannot read is a write, not a syntax error", () => {
+    for (const sql of ["SELECT a FROM t INTO OUTFILE '/tmp/x'", "SELECT a FROM t LIMIT 1 INTO @v"]) {
+      const reason = explainWrite(sql, "mysql").reason
+      expect(reason).toContain("INTO clause")
+      expect(reason).not.toContain("could not read")
+    }
+    // INTO inside a literal or after a dot is not an INTO clause.
+    expect(explainWrite("SELECT 'into' FROM WHERE", "postgres").reason).toContain("could not read")
+    expect(explainWrite("SELECT t.into FROM WHERE", "postgres").reason).toContain("could not read")
   })
 
   test("a refusal that is not about writing stays as it was", () => {

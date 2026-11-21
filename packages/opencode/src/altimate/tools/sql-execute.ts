@@ -252,8 +252,11 @@ export const SqlExecuteTool = Tool.define(
             const blocked = classification.blocked || (jinja && mentionsHardDenyAnywhere(sql))
             const query = mongo?.normalized ?? sql
             if (blocked) {
+              // Name the matched rule, or the unreadable quote that made a word count, for the dialect that blocked it.
+              const blockedIn = mongo ? -1 : dialects.findIndex((d) => classifyAndCheck(sql, d).blocked)
+              const why = blockedIn >= 0 ? writeReason(sql, dialects[blockedIn]) : ""
               throw new Error(
-                "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
+                `DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.${why}`,
               )
             }
             if (budget && queryType !== "read") {

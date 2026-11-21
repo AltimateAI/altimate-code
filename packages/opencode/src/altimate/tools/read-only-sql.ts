@@ -1,4 +1,4 @@
-import { UNAVAILABLE_NEXT_STEP, hasExecutableComment, classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
+import { UNAVAILABLE_NEXT_STEP, hardBlockCause, hasExecutableComment, classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
 import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls } from "./sql-functions"
 import { hasSideEffectFunction } from "./sql-function-policy"
@@ -86,9 +86,8 @@ export function writeReason(sql: string, dialect?: string): string {
     const statements = tokenizeSql(sql, dialect).complete ? statementsOf(sql, dialect) : []
     const index = statements.length > 1 ? statements.findIndex((statement) => classifyAndCheck(statement, dialect).blocked) : -1
     const where = index >= 0 ? `statement ${index + 1} of ${statements.length} is` : "it holds"
-    const hard =
-      ` It is refused because ${where} a hard-blocked statement, such as DROP DATABASE, DROP SCHEMA, TRUNCATE, SQL run` +
-      " from a string literal or an executable comment; those never run and cannot be allowed."
+    const cause = hardBlockCause(index >= 0 ? statements[index] : sql, dialect)
+    const hard = ` It is refused because ${where} a hard-blocked statement (${cause}); hard-blocked statements never run and cannot be allowed.`
     // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone, inside the
     // unreadable text or outside it: name the unreadable text first, since fixing it may be the whole fix.
     const untilClosed =

@@ -170,6 +170,17 @@ describe("sql_execute on a read-only agent", () => {
     expect(error).toContain("Fix the query")
   })
 
+  test("a hard block names its rule, or the open quote that made a word count", async () => {
+    const quote = await run("SELECT * FROM t WHERE note = 'don't truncate'")
+    expect(quote.error).toContain("blocked for safety")
+    expect(quote.error).toContain("unterminated")
+    expect(quote.error).toContain("write a single quote as ''")
+    expect(quote.asked).toHaveLength(0)
+    const real = await run("SELECT 1; DROP DATABASE secret_db")
+    expect(real.error).toContain("statement 2 of 2 is a hard-blocked statement (DROP DATABASE)")
+    expect(real.error).not.toContain("secret_db")
+  })
+
   test("a write names the statement and suggests a read", async () => {
     const { error } = await run("SELECT 1; DELETE FROM orders")
     expect(error).toContain("statement 2 of 2 is not a read (DELETE)")

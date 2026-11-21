@@ -594,6 +594,18 @@ export function hasExecutableComment(sql: string, dialect?: string): boolean {
   return tokenizeSql(sql, dialect).tokens.some(({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text))
 }
 
+// Which hard-block rule a blocked statement matched, as a fixed label (no SQL text): DROP DATABASE, SCHEMA,
+// CATALOG or NAMESPACE, TRUNCATE, an executable comment, or else SQL run from a string literal.
+export function hardBlockCause(sql: string, dialect?: string): string {
+  const lexical = tokenizeSql(sql, dialect)
+  const code = lexical.complete ? namesKept(lexical.tokens) : ""
+  const drop = /\bDROP\s+(?:(?:EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b/i.exec(code)
+  if (drop) return `DROP ${drop[1].toUpperCase()}`
+  if (/\bTRUNCATE\b(?!\s*\()/i.test(code)) return "TRUNCATE"
+  if (hasExecutableComment(sql, dialect)) return "an executable comment"
+  return "SQL run from a string literal"
+}
+
 // Statement keywords that may name an UNKNOWN statement in a refusal.
 const STATEMENT_KEYWORDS = new Set([
   "ATTACH", "DETACH", "INSTALL", "LOAD", "SET", "RESET", "PRAGMA", "COPY", "CALL", "EXEC", "EXECUTE", "GRANT", "REVOKE",
@@ -660,6 +672,11 @@ export function explainWrite(
           `${/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") ? "SQL Server runs a statement there even without a separator" : "this dialect is not modeled, so it may run as a statement"}` +
           "; run each statement in its own call, or quote it if it is a column name",
       )
+    }
+    // A SELECT ... INTO the parser cannot read (MySQL INTO OUTFILE or @var) is still a write: say so, not "fix the syntax".
+    const code = maskSql(tokenizeSql(statement, dialect).tokens)
+    if (result.parseError && /^\s*(SELECT|WITH)\b/i.test(code) && /(?<![\w$.]\.?)\bINTO\b/i.test(code) && hasQueryWriteClause(statement, dialect)) {
+      return writes(`${where} has an INTO clause (SELECT ... INTO a table, file or variable), which writes; drop INTO to read`)
     }
     if (result.parseError) {
       return unreadable(

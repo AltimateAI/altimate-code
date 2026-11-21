@@ -8,6 +8,7 @@ import * as Precedence from "../workspace/precedence"
 import { validateWarehouseName } from "./input-validation"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck, isSingleQuery } from "./sql-classify"
+import { writeReason } from "./read-only-sql"
 import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 
 /**
@@ -108,7 +109,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         /^(EXPLAIN|ANALY[SZ]E|VERBOSE)\b|^\((?![(\s]*(SELECT|WITH|VALUES|TABLE|FROM)\b)/i.test(statements[0] ?? "") ||
         (lexical.complete && /^\s*;/.test(maskSql(lexical.tokens)))
       let error: string | undefined
-      if (blocked) error = "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
+      if (blocked) error = `DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety.${writeReason(args.sql, dialect)}`
       else if (!lexical.complete)
         error = lexical.backslash
           ? "The SQL has a backslash in a quoted string, which this dialect can read as an escape, so it is not explained. Build that character with the dialect's character function instead (CHR(92) or CHAR(92), depending on the dialect) to get a plan."
