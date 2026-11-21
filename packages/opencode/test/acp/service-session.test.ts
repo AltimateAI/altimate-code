@@ -853,6 +853,19 @@ describe("ACP service sessions", () => {
     }),
   )
 
+  effectIt.effect("does not restore a reply whose parent row is outside the fetched page", () =>
+    Effect.gen(function* () {
+      const { service } = makeService([
+        {
+          info: { id: "msg_reply", parentID: "msg_older", role: "assistant", providerID: "test", modelID: "test-model", variant: "high" },
+          parts: [],
+        },
+      ])
+      const resumed = yield* service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] })
+      expect(select(resumed, "effort")?.currentValue).not.toBe("high")
+    }),
+  )
+
   it("closes local ACP state and aborts the backing session best-effort", async () => {
     const { service, aborts } = makeService()
     const created = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))

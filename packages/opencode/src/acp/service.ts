@@ -1217,6 +1217,7 @@ function restoreFromMessages(items: readonly { info: MessageInfo; parts?: readon
   const isDisplayOnly = (item: (typeof items)[number]) =>
     item.info.role === "user" && ModelMetadata.isModelMetadataOnly((item.parts ?? []) as MessageV2.Part[])
   const displayOnly = new Set(items.filter(isDisplayOnly).flatMap((item) => (item.info.id ? [item.info.id] : [])))
+  const userIds = new Set(items.flatMap((item) => (item.info.role === "user" && item.info.id ? [item.info.id] : [])))
   const user = items.findLast(
     (item) => item.info.role === "user" && item.info.model?.providerID && item.info.model.modelID && !isDisplayOnly(item),
   )?.info
@@ -1231,7 +1232,11 @@ function restoreFromMessages(items: readonly { info: MessageInfo; parts?: readon
 
   // altimate_change — replies to display-only rows carry the same display-only model
   const assistant = messages.findLast(
-    (message) => message.providerID && message.modelID && !(message.parentID && displayOnly.has(message.parentID)),
+    // A reply whose parent fell outside the fetched page cannot be shown to be a real prompt's reply.
+    (message) =>
+      message.providerID &&
+      message.modelID &&
+      (!message.parentID || (userIds.has(message.parentID) && !displayOnly.has(message.parentID))),
   )
   if (assistant?.providerID && assistant.modelID) {
     return {

@@ -27,6 +27,11 @@ const globalConfigFiles = [
   ...["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"].map((file) => path.join(Global.Path.config, file)),
   // altimate_change — also clean the server's global config dir (ServerGlobal) used by the alignment test.
   path.join(ServerGlobal.Path.config, "opencode.json"),
+  // altimate_change — branded global files and migration backups written by the precedence test
+  ...["opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"].flatMap((file) => [
+    path.join(Global.Path.config, `${file}.tui-migration.bak`),
+    ...(file.startsWith("altimate-code") ? [path.join(Global.Path.config, file)] : []),
+  ]),
 ]
 const managedConfigDir = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR
 
