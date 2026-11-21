@@ -34,6 +34,15 @@ describe("shellResidue", () => {
     expect(shellResidue("SELECT * FROM t | grep -i private | head", "postgres")).toBeUndefined()
   })
 
+  test("a long literal before a syntax error is explained in linear time", () => {
+    const sql = `SELECT '${"x".repeat(200_000)}' FROM WHERE`
+    const start = performance.now()
+    explainWrite(sql, "postgres")
+    shellResidue(sql, "postgres")
+    // Quadratic trimming took about 4 s at 80k characters; linear work stays far below this.
+    expect(performance.now() - start).toBeLessThan(3000)
+  })
+
   test("a crafted tail is scanned in linear time", () => {
     const start = performance.now()
     shellResidue(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")

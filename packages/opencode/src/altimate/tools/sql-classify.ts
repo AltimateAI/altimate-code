@@ -537,8 +537,8 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
 // (`2>/dev/null`, `2>&1`) can sit anywhere, even before LIMIT. At the very end there may also be one pipe
 // into a shell command (`| head -20`) or one redirect into a file (`> out.csv`). A file target must start
 // like a path (/, ./, ../, ~/) or end in a known output extension, so comparisons such as `x > 2`,
-// `x > 1.5` and `x > t.total` never match. Every pattern is anchored with no nested repetition, so a
-// crafted tail cannot make the scan backtrack.
+// `x > 1.5` and `x > t.total` never match. The tail patterns run on at most 400 characters and have no
+// nested repetition.
 const SHELL_REDIRECT = /\s(?:[12]|&)?>>?[ \t]*(?:&[12]|\/dev\/null)(?![\w/])/g
 const SHELL_PIPE_TAIL = /\|[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*$/i
 const SHELL_FILE_TAIL =
@@ -559,7 +559,10 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
     cuts.push({ start: match.index!, end: match.index! + match[0].length, label: match[0].replace(/\s+/g, "") })
   }
   // Only the last 400 characters can hold a tail; strip trailing ; and whitespace first.
-  const end = masked.replace(/[\s;]+$/, "").length
+  // A backward loop, not a `$`-anchored regex: masked literals can be long runs of spaces, and a regex
+  // would retry the end-of-text match from every position in them.
+  let end = masked.length
+  while (end > 0 && /[\s;]/.test(masked[end - 1])) end--
   const offset = Math.max(0, end - 400)
   const window = masked.slice(offset, end)
   const pipe = SHELL_PIPE_TAIL.exec(window)
@@ -628,6 +631,12 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length}` : "it"
     // Where statements need no separator, a statement keyword is the real reason, even if it breaks the parse.
     const batchKeyword = batchedStatement(maskSql(tokenizeSql(statement, dialect).tokens), dialect)
+    // The classifier itself could not run: no rewrite of the SQL can help.
+    if (result.parseError === "SQL parser is unavailable" || result.parseError === "SQL parser returned an invalid statement list") {
+      return writes(
+        "the SQL classifier is unavailable in this installation, so no query can be proven read-only; changing the SQL will not help",
+      )
+    }
     if (result.parseError && batchKeyword) {
       return writes(
         `${where} holds the statement keyword ${batchKeyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
