@@ -111,11 +111,13 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
   name: Schema.String,
 }) {}
 
+// altimate_change start — offline policy refusals are client errors
 export class OfflinePolicyError extends Schema.TaggedErrorClass<OfflinePolicyError>()(
   "MCP.OfflinePolicyError",
   { message: Schema.String },
   { httpApiStatus: 400 },
 ) {}
+// altimate_change end
 
 type MCPClient = Client
 
@@ -330,8 +332,10 @@ export interface Interface {
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   // altimate_change end
+  // altimate_change start — offline policy refusals
   readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }, OfflinePolicyError>
   readonly connect: (name: string) => Effect.Effect<void, NotFoundError | OfflinePolicyError>
+  // altimate_change end
   readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
   // altimate_change start — MCP.remove: full runtime teardown + ToolsChanged (merge dropped it)
   readonly remove: (name: string) => Effect.Effect<void>
@@ -429,6 +433,7 @@ export const layer = Layer.effect(
       key: string,
       mcp: ConfigMCPV1.Info & { type: "remote" },
     ) {
+      // altimate_change start — offline mode refuses remote MCP servers
       if (Offline.enabled() && !Offline.isLocalURL(mcp.url)) {
         return {
           client: undefined as MCPClient | undefined,
@@ -436,6 +441,7 @@ export const layer = Layer.effect(
           transport: undefined as TransportLabel | undefined,
         }
       }
+      // altimate_change end
       const url = remoteURL(mcp.url)
       if (!url) {
         return {
@@ -1092,8 +1098,10 @@ export const layer = Layer.effect(
     })
     // altimate_change end
 
+    // altimate_change start — offline policy refusal
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
       yield* enforceOfflinePolicy(mcp)
+    // altimate_change end
       // altimate_change start — see claim
       const seq = ++lifecycleSeq
       // altimate_change end

@@ -2,7 +2,9 @@ import path from "path"
 import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Global } from "./global"
+// altimate_change start — offline mode
 import { Flag, offlineModeEnabled } from "./flag/flag"
+// altimate_change end
 import { Flock } from "./util/flock"
 import { Hash } from "./util/hash"
 import { FSUtil } from "./fs-util"

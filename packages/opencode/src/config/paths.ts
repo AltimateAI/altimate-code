@@ -210,7 +210,9 @@ async function substitute(
   }
   // altimate_change end
 
+  // altimate_change start — offline opt-in probe reads text without file substitution
   if (opts.expandFiles === false) return text
+  // altimate_change end
   const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
   if (!fileMatches.length) return text
 
@@ -270,10 +272,12 @@ export async function parseText(
   text: string,
   input: ParseSource,
   missing: "error" | "empty" = "error",
+  // altimate_change start — offline opt-in probe options
   opts: { track?: boolean; expandFiles?: boolean } = {},
 ): Promise<any> {
   const configSource = source(input)
   text = await substitute(text, input, missing, opts)
+  // altimate_change end
 
   const errors: JsoncParseError[] = []
   const data = parseJsonc(text, errors, { allowTrailingComma: true })

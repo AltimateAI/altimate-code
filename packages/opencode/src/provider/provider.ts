@@ -2028,7 +2028,9 @@ export namespace Provider {
         continue
       }
       const result = await fn(data)
+      // altimate_change start — offline keeps the endpoint-bound loader
       if (result && (result.autoload || providers[providerID] || permittedOfflineLoader)) {
+      // altimate_change end
         if (result.getModel) modelLoaders[providerID] = result.getModel
         if (result.vars) varsLoaders[providerID] = result.vars
         const opts = result.options ?? {}

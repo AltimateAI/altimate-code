@@ -97,8 +97,10 @@ export namespace Discovery {
           if (!data) return []
 
           const list = data.skills.filter((skill) => {
+            // altimate_change start — reject unsafe skill names and file paths
             if (skill.name.includes("/") || !SkillDiscovery.isSafeRelativePath(skill.name)) return false
             if (!skill.files.every(SkillDiscovery.isSafeRelativePath)) return false
+            // altimate_change end
             if (!skill.files.includes("SKILL.md")) {
               log.warn("skill entry missing SKILL.md", { url: index, skill: skill.name })
               return false
@@ -110,7 +112,9 @@ export namespace Discovery {
             list,
             (skill) =>
               Effect.gen(function* () {
+                // altimate_change start — per-source cache for offline reuse
                 const root = path.join(sourceCache, skill.name)
+                // altimate_change end
 
                 yield* Effect.forEach(
                   skill.files,
@@ -126,7 +130,9 @@ export namespace Discovery {
             { concurrency: skillConcurrency },
           )
 
+          // altimate_change start — per-source cache for offline reuse
           const available = dirs.filter((dir): dir is string => dir !== null)
+          // altimate_change end
           // altimate_change start — store the directory list for a later offline run
           yield* fs.writeWithDirs(indexPath, JSON.stringify(available)).pipe(Effect.ignore)
           // altimate_change end

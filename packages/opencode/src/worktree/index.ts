@@ -15,7 +15,9 @@ import { Slug } from "@opencode-ai/core/util/slug"
 import { errorMessage } from "../util/error"
 import { EventV2 } from "@opencode-ai/core/event"
 import { GlobalBus } from "@/bus/global"
+// altimate_change start — offline Git transport policy
 import { Git, localGitEnv } from "@/git"
+// altimate_change end
 import { Effect, Layer, Path, Schema, Scope, Context } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { NodePath } from "@effect/platform-node"
@@ -176,7 +178,9 @@ export const layer: Layer.Layer<
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
         const result = yield* appProcess.run(
+          // altimate_change start — offline Git transport policy
           ChildProcess.make("git", args, { cwd: opts?.cwd, env: localGitEnv(), extendEnv: true, stdin: "ignore" }),
+          // altimate_change end
         )
         return {
           code: result.exitCode,
