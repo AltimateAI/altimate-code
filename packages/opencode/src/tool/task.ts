@@ -462,8 +462,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
         // altimate_change end
       }
-      // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
-      // Report an agent's unavailable model against its config on the child session
+      // altimate_change start — report an agent's unavailable model against its config on the child session
       // before any child prompt runs, foreground or background; a cancelled parent turn reports the cancellation
       ctx.abort.throwIfAborted()
       if (ctx.extra?.useRecordedModel !== true && agent.model)
@@ -475,6 +474,8 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           if (Provider.ModelNotFoundError.isInstance(error)) throw new Error(modelSelectionErrorText(error.data))
           throw error
         })
+      // altimate_change end
+      // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
       const run = async (): Promise<TaskResult> => {
         ctx.abort.addEventListener("abort", cancel)
         using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
