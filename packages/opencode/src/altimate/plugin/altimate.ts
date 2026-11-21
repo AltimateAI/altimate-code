@@ -1,6 +1,7 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
 import { randomBytes } from "crypto"
+import path from "path" // altimate_change — compare the handoff project with the Instance
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
@@ -88,9 +89,13 @@ export async function buildCliContext(machineIdPath?: string, directory?: string
     // Server routes run inside Instance.provide(), so the full config resolves during an
     // ordinary browser authorize().
     const loaded = await TelemetryConfig.loadedState().catch(() => undefined)
+    const instance = TelemetryConfig.instanceDirectory()
+    // A handoff for another project than the one this Instance serves: that project's own files
+    // may opt out, so they must allow it too.
+    const otherProject = Boolean(instance && directory && path.resolve(directory) !== instance)
     if (loaded) {
-      disabled = loaded !== "enabled"
-    } else if (TelemetryConfig.instanceDirectory()) {
+      disabled = loaded !== "enabled" || (otherProject && (await TelemetryConfig.disabledState(directory)) !== "enabled")
+    } else if (instance) {
       disabled = true
     } else {
       // The paths that skip instance bootstrap: `altimate auth login <url>` and the

@@ -161,6 +161,20 @@ describe("buildCliContext", () => {
       expect(await contextHasMachineId(project.path)).toBe(true)
     })
 
+    test("inside a project, omits machine_id for another project whose own files opt out", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await using current = await tmpdir({ git: true })
+      await using other = await tmpdir({ git: true })
+      fs.mkdirSync(path.join(other.path, ".altimate-code"))
+      fs.writeFileSync(path.join(other.path, ".altimate-code", "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) })
+      const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+      expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
+
     test("inside a project, omits machine_id when the full config fails to load", async () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       await using project = await tmpdir({ git: true })
