@@ -75,8 +75,10 @@ export const {
       provider_auth: Record<string, ProviderAuthMethod[]>
       agent: Agent[]
       command: Command[]
-      // altimate_change — commands finish loading independently of ancillary startup work
-      commandsReady: boolean
+      // altimate_change start — local actions can start once agents and commands are known
+      agentsLoading: boolean
+      commandCatalog: { workspace?: string; status: "loading" | "ready" | "failed" }
+      // altimate_change end
       permission: {
         [sessionID: string]: PermissionRequest[]
       }
@@ -150,8 +152,10 @@ export const {
       // altimate_change end
       question: {},
       command: [],
-      // altimate_change — do not guess whether an unknown slash command uses a model
-      commandsReady: false,
+      // altimate_change start — do not infer the meaning of a slash command from stale data
+      agentsLoading: true,
+      commandCatalog: { status: "loading" },
+      // altimate_change end
       provider: [],
       provider_default: {},
       session: [],
@@ -710,9 +714,36 @@ export const {
     const exit = useExit()
     const args = useArgs()
 
+    // altimate_change start — refresh commands independently of the provider catalog
+    let commandRequest = 0
+    let agentRequest = 0
+    async function refreshCommands() {
+      const workspace = project.workspace.current()
+      const request = ++commandRequest
+      const isCurrent = () => request === commandRequest && workspace === project.workspace.current()
+      setStore("commandCatalog", { workspace, status: "loading" })
+      try {
+        const response = await sdk.client.command.list({ workspace }, { throwOnError: true })
+        if (!isCurrent()) return
+        if (!response.data) throw new Error("No command catalog was returned")
+        batch(() => {
+          setStore("command", reconcile(response.data))
+          setStore("commandCatalog", { workspace, status: "ready" })
+        })
+      } catch {
+        if (isCurrent()) setStore("commandCatalog", { workspace, status: "failed" })
+      }
+    }
+    // altimate_change end
+
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
+      // altimate_change start — load local command prerequisites without waiting for providers
+      const catalog = refreshCommands()
+      const agentLoad = ++agentRequest
+      setStore("agentsLoading", true)
+      // altimate_change end
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 
@@ -727,7 +758,23 @@ export const {
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
         .catch(() => emptyConsoleState)
-      const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true })
+      // altimate_change start — publish agents as soon as they arrive
+      const agentsCurrent = () => agentLoad === agentRequest && workspace === project.workspace.current()
+      const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true }).then(
+        (response) => {
+          if (!agentsCurrent()) return
+          batch(() => {
+            setStore("agent", reconcile(response.data ?? []))
+            setStore("agentsLoading", false)
+          })
+        },
+        (error) => {
+          // A failed refresh keeps the previous agent list usable instead of blocking every submit.
+          if (agentsCurrent()) setStore("agentsLoading", false)
+          throw error
+        },
+      )
+      // altimate_change end
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
       await Promise.all([
         providersPromise,
@@ -743,7 +790,6 @@ export const {
           const providerListResponse = providerListPromise.then((x) => x.data!)
           const capabilitiesResponse = capabilitiesPromise
           const consoleStateResponse = consoleStatePromise
-          const agentsResponse = agentsPromise.then((x) => x.data ?? [])
           const configResponse = configPromise.then((x) => x.data!)
           const sessionListResponse = args.continue ? sessionListPromise : undefined
 
@@ -752,7 +798,6 @@ export const {
             providerListResponse,
             capabilitiesResponse,
             consoleStateResponse,
-            agentsResponse,
             configResponse,
             ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
@@ -760,9 +805,8 @@ export const {
             const providerList = responses[1]
             const capabilities = responses[2]
             const consoleState = responses[3]
-            const agents = responses[4]
-            const config = responses[5]
-            const sessions = responses[6]
+            const config = responses[4]
+            const sessions = responses[5]
 
             batch(() => {
               setStore("provider", reconcile(providers.providers))
@@ -770,7 +814,6 @@ export const {
               setStore("provider_next", reconcile(providerList))
               setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
               setStore("console_state", reconcile(consoleState))
-              setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
               if (sessions !== undefined) setStore("session", reconcile(sessions))
             })
@@ -782,14 +825,8 @@ export const {
           void Promise.all([
             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            // altimate_change start — slash commands depend on this list, ordinary chat does not
-            sdk.client.command.list({ workspace }).then((x) => {
-              batch(() => {
-                setStore("command", reconcile(x.data ?? []))
-                setStore("commandsReady", true)
-              })
-            }),
-            // altimate_change end
+            // altimate_change — catalog loading starts before other bootstrap requests
+            catalog,
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
             sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
             sdk.client.experimental.resource
@@ -830,6 +867,13 @@ export const {
       get status() {
         return store.status
       },
+      // altimate_change start — check workspace identity even before bootstrap restarts
+      get commandStatus() {
+        const catalog = store.commandCatalog
+        return catalog.workspace === project.workspace.current() ? catalog.status : "loading"
+      },
+      refreshCommands,
+      // altimate_change end
       get ready() {
         if (startup.skipInitialLoading) return true
         return store.status !== "loading"

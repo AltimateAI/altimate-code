@@ -1,6 +1,12 @@
-import { expandEnhancedPrompt, expandTrackedPastedText } from "../../src/prompt/part"
+import { expandEnhancedPrompt, expandPastedTextPlaceholders, expandTrackedPastedText } from "../../src/prompt/part"
 import { expect, test } from "bun:test"
-import { captureDraftRevision, isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../src/prompt/model"
+import {
+  captureDraftRevision,
+  catalogGate,
+  isModelMetadataOnly,
+  resolveCommandAgent,
+  submissionModel,
+} from "../../src/prompt/model"
 
 const current = { providerID: "local", modelID: "chat" }
 const commandAgentModel = { providerID: "local", modelID: "agent" }
@@ -103,7 +109,35 @@ test("expands pasted placeholders after enhancement and preserves originals if t
   const placeholder = "[Pasted ~10 lines]"
   const parts = [{ type: "text", text: "original pasted text", source: { text: { value: placeholder } } }]
   const originalExpanded = "Review original pasted text"
-  expect(expandEnhancedPrompt(`Please review ${placeholder} carefully.`, parts, originalExpanded))
+  const original = `Review ${placeholder}`
+  expect(expandEnhancedPrompt(original, `Please review ${placeholder} carefully.`, parts, originalExpanded))
     .toBe("Please review original pasted text carefully.")
-  expect(expandEnhancedPrompt("Please review it carefully.", parts, originalExpanded)).toBe(originalExpanded)
+  expect(expandEnhancedPrompt(original, "Please review it carefully.", parts, originalExpanded)).toBe(originalExpanded)
+})
+
+
+test("inserts pasted dollar tokens literally without reprocessing inserted markers", () => {
+  const first = { type: "text", text: "$& plus [Pasted ~20 lines]", source: { text: { value: "[Pasted ~10 lines]" } } }
+  const second = { type: "text", text: "$$ and $'", source: { text: { value: "[Pasted ~20 lines]" } } }
+  const original = "[Pasted ~10 lines] [Pasted ~20 lines]"
+  expect(expandPastedTextPlaceholders(first.source.text.value, [first])).toBe(first.text)
+  expect(expandEnhancedPrompt(original, `Review ${original}`, [first, second], "fallback"))
+    .toBe(`Review ${first.text} ${second.text}`)
+})
+
+test("keeps the original draft if a pasted marker is ambiguous before or after enhancement", () => {
+  const marker = "[Pasted ~10 lines]"
+  const part = { type: "text", text: "pasted", source: { text: { value: marker } } }
+  expect(expandEnhancedPrompt(`${marker} ${marker}`, marker, [part], "original with literal")).toBe("original with literal")
+  expect(expandEnhancedPrompt(marker, `${marker} ${marker}`, [part], "original")).toBe("original")
+  expect(expandEnhancedPrompt(`${marker} ${marker}`, `${marker} ${marker}`, [part, part], "two pastes")).toBe("two pastes")
+})
+
+test("shell and MCP admin submissions wait only for catalogs, never for model readiness", () => {
+  expect(submissionModel({ shell: true, text: "pwd" })).toEqual({ required: false })
+  expect(catalogGate({ agentsLoading: false, needsCommands: false, commandStatus: "loading" })).toBe("ready")
+  expect(catalogGate({ agentsLoading: true, needsCommands: false, commandStatus: "ready" })).toBe("wait")
+  expect(catalogGate({ agentsLoading: false, needsCommands: true, commandStatus: "loading" })).toBe("wait")
+  expect(catalogGate({ agentsLoading: false, needsCommands: true, commandStatus: "failed" })).toBe("commands-failed")
+  expect(catalogGate({ agentsLoading: false, needsCommands: true, commandStatus: "ready" })).toBe("ready")
 })

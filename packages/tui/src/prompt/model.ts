@@ -49,3 +49,20 @@ export function captureDraftRevision(readDraft: () => { input: string; mode: str
     },
   }
 }
+
+// A deferred submit is cancelled when either the draft or the prompt mode changes.
+export function deferredSubmitRevision<Prompt extends object>(prompt: Prompt, mode: string) {
+  return { ...prompt, mode }
+}
+
+// Agent and command catalogs gate every submission; model readiness is checked only after
+// `submissionModel` says the submission needs a model, so shell and MCP admin forms never wait on it.
+export function catalogGate(input: {
+  agentsLoading: boolean
+  needsCommands: boolean
+  commandStatus: "loading" | "ready" | "failed"
+}): "ready" | "wait" | "commands-failed" {
+  if (input.needsCommands && input.commandStatus === "failed") return "commands-failed"
+  if (input.agentsLoading || (input.needsCommands && input.commandStatus === "loading")) return "wait"
+  return "ready"
+}

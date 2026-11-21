@@ -1,5 +1,12 @@
 // altimate_change start — resolve the model used by a submission
-import { captureDraftRevision, isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../prompt/model"
+import {
+  captureDraftRevision,
+  catalogGate,
+  deferredSubmitRevision,
+  isModelMetadataOnly,
+  resolveCommandAgent,
+  submissionModel,
+} from "../../prompt/model"
 // altimate_change end
 import {
   BoxRenderable,
@@ -1088,12 +1095,16 @@ export function Prompt(props: PromptProps) {
   // `unwrap` matches the same store-to-plain-object pattern already used elsewhere in this file,
   // e.g. the prompt stash below.)
   const [waitForCommands, setWaitForCommands] = createSignal(false)
+  const [waitForModel, setWaitForModel] = createSignal(false)
   const modelPending = () => sync.status === "loading" || !local.model.ready
   const deferredSubmit = createDeferredRetry(
-    () => readyPending() || modelPending() || (waitForCommands() && !sync.data.commandsReady),
+    () =>
+      sync.data.agentsLoading ||
+      (waitForCommands() && sync.commandStatus === "loading") ||
+      (waitForModel() && (modelPending() || readyPending())),
     () => void submit(),
     {
-      getRevision: () => ({ ...unwrap(store.prompt), mode: store.mode }),
+      getRevision: () => deferredSubmitRevision(unwrap(store.prompt), store.mode),
     },
   )
   // altimate_change end
@@ -1153,7 +1164,21 @@ export function Prompt(props: PromptProps) {
     const commandName = promptText.startsWith("/") ? promptText.split("\n")[0].split(" ")[0].slice(1) : undefined
     const needsCommands = currentMode !== "shell" && commandName !== undefined
     setWaitForCommands(needsCommands)
-    if (modelPending() || (needsCommands && !sync.data.commandsReady)) {
+    setWaitForModel(false)
+    const gate = catalogGate({
+      agentsLoading: sync.data.agentsLoading,
+      needsCommands,
+      commandStatus: sync.commandStatus,
+    })
+    if (gate === "commands-failed") {
+      toast.show({
+        message: "Could not load workspace commands. Press Enter to retry after the list refreshes.",
+        variant: "error",
+      })
+      void sync.refreshCommands()
+      return false
+    }
+    if (gate === "wait") {
       deferredSubmit.defer()
       return false
     }
@@ -1171,6 +1196,11 @@ export function Prompt(props: PromptProps) {
       current: chatModel,
     })
     if (selection.required) {
+      setWaitForModel(true)
+      if (modelPending()) {
+        deferredSubmit.defer()
+        return false
+      }
       if (selection.model && !local.model.validate(selection.model)) return false
       if (selection.subtask) {
         if (!selection.parent) {
@@ -1342,7 +1372,7 @@ export function Prompt(props: PromptProps) {
       const enhanced = await requestAutoEnhancedPrompt(sdk, original)
       if (draft.changed() || input.isDestroyed) return keepEditedDraft()
       if (enhanced !== original) {
-        inputText = expandEnhancedPrompt(enhanced, store.prompt.parts, promptText)
+        inputText = expandEnhancedPrompt(original, enhanced, store.prompt.parts, promptText)
       }
     }
 
