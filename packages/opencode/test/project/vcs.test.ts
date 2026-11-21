@@ -158,31 +158,24 @@ describe("Vcs", () => {
 
 describe("Vcs diff", () => {
   worktreeIt.instance(
-    "offline VCS status and diff do not execute Git working-tree filters",
+    "offline VCS shows local changes and refuses remote Git operations",
     Effect.gen(function* () {
       const { directory } = yield* TestInstance
-      const marker = path.join(directory, "filter-ran")
-      yield* write(path.join(directory, ".gitattributes"), "*.txt filter=offline-fixture\n")
       yield* write(path.join(directory, "data.txt"), "before\n")
       yield* git(directory, ["add", "."])
-      yield* git(directory, ["commit", "-m", "test filter fixture"])
-      yield* git(directory, ["config", "filter.offline-fixture.clean",
-        `printf 'filter ran' > '${marker.replaceAll("\\", "/")}'; cat`])
+      yield* git(directory, ["commit", "-m", "test offline fixture"])
       yield* write(path.join(directory, "data.txt"), "after\n")
       const prior = process.env.ALTIMATE_OFFLINE
       process.env.ALTIMATE_OFFLINE = "1"
       try {
         const vcs = yield* Vcs.Service
-        const state = yield* vcs.status()
-        const diff = yield* vcs.diff("git")
-        const prefixed = yield* Git.Service.use((git) => git.run(
-          ["-c", "core.quotepath=false", "diff", "--numstat", "HEAD"],
+        expect(yield* vcs.status()).not.toEqual([])
+        expect(yield* vcs.diff("git")).not.toEqual([])
+        const result = yield* Git.Service.use((git) => git.run(
+          ["-c", "core.quotepath=false", "fetch", "https://unreachable.invalid/repo"],
           { cwd: directory },
         ))
-        expect(prefixed.exitCode).not.toBe(0)
-        expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(marker))).toBe(false)
-        expect(state).toEqual([])
-        expect(diff).toEqual([])
+        expect(result.stderr.toString()).toContain("Git remote operations require an online run.")
       } finally {
         if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
         else process.env.ALTIMATE_OFFLINE = prior

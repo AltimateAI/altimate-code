@@ -480,10 +480,13 @@ export namespace SessionPrompt {
     // does not even load the sync module.
     if (Offline.enabled()) {
       const dir = Instance.directory
-      const { snapshotRoot, ownManifest } = await import("../altimate/workspace/skill-sync")
-      const snapshot = await ownManifest(dir)
-      await Offline.announce(snapshot !== null)
-      if (existsSync(snapshotRoot(dir))) await refreshSkillRegistry(dir)
+      const writeOfflineNotice = async () => {
+        const { ownManifest } = await import("../altimate/workspace/skill-sync")
+        await Offline.announce((await ownManifest(dir)) !== null)
+        await refreshSkillRegistry(dir)
+      }
+      const notice = writeOfflineNotice().catch((error) => log.warn("offline skill snapshot setup failed", { error }))
+      if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) await notice
     } else if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
       // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
@@ -2445,8 +2448,8 @@ export namespace SessionPrompt {
       // acts on a false positive instead of only measuring it, so it should
       // not ship until those heuristics are consolidated into shared,
       // tested primitives.
-      const validatorsEnabled = !Offline.enabled() && process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
-      const validatorsShadow = !Offline.enabled() && process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
+      const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
+      const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
       const validatorsActive = validatorsEnabled || validatorsShadow
       const maxValidatorRetries = Number(process.env.ALTIMATE_VALIDATORS_MAX_RETRIES ?? "3")
       const validatorsDebug = process.env.ALTIMATE_VALIDATORS_DEBUG === "1"
@@ -4331,9 +4334,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   })
   export type ShellInput = z.infer<typeof ShellInput>
   export async function shell(input: ShellInput) {
-    // altimate_change start — prevent direct shell execution in offline sessions
-    if (Offline.enabled()) throw new Error("Shell commands are disabled in offline mode.")
-    // altimate_change end
     const abort = start(input.sessionID)
     if (!abort) {
       throw new Session.BusyError(input.sessionID)
@@ -4841,9 +4841,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const shell = ConfigMarkdown.shell(template)
     if (shell.length > 0) {
-      // altimate_change start — template expansion can invoke an arbitrary program
-      if (Offline.enabled()) throw new Error("Shell commands are disabled in offline mode.")
-      // altimate_change end
       // altimate_change start — upstream_fix: command template shell
       // expansion must honor configured shell instead of Bun's default parser.
       const sh = Shell.preferred((await Config.get()).shell)

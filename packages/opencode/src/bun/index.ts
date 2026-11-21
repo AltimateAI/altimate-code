@@ -54,9 +54,6 @@ export namespace BunProc {
   )
 
   export async function install(pkg: string, version = "latest") {
-    // altimate_change start — prevent package installs in offline mode
-    if (Offline.enabled()) throw new Error("Offline mode disables package installation.")
-    // altimate_change end
     // Use lock to ensure only one install at a time
     using _ = await Lock.write("bun-install")
 
@@ -71,6 +68,13 @@ export namespace BunProc {
     const dependencies = parsed.dependencies
     const modExists = await Filesystem.exists(mod)
     const cachedVersion = dependencies[pkg]
+
+    // altimate_change start — use the cached package without checking the registry
+    if (Offline.enabled()) {
+      if (modExists && cachedVersion && (version === "latest" || cachedVersion === version)) return mod
+      throw new Error("Install this package while online.")
+    }
+    // altimate_change end
 
     if (!modExists || !cachedVersion) {
       // continue to install

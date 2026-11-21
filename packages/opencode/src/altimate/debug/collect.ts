@@ -413,9 +413,9 @@ export function readLogTail(file: string, maxBytes = LOG_READ_BYTES): string | u
 export async function collect(opts: { network: boolean }): Promise<Facts> {
   const ctx = redactContext()
   const mcpServers = mcpFacts()
-  const [account, connections, telemetry] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network)])
+  const [account, connections, telemetry] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network && !Offline.enabled())])
   const proxy = PROXY_VARS.some((k) => k.toLowerCase() !== "no_proxy" && process.env[k])
-  const network = opts.network
+  const network = opts.network && !Offline.enabled()
     ? await Promise.all(networkTargets(connections, account, telemetry).map((t) => probe(t.target, t.host, { proxy })))
     : []
   const logPath = path.join(Global.Path.log, "opencode.log")

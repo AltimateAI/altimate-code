@@ -127,7 +127,12 @@ export const layer = Layer.effect(
         return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
-      if (offlineModeEnabled()) return yield* new InstallFailedError({ add: [pkg], dir })
+      if (offlineModeEnabled())
+        return yield* new InstallFailedError({
+          add: [pkg],
+          dir,
+          cause: new Error(`Install ${pkg} while online.`),
+        })
       const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {

@@ -8,7 +8,7 @@ const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..")
 const opencodeDir = path.join(repoRoot, "packages", "opencode")
 const cliEntry = path.join(opencodeDir, "src", "index.ts")
 
-function withIsolatedCli(fn: (ctx: { configDir: string; run: (args: string[]) => ReturnType<typeof spawnSync> }) => void) {
+function withIsolatedCli(fn: (ctx: { configDir: string; run: (args: string[]) => ReturnType<typeof spawnSync> }) => void, offline = false) {
   const root = mkdtempSync(path.join(tmpdir(), "altimate-mcp-add-"))
   const home = path.join(root, "home")
   const configHome = path.join(root, "config")
@@ -24,6 +24,7 @@ function withIsolatedCli(fn: (ctx: { configDir: string; run: (args: string[]) =>
       timeout: 30_000,
       env: {
         ...process.env,
+        ALTIMATE_OFFLINE: offline ? "1" : "0",
         HOME: home,
         XDG_CONFIG_HOME: configHome,
         XDG_DATA_HOME: dataHome,
@@ -152,4 +153,28 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
       })
     }),
   )
+})
+
+
+test("offline MCP add refuses remote configuration before writing it", () => {
+  withIsolatedCli(({ configDir, run }) => {
+    const configPath = path.join(configDir, "altimate-code.json")
+    mkdirSync(configDir, { recursive: true })
+    const original = '{"mcp":{},"username":"unchanged"}\n'
+    writeFileSync(configPath, original)
+    const result = run(["mcp", "add", "--name", "remote", "--url", "https://example.com/mcp", "--global"])
+    expect(result.status).not.toBe(0)
+    expect(`${result.stdout}${result.stderr}`).toContain("localhost/loopback")
+    expect(readFileSync(configPath, "utf8")).toBe(original)
+  }, true)
+})
+
+test("offline MCP add permits stdio and loopback configuration", () => {
+  withIsolatedCli(({ configDir, run }) => {
+    expectExit(run(["mcp", "add", "--name", "loopback", "--url", "http://127.0.0.1:9000/mcp", "--global"]), 0)
+    expectExit(run(["mcp", "add", "--name", "stdio", "--command", "local-server", "--global"]), 0)
+    const config = readJson(path.join(configDir, "altimate-code.json"))
+    expect(config.mcp.loopback.url).toBe("http://127.0.0.1:9000/mcp")
+    expect(config.mcp.stdio.command).toEqual(["local-server"])
+  }, true)
 })

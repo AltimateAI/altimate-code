@@ -249,8 +249,10 @@ export const TuiThreadCommand = cmd({
           network.port !== 0 ||
           network.hostname !== "127.0.0.1"
 
-        const listener = external ? await client.call("server", network) : undefined
-        const transport = listener && !Offline.enabled()
+        // altimate_change start — offline requests stay in the worker
+        const listener = external && !Offline.enabled() ? await client.call("server", network) : undefined
+        // altimate_change end
+        const transport = listener
           ? {
               url: listener.url,
               fetch: undefined,

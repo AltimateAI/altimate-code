@@ -114,10 +114,10 @@ export namespace Plugin {
       $: Bun.$,
     }
 
-    // altimate_change start — skip network work in offline mode
-    if (Offline.enabled()) return { hooks, input }
+    // altimate_change start — skip built-in authentication and telemetry plugins offline
+    const internal = Offline.enabled() ? [] : INTERNAL_PLUGINS
     // altimate_change end
-    for (const plugin of INTERNAL_PLUGINS) {
+    for (const plugin of internal) {
       log.info("loading internal plugin", { name: plugin.name })
       const init = await plugin(input).catch((err) => {
         log.error("failed to load internal plugin", { name: plugin.name, error: err })

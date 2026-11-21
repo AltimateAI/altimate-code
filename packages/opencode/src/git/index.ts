@@ -1,4 +1,4 @@
-// altimate_change start — skip working-tree Git operations that can run filters
+// altimate_change start — restrict Git transport offline
 import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -20,16 +20,23 @@ const cfg = [
   "core.quotepath=false",
 ] as const
 
-// altimate_change start — permit only the metadata reads used by offline clients
-const offlineMetadataCommands = new Set(["rev-parse", "symbolic-ref", "for-each-ref", "merge-base"])
+// altimate_change start — prevent Git from starting a transport offline
+const remoteCommands = new Set(["clone", "fetch", "pull", "push", "ls-remote", "send-pack", "fetch-pack", "submodule--helper"])
 
-function gitCommandAllowedOffline(args: string[]) {
-  const [command, operation] = args
-  if (offlineMetadataCommands.has(command)) return true
-  if (command === "remote") return args.length === 1
-  if (command === "config") return args.length === 2 && operation === "init.defaultBranch"
-  if (command === "show") return args.length === 2 && !operation.startsWith("-") && operation.includes(":")
-  return command === "worktree" && operation === "list"
+export function localGitEnv(env?: Record<string, string>) {
+  return offlineModeEnabled()
+    ? { ...env, GIT_ALLOW_PROTOCOL: "", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1" }
+    : env
+}
+
+function gitCommandUsesNetwork(args: string[]) {
+  let index = 0
+  while (args[index]?.startsWith("-")) {
+    index += ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(args[index]) ? 2 : 1
+  }
+  const [command, operation, ...rest] = args.slice(index)
+  return remoteCommands.has(command) ||
+    (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n"))))
 }
 // altimate_change end
 
@@ -125,14 +132,17 @@ export const layer = Layer.effect(
 
     const run = Effect.fn("Git.run")(
       function* (args: string[], opts: Options) {
-        // altimate_change start — Git can launch filters independently of its network transport
-        if (offlineModeEnabled() && !gitCommandAllowedOffline(args))
-          return fail(new Error("Git working-tree operations require an online run."))
+        // altimate_change start — allow local Git and deny transports, including lazy object fetches
+        const offline = offlineModeEnabled()
+        if (offline && gitCommandUsesNetwork(args))
+          return fail(new Error("Git remote operations require an online run."))
         // altimate_change end
         const result = yield* appProcess.run(
           ChildProcess.make("git", [...cfg, ...args], {
             cwd: opts.cwd,
-            env: opts.env,
+            // altimate_change start — prevent Git and Git LFS network requests
+            env: localGitEnv(opts.env),
+            // altimate_change end
             extendEnv: true,
             stdin: opts.stdin ?? "ignore",
             stdout: "pipe",

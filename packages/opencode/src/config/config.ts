@@ -565,12 +565,12 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(auth)) {
-          // altimate_change start — skip well-known network config in offline mode
-          if (Offline.enabled()) continue
-          // altimate_change end
           if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
+            // altimate_change start — keep the local token available without fetching remote config
+            if (Offline.enabled()) continue
+            // altimate_change end
             const wellknownURL = `${url}/.well-known/opencode`
             yield* Effect.logDebug("fetching remote config", { url: wellknownURL })
             const wellknown = yield* fetchRemoteJson(wellknownURL, undefined, ConfigV1.WellKnown, url)
@@ -851,8 +851,6 @@ export const layer = Layer.effect(
         if (Offline.enabled()) {
           result.offline = true
           result.share = "disabled"
-          result.formatter = false
-          result.lsp = false
         }
         // altimate_change end
         if (result.autoshare === true && !result.share) {
@@ -871,7 +869,7 @@ export const layer = Layer.effect(
         // may not yet be declared in the ConfigV1 experimental schema.
         const autoMcpDiscovery = (result.experimental as { auto_mcp_discovery?: boolean } | undefined)
           ?.auto_mcp_discovery
-        if (!Offline.enabled() && !Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
+        if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
           const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift, discoveredSource } =
             yield* Effect.promise(
             () => import("../mcp/discover"),

@@ -28,7 +28,7 @@ async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace:
         "offline-test": {
           npm: "@ai-sdk/openai-compatible",
           options: { baseURL: MODEL_ENDPOINT, apiKey: "local-only" },
-          models: { fixture: { name: "Offline fixture", limit: { context: 20000, output: 2000 } } },
+          models: { fixture: { name: "Offline fixture", limit: { context: 100000, output: 2000 } } },
         },
       },
       mcp: { remoteFixture: { type: "remote", url: "https://mcp.test" } },
@@ -76,13 +76,31 @@ async function fixture(snapshot: boolean, configMode: boolean, disableWorkspace:
     `
     import { appendFileSync } from "node:fs"
     const log = ${JSON.stringify(calls)}
+    let turn = 0
     globalThis.fetch = Object.assign(async (input, init) => {
       const url = input instanceof Request ? input.url : String(input)
       appendFileSync(log, JSON.stringify({ url, hasSkill: String(init?.body).includes(${JSON.stringify(SKILL)}) }) + "\\n")
       if (url !== ${JSON.stringify(MODEL_ENDPOINT + "/chat/completions")}) {
         return new Response("{}", { status: 503 })
       }
-      const chunks = [
+      const request = JSON.parse(String(init?.body ?? "{}"))
+      const canRunShell = request.tools?.some((tool) => tool.function?.name === "bash")
+      const chunks = process.env.OFFLINE_TEST_BASH && canRunShell && turn++ === 0
+        ? [
+            { choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{
+              index: 0, id: "call_shell", type: "function", function: {
+                name: "bash",
+                arguments: JSON.stringify({
+                  command: "printf shell-ran > shell-marker",
+                  description: "Write a local marker",
+                  workdir: process.cwd(),
+                  timeout: 5000,
+                }),
+              },
+            }] }, finish_reason: null }] },
+            { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+          ]
+        : [
         { choices: [{ index: 0, delta: { role: "assistant", content: "offline reply" }, finish_reason: null }] },
         { choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 2 } },
       ]
@@ -151,7 +169,7 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
       const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "Hello"], {
         cwd: f.project,
         // The snapshot must work on a cold host where ripgrep is absent.
-        env: configMode ? { ...f.env, PATH: path.join(f.root, "empty-path") } : f.env,
+        env: snapshot ? { ...f.env, PATH: path.join(f.root, "empty-path") } : f.env,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -185,6 +203,72 @@ for (const { scenario, snapshot, configMode, disableWorkspace } of [
     }
   }, 40_000)
 }
+
+test("offline model can execute a local bash command", async () => {
+  const f = await fixture(false, false, false)
+  try {
+    const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "--yolo", "Run the local shell command"], {
+      cwd: f.project,
+      env: { ...f.env, OFFLINE_TEST_BASH: "1", ALTIMATE_CLI_YOLO: "true" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(25_000),
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
+    const marker = await Bun.file(path.join(f.project, "shell-marker")).text().catch(() => "")
+    expect({ marker, stdout, stderr }).toMatchObject({ marker: "shell-ran" })
+    expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test("offline SQL tool queries a local DuckDB file", async () => {
+  const f = await fixture(false, false, false)
+  try {
+    const database = path.join(f.project, "warehouse.duckdb")
+    const seed = Bun.spawn([process.execPath, "-e", `
+      const duckdb = require("duckdb")
+      const db = new duckdb.Database(process.argv[1])
+      db.run("create table fixture as select 42 as offline_answer", (err) => {
+        if (err) throw err
+        db.close()
+      })
+    `, database], { cwd: import.meta.dir, stderr: "inherit" })
+    expect(await seed.exited).toBe(0)
+    await Bun.write(path.join(f.project, ".altimate-code", "connections.json"), JSON.stringify({
+      local: { type: "duckdb", path: database },
+    }))
+    const proc = Bun.spawn([
+      process.execPath, "--preload", f.preload, CLI, "tool", "run", "sql_execute", "--args",
+      JSON.stringify({ warehouse: "local", query: "select offline_answer from fixture" }), "--json",
+    ], {
+      cwd: f.project,
+      env: f.env,
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(25_000),
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline_answer") })
+    expect(JSON.parse(stdout).status).toBe("ok")
+    expect(stdout).toContain("42")
+    expect(await fs.readFile(f.calls, "utf8").catch(() => "")).toBe("")
+    expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 30_000)
 
 test("offline model transport bypasses proxy settings and refuses redirects", async () => {
   let proxyCalls = 0
@@ -298,15 +382,16 @@ test("offline skill install refuses a remote repository before running git clone
   }
 }, 25_000)
 
-test("offline mode does not launch a configured language server", async () => {
+test("offline mode launches a configured local language server", async () => {
   const f = await fixture(false, false, false)
   const marker = path.join(f.root, "unexpected-lsp")
   const stub = path.join(f.root, "language-server.ts")
+  const server = path.resolve(import.meta.dir, "../../fixture/lsp/fake-lsp-server.js")
   const file = path.join(f.project, "test.offline-fixture")
   try {
     await fs.rm(path.join(f.root, "data", "altimate-code", "auth.json"))
     await Bun.write(file, "test")
-    await Bun.write(stub, `await Bun.write(${JSON.stringify(marker)}, "server started")`)
+    await Bun.write(stub, `await Bun.write(${JSON.stringify(marker)}, "server started"); await import(${JSON.stringify(server)})`)
     await Bun.write(
       path.join(f.project, "opencode.json"),
       JSON.stringify({ lsp: { fixture: { command: [process.execPath, stub], extensions: [".offline-fixture"] } } }),
@@ -316,19 +401,19 @@ test("offline mode does not launch a configured language server", async () => {
       env: f.env,
       stdout: "pipe",
       stderr: "pipe",
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(45_000),
     })
     const [code, stdout, stderr] = await Promise.all([
       proc.exited,
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ])
-    expect(await Bun.file(marker).exists()).toBe(false)
+    expect(await Bun.file(marker).exists()).toBe(true)
     expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("{}") })
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })
   }
-}, 25_000)
+}, 50_000)
 
 test("offline mode never falls back from a blank endpoint to the provider catalog URL", async () => {
   const f = await fixture(false, false, false)
@@ -421,7 +506,7 @@ test.skipIf(process.platform === "win32")(
       expect(await Bun.file(marker).exists()).toBe(false)
       expect({ code, stdout, stderr }).toMatchObject({
         code: 0,
-        stdout: expect.stringContaining("Paired tool checks require online mode."),
+        stdout: expect.stringContaining("Paired tool --help checks require online mode."),
       })
     } finally {
       await fs.rm(f.root, { recursive: true, force: true })
@@ -430,27 +515,33 @@ test.skipIf(process.platform === "win32")(
   25_000,
 )
 
-test("standalone MCP rejects offline config before opening stdio", async () => {
+test("standalone MCP initializes offline over stdio without network requests", async () => {
   const f = await fixture(false, true, false)
   try {
     const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "mcp", "serve"], {
       cwd: f.project,
       env: f.env,
-      stdin: "ignore",
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
       signal: AbortSignal.timeout(30_000),
     })
-    const [code, stdout, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ])
-    expect({ code, stdout, stderr }).toMatchObject({
-      code: 1,
-      stdout: "",
-      stderr: expect.stringContaining("Run the standalone MCP server while online."),
-    })
+    const stderr = new Response(proc.stderr).text()
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "offline-test", version: "1" },
+    } }) + "\n")
+    proc.stdin.flush()
+    const reader = proc.stdout.getReader()
+    let output = ""
+    while (!output.includes("\n")) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      output += new TextDecoder().decode(chunk.value)
+    }
+    proc.stdin.end()
+    const code = await proc.exited
+    expect({ code, stderr: await stderr }).toMatchObject({ code: 0 })
+    expect(JSON.parse(output.trim())).toMatchObject({ id: 1, result: { serverInfo: { name: expect.any(String) } } })
     expect(await fs.readFile(f.calls, "utf8").catch(() => "")).toBe("")
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })

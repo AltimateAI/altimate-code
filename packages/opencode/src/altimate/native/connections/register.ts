@@ -1,3 +1,7 @@
+// altimate_change start — validate offline dbt profiles before starting adapters
+import { Offline } from "@/config/offline"
+import { assertLocalDbt } from "../dbt/offline"
+// altimate_change end
 /**
  * Register native connection handlers with the Dispatcher.
  *
@@ -66,7 +70,7 @@ export const dbtAdapterInternals: {
   /** Replaces the dbt config read, so a test can hold an attempt open. */
   readConfig?: () => Promise<unknown>
   /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
-  create?: (config: any, options?: { targetPath?: string }) => Promise<any>
+  create?: (config: any, options?: { targetPath?: string; offline?: boolean }) => Promise<any>
   /** Replaces the check for dbt-integration's lineage, which a test's fake adapter provides itself. */
   hasModelLineage?: (adapter?: unknown) => boolean
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
@@ -124,6 +128,8 @@ async function ensureDbtAdapter(): Promise<any | null> {
         return publish(null)
       }
 
+      if (Offline.enabled()) await assertLocalDbt(dbtConfig.projectRoot, [], dbtConfig.dbtIntegration)
+
       // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's
       // target/manifest.json is the user's (and other tools'), and a tool's compile or show would rewrite
       // it with compiled SQL for only the nodes that command compiled.
@@ -132,7 +138,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
       const options = SEPARATE_TARGET_MODES.has(dbtConfig.dbtIntegration || "core")
         ? { targetPath: await dbtToolTargetPath(dbtConfig.projectRoot) }
         : {}
-      return publish(await create(dbtConfig, options), dbtConfig.projectRoot)
+      return publish(await create(dbtConfig, { ...options, ...(Offline.enabled() ? { offline: true } : {}) }), dbtConfig.projectRoot)
     } catch {
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)

@@ -36,14 +36,15 @@ export const AcpCommand = effectCmd({
     yield* Effect.promise(() => FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered"))
     // altimate_change end
     const opts = yield* resolveNetworkOptions(args)
-    // altimate_change start — upstream_fix: preserve async server listen inside ACP profiler measure
-    const server = yield* Effect.promise(() =>
+    // altimate_change start — skip the HTTP listener when ACP uses in-process transport
+    const server = Offline.enabled() ? undefined : yield* Effect.promise(() =>
       ACPProfile.measure("cli.acp.server.listen", async () => Server.listen(opts)),
     )
     // altimate_change end
 
     const sdk = createOpencodeClient({
-      baseUrl: `http://${server.hostname}:${server.port}`,
+      // altimate_change — the offline SDK dispatches against an in-process URL
+      baseUrl: server ? `http://${server.hostname}:${server.port}` : "http://opencode.internal",
       headers: ServerAuth.headers(),
       // altimate_change start — route the offline ACP client to the in-process API
       fetch: Offline.enabled()

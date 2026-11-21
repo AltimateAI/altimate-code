@@ -1,6 +1,3 @@
-// altimate_change start — offline mode
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import { Log } from "../util/log"
@@ -99,9 +96,7 @@ export namespace LSP {
       }))
       // altimate_change end
 
-      // altimate_change start — skip language-server launches in offline mode
-      if (Offline.enabled() || cfg.lsp === false) {
-        // altimate_change end
+      if (cfg.lsp === false) {
         log.info("all LSPs are disabled")
         return {
           broken: new Set<string>(),

@@ -1,3 +1,7 @@
+// altimate_change start — validate offline dbt targets before spawning dbt
+import { Offline } from "@/config/offline"
+import { assertLocalDbt } from "./offline"
+// altimate_change end
 /**
  * dbt CLI wrapper — spawn dbt commands as subprocesses.
  *
@@ -24,7 +28,18 @@ function ensureUpstreamSelector(select: string, command: string): string {
 /**
  * Run a dbt CLI command via subprocess.
  */
-export function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
+export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
+  if (Offline.enabled()) {
+    try {
+      if (["deps", "init"].includes(params.command || "run")) throw new Error("Offline mode disables dbt dependency installation and initialization.")
+      await assertLocalDbt(params.project_dir || process.cwd(), [
+        ...(params.args ?? []),
+        ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
+      ])
+    } catch (error) {
+      return { stdout: "", stderr: String(error), exit_code: 1 }
+    }
+  }
   return new Promise((resolve) => {
     const command = params.command || "run"
     const args: string[] = [command]
@@ -42,7 +57,8 @@ export function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
       args.push("--project-dir", params.project_dir)
     }
 
-    execFile("dbt", args, { timeout: 300_000 }, (error, stdout, stderr) => {
+    const env = Offline.enabled() ? { ...process.env, DBT_SEND_ANONYMOUS_USAGE_STATS: "false" } : process.env
+    execFile("dbt", args, { timeout: 300_000, env }, (error, stdout, stderr) => {
       if (error) {
         if ((error as any).code === "ENOENT") {
           resolve({

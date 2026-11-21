@@ -193,7 +193,8 @@ let cli = yargs(args)
       (command === "tool" && opts._[1] === "daemon") ||
       (command === "learn" && opts._[1] === "import-reviews") ||
       (command === "console" && opts._[1] === "open") ||
-      (["providers", "auth", "mcp", "console"].includes(command) && opts._.some((arg) => arg === "login" || arg === "auth"))
+      (["providers", "auth", "console"].includes(command) && opts._[1] === "login") ||
+      (command === "mcp" && opts._[1] === "auth")
     )) throw new Error("This command requires network access. Run it while online.")
     // altimate_change end
 

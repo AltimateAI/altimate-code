@@ -1,6 +1,3 @@
-// altimate_change start — skip Git filters when reading files offline
-import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
-// altimate_change end
 import { BusEvent } from "@/bus/bus-event"
 import z from "zod"
 import { formatPatch, structuredPatch } from "diff"
@@ -443,9 +440,6 @@ export namespace File {
   }
 
   export async function status() {
-    // altimate_change start — skip Git working-tree status in offline mode
-    if (offlineModeEnabled()) return []
-    // altimate_change end
     const project = Instance.project
     if (project.vcs !== "git") return []
 
@@ -574,7 +568,7 @@ export namespace File {
     const content = (await Filesystem.readText(full).catch(() => "")).trim()
 
     // altimate_change start — retain file content without the Git working-tree comparison
-    if (!offlineModeEnabled() && project.vcs === "git") {
+    if (project.vcs === "git") {
       // altimate_change end
       let diff = (await git(["-c", "core.fsmonitor=false", "diff", "--", file], { cwd: Instance.directory })).text()
       if (!diff.trim()) {

@@ -404,7 +404,7 @@ async function registerOnce(
 export async function register(
   input: { origin: "picker" | "server"; signal?: AbortSignal } = { origin: "picker" },
 ): Promise<Credentials> {
-  if (Offline.enabled()) throw new Error("Register Altimate Base while online.")
+  if (Offline.enabled()) throw new ConfigurationError("Register Altimate Base while online.")
   const startedAt = performance.now()
   let configuredGateway: string
   try {

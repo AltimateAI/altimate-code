@@ -291,7 +291,6 @@ async function testSkillDirect(
 ): Promise<{ ok: boolean; message: string }> {
   const tools = detectToolReferences(content)
   if (tools.length === 0) return { ok: true, message: `${skillName}: PASS (no CLI tools)` }
-  if (Offline.enabled()) return { ok: false, message: "Paired tool checks require online mode." }
 
   const sep = process.platform === "win32" ? ";" : ":"
   const toolPath = [
@@ -304,6 +303,10 @@ async function testSkillDirect(
     .join(sep)
 
   for (const tool of tools) {
+    if (Offline.enabled()) {
+      if (!Bun.which(tool, { PATH: toolPath })) return { ok: false, message: `${skillName}: FAIL — "${tool}" not found` }
+      continue
+    }
     try {
       const proc = Bun.spawn([tool, "--help"], {
         stdout: "pipe",
@@ -320,7 +323,7 @@ async function testSkillDirect(
       return { ok: false, message: `${skillName}: FAIL — "${tool}" not found or failed to execute` }
     }
   }
-  return { ok: true, message: `${skillName}: PASS` }
+  return { ok: true, message: Offline.enabled() ? `${skillName}: tools found (skipped --help offline)` : `${skillName}: PASS` }
 }
 
 type RawSdkClient = {

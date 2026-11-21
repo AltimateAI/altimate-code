@@ -1,6 +1,3 @@
-// altimate_change start — offline mode skips terminal subprocesses
-import { Offline } from "@/config/offline"
-// altimate_change end
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 // altimate_change start — upstream moved the pty spawn backend into @opencode-ai/core
@@ -126,9 +123,6 @@ export namespace Pty {
   }
 
   export async function create(input: CreateInput) {
-    // altimate_change start — offline mode skips terminal subprocesses
-    if (Offline.enabled()) throw new Error("Terminal sessions are disabled in offline mode.")
-    // altimate_change end
     const id = PtyID.ascending()
     const command = input.command || Shell.preferred()
     const args = input.args || []

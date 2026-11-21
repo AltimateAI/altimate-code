@@ -863,7 +863,7 @@ export function endTurnBinding(sessionID: string): void {
 
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
   if (Offline.enabled()) {
-    const local = readPin().kind === "absent" ? await readLocalBinding(directory).catch(() => null) : null
+    const local = readPinLogged().kind === "absent" ? await readLocalBinding(directory).catch(() => null) : null
     return local ? { status: "bound", binding: local, stale: true } : { status: "unknown" }
   }
   // altimate_change — the IDE extension's selection outranks whatever binding this project carries.

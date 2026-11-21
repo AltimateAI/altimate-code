@@ -160,14 +160,15 @@ Control how context is managed when conversations grow long:
 !!! info
     Compaction automatically summarizes older messages to free up context window space, allowing longer conversations without losing important context. See [Context Management](context-management.md) for full details.
 
-## Offline / air-gapped mode
+## Offline mode
 
-Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a local config file such as `~/.config/altimate-code/altimate-code.json` or `.altimate-code/altimate-code.json` in the project. The switch is read when Altimate Code starts and applies to all projects served by that process and its workers. To use a project opt-in from an existing shared server, start a separate Altimate Code process in that project.
+Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a local global or project configuration file. The setting applies to the process and its workers. Start a separate process in the project to opt in when using a shared server.
 
-Before going offline:
+Configure an explicit HTTP(S) provider `options.baseURL` and select its `provider/model` ID. Define the model in the provider configuration if it is absent from the bundled or cached catalog. For an OpenAI-compatible endpoint, use the bundled `@ai-sdk/openai-compatible` provider.
 
-1. Configure the model locally, including its `provider/model` ID and the provider's explicit `options.baseURL`. For a self-hosted OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider. Define the model in your provider config if it is absent from the bundled or cached model catalog.
-2. From the linked project, run `altimate-code workspace refresh` while online. Keep the resulting skill snapshot and the local credentials for the same workspace account. Altimate Code uses the snapshot without refreshing or deleting it offline and prints one notice indicating whether cached skills are available.
-3. Pre-install any optional warehouse drivers you'll need when you reconnect. Run `warehouse_install_driver` while online, or run the npm command the tool prints. Offline mode disables all warehouse connections, including local DuckDB and SQLite, and automatic driver installs.
+- SQL tools can query local DuckDB and SQLite files or a warehouse listening on loopback. Use a local dbt profile for dbt commands.
+- Bash, installed language servers, and MCP servers using stdio or a loopback HTTP(S) URL remain available. Altimate Code skips automatic language server and warehouse driver installs. Install optional drivers and ripgrep ahead of time.
+- Git diffs, session snapshots and revert, and worktree creation, removal and reset operate locally. Reset uses the cached base and skips submodule downloads. Run Git remote operations online.
+- Altimate Code skips telemetry, account and remote configuration requests, model catalog downloads, update checks, workspace and engine sync, session sharing, and web search and fetch. Remote warehouse and MCP connections require an online run. Refresh workspace skills before going offline to use an existing snapshot.
 
-Offline mode sends model requests to the configured HTTP(S) endpoint. It turns off telemetry, account and remote config requests, model catalog downloads, update checks, workspace engine connections and session sharing. The offline tool catalog includes file editing, search, skills, and basic task tools. SQL and dbt tools, web tools, shell commands, external plugins, MCP servers, and language servers are unavailable. Git-backed file diffs, session snapshots and revert are disabled. Creating, removing, or resetting a Git worktree and revoking a published session share also require an online run. Install `ripgrep` ahead of time if you need file search on a fresh host.
+The configured model endpoint is the only external endpoint Altimate Code contacts in offline mode. Shell commands and other programs you configure or invoke retain their own network access.

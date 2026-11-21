@@ -56,7 +56,9 @@ export function resolveNetworkOptionsNoConfig(args: NetworkOptions, config?: Con
   const mdnsExplicitlySet = process.argv.includes("--mdns")
   const mdnsDomainExplicitlySet = process.argv.includes("--mdns-domain")
   // altimate_change start — offline mode skips multicast discovery
-  const mdns = !Offline.enabled() && (mdnsExplicitlySet ? args.mdns : (config?.server?.mdns ?? args.mdns))
+  const wantsMdns = mdnsExplicitlySet ? args.mdns : (config?.server?.mdns ?? args.mdns)
+  if (wantsMdns && Offline.enabled()) process.stderr.write("mDNS discovery skipped in offline mode.\n")
+  const mdns = wantsMdns && !Offline.enabled()
   // altimate_change end
   const mdnsDomain = mdnsDomainExplicitlySet ? args["mdns-domain"] : (config?.server?.mdnsDomain ?? args["mdns-domain"])
   const port = portExplicitlySet ? args.port : (config?.server?.port ?? args.port)

@@ -420,12 +420,6 @@ export namespace ToolRegistry {
     configInput?: RegistryConfigInput,
   ): Promise<Tool.Info[]> {
     const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
-    if (Offline.enabled()) {
-      return AppRuntime.runPromise(Effect.scoped(Effect.all([
-        InvalidTool, ...(question ? [QuestionTool] : []), ReadTool, GlobTool, GrepTool, EditTool, WriteTool,
-        TaskTool, TodoWriteTool, SkillTool, ApplyPatchTool, WarehouseInstallDriverTool,
-      ])))
-    }
     const custom = configInput?.matches
       ? await loadCustomTools(configInput.matches).then((x) => x.custom)
       : await state().then((x) => x.custom)
@@ -437,6 +431,9 @@ export namespace ToolRegistry {
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
     // built-in tool-definition effects against the AppRuntime layers (Truncate/Agent) before use.
+    // altimate_change start — keep local tools available in offline sessions
+    const offline = Offline.enabled()
+    // altimate_change end
     const builtins = [
       InvalidTool,
       ...(question ? [QuestionTool] : []),
@@ -447,11 +444,11 @@ export namespace ToolRegistry {
       EditTool,
       WriteTool,
       TaskTool,
-      WebFetchTool,
+      // altimate_change start — these tools contact remote services
+      ...(!offline ? [WebFetchTool, WebSearchTool, CodeSearchTool] : []),
+      // altimate_change end
       TodoWriteTool,
       // TodoReadTool,
-      WebSearchTool,
-      CodeSearchTool,
       SkillTool,
       ApplyPatchTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
@@ -537,8 +534,8 @@ export namespace ToolRegistry {
       AltimateCoreParseDbtTool,
       ToolLookupTool,
       ProjectScanTool,
-      DatamateManagerTool,
-      FeedbackSubmitTool,
+      ...(!offline ? [DatamateManagerTool] : []),
+      ...(!offline ? [FeedbackSubmitTool] : []),
       SampleSetupTool,
       // altimate_change end
       // altimate_change start - register altimate persistent memory tools
@@ -548,7 +545,7 @@ export namespace ToolRegistry {
             // Workspace-only: `refresh` no-ops with workspaces disabled, so
             // shipping its description then costs a tool slot and
             // invites a wasted call that can only answer "not enabled".
-            ...(CoreFlag.ALTIMATE_DISABLE_WORKSPACE ? [] : [MemoryRefreshTool]),
+            ...(offline || CoreFlag.ALTIMATE_DISABLE_WORKSPACE ? [] : [MemoryRefreshTool]),
             MemoryWriteTool,
             MemoryDeleteTool,
             MemoryAuditTool,

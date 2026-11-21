@@ -101,22 +101,23 @@ const withGitConfigGlobal = <A, E, R>(config: string, self: Effect.Effect<A, E, 
   )
 
 it.instance(
-  "offline snapshots do not run configured Git clean filters",
+  "offline snapshots track and revert local changes",
   Effect.gen(function* () {
     const { directory } = yield* TestInstance
-    const marker = path.join(directory, "filter-ran")
-    const config = path.join(directory, "fixture.gitconfig")
-    yield* exec(directory, ["git", "config", "--file", config, "filter.offline-fixture.clean",
-      `printf 'filter ran' > '${fwd(marker)}'; cat`])
-    yield* write(path.join(directory, ".gitattributes"), "*.txt filter=offline-fixture\n")
-    yield* write(path.join(directory, "data.txt"), "fixture")
+    const file = fwd(directory, "data.txt")
+    yield* write(file, "before")
     const previous = process.env.ALTIMATE_OFFLINE
     process.env.ALTIMATE_OFFLINE = "1"
     try {
       const snapshot = yield* Snapshot.Service
-      const current = yield* withGitConfigGlobal(config, snapshot.track())
-      expect(yield* exists(marker)).toBe(false)
-      expect(current).toBeUndefined()
+      const before = yield* snapshot.track()
+      expect(before).toBeDefined()
+      yield* write(file, "after")
+      const patch = yield* snapshot.patch(before!)
+      expect(patch.files).toContain(file)
+      expect(yield* snapshot.diff(before!)).toContain("+after")
+      yield* snapshot.revert([patch])
+      expect(yield* readText(file)).toBe("before")
     } finally {
       if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
       else process.env.ALTIMATE_OFFLINE = previous

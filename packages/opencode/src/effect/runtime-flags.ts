@@ -1,3 +1,6 @@
+// altimate_change start — offline mode prevents automatic LSP downloads
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { Config, ConfigProvider, Context, Effect, Layer, Option } from "effect"
 import { ConfigService } from "@/effect/config-service"
 
@@ -25,7 +28,8 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
     direct: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
   }).pipe(Config.map((flags) => flags.broad || flags.claudeCodeSkills || flags.direct)),
   // altimate_change end
-  disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
+  // altimate_change — apply to both Effect and legacy language server services
+  disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD").pipe(Config.map((disabled) => disabled || offlineModeEnabled())),
   disableClaudeCodePrompt: Config.all({
     broad: bool("OPENCODE_DISABLE_CLAUDE_CODE"),
     direct: bool("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"),

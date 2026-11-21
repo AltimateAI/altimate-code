@@ -1,4 +1,4 @@
-// altimate_change start — offline mode does not run project startup scripts
+// altimate_change start — offline mode skips worktree network steps
 import { Offline } from "@/config/offline"
 // altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -15,7 +15,7 @@ import { Slug } from "@opencode-ai/core/util/slug"
 import { errorMessage } from "../util/error"
 import { EventV2 } from "@opencode-ai/core/event"
 import { GlobalBus } from "@/bus/global"
-import { Git } from "@/git"
+import { Git, localGitEnv } from "@/git"
 import { Effect, Layer, Path, Schema, Scope, Context } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { NodePath } from "@effect/platform-node"
@@ -176,7 +176,7 @@ export const layer: Layer.Layer<
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
         const result = yield* appProcess.run(
-          ChildProcess.make("git", args, { cwd: opts?.cwd, extendEnv: true, stdin: "ignore" }),
+          ChildProcess.make("git", args, { cwd: opts?.cwd, env: localGitEnv(), extendEnv: true, stdin: "ignore" }),
         )
         return {
           code: result.exitCode,
@@ -234,9 +234,6 @@ export const layer: Layer.Layer<
     })
 
     const setup = Effect.fnUntraced(function* (info: Info) {
-      // altimate_change start — checkout filters can launch programs such as Git LFS
-      if (Offline.enabled()) return yield* new CreateFailedError({ message: "Create this worktree while online." })
-      // altimate_change end
       const ctx = yield* InstanceState.context
       const created = yield* git(
         info.branch
@@ -413,9 +410,6 @@ export const layer: Layer.Layer<
     }
 
     const remove = Effect.fn("Worktree.remove")(function* (input: RemoveInput) {
-      // altimate_change start — reject before modifying a worktree offline
-      if (Offline.enabled()) return yield* new RemoveFailedError({ message: "Remove this worktree while online." })
-      // altimate_change end
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })
@@ -500,9 +494,6 @@ export const layer: Layer.Layer<
     )
 
     const runStartScript = Effect.fnUntraced(function* (directory: string, cmd: string, kind: string) {
-      // altimate_change start — keep worktree startup commands offline
-      if (Offline.enabled()) return true
-      // altimate_change end
       const text = cmd.trim()
       if (!text) return true
       const result = yield* runStartCommand(directory, text)
@@ -556,9 +547,6 @@ export const layer: Layer.Layer<
     })
 
     const reset = Effect.fn("Worktree.reset")(function* (input: ResetInput) {
-      // altimate_change start — reset fetches the base and refreshes submodules
-      if (Offline.enabled()) return yield* new ResetFailedError({ message: "Reset this worktree while online." })
-      // altimate_change end
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })
@@ -588,7 +576,8 @@ export const layer: Layer.Layer<
       }
 
       const sep = base.ref.indexOf("/")
-      if (base.ref !== base.name && sep > 0) {
+      // altimate_change — reset to the cached ref when offline
+      if (!Offline.enabled() && base.ref !== base.name && sep > 0) {
         const remote = base.ref.slice(0, sep)
         const branch = base.ref.slice(sep + 1)
         yield* gitExpect(
@@ -611,11 +600,15 @@ export const layer: Layer.Layer<
         })
       }
 
-      yield* gitExpect(
-        ["submodule", "update", "--init", "--recursive", "--force"],
-        { cwd: worktreePath },
-        (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
-      )
+      // altimate_change start — submodule initialization can fetch missing objects
+      if (!Offline.enabled()) {
+        yield* gitExpect(
+          ["submodule", "update", "--init", "--recursive", "--force"],
+          { cwd: worktreePath },
+          (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
+        )
+      }
+      // altimate_change end
 
       yield* gitExpect(
         ["submodule", "foreach", "--recursive", "git", "reset", "--hard"],

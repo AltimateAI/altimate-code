@@ -216,8 +216,6 @@ const ToolRunCommand = cmd({
     try {
       const toolArgs = await readArgs(args)
       const directory = process.cwd()
-      if (Offline.enabled() && name !== "warehouse_install_driver")
-        throw new Error("This tool is disabled in offline mode.")
       const workspaceTools = !Offline.enabled() && (await resolveWorkspaceTools(args["workspace-tools"], directory))
       const daemon = await import("../../altimate/tool-cli/daemon")
       const reply = !Offline.enabled() && args.daemon && !daemon.daemonDisabled()

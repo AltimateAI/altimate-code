@@ -1,5 +1,6 @@
 // altimate_change start — offline mode
 import { Offline } from "@/config/offline"
+import { assertLocalConnection } from "./offline"
 // altimate_change end
 /**
  * ConnectionRegistry — manages database connections.
@@ -428,9 +429,7 @@ async function createConnector(
 ): Promise<Connector> {
   // altimate_change end
   // altimate_change start — skip network work in offline mode
-  if (Offline.enabled()) {
-    throw new Error("Offline mode disables warehouse connections.")
-  }
+  if (Offline.enabled()) assertLocalConnection(config)
   // altimate_change end
   const driverPath = DRIVER_MAP[config.type.toLowerCase()]
   if (!driverPath) {
@@ -454,6 +453,7 @@ async function createConnector(
 
   // Resolve credentials from keychain
   resolvedConfig = await resolveConfig(name, resolvedConfig)
+  if (Offline.enabled()) assertLocalConnection(resolvedConfig)
 
   // altimate_change start — validate password is a string for drivers that require it
   // Prevents cryptic SASL/SCRAM errors from database drivers
@@ -670,9 +670,6 @@ export function names(): string[] {
 
 /** Get a connector instance (creates lazily). */
 export async function get(name: string): Promise<Connector> {
-  // altimate_change start — reject warehouse execution before accessing the connector cache
-  if (Offline.enabled()) throw new Error("Offline mode disables warehouse connections.")
-  // altimate_change end
   // altimate_change start — captured once, so a connect that finishes later lands in the project that started it
   const s = ensureLoaded()
   const { configs, connectors, tunnels, pending } = s
@@ -681,6 +678,9 @@ export async function get(name: string): Promise<Connector> {
     if (configs.has(name)) throw new Error(SCRATCH_NAME_CONFLICT)
     return getScratch()
   }
+
+  const configured = configs.get(name)
+  if (Offline.enabled() && configured) assertLocalConnection(configured)
 
   const cached = connectors.get(name)
   if (cached) {

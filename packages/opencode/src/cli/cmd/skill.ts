@@ -414,7 +414,11 @@ const SkillTestCommand = cmd({
       if (tools.length === 0) {
         warn(`No CLI tool references detected in skill content`)
       } else if (Offline.enabled()) {
-        warn("Paired tool checks require online mode.")
+        for (const tool of tools) {
+          if (await isToolOnPath(tool, projectDir)) pass(`"${tool}" found on PATH`)
+          else fail(`"${tool}" not found on PATH`)
+        }
+        warn("Paired tool --help checks require online mode.")
       } else {
         process.stdout.write(EOL + `  Paired tools:` + EOL)
         for (const tool of tools) {
@@ -661,7 +665,9 @@ const SkillInstallCommand = cmd({
   async handler(args) {
     let source = (args.source as string).trim().replace(/\.git$/, "")
     const githubShorthand = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/
-    if (Offline.enabled() && (/^https?:\/\//.test(source) || githubShorthand.test(source))) {
+    const offlineLocal = Offline.enabled() && githubShorthand.test(source) &&
+      (await fs.stat(path.resolve(source)).catch(() => undefined))?.isDirectory()
+    if (Offline.enabled() && !offlineLocal && (/^https?:\/\//.test(source) || githubShorthand.test(source))) {
       throw new Error("Install remote skills while online, or install a local skill directory.")
     }
     const isGlobal = args.global as boolean
@@ -700,7 +706,7 @@ const SkillInstallCommand = cmd({
           process.exit(1)
         }
         skillDir = tmpDir
-      } else if (githubShorthand.test(source)) {
+      } else if (!offlineLocal && githubShorthand.test(source)) {
         // GitHub shorthand: owner/repo
         const url = `https://github.com/${source}.git`
         process.stdout.write(`Fetching from github.com/${source}...` + EOL)

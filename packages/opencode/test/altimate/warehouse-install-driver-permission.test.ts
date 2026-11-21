@@ -105,7 +105,7 @@ describe("warehouse_install_driver permissions", () => {
       const result = await tool.execute({ driver: "postgres" }, context(ask))
       expect(result.metadata.installed).toBe(false)
       expect(result.output).toContain("Install the driver while online: npm install --prefix")
-      expect(result.output).toContain("pg")
+      expect(result.output).toMatch(/ pg$/)
       expect(ask).not.toHaveBeenCalled()
       expect(install).not.toHaveBeenCalled()
     } finally {

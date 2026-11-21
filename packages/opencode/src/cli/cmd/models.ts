@@ -31,6 +31,7 @@ export const ModelsCommand = effectCmd({
   handler: Effect.fn("Cli.models")(function* (args) {
     const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
     // altimate_change start — skip catalog refresh in offline mode
+    if (args.refresh && Offline.enabled()) UI.println("Model catalog refresh skipped in offline mode.")
     if (args.refresh && !Offline.enabled()) {
       // altimate_change end
       yield* ModelsDev.Service.use((s) => s.refresh(true))

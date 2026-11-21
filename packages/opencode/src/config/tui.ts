@@ -260,9 +260,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
 
   return {
     config: result,
-    // altimate_change start — skip local and installed TUI plugins in offline mode
-    pluginOrigins: Offline.enabled() ? [] : acc.plugin_origins,
-    // altimate_change end
+    pluginOrigins: acc.plugin_origins,
     dirs: result.plugin?.length ? dirs : [],
   }
 })

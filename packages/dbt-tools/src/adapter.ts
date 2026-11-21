@@ -41,7 +41,7 @@ import type {
   RuntimePythonEnvironment,
 } from "@altimateai/dbt-integration"
 
-function configuration(cfg: Config): DBTConfiguration {
+function configuration(cfg: Config, options: CreateOptions): DBTConfiguration {
   return {
     getDbtCustomRunnerImport: () => DEFAULT_CONFIGURATION_VALUES.dbtCustomRunnerImport,
     getDbtIntegration: () => cfg.dbtIntegration ?? DEFAULT_CONFIGURATION_VALUES.dbtIntegration,
@@ -52,7 +52,7 @@ function configuration(cfg: Config): DBTConfiguration {
     getQueryLimit: () => cfg.queryLimit ?? DEFAULT_CONFIGURATION_VALUES.queryLimit,
     getEnableNotebooks: () => DEFAULT_CONFIGURATION_VALUES.enableNotebooks,
     getDisableQueryHistory: () => DEFAULT_CONFIGURATION_VALUES.disableQueryHistory,
-    getInstallDepsOnProjectInitialization: () => DEFAULT_CONFIGURATION_VALUES.installDepsOnProjectInitialization,
+    getInstallDepsOnProjectInitialization: () => options.offline ? false : DEFAULT_CONFIGURATION_VALUES.installDepsOnProjectInitialization,
     getDisableDepthsCalculation: () => true,
     getWorkingDirectory: () => cfg.projectRoot,
     getAltimateUrl: () => "",
@@ -83,6 +83,8 @@ function terminal(): DBTTerminal {
 
 /** What `create` needs besides the saved config. */
 export type CreateOptions = {
+  /** Skip automatic dependency downloads and anonymous usage reporting. */
+  offline?: boolean
   /**
    * The folder dbt writes its artifacts to (manifest.json, partial_parse.msgpack, run_results.json) for
    * every command this adapter runs, given to dbt as DBT_TARGET_PATH. Unset, dbt writes to the project's
@@ -96,6 +98,7 @@ export type CreateOptions = {
 
 function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
   const vars = { ...process.env }
+  if (options.offline) vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
   if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
   return {
     pythonPath: cfg.pythonPath,
@@ -113,7 +116,7 @@ export function hasModelLineage(adapter?: DBTProjectIntegrationAdapter): boolean
 }
 
 export async function create(cfg: Config, options: CreateOptions = {}): Promise<DBTProjectIntegrationAdapter> {
-  const config = configuration(cfg)
+  const config = configuration(cfg, options)
   const term = terminal()
   const factory = new DBTCommandFactory(config)
 

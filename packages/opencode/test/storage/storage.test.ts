@@ -233,7 +233,7 @@ describe("Storage", () => {
     }),
   )
 
-  it.live("migration 1 tolerates malformed legacy records", () =>
+  it.live("migration 1 migrates local projects even when offline", () =>
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service
       const tmp = yield* tmpdirScoped({ git: true })
@@ -254,22 +254,29 @@ describe("Storage", () => {
         JSON.stringify({ role: "user", text: "hello" }),
       )
 
-      yield* Effect.gen(function* () {
-        const svc = yield* Storage.Service
-        const projects = yield* svc.list(["project"])
-        expect(projects).toHaveLength(1)
-        const project = projects[0]![1]
+      const previous = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        yield* Effect.gen(function* () {
+          const svc = yield* Storage.Service
+          const projects = yield* svc.list(["project"])
+          expect(projects).toHaveLength(1)
+          const project = projects[0]![1]
 
-        expect(yield* svc.list(["session", project])).toEqual([["session", project, "ses_legacy"]])
-        expect(yield* svc.read<{ id: string; title: string }>(["session", project, "ses_legacy"])).toEqual({
-          id: "ses_legacy",
-          title: "legacy",
-        })
-        expect(yield* svc.read<{ role: string; text: string }>(["message", "ses_legacy", "msg_legacy"])).toEqual({
-          role: "user",
-          text: "hello",
-        })
-      }).pipe(Effect.provide(remappedStorage(tmp)))
+          expect(yield* svc.list(["session", project])).toEqual([["session", project, "ses_legacy"]])
+          expect(yield* svc.read<{ id: string; title: string }>(["session", project, "ses_legacy"])).toEqual({
+            id: "ses_legacy",
+            title: "legacy",
+          })
+          expect(yield* svc.read<{ role: string; text: string }>(["message", "ses_legacy", "msg_legacy"])).toEqual({
+            role: "user",
+            text: "hello",
+          })
+        }).pipe(Effect.provide(remappedStorage(tmp)))
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+      }
 
       expect(yield* fs.readFileString(path.join(storage, "migration"))).toBe("2")
     }),

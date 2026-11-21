@@ -68,8 +68,6 @@ export async function start(directory: string, model?: string) {
   // Workers and core services must see the same policy before constructing
   // their layers. Once enabled, keep it for the lifetime of the process.
   process.env.ALTIMATE_OFFLINE = "1"
-  process.env.GIT_NO_LAZY_FETCH = "1"
-  process.env.GIT_ALLOW_PROTOCOL = "file"
   // Bun consults proxy environment variables even when fetch sets proxy: "".
   // Offline traffic must go directly to the one configured endpoint.
   process.env.NO_PROXY = "*"
@@ -78,8 +76,10 @@ export async function start(directory: string, model?: string) {
   if (networkFetch) return
   networkFetch = globalThis.fetch
   globalThis.fetch = Object.assign(
-    async () => {
-      throw new Error("Offline mode allows network requests only to the configured model endpoint.")
+    async (...args: Parameters<typeof fetch>) => {
+      const [input] = args
+      if (isLocalURL(input instanceof Request ? input.url : input.toString())) return localFetch()(...args)
+      throw new Error("Offline mode allows network requests only to the configured model endpoint or loopback services.")
     },
     { preconnect: () => {} },
   )
@@ -124,6 +124,35 @@ export function modelFetch(baseURL: string | undefined): typeof fetch {
       const target = new URL(input instanceof Request ? input.url : input.toString())
       if (target.origin !== endpoint.origin)
         throw new Error("Offline mode blocked a request outside the configured model endpoint.")
+      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: undefined })
+    },
+    { preconnect: () => {} },
+  )
+}
+
+// Validate the URL before any offline loopback HTTP request.
+export function isLocalURL(value: string | URL) {
+  try {
+    const url = new URL(value)
+    if (!["http:", "https:"].includes(url.protocol)) return false
+    const host = url.hostname.toLowerCase()
+    return host === "localhost" || host === "localhost." || host === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(host)
+  } catch {
+    return false
+  }
+}
+
+export function assertLocalMcp(config: { type: string; url?: string }) {
+  if (enabled() && config.type === "remote" && !isLocalURL(config.url ?? ""))
+    throw new Error("Offline mode allows only stdio or localhost/loopback HTTP(S) MCP servers.")
+}
+
+export function localFetch(): typeof fetch {
+  return Object.assign(
+    async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const target = input instanceof Request ? input.url : input.toString()
+      if (!isLocalURL(target)) throw new Error("Offline mode blocked a non-local request.")
+      // Never follow redirects: a local endpoint must not grant access to a remote host.
       return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: undefined })
     },
     { preconnect: () => {} },

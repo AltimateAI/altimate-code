@@ -129,7 +129,8 @@ export namespace ShareNext {
 
   export async function create(sessionID: SessionID) {
     // altimate_change start — skip session sharing in offline mode
-    if (Offline.enabled() || disabled) return { id: "", url: "", secret: "" }
+    if (Offline.enabled()) throw new Error("Sharing sessions requires an online run.")
+    if (disabled) return { id: "", url: "", secret: "" }
     // altimate_change end
     log.info("creating share", { sessionID })
     const req = await request()

@@ -423,6 +423,13 @@ export const layer = Layer.effect(
       key: string,
       mcp: ConfigMCPV1.Info & { type: "remote" },
     ) {
+      if (Offline.enabled() && !Offline.isLocalURL(mcp.url)) {
+        return {
+          client: undefined as MCPClient | undefined,
+          status: { status: "failed" as const, error: "Offline mode blocks remote MCP servers; use stdio or localhost/loopback HTTP(S)." },
+          transport: undefined as TransportLabel | undefined,
+        }
+      }
       const url = remoteURL(mcp.url)
       if (!url) {
         return {
@@ -494,6 +501,7 @@ export const layer = Layer.effect(
           transport: new StreamableHTTPClientTransport(url, {
             authProvider,
             requestInit,
+            fetch: Offline.enabled() ? Offline.localFetch() : undefined,
           }),
         },
         {
@@ -501,6 +509,7 @@ export const layer = Layer.effect(
           transport: new SSEClientTransport(url, {
             authProvider,
             requestInit,
+            fetch: Offline.enabled() ? Offline.localFetch() : undefined,
           }),
         },
       ]
@@ -673,9 +682,6 @@ export const layer = Layer.effect(
 
     const create = Effect.fn("MCP.create")(
       function* (key: string, mcp: ConfigMCPV1.Info) {
-        // altimate_change start — skip external MCP processes and servers in offline mode
-        if (Offline.enabled()) return DISABLED_RESULT
-        // altimate_change end
         if (mcp.enabled === false) {
           return DISABLED_RESULT
         }
@@ -1070,6 +1076,7 @@ export const layer = Layer.effect(
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
+      Offline.assertLocalMcp(mcp)
       // altimate_change start — see claim
       const seq = ++lifecycleSeq
       // altimate_change end
