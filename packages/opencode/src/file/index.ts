@@ -567,9 +567,7 @@ export namespace File {
 
     const content = (await Filesystem.readText(full).catch(() => "")).trim()
 
-    // altimate_change start — retain file content without the Git working-tree comparison
     if (project.vcs === "git") {
-      // altimate_change end
       let diff = (await git(["-c", "core.fsmonitor=false", "diff", "--", file], { cwd: Instance.directory })).text()
       if (!diff.trim()) {
         diff = (

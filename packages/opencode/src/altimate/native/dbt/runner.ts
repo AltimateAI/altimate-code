@@ -29,13 +29,22 @@ function ensureUpstreamSelector(select: string, command: string): string {
  * Run a dbt CLI command via subprocess.
  */
 export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
+  // Offline: dbt runs with the exact profiles directory checked here and without its
+  // usage-stats and PyPI version-check requests.
+  let offlineEnv: NodeJS.ProcessEnv | undefined
   if (Offline.enabled()) {
     try {
-      if (["deps", "init"].includes(params.command || "run")) throw new Error("Offline mode disables dbt dependency installation and initialization.")
-      await assertLocalDbt(params.project_dir || process.cwd(), [
+      if ((params.command || "run") === "deps") throw new Error("Offline mode disables dbt dependency installation.")
+      const { profilesDir } = await assertLocalDbt(params.project_dir || process.cwd(), [
         ...(params.args ?? []),
         ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
       ])
+      offlineEnv = {
+        ...process.env,
+        DBT_PROFILES_DIR: profilesDir,
+        DBT_SEND_ANONYMOUS_USAGE_STATS: "false",
+        DBT_VERSION_CHECK: "false",
+      }
     } catch (error) {
       return { stdout: "", stderr: String(error), exit_code: 1 }
     }
@@ -57,8 +66,7 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
       args.push("--project-dir", params.project_dir)
     }
 
-    const env = Offline.enabled() ? { ...process.env, DBT_SEND_ANONYMOUS_USAGE_STATS: "false" } : process.env
-    execFile("dbt", args, { timeout: 300_000, env }, (error, stdout, stderr) => {
+    execFile("dbt", args, { timeout: 300_000, env: offlineEnv ?? process.env }, (error, stdout, stderr) => {
       if (error) {
         if ((error as any).code === "ENOENT") {
           resolve({

@@ -13,10 +13,22 @@ import { offlineModeEnabled } from "./flag/flag"
 // altimate_change start — prevent Git from starting a transport offline
 const remoteCommands = new Set(["clone", "fetch", "pull", "push", "ls-remote", "send-pack", "fetch-pack", "submodule--helper"])
 
+// Git LFS reads cached objects locally and contacts its endpoint only for missing ones.
+// Pointing that endpoint at a closed loopback port keeps cached content and fails on the rest.
+const OFFLINE_LFS_URL = "http://127.0.0.1:9/"
+
 export function localGitEnv(env?: Record<string, string>) {
-  return offlineModeEnabled()
-    ? { ...env, GIT_ALLOW_PROTOCOL: "", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1" }
-    : env
+  if (!offlineModeEnabled()) return env
+  const inherited = Number(env?.GIT_CONFIG_COUNT ?? process.env.GIT_CONFIG_COUNT ?? 0)
+  const index = Number.isInteger(inherited) && inherited > 0 ? inherited : 0
+  return {
+    ...env,
+    GIT_ALLOW_PROTOCOL: "",
+    GIT_NO_LAZY_FETCH: "1",
+    GIT_CONFIG_COUNT: String(index + 1),
+    [`GIT_CONFIG_KEY_${index}`]: "lfs.url",
+    [`GIT_CONFIG_VALUE_${index}`]: OFFLINE_LFS_URL,
+  }
 }
 
 export function gitCommandUsesNetwork(args: string[]) {
@@ -453,7 +465,7 @@ function execute(cwd: string, proc: AppProcess.Interface) {
         ChildProcess.make("git", args, {
           cwd,
           env: localGitEnv(),
-                extendEnv: true,
+          extendEnv: true,
           stdin: "ignore",
         }),
       )

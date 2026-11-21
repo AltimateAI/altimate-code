@@ -73,9 +73,7 @@ Heap.start()
 // InstanceRuntime.load/Config.get() would otherwise race it (transiently truncated
 // read) or cache the pre-heal entry, making the first session spawn the broken
 // config anyway. Errors are swallowed: a failed sync must never block the TUI.
-const datamateSyncReady: Promise<unknown> = Offline.enabled()
-  ? Promise.resolve()
-  : syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
+const datamateSyncReady: Promise<unknown> = syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
 // altimate_change end
 
 const traceConsumer = new TraceConsumer()

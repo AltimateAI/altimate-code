@@ -160,15 +160,48 @@ Control how context is managed when conversations grow long:
 !!! info
     Compaction automatically summarizes older messages to free up context window space, allowing longer conversations without losing important context. See [Context Management](context-management.md) for full details.
 
-## Offline mode
+## Offline / air-gapped mode
 
-Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a local global or project configuration file. The setting applies to the process and its workers. Start a separate process in the project to opt in when using a shared server.
+Offline mode is for running Altimate Code against a local or self-hosted model with no other network access. It stops the network requests Altimate Code itself makes. It does not stop local work: tools, shell commands, local databases and local Git keep working.
 
-Configure an explicit HTTP(S) provider `options.baseURL` and select its `provider/model` ID. Define the model in the provider configuration if it is absent from the bundled or cached catalog. For an OpenAI-compatible endpoint, use the bundled `@ai-sdk/openai-compatible` provider.
+### Turn it on
 
-- SQL tools can query local DuckDB and SQLite files or a warehouse listening on loopback. Use a local dbt profile for dbt commands.
-- Bash, installed language servers, and MCP servers using stdio or a loopback HTTP(S) URL remain available. Altimate Code skips automatic language server and warehouse driver installs. Install optional drivers and ripgrep ahead of time.
-- Git diffs, session snapshots and revert, and worktree creation, removal and reset operate locally. Reset uses the cached base and any locally available submodule commits. Git LFS files may appear as pointers until hydrated online. Run Git remote operations online.
-- Altimate Code skips telemetry, account and remote configuration requests, model catalog downloads, update checks, workspace and engine sync, session sharing, and web search and fetch. Remote warehouse and MCP connections require an online run. Run `altimate-code workspace refresh` before going offline to save a snapshot. Keep local credentials for the same workspace account to use that snapshot.
+Set `ALTIMATE_OFFLINE=1` before starting Altimate Code, or add `"offline": true` to a global or project configuration file. The setting covers the process and its workers. A project that requests offline mode is refused by a shared server started without it; start Altimate Code from that project instead.
 
-The configured model endpoint is the only external endpoint Altimate Code contacts in offline mode. Shell commands and other programs you configure or invoke retain their own network access.
+Configure a provider with an explicit HTTP(S) `options.baseURL` and select one of its models (`provider/model`). For an OpenAI-compatible server, use the bundled `@ai-sdk/openai-compatible` provider, and define the model under the provider if it is not in the bundled or cached catalog. Requests to that endpoint are the only requests Altimate Code sends off the machine. A `small_model` is used only if it belongs to the same provider; otherwise the main model handles those tasks.
+
+### Before going offline
+
+While still online:
+
+- Run `altimate-code workspace refresh` to save the workspace skill snapshot. Offline runs use it without refreshing or deleting it, as long as your local credentials belong to the same workspace account.
+- Install the warehouse drivers you need (the `warehouse_install_driver` tool), any language servers, and ripgrep.
+- Run `dbt deps` for dbt projects.
+
+### What keeps working
+
+- Local warehouses: DuckDB and SQLite files, and warehouses whose host is `localhost`, `::1` or `127.x.x.x`. The SQL and schema tools run against them.
+- dbt commands, when the selected profile and target point at a local database.
+- The shell tool, installed language servers, and MCP servers that use stdio or a loopback HTTP(S) URL.
+- Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and submodule commits. Git LFS files check out from the local LFS cache; a file whose content is not cached fails with a clear error instead of downloading.
+- `attach` and `run --attach` to a server on this machine.
+
+### What is blocked
+
+Each of these fails with a one-line message or is skipped:
+
+- telemetry, account and remote configuration requests;
+- model catalog downloads and update checks;
+- workspace and workspace engine sync;
+- session sharing;
+- the web fetch, web search, code search, workspace manager, feedback and memory refresh tools;
+- MCP servers at non-loopback URLs, and MCP sign-in;
+- automatic installs of warehouse drivers, language servers, plugins and ripgrep;
+- warehouse connections whose host is not loopback, SSH tunnels, and cloud sign-in methods;
+- `dbt deps`, and dbt's own usage reporting and version check;
+- Git fetch, pull, push, clone and other remote operations;
+- commands that need a remote service, such as `github`, `pr`, `web` and `attach` to another machine.
+
+### What offline mode does not police
+
+Programs you run or configure yourself keep their own network access: shell commands, language servers, local MCP servers and their child processes. They also keep your proxy settings. Offline mode does not sandbox them.

@@ -128,7 +128,8 @@ async function ensureDbtAdapter(): Promise<any | null> {
         return publish(null)
       }
 
-      if (Offline.enabled()) await assertLocalDbt(dbtConfig.projectRoot, [], dbtConfig.dbtIntegration)
+      // The integration reads profiles.yml relative to the project, so check from there.
+      if (Offline.enabled()) await assertLocalDbt(dbtConfig.projectRoot, [], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
 
       // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's
       // target/manifest.json is the user's (and other tools'), and a tool's compile or show would rewrite

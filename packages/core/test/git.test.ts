@@ -1,9 +1,10 @@
 import { describe, expect } from "bun:test"
 import { $ } from "bun"
 import fs from "fs/promises"
+import os from "os"
 import path from "path"
 import { Effect } from "effect"
-import { Git } from "@opencode-ai/core/git"
+import { Git, localGitEnv } from "@opencode-ai/core/git"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { branch, commit, gitRemote } from "./fixture/git"
 import { tmpdir } from "./fixture/tmpdir"
@@ -49,6 +50,49 @@ describe("Git", () => {
         }
       }),
     ),
+  )
+
+  // Offline Git must not download LFS objects, but objects already in the local cache still check out.
+  const hasLfs = Bun.spawnSync(["git", "lfs", "version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
+  const liveIfLfs = hasLfs ? it.live : it.live.skip
+  liveIfLfs("offline checkout keeps cached LFS content and refuses uncached objects", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "offline-lfs-"))),
+        (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
+      )
+      const gitIn = (args: string[], env?: Record<string, string>) =>
+        Bun.spawnSync(["git", ...args], { cwd: tmp, env: { ...process.env, ...env }, stderr: "pipe", stdout: "pipe" })
+      for (const args of [
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["lfs", "install", "--local"],
+        ["lfs", "track", "*.bin"],
+        ["remote", "add", "origin", "https://example.invalid/repo.git"],
+      ]) expect(gitIn(args).exitCode).toBe(0)
+      yield* Effect.promise(() => fs.writeFile(path.join(tmp, "a.bin"), "cached-content"))
+      expect(gitIn(["add", ".gitattributes", "a.bin"]).exitCode).toBe(0)
+      expect(gitIn(["commit", "-qm", "lfs"]).exitCode).toBe(0)
+
+      const previous = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        const env = localGitEnv()!
+        yield* Effect.promise(() => fs.rm(path.join(tmp, "a.bin")))
+        expect(gitIn(["checkout", "--", "a.bin"], env).exitCode).toBe(0)
+        expect(yield* Effect.promise(() => fs.readFile(path.join(tmp, "a.bin"), "utf8"))).toBe("cached-content")
+
+        yield* Effect.promise(() => fs.rm(path.join(tmp, "a.bin")))
+        yield* Effect.promise(() => fs.rm(path.join(tmp, ".git", "lfs", "objects"), { recursive: true, force: true }))
+        const missing = gitIn(["checkout", "--", "a.bin"], env)
+        expect(missing.exitCode).not.toBe(0)
+        expect(missing.stderr.toString()).toContain("127.0.0.1:9")
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+      }
+    }),
   )
 
   it.live("fetches, checks out, and resets remote changes", () =>

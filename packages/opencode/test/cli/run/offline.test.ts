@@ -96,7 +96,7 @@ async function fixture(
               index: 0, id: "call_shell", type: "function", function: {
                 name: "bash",
                 arguments: JSON.stringify({
-                  command: "printf shell-ran > shell-marker",
+                  command: 'printf "shell-ran:%s" "$NO_PROXY" > shell-marker',
                   description: "Write a local marker",
                   workdir: process.cwd(),
                   timeout: 5000,
@@ -214,7 +214,8 @@ test("offline model can execute a local bash command", async () => {
   try {
     const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "--yolo", "Run the local shell command"], {
       cwd: f.project,
-      env: { ...f.env, OFFLINE_TEST_BASH: "1", ALTIMATE_CLI_YOLO: "true" },
+      // The user's proxy exclusions reach their own commands; the offline bypass does not.
+      env: { ...f.env, OFFLINE_TEST_BASH: "1", ALTIMATE_CLI_YOLO: "true", NO_PROXY: "corp.example" },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -227,7 +228,7 @@ test("offline model can execute a local bash command", async () => {
     ])
     expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline reply") })
     const marker = await Bun.file(path.join(f.project, "shell-marker")).text().catch(() => "")
-    expect({ marker, stdout, stderr }).toMatchObject({ marker: "shell-ran" })
+    expect({ marker, stdout, stderr }).toMatchObject({ marker: "shell-ran:corp.example" })
     expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })
@@ -276,6 +277,55 @@ test("offline SQL tool queries a local DuckDB file", async () => {
     await fs.rm(f.root, { recursive: true, force: true })
   }
 }, 55_000)
+
+test("offline SQL tool refuses a warehouse whose host is not loopback", async () => {
+  const f = await fixture(false, false, false)
+  try {
+    await Bun.write(
+      path.join(f.project, ".altimate-code", "connections.json"),
+      JSON.stringify({ remote: { type: "postgres", host: "db.example.com", database: "analytics", user: "analyst" } }),
+    )
+    const proc = Bun.spawn([
+      process.execPath, "--preload", f.preload, CLI, "tool", "run", "sql_execute",
+      "--args", JSON.stringify({ warehouse: "remote", query: "select 1" }), "--json",
+    ], { cwd: f.project, env: f.env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(25_000) })
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+    await proc.exited
+    expect(stdout + stderr).toContain("Offline mode allows only local file databases and loopback warehouse connections.")
+    expect(await fs.readFile(f.calls, "utf8").catch(() => "")).toBe("")
+    expect(await fs.readFile(f.blocked, "utf8").catch(() => "")).toBe("")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test("offline attach accepts a server on this machine and refuses a remote one", async () => {
+  const f = await fixture(false, false, false)
+  try {
+    const attach = async (url: string) => {
+      const proc = Bun.spawn([process.execPath, "--preload", f.preload, CLI, "run", "--attach", url, "Hello"], {
+        cwd: f.project,
+        env: f.env,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        signal: AbortSignal.timeout(20_000),
+      })
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+      await proc.exited
+      return stdout + stderr
+    }
+    expect(await attach("https://remote-server.test")).toContain("This command requires network access")
+    // Nothing listens on port 9; the attempt fails on connection, not on the offline policy.
+    expect(await attach("http://127.0.0.1:9")).not.toContain("This command requires network access")
+    // The only requests made went to the local server.
+    const requests = (await fs.readFile(f.blocked, "utf8").catch(() => "")).trim().split("\n").filter(Boolean)
+    expect(requests.length).toBeGreaterThan(0)
+    expect(requests.filter((line) => !line.includes("http://127.0.0.1:9/"))).toEqual([])
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 45_000)
 
 test("offline model transport bypasses proxy settings and refuses redirects", async () => {
   let proxyCalls = 0
@@ -494,11 +544,11 @@ test.skipIf(process.platform === "win32")(
 )
 
 test.skipIf(process.platform === "win32")(
-  "offline skill validation skips running paired tools",
+  "offline skill validation runs local paired tools",
   async () => {
     const f = await fixture(true, false, false)
     const bin = path.join(f.root, "bin")
-    const marker = path.join(f.root, "unexpected-tool")
+    const marker = path.join(f.root, "paired-tool-ran")
     try {
       await fs.rm(path.join(f.root, "data", "altimate-code", "auth.json"))
       await fs.mkdir(bin)
@@ -518,11 +568,10 @@ test.skipIf(process.platform === "win32")(
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),
       ])
-      expect(await Bun.file(marker).exists()).toBe(false)
-      expect({ code, stdout, stderr }).toMatchObject({
-        code: 0,
-        stdout: expect.stringContaining("Paired tool --help checks require online mode."),
-      })
+      // A local executable is the user's own program: offline mode runs it like any other.
+      expect(await Bun.file(marker).exists()).toBe(true)
+      expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("fixture-tool") })
+      expect(stdout).not.toContain("online mode")
     } finally {
       await fs.rm(f.root, { recursive: true, force: true })
     }

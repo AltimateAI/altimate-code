@@ -63,8 +63,10 @@ export namespace Discovery {
           const base = url.endsWith("/") ? url : `${url}/`
           const index = new URL("index.json", base).href
           // altimate_change start — reuse the cached index for this source without contacting it
-          const sourceCache = path.join(cache, ".sources", createHash("sha256").update(index).digest("hex"))
-          const indexPath = path.join(sourceCache, "index.json")
+          const sourceKey = createHash("sha256").update(index).digest("hex")
+          const sourceCache = path.join(cache, ".sources", sourceKey)
+          // Beside the source directory, not inside it, so no skill name can collide with it.
+          const indexPath = path.join(cache, ".sources", `${sourceKey}.json`)
           if (Offline.enabled()) {
             const cached = yield* fs.readJson(indexPath).pipe(Effect.catch(() => Effect.void))
             const directories = Array.isArray(cached) ? cached : []

@@ -1363,6 +1363,35 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("offline withholds a snapshot from a different or broken serve pin without deleting it", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const keys = ["ALTIMATE_OFFLINE", "ALTIMATE_CODE_SERVE", "ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    const pin = (id: string) =>
+      Object.assign(process.env, {
+        ALTIMATE_CODE_SERVE: "1",
+        ALTIMATE_PINNED_WORKSPACE_ID: id,
+        ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+        ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+      })
+    try {
+      process.env.ALTIMATE_OFFLINE = "1"
+      pin("2")
+      expect(await snapshotWorkspaceId(project)).toBeNull()
+      pin("not-a-number")
+      expect(await snapshotWorkspaceId(project)).toBeNull()
+      pin("1")
+      expect(await snapshotWorkspaceId(project)).toBe(1)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key]
+      }
+    }
+  })
+
   test("registryStale reports a credential switch, with the snapshot untouched", async () => {
     // The disclosure this guards: the registry had already loaded the previous
     // account's skills, and an A-to-B switch changes nothing on disk. Keyed on

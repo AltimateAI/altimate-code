@@ -20,7 +20,7 @@ Workspace context adds bounded data to a client's prompt; skills load on demand.
 
 Verification covers unit contracts, a real stdio protocol fixture and existing SQLite MCP behavior. A non-empty cloud memory round trip and real workspace-engine SQL and knowledge calls are not covered by tests yet.
 
-In [offline mode](docs/configure/config.md#offline-mode), Altimate Code sessions use the local workspace skill snapshot. Refresh it with `altimate-code workspace refresh` while online. The external workspace gateway requires an online run.
+In [offline mode](docs/configure/config.md#offline-air-gapped-mode), Altimate Code sessions use the local workspace skill snapshot. Refresh it with `altimate-code workspace refresh` while online. The external workspace gateway requires an online run.
 
 ## Automatic-client setup and stable gateway
 

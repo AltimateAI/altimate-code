@@ -98,7 +98,10 @@ export type CreateOptions = {
 
 function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
   const vars = { ...process.env }
-  if (options.offline) vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
+  if (options.offline) {
+    vars.DBT_SEND_ANONYMOUS_USAGE_STATS = "false"
+    vars.DBT_VERSION_CHECK = "false"
+  }
   if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
   return {
     pythonPath: cfg.pythonPath,

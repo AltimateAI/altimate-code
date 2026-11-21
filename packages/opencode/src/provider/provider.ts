@@ -2431,13 +2431,18 @@ export namespace Provider {
   export async function getSmallModel(providerID: ProviderID) {
     const cfg = await Config.get()
 
+    // altimate_change start — offline: only a small model on the configured endpoint; otherwise the caller's model
+    if (Offline.enabled()) {
+      if (!cfg.small_model) return undefined
+      const parsed = parseModel(cfg.small_model)
+      return Offline.endpoint(cfg, parsed.providerID) ? getModel(parsed.providerID, parsed.modelID) : undefined
+    }
+    // altimate_change end
+
     if (cfg.small_model) {
       const parsed = parseModel(cfg.small_model)
       return getModel(parsed.providerID, parsed.modelID)
     }
-
-    // altimate_change — use the caller's configured model when no offline small model is set
-    if (Offline.enabled()) return undefined
 
     const provider = await state().then((state) => state.providers[providerID])
     if (provider) {

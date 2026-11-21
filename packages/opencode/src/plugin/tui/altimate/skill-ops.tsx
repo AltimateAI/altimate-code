@@ -303,10 +303,6 @@ async function testSkillDirect(
     .join(sep)
 
   for (const tool of tools) {
-    if (Offline.enabled()) {
-      if (!Bun.which(tool, { PATH: toolPath })) return { ok: false, message: `${skillName}: FAIL — "${tool}" not found` }
-      continue
-    }
     try {
       const proc = Bun.spawn([tool, "--help"], {
         stdout: "pipe",
@@ -323,7 +319,7 @@ async function testSkillDirect(
       return { ok: false, message: `${skillName}: FAIL — "${tool}" not found or failed to execute` }
     }
   }
-  return { ok: true, message: Offline.enabled() ? `${skillName}: tools found (skipped --help offline)` : `${skillName}: PASS` }
+  return { ok: true, message: `${skillName}: PASS` }
 }
 
 type RawSdkClient = {

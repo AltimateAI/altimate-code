@@ -413,12 +413,6 @@ const SkillTestCommand = cmd({
       const tools = detectToolReferences(skill.content)
       if (tools.length === 0) {
         warn(`No CLI tool references detected in skill content`)
-      } else if (Offline.enabled()) {
-        for (const tool of tools) {
-          if (await isToolOnPath(tool, projectDir)) pass(`"${tool}" found on PATH`)
-          else fail(`"${tool}" not found on PATH`)
-        }
-        warn("Paired tool --help checks require online mode.")
       } else {
         process.stdout.write(EOL + `  Paired tools:` + EOL)
         for (const tool of tools) {

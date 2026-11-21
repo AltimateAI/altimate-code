@@ -46,7 +46,60 @@ test("offline rejects remote targets, SSH, cloud auth, and URI host overrides", 
     { type: "mongodb", connection_string: "mongodb://localhost/db?directConnection=true", direct_connection: false },
     { type: "mongodb", connection_string: "mongodb://localhost/db?directConnection=true&authMechanism=MONGODB-AWS" },
     { type: "trino", url: "https://example.com" },
+    { type: "trino", host: "127.0.0.1", protocol: "http://evil.example" },
+    { type: "clickhouse", host: "127.0.0.1", protocol: "http://example.com:8123/" },
+    { type: "oracle", connection_string: "db.example.com:1521/ORCL" },
+    { type: "oracle", connection_string: "(DESCRIPTION=(ADDRESS=(HOST=db.example.com)))" },
+    { type: "oracle", connection_string: "PRODTNS" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
+})
+
+test("offline accepts plain protocols and local Oracle Easy Connect strings", () => {
+  for (const config of [
+    { type: "trino", host: "localhost", protocol: "https" },
+    { type: "clickhouse", host: "127.0.0.1", protocol: "HTTP" },
+    { type: "oracle", connection_string: "127.0.0.1:1521/ORCL" },
+    { type: "oracle", connection_string: "//localhost/XEPDB1" },
+    { type: "oracle", connection_string: "[::1]:1521/ORCL" },
+  ]) expect(() => assertLocalConnection(config)).not.toThrow()
+})
+
+test("dbt finds the project from a subdirectory and reads profiles from the working directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "offline-dbt-discovery-"))
+  try {
+    const models = path.join(root, "models")
+    const runDir = path.join(root, "run")
+    await fs.mkdir(models)
+    await fs.mkdir(runDir)
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "profile: test\n")
+    // The project's own profiles.yml is local, but dbt run from runDir reads runDir/profiles.yml.
+    await fs.writeFile(path.join(root, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: duckdb\n      path: ':memory:'\n")
+    await fs.writeFile(path.join(runDir, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: postgres\n      host: example.com\n")
+    await expect(assertLocalDbt(models, [], "core", root)).resolves.toEqual({ profilesDir: root })
+    await expect(assertLocalDbt(models, [], "core", runDir)).rejects.toThrow("Offline mode")
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test.skipIf(process.platform === "win32")("offline dbt runs with the checked profiles directory and no version check", async () => {
+  const { runDbt } = await import("../../../src/altimate/native/dbt/runner")
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "offline-dbt-run-"))
+  const previousPath = process.env.PATH
+  try {
+    const bin = path.join(root, "bin")
+    await fs.mkdir(bin)
+    await fs.writeFile(path.join(bin, "dbt"), "#!/bin/sh\necho \"$DBT_PROFILES_DIR|$DBT_VERSION_CHECK|$DBT_SEND_ANONYMOUS_USAGE_STATS\"\n", { mode: 0o755 })
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "profile: test\n")
+    await fs.writeFile(path.join(root, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: duckdb\n      path: ':memory:'\n")
+    process.env.PATH = `${bin}${path.delimiter}${previousPath}`
+    process.env.ALTIMATE_OFFLINE = "1"
+    const result = await runDbt({ command: "ls", project_dir: root, args: ["--profiles-dir", root] })
+    expect(result.exit_code).toBe(0)
+    expect(result.stdout.trim()).toBe(`${root}|false|false`)
+    expect((await runDbt({ command: "deps", project_dir: root })).stderr).toContain("Offline mode")
+  } finally {
+    process.env.PATH = previousPath
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
 test("dbt checks selected target and CLI overrides", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "offline-dbt-"))
@@ -54,10 +107,10 @@ test("dbt checks selected target and CLI overrides", async () => {
     await fs.writeFile(path.join(root, "dbt_project.yml"), "name: test\nprofile: test\n")
     await fs.writeFile(path.join(root, "profiles.yml"), "test:\n  target: local\n  outputs:\n    local:\n      type: duckdb\n      path: ':memory:'\n    remote:\n      type: postgres\n      host: example.com\n")
     const args = ["--profiles-dir", root]
-    await expect(assertLocalDbt(root, args)).resolves.toBeUndefined()
+    await expect(assertLocalDbt(root, args)).resolves.toEqual({ profilesDir: root })
     await expect(assertLocalDbt(root, [...args, "--target=remote"])).rejects.toThrow("Offline mode")
     await expect(assertLocalDbt(root, [...args, "--target", "local", "-t", "remote"])).rejects.toThrow("Offline mode")
-    await expect(assertLocalDbt(root, [...args, "-t", "remote", "--target", "local"])).resolves.toBeUndefined()
+    await expect(assertLocalDbt(root, [...args, "-t", "remote", "--target", "local"])).resolves.toEqual({ profilesDir: root })
     await expect(assertLocalDbt(root, [...args, "--target", "local", "-tremote"])).rejects.toThrow("Offline mode")
     await expect(assertLocalDbt(root, args, "cloud")).rejects.toThrow("Offline mode")
   } finally { await fs.rm(root, { recursive: true, force: true }) }
@@ -73,7 +126,7 @@ test("dbt project directory follows environment and CLI precedence", async () =>
     await fs.writeFile(path.join(root, "profiles.yml"), "local:\n  outputs:\n    default:\n      type: duckdb\n      path: ':memory:'\nremote:\n  outputs:\n    default:\n      type: postgres\n      host: example.com\n")
     process.env.DBT_PROJECT_DIR = other
     await expect(assertLocalDbt(root, ["--profiles-dir", root])).rejects.toThrow("Offline mode")
-    await expect(assertLocalDbt(root, ["--profiles-dir", root, "--project-dir", root])).resolves.toBeUndefined()
+    await expect(assertLocalDbt(root, ["--profiles-dir", root, "--project-dir", root])).resolves.toEqual({ profilesDir: root })
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 
@@ -139,7 +192,7 @@ test("cached remote target survives lost keychain credentials and closes on reje
   try {
     Credentials.setSecretBackendForTests({ name: "test", get: read, set: async () => {}, delete: async () => true })
     Registry.setConfigs({ remote: { type: "postgres", host: "localhost" } })
-    expect(await Registry.get("remote")).toBe(connector)
+    expect(await Registry.get("remote")).toBe(connector as any)
     expect(connect.mock.calls[0][0].connection_string).toBe("postgres://remote.example/db")
     read.mockClear()
     read.mockImplementation(async () => { throw new Error("keychain locked") })

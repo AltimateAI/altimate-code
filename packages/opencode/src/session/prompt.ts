@@ -484,6 +484,11 @@ export namespace SessionPrompt {
       const writeOfflineNotice = async () => {
         const { ownManifest, snapshotKnownEmpty } = await import("../altimate/workspace/skill-sync")
         const snapshot = await ownManifest(dir)
+        // A withheld snapshot (rebound project, other account) must not stay visible through .claude/skills copies.
+        if (!snapshot) {
+          const { mirrorClaudeSkills } = await import("../altimate/workspace/claude-skill-mirror")
+          await mirrorClaudeSkills(dir, { withdraw: true })
+        }
         const binding = snapshot ? null : await resolveBindingOutcome(dir)
         const empty = binding?.status === "bound" && await snapshotKnownEmpty(dir, binding.binding.datamateId)
         await Offline.announce(snapshot !== null, empty)

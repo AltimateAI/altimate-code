@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import { isIP } from "node:net"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import * as Effect from "effect/Effect"
@@ -49,6 +50,13 @@ async function localOptIn(directory: string) {
   for (const file of files) {
     if (file && (await optedIn(await fs.readFile(file, "utf8").catch(() => undefined), file))) return true
   }
+  // The legacy global TOML file is converted to config.json only after startup, so read it here too.
+  const legacy = await fs.readFile(path.join(Global.Path.config, "config"), "utf8").catch(() => undefined)
+  if (legacy !== undefined) {
+    try {
+      if ((Bun.TOML.parse(legacy) as { offline?: unknown }).offline === true) return true
+    } catch {}
+  }
   const managed = await ConfigManaged.readManagedPreferences().catch(() => undefined)
   return managed ? optedIn(managed.text, { source: managed.source, dir: path.dirname(managed.source) }) : false
 }
@@ -63,13 +71,40 @@ export async function assertStartupPolicy(directory: string) {
 
 let networkFetch: typeof fetch | undefined
 
+const USER_PROXY = "ALTIMATE_OFFLINE_USER_PROXY"
+
+/**
+ * Environment for programs the user runs or configures (shell commands, language servers,
+ * stdio MCP servers). Offline mode does not police their network access, so they get the
+ * user's original proxy exclusions back instead of the process-wide bypass.
+ */
+export function userEnv<T extends Record<string, string | undefined>>(env: T): T {
+  const saved = env[USER_PROXY] ?? process.env[USER_PROXY]
+  if (saved === undefined) return env
+  delete env[USER_PROXY]
+  try {
+    const original = JSON.parse(saved) as Record<string, unknown>
+    for (const key of ["NO_PROXY", "no_proxy"] as const) {
+      // Only the inherited bypass is replaced; a value the program's own config set stays.
+      if (env[key] !== process.env[key]) continue
+      const value = original[key]
+      if (typeof value === "string") (env as Record<string, string | undefined>)[key] = value
+      else delete env[key]
+    }
+  } catch {}
+  return env
+}
+
 export async function start(directory: string, model?: string) {
   if (!enabled() && !(await localOptIn(directory))) return
   // Workers and core services must see the same policy before constructing
   // their layers. Once enabled, keep it for the lifetime of the process.
   process.env.ALTIMATE_OFFLINE = "1"
   // Bun consults proxy environment variables even when fetch sets proxy: "".
-  // Offline traffic must go directly to the one configured endpoint.
+  // Offline traffic must go directly to the one configured endpoint. The user's own
+  // values are kept (and inherited by workers) so their programs get them back: see userEnv.
+  if (process.env[USER_PROXY] === undefined)
+    process.env[USER_PROXY] = JSON.stringify({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy })
   process.env.NO_PROXY = "*"
   process.env.no_proxy = "*"
   if (model) process.env.ALTIMATE_OFFLINE_MODEL = model
@@ -134,13 +169,18 @@ export function modelFetch(baseURL: string | undefined): typeof fetch {
   )
 }
 
+/** Literal loopback addresses only: no DNS lookups or hostname suffix matching. */
+export function isLoopbackHost(value: unknown): boolean {
+  if (typeof value !== "string") return false
+  const host = value.toLowerCase().replace(/^\[|\]$/g, "")
+  return host === "localhost" || host === "localhost." || host === "::1" || (isIP(host) === 4 && host.startsWith("127."))
+}
+
 // Validate the URL before any offline loopback HTTP request.
 export function isLocalURL(value: string | URL) {
   try {
     const url = new URL(value)
-    if (!["http:", "https:"].includes(url.protocol)) return false
-    const host = url.hostname.toLowerCase()
-    return host === "localhost" || host === "localhost." || host === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(host)
+    return ["http:", "https:"].includes(url.protocol) && isLoopbackHost(url.hostname)
   } catch {
     return false
   }

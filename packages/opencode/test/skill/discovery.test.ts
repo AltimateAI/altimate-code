@@ -137,4 +137,40 @@ describe("Discovery.pull", () => {
       expect(downloadCount).toBe(firstCount)
     }),
   )
+
+  // altimate_change start — offline reuses the cached source list, even when a skill is named like it
+  it.live("offline serves the cached skills of a source, including one named index.json", () =>
+    Effect.gen(function* () {
+      const source = Bun.serve({
+        port: 0,
+        fetch(req) {
+          const { pathname } = new URL(req.url)
+          if (pathname === "/s/index.json")
+            return Response.json({
+              skills: [
+                { name: "index.json", description: "odd name", files: ["SKILL.md"] },
+                { name: "plain", description: "plain", files: ["SKILL.md"] },
+              ],
+            })
+          if (pathname.endsWith("/SKILL.md")) return new Response("---\nname: x\ndescription: x\n---\nbody")
+          return new Response("Not Found", { status: 404 })
+        },
+      })
+      const previous = process.env.ALTIMATE_OFFLINE
+      try {
+        const discovery = yield* Discovery.Service
+        const url = `http://localhost:${source.port}/s/`
+        const online = yield* discovery.pull(url)
+        expect(online.map((dir) => path.basename(dir)).sort()).toEqual(["index.json", "plain"])
+        process.env.ALTIMATE_OFFLINE = "1"
+        const offline = yield* discovery.pull(url)
+        expect(offline.sort()).toEqual(online.sort())
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+        void source.stop(true)
+      }
+    }),
+  )
+  // altimate_change end
 })

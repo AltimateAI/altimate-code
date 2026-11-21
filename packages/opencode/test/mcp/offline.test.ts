@@ -10,6 +10,11 @@ test("offline MCP URL policy accepts only HTTP(S) localhost and loopback", () =>
 })
 
 test("offline local MCP fetch rejects remote requests and redirects before remote egress", async () => {
+  // Bun applies HTTP(S)_PROXY to loopback too unless NO_PROXY covers it; keep an ambient proxy out of this test.
+  const proxyKeys = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]
+  const savedProxy = Object.fromEntries(proxyKeys.map((key) => [key, process.env[key]]))
+  for (const key of proxyKeys) delete process.env[key]
+  process.env.NO_PROXY = process.env.no_proxy = "127.0.0.1,localhost"
   let calls = 0
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -29,5 +34,34 @@ test("offline local MCP fetch rejects remote requests and redirects before remot
     expect(calls).toBe(2)
   } finally {
     server.stop(true)
+    for (const key of proxyKeys) {
+      if (savedProxy[key] === undefined) delete process.env[key]
+      else process.env[key] = savedProxy[key]
+    }
+  }
+})
+
+test("user programs get their own proxy exclusions back, not the offline bypass", () => {
+  const keys = ["NO_PROXY", "no_proxy", "ALTIMATE_OFFLINE_USER_PROXY"]
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+  try {
+    // What Offline.start leaves behind: the bypass, plus the user's original values.
+    process.env.ALTIMATE_OFFLINE_USER_PROXY = JSON.stringify({ NO_PROXY: "corp.example" })
+    process.env.NO_PROXY = process.env.no_proxy = "*"
+    const env: Record<string, string | undefined> = Offline.userEnv({ ...process.env, PATH: "/bin" })
+    expect(env.NO_PROXY).toBe("corp.example")
+    expect(env.no_proxy).toBeUndefined()
+    expect(env.ALTIMATE_OFFLINE_USER_PROXY).toBeUndefined()
+    expect(env.PATH).toBe("/bin")
+    // A value the program's own configuration set is kept.
+    expect(Offline.userEnv({ ...process.env, NO_PROXY: "mcp.local" }).NO_PROXY).toBe("mcp.local")
+    // Without offline state, the environment is unchanged.
+    delete process.env.ALTIMATE_OFFLINE_USER_PROXY
+    expect(Offline.userEnv({ NO_PROXY: "*" }).NO_PROXY).toBe("*")
+  } finally {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
   }
 })

@@ -180,6 +180,7 @@ let cli = yargs(args)
       directory?: string
       project?: string
       attach?: string
+      url?: string
       model?: string
     }
     const offlineTarget = (command === "run" && !args.attach ? args.dir : undefined)
@@ -187,10 +188,11 @@ let cli = yargs(args)
       ?? (command === "workspace" ? args.directory : undefined)
     const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
     await Offline.start(directory, args.model)
+    // Attaching to a server on this machine is local; any other server is a network peer.
+    const attachURL = command === "attach" ? args.url : command === "run" ? args.attach : undefined
     if (Offline.enabled() && (
-      ["attach", "github", "gitlab", "pr", "review", "link", "workspace-client", "workspace-serve", "web", "integrations"].includes(command) ||
-      (command === "run" && args.attach) ||
-      (command === "tool" && opts._[1] === "daemon") ||
+      ["github", "gitlab", "pr", "review", "link", "workspace-client", "web", "integrations"].includes(command) ||
+      (attachURL !== undefined && !Offline.isLocalURL(attachURL)) ||
       (command === "learn" && opts._[1] === "import-reviews") ||
       (command === "console" && opts._[1] === "open") ||
       (["providers", "auth", "console"].includes(command) && opts._[1] === "login") ||
