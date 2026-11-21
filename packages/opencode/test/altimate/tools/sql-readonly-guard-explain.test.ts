@@ -139,6 +139,7 @@ describe("explainWrite", () => {
       "SELECT len(DISTINCT customer_secret_name(a)) FROM t",
       "SELECT customer_secret_name customer_x customer_y FROM t",
       "SELECT a FROM customer_secret_table WHERE (((",
+      "SELECT CAST(a AS int 'customer_it''s secret') FROM t",
     ]) {
       const message = explainWrite(sql, "sqlite").reason
       expect(message).toContain("could not read")

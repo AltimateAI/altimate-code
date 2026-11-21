@@ -581,13 +581,14 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
   return result.queryType === "read" && !result.blocked ? labels.join("`, `") : undefined
 }
 
-/** The parser's message with any quoted or named token removed: only the position and the kind of error
- * remain, since telemetry records this error and does not mask a bare word. */
+/** The parser's position and the kind of error only: everything from the first quoted or named token
+ * (`got`, `found`, `near`, a parenthesis, a quote, a colon after the kind) is cut, since telemetry records
+ * this error and its masking does not cover every token the parser prints. */
 function parserMessage(message: string): string {
-  return message
-    .replace(/\s*near \[[^\]]*\]?/gi, "")
-    .replace(/\s*\('[^']*'\)/g, "")
-    .replace(/(Unexpected token|found|got):\s*[^\s,)]+/gi, "$1")
+  const located = /^(.*?line \d+, column \d+:\s*)([\s\S]*)$/.exec(message)
+  const prefix = located ? located[1] : ""
+  const detail = (located ? located[2] : message).split(/\s+(?:got|found|near)\b|\s*[('"`[:]/i)[0].trim()
+  return `${prefix}${detail}`.trim() || "parse error"
 }
 
 /**

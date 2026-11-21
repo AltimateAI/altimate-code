@@ -293,7 +293,13 @@ export const SqlExecuteTool = Tool.define(
                 })
               } catch (error) {
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
-                const rules: Array<{ permission?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
+                const rules: Array<{ pattern?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
+                // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
+                // nothing after it allows or asks (an agent's own deny can override a user's earlier "ask").
+                let lastCatchAllDeny = -1
+                rules.forEach((rule, index) => {
+                  if (rule.pattern === "*" && rule.action === "deny") lastCatchAllDeny = index
+                })
                 throw new Error(
                   deniedWriteMessage({
                     sql,
@@ -302,8 +308,7 @@ export const SqlExecuteTool = Tool.define(
                     mongo: mongo !== null,
                     scratch: isScratch(args.warehouse),
                     warehouseGiven: !!args.warehouse,
-                    // Read-only unless a rule of its own allows or asks for some writes (a pattern deny).
-                    readOnly: !rules.some((rule) => rule.permission !== "*" && rule.action !== "deny"),
+                    readOnly: !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny"),
                   }),
                 )
               }

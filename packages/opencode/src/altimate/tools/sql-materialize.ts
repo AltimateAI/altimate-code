@@ -215,7 +215,7 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
   const { queryType, blocked } = classifyAndCheck(sql, Registry.canonicalType(type) ?? undefined)
   try {
     if (blocked || queryType !== "read") throw new Error("Not a read")
-    return { mongo: false, sql: readSql(sql, Registry.canonicalType(type) ?? undefined) }
+    return { mongo: false, sql: readSql(sql, Registry.canonicalType(type) ?? undefined, { explain: false }) }
   } catch {
     throw new MaterializeError(
       "sql_materialize only reads from the source warehouse: use a single read-only SELECT (or WITH ... SELECT), " +

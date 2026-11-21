@@ -217,6 +217,20 @@ describe("denied write message branches", () => {
     expect(message).toContain("rules allow")
   })
 
+  test("an agent deny after a user's ask is still read-only", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ruleset = [
+      { permission: "*", pattern: "*", action: "allow" },
+      { permission: "sql_execute_write", pattern: "*", action: "deny" },
+      { permission: "sql_execute_write", pattern: "*", action: "ask" },
+      { permission: "sql_execute_write", pattern: "*", action: "deny" },
+    ]
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
+    await expect(
+      tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
+    ).rejects.toThrow("may only read")
+  })
+
   test("sql_execute reads the denial's rules to choose the wording", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ruleset = [
