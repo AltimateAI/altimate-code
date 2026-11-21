@@ -172,8 +172,16 @@ function sqlJsonHistory(target: number): string {
   return blocks.join("\n")
 }
 
-/** Earlier turns (`user`, answered without usage), then the turn whose answer reported `assistantUsage`. */
-type Seeded = { user: string | string[]; assistantUsage?: number; next?: string }
+/**
+ * Earlier turns (`user`, answered without usage), then the turn whose answer reported
+ * `assistantUsage` (optionally from another model, as a mid-turn step, or with its own text).
+ */
+type Seeded = {
+  user: string | string[]
+  assistantUsage?: number
+  next?: string
+  last?: { modelID?: string; finish?: string; text?: string }
+}
 
 /** Seed [user history, finished assistant with provider usage, new user turn] and run the loop. */
 const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) =>
@@ -197,7 +205,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, type: "text", text } as any)
       return msg
     })
-    const answer = Effect.fnUntraced(function* (parentID: MessageID, usage: number) {
+    const answer = Effect.fnUntraced(function* (parentID: MessageID, usage: number, last: Seeded["last"] = {}) {
       const msg = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "assistant",
@@ -207,10 +215,10 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         path: { cwd: dir, root: dir },
         cost: 0,
         tokens: { input: usage, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        modelID: model.modelID,
+        modelID: last.modelID ?? model.modelID,
         providerID: model.providerID,
         parentID,
-        finish: "stop",
+        finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
       } as any)
       yield* sessions.updatePart({
@@ -218,7 +226,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         messageID: msg.id,
         sessionID,
         type: "text",
-        text: "The top customers by paid revenue are listed above.",
+        text: last.text ?? "The top customers by paid revenue are listed above.",
       } as any)
     })
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
@@ -226,7 +234,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       const msg = yield* user(text)
       const last = index === turns.length - 1
       if (!last) yield* answer(msg.id, 0)
-      else if (seeded.assistantUsage !== undefined) yield* answer(msg.id, seeded.assistantUsage)
+      else if (seeded.assistantUsage !== undefined) yield* answer(msg.id, seeded.assistantUsage, seeded.last)
     }
     if (seeded.next !== undefined) yield* user(seeded.next)
 
@@ -315,12 +323,13 @@ it.live(
           next: "Summarize the revenue concentration.",
         })
 
-        // One compaction at most, then the budget error ends the turn instead of compacting again.
-        expect(result.summaries.length).toBeLessThanOrEqual(1)
+        // One compaction (the summarizer request is the only one sent), then the budget error ends
+        // the turn instead of compacting again.
         expect(result.compactions.length).toBe(1)
-        expect(result.errors.length).toBeGreaterThanOrEqual(1)
-        expect(result.errors.at(-1)).toContain("Context budget exceeded before the request was sent")
-        expect(result.hits.every((hit) => !JSON.stringify(hit.body).includes("Summarize the revenue"))).toBe(true)
+        expect(result.summaries.length).toBe(1)
+        expect(result.hits.length).toBe(1)
+        expect(result.errors.length).toBe(1)
+        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
@@ -393,11 +402,85 @@ it.live(
   { timeout: 120_000 },
 )
 
+it.live(
+  "usage reported by another model is not trusted: the guard trips and the session compacts",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // Same history and usage as the regression above, but counted by a different model's tokenizer.
+        yield* llm.text("summary of the revenue analysis so far")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonHistory(88_000),
+          assistantUsage: 108_000,
+          last: { modelID: "another-model" },
+          next: "Summarize the revenue concentration.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries.length).toBe(1)
+        expect(result.hits.length).toBe(2)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "with auto-compaction off a refusal stays the budget error",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonHistory(100_000),
+          assistantUsage: 0,
+          next: "Summarize the revenue concentration.",
+        })
+
+        expect(result.hits.length).toBe(0)
+        expect(result.compactions.length).toBe(0)
+        expect(result.errors.length).toBe(1)
+        expect(result.errors[0]).toContain("UnknownError")
+        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+      }),
+      { git: true, config: (url: string) => ({ ...providerCfg(LARGE_WINDOW)(url), compaction: { auto: false } }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a refusal in the middle of a turn summarizes that turn's steps instead of dropping them",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // [earlier turn] [current user turn] [a finished tool step of the current turn] -> refusal.
+        yield* llm.text("summary of the revenue analysis so far")
+        yield* llm.text("Revenue is concentrated in the top ten customers.")
+        const result = yield* runSession(dir, llm, {
+          user: ["List the top customers by paid revenue.", sqlJsonHistory(100_000)],
+          assistantUsage: 0,
+          last: { finish: "tool-calls", text: "Step result of the current turn: 42 customers above threshold." },
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries.length).toBe(1)
+        // The current turn's step survives compaction (summarized, or kept in the verbatim tail) and
+        // reaches the retried request: compaction did not cut at the last user message and replay it.
+        expect(result.hits.length).toBe(2)
+        expect(JSON.stringify(result.hits[1]!.body)).toContain("Step result of the current turn")
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
 describe("guard calibration", () => {
   test("uses the smaller provider-reported size, and the estimate when usage is missing or unusable", () => {
     expect(calibratedInputTokens(128_000, 108_400)).toBe(108_400)
     // Reported usage never raises the estimate: the guard stays at least as permissive as before.
     expect(calibratedInputTokens(90_000, 108_400)).toBe(90_000)
+    // Nor lowers it below half the estimate (partial usage, a request that changed since).
+    expect(calibratedInputTokens(128_000, 2_000)).toBe(64_000)
     for (const reported of [undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(calibratedInputTokens(128_000, reported)).toBe(128_000)
     }

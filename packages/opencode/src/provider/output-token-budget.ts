@@ -20,6 +20,8 @@ const VIDEO_TOKEN_ALLOWANCE = 8_192
 const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
+/** Lowest share of the character estimate that provider-reported usage may calibrate the guard to. */
+const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.5
 const EMOJI = /\p{Extended_Pictographic}/u
 const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
 const DENSE_ASCII_MIN_LENGTH = 32
@@ -423,7 +425,9 @@ export function reportedContextTokens(input: {
  */
 export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
   if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
-  return Math.min(estimate, reported)
+  // Usage from a request that differed in ways the tail cannot see (new tools, partial reporting)
+  // may undercount; never let it lower the guard below this share of the estimate.
+  return Math.min(estimate, Math.max(reported, Math.ceil(estimate * MIN_CALIBRATED_ESTIMATE_FRACTION)))
 }
 
 /** True for the pre-send refusals that compacting the conversation can resolve. */

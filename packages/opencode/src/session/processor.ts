@@ -341,6 +341,9 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
+    // altimate_change start — the pending compaction comes from a pre-send budget refusal (nothing was sent)
+    let refusedBeforeSend = false
+    // altimate_change end
     // altimate_change start — per-step generation telemetry
     let stepStartTime = Date.now()
     // altimate_change end
@@ -357,6 +360,11 @@ export namespace SessionProcessor {
       get message() {
         return input.assistantMessage
       },
+      // altimate_change start — see refusedBeforeSend above
+      get refusedBeforeSend() {
+        return refusedBeforeSend
+      },
+      // altimate_change end
       // altimate_change start — disambiguate repeated concurrent tool-call ids
       partFromToolCall(toolCallID: string, identity: ToolCallIdentity = {}) {
         // Tool metadata may arrive out of order too. Skip an ambiguous update
@@ -394,6 +402,9 @@ export namespace SessionProcessor {
         // altimate_change end
         log.info("process")
         needsCompaction = false
+        // altimate_change start — see refusedBeforeSend above
+        refusedBeforeSend = false
+        // altimate_change end
         // altimate_change start - let the prompt's exit guard publish a recovered compaction answer
         let recoveredCommittedAnswer = false
         // altimate_change end
@@ -1341,10 +1352,10 @@ export namespace SessionProcessor {
               // altimate_change start — a pre-send budget refusal on a compactable conversation is a
               // context overflow: compact and retry, as for a provider-reported overflow. Right after
               // a compaction (or on a first turn) it stays the fatal budget error, so it cannot loop.
-              const error =
-                compactable && isContextBudgetError(e)
-                  ? new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
-                  : MessageV2.fromError(e, { providerID: input.model.providerID })
+              refusedBeforeSend = compactable === true && isContextBudgetError(e)
+              const error = refusedBeforeSend
+                ? new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+                : MessageV2.fromError(e, { providerID: input.model.providerID })
               // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
               if (

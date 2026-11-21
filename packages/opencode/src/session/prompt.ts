@@ -2236,18 +2236,22 @@ export namespace SessionPrompt {
       // altimate_change start — the pre-send guard measures this request the way isOverflow does
       // (provider-reported usage of the last turn on this model plus the estimated tail), and a
       // guard refusal compacts whenever the proactive check above could have compacted.
-      // A provider that reports no usage leaves only the estimate: a tail alone would undercount.
+      // The reported usage applies only to the same model and agent (same tokenizer, system prompt
+      // and tools), and only when it counts input: a provider reporting none, or only output tokens,
+      // leaves the estimate in charge. With auto-compaction off a refusal stays the budget error.
+      const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
-      const compactable = measured !== undefined
+      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false
       const reportedInputTokens =
         measured &&
         measured.providerID === model.providerID &&
         measured.modelID === model.id &&
-        reportedContextTokens({ tokens: measured.tokens, fraction: 1 }) > 0
+        measured.agent === lastUser.agent &&
+        (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
           ? reportedContextTokens({
               tokens: measured.tokens,
               estimatedTokens: uncountedTail,
-              fraction: SessionCompaction.contextSafetyFraction(await Config.get()),
+              fraction: SessionCompaction.contextSafetyFraction(loopConfig),
             })
           : undefined
       // altimate_change end
@@ -2667,7 +2671,10 @@ export namespace SessionPrompt {
           agent: lastUser.agent,
           model: lastUser.model,
           auto: true,
-          overflow: !processor.message.finish,
+          // altimate_change start — a pre-send refusal sent nothing: compact the whole conversation as the
+          // proactive check does, instead of replaying the last user message and dropping this turn's steps
+          overflow: !processor.message.finish && !processor.refusedBeforeSend,
+          // altimate_change end
         })
       }
       continue

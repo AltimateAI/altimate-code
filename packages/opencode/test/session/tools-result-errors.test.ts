@@ -210,6 +210,7 @@ it.live("session/prompt resolveTools emits an SDK tool-error for a backend error
               cost: 0,
               tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
             },
+            refusedBeforeSend: false,
             beginToolExecution: (raw) => ({ raw, occurrence: 0 }),
             finishToolExecution: (execution) => {
               finished.push(execution)
