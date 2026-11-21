@@ -57,6 +57,10 @@ export async function startOfflineMode(directory: string, model?: string) {
   // their layers. Once enabled, keep it for the lifetime of the process.
   process.env.ALTIMATE_OFFLINE = "1"
   process.env.GIT_NO_LAZY_FETCH = "1"
+  // Bun consults proxy environment variables even when fetch sets proxy: "".
+  // Offline traffic must go directly to the one configured endpoint.
+  process.env.NO_PROXY = "*"
+  process.env.no_proxy = "*"
   if (model) process.env.ALTIMATE_OFFLINE_MODEL = model
   if (networkFetch) return
   networkFetch = globalThis.fetch
@@ -92,7 +96,7 @@ export function offlineModelFetch(baseURL: string | undefined): typeof fetch {
       const target = new URL(input instanceof Request ? input.url : input.toString())
       if (target.origin !== endpoint.origin)
         throw new Error("Offline mode blocked a request outside the configured model endpoint.")
-      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error", proxy: "" })
+      return (networkFetch ?? globalThis.fetch)(input, { ...init, redirect: "error" })
     },
     { preconnect: () => {} },
   )

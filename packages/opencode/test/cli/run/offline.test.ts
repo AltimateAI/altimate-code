@@ -149,3 +149,74 @@ for (const configMode of [false, true]) {
     }
   }, 40_000)
 }
+
+test("offline model transport bypasses proxy settings and refuses redirects", async () => {
+  let proxyCalls = 0
+  const proxy = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      proxyCalls++
+      return new Response("unexpected proxy")
+    },
+  })
+  const model = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname === "/redirect") return Response.redirect(proxy.url, 302)
+      return new Response("direct model response")
+    },
+  })
+  try {
+    const source = path.resolve(import.meta.dir, "../../../src/config/offline.ts")
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `
+          import { startOfflineMode, offlineModelFetch } from ${JSON.stringify(source)}
+          await startOfflineMode(process.cwd())
+          const request = offlineModelFetch(process.env.OFFLINE_TEST_MODEL)
+          console.log(await (await request(process.env.OFFLINE_TEST_MODEL)).text())
+          try {
+            await request(new URL("/redirect", process.env.OFFLINE_TEST_MODEL))
+            throw new Error("redirect was accepted")
+          } catch (error) {
+            if (error.message === "redirect was accepted") throw error
+            console.log("redirect refused")
+          }
+        `,
+      ],
+      {
+        cwd: path.resolve(import.meta.dir, "../../.."),
+        env: {
+          ...process.env,
+          ALTIMATE_OFFLINE: "1",
+          OFFLINE_TEST_MODEL: model.url.href,
+          HTTP_PROXY: proxy.url.href,
+          http_proxy: proxy.url.href,
+          NO_PROXY: "",
+          no_proxy: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        signal: AbortSignal.timeout(15_000),
+      },
+    )
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    expect({ code, stdout, stderr }).toEqual({
+      code: 0,
+      stdout: "direct model response\nredirect refused\n",
+      stderr: "",
+    })
+    expect(proxyCalls).toBe(0)
+  } finally {
+    model.stop(true)
+    proxy.stop(true)
+  }
+})
