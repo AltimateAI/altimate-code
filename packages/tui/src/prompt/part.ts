@@ -8,9 +8,31 @@ export function stripPromptPartIDs<Part extends { id: string; messageID: string;
 export function expandPastedTextPlaceholders(text: string, parts: readonly unknown[]) {
   return parts.reduce<string>((result, part) => {
     if (!isPastedTextPart(part)) return result
-    return result.replace(part.source.text.value, part.text)
+    return result.replace(part.source.text.value, () => part.text) // altimate_change — replace with literal pasted content
   }, text)
 }
+
+// altimate_change start — rewrite only when each pasted marker can be identified unambiguously
+export function expandEnhancedPrompt(original: string, enhanced: string, parts: readonly unknown[], originalExpanded: string) {
+  const seen = new Set<string>()
+  const ranges: { start: number; end: number; text: string }[] = []
+  for (const part of parts.filter(isPastedTextPart)) {
+    const marker = part.source.text.value
+    if (!marker || seen.has(marker)) return originalExpanded
+    seen.add(marker)
+    const before = original.indexOf(marker)
+    const after = enhanced.indexOf(marker)
+    if (before === -1 || before !== original.lastIndexOf(marker)) return originalExpanded
+    if (after === -1 || after !== enhanced.lastIndexOf(marker)) return originalExpanded
+    ranges.push({ start: after, end: after + marker.length, text: part.text })
+  }
+
+  return ranges.sort((a, b) => b.start - a.start).reduce(
+    (text, range) => text.slice(0, range.start) + range.text + text.slice(range.end),
+    enhanced,
+  )
+}
+// altimate_change end
 
 function isPastedTextPart(part: unknown): part is { type: "text"; text: string; source: { text: { value: string } } } {
   if (!part || typeof part !== "object" || !("type" in part) || part.type !== "text") return false

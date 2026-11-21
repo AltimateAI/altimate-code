@@ -541,6 +541,18 @@ it.instance("loads JSONC config file", () =>
   }),
 )
 
+it.instance("loads branded project JSON and JSONC ahead of legacy names in the same directory", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, { username: "legacy-user", model: "legacy/model" })
+    yield* writeConfigEffect(test.directory, { username: "branded-user", model: "branded/json" }, "altimate-code.json")
+    yield* writeConfigEffect(test.directory, { model: "branded/jsonc" }, "altimate-code.jsonc")
+    const config = yield* Config.use.get()
+    expect(config.username).toBe("branded-user")
+    expect(config.model).toBe("branded/jsonc")
+  }),
+)
+
 it.instance("loads JSONC config from .altimate-code directory", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance

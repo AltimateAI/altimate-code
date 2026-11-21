@@ -229,10 +229,14 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   // 4. `.opencode` directories (and OPENCODE_CONFIG_DIR) discovered while
   // walking up the tree. Also returned below so callers can install plugin
   // dependencies from each location.
-  const dirs = unique(directories).filter((dir) => dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR)
+  // altimate_change start — `.altimate-code` directories hold TUI config too, matching the server loader
+  const isConfigDir = (dir: string) =>
+    dir.endsWith(".opencode") || dir.endsWith(".altimate-code") || dir === Flag.OPENCODE_CONFIG_DIR
+  const dirs = unique(directories).filter(isConfigDir)
 
   for (const dir of dirs) {
-    if (!dir.endsWith(".opencode") && dir !== Flag.OPENCODE_CONFIG_DIR) continue
+    if (!isConfigDir(dir)) continue
+    // altimate_change end
     for (const file of ConfigPaths.fileInDirectory(dir, "tui")) {
       yield* mergeFile(acc, file)
     }

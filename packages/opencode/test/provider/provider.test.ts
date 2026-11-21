@@ -875,6 +875,30 @@ test("defaultModel respects config model setting", async () => {
   })
 })
 
+test("defaultModel rejects a configured model even when another provider is available", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          model: "missing-provider/missing-model",
+          provider: { anthropic: { options: { apiKey: "test-api-key" } } },
+        }),
+      )
+    },
+  })
+  await provideProviderTestInstance({
+    directory: tmp.path,
+    fn: async () => {
+      expect(await Provider.getProvider(ProviderID.make("anthropic"))).toBeDefined()
+      await expect(Provider.defaultModel()).rejects.toMatchObject({
+        name: "ProviderModelNotFoundError",
+        data: { providerID: "missing-provider", modelID: "missing-model" },
+      })
+    },
+  })
+})
+
 test("provider with baseURL from config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

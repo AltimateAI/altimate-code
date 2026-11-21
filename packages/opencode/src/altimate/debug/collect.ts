@@ -14,6 +14,7 @@ import { env as flagEnv, truthy as flagTruthy } from "@opencode-ai/core/flag/fla
 import { Global } from "@opencode-ai/core/global"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { resolveInstall } from "@/installation"
+import { projectConfigNames } from "@/config/paths"
 import { Telemetry } from "@/altimate/telemetry"
 import { AltimateApi } from "@/altimate/api/client"
 import * as Registry from "@/altimate/native/connections/registry"
@@ -236,7 +237,7 @@ export function configFiles(src: ConfigSources): string[] {
       ? []
       : upwards(src.cwd, root)
           .reverse()
-          .flatMap((d) => [path.join(d, "opencode.json"), path.join(d, "opencode.jsonc")])),
+          .flatMap((d) => projectConfigNames.map((name) => path.join(d, name)))),
     ...[...new Set(configDirs)].flatMap(inDir),
   ]
 }

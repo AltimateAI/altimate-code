@@ -46,7 +46,7 @@ export async function mount(agentModel?: { providerID: string; modelID: string }
     { SDKProvider },
     { ProjectProvider },
     { SyncProvider, useSync },
-    { RouteProvider },
+    { RouteProvider, useRoute },
     { ExitProvider },
     { TuiConfigProvider },
   ] = await Promise.all([
@@ -111,9 +111,11 @@ export async function mount(agentModel?: { providerID: string; modelID: string }
 
   let localAccessor: ReturnType<typeof useLocal> | undefined
   let syncAccessor: ReturnType<typeof useSync> | undefined
+  let routeAccessor: ReturnType<typeof useRoute> | undefined
   function Capture() {
     localAccessor = useLocal()
     syncAccessor = useSync()
+    routeAccessor = useRoute()
     return null
   }
 
@@ -149,6 +151,7 @@ export async function mount(agentModel?: { providerID: string; modelID: string }
   const local = localAccessor!
 
   return {
+    route: routeAccessor!,
     local,
     sync: syncAccessor!,
     emit: source.emit,

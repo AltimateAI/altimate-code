@@ -59,6 +59,7 @@ import { applyRunModeDefault } from "./run/run-mode"
 // altimate_change end
 // altimate_change start — a failed provider list is reported as itself, not "Model not found" (fork-only module)
 import { providerListOrThrow } from "./run/provider-list"
+import { FormatError } from "../error"
 // altimate_change end
 // altimate_change start — run-mode-only idle-done fallback (fork-only modules).
 // Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
@@ -611,9 +612,8 @@ export const RunCommand = cmd({
       return message.slice(0, 50) + (message.length > 50 ? "..." : "")
     }
 
-    async function session(sdk: OpencodeClient) {
-      const baseID = args.continue ? (await sdk.session.list()).data?.find((s) => !s.parentID)?.id : args.session
-
+    // altimate_change — reuse the resume target from model preflight
+    async function session(sdk: OpencodeClient, baseID: string | undefined) {
       if (baseID && args.fork) {
         const forked = await sdk.session.fork({ sessionID: baseID })
         return forked.data?.id
@@ -674,33 +674,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
         lastTextStep !== undefined && lastTextStep === step && lastToolStep !== step && interruptedStep !== step
       // altimate_change end
       // altimate_change end
-      // altimate_change start — validate explicit models before starting the session event loop.
-      // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
-      // `run` waiting until the process-level timeout kills it.
-      if (args.model) {
-        const parsed = Provider.parseModel(args.model)
-        // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
-        // instead of masquerading as an unknown model.
-        const providers = await (async () => {
-          for (let attempt = 1; ; attempt++) {
-            const res = await sdk.provider.list()
-            if (!res.error && Array.isArray(res.data?.all)) return res.data.all
-            if (attempt >= 3) return providerListOrThrow(res, args.model!)
-            await Bun.sleep(250 * attempt)
-          }
-        })()
-        const provider = providers.find((item) => item.id === parsed.providerID)
-        if (!provider?.models?.[parsed.modelID]) {
-          throw new Provider.ModelNotFoundError({
-            providerID: parsed.providerID,
-            modelID: parsed.modelID,
-            suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
-            providerMissing: !provider,
-          })
-        }
-      }
-      // altimate_change end
-
       function tool(part: ToolPart) {
         try {
           if (part.tool === "bash") return bash(props<typeof BashTool>(part))
@@ -754,6 +727,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const requestOwnership = RunAccounting.createRequestOwnership()
       // A queued request must not revoke the in-flight echo owned by an earlier request.
       const committedRequests = new Set<string>()
+      let commandSelection: { agent: string; model: { providerID: string; modelID: string }; variant?: string } | undefined
+      const selectionFromUser = (user: Extract<Message, { role: "user" }>) => ({
+        agent: user.agent,
+        model: { providerID: user.model.providerID, modelID: user.model.modelID },
+        variant: "variant" in user && typeof user.variant === "string" ? user.variant : user.model.variant,
+      })
+      const readCommandSelection = async (sessionID: string, signal: AbortSignal) => {
+        if (commandSelection) return commandSelection
+        const { data } = await sdk.session.message({ sessionID, messageID: sendMessageID }, { signal })
+        if (data?.info.role === "user") commandSelection = selectionFromUser(data.info)
+        return commandSelection
+      }
       const beginRequest = (messageID: string) => {
         // The persisted request boundary includes requests from other attached clients.
         // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
@@ -892,6 +877,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
         })
         // altimate_change end
       }
+      let nextCommandSelectionLookup = 0
+      let lookingUpCommandSelection = false
       const checkTimeBudget = () => {
         if (!sessionID || !workActive || timeExhausted()) return
         const deadline = RunTimeBudget.deadline(elapsedSeconds(), timeBudget)
@@ -913,6 +900,20 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
         // altimate_change start — partial emitted text is not proof that an active request finished
         if (deadline !== "soft" || timeBudgetDeadline !== "none") return
+        if (args.command && !commandSelection) {
+          // The persisted request also covers a missed message.updated event. Keep
+          // the periodic budget check responsive while the lookup is in flight.
+          if (!lookingUpCommandSelection && Date.now() >= nextCommandSelectionLookup) {
+            lookingUpCommandSelection = true
+            void readCommandSelection(sessionID, AbortSignal.timeout(1000))
+              .catch(() => undefined)
+              .finally(() => {
+                lookingUpCommandSelection = false
+                nextCommandSelectionLookup = Date.now() + 250
+              })
+          }
+          return
+        }
         // altimate_change end
         timeBudgetDeadline = "soft"
         tracer?.setRunBudget(budgetMetadata())
@@ -935,9 +936,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
               sessionID,
               messageID,
               noReply: true,
-              agent,
-              model: args.model ? Provider.parseModel(args.model) : undefined,
-              variant: args.variant,
+              ...(commandSelection ?? {
+                agent,
+                model: args.model ? Provider.parseModel(args.model) : undefined,
+                variant: args.variant,
+              }),
               ...(audienceSystem ? { system: audienceSystem } : {}),
               parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
             },
@@ -1038,6 +1041,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // This provisional owner is replaced by the persisted request boundary
             // or the internal continuation's explicit origin before its assistant starts.
             requestOwnership.onUserMessage(event.properties.info.id)
+            if (args.command && event.properties.info.id === sendMessageID) {
+              commandSelection = selectionFromUser(event.properties.info)
+            }
           }
           if (
             event.type === "message.updated" &&
@@ -1430,10 +1436,23 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       }
 
+      // altimate_change start — attached runs must resolve agent configuration on the serving instance
+      const remoteAgents = () => sdk.app.agents(undefined, { throwOnError: true }).then((result) => result.data ?? [])
+      // altimate_change end
       // Validate agent if specified; capture audience option from agent definition
-      const { agent, agentAudience } = await (async () => {
+      const { agent, agentAudience, agentModel } = await (async () => {
         if (!args.agent) return { agent: undefined, agentAudience: undefined }
-        const entry = await Agent.get(args.agent)
+        // altimate_change start — use the attached server's agent definitions
+        const requestedAgent = args.agent
+        const entry = args.attach
+          ? await (async () => {
+              const agents = await remoteAgents()
+              // Match Agent.get: a custom build agent takes precedence over the legacy alias.
+              return agents.find((item) => item.name === requestedAgent)
+                ?? (requestedAgent === "build" ? agents.find((item) => item.name === "builder") : undefined)
+            })()
+          : await Agent.get(requestedAgent)
+        // altimate_change end
         if (!entry) {
           UI.println(
             UI.Style.TEXT_WARNING_BOLD + "!",
@@ -1451,14 +1470,65 @@ You are speaking to a non-technical business executive. Follow these rules stric
           return { agent: undefined, agentAudience: undefined }
         }
         const aud = entry.options?.audience as string | undefined
-        return { agent: args.agent, agentAudience: aud }
+        // altimate_change start — validate and send the same resolved agent
+        return { agent: entry.name, agentAudience: aud, agentModel: entry.model }
+        // altimate_change end
       })()
+
+      // altimate_change start — validate fresh runs before creating a session
+      const baseID = args.continue ? (await sdk.session.list()).data?.find((s) => !s.parentID)?.id : args.session
+      // The server owns command and resumed-session precedence, including model overrides.
+      const selection = await (async () => {
+        if (args.command) return undefined
+        if (args.model !== undefined) return { value: args.model, source: "CLI --model" }
+        if (baseID) return undefined
+        // The server must resolve its default agent; the remote agent list is sorted for display.
+        if (args.attach && !agent) return undefined
+        const config = (await sdk.config.get(undefined, { throwOnError: true })).data
+        const selected = args.attach ? undefined : await Agent.get(agent ?? (await Agent.defaultAgent()))
+        const model = agentModel ?? selected?.model
+        if (model) {
+          const { providerID, modelID } = model
+          return {
+            value: providerID || modelID ? `${providerID}/${modelID}` : "",
+            source: `agent "${agent ?? selected?.name}" config (model)`,
+          }
+        }
+        if (config?.model !== undefined) return { value: config.model, source: "project or global config (model)" }
+      })()
+      if (selection) {
+        const requested = selection.value
+        const parsed = Provider.parseModel(requested)
+        if (!requested) throw new Provider.ModelNotFoundError({ ...parsed, source: selection.source })
+        // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
+        // instead of masquerading as an unknown model.
+        const providers = await (async () => {
+          for (let attempt = 1; ; attempt++) {
+            const res = await sdk.provider.list()
+            if (!res.error && Array.isArray(res.data?.all))
+              return res.data.all.filter((item) => res.data.connected.includes(item.id))
+            if (attempt >= 3) return providerListOrThrow(res, requested)
+            await Bun.sleep(250 * attempt)
+          }
+        })()
+        const provider = providers.find((item) => item.id === parsed.providerID)
+        if (!provider?.models?.[parsed.modelID]) {
+          throw new Provider.ModelNotFoundError({
+            providerID: parsed.providerID,
+            modelID: parsed.modelID,
+            suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
+            providerMissing: !provider,
+            source: selection.source,
+          })
+        }
+      }
+      // altimate_change end
 
       // Build audience system directive (--audience flag overrides agent-level setting)
       const audienceMode = args.audience ?? agentAudience
       const audienceSystem = audienceMode === "executive" ? EXECUTIVE_DIRECTIVE : undefined
 
-      const sessionID = await session(sdk)
+      const sessionID = await session(sdk, baseID)
       if (!sessionID) {
         UI.error("Session not found")
         process.exit(1)
@@ -1606,6 +1676,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Start event listener before sending the prompt so no events are missed
       // altimate_change start — pass the stream explicitly (see loop signature)
       let eventLoopFailure: unknown
+      const sendMessageID = MessageID.ascending()
       const loopPromise = loop(events.stream, { suppressInterruptedPromptAbort: true }).catch((e) => {
         eventLoopFailure = e
         accounting.onSessionError("EventStreamError", e instanceof Error ? e.message : String(e))
@@ -1648,7 +1719,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // a second user message and a second execution. Pinning a stable
       // messageID makes the attempt identifiable: before each retry we ask the
       // server whether that message landed, and only re-send when it did not.
-      const sendMessageID = MessageID.ascending()
       const send = () => {
         beginRequest(sendMessageID)
         // altimate_change start — start once at prompt dispatch, never reset on retry or child work
@@ -1772,6 +1842,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
           const messageID = MessageID.ascending()
           beginRequest(messageID)
           const promptPromise = (async (): Promise<SendResult | undefined> => {
+            // Commands may override the CLI model. Read the original request when SSE missed it.
+            if (args.command && !(await readCommandSelection(sessionID, turnAbort.signal))) {
+              throw new Error("The command did not record a model for its follow-up")
+            }
             // The previous turn may have published idle just before releasing its
             // session lock. Retry that narrow race, but only after definitive
             // proof this exact message was not persisted.
@@ -1782,9 +1856,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
                   {
                     sessionID,
                     messageID,
-                    agent,
-                    model: args.model ? Provider.parseModel(args.model) : undefined,
-                    variant: args.variant,
+                    ...(commandSelection ?? {
+                      agent,
+                      model: args.model ? Provider.parseModel(args.model) : undefined,
+                      variant: args.variant,
+                    }),
                     ...(audienceSystem ? { system: audienceSystem } : {}),
                     // Synthetic harness text must never replace the authoritative
                     // original task pin when this session is resumed.
@@ -1954,7 +2030,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
         if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
         else {
           accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
-          error = RunAccounting.serializeSessionError(sendResult.error)
+          // altimate_change start — preserve model resolution guidance from rejected session requests
+          if (Provider.ModelNotFoundError.isInstance(sendResult.error)) {
+            const modelError = FormatError(sendResult.error) ?? RunAccounting.serializeSessionError(sendResult.error)
+            if (!error && !emit("error", { error: sendResult.error })) UI.error(modelError)
+            error = modelError
+          } else error = RunAccounting.serializeSessionError(sendResult.error)
+          // altimate_change end
         }
         eventAbort.abort()
       } else accounting.onPromptResult(sendResult?.data?.info)

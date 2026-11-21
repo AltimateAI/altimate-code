@@ -35,6 +35,10 @@ import { redactSecrets } from "@/altimate/learn/digest"
 import { AsyncLocalStorage } from "async_hooks"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
+// altimate_change start — name an agent's configured model as the source of an unavailable-model error
+import { Provider } from "@/provider/provider"
+import { modelSelectionErrorText } from "@/altimate/provider/model-hint"
+// altimate_change end
 const log = Log.create({ service: "tool.task" })
 
 /**
@@ -425,10 +429,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
-      const model = agent.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // altimate_change start — run command subtasks with the model selected at command dispatch
+      const recordedModel = { modelID: msg.info.modelID, providerID: msg.info.providerID }
+      const model = ctx.extra?.useRecordedModel === true ? recordedModel : agent.model ?? recordedModel
+      // altimate_change end
 
       // altimate_change start — upstream_fix: bind partial findings to this child prompt during parent cancellation.
       const messageID = MessageID.ascending()
@@ -490,6 +494,15 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           ? Effect.runPromise(promptOps.prompt(promptInput))
           : SessionPrompt.prompt(promptInput)
         ).catch(async (error) => {
+          // altimate_change start — an agent's unavailable model is reported against that agent's config
+          if (
+            !ctx.abort.aborted &&
+            ctx.extra?.useRecordedModel !== true &&
+            agent.model &&
+            Provider.ModelNotFoundError.isInstance(error)
+          )
+            throw new Error(modelSelectionErrorText({ ...error.data, source: `agent "${agent.name}" config (model)` }))
+          // altimate_change end
           if (!ctx.abort.aborted) throw error
           partialOutput = await interruptedTaskOutput(session.id, messageID)
           if (!partialOutput) throw error

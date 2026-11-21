@@ -28,7 +28,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, createEffect, on, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 // altimate_change start - yolo mode + smooth streaming
@@ -75,6 +75,10 @@ export const {
       provider_auth: Record<string, ProviderAuthMethod[]>
       agent: Agent[]
       command: Command[]
+      // altimate_change start — local actions can start once agents and commands are known
+      agentCatalog: { workspace?: string; status: "loading" | "ready" | "failed" }
+      commandCatalog: { workspace?: string; status: "loading" | "ready" | "failed" }
+      // altimate_change end
       permission: {
         [sessionID: string]: PermissionRequest[]
       }
@@ -148,6 +152,10 @@ export const {
       // altimate_change end
       question: {},
       command: [],
+      // altimate_change start — do not infer the meaning of a slash command from stale data
+      agentCatalog: { status: "loading" },
+      commandCatalog: { status: "loading" },
+      // altimate_change end
       provider: [],
       provider_default: {},
       session: [],
@@ -706,9 +714,59 @@ export const {
     const exit = useExit()
     const args = useArgs()
 
+    // altimate_change start — refresh agents and commands independently of the provider catalog
+    let commandRequest = 0
+    let agentRequest = 0
+    // A failed refresh keeps a list already loaded for the same workspace; otherwise it reports failure.
+    async function refreshAgents() {
+      const workspace = project.workspace.current()
+      const request = ++agentRequest
+      const isCurrent = () => request === agentRequest && workspace === project.workspace.current()
+      const previous = store.agentCatalog
+      const retained = previous.workspace === workspace && previous.status === "ready"
+      setStore("agentCatalog", { workspace, status: "loading" })
+      try {
+        const response = await sdk.client.app.agents({ workspace }, { throwOnError: true })
+        if (!isCurrent()) return
+        batch(() => {
+          setStore("agent", reconcile(response.data ?? []))
+          setStore("agentCatalog", { workspace, status: "ready" })
+        })
+      } catch (error) {
+        // A request superseded by a newer one or a workspace change no longer affects this workspace.
+        if (!isCurrent()) return
+        setStore("agentCatalog", { workspace, status: retained ? "ready" : "failed" })
+        throw error
+      }
+    }
+    async function refreshCommands() {
+      const workspace = project.workspace.current()
+      const request = ++commandRequest
+      const isCurrent = () => request === commandRequest && workspace === project.workspace.current()
+      const previous = store.commandCatalog
+      const retained = previous.workspace === workspace && previous.status === "ready"
+      setStore("commandCatalog", { workspace, status: "loading" })
+      try {
+        const response = await sdk.client.command.list({ workspace }, { throwOnError: true })
+        if (!isCurrent()) return
+        if (!response.data) throw new Error("No command catalog was returned")
+        batch(() => {
+          setStore("command", reconcile(response.data))
+          setStore("commandCatalog", { workspace, status: "ready" })
+        })
+      } catch {
+        if (isCurrent()) setStore("commandCatalog", { workspace, status: retained ? "ready" : "failed" })
+      }
+    }
+    // altimate_change end
+
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
+      // altimate_change start — load local command prerequisites without waiting for providers
+      const catalog = refreshCommands()
+      const agentsPromise = refreshAgents()
+      // altimate_change end
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 
@@ -723,7 +781,6 @@ export const {
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
         .catch(() => emptyConsoleState)
-      const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true })
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
       await Promise.all([
         providersPromise,
@@ -739,7 +796,6 @@ export const {
           const providerListResponse = providerListPromise.then((x) => x.data!)
           const capabilitiesResponse = capabilitiesPromise
           const consoleStateResponse = consoleStatePromise
-          const agentsResponse = agentsPromise.then((x) => x.data ?? [])
           const configResponse = configPromise.then((x) => x.data!)
           const sessionListResponse = args.continue ? sessionListPromise : undefined
 
@@ -748,7 +804,6 @@ export const {
             providerListResponse,
             capabilitiesResponse,
             consoleStateResponse,
-            agentsResponse,
             configResponse,
             ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
@@ -756,9 +811,8 @@ export const {
             const providerList = responses[1]
             const capabilities = responses[2]
             const consoleState = responses[3]
-            const agents = responses[4]
-            const config = responses[5]
-            const sessions = responses[6]
+            const config = responses[4]
+            const sessions = responses[5]
 
             batch(() => {
               setStore("provider", reconcile(providers.providers))
@@ -766,7 +820,6 @@ export const {
               setStore("provider_next", reconcile(providerList))
               setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
               setStore("console_state", reconcile(consoleState))
-              setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
               if (sessions !== undefined) setStore("session", reconcile(sessions))
             })
@@ -778,7 +831,8 @@ export const {
           void Promise.all([
             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
+            // altimate_change — catalog loading starts before other bootstrap requests
+            catalog,
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
             sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
             sdk.client.experimental.resource
@@ -813,12 +867,37 @@ export const {
       void bootstrap()
     })
 
+    // altimate_change start — a workspace change without a bootstrap still reloads both catalogs
+    createEffect(
+      on(
+        () => project.workspace.current(),
+        (workspace) => {
+          if (store.commandCatalog.workspace !== workspace) void refreshCommands()
+          if (store.agentCatalog.workspace !== workspace) void refreshAgents().catch(() => undefined)
+        },
+        { defer: true },
+      ),
+    )
+    // altimate_change end
+
     const result = {
       data: store,
       set: setStore,
       get status() {
         return store.status
       },
+      // altimate_change start — check workspace identity even before bootstrap restarts
+      get agentStatus() {
+        const catalog = store.agentCatalog
+        return catalog.workspace === project.workspace.current() ? catalog.status : "loading"
+      },
+      get commandStatus() {
+        const catalog = store.commandCatalog
+        return catalog.workspace === project.workspace.current() ? catalog.status : "loading"
+      },
+      refreshAgents,
+      refreshCommands,
+      // altimate_change end
       get ready() {
         if (startup.skipInitialLoading) return true
         return store.status !== "loading"
