@@ -302,6 +302,7 @@ describe("is_upgrade ordering", () => {
     // would make the "machine-id exists after await" assertion fail on a machine or CI
     // runner that exports OPENCODE_DISABLE_TELEMETRY.
     const origOpencodeDisabled = process.env.OPENCODE_DISABLE_TELEMETRY
+    const origCliDisabled = process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
     const tmpHome = mkdtempSync(join(os.tmpdir(), "install-telemetry-home-"))
     spyOn(os, "homedir").mockImplementation(() => tmpHome)
     spyOn(Config, "get").mockResolvedValue({})
@@ -312,6 +313,7 @@ describe("is_upgrade ordering", () => {
       // when it has no connection string — which would make this test vacuously pass.
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       delete process.env.OPENCODE_DISABLE_TELEMETRY
+      delete process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
         "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
       // init() is `initPromise ??= doInit()`; shutdown() is the only seam that clears it, so
@@ -336,6 +338,8 @@ describe("is_upgrade ordering", () => {
       else delete process.env.ALTIMATE_TELEMETRY_DISABLED
       if (origOpencodeDisabled !== undefined) process.env.OPENCODE_DISABLE_TELEMETRY = origOpencodeDisabled
       else delete process.env.OPENCODE_DISABLE_TELEMETRY
+      if (origCliDisabled !== undefined) process.env.ALTIMATE_CLI_DISABLE_TELEMETRY = origCliDisabled
+      else delete process.env.ALTIMATE_CLI_DISABLE_TELEMETRY
       rmSync(tmpHome, { recursive: true, force: true })
     }
   })

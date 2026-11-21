@@ -15,6 +15,7 @@ import fs from "fs"
 import path from "path"
 import os from "os"
 import { fileLog } from "@/altimate/util/file-log"
+import { Filesystem } from "@/util/filesystem"
 
 const log = Log.create({ service: "telemetry" })
 
@@ -2286,7 +2287,9 @@ export namespace Telemetry {
   }
 
   let enabled = false
-  let buffer: Event[] = []
+  let buffer: { event: Event; scope?: string; held?: boolean }[] = []
+  let configScope: string | undefined
+  let reinitScope: string | undefined
   let flushTimer: ReturnType<typeof setInterval> | undefined
   // altimate_change — who the machine is signed in as (backend user uuid + tenant), for the
   // funnel join with web events. Resolved off the stored credential in doInit(); see identity.ts.
@@ -2311,7 +2314,11 @@ export namespace Telemetry {
   // Instance: the CLI initialises telemetry before a command changes into its `--dir` or project.
   let configDirectory: string | undefined
   export function setConfigDirectory(directory: string | undefined) {
-    configDirectory = directory
+    try {
+      configDirectory = directory === undefined ? undefined : Filesystem.resolve(directory)
+    } catch {
+      configDirectory = directory === undefined ? undefined : path.resolve(directory)
+    }
   }
   let machineId = ""
   let sessionId = ""
@@ -2487,6 +2494,8 @@ export namespace Telemetry {
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
+    const instance = TelemetryConfig.instanceDirectory()
+    const scope = instance ?? configDirectory ?? process.cwd()
     // altimate_change start — never re-init across an in-flight shutdown.
     //
     // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
@@ -2501,12 +2510,15 @@ export namespace Telemetry {
     // Chaining onto shutdownPromise keeps the generations separate: callers arriving mid-shutdown
     // wait for the new init rather than joining the dying one.
     if (shutdownPromise) {
+      if (reinitPromise && reinitScope !== scope) return reinitPromise.then(() => init())
       if (!reinitPromise) {
+        reinitScope = scope
         reinitPromise = shutdownPromise
           .catch(() => {})
-          .then(doInit)
+          .then(() => doInit(scope))
           .finally(() => {
             reinitPromise = undefined
+            reinitScope = undefined
           })
         // Publish it as initPromise too. Without this, a caller arriving after the shutdown had
         // settled — but before this chained doInit() finished — saw an empty initPromise and
@@ -2522,7 +2534,10 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
-    if (!initDone && initPromise && TelemetryConfig.instanceDirectory()) {
+    if (initPromise && configScope !== scope) {
+      return shutdown({ preserveUnresolved: true }).then(() => init())
+    }
+    if (!initDone && initPromise && instance) {
       // A session can join the middleware init while its local probe is still running.
       // Retry once from the session's context when the probe could not resolve config.
       const pending = initPromise
@@ -2535,28 +2550,40 @@ export namespace Telemetry {
       initPromise = undefined
       initDone = false
     }
-    return (initPromise ??= doInit())
+    return (initPromise ??= doInit(scope))
     // altimate_change end
   }
 
-  async function doInit() {
+  function clearScope(scope: string | undefined) {
+    buffer = buffer.filter((entry) => entry.scope !== scope)
+    droppedEvents = 0
+  }
+
+  async function doInit(scope: string) {
+    // Events tracked before the CLI selects its config directory belong to the
+    // first scope it resolves. Later scopes must resolve their own opt-out.
+    for (const entry of buffer) entry.scope ??= scope
+    const retry = (configUnresolved && configScope === scope) || buffer.some((entry) => entry.scope === scope && entry.held)
+    if (configScope !== undefined && configScope !== scope) droppedEvents = 0
+    configScope = scope
+    configUnresolved = false
     try {
       // altimate_change start — hold bounded startup events until the opt-out is resolved.
-      const retry = configUnresolved
-      configUnresolved = false
       if (TelemetryConfig.disablingEnvironmentVariable()) {
         buffer = []
         droppedEvents = 0
         return
       }
-      const state = await TelemetryConfig.resolve(configDirectory, retry)
+      const state = await TelemetryConfig.resolve(scope, retry)
       if (state === "unreadable") {
         configUnresolved = true
+        for (const entry of buffer) {
+          if (entry.scope === scope) entry.held = true
+        }
         return
       }
       if (state === "disabled") {
-        buffer = []
-        droppedEvents = 0
+        clearScope(scope)
         return
       }
       // altimate_change end
@@ -2569,13 +2596,13 @@ export namespace Telemetry {
       // and active-machine metric by ~33%.
       const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       if (!explicit && isAutomatedRun()) {
-        buffer = []
+        clearScope(scope)
         return
       }
       const connectionString = explicit ?? DEFAULT_CONNECTION_STRING
       const cfg = parseConnectionString(connectionString)
       if (!cfg) {
-        buffer = []
+        clearScope(scope)
         return
       }
       appInsights = cfg
@@ -2602,10 +2629,10 @@ export namespace Telemetry {
       // altimate_change start — first-run health: drain anchor events that were tracked before init
       // finished (first_launch always is) instead of leaving them to the 5 s interval a startup freeze
       // would block. The stall watcher starts in `finally`, telemetry or not.
-      if (retry || buffer.some((event) => ANCHOR_EVENTS.has(event.type))) void Telemetry.flush().catch(() => {})
+      if (buffer.some(({ event, scope: owner }) => owner === scope && (retry || ANCHOR_EVENTS.has(event.type)))) void Telemetry.flush().catch(() => {})
       // altimate_change end
     } catch {
-      buffer = []
+      clearScope(scope)
     } finally {
       initDone = true
       // altimate_change start — the stall watcher also writes each stall to opencode.log, which `debug bundle`
@@ -2875,8 +2902,11 @@ export namespace Telemetry {
   // altimate_change end
 
   export function track(event: Event) {
-    // Buffer during init and while config is unresolved. A resolved opt-out drops events.
-    if (initDone && !enabled && !configUnresolved) return
+    // Membership is decided when events are tracked, never by whichever
+    // project happens to initialize before the next flush.
+    const directory = TelemetryConfig.instanceDirectory() ?? configDirectory
+    const scope = directory ?? (configScope === undefined ? undefined : process.cwd())
+    if (scope === configScope && initDone && !enabled && !configUnresolved) return
     // altimate_change start — stamp the client trace of the turn the event's own session is
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
     // explicit per-event `session_id` is used — the process-global session can be another one.
@@ -2889,16 +2919,15 @@ export namespace Telemetry {
     // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
     // carries none. A process-wide or per-session fallback kept attributing cancelled turns' rows to
     // their replacements.
-    buffer.push(event)
+    buffer.push({ event, scope, held: scope === configScope && configUnresolved })
     if (buffer.length > MAX_BUFFER_SIZE) {
-      buffer.shift()
-      droppedEvents++
+      if (buffer.shift()?.scope === configScope) droppedEvents++
     }
     // altimate_change start — anchor events flush immediately. A frozen-then-killed process otherwise
     // dies with its buffer: the 5 s interval cannot fire while the loop is blocked, and the stall
     // report itself would be the first thing lost.
     if (event.type === "first_launch" && !event.is_upgrade) freshInstall = true
-    if (initDone && enabled && ANCHOR_EVENTS.has(event.type)) void Telemetry.flush().catch(() => {})
+    if (scope === configScope && initDone && enabled && ANCHOR_EVENTS.has(event.type)) void Telemetry.flush().catch(() => {})
     // altimate_change end
   }
 
@@ -2940,7 +2969,10 @@ export namespace Telemetry {
     // altimate_change end
     if (!enabled || buffer.length === 0 || !appInsights) return
 
-    const events = buffer.splice(0, buffer.length)
+    const scope = configScope
+    const events = buffer.filter((entry) => entry.scope === scope).map(({ event }) => event)
+    if (events.length === 0) return
+    buffer = buffer.filter((entry) => entry.scope !== scope)
 
     if (droppedEvents > 0) {
       events.push({
@@ -2991,7 +3023,7 @@ export namespace Telemetry {
         if (attempted.has(e)) (e as any)._retried = true
       }
       const space = Math.max(0, MAX_BUFFER_SIZE - buffer.length)
-      buffer.unshift(...retriable.slice(0, space))
+      buffer.unshift(...retriable.slice(0, space).map((event) => ({ event, scope })))
     } finally {
       clearTimeout(timeout)
       if (activeFlushAbort === controller) activeFlushAbort = undefined
@@ -3108,10 +3140,14 @@ export namespace Telemetry {
     shuttingDown = false
     enabled = false
     appInsights = undefined
-    if (!preserveUnresolved || !configUnresolved) {
+    if (!preserveUnresolved) {
       configUnresolved = false
+      configScope = undefined
       buffer = []
       droppedEvents = 0
+    } else if (!configUnresolved) {
+      clearScope(configScope)
+      configScope = undefined
     }
     sessionId = ""
     projectId = ""

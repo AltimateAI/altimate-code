@@ -278,6 +278,38 @@ describe("telemetry opt-out", () => {
     expect(names).toEqual(["startup_ready"])
   })
 
+  test("only the owning project can release a held startup event", async () => {
+    const names = recordIngestion()
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.shutdown({ preserveUnresolved: true })
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    const other = path.join(home, "other")
+    mkdirSync(other)
+    Telemetry.setConfigDirectory(other)
+    configSpy.mockResolvedValue({})
+    Telemetry.track({
+      type: "error",
+      timestamp: Date.now(),
+      error_name: "OtherProject",
+      error_message: "test",
+      context: "test",
+      session_id: "",
+    })
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual(["error"])
+    await Telemetry.shutdown({ preserveUnresolved: true })
+
+    Telemetry.setConfigDirectory(home)
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(names).toEqual(["error", "startup_ready"])
+  })
+
   test("resolution to disabled discards held startup events", async () => {
     const names = recordIngestion()
     process.env.OPENCODE_CONFIG_CONTENT = "{"
