@@ -308,7 +308,7 @@ describe("run model resolution", () => {
   )
 
   cliIt.live(
-    "runs shell without a usable model and reports an unavailable async prompt model once",
+    "runs shell and /mcps without a usable model and reports an unavailable async prompt model once",
     ({ opencode, llm }) =>
       Effect.gen(function* () {
         const server = yield* opencode.serve({
@@ -327,6 +327,8 @@ describe("run model resolution", () => {
         const sessionID = data.id
         const shell = yield* Effect.promise(() => sdk.session.shell({ sessionID, agent: "build", command: "echo shell-ok" }))
         expect(JSON.stringify(shell.data)).toContain("shell-ok")
+        const mcps = yield* Effect.promise(() => sdk.session.command({ sessionID, command: "mcps", arguments: "" }))
+        expect(JSON.stringify(mcps.data)).toContain("MCP")
 
         const controller = new AbortController()
         const events = yield* Effect.promise(() => fetch(`${server.url}/event`, { signal: controller.signal }))

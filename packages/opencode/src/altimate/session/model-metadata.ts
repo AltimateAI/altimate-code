@@ -12,4 +12,15 @@ export function isModelMetadataOnly(parts: readonly MessageV2.Part[]) {
   )
 }
 
+const reported = new WeakSet<object>()
+
+// Record that guided text for a model selection error was already published to the session.
+export function markReported(error: unknown) {
+  if (typeof error === "object" && error !== null) reported.add(error)
+}
+
+export function wasReported(error: unknown) {
+  return typeof error === "object" && error !== null && reported.has(error)
+}
+
 export * as ModelMetadata from "./model-metadata"

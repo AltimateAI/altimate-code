@@ -229,6 +229,7 @@ function reportModelSelectionError(sessionID: SessionID, error: unknown) {
   const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
   const guidance = modelNotFoundHint(providerID, providerMissing)
   const message = modelNotFoundMessage(providerID, modelID, source)
+  ModelMetadata.markReported(error)
   Bus.publish(Session.Event.Error, {
     sessionID,
     error: new NamedError.Unknown({
@@ -2860,7 +2861,11 @@ export namespace SessionPrompt {
     if (configured !== undefined) {
       return { model: Provider.parseModel(configured), source: "project or global config (model)" }
     }
-    return { model: metadataOnly ? Provider.parseModel("") : await Provider.defaultModel(), source: "automatic selection" }
+    // Display-only rows still record the automatic choice, but never fail when none is available.
+    const automatic = metadataOnly
+      ? await Provider.defaultModel().catch(() => Provider.parseModel(""))
+      : await Provider.defaultModel()
+    return { model: automatic, source: "automatic selection" }
     // altimate_change end
   }
 

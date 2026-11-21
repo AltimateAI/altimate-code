@@ -19,3 +19,15 @@ describe("ModelMetadata.isModelMetadataOnly", () => {
     expect(ModelMetadata.isModelMetadataOnly([])).toBe(false)
   })
 })
+
+describe("ModelMetadata reported errors", () => {
+  test("only errors marked by the reporter count as reported", () => {
+    const reported = new Error("reported")
+    const unreported = new Error("unreported")
+    ModelMetadata.markReported(reported)
+    expect(ModelMetadata.wasReported(reported)).toBe(true)
+    expect(ModelMetadata.wasReported(unreported)).toBe(false)
+    expect(ModelMetadata.wasReported("text")).toBe(false)
+    expect(ModelMetadata.wasReported(undefined)).toBe(false)
+  })
+})

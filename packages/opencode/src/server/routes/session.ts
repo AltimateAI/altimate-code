@@ -32,7 +32,7 @@ import { PermissionNext } from "@/permission/next"
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
 // altimate_change start — recognize model selection errors already reported by the prompt
-import { Provider } from "@/provider/provider"
+import { ModelMetadata } from "@/altimate/session/model-metadata"
 // altimate_change end
 import { errors } from "../error"
 import { NotFoundError as StorageNotFoundError } from "../../storage/db"
@@ -994,7 +994,7 @@ export const SessionRoutes = lazy(() =>
             // altimate_change end
             log.error("prompt_async failed", { sessionID, error: err })
             // altimate_change start — the prompt already published guided text for an unavailable model
-            if (Provider.ModelNotFoundError.isInstance(err)) return
+            if (ModelMetadata.wasReported(err)) return
             // altimate_change end
             Bus.publish(Session.Event.Error, {
               sessionID,
