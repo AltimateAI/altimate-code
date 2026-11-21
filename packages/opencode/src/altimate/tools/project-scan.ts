@@ -492,9 +492,12 @@ export async function detectDataTools(skip: boolean): Promise<DataToolInfo[]> {
       const result = safeSpawnSync([tool, "--version"], { timeout: 5000, env })
       // Offline, a probe that did not finish still shows dbt is installed: use what it printed, else PATH.
       if (env && !(result && result.exitCode === 0)) {
-        const version = result ? parseToolVersion(result.stdout) : undefined
+        // dbt 1.x prints "Core:" then "  - installed: <version>"; older output leads with the version.
+        const version = result
+          ? (result.stdout.match(/-\s*installed:\s*([0-9]+\.[0-9]+\.[0-9]+\S*)/)?.[1] ?? parseToolVersion(result.stdout))
+          : undefined
         const installed = version !== undefined || Bun.which(tool, { PATH: process.env.PATH ?? "" }) !== null
-        return installed ? { name: tool, installed, ...(version ? { version } : {}) } : { name: tool, installed: false }
+        return { name: tool, installed, ...(version ? { version } : {}) }
       }
       if (result && result.exitCode === 0) {
         return {

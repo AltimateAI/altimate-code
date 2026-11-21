@@ -186,6 +186,7 @@ let cli = yargs(args)
     const offlineTarget = (command === "run" && !args.attach ? args.dir : undefined)
       ?? (command === "acp" ? args.cwd : undefined)
       ?? (command === "workspace" ? args.directory : undefined)
+      ?? (command === "attach" ? args.dir : undefined)
     const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
     await Offline.start(directory, args.model)
     // Attaching to a server on this machine is local; any other server is a network peer.

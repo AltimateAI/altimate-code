@@ -328,6 +328,22 @@ test("offline attach accepts a server on this machine and refuses a remote one",
   }
 }, 45_000)
 
+test("attach --dir applies that project's offline setting when launched elsewhere", async () => {
+  // configMode without a snapshot: the project's own config turns offline mode on; the env switch is off.
+  const f = await fixture(false, true, false)
+  try {
+    const proc = Bun.spawn(
+      [process.execPath, "--preload", f.preload, CLI, "attach", "https://remote-server.test", "--dir", f.project],
+      { cwd: f.root, env: f.env, stdin: "ignore", stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(20_000) },
+    )
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+    await proc.exited
+    expect(stdout + stderr).toContain("This command requires network access")
+  } finally {
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test("offline model transport bypasses proxy settings and refuses redirects", async () => {
   let proxyCalls = 0
   const proxy = Bun.serve({

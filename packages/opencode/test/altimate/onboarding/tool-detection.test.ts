@@ -221,7 +221,7 @@ test.skipIf(process.platform === "win32")("offline detection runs dbt --version 
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true, dbtCoreVersion: "1.9.3" })
     expect(fs.readFileSync(seen, "utf8")).toBe("http://127.0.0.1:9|")
-    // A probe that prints the versions and then fails (or times out) still finds dbt offline.
+    // A probe that prints the versions and then exits non-zero still finds dbt offline.
     fs.writeFileSync(path.join(dir, "dbt"), `#!/bin/sh\nprintf "Core:\\n  - installed: 1.9.3\\n"\nexit 1\n`, { mode: 0o755 })
     _resetDbtRuntimeCacheForTests()
     expect(await detectDbtRuntime({ force: true })).toMatchObject({ hasDbt: true, dbtCoreVersion: "1.9.3" })

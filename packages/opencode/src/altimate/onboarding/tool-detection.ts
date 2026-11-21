@@ -105,7 +105,7 @@ async function probe(): Promise<DbtRuntime> {
     out = await runDbtVia(env, "cmd.exe", ["/c", "dbt", "--version"])
   }
   // Offline, a probe that timed out or exited non-zero still counts when it printed dbt's version lines.
-  const printedVersion = /-\s*installed:|core=/.test(`${out.stdout}\n${out.stderr}`)
+  const printedVersion = /-\s*installed:\s*[0-9]+\.[0-9]+\.[0-9]+|core=[0-9]+\.[0-9]+\.[0-9]+/.test(`${out.stdout}\n${out.stderr}`)
   if (!out.ok && !(Offline.enabled() && printedVersion)) return { hasDbt: false, hasDbtDuckdb: false }
 
   // dbt --version on 1.x prints:

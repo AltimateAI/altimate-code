@@ -810,11 +810,26 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.workspace_id, id))
         .all()
         .pipe(Effect.orDie)
-      // altimate_change start — offline mode cannot revoke a public share, so it refuses before removing anything
-      if (Offline.enabled() && sessions.some((sessionInfo) => sessionInfo.shareURL))
-        return yield* Effect.die(
-          new Offline.OfflinePolicyError("This workspace has a shared session. Remove it while online so the share can be revoked."),
-        )
+      // altimate_change start — offline mode cannot revoke a public share, so it refuses before removing anything.
+      // Subagent sessions carry only a parent id, so the check walks each tree, not just the workspace's rows.
+      if (Offline.enabled()) {
+        let level = sessions
+        const seen = new Set(sessions.map((sessionInfo) => sessionInfo.id))
+        while (level.length) {
+          if (level.some((sessionInfo) => sessionInfo.shareURL))
+            return yield* Effect.die(
+              new Offline.OfflinePolicyError("This workspace has a shared session. Remove it while online so the share can be revoked."),
+            )
+          const children = yield* db
+            .select({ id: SessionTable.id, parentID: SessionTable.parent_id, shareURL: SessionTable.share_url })
+            .from(SessionTable)
+            .where(inArray(SessionTable.parent_id, level.map((sessionInfo) => sessionInfo.id)))
+            .all()
+            .pipe(Effect.orDie)
+          level = children.filter((child) => !seen.has(child.id))
+          for (const child of level) seen.add(child.id)
+        }
+      }
       // altimate_change end
       const sessionIDs = new Set(sessions.map((sessionInfo) => sessionInfo.id))
       yield* Effect.forEach(

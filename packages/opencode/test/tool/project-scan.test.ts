@@ -1035,7 +1035,10 @@ test.skipIf(process.platform === "win32")("offline data tool detection runs dbt 
     const tools = await detectDataTools(false)
     expect(tools.find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.3" })
     expect(await fsp.readFile(seen, "utf8")).toBe("http://127.0.0.1:9")
-    // A probe that does not finish cleanly still reports an installed dbt offline.
+    // A probe that prints dbt's real version lines and then exits non-zero still reports the version offline.
+    await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nprintf 'Core:\\n  - installed: 1.9.3\\n'\nexit 1\n", { mode: 0o755 })
+    expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.3" })
+    // A probe that prints nothing falls back to finding dbt on PATH.
     await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nexit 1\n", { mode: 0o755 })
     expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true })
   } finally {
