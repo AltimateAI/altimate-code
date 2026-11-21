@@ -13,8 +13,9 @@ export function isModeledDialect(dialect?: string): boolean {
 }
 
 /** Lex quoted SQL before recognizing comments or statement delimiters.
- * `complete` is false for syntax we cannot safely interpret across supported dialects. */
-export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]; complete: boolean } {
+ * `complete` is false for syntax we cannot safely interpret across supported dialects; `backslash`
+ * is true when a backslash in a quoted string is what made it so. */
+export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]; complete: boolean; backslash: boolean } {
   const tokens: SqlToken[] = []
   const mysqlComments = !dialect || /^(mysql|mariadb)$/i.test(dialect)
   const hashComments = /^(mysql|mariadb|bigquery)$/i.test(dialect ?? "")
@@ -50,6 +51,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   const qQuotes = unmodeled || /^oracle$/i.test(dialect ?? "")
   const ambiguousBackslash = unmodeled || /^(postgres|postgresql|spark|databricks|hive)$/i.test(dialect ?? "")
   let complete = true
+  let backslash = false
   let i = 0
   let code = 0
   while (i < sql.length) {
@@ -124,6 +126,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
         if (bigquery && quote === '"') kind = "literal"
         i += escaped ? 2 : 1
         let closed = false
+        let sawEscape = false
         while (i < sql.length) {
           // Ordinary strings in these engines can escape their closing quote.
           // MySQL modes can disable that behavior (and make double quotes
@@ -133,7 +136,10 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
             !escaped &&
             ((quote === "'" && /^(mysql|mariadb|clickhouse|snowflake)$/i.test(dialect ?? "")) ||
               (quote === '"' && /^(mysql|mariadb)$/i.test(dialect ?? "")))
-          ) complete = false
+          ) {
+            complete = false
+            backslash = true
+          }
           // After an odd run of backslashes a quote is escaped in some modes and closes the literal in
           // others, so where it ends cannot be known: in an unmodeled dialect, in Spark, Databricks
           // and Hive (escapedStringLiterals) and in PostgreSQL (standard_conforming_strings off).
@@ -147,9 +153,13 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
           ) {
             let run = 0
             for (let j = i - 1; j > start && sql[j] === "\\"; j--) run++
-            if (run % 2 === 1) complete = false
+            if (run % 2 === 1) {
+              complete = false
+              backslash = true
+            }
           }
           if ((escaped || backslashEscapes) && sql[i] === "\\") {
+            sawEscape = true
             i += 2
             continue
           }
@@ -161,7 +171,11 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
           closed = true
           break
         }
-        if (!closed) complete = false
+        if (!closed) {
+          complete = false
+          // A string left open after a backslash escape most likely ends in an escaped quote.
+          if (sawEscape) backslash = true
+        }
         i = Math.min(i, sql.length)
       } else if (dollarQuotes && sql[i] === "$" && !(clickhouse ? /[\w$]/ : IDENTIFIER_CHAR).test(sql[i - 1] ?? "")) {
         DOLLAR_TAG.lastIndex = i
@@ -199,7 +213,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     code = i
   }
   if (code < sql.length) tokens.push({ kind: "code", text: sql.slice(code) })
-  return { tokens, complete }
+  return { tokens, complete, backslash }
 }
 
 export function maskSql(tokens: SqlToken[], identifiers = false): string {

@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workspace review decisions are no longer hidden by "Sync now".** Decisions that arrive together show as one toast. (#1751)
 - **The column answer reads a cast after a SELECT modifier or in parentheses**, and column names at the edges of the answer are right. (#1760, #1754)
 - **`schema-verify` says when its verdict rests on a stale manifest.** (#1704)
-- **Snowflake key-pair login reads every private-key format**: PEMs whose line breaks became spaces, encrypted PKCS#8 keys without a passphrase, and legacy encrypted PKCS#1 keys. (#1777)
+- **Snowflake key-pair login reads every private-key format**: PEMs whose line breaks became spaces, encrypted PKCS#8 keys with their passphrase (and a clear error when `private_key_passphrase` is missing), and legacy encrypted PKCS#1 keys. (#1777)
 - **`serve` never sends a stack trace in an error response.** A remote config that can't be fetched is a 502 that names the remote. (#1788)
 - **A missing npm on Windows is reported as missing**, not as a failed driver install. (#1790)
 - **dbt tool argument errors name the field**, and activating a different virtualenv (`VIRTUAL_ENV`, `CONDA_PREFIX`) gets a `tool run` daemon that uses it. (#1781)

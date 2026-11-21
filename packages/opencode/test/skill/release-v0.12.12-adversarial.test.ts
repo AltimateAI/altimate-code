@@ -39,6 +39,8 @@ import * as Registry from "@/altimate/native/connections/registry"
 import { initTool } from "../altimate/tool-fixture"
 import { resolveReviewBase } from "@/altimate/review/git"
 import { credentialsInternals } from "@/altimate/integrations/credentials"
+import { tokenizeSql } from "@/altimate/tools/sql-tokenize"
+import { DbtBuildGreenValidator } from "@/altimate/validators/dbt-build-green"
 
 const src = path.join(import.meta.dir, "../../src")
 const read = (file: string) => fs.readFile(path.join(src, file), "utf8")
@@ -194,6 +196,32 @@ describe("v0.12.12: readRunResults against hostile files", () => {
     }
   })
 
+  test("a file of exactly the size cap is still read", async () => {
+    const file = path.join(root, "target", "run_results.json")
+    await write("{}")
+    await fs.truncate(file, 256 * 1024 * 1024)
+    // The bytes are not materialized: the read answers a small artifact for this file.
+    const read = spyOn(fsp, "readFile").mockResolvedValue('{"results":[]}' as any)
+    try {
+      expect(await readRunResults(root)).not.toBeNull()
+      expect(read.mock.calls.some(([p]) => String(p) === file)).toBe(true)
+    } finally {
+      read.mockRestore()
+    }
+  })
+
+  test("an artifact over the cap is no build evidence for the build-green gate", async () => {
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "name: t\nversion: '1.0'\nconfig-version: 2\nprofile: t\n")
+    await fs.mkdir(path.join(root, "models"))
+    await fs.writeFile(path.join(root, "models", "stg_orders.sql"), "select 1 as id")
+    const file = path.join(root, "target", "run_results.json")
+    await write(JSON.stringify({ results: [{ unique_id: "model.t.stg_orders", status: "success" }] }))
+    await fs.truncate(file, 257 * 1024 * 1024)
+    const r = await DbtBuildGreenValidator.check({ sessionID: "s", workingDirectory: root, sessionStartMs: 0, step: 1, retryCount: 0 })
+    expect(r.ok).toBe(false)
+    expect(r.details!["verdict"]).toBe("no-fresh-build")
+  })
+
   test("a well-formed file is read", async () => {
     await write(JSON.stringify({ results: [], args: { which: "build" }, elapsed_time: 1 }))
     expect(await readRunResults(root)).not.toBeNull()
@@ -225,6 +253,38 @@ describe("v0.12.12: refusal messages name the real cause", () => {
     const tool = await initTool(SqlExplainTool)
     const result = await tool.execute({ sql: "select 'abc", warehouse: "sf", analyze: false }, ctx())
     expect(result.output).toContain("unterminated")
+  })
+
+  test("the backslash hint appears only when a backslash is why the quotes could not be read", async () => {
+    Registry.setConfigs({ pg: { type: "postgres" } as any, lite: { type: "sqlite" } as any, my: { type: "mysql" } as any })
+    const tool = await initTool(SqlExplainTool)
+    const explain = (sql: string, warehouse: string) => tool.execute({ sql, warehouse, analyze: false }, ctx())
+    // An unterminated quote in SQL that also holds a backslash elsewhere: the backslash is not the cause.
+    for (const [sql, warehouse] of [
+      ["select regexp_replace(a, '\\d', '') || 'abc from t", "pg"],
+      ["select 'C:\\dir' || 'abc from t", "lite"],
+    ]) {
+      const out = (await explain(sql, warehouse)).output
+      expect(out).toContain("unterminated")
+      expect(out).not.toContain("backslash")
+    }
+    // A quote after a backslash: PostgreSQL with standard_conforming_strings off, and MySQL, read it as escaped.
+    for (const [sql, warehouse] of [
+      ["select 'it\\'s' from t", "pg"],
+      ["select 'a\\b' from t", "my"],
+    ]) {
+      const out = (await explain(sql, warehouse)).output
+      expect(out).toContain("backslash")
+      expect(out).toContain("CHR(92) or CHAR(92)")
+    }
+  })
+
+  test("tokenizeSql reports a backslash cause only for a backslash", () => {
+    expect(tokenizeSql("select 'abc", "postgres")).toMatchObject({ complete: false, backslash: false })
+    expect(tokenizeSql("select 'it\\'s'", "postgres")).toMatchObject({ complete: false, backslash: true })
+    // BigQuery escapes with a backslash, so a string left open after one most likely ends in an escaped quote.
+    expect(tokenizeSql("select 'abc\\'", "bigquery")).toMatchObject({ complete: false, backslash: true })
+    expect(tokenizeSql("select 'a\\b'", "sqlite")).toMatchObject({ complete: true, backslash: false })
   })
 
   test("the dbt adapter refusal names only the fix that applies: plan mode, or --allow-write", async () => {
@@ -287,7 +347,15 @@ describe("v0.12.12: the missing-fields hint re-runs the call that failed", () =>
       await fs.symlink(process.execPath, path.join(dir, "bin", "bun"))
       const cli = path.join(import.meta.dir, "../../src/index.ts")
       const p = Bun.spawnSync([path.join(dir, "bin", "bun"), "run", cli, "integrations", ...args], {
-        env: { HOME: dir, PATH: path.join(dir, "bin"), ALTIMATE_INTEGRATIONS_DIR: dir, ALTIMATE_INTEGRATIONS_MOCK: "1" },
+        // NODE_ENV and ALTIMATE_TELEMETRY_DISABLED keep the child from sending telemetry.
+        env: {
+          HOME: dir,
+          PATH: path.join(dir, "bin"),
+          ALTIMATE_INTEGRATIONS_DIR: dir,
+          ALTIMATE_INTEGRATIONS_MOCK: "1",
+          NODE_ENV: "test",
+          ALTIMATE_TELEMETRY_DISABLED: "1",
+        },
         stdout: "pipe",
         stderr: "pipe",
       })
