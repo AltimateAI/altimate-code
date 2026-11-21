@@ -14,7 +14,8 @@ export function isModelMetadataOnly(parts: readonly MessageV2.Part[]) {
 
 const reported = new WeakSet<object>()
 
-// Record that guided text for a model selection error was already published to the session.
+// Record that the session already received an error event for this error (an unavailable model or an
+// unknown agent), so a route that catches it does not publish it again.
 export function markReported(error: unknown) {
   if (typeof error === "object" && error !== null) reported.add(error)
 }

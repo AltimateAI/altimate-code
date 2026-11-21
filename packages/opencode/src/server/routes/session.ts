@@ -1004,7 +1004,7 @@ export const SessionRoutes = lazy(() =>
             TraceContext.release(sessionID, [messageID])
             // altimate_change end
             log.error("prompt_async failed", { sessionID, error: err })
-            // altimate_change start — the prompt already published guided text for an unavailable model
+            // altimate_change start — the prompt already published this error (unavailable model or unknown agent)
             if (ModelMetadata.wasReported(err)) return
             // altimate_change end
             Bus.publish(Session.Event.Error, {
