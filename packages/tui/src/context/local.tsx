@@ -717,14 +717,13 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return persistedAgentPick
 
         if (args.model !== undefined) return parseModel(args.model)
-        const agentConfiguredModel = a?.model
-        if (agentConfiguredModel) return agentConfiguredModel
-        const explicit = explicitFallbackModel()
-        if (explicit) return explicit
+        const configured = a?.model ?? explicitFallbackModel()
+        if (configured && !isModelValid(configured)) return configured
         // altimate_change end
 
         if (persistedAgentPick && isModelValid(persistedAgentPick))
           return substituteStaleZen(persistedAgentPick)
+        if (configured) return configured
 
         return substituteStaleZen(fallbackModel())
       })
