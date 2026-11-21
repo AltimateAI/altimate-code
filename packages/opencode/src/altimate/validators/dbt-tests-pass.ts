@@ -12,9 +12,8 @@
  * tests because the SELECT logic produces wrong values or wrong row counts.
  *
  * The agent does not see this validator existing — it runs in the harness
- * AFTER `finishReason === "stop"`. Its output is surfaced to the agent only
- * if there are failures, via a synthetic user message the framework injects
- * to force one more turn. See types.ts header for the rationale.
+ * AFTER `finishReason === "stop"`. Findings can trigger a retry. The harness
+ * adds an inconclusive check as an advisory on the next ordinary request.
  */
 
 import { spawn } from "child_process"
@@ -290,7 +289,9 @@ export const DbtTestsPassValidator: Validator = {
       }
     }
 
-    const hintBlocks: TestRunOutput[] = [...failures, ...toolErrors.map(({ model, error }) => ({ model, error }))]
+    const hintBlocks = failures.length > 0
+      ? failures
+      : toolErrors.map(({ model, error }) => ({ model, error }))
     const failingNames = failures.map((f) => f.model).filter(Boolean)
     const erroredNames = toolErrors.map((f) => f.model).filter(Boolean)
     const reason =

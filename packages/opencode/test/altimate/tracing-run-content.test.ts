@@ -76,7 +76,8 @@ function sha256(value: string) {
 describe("run trace content", () => {
   test("request snapshots preserve effective inputs and hash-dedupe canonical tool schemas", async () => {
     const { root, files } = recording()
-    const first = request()
+    const note = "The schema verification tool did not run."
+    const first = request({ uncachedTurnContext: note })
     root.logLLMRequest(first)
     root.logLLMRequest(
       request({
@@ -96,6 +97,10 @@ describe("run trace content", () => {
     await root.endTrace()
     const spans = files.get("root")!.spans.filter((span) => span.name === "llm-request")
     expect(spans).toHaveLength(2)
+    expect(spans[0]?.input).toMatchObject({
+      uncachedTurnContext: { hash: sha256(note), content: note },
+    })
+    expect(spans[1]?.input).not.toHaveProperty("uncachedTurnContext")
     const systemHash = sha256(first.system)
     const instructionsHash = sha256(first.instructions!)
     const toolsHash = sha256(

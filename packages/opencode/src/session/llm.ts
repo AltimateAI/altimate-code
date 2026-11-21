@@ -400,6 +400,7 @@ export namespace LLM {
             ...system,
             ...input.messages.filter((message) => message.role === "system").map((message) => message.content),
           ].join("\n\n"),
+          uncachedTurnContext: input.uncachedTurnContext,
           instructions: typeof requestOptions.instructions === "string" ? requestOptions.instructions : undefined,
           tools: await Promise.all(
             Object.entries(tools)

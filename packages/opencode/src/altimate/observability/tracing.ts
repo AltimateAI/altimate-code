@@ -41,6 +41,7 @@ export const LLMRequestEvent = BusEvent.define(
     variant: z.string().optional(),
     startTime: z.number(),
     system: z.string(),
+    uncachedTurnContext: z.string().optional(),
     instructions: z.string().optional(),
     tools: z.array(
       z.object({
@@ -1363,6 +1364,9 @@ export class Trace {
         },
         input: {
           system: snapshot("system", request.system),
+          ...(request.uncachedTurnContext !== undefined && {
+            uncachedTurnContext: snapshot("uncachedTurnContext", request.uncachedTurnContext),
+          }),
           tools: snapshot("tools", tools),
           ...(request.instructions !== undefined && { instructions: snapshot("instructions", request.instructions) }),
         },

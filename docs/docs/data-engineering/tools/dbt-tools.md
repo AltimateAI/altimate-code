@@ -373,12 +373,12 @@ WHERE updated_at > (SELECT MAX(updated_at) FROM {{ this }})
 Beyond the agent-facing tools above, altimate-code ships **harness-side
 validators** that fire automatically after the agent declares done. They run
 `altimate-dbt test` and `altimate-dbt schema-verify` against every model
-modified during the session. Confirmed findings block completion and
-inconclusive checks are advisory by default.
+modified during the session.
 
-This is **opt-in** today via either `ALTIMATE_VALIDATORS_ENABLED=1`
-(enforcement mode, with synthetic retries for confirmed findings) or `ALTIMATE_VALIDATORS_SHADOW=1` (telemetry-only mode — runs
-without blocking, useful for measuring "would have caught" rates). When
+With `ALTIMATE_VALIDATORS_ENABLED=1`, confirmed findings block completion
+with synthetic retries and inconclusive checks leave advisories. Set
+`ALTIMATE_VALIDATORS_STRICT=1` to restore the previous retry policy.
+`ALTIMATE_VALIDATORS_SHADOW=1` alone runs the checks for telemetry. When
 neither flag is set the dispatch path is completely skipped and there
 is zero overhead. See the [Validators page](../validators.md) for the
 full reference, env var catalogue, performance characteristics, and

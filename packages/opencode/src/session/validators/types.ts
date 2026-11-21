@@ -22,10 +22,9 @@
  *     framework is generic. The dispatch hook lives in the session step loop
  *     (prompt.ts); registered validators are evaluated when `finishReason`
  *     resolves to a non-tool stop.
- *   - A failed validator does not throw. It returns `{ok: false, ...}` and the
- *     framework inserts a synthetic user message describing the gap. The loop
- *     continues with that message in context; the model gets one more turn to
- *     fix the issue. A retry budget prevents runaway loops.
+ *   - A finding uses the retry budget to give the model another turn to fix
+ *     the issue. An unverifiable check adds an advisory to the next ordinary
+ *     request. Strict mode restores the previous enforcement policy.
  *
  * Generalisable: this is not a dbt-specific change. The hook fires for every
  * session regardless of workload; per-validator `appliesTo()` decides whether
@@ -66,13 +65,14 @@ export interface ValidatorContext {
  * Result of running a validator against a session context.
  */
 export interface ValidatorResult {
-  /** Whether the validator reported a failure. */
+  /** A pass has `ok: true`; a failed or inconclusive check can return `ok: false`. */
   ok: boolean
 
   /** A legacy failure retained solely for the strict-mode control policy. */
   strictFailure?: true
 
-  /** Set by the validator when it has a finding or could not complete the check. */
+  /** A failed result with no classification or with `finding` can spend a retry.
+   * `unverifiable` is advisory unless `ALTIMATE_VALIDATORS_STRICT=1`. */
   classification?: "finding" | "unverifiable"
 
   /** A prompt-safe description of what could not be checked and why. May accompany a finding. */

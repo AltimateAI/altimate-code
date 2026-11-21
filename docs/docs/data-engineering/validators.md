@@ -7,12 +7,12 @@ description: "Harness-side validators run after the agent declares done, catchin
 
 Validators are harness-side checks that run **after** the agent declares done.
 Unlike tools, they are not visible to the agent — the framework dispatches
-them automatically once the LLM emits `finishReason === "stop"`. A confirmed
-finding injects a synthetic user turn with the failure details,
-giving the agent one more turn to fix the issue within the retry budget.
-An inconclusive check, such as a schema tool failure, leaves an advisory in
-the next model request's context. An advisory alone does not start a request
-or spend a retry.
+them automatically once the LLM emits `finishReason === "stop"`.
+With `ALTIMATE_VALIDATORS_ENABLED=1`, a confirmed finding gives the agent
+one more turn to fix the issue within the retry budget. An inconclusive
+check leaves a note in the next model request's context. Set
+`ALTIMATE_VALIDATORS_STRICT=1` to restore the previous retry policy.
+Shadow-only mode records results in telemetry without injecting messages.
 
 This catches a class of error that prompt engineering alone cannot: the
 agent claiming "done" while the work is actually broken (failing dbt
@@ -69,7 +69,8 @@ counts.
 After the agent declares done, runs `altimate-dbt schema-verify --model
 <name>` on every modified model. Reports a mismatch if the produced
 column shape diverges from the `schema.yml` spec (extra, missing,
-reordered, or type-mismatched columns).
+reordered, or type-mismatched columns). If the schema verification tool
+cannot complete the check, the validator reports an advisory.
 
 **Catches**: column-level drift that wouldn't be caught by `dbt build`
 alone — equality tests against the spec would fail later but the
@@ -192,7 +193,9 @@ minute of wall time.
 When validators run (either mode), they emit one
 `validator_check` event per applied validator. The optional `classification`
 field is `finding` or `unverifiable`. The `ok` field retains its legacy
-meaning. `enforced` is false for advisory-only results in advisory mode.
+meaning. `enforced` is false for advisory-only results when
+`ALTIMATE_VALIDATORS_ENABLED=1` is set without
+`ALTIMATE_VALIDATORS_STRICT=1`.
 
 ```json
 {
@@ -227,6 +230,9 @@ When a validator runs, it returns:
 ```ts
 {
   ok: boolean
+  classification?: "finding" | "unverifiable"
+  advisory?: string    // what could not be checked and why
+  strictFailure?: true // preserves a legacy failure in strict mode
   reason?: string      // human-readable failure summary
   fixHint?: string     // the body injected into the synthetic user turn
   details: {

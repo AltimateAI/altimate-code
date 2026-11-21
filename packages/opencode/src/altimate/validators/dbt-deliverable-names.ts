@@ -39,7 +39,7 @@ import {
   findDbtProjectRoot,
   findTaskInstructionFiles,
   extractRequiredDeliverables,
-  collectProducedNodeNames,
+  collectProducedNodeInventory,
   modelsModifiedSince,
   modelNameFromPath,
   resolveWithinRoot,
@@ -138,7 +138,7 @@ export const DbtDeliverableNamesValidator: Validator = {
       return { ok: true, details: { skipped: "no literal contract", session_id: ctx.sessionID } }
     }
 
-    const produced = await collectProducedNodeNames(dbtRoot)
+    const { names: produced, manifestUnreadable } = await collectProducedNodeInventory(dbtRoot)
     const missingModels = contract.required.models.filter((name) => !produced.has(name))
     const missingFiles: string[] = []
     for (const relative of contract.required.files) {
@@ -176,8 +176,14 @@ export const DbtDeliverableNamesValidator: Validator = {
       ),
     )
 
+    // An unreadable manifest leaves alias claims unresolved. A literal file
+    // absence is independently verifiable and still has its own retry.
+    const advisory = manifestUnreadable && missingModels.length > 0
+      ? "Could not verify the missing dbt deliverable names against aliases because manifest.json could not be read or parsed."
+      : undefined
+    const includeModelFindings = missingModels.length > 0 && (!advisory || missingFiles.length === 0)
     const reasonParts: string[] = []
-    if (missingModels.length > 0) {
+    if (includeModelFindings) {
       reasonParts.push(
         `the task names ${missingModels.length} deliverable(s) this project does not define: ${missingModels.join(", ")}`,
       )
@@ -195,7 +201,7 @@ export const DbtDeliverableNamesValidator: Validator = {
     const hintLines: string[] = [
       `The task document (${safeTaskFile}) states these names literally. A model that does the right thing under a different name does not satisfy the task, and self-verification against the renamed output will not detect it.`,
     ]
-    if (missingModels.length > 0) {
+    if (includeModelFindings) {
       hintLines.push(`  • Create or rename to exactly: ${missingModels.join(", ")}`)
     }
     if (missingFiles.length > 0) {
@@ -214,13 +220,15 @@ export const DbtDeliverableNamesValidator: Validator = {
         `  • Models you created this session that the task did not name: ${safeUnrequested.join(", ")}. If one of them is a renamed version of a required deliverable, rename the file (and any \`ref()\` to it) back to the required name.`,
       )
     }
-    hintLines.push(
-      "  • If a required deliverable is produced under an alias, set `alias` in its config so the required name is the relation name.",
-    )
-
+    if (includeModelFindings) {
+      hintLines.push(
+        "  • If a required deliverable is produced under an alias, set `alias` in its config so the required name is the relation name.",
+      )
+    }
     return {
       ok: false,
-      classification: "finding",
+      classification: advisory && missingFiles.length === 0 ? "unverifiable" : "finding",
+      advisory,
       reason: `Deliverable-name mismatch: ${reasonParts.join("; ")}.`,
       fixHint: hintLines.join("\n"),
       details: { ...details, unrequested_models: unrequested },

@@ -92,6 +92,7 @@ describe("DbtDeliverableNamesValidator — check", () => {
     await writeModel("fct_orders_v2.sql")
     const r = await DbtDeliverableNamesValidator.check(ctx())
     expect(r.ok).toBe(false)
+    expect(r.classification).toBe("finding")
     expect(r.details!["missing_models"]).toEqual(["fct_orders"])
     expect(r.fixHint).toContain("fct_orders_v2")
   })
@@ -117,6 +118,20 @@ describe("DbtDeliverableNamesValidator — check", () => {
       JSON.stringify({ nodes: { "model.t.orders_fact": { name: "orders_fact", alias: "fct_orders" } } }),
     )
     expect((await DbtDeliverableNamesValidator.check(ctx())).ok).toBe(true)
+  })
+
+  test.each([
+    { contract: "Create the model `fct_orders`.", classification: "unverifiable" },
+    { contract: "Create the model `fct_orders` and the file `models/orders.sql`.", classification: "finding" },
+  ])("classifies a broken manifest as $classification", async ({ contract, classification }) => {
+    await makeProject()
+    await writeTask(contract)
+    await writeModel("orders_fact.sql")
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(join(dir, "target", "manifest.json"), "invalid JSON")
+    const result = await DbtDeliverableNamesValidator.check(ctx())
+    expect(result).toMatchObject({ ok: false, classification })
+    expect(result.advisory).toContain("manifest.json")
   })
 
   test("a seed satisfies a required name", async () => {
