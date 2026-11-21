@@ -2268,7 +2268,12 @@ export namespace SessionPrompt {
           if (attachments.some((attachment) => MessageV2.isMedia(attachment.mime))) unseenMedia = true
         }
       }
-      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
+      // Unmeasured content (sized like the guard sizes it) that alone fills the window cannot be helped
+      // by compacting the history before it: that refusal stays immediate and the history untouched.
+      const guardTail = measured ? estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens) : 0
+      const tailFillsWindow = guardTail >= (model.limit.input || model.limit.context || Infinity)
+      const compactable =
+        measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia && !tailFillsWindow
       // A step that made tool calls was sent with the full tool set; a text-only step may have been
       // sent without tools (an echo or final step), so its usage can undercount this request.
       const measuredWithTools = msgs
@@ -2282,16 +2287,13 @@ export namespace SessionPrompt {
         measured.modelID === model.id &&
         measured.agent === lastUser.agent &&
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
-          ? (() => {
+          ? reportedContextTokens({
+              tokens: measured.tokens,
               // Unmeasured text is sized with the guard's own conservative (multilingual, dense-text)
               // estimator, so the discount applies only to what the provider has counted.
-              const guardTail = estimateUncountedTail(msgs, measured.id, isAfterMeasured, estimateTextTokens)
-              return reportedContextTokens({
-                tokens: measured.tokens,
-                estimatedTokens: guardTail,
-                fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
-              })
-            })()
+              estimatedTokens: guardTail,
+              fraction: guardTail > 0 ? SessionCompaction.contextSafetyFraction(loopConfig) : 1,
+            })
           : undefined
       // altimate_change end
       const result = await processor.process({
@@ -2717,7 +2719,16 @@ export namespace SessionPrompt {
           // proactive check does, so this turn's steps are kept; on the turn's first request the user's
           // prompt is replayed verbatim, as for a provider overflow
           overflow:
-            !processor.message.finish && (!processor.refusedBeforeSend || lastFinished?.parentID !== lastUser.id),
+            !processor.message.finish &&
+            (!processor.refusedBeforeSend ||
+              // the turn's first request: no earlier step of this turn, finished or interrupted
+              !msgs.some(
+                (msg) =>
+                  msg.info.role === "assistant" &&
+                  msg.info.parentID === lastUser.id &&
+                  msg.info.id !== processor.message.id &&
+                  msg.parts.length > 0,
+              )),
           // altimate_change end
         })
       }

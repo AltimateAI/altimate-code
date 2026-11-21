@@ -1369,7 +1369,9 @@ export namespace SessionProcessor {
                   providerID: input.model.providerID,
                   modelID: input.model.id,
                 })
-                // Nothing was sent: the directive this request carried belongs to the retry.
+                // Nothing was sent: hand the directive back for the retry. It reaches the retry on the
+                // turn-start replay path; a mid-turn continuation registers its own completion nudge,
+                // which takes precedence, and detectors re-register theirs on later steps.
                 if (takenDirective) NudgeArbiter.register(input.sessionID, takenDirective, input.nudgeGeneration)
               }
               let error = MessageV2.fromError(e, { providerID: input.model.providerID })

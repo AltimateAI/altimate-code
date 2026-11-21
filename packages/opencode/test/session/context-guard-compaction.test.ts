@@ -425,6 +425,29 @@ it.live(
 )
 
 it.live(
+  "a new message that alone fills the window fails at once, leaving the history uncompacted",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        // Compacting the earlier history cannot make room for a message bigger than the window.
+        const result = yield* runSession(dir, llm, {
+          user: "List the top customers by paid revenue.",
+          assistantUsage: 5_000,
+          last: TOOL_STEP,
+          next: sqlJsonHistory(140_000),
+        })
+
+        expect(result.hits.length).toBe(0)
+        expect(result.compactions.length).toBe(0)
+        expect(result.errors.length).toBe(1)
+        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
   "a first turn with no provider usage is sent when it fits",
   () =>
     provideTmpdirServerLegacy(

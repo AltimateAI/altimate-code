@@ -409,8 +409,8 @@ export type ReportedUsage = {
 
 /**
  * The context size the compaction trigger compares against its threshold: provider-reported usage
- * (exact) plus an estimated uncounted tail inflated by 1/fraction. The pre-send guard uses the same
- * measure, so it cannot refuse a request the compaction trigger still considers in budget.
+ * (exact) plus an estimated uncounted tail inflated by 1/fraction. The pre-send guard builds on the
+ * same measure (with a more conservative tail estimator) instead of the bare character estimate.
  */
 export function reportedContextTokens(input: {
   readonly tokens: ReportedUsage
@@ -424,9 +424,10 @@ export function reportedContextTokens(input: {
 }
 
 /**
- * Prefer the provider-reported size of the same conversation when it is smaller than the
- * character estimate. The estimate runs high on SQL- and JSON-heavy context; reported usage plus
- * an estimated tail is the measure the compaction trigger uses, so the guard and compaction agree.
+ * Prefer the provider-reported size of the same conversation when it is smaller than the character
+ * estimate, which runs high on SQL- and JSON-heavy context. Never raises the estimate, and distrusts
+ * usage below MIN_CALIBRATED_ESTIMATE_FRACTION of it; in those cases the estimate decides, so the
+ * guard can still refuse (and the session compact) below the compaction trigger.
  */
 export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
   if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
