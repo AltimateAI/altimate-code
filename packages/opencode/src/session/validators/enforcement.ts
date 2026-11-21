@@ -47,6 +47,7 @@ interface AdvisoryState {
 const log = Log.create({ service: "validator-advisories" })
 // A transient write failure must not replay a delivered note on the next turn.
 const unsaved = new Map<SessionID, AdvisoryState>()
+const MAX_UNSAVED_SESSIONS = 128
 
 export function advisoryFingerprint(text: string): string {
   return createHash("sha256").update(text).digest("hex")
@@ -80,7 +81,11 @@ export function saveAdvisories(sessionID: SessionID, state: AdvisoryState): void
     Filesystem.writeJsonAtomic(advisoryFile(sessionID), state, 0o600)
     unsaved.delete(sessionID)
   } catch (error) {
+    unsaved.delete(sessionID)
     unsaved.set(sessionID, state)
+    if (unsaved.size > MAX_UNSAVED_SESSIONS) {
+      unsaved.delete(unsaved.keys().next().value!)
+    }
     log.warn("failed to save validator advisories", { error })
   }
 }

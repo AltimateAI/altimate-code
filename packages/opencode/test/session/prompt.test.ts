@@ -588,6 +588,8 @@ for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "str
       const requests: string[] = []
       const note = "Could not verify orders because the schema tool failed."
       const retryNote = "Could not verify customers because the test tool failed."
+      const strictReason = "Previous failure summary."
+      const strictFixHint = "Previous fix guidance."
       let checkCount = 0
       const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async () => {
         checkCount++
@@ -599,6 +601,10 @@ for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "str
           result: { ok: false, classification: "unverifiable" as const, reason: text, advisory: text },
         })
         if (mode === "finding") return [finding]
+        if (mode === "strict") {
+          const check = advisory(note)
+          return [{ ...check, result: { ...check.result, strictReason, strictFixHint } }]
+        }
         if (mode === "mixed") {
           if (checkCount === 1) return [finding, advisory(note)]
           if (checkCount === 2) return [advisory(retryNote)]
@@ -668,6 +674,12 @@ for (const mode of ["advisory", "advisory-after-error", "mixed", "finding", "str
           expect(requests).toHaveLength(4)
           expect(retries).toEqual([0, 1, 2, 3])
           expect(requests.every((request) => !request.includes(note))).toBe(true)
+          if (mode === "strict") {
+            const retryBody = JSON.stringify(stream.mock.calls[1]?.[0].messages)
+            expect(retryBody).toContain(strictReason)
+            expect(retryBody).toContain(strictFixHint)
+            expect(retryBody).not.toContain(note)
+          }
         }
       } finally {
         stream.mockRestore()
