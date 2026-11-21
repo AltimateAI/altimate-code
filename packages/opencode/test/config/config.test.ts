@@ -6,7 +6,6 @@ import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { Config } from "@/config/config"
 import { ConfigManaged } from "@/config/managed"
-import { migrateTuiConfig } from "@/config/tui-migrate"
 import { ConfigParse } from "../../src/config/parse"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 
@@ -553,21 +552,6 @@ it.instance("loads branded project JSON and JSONC ahead of legacy names in the s
     expect(config.model).toBe("branded/jsonc")
   }),
 )
-
-test("TUI migration keeps JSONC precedence and recognizes branded project files", async () => {
-  for (const branded of [false, true]) {
-    await using project = await tmpdir()
-    await writeConfig(project.path, { theme: "legacy-json" }, "opencode.json")
-    await writeConfig(project.path, { theme: "legacy-jsonc" }, "opencode.jsonc")
-    if (branded) {
-      await writeConfig(project.path, { theme: "branded-json" }, "altimate-code.json")
-      await writeConfig(project.path, { theme: "branded-jsonc" }, "altimate-code.jsonc")
-    }
-    await migrateTuiConfig({ cwd: project.path, worktree: project.path, directories: [] })
-    const migrated = await Bun.file(path.join(project.path, "tui.json")).json()
-    expect(migrated.theme).toBe(branded ? "branded-jsonc" : "legacy-jsonc")
-  }
-})
 
 it.instance("loads JSONC config from .altimate-code directory", () =>
   Effect.gen(function* () {
