@@ -3055,6 +3055,7 @@ export namespace Telemetry {
     } catch {
       // altimate_change — only process exit drops unsent retries. A project handoff
       // can retain them for the same scope without extending the transport deadline.
+      // They can retry when that scope is active again. Process exit clears any still queued.
       if (shuttingDown && !retainPendingOnShutdown) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
