@@ -528,52 +528,53 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
 }
 
 // Shell syntax pasted into a query out of terminal habit. A redirect to a descriptor or /dev/null
-// (`2>/dev/null`, `2>&1`) can sit anywhere, even before LIMIT; a pipe into a shell command (`| head -20`)
-// or a redirect into a file (`> out.csv`) only ends the text. A file target must start like a path
-// (/, ./, ../, ~/) or end in a known output extension, so comparisons such as `x > 2`, `x > 1.5` and
-// `x > t.total` never match.
-const SHELL_REDIRECT = /\s(?:[12]|&)?>>?\s*(?:&[12]|\/dev\/null)(?![\w/])/g
-const SHELL_TAIL =
-  /(?:\s*\|\s*(?:head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*|\s*(?:[12]|&)?>>?\s*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp)\b))+\s*;?\s*$/i
+// (`2>/dev/null`, `2>&1`) can sit anywhere, even before LIMIT. At the very end there may also be one pipe
+// into a shell command (`| head -20`) or one redirect into a file (`> out.csv`). A file target must start
+// like a path (/, ./, ../, ~/) or end in a known output extension, so comparisons such as `x > 2`,
+// `x > 1.5` and `x > t.total` never match. Every pattern is anchored with no nested repetition, so a
+// crafted tail cannot make the scan backtrack.
+const SHELL_REDIRECT = /\s(?:[12]|&)?>>?[ \t]*(?:&[12]|\/dev\/null)(?![\w/])/g
+const SHELL_PIPE_TAIL = /\|[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*$/i
+const SHELL_FILE_TAIL =
+  /\s(?:[12]|&)?>>?[ \t]*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp))[ \t]*$/i
 
 /** The shell syntax in a query that is a read without it, or undefined. Only code counts (literals and
- * comments are masked). The query is never rewritten: the caller names the residue so the sender removes
- * it, since running the query without it would run SQL other than what was sent. */
+ * comments are masked), and only text that does not parse as sent. The query is never rewritten: the
+ * caller names the residue so the sender removes it, since running the query without it would run SQL
+ * other than what was sent. Fragments are named by their form (`2>/dev/null`, `> <file>`, `| head ...`),
+ * since a path or a pipe's arguments may hold private text and telemetry records the error. */
 export function shellResidue(sql: string, dialect?: string): string | undefined {
   const lexical = tokenizeSql(sql, dialect)
-  // Residue is only an explanation for text that does not parse; valid SQL is never offered for removal.
   if (!lexical.complete || !classifyAndCheck(sql, dialect).parseError) return undefined
-  // Masking keeps every offset, so a match in the masked text cuts the same span of the original.
-  const masked = maskSql(lexical.tokens)
-  const cuts = [...masked.matchAll(SHELL_REDIRECT)].map((match) => [match.index!, match.index! + match[0].length])
-  // Only the tail can hold a pipe or file redirect; bounding it keeps the scan cheap on large queries.
-  const offset = Math.max(0, masked.length - 400)
-  const tail = SHELL_TAIL.exec(masked.slice(offset))
-  if (tail) cuts.push([offset + tail.index, masked.length])
+  // Masking keeps every offset, so a span of the masked text cuts the same span of the original.
+  let masked = maskSql(lexical.tokens)
+  const cuts: Array<{ start: number; end: number; label: string }> = []
+  for (const match of masked.matchAll(SHELL_REDIRECT)) {
+    cuts.push({ start: match.index!, end: match.index! + match[0].length, label: match[0].replace(/\s+/g, "") })
+  }
+  // Only the last 400 characters can hold a tail; strip trailing ; and whitespace first.
+  const end = masked.replace(/[\s;]+$/, "").length
+  const offset = Math.max(0, end - 400)
+  const window = masked.slice(offset, end)
+  const pipe = SHELL_PIPE_TAIL.exec(window)
+  const file = pipe ? undefined : SHELL_FILE_TAIL.exec(window)
+  if (pipe) cuts.push({ start: offset + pipe.index, end: masked.length, label: `| ${pipe[1].toLowerCase()} ...` })
+  if (file) cuts.push({ start: offset + file.index, end: masked.length, label: `${file[0].trim().match(/^[12&]?>>?/)![0]} <file>` })
   if (!cuts.length) return undefined
-  cuts.sort((a, b) => a[0] - b[0])
-  const fragments: string[] = []
+  cuts.sort((a, b) => a.start - b.start)
+  const labels: string[] = []
   let query = ""
   let position = 0
-  for (const [start, end] of cuts) {
-    if (end <= position) continue
-    const from = Math.max(start, position)
-    query += sql.slice(position, from) + " "
-    // Name only the shell form: a file path or a pipe's arguments may hold private text, and telemetry
-    // records this error.
-    fragments.push(
-      sql
-        .slice(from, end)
-        .trim()
-        .replace(/(>>?\s*)(?!&[12]|\/dev\/null)\S+/g, "$1<file>")
-        .replace(/(\|\s*[A-Za-z]+)[^|]*/g, "$1 ..."),
-    )
-    position = end
+  for (const cut of cuts) {
+    if (cut.end <= position) continue
+    query += sql.slice(position, Math.max(cut.start, position)) + " "
+    labels.push(cut.label)
+    position = cut.end
   }
   query += sql.slice(position)
   if (!query.trim()) return undefined
   const result = classifyAndCheck(query, dialect)
-  return result.queryType === "read" && !result.blocked ? fragments.filter(Boolean).join("`, `") : undefined
+  return result.queryType === "read" && !result.blocked ? labels.join("`, `") : undefined
 }
 
 /**

@@ -29,6 +29,19 @@ describe("shellResidue", () => {
     expect(shellResidue("SELECT a FROM t WHERE x >= 2.5", "postgres")).toBeUndefined()
   })
 
+  test("an appended redirect is named as written, and several pipes by their last command", () => {
+    expect(shellResidue("SELECT * FROM t 2>> /dev/null", "postgres")).toBe("2>>/dev/null")
+    expect(shellResidue("SELECT * FROM t | grep -i private | head", "postgres")).toBeUndefined()
+  })
+
+  test("a crafted tail is scanned in linear time", () => {
+    const start = performance.now()
+    shellResidue(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")
+    shellResidue(`SELECT * FROM t ${"| head   ".repeat(44)};y`, "postgres")
+    explainWrite(`SELECT * FROM t ${"| head ".repeat(60)}x;y`, "postgres")
+    expect(performance.now() - start).toBeLessThan(1000)
+  })
+
   test("a comparison before the residue is kept", () => {
     expect(shellResidue("SELECT a FROM t WHERE flag OR x > 1.5 2>/dev/null", "postgres")).toBe("2>/dev/null")
     expect(shellResidue("SELECT a FROM t WHERE x > t.total 2>/dev/null", "postgres")).toBe("2>/dev/null")
@@ -57,7 +70,7 @@ describe("shellResidue", () => {
 })
 
 describe("other read-only refusals carry the reason", () => {
-  test("sql_check and query_from (readSql)", () => {
+  test("sql_check (readSql)", () => {
     expect(() => readSql("SELECT 1 2>/dev/null", "postgres")).toThrow("`2>/dev/null`")
     expect(() => readSql("SELECT 1; DELETE FROM t", "postgres")).toThrow("statement 2 of 2")
   })
