@@ -178,18 +178,24 @@ describe("explainWrite", () => {
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).toContain('"t"."update"')
   })
 
-  test("every write in the guard corpus gets a specific reason", () => {
-    const writes = [
+  test("every write in the guard corpus is a write with a specific reason", () => {
+    const everywhere = [
       "INSERT INTO t VALUES (1)", "UPDATE t SET a = 1", "DELETE FROM t", "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE",
       "CREATE TABLE t (a INT)", "DROP TABLE t", "ALTER TABLE t ADD COLUMN c INT", "COPY INTO t FROM @s", "SELECT 1; DELETE FROM t",
       "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", "SELECT * INTO c FROM t", "SELECT 1. INTO c FROM t",
-      "SELECT nextval('s')", "SELECT exec FROM t",
     ]
-    for (const dialect of ["postgres", "snowflake", "duckdb", "sqlserver", "bigquery", undefined]) {
-      for (const sql of writes) {
-        if (classifyAndCheck(sql, dialect).queryType !== "write") continue
-        expect({ dialect, sql, reason: explainWrite(sql, dialect).reason }).not.toMatchObject({ reason: expect.stringContaining("could not be proven") })
-      }
+    const cases: Array<[string, string | undefined]> = [
+      ...["postgres", "snowflake", "duckdb", "sqlserver", "bigquery", undefined].flatMap((d) => everywhere.map((sql) => [sql, d] as [string, string | undefined])),
+      ["SELECT exec FROM t", "sqlserver"],
+      ["SELECT nextval('s')", "postgres"],
+      ["SELECT NEXT VALUE FOR s", "sqlserver"],
+    ]
+    for (const [sql, dialect] of cases) {
+      expect({ dialect, sql, type: classifyAndCheck(sql, dialect).queryType }).toEqual({ dialect, sql, type: "write" })
+      const reason = explainWrite(sql, dialect).reason
+      // Every corpus write parses, so a parser-failure reason would be generic too.
+      const specific = reason.length > 10 && !reason.includes("could not be proven") && !reason.includes("could not read")
+      expect({ dialect, sql, specific }).toEqual({ dialect, sql, specific: true })
     }
   })
 
