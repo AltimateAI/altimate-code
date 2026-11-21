@@ -74,7 +74,7 @@ describe("cli.error", () => {
       "Model not found: anthropic/claude-sonet-4",
       "Did you mean: claude-sonnet-4",
       "Try: `altimate models` to list available models",
-      "Or check your config (altimate-code.json) provider/model names",
+      "Check the provider and model in your project config (altimate-code.json or opencode.json, including .jsonc files, at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).",
     ].join("\n")
 
     expect(FormatError({ name: "ProviderModelNotFoundError", data })).toBe(expected)

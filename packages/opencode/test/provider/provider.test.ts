@@ -878,12 +878,17 @@ test("defaultModel respects config model setting", async () => {
 test("defaultModel rejects a configured model even when another provider is available", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
-      await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ model: "missing-provider/missing-model" }))
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          model: "missing-provider/missing-model",
+          provider: { anthropic: { options: { apiKey: "test-api-key" } } },
+        }),
+      )
     },
   })
   await provideProviderTestInstance({
     directory: tmp.path,
-    init: async () => Env.set("ANTHROPIC_API_KEY", "test-api-key"),
     fn: async () => {
       expect(await Provider.getProvider(ProviderID.make("anthropic"))).toBeDefined()
       await expect(Provider.defaultModel()).rejects.toMatchObject({

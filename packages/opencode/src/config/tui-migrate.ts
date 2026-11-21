@@ -128,7 +128,9 @@ async function opencodeFiles(input: { directories: string[]; cwd: string; worktr
   // altimate_change start — upstream_fix: restore worktree-bounded TUI migration
   const walkedUp = (
     await Array.fromAsync(
-      Filesystem.up({ targets: ConfigPaths.projectConfigNames.toReversed(), start: input.cwd, stop: input.worktree }),
+      // Migration creates the target from the first matching file in each directory.
+      // The reversal below must put branded JSONC first, and preserve legacy JSONC over JSON.
+      Filesystem.up({ targets: [...ConfigPaths.projectConfigNames], start: input.cwd, stop: input.worktree }),
     )
   ).reverse()
   // altimate_change end

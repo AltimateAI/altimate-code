@@ -220,6 +220,18 @@ function local_model_is(mounted: Awaited<ReturnType<typeof mount>>, providerID: 
 }
 // altimate_change end
 
+async function withIsolatedState(run: () => Promise<void>) {
+  await using state = await tmpdir()
+  const prior = process.env.OPENCODE_TEST_STATE_HOME
+  process.env.OPENCODE_TEST_STATE_HOME = state.path
+  try {
+    await run()
+  } finally {
+    if (prior === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+    else process.env.OPENCODE_TEST_STATE_HOME = prior
+  }
+}
+
 // upstream_fix start — real-provider regressions for unavailable explicit references.
 for (const scenario of [
   {
@@ -238,34 +250,38 @@ for (const scenario of [
   { name: "agent missing model", args: { agentModel: { providerID: "opencode", modelID: "missing" } }, expected: { providerID: "opencode", modelID: "missing" } },
   { name: "CLI overrides valid config", args: { model: "ollama/local", configModel: "opencode/zen-model" }, expected: { providerID: "ollama", modelID: "local" } },
 ]) {
-  test(`unavailable explicit ${scenario.name} cannot silently select registered cloud Base`, async () => {
-    const mounted = await mount(scenario.args)
+  test(`unavailable explicit ${scenario.name} cannot silently select registered cloud Base`, () =>
+    withIsolatedState(async () => {
+      const mounted = await mount(scenario.args)
+      try {
+        await waitUntil(() => local_model_is(mounted, scenario.expected.providerID, scenario.expected.modelID))
+        expect(mounted.local.model.current()).toEqual(scenario.expected)
+        mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
+        expect(mounted.local.model.current()).toEqual(scenario.expected)
+        expect(mounted.local.model.validate()).toBe(false)
+        await waitUntil(() => mounted.toast.currentToast?.variant === "error")
+        expect(mounted.toast.currentToast?.message).toContain(`${scenario.expected.providerID}/${scenario.expected.modelID}`)
+        expect(mounted.toast.currentToast?.message).toContain("/models")
+        expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
+        mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
+        expect(mounted.local.model.validate()).toBe(true)
+        expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
+      } finally {
+        await mounted.cleanup()
+      }
+    }),
+  )
+}
+
+test("stale implicit recent model still falls back to registered Base", () =>
+  withIsolatedState(async () => {
+    const mounted = await mount({ recent: [{ providerID: "ollama", modelID: "removed" }] })
     try {
-      await waitUntil(() => local_model_is(mounted, scenario.expected.providerID, scenario.expected.modelID))
-      expect(mounted.local.model.current()).toEqual(scenario.expected)
-      mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
-      expect(mounted.local.model.current()).toEqual(scenario.expected)
-      expect(mounted.local.model.validate()).toBe(false)
-      await waitUntil(() => mounted.toast.currentToast?.variant === "error")
-      expect(mounted.toast.currentToast?.message).toContain(`${scenario.expected.providerID}/${scenario.expected.modelID}`)
-      expect(mounted.toast.currentToast?.message).toContain("/models")
-      expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
-      mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
-      expect(mounted.local.model.validate()).toBe(true)
+      await waitUntil(() => local_model_is(mounted, "altimate-free", "altimate-base"))
       expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
     } finally {
       await mounted.cleanup()
     }
-  })
-}
-
-test("stale implicit recent model still falls back to registered Base", async () => {
-  const mounted = await mount({ recent: [{ providerID: "ollama", modelID: "removed" }] })
-  try {
-    await waitUntil(() => local_model_is(mounted, "altimate-free", "altimate-base"))
-    expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
-  } finally {
-    await mounted.cleanup()
-  }
-})
+  }),
+)
 // upstream_fix end

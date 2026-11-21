@@ -610,11 +610,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `fallbackModel()`'s recents/allowlist implicit tail) so `currentModel()` can tell them apart
       // without duplicating `fallbackModel()`'s own logic inline.
       const explicitFallbackModel = createMemo(() => {
-        // altimate_change start — upstream_fix: unavailable explicit models must reach server validation,
-        // never fall through to a different (potentially cloud-hosted) model.
+        // Keep unavailable explicit selections so validation can reject them.
         if (args.model !== undefined) return parseModel(args.model)
         if (sync.data.config.model !== undefined) return parseModel(sync.data.config.model)
-        // altimate_change end
         return undefined
       })
       // altimate_change end
@@ -710,7 +708,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const currentModel = createMemo(() => {
         const a = agent.current()
 
-        // altimate_change start — upstream_fix: explicit intent outranks restored history.
+        // An unavailable explicit selection outranks restored history.
         // A deliberate picker choice during this launch is the recovery path.
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
         if (persistedAgentPick && isModelValid(persistedAgentPick) && explicitPicks[pickKey(persistedAgentPick)])
@@ -719,7 +717,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         if (args.model !== undefined) return parseModel(args.model)
         const configured = a?.model ?? explicitFallbackModel()
         if (configured && !isModelValid(configured)) return configured
-        // altimate_change end
 
         if (persistedAgentPick && isModelValid(persistedAgentPick))
           return substituteStaleZen(persistedAgentPick)
