@@ -38,13 +38,18 @@ describe("shellResidue", () => {
   })
 
   // Timing compares two sizes on the same host instead of a wall-clock bound: linear work grows about 8x
-  // from 1x to 8x input, quadratic about 64x.
+  // from 1x to 8x input, quadratic about 64x. Each size takes its fastest of three runs, so one scheduler
+  // stall on a loaded host does not read as growth.
   const growth = (build: (n: number) => string, n: number) => {
     const time = (sql: string) => {
-      const start = performance.now()
-      explainWrite(sql, "postgres")
-      shellResidue(sql, "postgres")
-      return performance.now() - start
+      let best = Infinity
+      for (let run = 0; run < 3; run++) {
+        const start = performance.now()
+        explainWrite(sql, "postgres")
+        shellResidue(sql, "postgres")
+        best = Math.min(best, performance.now() - start)
+      }
+      return best
     }
     time(build(n)) // warm up
     return time(build(n * 8)) / Math.max(time(build(n)), 1)
@@ -261,7 +266,7 @@ describe("explainWrite", () => {
     expect(reason).not.toContain("Set")
     expect(reason).not.toContain("a token")
     for (const sql of [
-      "SELECT len(DISTINCT customer_secret_name(a)) FROM t",
+      "SELECT customer_secret_name(a FROM t",
       "SELECT customer_secret_name customer_x customer_y FROM t",
       "SELECT a FROM customer_secret_table WHERE (((",
       "SELECT CAST(a AS int 'customer_it''s secret') FROM t",

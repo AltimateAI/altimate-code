@@ -91,6 +91,16 @@ describe("reads are classified as reads in every dialect", () => {
     }
   })
 
+  test("a schema-qualified function named like a statement word is a function call, like any user function", () => {
+    // Engines read a keyword after a dot as a name. User function calls are reads with or without a qualifier.
+    for (const dialect of ["sqlserver", "postgres"]) {
+      for (const sql of ["SELECT run_sql('DELETE FROM t')", "SELECT dbo.run_sql('DELETE FROM t')", "SELECT t.DELETE('x')"]) {
+        expect(isRead(sql, dialect)).toBe(true)
+      }
+    }
+    expect(isRead("SELECT t.EXEC('DROP TABLE z')", "sqlserver")).toBe(true)
+  })
+
   test("DESCRIBE, SHOW and PRAGMA metadata reads", () => {
     for (const sql of ["DESCRIBE orders", "SHOW TABLES", "SHOW COLUMNS FROM orders"]) expect(isRead(sql, "duckdb")).toBe(true)
     expect(isRead("PRAGMA table_info('orders')", "sqlite")).toBe(true)
