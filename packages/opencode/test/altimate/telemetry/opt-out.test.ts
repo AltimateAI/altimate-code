@@ -864,9 +864,14 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
-  test("auth content that parses to something other than an object holds no well-known entry, as Auth reads it", async () => {
+  test("auth content or an auth file that parses to something other than an object holds no well-known entry, as Auth reads it", async () => {
     for (const content of ["[]", '"x"', "1", "null"]) {
       process.env.OPENCODE_AUTH_CONTENT = content
+      expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+    }
+    delete process.env.OPENCODE_AUTH_CONTENT
+    for (const content of ["[]", '"x"', "5", "true"]) {
+      writeFileSync(Auth.filepath(), content)
       expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
     }
   })

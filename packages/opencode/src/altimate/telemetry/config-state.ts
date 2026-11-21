@@ -68,8 +68,6 @@ async function hasWellKnownAuth(): Promise<boolean> {
   // As Auth reads it: OPENCODE_AUTH_CONTENT when it parses, otherwise the auth file.
   const inline = process.env.OPENCODE_AUTH_CONTENT
   let parsed: unknown = inline ? parseJson(inline) : undefined
-  // Auth uses parsed inline content as is, so content that is not an object holds no entry.
-  if (parsed !== undefined && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) return false
   if (parsed === undefined) {
     let contents: string
     try {
@@ -83,7 +81,9 @@ async function hasWellKnownAuth(): Promise<boolean> {
     // reads it; anything else that does not parse (whitespace included) is unreadable there too.
     parsed = contents === "" ? {} : JSON.parse(contents)
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
+  // Valid JSON that is not an object holds no entry: Auth uses inline content as is and reads such a file
+  // as an empty store, without marking the read failed.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false
   // Any well-known-typed entry counts: Auth passes OPENCODE_AUTH_CONTENT through without decoding it, so
   // Config can fetch remote config even for an entry the file path would reject (fail closed).
   return Object.values(parsed).some(

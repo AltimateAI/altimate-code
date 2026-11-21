@@ -24,19 +24,22 @@ function stubConfig(impl: () => Promise<unknown>) {
 
 describe("buildCliContext", () => {
   let cfg: ReturnType<typeof spyOn>
-  let savedDisabled: string | undefined
+  const optOutFlags = ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"]
+  let savedFlags: Record<string, string | undefined> = {}
 
   beforeEach(() => {
     // Clear any real opt-out from the dev's shell so these "telemetry enabled"
-    // tests are not silently broken by an exported ALTIMATE_TELEMETRY_DISABLED.
-    savedDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    // tests are not silently broken (or skipped) by an exported opt-out variable.
+    savedFlags = Object.fromEntries(optOutFlags.map((flag) => [flag, process.env[flag]]))
+    for (const flag of optOutFlags) delete process.env[flag]
     cfg = stubConfig(async () => ({}))
   })
   afterEach(() => {
     cfg.mockRestore()
-    if (savedDisabled === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
-    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedDisabled
+    for (const flag of optOutFlags) {
+      if (savedFlags[flag] === undefined) delete process.env[flag]
+      else process.env[flag] = savedFlags[flag]
+    }
   })
 
   test("returns a valid base64url-encoded JSON blob with machine_id", async () => {
@@ -188,7 +191,7 @@ describe("buildCliContext", () => {
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
     })
 
-    test("inside a project, keeps machine_id for another project without an opt-out when remote sources exist", async () => {
+    test("inside a project, keeps machine_id for another project without an opt-out when the account database cannot be read", async () => {
       if (TelemetryConfig.disablingEnvironmentVariable()) return
       await using current = await tmpdir({ git: true })
       await using other = await tmpdir({ git: true })

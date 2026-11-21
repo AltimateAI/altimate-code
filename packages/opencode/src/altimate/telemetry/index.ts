@@ -2383,7 +2383,7 @@ export namespace Telemetry {
     // Checked again once the running init settles: a shutdown may have started (or finished) meanwhile.
     return (initPromise ?? Promise.resolve())
       .catch(() => {})
-      .then(() => (shutdownPromise || shutdownsStarted !== shutdownsAtCall ? undefined : init()))
+      .then(() => (shutdownsStarted !== shutdownsAtCall ? undefined : init()))
   }
   /** Test seam: forget the process-wide opt-out decision and the events held for it. A lifecycle a
    * test left running and enabled keeps its decision, so it goes on sending as it did before the gate. */
@@ -3019,18 +3019,16 @@ export namespace Telemetry {
     // Becomes the envelope's `ai.operation.id`, joining it to the extension's and backend's records.
     const eventSession = (event as { session_id?: unknown }).session_id
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
-    if (operationId) (event as any)._operation_id = operationId
     // An event held while the opt-out is unknown can outlive this session: it keeps the session and
     // project it was tracked under instead of taking the next one's at flush.
-    if (!initDone) {
-      const held = event as { session_id?: unknown; project_id?: unknown }
-      const stamp = {
-        ...(held.session_id === undefined && sessionId ? { session_id: sessionId } : {}),
-        ...(held.project_id === undefined && projectId ? { project_id: projectId } : {}),
-      }
-      // Stamped on a copy, so a caller's object is left as it passed it.
-      if (Object.keys(stamp).length > 0) event = { ...event, ...stamp } as Event
+    const held = event as { session_id?: unknown; project_id?: unknown }
+    const stamp = {
+      ...(operationId ? { _operation_id: operationId } : {}),
+      ...(!initDone && held.session_id === undefined && sessionId ? { session_id: sessionId } : {}),
+      ...(!initDone && held.project_id === undefined && projectId ? { project_id: projectId } : {}),
     }
+    // Stamped on a copy, so a caller's object is left as it passed it.
+    if (Object.keys(stamp).length > 0) event = { ...event, ...stamp } as Event
     // altimate_change end
     // altimate_change — no ambient workspace stamping: a row names its workspace itself (the prompt
     // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
@@ -3257,7 +3255,7 @@ export namespace Telemetry {
     shuttingDown = false
     enabled = false
     appInsights = undefined
-    // altimate_change start — while the opt-out is undecided nothing was flushed: keep the events for a
+    // altimate_change — while the opt-out is undecided nothing was flushed: keep the events for a
     // later init in this process to send or drop. At process exit they go with the process. Not when a
     // project's own read failed: once its session ends, another project's decision must not send its
     // events. (Sessions that overlap share one lifecycle, as before: see the docs' multi-project note.)
@@ -3266,7 +3264,6 @@ export namespace Telemetry {
       buffer = []
       droppedEvents = 0
     }
-    // altimate_change end
     sessionId = ""
     projectId = ""
     machineId = ""
