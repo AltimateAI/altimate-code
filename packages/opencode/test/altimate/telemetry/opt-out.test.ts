@@ -1,6 +1,6 @@
 import { Database as SQLite } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
 import { Database } from "@opencode-ai/core/database/database"
@@ -546,6 +546,44 @@ describe("telemetry opt-out", () => {
     expect(Telemetry.init()).toBe(reinit)
     await reinit
     expect(Telemetry.optOutState()).toBe("enabled")
+  })
+
+  test("one project's unreadable config never holds up an opted-in project's next session", async () => {
+    const names = recordIngestion()
+    signOut()
+    await using a = await tmpdir({ git: true })
+    await using b = await tmpdir({ git: true })
+    const unresolvedConfig = {} as Awaited<ReturnType<typeof Config.get>>
+    configSpy.mockImplementation(async () => (TelemetryConfig.instanceDirectory() === b.path ? unresolvedConfig : {}))
+    const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockImplementation((config) => config === unresolvedConfig)
+    try {
+      await Instance.provide({ directory: a.path, fn: () => Telemetry.init() })
+      await Telemetry.shutdown()
+      await Instance.provide({ directory: b.path, fn: () => Telemetry.init() })
+      await Telemetry.shutdown()
+      // Within 30 s of B's failed read, A's next session still starts telemetry and sends its events.
+      await Instance.provide({
+        directory: a.path,
+        fn: async () => {
+          await Telemetry.init()
+          expect(Telemetry.isEnabled()).toBe(true)
+          Telemetry.track(errorEvent("A"))
+          await Telemetry.flush()
+        },
+      })
+      expect(names).toEqual(["A"])
+    } finally {
+      unresolved.mockRestore()
+    }
+  })
+
+  test("the opt-out marker files earlier versions wrote are removed", async () => {
+    const markers = ["telemetry-opted-out", "telemetry-opted-out.sending"].map((name) => path.join(home, ".altimate", name))
+    for (const marker of markers) writeFileSync(marker, "")
+    signOut()
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    expect(markers.filter((marker) => existsSync(marker))).toEqual([])
   })
 
   test("the retry throttle still applies after an earlier session enabled telemetry", async () => {

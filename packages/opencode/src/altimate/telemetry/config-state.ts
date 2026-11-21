@@ -134,14 +134,18 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
     const tables = db.query<{ count: number }, []>(
       "SELECT count(*) AS count FROM sqlite_schema WHERE name IN ('account', 'account_state') AND type = 'table'",
     ).get()
-    if (tables?.count !== 2) return false // A pre-migration database cannot select an organization.
+    // An immutable read is a snapshot: a writer that attached since (a -wal file appeared) may have
+    // selected an organization, so the answer is unknown.
+    const writerAttached = () => immutable && existsSync(`${dbPath}-wal`)
+    if (tables?.count !== 2) return writerAttached() // A pre-migration database cannot select an organization.
     const modern = db.query("SELECT 1 FROM pragma_table_info('account_state') WHERE name = 'active_org_id'").get()
     // The earlier schema stored the selected org on the account row. The migration
     // copies that value into account_state, so it can still enable remote config.
     const orgColumn = modern ? "account_state.active_org_id" : "account.selected_org_id"
-    return db.query(`SELECT 1 FROM account_state
+    const selected = db.query(`SELECT 1 FROM account_state
       JOIN account ON account.id = account_state.active_account_id
       WHERE account_state.id = 1 AND ${orgColumn} IS NOT NULL`).get() !== null
+    return selected || writerAttached()
   } finally {
     db.close()
   }

@@ -2315,7 +2315,7 @@ export namespace Telemetry {
   let gate: "pending" | "enabled" | "disabled" = "pending"
   // While the config is unreadable, re-resolve it at most this often.
   const CONFIG_RETRY_MS = 30_000
-  let configRetry: { at: number; instance: boolean } | undefined
+  let configRetry: { at: number } | undefined
   // An enabled opt-out resolved by another thread of this launch (the TUI worker), used by the next init.
   let adopted: "enabled" | undefined
   const decisionListeners = new Set<(state: "enabled" | "disabled") => void>()
@@ -2363,6 +2363,7 @@ export namespace Telemetry {
   export function resetGateForTest() {
     configRetry = undefined
     adopted = undefined
+    legacyMarkersRemoved = false
     if (initDone && enabled) return
     gate = "pending"
     buffer = []
@@ -2372,6 +2373,8 @@ export namespace Telemetry {
   export function bufferedCountForTest() {
     return buffer.length
   }
+  // The test preload resets the gate between tests through this, without importing this module.
+  ;(globalThis as Record<symbol, unknown>)[Symbol.for("altimate.telemetry.resetGateForTest")] = resetGateForTest
   /** Test seam: end the unreadable-config retry backoff so the next init() re-resolves. */
   export function retryConfigNowForTest() {
     if (configRetry) configRetry.at = 0
@@ -2592,12 +2595,12 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
-    // While the config stays unreadable, retry at most every CONFIG_RETRY_MS. The first init inside
-    // an Instance is not throttled by an earlier one outside it: it reads the full config, which the
-    // instance-less probe could not. An opt-out adopted from another thread needs no read. Inside an
-    // Instance a retry reads the Instance's cached config, which its own reloads keep current.
-    if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at) {
-      if (configRetry.instance || !TelemetryConfig.instanceDirectory()) return Promise.resolve()
+    // While the config stays unreadable, re-read the files outside an Instance at most every
+    // CONFIG_RETRY_MS. Inside an Instance a read is the Instance's cached config (its own reloads keep
+    // it current), so every init reads it: one project's unreadable config never holds up another's.
+    // An opt-out adopted from another thread needs no read.
+    if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at && !TelemetryConfig.instanceDirectory()) {
+      return Promise.resolve()
     }
     if (!initPromise) {
       const started: Promise<void> = doInit().then(() => releaseUnresolved(started))
@@ -2614,7 +2617,23 @@ export namespace Telemetry {
   }
   // altimate_change end
 
+  // altimate_change start — the opt-out marker files earlier versions wrote are no longer read
+  let legacyMarkersRemoved = false
+  function removeLegacyOptOutMarkers() {
+    if (legacyMarkersRemoved) return
+    legacyMarkersRemoved = true
+    for (const name of ["telemetry-opted-out", "telemetry-opted-out.sending"]) {
+      try {
+        fs.rmSync(path.join(os.homedir(), ".altimate", name), { force: true, recursive: true })
+      } catch {
+        // Best effort: a leftover marker is harmless.
+      }
+    }
+  }
+  // altimate_change end
+
   async function doInit() {
+    removeLegacyOptOutMarkers() // altimate_change
     // altimate_change — an unreadable config leaves this init unfinished, so the next init() retries.
     let unresolved = false
     try {
@@ -2626,7 +2645,6 @@ export namespace Telemetry {
         droppedEvents = 0
         return
       }
-      const instance = Boolean(TelemetryConfig.instanceDirectory())
       const state = adopted ?? (await TelemetryConfig.resolve(configDirectory))
       // Another thread's opt-out may have been adopted while the read ran: it still wins.
       if (state === "disabled" || optOutState() === "disabled") {
@@ -2638,8 +2656,9 @@ export namespace Telemetry {
       if (state === "unreadable") {
         // An opted-out user may be behind it: hold the buffer (capped) and send nothing.
         unresolved = true
-        configRetry = { at: Date.now() + CONFIG_RETRY_MS, instance }
-        log.info("telemetry held: opt-out unresolved", { instance })
+        configRetry = { at: Date.now() + CONFIG_RETRY_MS }
+        // A warning: a corrupt auth file or a failed organization config fetch holds telemetry this way.
+        log.warn("telemetry held: opt-out unresolved", { instance: Boolean(TelemetryConfig.instanceDirectory()) })
         return
       }
       decide("enabled")
@@ -3202,9 +3221,10 @@ export namespace Telemetry {
     shuttingDown = false
     enabled = false
     appInsights = undefined
-    // altimate_change start — while the opt-out is unresolved nothing was flushed: keep the events
-    // for a later init in this process to send or drop. At process exit they go with the process.
-    if (gate !== "pending") {
+    // altimate_change start — while the opt-out is unresolved (no decision yet, or this session's read
+    // failed) nothing was flushed: keep the events for a later init in this process to send or drop.
+    // At process exit they go with the process.
+    if (gate !== "pending" && !configRetry) {
       buffer = []
       droppedEvents = 0
     }
