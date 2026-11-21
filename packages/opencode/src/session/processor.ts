@@ -22,6 +22,7 @@ import { LLM } from "./llm"
 import { Config } from "@/config/config"
 // altimate_change start — recognize pre-send context budget refusals
 import { isContextBudgetError, REQUEST_ESTIMATE_METADATA_KEY } from "@/provider/output-token-budget"
+import { NamedError } from "@opencode-ai/util/error"
 // altimate_change end
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
@@ -85,6 +86,10 @@ async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number):
   }
   return { ...part, state: { ...state, status: "error", error: "Tool execution aborted", metadata, time } }
 }
+// altimate_change end
+
+// altimate_change start — track each directive once across a pre-send refusal and retry
+const trackedDirectives = new WeakSet<NudgeArbiter.Directive>()
 // altimate_change end
 
 export namespace SessionProcessor {
@@ -393,11 +398,13 @@ export namespace SessionProcessor {
       async process({
         deferText,
         compactable,
+        compactBlockedByMedia,
         ...streamInput
       }: LLM.StreamInput & {
         deferText?: MessageV2.TextPart[]
         // The prompt loop can compact this conversation (a finished non-summary turn exists).
         compactable?: boolean
+        compactBlockedByMedia?: boolean
       }) {
         // altimate_change end
         log.info("process")
@@ -479,14 +486,18 @@ export namespace SessionProcessor {
               if (directive.kind === "starvation") return "starvation" as const
               return "nudge" as const
             })()
-            Telemetry.track({
-              type: "starvation_breaker",
-              timestamp: Date.now(),
-              session_id: input.sessionID,
-              mode: sbMode,
-              kind: telemetryKind,
-              action: "injected",
-            })
+            // A handed-back directive has already been counted.
+            if (!trackedDirectives.has(directive)) {
+              trackedDirectives.add(directive)
+              Telemetry.track({
+                type: "starvation_breaker",
+                timestamp: Date.now(),
+                session_id: input.sessionID,
+                mode: sbMode,
+                kind: telemetryKind,
+                action: "injected",
+              })
+            }
             log.info("nudge arbiter directive injected", {
               sessionID: input.sessionID,
               source: directive.source,
@@ -1393,6 +1404,13 @@ export namespace SessionProcessor {
                 ).toObject()
               } else if (echoRecovery && isContextBudgetError(e)) {
                 error = new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+              } else if (compactBlockedByMedia && isContextBudgetError(e)) {
+                error = new NamedError.Unknown(
+                  {
+                    message: "The conversation plus the new attachment does not fit the model's context window. Run /compact, then attach it again, or remove the attachment.",
+                  },
+                  { cause: e },
+                ).toObject()
               }
               // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event

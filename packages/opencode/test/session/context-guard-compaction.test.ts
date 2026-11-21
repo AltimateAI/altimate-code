@@ -13,6 +13,7 @@ import path from "node:path"
 import { Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
+import { Telemetry } from "@/altimate/telemetry"
 import { NudgeArbiter } from "../../src/session/nudge"
 import { SessionPrompt } from "../../src/session/prompt"
 import { Token } from "../../src/util/token"
@@ -147,8 +148,6 @@ const providerCfg =
   })
 
 const LARGE_WINDOW = { context: 131_072, output: 16_384 }
-/** A finished step that made a tool call: its reported usage covered the full tool set. */
-const TOOL_STEP = { toolOutput: "42 customers above the revenue threshold." }
 /** A 1x1 PNG. */
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 const SMALL_WINDOW = { context: 16_384, output: 4_096 }
@@ -204,9 +203,11 @@ type Seeded = {
   nextSystem?: string
   last?: {
     modelID?: string
+    providerID?: string
     agent?: string
     finish?: string
     text?: string
+    file?: boolean
     toolOutput?: string
     tool?: "answer_commit"
     /** Attach an image to the step's tool result. */
@@ -243,6 +244,16 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, type: "text", text } as any)
       return msg
     })
+    const attachImage = (messageID: MessageID) =>
+      sessions.updatePart({
+        id: PartID.ascending(),
+        messageID,
+        sessionID,
+        type: "file",
+        mime: "image/png",
+        filename: "revenue-chart.png",
+        url: `data:image/png;base64,${PNG_BASE64}`,
+      } as any)
     const answerText = "The top customers by paid revenue are listed above."
     const answer = Effect.fnUntraced(function* (
       parentID: MessageID,
@@ -260,7 +271,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         cost: 0,
         tokens: { input: usage, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
         modelID: last.modelID ?? model.modelID,
-        providerID: model.providerID,
+        providerID: last.providerID ?? model.providerID,
         parentID,
         finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
@@ -274,6 +285,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         type: "text",
         text: last.text ?? answerText,
       } as any)
+      if (last.file) yield* attachImage(msg.id)
       if (last.toolOutput !== undefined) {
         yield* sessions.updatePart({
           id: PartID.ascending(),
@@ -308,16 +320,6 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         } as any)
       }
     })
-    const attachImage = (messageID: MessageID) =>
-      sessions.updatePart({
-        id: PartID.ascending(),
-        messageID,
-        sessionID,
-        type: "file",
-        mime: "image/png",
-        filename: "revenue-chart.png",
-        url: `data:image/png;base64,${PNG_BASE64}`,
-      } as any)
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
     // Estimate the seeded history as it was before the measured assistant answered.
     const history: { role: "user" | "assistant"; content: { type: "text"; text: string }[] }[] = []
@@ -337,17 +339,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
     }
     if (seeded.next !== undefined) {
       const next = yield* user(seeded.next, seeded.nextSystem)
-      if (seeded.nextFile) {
-        yield* sessions.updatePart({
-          id: PartID.ascending(),
-          messageID: next.id,
-          sessionID,
-          type: "file",
-          mime: "image/png",
-          filename: "revenue-chart.png",
-          url: `data:image/png;base64,${PNG_BASE64}`,
-        } as any)
-      }
+      if (seeded.nextFile) yield* attachImage(next.id)
     }
 
     yield* prompt.loop({ sessionID })
@@ -700,7 +692,7 @@ it.live(
 )
 
 it.live(
-  "a refused request hands its directive back to the retry",
+  "a refused request hands its directive back to the retry and tracks it once",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
@@ -712,6 +704,7 @@ it.live(
           return generation
         })
         const runMode = process.env.ALTIMATE_RUN_MODE
+        const track = spyOn(Telemetry, "track")
         process.env.ALTIMATE_RUN_MODE = "1"
         try {
           yield* llm.text("Summary of the earlier turns.")
@@ -727,8 +720,12 @@ it.live(
           expect(result.hits).toHaveLength(2)
           expect(JSON.stringify(result.hits[0]!.body)).not.toContain(directive)
           expect(JSON.stringify(result.hits[1]!.body)).toContain(directive)
+          expect(
+            track.mock.calls.filter(([event]) => event.type === "starvation_breaker" && event.action === "injected"),
+          ).toHaveLength(1)
         } finally {
           beginSpy.mockRestore()
+          track.mockRestore()
           if (runMode === undefined) delete process.env.ALTIMATE_RUN_MODE
           else process.env.ALTIMATE_RUN_MODE = runMode
         }
@@ -766,24 +763,23 @@ it.live(
   { timeout: 120_000 },
 )
 
-// Usage counted for another model (different tokenizer), another agent (different system prompt and
-// tools) falls back to the full estimate, which forces compaction.
-for (const [name, last] of [
-  ["another model", { ...TOOL_STEP, modelID: "another-model" }],
-  ["another agent", { ...TOOL_STEP, agent: "plan" }],
+// With matching identities the reported input would fit. Each mismatch forces the full estimate.
+for (const [field, identity] of [
+  ["providerID", "other-provider"],
+  ["modelID", "other-model"],
+  ["agent", "other-agent"],
 ] as const) {
   it.live(
-    `usage reported by ${name} is not trusted: the guard trips and the session compacts`,
+    `reported usage with a different ${field} cannot calibrate the guard`,
     () =>
       provideTmpdirServerLegacy(
         Effect.fnUntraced(function* ({ dir, llm }) {
-          // Same history and usage as the regression above.
           yield* llm.text("summary of the revenue analysis so far")
           yield* llm.text("Revenue is concentrated in the top ten customers.")
           const result = yield* runSession(dir, llm, {
             user: sqlJsonTurns(130_000),
             assistantUsage: 108_000,
-            last,
+            last: { [field]: identity, requestEstimateTokens: 137_000 },
             next: "Summarize the revenue concentration.",
           })
 
@@ -874,6 +870,32 @@ it.live(
   { timeout: 120_000 },
 )
 
+const MEDIA_GUIDANCE =
+  "The conversation plus the new attachment does not fit the model's context window. Run /compact, then attach it again, or remove the attachment."
+
+it.live(
+  "a refused request with an unseen user image gives manual compaction guidance",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(135_000),
+          assistantUsage: 0,
+          next: "Describe this image.",
+          nextFile: true,
+        })
+
+        expect(result.hits).toHaveLength(0)
+        expect(result.compactions).toHaveLength(0)
+        expect(result.errors.map((error) => JSON.parse(error))).toEqual([
+          { name: "UnknownError", data: { message: MEDIA_GUIDANCE } },
+        ])
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
 it.live(
   "an image from a tool result the model has not seen yet is not compacted away",
   () =>
@@ -890,7 +912,30 @@ it.live(
         expect(result.hits.length).toBe(0)
         expect(result.compactions.length).toBe(0)
         expect(result.errors.length).toBe(1)
-        expect(result.errors[0]).toContain("Context budget exceeded before the request was sent")
+        expect(result.errors[0]).toContain(MEDIA_GUIDANCE)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "an image generated by the measured assistant does not block compaction",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Summary of the earlier turns.")
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(135_000),
+          assistantUsage: 0,
+          last: { file: true },
+          next: "Answer the follow-up question.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries).toHaveLength(1)
+        expect(result.hits).toHaveLength(2)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
     ),

@@ -2251,13 +2251,16 @@ export namespace SessionPrompt {
           (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
           msg.parts.some(
             (part) =>
-              (part.type === "file" && MessageV2.isMedia(part.mime)) ||
+              (msg.info.role === "user" &&
+                msg.info.id !== measuredID &&
+                part.type === "file" &&
+                MessageV2.isMedia(part.mime)) ||
               (part.type === "tool" &&
                 part.state.status === "completed" &&
                 part.state.attachments?.some((attachment) => MessageV2.isMedia(attachment.mime))),
           ),
       )
-      const compactable = measured !== undefined && loopConfig.compaction?.auto !== false && !unseenMedia
+      const canAutoCompact = measured !== undefined && loopConfig.compaction?.auto !== false
       const measuredInputTokens =
         measured &&
         typeof recordedEstimate === "number" &&
@@ -2271,7 +2274,8 @@ export namespace SessionPrompt {
       // altimate_change end
       const result = await processor.process({
         // altimate_change start — pass the measured input usage and its matching estimate
-        compactable,
+        compactable: canAutoCompact && !unseenMedia,
+        compactBlockedByMedia: canAutoCompact && unseenMedia,
         measuredInputTokens,
         measuredEstimateTokens: typeof recordedEstimate === "number" ? recordedEstimate : undefined,
         // altimate_change end
