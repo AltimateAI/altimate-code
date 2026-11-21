@@ -51,9 +51,10 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
-// altimate_change start — loaded configs whose organization remote config, which may set
-// `telemetry.disabled`, could not be read: the opt-out is unknown.
+// altimate_change start — loaded configs in which a source that may set `telemetry.disabled` (the
+// organization remote config, a global config the loader replaced with defaults) could not be read.
 const configsWithUnresolvedTelemetry = new WeakSet<Info>()
+const incompleteGlobals = new WeakSet<Info>()
 export function telemetryConfigUnresolved(config: Info): boolean {
   return configsWithUnresolvedTelemetry.has(config)
 }
@@ -453,7 +454,10 @@ export const layer = Layer.effect(
       // altimate_change end
 
       const legacy = path.join(Global.Path.config, "config")
+      // altimate_change — a legacy file that fails to load may hold a telemetry opt-out
+      let legacyUnread = false
       if (existsSync(legacy)) {
+        legacyUnread = true
         yield* Effect.promise(() =>
           import(pathToFileURL(legacy).href, { with: { type: "toml" } })
             .then(async (mod) => {
@@ -463,6 +467,7 @@ export const layer = Layer.effect(
               result["$schema"] = "https://altimate.ai/config.json"
               // altimate_change end
               result = mergeConfig(result, rest)
+              legacyUnread = false // altimate_change — merged; a failed migration below is harmless
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
@@ -470,6 +475,7 @@ export const layer = Layer.effect(
         )
       }
 
+      if (legacyUnread) incompleteGlobals.add(result) // altimate_change
       return result
     })
 
@@ -478,7 +484,13 @@ export const layer = Layer.effect(
         Effect.tapError((error) =>
           Effect.logError("failed to load global config, using defaults", { error: String(error) }),
         ),
-        Effect.orElseSucceed((): Info => ({})),
+        // altimate_change start — the defaults stand in for a global config that may opt out
+        Effect.orElseSucceed((): Info => {
+          const fallback: Info = {}
+          incompleteGlobals.add(fallback)
+          return fallback
+        }),
+        // altimate_change end
       ),
       Duration.infinity,
     )
@@ -913,7 +925,7 @@ export const layer = Layer.effect(
         // altimate_change end
 
         // altimate_change — a source that could set `telemetry.disabled` was not read
-        if (orgConfigUnresolved) configsWithUnresolvedTelemetry.add(result)
+        if (orgConfigUnresolved || incompleteGlobals.has(global)) configsWithUnresolvedTelemetry.add(result)
 
         return {
           config: result,

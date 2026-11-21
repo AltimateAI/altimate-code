@@ -809,6 +809,16 @@ for (const failure of ["account", "organization"] as const) {
   )
 }
 
+it.effect("a legacy global config that fails to load leaves the telemetry opt-out unresolved", () =>
+  withGlobalConfig({}, ({ dir }) =>
+    Effect.gen(function* () {
+      yield* FSUtil.use.writeWithDirs(path.join(dir, "config"), "broken = [")
+      const config = yield* Config.use.get().pipe(provideInstanceEffect(dir))
+      expect(Config.telemetryConfigUnresolved(config)).toBe(true)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  ),
+)
+
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance

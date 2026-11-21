@@ -127,8 +127,8 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
   try {
     const versions = Buffer.alloc(2)
     const { bytesRead } = await header.read(versions, 0, 2, 18)
-    // A file too short for a header is new and empty: it holds no account yet.
-    if (bytesRead !== 2) return false
+    // An empty file is new: it holds no account yet. A short non-empty one is corrupt: unknown.
+    if (bytesRead !== 2) return (await header.stat()).size > 0
     // A non-WAL database is not read (see above), so an organization it may hold is unknown: fail closed.
     if (versions[0] !== 2 || versions[1] !== 2) return true
   } finally {
