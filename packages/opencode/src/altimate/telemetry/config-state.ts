@@ -1,4 +1,4 @@
-import { Database as SQLite } from "bun:sqlite"
+import { Database as SQLite, constants as SQLiteConstants } from "bun:sqlite"
 import path from "path"
 import fs from "fs/promises"
 import { existsSync } from "fs"
@@ -159,7 +159,8 @@ async function remoteMayDisable(local: boolean | undefined): Promise<boolean> {
   // no writer is attached, so read it as immutable (which reports its journal mode as "delete").
   const immutable = !existsSync(`${dbPath}-wal`)
   const db = immutable
-    ? new SQLite(`${pathToFileURL(dbPath).href}?immutable=1`, { readonly: true }) // escapes `#`, `?`, `%`
+    ? // escapes `#`, `?`, `%`; URI parsing must be asked for explicitly where SQLite is built without it (Linux)
+      new SQLite(`${pathToFileURL(dbPath).href}?immutable=1`, SQLiteConstants.SQLITE_OPEN_READONLY | SQLiteConstants.SQLITE_OPEN_URI)
     : new SQLite(dbPath, { readonly: true })
   try {
     db.exec("PRAGMA busy_timeout = 0")

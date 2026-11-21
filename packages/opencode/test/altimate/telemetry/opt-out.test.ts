@@ -554,7 +554,11 @@ describe("telemetry opt-out", () => {
     await Telemetry.shutdown()
 
     configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+    // The selected organization makes the files alone inconclusive...
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
+    // ...until the files themselves opt out.
     process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: true } })
+    expect(await TelemetryConfig.disabledState(home)).toBe("disabled")
     trackStartup()
     await Telemetry.init()
     await Telemetry.flush()
