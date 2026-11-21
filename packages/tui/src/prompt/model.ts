@@ -71,6 +71,10 @@ export function catalogGate(input: {
 
 // The server publishes guided text for an unavailable model before rejecting the request, so the
 // rejection itself needs no second toast.
-export function isServerReportedModelError(error: unknown) {
-  return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "ProviderModelNotFoundError"
+export function isServerReportedModelError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false
+  if ((error as { name?: unknown }).name === "ProviderModelNotFoundError") return true
+  // The SDK wraps a rejected body in an Error and keeps the server's body at `cause.body`.
+  const cause = (error as { cause?: unknown }).cause
+  return typeof cause === "object" && cause !== null && isServerReportedModelError((cause as { body?: unknown }).body)
 }

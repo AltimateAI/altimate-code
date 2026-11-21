@@ -1,5 +1,6 @@
 import { expandEnhancedPrompt, expandPastedTextPlaceholders, expandTrackedPastedText } from "../../src/prompt/part"
 import { expect, test } from "bun:test"
+import { wrapClientError } from "../../../sdk/js/src/error-interceptor"
 import {
   captureDraftRevision,
   catalogGate,
@@ -152,5 +153,11 @@ test("a server-reported model rejection is not toasted a second time", () => {
   expect(isServerReportedModelError({ name: "ProviderModelNotFoundError", data: { providerID: "x", modelID: "y" } })).toBe(true)
   expect(isServerReportedModelError({ name: "UnknownError", data: { message: "boom" } })).toBe(false)
   expect(isServerReportedModelError(new Error("network"))).toBe(false)
+  // The shape the SDK client throws with throwOnError: the body wrapped by wrapClientError.
+  const body = { name: "ProviderModelNotFoundError", data: { providerID: "x", modelID: "y" } }
+  expect(isServerReportedModelError(wrapClientError(body, new Response(null, { status: 400 }), undefined, { throwOnError: true })))
+    .toBe(true)
+  expect(isServerReportedModelError(wrapClientError({ name: "UnknownError", data: { message: "boom" } }, new Response(null, { status: 500 }), undefined, { throwOnError: true })))
+    .toBe(false)
   expect(isServerReportedModelError(undefined)).toBe(false)
 })
