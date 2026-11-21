@@ -89,6 +89,10 @@ describe("writes stay writes", () => {
     "write CTE": "WITH x AS (DELETE FROM orders RETURNING *) SELECT * FROM x",
     "SELECT INTO": "SELECT * INTO copy_of_orders FROM orders",
     "qualified column beside a real write": "SELECT o.update FROM orders o; UPDATE orders SET a = 1",
+    "SELECT INTO after a number ending in a dot": "SELECT 1. INTO copy_of_orders FROM orders",
+    "SELECT INTO after a column and a number ending in a dot": "SELECT o.a, 2. INTO copy_of_orders FROM orders o",
+    "SELECT INTO after a hex number ending in a dot": "SELECT 0x1.INTO copy_of_orders FROM orders",
+    "SELECT INTO after a spaced qualifier": "SELECT o. INTO copy_of_orders FROM orders o",
     "write followed by shell residue": "DELETE FROM orders 2>/dev/null",
     "unparseable text": "SELECT a b c FROM WHERE",
   }

@@ -88,9 +88,11 @@ function hasQueryWriteClause(sql: string, dialect?: string): boolean {
   let masked = maskSql(tokenizeSql(sql, dialect).tokens)
   // UNPIVOT's INTO NAME labels output columns; it does not create a table.
   if (dialect?.toLowerCase() === "duckdb") masked = maskUnpivotLabels(masked)
-  // A name qualified by a table or alias (t.update, s.delete) is a column, not a clause. The lookbehind
-  // runs only where a keyword matched, so long masked literals are not rescanned at every position.
-  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<![\w$]\s*\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
+  // A name qualified by a table or alias (t.update, s.delete) is a column, not a clause. The qualifier
+  // must be a whole unquoted identifier directly before the dot: `1. INTO t` and `0x1.INTO t` are a
+  // number followed by SELECT INTO, and anything else stays a write. The lookbehind runs only where a
+  // keyword matched, so long masked literals are not rescanned at every position.
+  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<!(?:^|[^\w$])[A-Za-z_][\w$]*\.(?:INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
 }
 
 const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*)$/i
