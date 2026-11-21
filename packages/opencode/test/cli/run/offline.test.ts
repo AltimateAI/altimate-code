@@ -238,33 +238,35 @@ test("offline SQL tool queries a local DuckDB file", async () => {
   const f = await fixture(false, false, false)
   try {
     const database = path.join(f.project, "warehouse.duckdb")
-    const seed = Bun.spawn([process.execPath, "-e", `
-      const duckdb = require("duckdb")
-      const db = new duckdb.Database(process.argv[1])
-      db.run("create table fixture as select 42 as offline_answer", (err) => {
-        if (err) throw err
-        db.close()
+    const connections = path.join(f.project, ".altimate-code", "connections.json")
+    const writeConnection = (create = false) =>
+      Bun.write(connections, JSON.stringify({ local: { type: "duckdb", path: database, create } }))
+    const runSQL = async (query: string, allowWrite = false) => {
+      const proc = Bun.spawn([
+        process.execPath, "--preload", f.preload, CLI, "tool", "run", "sql_execute",
+        ...(allowWrite ? ["--allow-write"] : []),
+        "--args", JSON.stringify({ warehouse: "local", query }), "--json",
+      ], {
+        cwd: f.project,
+        env: f.env,
+        stdout: "pipe",
+        stderr: "pipe",
+        signal: AbortSignal.timeout(25_000),
       })
-    `, database], { cwd: import.meta.dir, stderr: "inherit" })
-    expect(await seed.exited).toBe(0)
-    await Bun.write(path.join(f.project, ".altimate-code", "connections.json"), JSON.stringify({
-      local: { type: "duckdb", path: database },
-    }))
-    const proc = Bun.spawn([
-      process.execPath, "--preload", f.preload, CLI, "tool", "run", "sql_execute", "--args",
-      JSON.stringify({ warehouse: "local", query: "select offline_answer from fixture" }), "--json",
-    ], {
-      cwd: f.project,
-      env: f.env,
-      stdout: "pipe",
-      stderr: "pipe",
-      signal: AbortSignal.timeout(25_000),
-    })
-    const [code, stdout, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ])
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      return { code, stdout, stderr }
+    }
+
+    await writeConnection(true)
+    const seed = await runSQL("create table fixture as select 42 as offline_answer", true)
+    expect(seed).toMatchObject({ code: 0, stdout: expect.stringContaining('"status":"ok"') })
+    expect(await Bun.file(database).exists()).toBe(true)
+    await writeConnection()
+    const { code, stdout, stderr } = await runSQL("select offline_answer from fixture")
     expect({ code, stdout, stderr }).toMatchObject({ code: 0, stdout: expect.stringContaining("offline_answer") })
     expect(JSON.parse(stdout).status).toBe("ok")
     expect(stdout).toContain("42")
@@ -273,7 +275,7 @@ test("offline SQL tool queries a local DuckDB file", async () => {
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })
   }
-}, 30_000)
+}, 55_000)
 
 test("offline model transport bypasses proxy settings and refuses redirects", async () => {
   let proxyCalls = 0
