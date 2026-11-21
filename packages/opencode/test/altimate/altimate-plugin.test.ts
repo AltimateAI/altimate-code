@@ -6,6 +6,7 @@ import { buildAuthorizeUrl, buildCliContext } from "../../src/altimate/plugin/al
 import { getOrCreateMachineId } from "../../src/altimate/util/machine-id"
 import { Config } from "../../src/config/config"
 import { Telemetry } from "../../src/altimate/telemetry"
+import { TelemetryConfig } from "../../src/altimate/telemetry/config-state"
 import os from "os"
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
@@ -162,9 +163,8 @@ describe("buildCliContext", () => {
     })
 
     test("inside a project, omits machine_id for another project whose own files opt out", async () => {
-      for (const key of ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"]) {
-        if (process.env[key] !== undefined) return // an inherited env opt-out would short-circuit before this branch
-      }
+      // An inherited env opt-out would short-circuit before this branch.
+      if (TelemetryConfig.disablingEnvironmentVariable()) return
       await using current = await tmpdir({ git: true })
       await using other = await tmpdir({ git: true })
       fs.mkdirSync(path.join(other.path, ".altimate-code"))
@@ -172,8 +172,11 @@ describe("buildCliContext", () => {
       await using dir = await tmpdir()
       const idPath = path.join(dir.path, "machine-id")
       fs.writeFileSync(idPath, VALID_UUID, "utf8")
-      // The same call for the Instance's own project keeps the id, so the omission comes from the new branch.
-      const own = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, current.path) })
+      // The Instance's own project, named through a symlink, keeps the id: the comparison is canonical, and
+      // the omission below comes from the other-project branch.
+      const link = path.join(dir.path, "current-link")
+      fs.symlinkSync(current.path, link)
+      const own = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, link) })
       expect(Object.prototype.hasOwnProperty.call(JSON.parse(Buffer.from(own, "base64url").toString("utf8")), "machine_id")).toBe(true)
       const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) })
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
