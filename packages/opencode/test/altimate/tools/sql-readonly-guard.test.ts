@@ -5,6 +5,7 @@ import { PermissionNext } from "../../../src/permission/next"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import { SqlExecuteTool, deniedWriteMessage } from "../../../src/altimate/tools/sql-execute"
 import { classifyAndCheck, isScratchSafeWrite } from "../../../src/altimate/tools/sql-classify"
+import { readSql } from "../../../src/altimate/tools/read-only-sql"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { initTool } from "../tool-fixture"
@@ -76,6 +77,12 @@ describe("reads are classified as reads in every dialect", () => {
       expect(dialects.filter((dialect) => !isRead(sql, dialect))).toEqual([])
     })
   }
+
+  test("readSql on ClickHouse refuses dotted statement words too", () => {
+    expect(() => readSql("SELECT * FROM t AS x.DROP TABLE y", "clickhouse")).toThrow()
+    expect(() => readSql("SELECT t.alter FROM t", "clickhouse")).toThrow()
+    expect(readSql("SELECT t.alter FROM t", "postgres")).toBe("SELECT t.alter FROM t")
+  })
 
   test("ClickHouse keeps dotted write keywords as writes, since its parser accepts trailing text", () => {
     for (const sql of ["SELECT * FROM a.INTO OUTFILE '/tmp/x'", "SELECT a FROM t x.UPDATE t SET a = 1"]) {

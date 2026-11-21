@@ -676,8 +676,11 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     if (parsed && parsed.category !== "query") return writes(`${where} is not a read (${type})`)
     if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
       return writes(
-        `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
-          'or a write keyword after a quoted name such as "t".update: quote the column too, "t"."update")',
+        dialect?.toLowerCase() === "clickhouse"
+          ? `${where} contains a write clause (SELECT ... INTO or a modifying CTE), or a write keyword that on ClickHouse ` +
+              'counts even after a dot: quote the column, t."update"'
+          : `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
+              'or a write keyword after a quoted name such as "t".update: quote the column too, "t"."update")',
       )
     }
     const keyword = batchedStatement(masked, dialect)
