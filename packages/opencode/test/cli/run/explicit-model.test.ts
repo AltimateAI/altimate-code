@@ -375,7 +375,7 @@ describe("run model resolution", () => {
           ],
         }))
         const subtaskDeadline = Date.now() + 10_000
-        while (!received.includes("subtask-model") && Date.now() < subtaskDeadline) yield* Effect.promise(() => Bun.sleep(50))
+        while (!received.includes("Model not found: missing-provider/subtask-model") && Date.now() < subtaskDeadline) yield* Effect.promise(() => Bun.sleep(50))
         yield* Effect.promise(() => Bun.sleep(500))
         subtaskEvents.abort()
         yield* Effect.promise(() => subtaskCollect)
