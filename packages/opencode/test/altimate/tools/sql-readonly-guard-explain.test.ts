@@ -42,6 +42,12 @@ describe("shellResidue", () => {
     expect(shellResidue("SELECT '2>/dev/null'", "postgres")).toBeUndefined()
   })
 
+  test("a write after residue is named, not hidden in the residue", () => {
+    const sql = "SELECT 1 FROM t | head -5; DROP TABLE t"
+    expect(shellResidue(sql, "postgres")).toBeUndefined()
+    expect(explainWrite(sql, "postgres").reason).not.toContain("shell syntax")
+  })
+
   test("a write followed by residue is not offered as a read", () => {
     expect(shellResidue("DELETE FROM t 2>/dev/null", "postgres")).toBeUndefined()
     expect(explainWrite("DELETE FROM t 2>/dev/null", "postgres").reason).not.toContain("shell syntax")
@@ -88,6 +94,10 @@ describe("explainWrite", () => {
       reason: "statement 3 of 3 is not a read (DROP TABLE)",
     })
     expect(explainWrite("COPY INTO orders FROM @stage", "snowflake").reason).toBe("it is not a read (COPY)")
+  })
+
+  test("names a SQL Server batch keyword", () => {
+    expect(explainWrite("SELECT exec FROM t", "sqlserver").reason).toContain("statement keyword EXEC")
   })
 
   test("names a write clause inside a query", () => {

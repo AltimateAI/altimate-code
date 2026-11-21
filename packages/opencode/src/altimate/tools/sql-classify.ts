@@ -221,11 +221,13 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
   return { queryType: "write", blocked }
 }
 
-/** Where statements need no separator (T-SQL) or the dialect is not one the lexer models, a read
+/** The statement keyword, if any. Where statements need no separator (T-SQL) or the dialect is not one the lexer models, a read
  * must hold no statement keyword in its code (literals, identifiers and comments masked): the
  * engine would run `SELECT ... DELETE FROM t` as two statements however a parser reads it. */
-function batchedStatement(masked: string, dialect?: string): boolean {
-  return (/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) && BATCH_STATEMENT.test(masked)
+function batchedStatement(masked: string, dialect?: string): string | undefined {
+  if (!/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return undefined
+  // A name qualified by a whole unquoted identifier (t.update, t.into) cannot start a statement.
+  return BATCH_STATEMENT.exec(masked.replace(/((?:^|[^\w$])[A-Za-z_][\w$]*\.)[A-Za-z_][\w$]*/g, "$1_"))?.[0]
 }
 
 // T-SQL statements that can follow a read in the same batch. Words that are also common column names
@@ -532,7 +534,7 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
 // `x > t.total` never match.
 const SHELL_REDIRECT = /\s(?:[12]|&)?>>?\s*(?:&[12]|\/dev\/null)(?![\w/])/g
 const SHELL_TAIL =
-  /(?:\s*\|\s*(?:head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|\n]*|\s*(?:[12]|&)?>>?\s*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp)\b))+\s*;?\s*$/i
+  /(?:\s*\|\s*(?:head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*|\s*(?:[12]|&)?>>?\s*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp)\b))+\s*;?\s*$/i
 
 /** The shell syntax in a query that is a read without it, or undefined. Only code counts (literals and
  * comments are masked). The query is never rewritten: the caller names the residue so the sender removes
@@ -587,7 +589,8 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
   for (const [index, statement] of statements.entries()) {
     const result = classifySql(statement, dialect, 0)
     if (result.queryType === "read" && !result.blocked) continue
-    // No SQL text is quoted back: the error is also recorded by telemetry.
+    // Statements are not quoted back, since telemetry records this error; the parser's own message
+    // quotes at most a token, which telemetry masks as a literal.
     const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length}` : "it"
     if (result.parseError) {
       return unreadable(
@@ -596,17 +599,33 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
         "check the clause order, and replace any placeholder text such as ..."
       )
     }
-    let type: string | undefined
+    // The checks below follow classifySql's conditions.
+    let parsed: { category?: string; statement_type?: string } | undefined
     try {
-      type = getStatementTypes?.(parserSql(statement, dialect), dialect)?.statements?.[0]?.statement_type
+      parsed = getStatementTypes?.(parserSql(statement, dialect), dialect)?.statements?.[0]
     } catch {
-      type = undefined
+      parsed = undefined
     }
-    if (type && !/^(SELECT|QUERY)$/i.test(type)) return writes(`${where} is not a read (${type.toUpperCase()})`)
-    if (hasQueryWriteClause(statement, dialect)) {
+    const type = String(parsed?.statement_type ?? "statement").toUpperCase()
+    const tokens = tokenizeSql(statement, dialect).tokens
+    const masked = maskSql(tokens)
+    if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
+    const keyword = batchedStatement(masked, dialect)
+    if (keyword) {
+      return writes(
+        `${where} holds the statement keyword ${keyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
+          "SQL Server runs a statement there even without a separator, so quote it if it is a column name",
+      )
+    }
+    if (/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) return writes(`${where} chains statements with ->>`)
+    if (/\bTRANSFORM\s*\(/i.test(masked) && /\bUSING\b(?!\s*\()/i.test(masked)) {
+      return writes(`${where} runs a command through TRANSFORM ... USING`)
+    }
+    if (advancesSequence(tokens, masked, dialect)) return writes(`${where} advances a sequence`)
+    if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
       return writes(`${where} contains a write clause (SELECT ... INTO, or INSERT/UPDATE/DELETE/MERGE inside a CTE)`)
     }
-    if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
+    if (parsed?.category !== "query") return writes(`${where} is not a read (${type})`)
     return writes(`${where} could not be proven read-only`)
   }
   return writes("the statements together could not be proven read-only")

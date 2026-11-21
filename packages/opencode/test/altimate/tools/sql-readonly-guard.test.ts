@@ -11,7 +11,7 @@ import { initTool } from "../tool-fixture"
 // A read-only agent denies `sql_execute_write`. Reads must never reach that rule, and when a query does,
 // the agent must learn why and what to change instead of a raw permission-rule dump it tends to retry.
 
-const DIALECTS = ["postgres", "snowflake", "bigquery", "duckdb", "sqlite", "mysql", "databricks", "redshift"]
+const DIALECTS = ["postgres", "snowflake", "bigquery", "duckdb", "sqlite", "mysql", "databricks", "redshift", "sqlserver", "oracle", "clickhouse"]
 
 const isRead = (sql: string, dialect: string) => {
   const result = classifyAndCheck(sql, dialect)
@@ -95,7 +95,7 @@ describe("writes stay writes", () => {
     "SELECT INTO after a hex number ending in a dot": "SELECT 0x1.INTO copy_of_orders FROM orders",
     "SELECT INTO after a spaced qualifier": "SELECT o. INTO copy_of_orders FROM orders o",
     "write followed by shell residue": "DELETE FROM orders 2>/dev/null",
-    "unparseable text": "SELECT a b c FROM WHERE",
+    "unparseable text": "SELECT FROM WHERE (((",
   }
   for (const [name, sql] of Object.entries(writes)) {
     test(name, () => {
