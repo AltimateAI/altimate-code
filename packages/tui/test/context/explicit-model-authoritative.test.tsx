@@ -66,13 +66,18 @@ const AGENT = {
   options: {},
 }
 
-async function mount(args: { model?: string }) {
+async function mount(args: {
+  model?: string
+  configModel?: string
+  agentModel?: { providerID: string; modelID: string }
+  recent?: { providerID: string; modelID: string }[]
+}) {
   const [
-    { KVProvider },
+    { KVProvider, useKV },
     { LocalProvider, useLocal },
     { ArgsProvider },
     { ThemeProvider },
-    { ToastProvider },
+    { ToastProvider, useToast },
     { SDKProvider },
     { ProjectProvider },
     { SyncProvider },
@@ -99,7 +104,7 @@ async function mount(args: { model?: string }) {
   await Bun.write(path.join(state, "kv.json"), "{}")
   // No recents at all: the only way `currentModel()` could resolve anything here is through
   // `args.model` (explicit) or the implicit allowlist fallback — isolates the explicit path.
-  await Bun.write(path.join(state, "model.json"), JSON.stringify({ recent: [] }))
+  await Bun.write(path.join(state, "model.json"), JSON.stringify({ recent: args.recent ?? [] }))
 
   const inner = createFetch((url) => {
     if (url.pathname === "/instance/dispose") return json({})
@@ -107,14 +112,19 @@ async function mount(args: { model?: string }) {
       return json({ providers: [ZEN_PROVIDER, BASE_PROVIDER], default: {} })
     if (url.pathname === "/provider")
       return json({ all: [ZEN_PROVIDER, BASE_PROVIDER], default: {}, connected: ["opencode", "altimate-free"] })
-    if (url.pathname === "/agent") return json([AGENT])
+    if (url.pathname === "/config") return json(args.configModel === undefined ? {} : { model: args.configModel })
+    if (url.pathname === "/agent") return json([{ ...AGENT, model: args.agentModel }])
     if (url.pathname === "/project/proj_test/directories") return json([])
     return undefined
   })
   const source = createEventSource()
 
   let localAccessor: ReturnType<typeof useLocal> | undefined
+  let kvAccessor: ReturnType<typeof useKV> | undefined
+  let toastAccessor: ReturnType<typeof useToast> | undefined
   function Capture() {
+    kvAccessor = useKV()
+    toastAccessor = useToast()
     localAccessor = useLocal()
     return null
   }
@@ -152,9 +162,11 @@ async function mount(args: { model?: string }) {
 
   return {
     local,
+    toast: toastAccessor!,
     async cleanup() {
       app.renderer.destroy()
       await local.model.persisted().catch(() => {})
+      await kvAccessor?.flush()
       await tmp[Symbol.asyncDispose]()
     },
   }
@@ -207,3 +219,48 @@ function local_model_is(mounted: Awaited<ReturnType<typeof mount>>, providerID: 
   return current?.providerID === providerID && current?.modelID === modelID
 }
 // altimate_change end
+
+// upstream_fix start — real-provider regressions for unavailable explicit references.
+for (const scenario of [
+  { name: "CLI missing provider", args: { model: "ollama/local" }, expected: { providerID: "ollama", modelID: "local" } },
+  { name: "CLI missing model", args: { model: "opencode/missing" }, expected: { providerID: "opencode", modelID: "missing" } },
+  { name: "empty CLI", args: { model: "" }, expected: { providerID: "", modelID: "" } },
+  { name: "empty config", args: { configModel: "" }, expected: { providerID: "", modelID: "" } },
+  { name: "malformed CLI", args: { model: "local" }, expected: { providerID: "local", modelID: "" } },
+  { name: "config missing provider", args: { configModel: "ollama/local" }, expected: { providerID: "ollama", modelID: "local" } },
+  { name: "config missing model", args: { configModel: "opencode/missing" }, expected: { providerID: "opencode", modelID: "missing" } },
+  { name: "agent missing provider", args: { agentModel: { providerID: "ollama", modelID: "local" } }, expected: { providerID: "ollama", modelID: "local" } },
+  { name: "agent missing model", args: { agentModel: { providerID: "opencode", modelID: "missing" } }, expected: { providerID: "opencode", modelID: "missing" } },
+  { name: "CLI overrides valid config", args: { model: "ollama/local", configModel: "opencode/zen-model" }, expected: { providerID: "ollama", modelID: "local" } },
+]) {
+  test(`unavailable explicit ${scenario.name} cannot silently select registered cloud Base`, async () => {
+    const mounted = await mount(scenario.args)
+    try {
+      await waitUntil(() => local_model_is(mounted, scenario.expected.providerID, scenario.expected.modelID))
+      expect(mounted.local.model.current()).toEqual(scenario.expected)
+      mounted.local.model.restoreSession({ providerID: "altimate-free", modelID: "altimate-base" })
+      expect(mounted.local.model.current()).toEqual(scenario.expected)
+      expect(mounted.local.model.validate()).toBe(false)
+      await waitUntil(() => mounted.toast.currentToast?.variant === "error")
+      expect(mounted.toast.currentToast?.message).toContain(`${scenario.expected.providerID}/${scenario.expected.modelID}`)
+      expect(mounted.toast.currentToast?.message).toContain("/models")
+      expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
+      mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
+      expect(mounted.local.model.validate()).toBe(true)
+      expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+}
+
+test("stale implicit recent model still falls back to registered Base", async () => {
+  const mounted = await mount({ recent: [{ providerID: "ollama", modelID: "removed" }] })
+  try {
+    await waitUntil(() => local_model_is(mounted, "altimate-free", "altimate-base"))
+    expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
+  } finally {
+    await mounted.cleanup()
+  }
+})
+// upstream_fix end

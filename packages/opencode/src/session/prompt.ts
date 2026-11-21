@@ -24,7 +24,7 @@ import { ModelID, ProviderID } from "../provider/schema"
 // altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
 import { FreeTier } from "../altimate/free/client"
 // altimate_change — explain a missing Anthropic provider (Claude Pro/Max sign-in removed)
-import { modelNotFoundHint } from "../altimate/provider/model-hint"
+import { modelConfigHint, modelNotFoundHint } from "../altimate/provider/model-hint"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -1303,15 +1303,6 @@ export namespace SessionPrompt {
       // altimate_change end
 
       step++
-      if (step === 1)
-        // altimate_change — fire-and-forget, but never an unhandled rejection
-        void ensureTitle({
-          session,
-          modelID: lastUser.model.modelID,
-          providerID: lastUser.model.providerID,
-          history: msgs,
-        }).catch((error) => log.error("failed to generate title", { error: String(error) }))
-
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) {
           const hint = e.data.suggestions?.length ? ` Did you mean: ${e.data.suggestions.join(", ")}?` : ""
@@ -1320,12 +1311,22 @@ export namespace SessionPrompt {
           Bus.publish(Session.Event.Error, {
             sessionID,
             error: new NamedError.Unknown({
-              message: `Model not found: ${e.data.providerID}/${e.data.modelID}.${hint}${guidance ? ` ${guidance}` : ""}`,
+              message: `Model not found: ${e.data.providerID}/${e.data.modelID}.${hint}${guidance ? ` ${guidance}` : ""} ${modelConfigHint}`,
             }).toObject(),
           })
         }
         throw e
       })
+      // altimate_change start — resolve the chat model before sending any context for titling
+      if (step === 1)
+        // altimate_change — fire-and-forget, but never an unhandled rejection
+        void ensureTitle({
+          session,
+          modelID: lastUser.model.modelID,
+          providerID: lastUser.model.providerID,
+          history: msgs,
+        }).catch((error) => log.error("failed to generate title", { error: String(error) }))
+      // altimate_change end
       const task = tasks.pop()
 
       // pending subtask
@@ -2826,6 +2827,8 @@ export namespace SessionPrompt {
     // `Provider.list()` below is expensive (it can hit the models.dev catalog) — check both cheap,
     // sync-ish preconditions first so the common case (any other provider, or Base not
     // registered) never pays that cost.
+    // altimate_change — project configuration takes precedence over an old session model
+    if ((await Config.get()).model !== undefined) return Provider.defaultModel()
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user" && item.info.model) {
         // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,

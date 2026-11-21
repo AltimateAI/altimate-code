@@ -21,7 +21,7 @@ export async function projectConfigFile(root: string, directory: string): Promis
   for await (const dir of Filesystem.up({ targets: [".altimate-code", ".opencode"], start: directory, stop: root }))
     directories.push(dir)
   const candidates = directories.reverse().flatMap((dir) => names.map((name) => path.join(dir, name)))
-  for await (const file of Filesystem.up({ targets: ["opencode.jsonc", "opencode.json"], start: directory, stop: root }))
+  for await (const file of Filesystem.up({ targets: ["altimate-code.jsonc", "altimate-code.json", "opencode.jsonc", "opencode.json"], start: directory, stop: root }))
     candidates.push(file)
   let file = path.join(root, ".altimate-code", "altimate-code.json")
   let text = "{}\n"

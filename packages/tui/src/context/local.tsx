@@ -365,6 +365,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       return !!provider?.models[model.modelID]
     }
 
+    // altimate_change start — upstream_fix: keep unavailable explicit selections visible and recoverable.
+    function validateModel(model: ModelRef) {
+      if (isModelValid(model)) return true
+      toast.show({
+        variant: "error",
+        message: `Model ${model.providerID}/${model.modelID} is not available. Choose an available model with /models or correct --model. Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).`,
+        duration: 10000,
+      })
+      return false
+    }
+    // altimate_change end
+
     function createAgent() {
       const agents = createMemo(() => sync.data.agent.filter((agent) => agent.mode !== "subagent" && !agent.hidden))
       const visibleAgents = createMemo(() => sync.data.agent.filter((agent) => !agent.hidden))
@@ -598,14 +610,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `fallbackModel()`'s recents/allowlist implicit tail) so `currentModel()` can tell them apart
       // without duplicating `fallbackModel()`'s own logic inline.
       const explicitFallbackModel = createMemo(() => {
-        if (args.model) {
-          const { providerID, modelID } = parseModel(args.model)
-          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
-        }
-        if (sync.data.config.model) {
-          const { providerID, modelID } = parseModel(sync.data.config.model)
-          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
-        }
+        // altimate_change start — upstream_fix: unavailable explicit models must reach server validation,
+        // never fall through to a different (potentially cloud-hosted) model.
+        if (args.model !== undefined) return parseModel(args.model)
+        if (sync.data.config.model !== undefined) return parseModel(sync.data.config.model)
+        // altimate_change end
         return undefined
       })
       // altimate_change end
@@ -701,15 +710,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const currentModel = createMemo(() => {
         const a = agent.current()
 
+        // altimate_change start — upstream_fix: explicit intent outranks restored history.
+        // A deliberate picker choice during this launch is the recovery path.
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
-        if (persistedAgentPick && isModelValid(persistedAgentPick))
-          return substituteStaleZen(persistedAgentPick)
+        if (persistedAgentPick && isModelValid(persistedAgentPick) && explicitPicks[pickKey(persistedAgentPick)])
+          return persistedAgentPick
 
+        if (args.model !== undefined) return parseModel(args.model)
         const agentConfiguredModel = a?.model
-        if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
-
+        if (agentConfiguredModel) return agentConfiguredModel
         const explicit = explicitFallbackModel()
         if (explicit) return explicit
+        // altimate_change end
+
+        if (persistedAgentPick && isModelValid(persistedAgentPick))
+          return substituteStaleZen(persistedAgentPick)
 
         return substituteStaleZen(fallbackModel())
       })
@@ -866,6 +881,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       return {
         current: currentModel,
+        // altimate_change start — upstream_fix: callers can reject submission without losing the draft.
+        validate() {
+          const value = currentModel()
+          return value ? validateModel(value) : false
+        },
+        // altimate_change end
         get ready() {
           return modelStore.ready
         },
@@ -1290,14 +1311,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     }
 
     createEffect(() => {
-      const value = agent.current()
-      if (!value?.model) return
-      if (isModelValid(value.model)) return
-      toast.show({
-        variant: "warning",
-        message: `Agent ${value.name}'s configured model ${value.model.providerID}/${value.model.modelID} is not valid`,
-        duration: 3000,
-      })
+      // altimate_change start — upstream_fix: explain invalid explicit choices without substituting a model.
+      if (sync.status !== "complete" || !model.ready) return
+      const value = model.current()
+      if (value) validateModel(value)
+      // altimate_change end
     })
 
     const result = {

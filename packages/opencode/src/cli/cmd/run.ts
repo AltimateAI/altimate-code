@@ -674,33 +674,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
         lastTextStep !== undefined && lastTextStep === step && lastToolStep !== step && interruptedStep !== step
       // altimate_change end
       // altimate_change end
-      // altimate_change start — validate explicit models before starting the session event loop.
-      // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
-      // `run` waiting until the process-level timeout kills it.
-      if (args.model) {
-        const parsed = Provider.parseModel(args.model)
-        // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
-        // instead of masquerading as an unknown model.
-        const providers = await (async () => {
-          for (let attempt = 1; ; attempt++) {
-            const res = await sdk.provider.list()
-            if (!res.error && Array.isArray(res.data?.all)) return res.data.all
-            if (attempt >= 3) return providerListOrThrow(res, args.model!)
-            await Bun.sleep(250 * attempt)
-          }
-        })()
-        const provider = providers.find((item) => item.id === parsed.providerID)
-        if (!provider?.models?.[parsed.modelID]) {
-          throw new Provider.ModelNotFoundError({
-            providerID: parsed.providerID,
-            modelID: parsed.modelID,
-            suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
-            providerMissing: !provider,
-          })
-        }
-      }
-      // altimate_change end
-
       function tool(part: ToolPart) {
         try {
           if (part.tool === "bash") return bash(props<typeof BashTool>(part))
@@ -1430,10 +1403,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       }
 
+      // altimate_change start — attached runs must resolve agent configuration on the serving instance
+      const remoteAgents = () => sdk.app.agents(undefined, { throwOnError: true }).then((result) => result.data ?? [])
+      // altimate_change end
       // Validate agent if specified; capture audience option from agent definition
       const { agent, agentAudience } = await (async () => {
         if (!args.agent) return { agent: undefined, agentAudience: undefined }
-        const entry = await Agent.get(args.agent)
+        // altimate_change start — use the attached server's agent definitions
+        const entry = args.attach
+          ? (await remoteAgents()).find((item) => item.name === args.agent)
+          : await Agent.get(args.agent)
+        // altimate_change end
         if (!entry) {
           UI.println(
             UI.Style.TEXT_WARNING_BOLD + "!",
@@ -1453,6 +1433,43 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const aud = entry.options?.audience as string | undefined
         return { agent: args.agent, agentAudience: aud }
       })()
+
+      // altimate_change start — validate explicit models before starting the session event loop.
+      // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
+      // `run` waiting until the process-level timeout kills it.
+      const requested = args.model ?? (await (async () => {
+        const config = (await sdk.config.get(undefined, { throwOnError: true })).data
+        const selected = args.attach
+          ? (await remoteAgents()).find((item) => agent || config?.default_agent
+            ? item.name === (agent ?? config?.default_agent)
+            : item.mode !== "subagent" && !item.hidden)
+          : await Agent.get(agent ?? (await Agent.defaultAgent()))
+        return selected?.model ? `${selected.model.providerID}/${selected.model.modelID}` : config?.model
+      })())
+      if (requested !== undefined) {
+        const parsed = Provider.parseModel(requested)
+        // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
+        // instead of masquerading as an unknown model.
+        const providers = await (async () => {
+          for (let attempt = 1; ; attempt++) {
+            const res = await sdk.provider.list()
+            if (!res.error && Array.isArray(res.data?.all))
+              return res.data.all.filter((item) => res.data.connected.includes(item.id))
+            if (attempt >= 3) return providerListOrThrow(res, requested)
+            await Bun.sleep(250 * attempt)
+          }
+        })()
+        const provider = providers.find((item) => item.id === parsed.providerID)
+        if (!provider?.models?.[parsed.modelID]) {
+          throw new Provider.ModelNotFoundError({
+            providerID: parsed.providerID,
+            modelID: parsed.modelID,
+            suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
+            providerMissing: !provider,
+          })
+        }
+      }
+      // altimate_change end
 
       // Build audience system directive (--audience flag overrides agent-level setting)
       const audienceMode = args.audience ?? agentAudience

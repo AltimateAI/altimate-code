@@ -21,7 +21,12 @@ export const files = Effect.fn("ConfigPaths.projectFiles")(function* (
 ) {
   const afs = yield* FSUtil.Service
   return (yield* afs.up({
-    targets: [`${name}.jsonc`, `${name}.json`],
+    // altimate_change start — load the branded project config at the same levels as the legacy name
+    targets:
+      name === "opencode"
+        ? ["altimate-code.jsonc", "altimate-code.json", "opencode.jsonc", "opencode.json"]
+        : [`${name}.jsonc`, `${name}.json`],
+    // altimate_change end
     start: directory,
     stop: worktree,
   })).toReversed()

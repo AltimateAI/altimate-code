@@ -2494,7 +2494,13 @@ export namespace Provider {
 
   export async function defaultModel() {
     const cfg = await Config.get()
-    if (cfg.model) return parseModel(cfg.model)
+    // altimate_change start — resolve a configured model before returning it
+    if (cfg.model !== undefined) {
+      const requested = parseModel(cfg.model)
+      await getModel(requested.providerID, requested.modelID)
+      return requested
+    }
+    // altimate_change end
 
     const providers = await list()
     // altimate_change start — preserve explicit/recent precedence without bypassing managed consent

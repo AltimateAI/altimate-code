@@ -1112,6 +1112,10 @@ export function Prompt(props: PromptProps) {
       void exit()
       return true
     }
+    // altimate_change start — upstream_fix: reject unavailable explicit models before onboarding or session
+    // creation; preserve the draft so choosing an available model is enough to retry.
+    if (local.model.current() && !local.model.validate()) return false
+    // altimate_change end
     // altimate_change start — first-run gate without dead chat / error copy: a normal
     // message with no provider ready opens the welcome picker (the message is
     // discarded) with a friendly line, rather than erroring.

@@ -24,6 +24,8 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 !!! tip
     For most projects, create a `altimate-code.json` in your project root or use the `.altimate-code/` directory for a cleaner setup.
 
+At each project level, Altimate Code loads `altimate-code.json` and `altimate-code.jsonc` alongside the legacy `opencode.json` and `opencode.jsonc` names. The nearest directory takes precedence. Within the same directory, the branded files override legacy files, and JSONC overrides JSON for the same name. Files in the config directories are loaded in the later directory-config layer.
+
 ## Minimal Example
 
 ```json
