@@ -115,6 +115,7 @@ import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change end
 
 // altimate_change start - validator framework (see session/validators/types.ts header)
+import { validatorEnforcement } from "./validators/enforcement"
 import { ValidatorRegistry } from "./validators/registry"
 import { registerAltimateValidators } from "../altimate/validators"
 import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils"
@@ -900,6 +901,10 @@ export namespace SessionPrompt {
     let compactionCount = 0
     // altimate_change start — validator framework retry counter
     let validatorRetryCount = 0
+    const validatorStrict = process.env.ALTIMATE_VALIDATORS_STRICT === "1"
+    const validatorAdvisoriesEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1" && !validatorStrict
+    const seenValidatorAdvisories = new Set<string>()
+    let pendingValidatorAdvisories: MessageV2.Assistant | undefined
     // altimate_change end
     let sessionAgentName = ""
     let sessionHadError = false
@@ -2229,6 +2234,24 @@ export namespace SessionPrompt {
       // altimate_change end
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
+      // A queued note survives normal termination and history compaction. Read
+      // it once when resuming this session, or use the note queued in this loop.
+      if (validatorAdvisoriesEnabled && modelSteps === 1) {
+        for (const message of MessageV2.stream(sessionID)) {
+          if (message.info.role !== "assistant" || message.info.id === processor.message.id || message.info.summary) continue
+          const { validatorAdvisories, validatorAdvisoriesShown } = message.info.metadata ?? {}
+          if (Array.isArray(validatorAdvisories) && validatorAdvisories.length > 0) pendingValidatorAdvisories = message.info
+          if (Array.isArray(validatorAdvisoriesShown)) {
+            for (const advisory of validatorAdvisoriesShown) seenValidatorAdvisories.add(advisory)
+          }
+          break
+        }
+      }
+      const validatorAdvisories = pendingValidatorAdvisories?.metadata?.validatorAdvisories
+      const advisoryContext =
+        Array.isArray(validatorAdvisories) && validatorAdvisories.length > 0
+          ? ["Completion checks that could not be verified (advisory only):", ...validatorAdvisories].join("\n")
+          : undefined
       // altimate_change end
       const result = await processor.process({
         user: lastUser,
@@ -2238,7 +2261,9 @@ export namespace SessionPrompt {
         agent,
         abort,
         sessionID,
-        system,
+        // altimate_change start — one-shot advisory context for the existing turn
+        system: advisoryContext ? [...system, advisoryContext] : system,
+        // altimate_change end
         // altimate_change start — upstream_fix: append ambient context after the cached instructions
         environment: await SystemPrompt.environment(model),
         // altimate_change end
@@ -2283,6 +2308,20 @@ export namespace SessionPrompt {
           echoCommittedAnswer || textFinalStep ? "none" : format.type === "json_schema" ? "required" : undefined,
         // altimate_change end
       })
+
+      // altimate_change start — deliver advisory context at most once
+      if (pendingValidatorAdvisories) {
+        const { validatorAdvisories, ...metadata } = pendingValidatorAdvisories.metadata ?? {}
+        if (Array.isArray(validatorAdvisories)) {
+          for (const advisory of validatorAdvisories) seenValidatorAdvisories.add(advisory)
+        }
+        await Session.updateMessage({
+          ...pendingValidatorAdvisories,
+          metadata: { ...metadata, validatorAdvisoriesShown: [...seenValidatorAdvisories] },
+        })
+        pendingValidatorAdvisories = undefined
+      }
+      // altimate_change end
 
       // altimate_change start - finalize buffered echoes before publishing any text to clients
       const stepParts = MessageV2.parts(processor.message.id)
@@ -2512,7 +2551,12 @@ export namespace SessionPrompt {
                 }),
             )
           }
-          const failures = checks.filter((c) => !c.result.ok)
+          const { failures, advisories, retry, exhausted } = validatorEnforcement(checks, {
+            enabled: validatorsEnabled,
+            strict: validatorStrict,
+            retryCount: validatorRetryCount,
+            maxRetries: maxValidatorRetries,
+          })
 
           // Telemetry: emit one event per validator that ran, plus a session
           // rollup. Always emitted, even when the feature flag is off, so we
@@ -2536,12 +2580,24 @@ export namespace SessionPrompt {
               ok: vRes.ok,
               step,
               retry_count: validatorRetryCount,
-              enforced: validatorsEnabled,
+              enforced: validatorsEnabled && (validatorStrict || vRes.classification !== "unverifiable"),
+              ...(vRes.classification && { classification: vRes.classification }),
               ...(vRes.details && { details: sanitizeTelemetryDetails(vRes.details) }),
             } as any)
           }
 
-          if (failures.length > 0 && validatorsEnabled && validatorRetryCount < maxValidatorRetries) {
+          if (advisories.length > 0) {
+            const pending = advisories.filter((advisory) => !seenValidatorAdvisories.has(advisory))
+            processor.message.metadata = {
+              ...processor.message.metadata,
+              validatorAdvisories: pending,
+              validatorAdvisoriesShown: advisories.filter((advisory) => seenValidatorAdvisories.has(advisory)),
+            }
+            await Session.updateMessage(processor.message)
+            if (pending.length > 0) pendingValidatorAdvisories = processor.message
+          }
+
+          if (retry) {
             // Build a single synthetic user-turn body that aggregates every
             // failing validator's reason + fixHint. The agent sees this as
             // the next user message and gets one more turn to address it.
@@ -2585,7 +2641,7 @@ export namespace SessionPrompt {
 
             validatorRetryCount++
             continue
-          } else if (failures.length > 0 && validatorsEnabled && validatorRetryCount >= maxValidatorRetries) {
+          } else if (exhausted) {
             // Retry budget exhausted with outstanding failures. Session will
             // terminate on the natural break below. Emit an explicit signal so
             // the operator dashboard can distinguish "completed cleanly" from

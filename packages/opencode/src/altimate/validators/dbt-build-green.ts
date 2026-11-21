@@ -219,6 +219,7 @@ export const DbtBuildGreenValidator: Validator = {
             : `You edited ${touchedPaths.length} model(s) but the only build artifact (${sanitizeForPrompt(artifact.path, 160)}) predates this session. Your edits have never been built.`
       return {
         ok: false,
+        classification: "finding",
         reason,
         fixHint: freshButNotABuild
           ? `That command only parses and renders SQL — it never runs it against the warehouse. Run \`dbt build\` for the models you changed and confirm it finishes without errors before declaring done.`
@@ -523,6 +524,7 @@ export const DbtBuildGreenValidator: Validator = {
 
     return {
       ok: false,
+      classification: "finding",
       reason: `The build is not green: ${reasonParts.join("; ")}.`,
       fixHint: hintLines.join("\n"),
       details,

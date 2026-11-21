@@ -220,6 +220,7 @@ export const DbtDeliverableNamesValidator: Validator = {
 
     return {
       ok: false,
+      classification: "finding",
       reason: `Deliverable-name mismatch: ${reasonParts.join("; ")}.`,
       fixHint: hintLines.join("\n"),
       details: { ...details, unrequested_models: unrequested },

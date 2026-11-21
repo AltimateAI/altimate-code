@@ -473,6 +473,7 @@ export const DbtIncrementalConfigValidator: Validator = {
 
     return {
       ok: false,
+      classification: "finding",
       // Model names come from repository filenames and reach a synthetic
       // `role: "user"` turn through dispatch, so they are sanitized exactly as
       // `dbt-build-green` sanitizes node names and artifact paths.

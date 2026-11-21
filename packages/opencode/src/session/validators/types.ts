@@ -66,8 +66,14 @@ export interface ValidatorContext {
  * Result of running a validator against a session context.
  */
 export interface ValidatorResult {
-  /** `true` means the agent's work passes this check. */
+  /** Whether the previous enforcement policy accepted the result. */
   ok: boolean
+
+  /** Set by the validator when it has a finding or could not complete the check. */
+  classification?: "finding" | "unverifiable"
+
+  /** A prompt-safe description of what could not be checked and why. May accompany a finding. */
+  advisory?: string
 
   /** Short human-readable explanation of what's wrong. Surfaced in the
    *  synthetic user message; should fit on one or two lines. */

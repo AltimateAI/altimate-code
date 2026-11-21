@@ -244,6 +244,14 @@ export const DbtSchemaVerifyValidator: Validator = {
     // (set at push time), so the operator can see WHICH models couldn't be verified
     // instead of an anonymous count.
     const erroredNames = results.filter((r) => r.error).map((r) => r.model).filter(Boolean) as string[]
+    const advisoryNames = results.flatMap((result, index) =>
+      result.error ? [modelNameFromPath(touched[index]!)] : [],
+    )
+    const advisoryCause =
+      spawnFailures === errored ? "the schema verification subprocess did not start or returned no output"
+      : spawnFailures > 0 ? "the schema verification subprocess could not run or the tool failed"
+      : "the schema verification tool failed"
+
     const reason =
       mismatches.length > 0
         ? `${mismatches.length} of ${results.length} models you edited have a column-shape mismatch against schema.yml${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}. The build may be green, but equality tests will fail.`
@@ -252,6 +260,10 @@ export const DbtSchemaVerifyValidator: Validator = {
 
     return {
       ok: false,
+      classification: mismatches.length > 0 ? "finding" : "unverifiable",
+      advisory: errored > 0
+        ? `Could not verify the schema for ${errored} model(s) because ${advisoryCause}: ${advisoryNames.slice(0, 10).map((name) => sanitizeForPrompt(name.replace(/[^\w.-]/g, "?"), 80)).join(", ")}.`
+        : undefined,
       reason,
       fixHint: leadWithStaleManifestNote(
         results,

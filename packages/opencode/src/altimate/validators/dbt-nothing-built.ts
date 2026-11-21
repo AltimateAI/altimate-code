@@ -432,6 +432,7 @@ export const DbtNothingBuiltValidator: Validator = {
 
     return {
       ok: false,
+      classification: "finding",
       reason,
       fixHint:
         [

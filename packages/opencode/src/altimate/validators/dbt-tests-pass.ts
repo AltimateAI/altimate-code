@@ -27,6 +27,7 @@ import {
   modelNameFromPath,
   extractLastJsonObject,
   runWithConcurrencyLimit,
+  sanitizeForPrompt,
 } from "./validator-utils"
 
 export interface TestSummary {
@@ -166,12 +167,17 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
         else resolve(null)
         return
       }
+      const dbtLog = typeof envelope.stdout === "string" ? envelope.stdout : ""
+      const summary = parseDbtTestOutput(dbtLog)
+      // The CLI can include diagnostic stderr alongside a real test summary.
+      if (summary && summary.error > 0) {
+        resolve({ model, summary })
+        return
+      }
       if (typeof envelope.error === "string") {
         resolve({ model, error: envelope.error.slice(0, 500) })
         return
       }
-      const dbtLog = typeof envelope.stdout === "string" ? envelope.stdout : ""
-      const summary = parseDbtTestOutput(dbtLog)
       if (!summary) {
         resolve({ model, error: `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
         return
@@ -269,9 +275,18 @@ export const DbtTestsPassValidator: Validator = {
       elapsed_ms: Date.now() - startedAt,
     }
 
+    const unverifiedNames = [
+      ...errored.map((r) => r.model),
+      ...touched.filter((_, index) => !outputs[index]).map(modelNameFromPath),
+    ]
+    const advisory = unverifiedNames.length > 0
+      ? `Could not verify dbt tests for ${unverifiedNames.length} model(s) because the test tool did not return a usable result: ${unverifiedNames.slice(0, 10).map((name) => sanitizeForPrompt(name.replace(/[^\w.-]/g, "?"), 80)).join(", ")}.`
+      : undefined
+
     if (failures.length === 0 && errored.length === 0) {
       return {
         ok: true,
+        ...(advisory && { classification: "unverifiable", advisory }),
         details: {
           ...baseDetails,
           passed: passed.length,
@@ -290,6 +305,8 @@ export const DbtTestsPassValidator: Validator = {
         : `${errored.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
     return {
       ok: false,
+      classification: failures.length > 0 ? "finding" : "unverifiable",
+      advisory,
       reason,
       fixHint:
         formatFixHint(hintBlocks) +
