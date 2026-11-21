@@ -416,7 +416,8 @@ export const RunCommand = cmd({
         // altimate_change start — budget limits for CI/enterprise governance
         .option("max-turns", {
           type: "number",
-          describe: "maximum assistant work turns; allows one committed-answer echo, or one best-effort reply after a budget abort",
+          describe:
+            "maximum completed assistant work turns (a failed or retried attempt is not counted); allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
@@ -1149,12 +1150,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // compaction-machinery steps are excluded from turn accounting —
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
+              // Turns are charged on step-finish: a step may start only while fewer
+              // than maxTurns steps have completed, so a retried attempt is free.
               const counted = accounting.onStepStart(part.messageID)
               const requestID = requestOwnership.ownerOf(part.messageID)
               const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
+                counted && accounting.turnBudgetReached(maxTurns) && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
@@ -2049,7 +2052,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // A silent stop exactly at the work limit has no in-flight generation to
       // abort. Enter finalization directly instead of spending a reply just to
       // discover that it exceeds the same budget.
-      if (!answered() && assistantStarted && !accounting.fatal && args.maxTurns && accounting.turnCount >= args.maxTurns) {
+      // The same completed-step count the in-loop budget check uses.
+      if (!answered() && assistantStarted && !accounting.fatal && accounting.turnBudgetReached(args.maxTurns)) {
         accounting.onBudgetExhausted()
         error = `Budget exceeded: reached ${args.maxTurns} assistant turn${args.maxTurns !== 1 ? "s" : ""} limit`
         if (!emit("budget_exhausted", { limit: args.maxTurns })) {

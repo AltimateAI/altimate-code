@@ -22,12 +22,52 @@ describe("RunAccounting recoverable overflow trace errors", () => {
 })
 
 describe("RunAccounting turn accounting", () => {
-  test("counts ordinary assistant steps", () => {
+  test("counts ordinary assistant steps when they finish", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
     expect(acc.onStepStart("msg_1")).toBe(true)
+    acc.onStepFinish("msg_1", "tool-calls")
     expect(acc.onStepStart("msg_1")).toBe(true)
+    acc.onStepFinish("msg_1", "stop")
     expect(acc.turnCount).toBe(2)
+  })
+
+  test("a step that fails mid-stream and is retried costs exactly one turn", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    // attempt 1 streams its step-start, then the provider stream breaks: no step-finish
+    acc.onStepStart("msg_1")
+    // attempt 2 (the processor's retry) starts the same step again
+    acc.onStepStart("msg_1")
+    expect(acc.turnCount).toBe(0)
+    acc.onStepFinish("msg_1", "stop")
+    expect(acc.turnCount).toBe(1)
+  })
+
+  test("a step whose every attempt fails costs no turn and keeps its error", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    // the first attempt plus every retry the processor allows, none completing
+    for (let attempt = 0; attempt <= 5; attempt++) acc.onStepStart("msg_1")
+    acc.onSessionError("APIError", "upstream stream reset")
+    expect(acc.turnCount).toBe(0)
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    expect(acc.fatal).toBe(true)
+    expect(acc.termination().why_harness_stopped).toBe("error")
+  })
+
+  test("the budget is reached only after maxTurns steps complete", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    acc.onStepStart("msg_1")
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    acc.onStepStart("msg_1") // a retried attempt does not trip a one-turn budget
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    acc.onStepFinish("msg_1", "tool-calls")
+    expect(acc.turnBudgetReached(1)).toBe(true)
+    expect(acc.turnBudgetReached(2)).toBe(false)
+    expect(acc.turnBudgetReached(undefined)).toBe(false)
   })
 
   test("excludes compaction-machinery steps from turnCount", () => {
@@ -35,9 +75,13 @@ describe("RunAccounting turn accounting", () => {
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })
     acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
     expect(acc.onStepStart("msg_work")).toBe(true)
+    acc.onStepFinish("msg_work", "tool-calls")
     expect(acc.onStepStart("msg_compact")).toBe(false)
+    acc.onStepFinish("msg_compact", "stop")
     expect(acc.onStepStart("msg_compact")).toBe(false)
+    acc.onStepFinish("msg_compact", "stop")
     expect(acc.onStepStart("msg_work")).toBe(true)
+    acc.onStepFinish("msg_work", "stop")
     expect(acc.turnCount).toBe(2)
   })
 
@@ -45,12 +89,14 @@ describe("RunAccounting turn accounting", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_user_agent", agent: "compaction", summary: false })
     expect(acc.onStepStart("msg_user_agent")).toBe(true)
+    acc.onStepFinish("msg_user_agent", "stop")
     expect(acc.turnCount).toBe(1)
   })
 
   test("a step whose owning message is unknown is counted (conservative default)", () => {
     const acc = RunAccounting.create()
     expect(acc.onStepStart("msg_unknown")).toBe(true)
+    acc.onStepFinish("msg_unknown", "stop")
     expect(acc.turnCount).toBe(1)
   })
 

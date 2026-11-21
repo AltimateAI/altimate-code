@@ -1,8 +1,10 @@
 // Fork-only helpers for the `run` command:
 //   - honest turn accounting: compaction-machinery steps must not consume the
-//     --max-turns budget. `step-start` parts carry only messageID/sessionID, so
-//     the owning message's summary flag is resolved via a lookup populated from
-//     `message.updated` events (the assistant message row is persisted — and its
+//     --max-turns budget, and a turn is charged when a step completes, so a
+//     failed or retried attempt costs nothing. Step parts carry only
+//     messageID/sessionID, so the owning message's summary flag is resolved via
+//     a lookup populated from `message.updated` events (the assistant message
+//     row is persisted — and its
 //     event published — before its first step-start part streams).
 //   - dual-attribution termination logging: every run records TWO independent
 //     fields instead of one rc: `why_model_stopped` and `why_harness_stopped`,
@@ -166,23 +168,36 @@ export function create() {
       else summaryMessages.delete(info.id)
     },
     isCompactionStep,
+    // altimate_change start — charge the turn budget on step-finish, not step-start
+    // A step-start opens an attempt; the processor retries a failed attempt
+    // (up to SessionRetry.RETRY_MAX_ATTEMPTS per step), and each retry streams
+    // its own step-start but only the attempt that completes streams a
+    // step-finish. Charging on start billed every failed attempt as a turn.
+    // `turnCount` is therefore the number of COMPLETED non-compaction steps;
+    // harness-injected generations (idle-done challenge, continuation,
+    // silent-turn reply) are real assistant steps and are charged the same way.
     /**
-     * Count a step-start toward the turn budget unless it belongs to a
-     * compaction-machinery message. Returns true when the step was counted.
+     * Whether a starting step is subject to the turn budget (false for
+     * compaction machinery). The step is charged only when it finishes.
      */
     onStepStart(messageID: string): boolean {
-      if (isCompactionStep(messageID)) return false
-      turnCount++
-      return true
+      return !isCompactionStep(messageID)
     },
+    /** Completed non-compaction assistant steps. */
     get turnCount() {
       return turnCount
     },
+    /** True when `maxTurns` completed steps already ran, so no further step may start. */
+    turnBudgetReached(maxTurns: number | undefined): boolean {
+      return maxTurns !== undefined && maxTurns > 0 && turnCount >= maxTurns
+    },
     onStepFinish(messageID: string, reason: string | undefined) {
       if (isCompactionStep(messageID)) return
+      turnCount++
       lastFinishReason = reason
       lastFinishMessageID = messageID
     },
+    // altimate_change end
     onText(messageID: string, text: string, synthetic = false) {
       if (isCompactionStep(messageID)) return
       if (synthetic) return
