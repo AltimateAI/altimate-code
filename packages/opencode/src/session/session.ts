@@ -512,6 +512,8 @@ export interface Interface {
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   // altimate_change start — offline mode refuses to delete a shared session
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound | OfflinePolicyError>
+  /** Whether the session or any descendant (subagent sessions included) has a public share. */
+  readonly sharedInTree: (sessionID: SessionID) => Effect.Effect<boolean, NotFound>
   // altimate_change end
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
@@ -1012,6 +1014,9 @@ export const layer: Layer.Layer<
       messages,
       children,
       remove,
+      // altimate_change start — offline shared-session check
+      sharedInTree,
+      // altimate_change end
       updateMessage,
       removeMessage,
       removePart,

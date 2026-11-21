@@ -803,31 +803,21 @@ export const layer = Layer.effect(
 
     const remove = Effect.fn("Workspace.remove")(function* (id: WorkspaceV2.ID) {
       const sessions = yield* db
-        // altimate_change start — the share URL decides whether an offline removal may proceed
-        .select({ id: SessionTable.id, parentID: SessionTable.parent_id, shareURL: SessionTable.share_url })
-        // altimate_change end
+        .select({ id: SessionTable.id, parentID: SessionTable.parent_id })
         .from(SessionTable)
         .where(eq(SessionTable.workspace_id, id))
         .all()
         .pipe(Effect.orDie)
       // altimate_change start — offline mode cannot revoke a public share, so it refuses before removing anything.
-      // Subagent sessions carry only a parent id, so the check walks each tree, not just the workspace's rows.
+      // The session service's tree check covers subagent sessions, which carry only a parent id.
       if (Offline.enabled()) {
-        let level = sessions
-        const seen = new Set(sessions.map((sessionInfo) => sessionInfo.id))
-        while (level.length) {
-          if (level.some((sessionInfo) => sessionInfo.shareURL))
+        const roots = sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessions.some((other) => other.id === sessionInfo.parentID))
+        for (const root of roots) {
+          const shared = yield* session.sharedInTree(root.id).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(false)))
+          if (shared)
             return yield* Effect.die(
               new Offline.OfflinePolicyError("This workspace has a shared session. Remove it while online so the share can be revoked."),
             )
-          const children = yield* db
-            .select({ id: SessionTable.id, parentID: SessionTable.parent_id, shareURL: SessionTable.share_url })
-            .from(SessionTable)
-            .where(inArray(SessionTable.parent_id, level.map((sessionInfo) => sessionInfo.id)))
-            .all()
-            .pipe(Effect.orDie)
-          level = children.filter((child) => !seen.has(child.id))
-          for (const child of level) seen.add(child.id)
         }
       }
       // altimate_change end

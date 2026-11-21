@@ -339,10 +339,18 @@ test("attach --dir applies that project's offline setting when launched elsewher
     const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
     await proc.exited
     expect(stdout + stderr).toContain("This command requires network access")
+    // From inside that project, a --dir that exists only on the remote server keeps the project's setting.
+    const remote = Bun.spawn(
+      [process.execPath, "--preload", f.preload, CLI, "attach", "https://remote-server.test", "--dir", "/srv/remote-only"],
+      { cwd: f.project, env: f.env, stdin: "ignore", stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(20_000) },
+    )
+    const [out2, err2] = await Promise.all([new Response(remote.stdout).text(), new Response(remote.stderr).text()])
+    await remote.exited
+    expect(out2 + err2).toContain("This command requires network access")
   } finally {
     await fs.rm(f.root, { recursive: true, force: true })
   }
-}, 30_000)
+}, 45_000)
 
 test("offline model transport bypasses proxy settings and refuses redirects", async () => {
   let proxyCalls = 0

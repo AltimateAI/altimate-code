@@ -1038,6 +1038,9 @@ test.skipIf(process.platform === "win32")("offline data tool detection runs dbt 
     // A probe that prints dbt's real version lines and then exits non-zero still reports the version offline.
     await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nprintf 'Core:\\n  - installed: 1.9.3\\n'\nexit 1\n", { mode: 0o755 })
     expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.3" })
+    // Some dbt builds print --version to stderr.
+    await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nprintf 'Core:\\n  - installed: 1.9.4\\n' >&2\nexit 1\n", { mode: 0o755 })
+    expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true, version: "1.9.4" })
     // A probe that prints nothing falls back to finding dbt on PATH.
     await fsp.writeFile(path.join(dir, "dbt"), "#!/bin/sh\nexit 1\n", { mode: 0o755 })
     expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true })

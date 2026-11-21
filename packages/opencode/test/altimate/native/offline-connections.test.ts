@@ -30,6 +30,8 @@ test("offline permits embedded databases and literal loopback", () => {
 test("offline rejects remote targets, SSH, cloud auth, and URI host overrides", () => {
   for (const config of [
     { type: "duckdb", path: "md:cloud" },
+    { type: "duckdb", path: "{% if true %}md:cloud{% endif %}" },
+    { type: "duckdb", path: "{# cloud #}md:cloud" },
     { type: "duckdb", path: "https://example.com/db" },
     { type: "sqlite", path: "file://example.com/share/db" },
     { type: "sqlite", path: "file:////server/share/db.sqlite" },

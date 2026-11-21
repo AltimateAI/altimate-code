@@ -3,7 +3,8 @@ import { isLocalFilePath, normalizeConfig, type ConnectionConfig } from "@altima
 import { isLoopbackHost } from "@/config/offline"
 
 function localStore(value: unknown): boolean {
-  if (typeof value !== "string" || value.includes("{{")) return false
+  // dbt renders Jinja (expressions, statements, comments) after this check, so only a literal path is local.
+  if (typeof value !== "string" || /\{[{%#]/.test(value)) return false
   if (value === ":memory:" || value === "") return true
   // UNC shares are network locations, even though they look like paths.
   if (/^(?:\\\\|\/\/)/.test(value)) return false

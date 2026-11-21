@@ -1,4 +1,5 @@
 // altimate_change start — offline mode
+import { existsSync } from "node:fs"
 import { Offline } from "@/config/offline"
 // altimate_change end
 import yargs from "yargs"
@@ -186,9 +187,10 @@ let cli = yargs(args)
     const offlineTarget = (command === "run" && !args.attach ? args.dir : undefined)
       ?? (command === "acp" ? args.cwd : undefined)
       ?? (command === "workspace" ? args.directory : undefined)
-      ?? (command === "attach" ? args.dir : undefined)
     const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
     await Offline.start(directory, args.model)
+    // attach: the invoking project's setting applies, and so does --dir's when it is a local directory.
+    if (command === "attach" && args.dir && existsSync(path.resolve(args.dir))) await Offline.start(path.resolve(args.dir), args.model)
     // Attaching to a server on this machine is local; any other server is a network peer.
     const attachURL = command === "attach" ? args.url : command === "run" ? args.attach || undefined : undefined
     if (Offline.enabled() && (

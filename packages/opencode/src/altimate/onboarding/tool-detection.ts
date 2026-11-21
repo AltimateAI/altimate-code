@@ -104,9 +104,12 @@ async function probe(): Promise<DbtRuntime> {
   if (!out.ok && process.platform === "win32") {
     out = await runDbtVia(env, "cmd.exe", ["/c", "dbt", "--version"])
   }
-  // Offline, a probe that timed out or exited non-zero still counts when it printed dbt's version lines.
-  const printedVersion = /-\s*installed:\s*[0-9]+\.[0-9]+\.[0-9]+|core=[0-9]+\.[0-9]+\.[0-9]+/.test(`${out.stdout}\n${out.stderr}`)
-  if (!out.ok && !(Offline.enabled() && printedVersion)) return { hasDbt: false, hasDbtDuckdb: false }
+  const combined = `${out.stdout}\n${out.stderr}`
+  const versionMatch =
+    combined.match(/-\s*installed:\s*([0-9]+\.[0-9]+\.[0-9]+\S*)/) ??
+    combined.match(/core=([0-9]+\.[0-9]+\.[0-9]+\S*)/)
+  // Offline, a probe that timed out or exited non-zero still counts when it printed dbt's version.
+  if (!out.ok && !(Offline.enabled() && versionMatch)) return { hasDbt: false, hasDbtDuckdb: false }
 
   // dbt --version on 1.x prints:
   //   Core:
@@ -115,12 +118,7 @@ async function probe(): Promise<DbtRuntime> {
   //     - duckdb: 1.11.4 - Update available!
   // Match the plugin line specifically ("- duckdb:") — a generic "duckdb"
   // substring would false-positive on an "install dbt-duckdb" upgrade hint.
-  const combined = `${out.stdout}\n${out.stderr}`
   const hasDbtDuckdb = /^\s*-\s*duckdb:/m.test(combined)
-
-  const versionMatch =
-    combined.match(/-\s*installed:\s*([0-9]+\.[0-9]+\.[0-9]+\S*)/) ??
-    combined.match(/core=([0-9]+\.[0-9]+\.[0-9]+\S*)/)
   return {
     hasDbt: true,
     hasDbtDuckdb,

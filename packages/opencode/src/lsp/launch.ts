@@ -21,6 +21,7 @@ export function spawn(cmd: string, argsOrOpts?: string[] | Process.Options, opts
             NO_PROXY: undefined,
             no_proxy: undefined,
             ALTIMATE_OFFLINE_USER_PROXY: undefined,
+            ALTIMATE_OFFLINE_MODEL: undefined,
             ...Offline.userEnv({ ...process.env, ...cfg?.env }),
           },
         }
