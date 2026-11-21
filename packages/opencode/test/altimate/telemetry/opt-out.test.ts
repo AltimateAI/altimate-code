@@ -803,9 +803,9 @@ describe("telemetry opt-out", () => {
     }
   })
 
-  test("a well-known entry Auth would reject does not hold telemetry", async () => {
-    writeFileSync(Auth.filepath(), JSON.stringify({ "https://config.example.invalid": { type: "wellknown" } }))
-    expect(await TelemetryConfig.disabledState(home)).toBe("enabled")
+  test("a raw well-known entry in OPENCODE_AUTH_CONTENT holds telemetry, as Config can still fetch for it", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ "https://config.example.invalid": { type: "wellknown" } })
+    expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
   test("an in-memory account database is an unknown organization source", async () => {

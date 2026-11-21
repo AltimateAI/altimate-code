@@ -4,7 +4,6 @@ import fs from "fs/promises"
 import { existsSync } from "fs"
 import { pathToFileURL } from "url"
 import * as Effect from "effect/Effect"
-import { Option, Schema } from "effect"
 import { InstanceRef } from "@/effect/instance-ref"
 import { attach } from "@/effect/run-service"
 import { Flag, env as flagEnv } from "@opencode-ai/core/flag/flag"
@@ -82,13 +81,12 @@ async function hasWellKnownAuth(): Promise<boolean> {
     parsed = contents.trim() === "" ? {} : JSON.parse(contents)
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unreadable auth store")
-  // Only entries Auth itself accepts: Config never fetches a malformed one.
-  return Object.values(parsed).some((entry) => {
-    const decoded = decodeAuthEntry(entry)
-    return Option.isSome(decoded) && decoded.value.type === "wellknown"
-  })
+  // Any well-known-typed entry counts: Auth passes OPENCODE_AUTH_CONTENT through without decoding it, so
+  // Config can fetch remote config even for an entry the file path would reject (fail closed).
+  return Object.values(parsed).some(
+    (entry) => entry && typeof entry === "object" && (entry as { type?: unknown }).type === "wellknown",
+  )
 }
-const decodeAuthEntry = Schema.decodeUnknownOption(Auth.Info)
 
 export function instanceDirectory(): string | undefined {
   return Effect.runSync(attach(InstanceRef))?.directory
