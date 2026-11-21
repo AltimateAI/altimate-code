@@ -28,6 +28,7 @@ const runTask = (input: { background?: boolean; abort: AbortSignal; onLookup?: (
     let prompted = false
     let lookedUp = false
     let traced = 0
+    let tracedAtPrompt: number | undefined
     let created = false
     const published: unknown[][] = []
     const mocks = [
@@ -75,6 +76,7 @@ const runTask = (input: { background?: boolean; abort: AbortSignal; onLookup?: (
       prompt: () =>
         Effect.suspend(() => {
           prompted = true
+          tracedAtPrompt = traced
           return Effect.fail(
             new Provider.ModelNotFoundError({
               providerID: ProviderID.make("missing-provider"),
@@ -104,7 +106,7 @@ const runTask = (input: { background?: boolean; abort: AbortSignal; onLookup?: (
           (failure: unknown) => failure,
         ),
     )
-    return { error, created, prompted, lookedUp, published, traced }
+    return { error, created, prompted, lookedUp, published, traced, tracedAtPrompt }
   })
 
 it.effect("an unavailable subagent model names that agent's config as its source", () =>
@@ -165,8 +167,12 @@ it.effect("cancellation during the model lookup binds no trace and starts no chi
 
 it.effect("an available subagent model binds the child trace once before the child prompt runs", () =>
   Effect.gen(function* () {
-    const { prompted, traced } = yield* runTask({ abort: new AbortController().signal, onLookup: () => ({}) })
-    expect(traced).toBe(1)
+    const { prompted, traced, tracedAtPrompt } = yield* runTask({
+      abort: new AbortController().signal,
+      onLookup: () => ({}),
+    })
     expect(prompted).toBe(true)
+    expect(tracedAtPrompt).toBe(1)
+    expect(traced).toBe(1)
   }),
 )
