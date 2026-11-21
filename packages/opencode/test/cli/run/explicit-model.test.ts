@@ -67,6 +67,38 @@ describe("run model resolution", () => {
   )
 
   cliIt.live(
+    "keeps the command model for a synthetic reply after a silent turn",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              command: { local: { model: "test/test-model", template: "Say hello" } },
+            }),
+          },
+        })
+        const sdk = createOpencodeClient({ baseUrl: server.url, throwOnError: true })
+        const { data: session } = yield* Effect.promise(() => sdk.session.create({ title: "Silent command" }))
+        if (!session) throw new Error("Session creation returned no data")
+        yield* llm.text("")
+        yield* llm.text("Synthetic reply still used the command model")
+        const result = yield* opencode.spawn(
+          ["run", "--attach", server.url, "--session", session.id, "--command", "local", "--model", "unused/model", "--no-trace", "--format", "json"],
+          { bunRun: true },
+        )
+        opencode.expectExit(result, 0)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(1)
+        expect(result.stdout).toContain("Synthetic reply still used the command model")
+        expect(yield* llm.calls).toBe(2)
+      }),
+    90_000,
+  )
+
+  cliIt.live(
     "rejects an unavailable command model before inference despite a usable CLI model",
     ({ opencode, llm }) =>
       Effect.gen(function* () {
@@ -108,6 +140,46 @@ describe("run model resolution", () => {
         expect(yield* llm.calls).toBe(0)
       }),
     30_000,
+  )
+
+  cliIt.live(
+    "runs the command subtask on its validated model despite an unavailable agent model",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              agent: { general: { model: "test/missing-model" } },
+              command: { local: { agent: "general", model: "test/test-model", template: "Say hello" } },
+            }),
+          },
+        })
+        const sdk = createOpencodeClient({ baseUrl: server.url, throwOnError: true })
+        const { data: session } = yield* Effect.promise(() => sdk.session.create({ title: "Command parent" }))
+        if (!session) throw new Error("Session creation returned no data")
+        yield* llm.text("Child used the command model")
+        yield* llm.text("Parent completed")
+        yield* Effect.promise(() => sdk.session.command({
+          sessionID: session.id,
+          command: "local",
+          arguments: "",
+          agent: "builder",
+          model: "test/test-model",
+        }))
+        const { data: children } = yield* Effect.promise(() => sdk.session.children({ sessionID: session.id }))
+        expect(children).toHaveLength(1)
+        const { data: messages } = yield* Effect.promise(() => sdk.session.messages({ sessionID: children![0].id }))
+        const user = messages?.find(({ info }) => info.role === "user")?.info
+        expect(user?.role === "user" ? user.model : undefined).toMatchObject({
+          providerID: "test",
+          modelID: "test-model",
+        })
+        expect(yield* llm.calls).toBe(2)
+      }),
+    60_000,
   )
 
   cliIt.live(
@@ -204,6 +276,32 @@ describe("run model resolution", () => {
         opencode.expectExit(result, 0)
         expect(result.stderr).not.toContain('agent "build" not found')
         expect(result.stdout).toContain("Attached run used the builder model")
+      }),
+    90_000,
+  )
+
+  cliIt.live(
+    "attached run leaves an unnamed default agent to the server",
+    ({ opencode, llm }) =>
+      Effect.gen(function* () {
+        const server = yield* opencode.serve({
+          bunRun: true,
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              enabled_providers: ["test"],
+              agent: {
+                builder: { hidden: true },
+                aardvark: { model: "test/missing-model" },
+                analyst: { model: "test/test-model" },
+              },
+            }),
+          },
+        })
+        yield* llm.text("Attached run used the server default")
+        const result = yield* opencode.spawn(["run", "--attach", server.url, "--no-trace", "test"], { bunRun: true })
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toContain("Attached run used the server default")
       }),
     90_000,
   )

@@ -1416,7 +1416,9 @@ export namespace SessionPrompt {
           workspaceId: boundWorkspace?.datamateId,
           turn: telemetryTurn,
           // altimate_change end
-          extra: { bypassAgentCheck: true },
+          // altimate_change start — command subtasks already resolved and validated the model in this assistant row
+          extra: { bypassAgentCheck: true, useRecordedModel: !!task.command && !!task.model },
+          // altimate_change end
           // altimate_change start — pass effective permission rules to search result filtering
           permissions: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
           // altimate_change end

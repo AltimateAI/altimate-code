@@ -727,6 +727,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const requestOwnership = RunAccounting.createRequestOwnership()
       // A queued request must not revoke the in-flight echo owned by an earlier request.
       const committedRequests = new Set<string>()
+      let commandSelection: { agent: string; model: { providerID: string; modelID: string }; variant?: string } | undefined
+      const selectionFromUser = (user: Extract<Message, { role: "user" }>) => ({
+        agent: user.agent,
+        model: { providerID: user.model.providerID, modelID: user.model.modelID },
+        variant: "variant" in user && typeof user.variant === "string" ? user.variant : user.model.variant,
+      })
       const beginRequest = (messageID: string) => {
         // The persisted request boundary includes requests from other attached clients.
         // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
@@ -886,6 +892,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
         // altimate_change start — partial emitted text is not proof that an active request finished
         if (deadline !== "soft" || timeBudgetDeadline !== "none") return
+        // Wait for the command's accepted model before saving its synthetic reminder.
+        if (args.command && !commandSelection) return
         // altimate_change end
         timeBudgetDeadline = "soft"
         tracer?.setRunBudget(budgetMetadata())
@@ -908,9 +916,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
               sessionID,
               messageID,
               noReply: true,
-              agent,
-              model: args.model ? Provider.parseModel(args.model) : undefined,
-              variant: args.variant,
+              ...(commandSelection ?? {
+                agent,
+                model: args.model ? Provider.parseModel(args.model) : undefined,
+                variant: args.variant,
+              }),
               ...(audienceSystem ? { system: audienceSystem } : {}),
               parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
             },
@@ -1011,6 +1021,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // This provisional owner is replaced by the persisted request boundary
             // or the internal continuation's explicit origin before its assistant starts.
             requestOwnership.onUserMessage(event.properties.info.id)
+            if (args.command && event.properties.info.id === sendMessageID) {
+              commandSelection = selectionFromUser(event.properties.info)
+            }
           }
           if (
             event.type === "message.updated" &&
@@ -1407,7 +1420,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const remoteAgents = () => sdk.app.agents(undefined, { throwOnError: true }).then((result) => result.data ?? [])
       // altimate_change end
       // Validate agent if specified; capture audience option from agent definition
-      const { agent, agentAudience } = await (async () => {
+      const { agent, agentAudience, agentModel } = await (async () => {
         if (!args.agent) return { agent: undefined, agentAudience: undefined }
         // altimate_change start — use the attached server's agent definitions
         const requestedAgent = args.agent
@@ -1438,7 +1451,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
         const aud = entry.options?.audience as string | undefined
         // altimate_change start — validate and send the same resolved agent
-        return { agent: entry.name, agentAudience: aud }
+        return { agent: entry.name, agentAudience: aud, agentModel: entry.model }
         // altimate_change end
       })()
 
@@ -1449,21 +1462,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
         if (args.command) return undefined
         if (args.model !== undefined) return { value: args.model, source: "CLI --model" }
         if (baseID) return undefined
+        // The server must resolve its default agent; the remote agent list is sorted for display.
+        if (args.attach && !agent) return undefined
         const config = (await sdk.config.get(undefined, { throwOnError: true })).data
-        const selected = await (async () => {
-          if (!args.attach) return Agent.get(agent ?? (await Agent.defaultAgent()))
-          const agents = await remoteAgents()
-          const name = agent ?? config?.default_agent
-          if (!name) return agents.find((item) => item.mode !== "subagent" && !item.hidden)
-          // Match the server's migration when the old default name has no custom definition.
-          return agents.find((item) => item.name === name)
-            ?? (name === "data-qa" ? agents.find((item) => item.name === "analyst") : undefined)
-        })()
-        if (selected?.model) {
-          const { providerID, modelID } = selected.model
+        const selected = args.attach ? undefined : await Agent.get(agent ?? (await Agent.defaultAgent()))
+        const model = agentModel ?? selected?.model
+        if (model) {
+          const { providerID, modelID } = model
           return {
             value: providerID || modelID ? `${providerID}/${modelID}` : "",
-            source: `agent "${selected.name}" config (model)`,
+            source: `agent "${agent ?? selected?.name}" config (model)`,
           }
         }
         if (config?.model !== undefined) return { value: config.model, source: "project or global config (model)" }
@@ -1648,6 +1656,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Start event listener before sending the prompt so no events are missed
       // altimate_change start — pass the stream explicitly (see loop signature)
       let eventLoopFailure: unknown
+      const sendMessageID = MessageID.ascending()
       const loopPromise = loop(events.stream, { suppressInterruptedPromptAbort: true }).catch((e) => {
         eventLoopFailure = e
         accounting.onSessionError("EventStreamError", e instanceof Error ? e.message : String(e))
@@ -1690,7 +1699,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // a second user message and a second execution. Pinning a stable
       // messageID makes the attempt identifiable: before each retry we ask the
       // server whether that message landed, and only re-send when it did not.
-      const sendMessageID = MessageID.ascending()
       const send = () => {
         beginRequest(sendMessageID)
         // altimate_change start — start once at prompt dispatch, never reset on retry or child work
@@ -1814,6 +1822,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
           const messageID = MessageID.ascending()
           beginRequest(messageID)
           const promptPromise = (async (): Promise<SendResult | undefined> => {
+            // Commands may override the CLI model. Read the original request when SSE missed it.
+            if (args.command && !commandSelection) {
+              const { data } = await sdk.session.message({ sessionID, messageID: sendMessageID }, { signal: turnAbort.signal })
+              if (data?.info.role !== "user") throw new Error("The command did not record a model for its follow-up")
+              commandSelection = selectionFromUser(data.info)
+            }
             // The previous turn may have published idle just before releasing its
             // session lock. Retry that narrow race, but only after definitive
             // proof this exact message was not persisted.
@@ -1824,9 +1838,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
                   {
                     sessionID,
                     messageID,
-                    agent,
-                    model: args.model ? Provider.parseModel(args.model) : undefined,
-                    variant: args.variant,
+                    ...(commandSelection ?? {
+                      agent,
+                      model: args.model ? Provider.parseModel(args.model) : undefined,
+                      variant: args.variant,
+                    }),
                     ...(audienceSystem ? { system: audienceSystem } : {}),
                     // Synthetic harness text must never replace the authoritative
                     // original task pin when this session is resumed.

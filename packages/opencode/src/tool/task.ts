@@ -425,10 +425,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
-      const model = agent.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // altimate_change start — run command subtasks with the model selected at command dispatch
+      const recordedModel = { modelID: msg.info.modelID, providerID: msg.info.providerID }
+      const model = ctx.extra?.useRecordedModel === true ? recordedModel : agent.model ?? recordedModel
+      // altimate_change end
 
       // altimate_change start — upstream_fix: bind partial findings to this child prompt during parent cancellation.
       const messageID = MessageID.ascending()
