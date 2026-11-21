@@ -119,7 +119,7 @@ describe("other read-only refusals carry the reason", () => {
     // An unclosed quote holding a blocked word names the quote first.
     const reason = writeReason("SELECT a FROM t WHERE n = 'do not truncate", "postgres")
     expect(reason.indexOf("unterminated")).toBeGreaterThan(-1)
-    expect(reason.indexOf("unterminated")).toBeLessThan(reason.indexOf("Until it is closed"))
+    expect(reason.indexOf("unterminated")).toBeLessThan(reason.indexOf("Until that quoted text"))
     expect(reason).not.toContain("cannot be allowed")
   })
 

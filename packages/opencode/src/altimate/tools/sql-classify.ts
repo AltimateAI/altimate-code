@@ -624,8 +624,8 @@ export function explainWrite(
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     return unreadable(
-      "it has unterminated quoted text or comments, so it cannot be proven read-only. Check that every quote and comment " +
-      "is closed; inside a string literal, write a single quote as ''"
+      "it has unterminated or unsupported quoted text or comments, so it cannot be proven read-only. Check that every " +
+      "quote and comment is closed; inside a string literal, write a single quote as ''"
     )
   }
   const statements = statementsOf(sql, dialect)

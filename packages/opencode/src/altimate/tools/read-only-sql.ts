@@ -82,13 +82,13 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
 export function writeReason(sql: string, dialect?: string): string {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
   if (blocked) {
-    // Text that cannot be read is blocked on its words alone, even inside an unclosed literal: name the
-    // unreadable text first, since closing the quote may be the whole fix.
+    // Text that cannot be read (an open or unsupported quote or comment) is blocked on its words alone: name
+    // the unreadable text first, since fixing it may be the whole fix.
     const hard =
       " It holds a hard-blocked statement, such as DROP DATABASE, DROP SCHEMA, TRUNCATE, SQL run from a string" +
       " literal or an executable comment; those never run and cannot be allowed."
     const untilClosed =
-      " Until it is closed, words inside the open quote or comment such as DROP DATABASE or TRUNCATE count as a" +
+      " Until that quoted text or comment can be read, words inside it such as DROP DATABASE or TRUNCATE count as a" +
       " hard-blocked statement, which never runs."
     return tokenizeSql(sql, dialect).complete
       ? hard
