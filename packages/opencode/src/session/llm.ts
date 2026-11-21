@@ -75,6 +75,9 @@ export namespace LLM {
     // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
     environment?: string[]
     // altimate_change end
+    // altimate_change start — per-request context excluded from prompt cache breakpoints
+    uncachedTurnContext?: string
+    // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
     small?: boolean
@@ -360,7 +363,7 @@ export namespace LLM {
       }),
       inputTokens: () =>
         estimateInputTokens({
-          system,
+          system: input.uncachedTurnContext ? [...system, input.uncachedTurnContext] : system,
           messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
           tools,
           instructions: params.options.instructions,
@@ -498,6 +501,14 @@ export namespace LLM {
                 // altimate_change start — transform messages with the reconciled reasoning options
                 // @ts-expect-error
                 args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, requestOptions)
+                // altimate_change end
+                // altimate_change start — append advisory context after the normal cache breakpoints
+                if (input.uncachedTurnContext) {
+                  args.params.prompt.push({
+                    role: "user",
+                    content: [{ type: "text", text: input.uncachedTurnContext }],
+                  })
+                }
                 // altimate_change end
               }
               return args.params

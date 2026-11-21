@@ -4,7 +4,7 @@
  *
  * Fires after the agent declares done. Detects which dbt models the session
  * touched, runs `altimate-dbt test --model <name>` against each, and refuses
- * to terminate if any dbt test fails or errors.
+ * to terminate if the test run reports failures. Inconclusive checks are advisory by default.
  *
  * Catches row-data correctness errors that the column-shape validator does
  * not: a model whose schema.yml matches the actual columns can still fail
@@ -213,7 +213,7 @@ function formatFixHint(failures: TestRunOutput[]): string {
 export const DbtTestsPassValidator: Validator = {
   name: "dbt-tests-pass",
   description:
-    "After the agent declares done, runs `altimate-dbt test` against every dbt model the agent modified during this session and refuses to terminate if any model's tests fail or error. Catches row-data correctness errors (relationships, unique, not_null, accepted_values, AUTO_*_equality) that column-shape verification cannot detect.",
+    "After the agent declares done, runs `altimate-dbt test` against every dbt model the agent modified during this session. Reported test failures block completion, and inconclusive checks are advisory by default. Catches row-data correctness errors (relationships, unique, not_null, accepted_values, AUTO_*_equality) that column-shape verification cannot detect.",
 
   async appliesTo(ctx: ValidatorContext): Promise<boolean> {
     return (await findDbtProjectRoot(ctx.workingDirectory)) !== null

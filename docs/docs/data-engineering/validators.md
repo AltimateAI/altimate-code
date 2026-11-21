@@ -7,7 +7,8 @@ description: "Harness-side validators run after the agent declares done, catchin
 
 Validators are harness-side checks that run **after** the agent declares done.
 Unlike tools, they are not visible to the agent — the framework dispatches
-them automatically once the LLM emits `finishReason === "stop"`. A confirmed finding injects a synthetic user turn with the failure details,
+them automatically once the LLM emits `finishReason === "stop"`. A confirmed
+finding injects a synthetic user turn with the failure details,
 giving the agent one more turn to fix the issue within the retry budget.
 An inconclusive check, such as a schema tool failure, leaves an advisory in
 the next model request's context. An advisory alone does not start a request

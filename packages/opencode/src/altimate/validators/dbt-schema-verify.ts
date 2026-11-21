@@ -156,7 +156,7 @@ function leadWithStaleManifestNote(results: SchemaVerifyOutput[], hint: string):
 export const DbtSchemaVerifyValidator: Validator = {
   name: "dbt-schema-verify",
   description:
-    "After the agent declares done, runs `altimate-dbt schema-verify` on every dbt model the agent modified during this session and refuses to terminate if any model's actual columns diverge from the schema.yml spec (extra, missing, reordered, or type-mismatched).",
+    "After the agent declares done, runs `altimate-dbt schema-verify` on every dbt model the agent modified during this session and refuses to terminate if any model's actual columns diverge from the schema.yml spec (extra, missing, reordered, or type-mismatched). Inconclusive checks are advisory by default.",
 
   async appliesTo(ctx: ValidatorContext): Promise<boolean> {
     // Only run for sessions that took place inside a dbt project. Quick check.
@@ -231,9 +231,7 @@ export const DbtSchemaVerifyValidator: Validator = {
       elapsed_ms: Date.now() - startedAt,
     }
 
-    // Fail closed: return ok only when every model was verified and none mismatched.
-    // Errors (spawn failures, schema-verify tool errors) prevent a clean pass because
-    // we cannot rule out drift on models we failed to inspect.
+    // Retain the legacy ok value for strict mode. Classification controls advisory mode.
     if (mismatches.length === 0 && errored === 0) {
       return { ok: true, details: baseDetails }
     }

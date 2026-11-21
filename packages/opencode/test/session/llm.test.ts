@@ -1153,7 +1153,8 @@ describe("session.llm.stream client trace", () => {
     userID: string
     traceparent?: string
     configHeaders?: Record<string, string>
-  }): Promise<Headers> {
+    uncachedTurnContext?: string
+  }) {
     const server = state.server
     if (!server) throw new Error("Server not initialized")
     const { model } = await loadFixture("openai", "gpt-5.2")
@@ -1225,6 +1226,7 @@ describe("session.llm.stream client trace", () => {
           model: resolved,
           agent,
           system: ["You are a helpful assistant."],
+          uncachedTurnContext: input.uncachedTurnContext,
           abort: new AbortController().signal,
           messages: [{ role: "user", content: "Hello" }],
           tools: {},
@@ -1233,11 +1235,24 @@ describe("session.llm.stream client trace", () => {
         }
       },
     })
-    return (await request).headers
+    return request
   }
 
+  test("sends one-shot context after the ordinary request content", async () => {
+    const note = "The schema verification tool did not run."
+    const { body } = await captureTurn({
+      providerID: "altimate-backend",
+      userID: "msg_trace_uncached_context",
+      uncachedTurnContext: note,
+    })
+    const messages = body.input as Array<{ role: string; content: unknown }>
+    expect(messages.at(-1)).toMatchObject({ role: "user", content: [{ text: note }] })
+    expect(messages.at(-2)).toMatchObject({ role: "user", content: [{ text: "Hello" }] })
+    expect(JSON.stringify(messages.slice(0, -1))).not.toContain(note)
+  })
+
   test("an Altimate provider receives the turn's trace with a fresh child span", async () => {
-    const headers = await captureTurn({
+    const { headers } = await captureTurn({
       providerID: "altimate-backend",
       userID: "msg_trace_altimate",
       traceparent: `00-${TRACE_ID}-${CLIENT_SPAN}-01`,
@@ -1249,13 +1264,13 @@ describe("session.llm.stream client trace", () => {
   })
 
   test("an untraced turn sends no trace headers", async () => {
-    const headers = await captureTurn({ providerID: "altimate-backend", userID: "msg_trace_none" })
+    const { headers } = await captureTurn({ providerID: "altimate-backend", userID: "msg_trace_none" })
     expect(headers.get("traceparent")).toBeNull()
     expect(headers.get("x-request-id")).toBeNull()
   })
 
   test("a non-Altimate provider never receives the trace", async () => {
-    const headers = await captureTurn({
+    const { headers } = await captureTurn({
       providerID: "custom-gateway",
       userID: "msg_trace_other",
       traceparent: `00-${TRACE_ID}-${CLIENT_SPAN}-01`,
@@ -1265,7 +1280,7 @@ describe("session.llm.stream client trace", () => {
   })
 
   test("configuration that sets either header keeps the pair out entirely", async () => {
-    const headers = await captureTurn({
+    const { headers } = await captureTurn({
       providerID: "altimate-backend",
       userID: "msg_trace_config",
       traceparent: `00-${TRACE_ID}-${CLIENT_SPAN}-01`,

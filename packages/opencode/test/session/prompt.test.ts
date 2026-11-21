@@ -576,7 +576,7 @@ for (const downgrade of [true, false]) {
 // altimate_change end
 
 // altimate_change start — completion validator enforcement through the real prompt loop
-for (const mode of ["advisory", "finding", "strict"] as const) {
+for (const mode of ["advisory", "advisory-after-error", "finding", "strict"] as const) {
   noLLMServer.instance(
     `completion validators use the ${mode} policy`,
     () => Effect.gen(function* () {
@@ -587,14 +587,20 @@ for (const mode of ["advisory", "finding", "strict"] as const) {
       delete process.env.ALTIMATE_VALIDATORS_MAX_RETRIES
       const requests: string[] = []
       const note = "Could not verify orders because the schema tool failed."
-      const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async () => [{
-        validator: ValidatorRegistry.list()[0]!,
-        result: mode === "finding"
-          ? { ok: false, classification: "finding", reason: "Confirmed failure." }
-          : { ok: false, classification: "unverifiable", reason: note, advisory: note },
-      }])
+      let checkCount = 0
+      const runAll = spyOn(ValidatorRegistry, "runAll").mockImplementation(async () => {
+        checkCount++
+        if (mode === "advisory" && checkCount === 2) return []
+        return [{
+          validator: ValidatorRegistry.list()[0]!,
+          result: mode === "finding"
+            ? { ok: false, classification: "finding", reason: "Confirmed failure." }
+            : { ok: false, classification: "unverifiable", reason: note, advisory: note },
+        }]
+      })
       const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
-        requests.push(input.system.join("\n"))
+        requests.push(input.uncachedTurnContext ?? "")
+        if (mode === "advisory-after-error" && requests.length === 2) throw new Error("Provider unavailable")
         const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
         async function* fullStream() {
           yield { type: "start" }
@@ -627,6 +633,16 @@ for (const mode of ["advisory", "finding", "strict"] as const) {
           expect(requests).toHaveLength(4)
           expect(requests[1]).toContain(note)
           expect(requests[2]).not.toContain(note)
+          expect(requests[3]).not.toContain(note)
+        } else if (mode === "advisory-after-error") {
+          expect(requests).toHaveLength(1)
+          const failed = yield* reply("Follow-up while the provider is unavailable.")
+          expect(failed.info).toHaveProperty("error")
+          yield* reply("Try again.")
+          yield* reply("One more question.")
+          expect(requests).toHaveLength(4)
+          expect(requests[1]).toContain(note)
+          expect(requests[2]).toContain(note)
           expect(requests[3]).not.toContain(note)
         } else {
           expect(requests).toHaveLength(4)
