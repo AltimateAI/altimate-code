@@ -1215,8 +1215,14 @@ export function Prompt(props: PromptProps) {
       const accepted = acceptSubmissionModel({
         model: selection.model,
         source: submissionModelSource({ command, commandAgent, currentSource: local.model.source() }),
+        pickerCanOverride: command?.model === undefined && !commandAgent?.model,
         validate: (model, source) => local.model.validate(model, source),
         openPicker: () => {
+          // Readiness is unknown while kv hydrates; retry once it settles instead of guessing.
+          if (readyPending()) {
+            deferredSubmit.defer()
+            return
+          }
           if (ready()) {
             dialog.replace(() => <DialogModel />)
             return

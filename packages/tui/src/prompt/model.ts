@@ -85,11 +85,13 @@ export function isServerReportedModelError(error: unknown): boolean {
 export function acceptSubmissionModel<Model>(input: {
   model: Model | undefined
   source?: string
+  // A command or command-agent model outranks the chat model, so a pick cannot replace it.
+  pickerCanOverride: boolean
   validate: (model: Model, source?: string) => boolean
   openPicker: () => void
 }) {
   if (input.model === undefined || input.validate(input.model, input.source)) return true
-  input.openPicker()
+  if (input.pickerCanOverride) input.openPicker()
   return false
 }
 

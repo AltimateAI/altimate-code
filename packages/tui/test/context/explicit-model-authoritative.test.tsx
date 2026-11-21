@@ -314,17 +314,19 @@ for (const scenario of [
         )
         expect(mounted.toast.currentToast?.message).toContain("/models")
         expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
-        if (!scenario.expected.providerID && !scenario.expected.modelID)
+        if (!scenario.expected.providerID && !scenario.expected.modelID && (scenario.args as { model?: string }).model === undefined)
           expect(mounted.toast.currentToast?.message).toContain("check that the variable is set")
         const args = scenario.args as { model?: string; configModel?: string; agentModel?: unknown }
         expect(mounted.toast.currentToast?.message).toContain(
           args.model !== undefined
             ? "(from CLI --model)"
             : args.agentModel
-              ? 'config (model))'
+              ? '(from agent "build" config (model))'
               : "(from project or global config (model))",
         )
-        expect(mounted.toast.currentToast?.message).toContain("does not change your config")
+        // Only config-backed sources say a pick leaves the config unchanged.
+        if (args.model === undefined) expect(mounted.toast.currentToast?.message).toContain("does not change your config")
+        else expect(mounted.toast.currentToast?.message).not.toContain("does not change your config")
         mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
         expect(mounted.local.model.validate()).toBe(true)
         expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })

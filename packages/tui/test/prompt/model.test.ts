@@ -165,11 +165,12 @@ test("a server-reported model rejection is not toasted a second time", () => {
 })
 
 test("an unavailable configured model shows the error with its source and opens the picker", () => {
-  const run = (valid: boolean) => {
+  const run = (valid: boolean, canOverride = true) => {
     const calls = { validated: [] as [string, string | undefined][], picker: 0 }
     const accepted = acceptSubmissionModel({
       model: "missing/model",
       source: "project or global config (model)",
+      pickerCanOverride: canOverride,
       validate: (model, source) => {
         calls.validated.push([model, source])
         return valid
@@ -188,7 +189,15 @@ test("an unavailable configured model shows the error with its source and opens 
     validated: [["missing/model", "project or global config (model)"]],
     picker: 0,
   })
-  expect(acceptSubmissionModel({ model: undefined, validate: () => false, openPicker: () => {} })).toBe(true)
+  // A command or command-agent model cannot be replaced by a pick, so no picker opens for it.
+  expect(run(false, false)).toEqual({
+    accepted: false,
+    validated: [["missing/model", "project or global config (model)"]],
+    picker: 0,
+  })
+  expect(
+    acceptSubmissionModel({ model: undefined, pickerCanOverride: true, validate: () => false, openPicker: () => {} }),
+  ).toBe(true)
 })
 
 test("each submission model source is named for the error and picker trigger", () => {
