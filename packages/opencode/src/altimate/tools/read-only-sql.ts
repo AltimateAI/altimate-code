@@ -1,4 +1,4 @@
-import { classifyAndCheck, isSingleQuery } from "./sql-classify"
+import { classifyAndCheck, explainWrite, isSingleQuery } from "./sql-classify"
 import { maskSql, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls } from "./sql-functions"
 import { hasSideEffectFunction } from "./sql-function-policy"
@@ -57,9 +57,16 @@ export function readSql(sql: string, dialect?: string): string {
     /\bREPLACE\b(?!\s*\()/i.test(body)
   ) {
     throw new Error(
-      "This operation only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data.",
+      "This operation only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data." +
+        writeReason(sql, dialect),
     )
   }
   const semicolon = checked.masked.indexOf(";")
   return semicolon < 0 ? sql : sql.slice(0, semicolon) + sql.slice(semicolon + 1)
+}
+
+/** Why the classifier reads sql as a write, as a sentence to append to a refusal; empty for a read. */
+export function writeReason(sql: string, dialect?: string): string {
+  const { queryType, blocked } = classifyAndCheck(sql, dialect)
+  return queryType === "write" && !blocked ? ` It counts as a write because ${explainWrite(sql, dialect).reason}.` : ""
 }

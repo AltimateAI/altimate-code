@@ -7,6 +7,7 @@ import * as WorkspaceClient from "../workspace/client"
 import { which, versionOf } from "../workspace/engine-probes"
 import { clearsFloor, engineEntry, ENGINE_BINARY } from "../workspace/engine-types"
 import { classifyAndCheck } from "../tools/sql-classify"
+import { writeReason } from "../tools/read-only-sql"
 
 // Deliberately closed: adding a new engine capability requires classifying it.
 const METADATA_READS = new Set([
@@ -38,7 +39,7 @@ export function checkEngineRead(name: string, args: Record<string, unknown>) {
   for (const query of queries) {
     const result = classifyAndCheck(query, dialect)
     if (result.parseError || result.blocked || result.queryType !== "read") {
-      throw new Error("Workspace SQL must be read-only. Use Altimate Code directly for writes.")
+      throw new Error("Workspace SQL must be read-only. Use Altimate Code directly for writes." + writeReason(query, dialect))
     }
   }
 }

@@ -88,7 +88,9 @@ function hasQueryWriteClause(sql: string, dialect?: string): boolean {
   let masked = maskSql(tokenizeSql(sql, dialect).tokens)
   // UNPIVOT's INTO NAME labels output columns; it does not create a table.
   if (dialect?.toLowerCase() === "duckdb") masked = maskUnpivotLabels(masked)
-  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked)
+  // A name qualified by a table or alias (t.update, s.delete) is a column, not a clause. The lookbehind
+  // runs only where a keyword matched, so long masked literals are not rescanned at every position.
+  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<![\w$]\s*\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
 }
 
 const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*)$/i
@@ -521,6 +523,95 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
   }
 }
 
+// Shell syntax pasted into a query out of terminal habit. A redirect to a descriptor or /dev/null
+// (`2>/dev/null`, `2>&1`) can sit anywhere, even before LIMIT; a pipe into a shell command (`| head -20`)
+// or a redirect into a file (`> out.csv`) only ends the text. A file target needs a / or an extension,
+// so a comparison such as `x > 2` never matches.
+const SHELL_REDIRECT = /\s(?:[12]|&)?>>?\s*(?:&[12]|\/dev\/null)(?![\w/])/g
+const SHELL_TAIL =
+  /(?:\s*\|\s*(?:head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|\n]*|\s*(?:[12]|&)?>>?\s*[\w~.-]*[/.][\w./~-]+)+\s*;?\s*$/i
+
+/** The shell syntax in a query that is a read without it, or undefined. Only code counts (literals and
+ * comments are masked). The query is never rewritten: the caller names the residue so the sender removes
+ * it, since running the query without it would run SQL other than what was sent. */
+export function shellResidue(sql: string, dialect?: string): string | undefined {
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) return undefined
+  // Masking keeps every offset, so a match in the masked text cuts the same span of the original.
+  const masked = maskSql(lexical.tokens)
+  const cuts = [...masked.matchAll(SHELL_REDIRECT)].map((match) => [match.index!, match.index! + match[0].length])
+  // Only the tail can hold a pipe or file redirect; bounding it keeps the scan cheap on large queries.
+  const offset = Math.max(0, masked.length - 400)
+  const tail = SHELL_TAIL.exec(masked.slice(offset))
+  if (tail) cuts.push([offset + tail.index, masked.length])
+  if (!cuts.length) return undefined
+  cuts.sort((a, b) => a[0] - b[0])
+  const fragments: string[] = []
+  let query = ""
+  let position = 0
+  for (const [start, end] of cuts) {
+    if (end <= position) continue
+    const from = Math.max(start, position)
+    query += sql.slice(position, from) + " "
+    fragments.push(sql.slice(from, end).trim())
+    position = end
+  }
+  query += sql.slice(position)
+  if (!query.trim()) return undefined
+  const result = classifyAndCheck(query, dialect)
+  return result.queryType === "read" && !result.blocked ? fragments.filter(Boolean).join("`, `") : undefined
+}
+
+function snippet(statement: string): string {
+  const flat = statement.replace(/\s+/g, " ").trim()
+  return flat.length > 80 ? `${flat.slice(0, 77)}...` : flat
+}
+
+/**
+ * Why classifyAndCheck treats this SQL as a write, in words an agent can act on: shell residue to
+ * remove, the parser error and its position, or the first statement that is not a read. `unreadable`
+ * is true when the SQL could not be read at all (fix the text), false when a statement writes.
+ */
+export function explainWrite(sql: string, dialect?: string): { reason: string; unreadable: boolean } {
+  const unreadable = (reason: string) => ({ reason, unreadable: true })
+  const writes = (reason: string) => ({ reason, unreadable: false })
+  const residue = shellResidue(sql, dialect)
+  if (residue) return unreadable(`it contains shell syntax (\`${residue}\`), which is not SQL. Remove it and send only the SQL`)
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) {
+    return unreadable(
+      "it has unterminated quoted text or comments, so it cannot be proven read-only. Check that every quote and comment " +
+      "is closed; inside a string literal, write a single quote as ''"
+    )
+  }
+  const statements = statementsOf(sql, dialect)
+  for (const [index, statement] of statements.entries()) {
+    const result = classifySql(statement, dialect, 0)
+    if (result.queryType === "read" && !result.blocked) continue
+    const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length} (${snippet(statement)})` : "it"
+    if (result.parseError) {
+      return unreadable(
+        `the SQL parser could not read ${where} (${result.parseError}), so it cannot be proven read-only. ` +
+        'Fix the syntax at that position: quote identifiers that contain spaces or are keywords ("order date"), ' +
+        "check the clause order, and replace any placeholder text such as ..."
+      )
+    }
+    let type: string | undefined
+    try {
+      type = getStatementTypes?.(parserSql(statement, dialect), dialect)?.statements?.[0]?.statement_type
+    } catch {
+      type = undefined
+    }
+    if (type && !/^(SELECT|QUERY)$/i.test(type)) return writes(`${where} is not a read (${type.toUpperCase()})`)
+    if (hasQueryWriteClause(statement, dialect)) {
+      return writes(`${where} contains a write clause (SELECT ... INTO, or INSERT/UPDATE/DELETE/MERGE inside a CTE)`)
+    }
+    if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
+    return writes(`${where} could not be proven read-only`)
+  }
+  return writes("the statements together could not be proven read-only")
+}
+
 // MongoDB commands are JSON, not SQL: the SQL classifier reads every one as a write, which denied
 // 52 of 52 Mongo reads for a read-only agent in one evaluation run. Classify them by command.
 const MONGO_READ_COMMANDS = new Set([
@@ -593,8 +684,13 @@ function hasLocalScratchTarget(statement: string): boolean {
     "i",
   ).exec(statement)
   if (!target) return false
-  const names = target[1].match(new RegExp(identifier, "g"))!
-  if (names.length > 2 || (names.length === 2 && names[0].replace(/^"|"$/g, "").toLowerCase() !== "main")) return false
+  const names = target[1].match(new RegExp(identifier, "g"))!.map((name) => name.replace(/^"|"$/g, "").toLowerCase())
+  // The scratch database's own catalog is named scratch: scratch.t and scratch.main.t are local too.
+  const local =
+    names.length === 1 ||
+    (names.length === 2 && (names[0] === "main" || names[0] === "scratch")) ||
+    (names.length === 3 && names[0] === "scratch" && names[1] === "main")
+  if (!local) return false
   // A DROP statement can name more than one table, unlike the other forms.
   return !/^\s*DROP\b/i.test(statement) || !statement.slice(target[0].length).includes(",")
 }

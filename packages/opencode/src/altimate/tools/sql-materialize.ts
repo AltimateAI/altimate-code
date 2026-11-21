@@ -8,6 +8,7 @@ import * as Registry from "../native/connections/registry"
 import { SCRATCH_NAME, withScratchConnection, isScratch } from "../native/connections/scratch"
 import { classifyAndCheck, classifyMongoCommand } from "./sql-classify"
 import { readSql } from "./sql-check"
+import { writeReason } from "./read-only-sql"
 import { lintSqlResult } from "./sql-result-lint"
 import * as Precedence from "../workspace/precedence"
 import { executeQuery, type QueryContext } from "../native/query-execution"
@@ -218,7 +219,8 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
   } catch {
     throw new MaterializeError(
       "sql_materialize only reads from the source warehouse: use a single read-only SELECT (or WITH ... SELECT), " +
-        "without modifying CTEs, SELECT INTO or side-effect functions. Its only write target is the scratch database.",
+        "without modifying CTEs, SELECT INTO or side-effect functions. Its only write target is the scratch database." +
+        writeReason(sql, Registry.canonicalType(type) ?? undefined),
     )
   }
 }

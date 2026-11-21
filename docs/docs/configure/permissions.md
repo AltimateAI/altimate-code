@@ -251,6 +251,12 @@ When prompted, you have three choices:
 
 "Allow always" approvals persist for your current session only. They reset when you restart Altimate Code.
 
+### How SQL is classified for `sql_execute_write`
+
+`sql_execute` parses each query and asks for `sql_execute_write` only when a statement is not a read. Comments, string literals and column names that contain words like `update` or `delete` do not count. SQL the parser cannot read is treated as a write, so it is never run without write permission.
+
+When an agent's `sql_execute_write` is `"deny"`, the tool error tells the agent why the query counted as a write and what to change: the statement that writes, the parser error and its position, or trailing shell syntax such as `2>/dev/null` to remove.
+
 ## Tips
 
 - **Start with `"ask"` and relax as you build confidence.** You can always approve patterns with "Allow always" during a session.

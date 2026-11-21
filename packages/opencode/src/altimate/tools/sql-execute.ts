@@ -13,6 +13,7 @@ import {
   classifyAndCheck,
   classifyMongoCommand,
   computeSqlFingerprint,
+  explainWrite,
   isScratchSafeWrite,
   mentionsHardDenyAnywhere,
 } from "./sql-classify"
@@ -25,6 +26,8 @@ function isMongoWarehouse(name: string | undefined): boolean {
   return MONGO_WAREHOUSE_TYPES.has(type)
 }
 import { Telemetry } from "../telemetry"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { PermissionNext } from "../../permission/next"
 // altimate_change end
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
@@ -274,17 +277,24 @@ export const SqlExecuteTool = Tool.define(
             // the hard-deny list above still applies.
             if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(sql))) {
               // Unprovable SQL still goes through write approval; the prompt carries the parse error.
-              await ctx.ask({
-                permission: "sql_execute_write",
-                patterns: [sql.slice(0, 200)],
-                always: ["*"],
-                metadata: {
-                  queryType,
-                  warehouse: args.warehouse || target?.warehouse,
-                  hardDenyChecked: true,
-                  ...(parseError && { parseError }),
-                },
-              })
+              // altimate_change start — a denied write says why and how to proceed, instead of a rule dump
+              try {
+                await ctx.ask({
+                  permission: "sql_execute_write",
+                  patterns: [sql.slice(0, 200)],
+                  always: ["*"],
+                  metadata: {
+                    queryType,
+                    warehouse: args.warehouse || target?.warehouse,
+                    hardDenyChecked: true,
+                    ...(parseError && { parseError }),
+                  },
+                })
+              } catch (error) {
+                if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
+                throw new Error(deniedWriteMessage({ sql, dialects, jinja, mongo: mongo !== null, scratch: isScratch(args.warehouse) }))
+              }
+              // altimate_change end
             }
             // altimate_change end
 
@@ -720,6 +730,34 @@ function classifyEvery(sql: string, dialects: (string | undefined)[]) {
     ...(parseError && { parseError }),
   }
 }
+
+// altimate_change start — a denied write says why and how to proceed
+/** The error a read-only agent gets when its query counts as a write: the reason, then what to do next,
+ * so the agent fixes the query instead of resending it. */
+function deniedWriteMessage(input: {
+  sql: string
+  dialects: (string | undefined)[]
+  jinja: boolean
+  mongo: boolean
+  scratch: boolean
+}): string {
+  const head = "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
+  if (input.jinja) {
+    return `${head} it contains Jinja ({{ }}, {% %} or {# #}), which dbt renders and runs before the SQL. Send plain SQL without Jinja.`
+  }
+  if (input.mongo) {
+    return `${head} it is a MongoDB write (a write command, or an aggregate with a $out or $merge stage). Use a read command (find, aggregate, countDocuments, distinct) instead.`
+  }
+  const dialect = input.dialects.find((d) => classifyAndCheck(input.sql, d).queryType === "write")
+  const { reason, unreadable } = explainWrite(input.sql, dialect)
+  const next = unreadable
+    ? "Fix the query and call sql_execute again; the same text will be refused again."
+    : input.scratch
+      ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission; send reads in their own call."
+      : "Rewrite it as a single read (SELECT, or WITH ... SELECT). To keep an intermediate result, store it in scratch with sql_materialize if that tool is available."
+  return `${head} ${reason}. ${next}`
+}
+// altimate_change end
 
 /** Dialects whose string literals treat a backslash as an escape character. */
 const BACKSLASH_ESCAPE_TYPES = new Set(["mysql", "bigquery", "snowflake", "databricks", "clickhouse", "redshift"])
