@@ -1369,6 +1369,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
             // altimate_change start — idle gaps are not active work; continuations retain the same start time
             workActive = false
+            accounting.onIdle()
             // altimate_change end
             break
           }

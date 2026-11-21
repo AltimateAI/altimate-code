@@ -36,6 +36,8 @@ describe("RunAccounting turn accounting", () => {
     // Attempt 1 started and its stream broke, so it wrote no step-finish. The
     // retry's start is checked against completed steps only, so a one-turn
     // budget still lets it run.
+    acc.onStepAttempt("msg_1")
+    acc.onStepAttempt("msg_1")
     expect(acc.turnCount).toBe(0)
     expect(acc.turnBudgetReached(1)).toBe(false)
     acc.onStepFinish("msg_1", "stop")
@@ -47,6 +49,7 @@ describe("RunAccounting turn accounting", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
     // Every attempt the processor allows failed before finishing.
+    for (let i = 0; i < 6; i++) acc.onStepAttempt("msg_1")
     acc.onSessionError("APIError", "upstream stream reset")
     expect(acc.turnCount).toBe(0)
     expect(acc.turnBudgetReached(1)).toBe(false)
@@ -85,6 +88,15 @@ describe("RunAccounting turn accounting", () => {
     acc.onStepAttempt("msg_1") // interrupted, never finishes
     acc.onStepAttempt("msg_compact")
     acc.onSessionError("ContextOverflowError", "summary too long")
+    expect(acc.turnCount).toBe(0)
+  })
+
+  test("after the session goes idle, a later pre-step overflow is not charged to an interrupted step", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1") // soft-deadline interrupt: no step-finish
+    acc.onIdle()
+    acc.onSessionError("ContextOverflowError", "too long")
     expect(acc.turnCount).toBe(0)
   })
 

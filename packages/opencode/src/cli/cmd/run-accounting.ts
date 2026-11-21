@@ -188,6 +188,10 @@ export function create() {
     onStepAttempt(messageID: string) {
       openAttempt = !isCompactionStep(messageID)
     },
+    /** The session went idle: no step is streaming any more. */
+    onIdle() {
+      openAttempt = false
+    },
     /** Completed non-compaction assistant steps. */
     get turnCount() {
       return turnCount
