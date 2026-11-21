@@ -113,7 +113,8 @@ describe("cli.error", () => {
   test("config-file advice follows the model source", () => {
     const format = (source?: string) =>
       FormatError({ name: "ProviderModelNotFoundError", data: { providerID: "p", modelID: "m", suggestions: [], source } })
-    expect(format("CLI --model")).not.toContain("altimate-code.json")
+    for (const source of ["CLI --model", "request (model)", 'subtask "plan" request (model)', "session history"])
+      expect(format(source)).not.toContain("altimate-code.json")
     expect(format('agent "build" config (model)')).toContain("altimate-code.json")
     expect(format()).toContain("altimate-code.json")
   })
