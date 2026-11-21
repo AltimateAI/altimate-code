@@ -933,7 +933,7 @@ export const SessionRoutes = lazy(() =>
       ),
       validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
       async (c) => {
-        // altimate_change start — an unavailable model returns 400; other failures keep the empty 200 reply
+        // altimate_change start — request errors keep their status; failures during the turn keep the empty 200 reply
         const sessionID = c.req.valid("param").sessionID
         const body = c.req.valid("json")
         // Bind the client's trace to this turn's user message.
@@ -951,7 +951,15 @@ export const SessionRoutes = lazy(() =>
           () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
         ).catch((error) => {
           TraceContext.release(sessionID, [messageID])
-          if (Provider.ModelNotFoundError.isInstance(error)) throw error
+          // Request errors keep their status (unavailable model, missing or busy session); a failure while
+          // the turn runs keeps main's empty 200 and reaches the client through the session error event.
+          if (
+            Provider.ModelNotFoundError.isInstance(error) ||
+            error instanceof StorageNotFoundError ||
+            error instanceof Session.BusyError ||
+            (error instanceof Error && error.name === "NotFoundError")
+          )
+            throw error
           log.error("prompt failed", { sessionID, error })
           return undefined
         })

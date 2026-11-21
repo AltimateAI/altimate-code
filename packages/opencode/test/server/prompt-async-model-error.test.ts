@@ -15,6 +15,7 @@ import { ModelMetadata } from "../../src/altimate/session/model-metadata"
 import { TraceContext } from "../../src/altimate/observability/trace-context"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { TestInstance } from "../fixture/fixture"
+import { NotFoundError as StorageNotFoundError } from "../../src/storage/db"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, Project.defaultLayer, CrossSpawnSpawner.defaultLayer))
@@ -116,6 +117,16 @@ describe("prompt_async model errors", () => {
     () =>
       Effect.gen(function* () {
         expect(yield* syncStatus(new Error("compaction failed"))).toBe(200)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
+    "the synchronous route keeps 404 for a missing session",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* syncStatus(new StorageNotFoundError({ message: "Session not found" }))).toBe(404)
       }),
     { git: true },
     30_000,
