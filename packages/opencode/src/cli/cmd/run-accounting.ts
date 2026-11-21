@@ -101,9 +101,9 @@ export type TurnBudgetStop = "completed" | "attempts"
 
 /** The user-facing reason a `--max-turns` budget stopped the run. */
 export function turnBudgetMessage(maxTurns: number, stop: TurnBudgetStop): string {
-  const limit = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
-  if (stop === "completed") return limit
-  return `${limit} (${maxTurns * ATTEMPTS_PER_TURN} step attempts started without enough of them completing)`
+  const turns = `${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""}`
+  if (stop === "completed") return `Budget exceeded: reached ${turns} limit`
+  return `Budget exceeded: ${maxTurns * ATTEMPTS_PER_TURN} step attempts started under the ${turns} limit without enough of them completing`
 }
 // altimate_change end
 

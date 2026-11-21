@@ -36,7 +36,10 @@ describe("RunAccounting turn accounting", () => {
     // Attempt 1 started and its stream broke, so it wrote no step-finish. The
     // retry's start is checked against completed steps only, so a one-turn
     // budget still lets it run.
+    acc.onStepAttempt("msg_1")
     expect(acc.turnCount).toBe(0)
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    acc.onStepAttempt("msg_1")
     expect(acc.turnBudgetReached(1)).toBe(false)
     acc.onStepFinish("msg_1", "stop")
     expect(acc.turnCount).toBe(1)
@@ -47,9 +50,13 @@ describe("RunAccounting turn accounting", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
     // Every attempt the processor allows failed before finishing.
+    for (let i = 0; i < RunAccounting.ATTEMPTS_PER_TURN; i++) acc.onStepAttempt("msg_1")
     acc.onSessionError("APIError", "upstream stream reset")
     expect(acc.turnCount).toBe(0)
-    expect(acc.turnBudgetReached(1)).toBe(false)
+    // No turn was charged. The processor makes no seventh attempt; if anything
+    // did start another step, the attempt backstop would stop it.
+    expect(acc.turnBudgetStop(1)).toBe("attempts")
+    expect(acc.turnBudgetStop(2)).toBeUndefined()
     expect(acc.fatal).toBe(true)
     expect(acc.termination().why_harness_stopped).toBe("error")
   })
@@ -90,7 +97,7 @@ describe("RunAccounting turn accounting", () => {
     expect(RunAccounting.turnBudgetMessage(3, "completed")).toBe("Budget exceeded: reached 3 assistant turns limit")
     expect(RunAccounting.turnBudgetMessage(1, "completed")).toBe("Budget exceeded: reached 1 assistant turn limit")
     expect(RunAccounting.turnBudgetMessage(1, "attempts")).toBe(
-      `Budget exceeded: reached 1 assistant turn limit (${RunAccounting.ATTEMPTS_PER_TURN} step attempts started without enough of them completing)`,
+      `Budget exceeded: ${RunAccounting.ATTEMPTS_PER_TURN} step attempts started under the 1 assistant turn limit without enough of them completing`,
     )
   })
 
