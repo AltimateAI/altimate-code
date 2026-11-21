@@ -1,5 +1,5 @@
 // altimate_change start — resolve the model used by a submission
-import { isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../prompt/model"
+import { captureDraftRevision, isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../prompt/model"
 // altimate_change end
 import {
   BoxRenderable,
@@ -1129,6 +1129,11 @@ export function Prompt(props: PromptProps) {
     // creation; preserve the draft so choosing an available model is enough to retry.
     const currentMode = store.mode
     const draftText = store.prompt.input
+    const draftChanged = captureDraftRevision(() => ({
+      input: input.isDestroyed ? store.prompt.input : input.plainText,
+      mode: store.mode,
+      parts: unwrap(store.prompt.parts),
+    }))
     const promptText = expandTrackedPastedText(
       draftText,
       input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
@@ -1244,6 +1249,12 @@ export function Prompt(props: PromptProps) {
       const directory = await move.getDirectory(store.prompt.input)
       if (move.pending() && !directory) return false
       finishMoveProgress = Boolean(move.progress())
+      // altimate_change start — keep edits made while selecting a workspace
+      if (draftChanged() || input.isDestroyed) {
+        if (finishMoveProgress) move.finishSubmit()
+        return false
+      }
+      // altimate_change end
 
       const res = await sdk.client.session.create({
         directory,
@@ -1280,6 +1291,28 @@ export function Prompt(props: PromptProps) {
       // altimate_change end
     }
 
+    // altimate_change start — retain newer edits across session creation and prompt enhancement
+    const openCreatedSession = () => {
+      batch(() => {
+        local.model.adoptSession(sessionID)
+        route.navigate({ type: "session", sessionID })
+      })
+    }
+    const keepEditedDraft = () => {
+      if (finishMoveProgress) move.finishSubmit()
+      // A newly created session can hold the live draft; the prompt stash carries it across navigation.
+      if (!input.isDestroyed && !props.sessionID && route.data.type === "home") {
+        if (input.plainText !== store.prompt.input) {
+          setStore("prompt", "input", input.plainText)
+          syncExtmarksWithPromptParts()
+        }
+        openCreatedSession()
+      }
+      return false
+    }
+    if (draftChanged() || input.isDestroyed) return keepEditedDraft()
+    // altimate_change end
+
     // altimate_change start — restore auto-enhance-before-submit for normal prompts
     let inputText = promptText
 
@@ -1292,10 +1325,8 @@ export function Prompt(props: PromptProps) {
       const original = inputText
       toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
       const enhanced = await requestAutoEnhancedPrompt(sdk, original)
-      if (store.prompt.input !== draftText) {
-        // A changed draft was not the text validated above; retain it for a new submit.
-        return false
-      } else if (enhanced !== original) {
+      if (draftChanged() || input.isDestroyed) return keepEditedDraft()
+      if (enhanced !== original) {
         inputText = enhanced
         setStore("prompt", "input", enhanced)
       }
@@ -1405,12 +1436,7 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) {
       if (editorParts.length > 0) editor.preserveSelectionFromNewSession()
       // altimate_change start — carry home picker recovery into metadata-only sessions
-      setTimeout(() => {
-        batch(() => {
-          local.model.adoptSession(sessionID)
-          route.navigate({ type: "session", sessionID })
-        })
-      }, 50)
+      setTimeout(openCreatedSession, 50)
       // altimate_change end
     }
     input.clear()

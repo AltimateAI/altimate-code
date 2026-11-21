@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { captureDraftRevision } from "../../../src/prompt/model"
 
 // Regression test for the prompt submit race in
 // packages/tui/src/component/prompt/index.tsx (`submit`).
@@ -56,8 +57,10 @@ function createSubmit() {
     submitting = true
     try {
       if (!h.store.input) return false
-      const sessionID = await h.createSession()
       const inputText = h.store.input
+      const draftChanged = captureDraftRevision(() => ({ input: h.store.input, mode: "normal", parts: [] }))
+      const sessionID = await h.createSession()
+      if (draftChanged()) return false
       await h.sendPrompt(sessionID, inputText)
       h.store.input = ""
       return true
@@ -80,6 +83,19 @@ describe("Prompt.submit race", () => {
     // text, and no submission may have an empty text payload.
     expect(h.submissions.every((s) => s.text === "Hello there.")).toBe(true)
     expect(h.submissions.some((s) => s.text === "")).toBe(false)
+  })
+
+  test("an edit during session creation stays in the draft", async () => {
+    const submit = createSubmit()
+    const h = createHarness({ sessionCreateDelayMs: 5 })
+    h.store.input = "Original draft"
+
+    const pending = submit(h)
+    h.store.input = "Edited draft"
+
+    expect(await pending).toBe(false)
+    expect(h.submissions).toHaveLength(0)
+    expect(h.store.input).toBe("Edited draft")
   })
 
   test("a sequential second submit after clear is a no-op, not a phantom session", async () => {

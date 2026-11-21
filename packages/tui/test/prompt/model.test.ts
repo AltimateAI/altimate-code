@@ -1,6 +1,6 @@
 import { expandTrackedPastedText } from "../../src/prompt/part"
 import { expect, test } from "bun:test"
-import { isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../src/prompt/model"
+import { captureDraftRevision, isModelMetadataOnly, resolveCommandAgent, submissionModel } from "../../src/prompt/model"
 
 const current = { providerID: "local", modelID: "chat" }
 const commandAgentModel = { providerID: "local", modelID: "agent" }
@@ -66,4 +66,19 @@ test("command agent resolution prefers exact build, then the builder compatibili
   expect(resolveCommandAgent([builder], "missing")).toBeUndefined()
   expect(submissionModel({ shell: false, text: "/task", command: { name: "task" }, commandAgentModel: resolveCommandAgent([builder], "build")?.model, current }))
     .toEqual({ required: true, model: builder.model })
+})
+
+
+test("a later submit stage detects edits to text, mode, and attachments", () => {
+  const draft = { input: "/report", mode: "normal", parts: [{ type: "file", url: "file:///first" }] }
+  const changed = captureDraftRevision(() => draft)
+  expect(changed()).toBe(false)
+  draft.input = "/another"
+  expect(changed()).toBe(true)
+  draft.input = "/report"
+  draft.mode = "shell"
+  expect(changed()).toBe(true)
+  draft.mode = "normal"
+  draft.parts[0].url = "file:///updated"
+  expect(changed()).toBe(true)
 })

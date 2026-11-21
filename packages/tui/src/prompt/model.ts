@@ -37,3 +37,8 @@ export function resolveCommandAgent<T extends { name: string }>(agents: readonly
   return agents.find((agent) => agent.name === name) ??
     (name === "build" ? agents.find((agent) => agent.name === "builder") : undefined)
 }
+
+export function captureDraftRevision(readDraft: () => { input: string; mode: string; parts: readonly unknown[] }) {
+  const initial = JSON.stringify(readDraft())
+  return () => JSON.stringify(readDraft()) !== initial
+}
