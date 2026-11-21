@@ -162,3 +162,11 @@ it.effect("cancellation during the model lookup binds no trace and starts no chi
     expect(traced).toBe(0)
   }),
 )
+
+it.effect("an available subagent model binds the child trace once before the child prompt runs", () =>
+  Effect.gen(function* () {
+    const { prompted, traced } = yield* runTask({ abort: new AbortController().signal, onLookup: () => ({}) })
+    expect(traced).toBe(1)
+    expect(prompted).toBe(true)
+  }),
+)
