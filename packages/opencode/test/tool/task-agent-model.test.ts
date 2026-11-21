@@ -13,7 +13,7 @@ import { initTool } from "../altimate/tool-fixture"
 import { TraceContext } from "../../src/altimate/observability/trace-context"
 import { it } from "../lib/effect"
 
-const runTask = (input: { background?: boolean; abort: AbortSignal }) =>
+const runTask = (input: { background?: boolean; abort: AbortSignal; onLookup?: () => unknown }) =>
   Effect.gen(function* () {
     const parentID = SessionID.make("ses_agent_model_parent")
     const childID = SessionID.make("ses_agent_model_child")
@@ -50,6 +50,7 @@ const runTask = (input: { background?: boolean; abort: AbortSignal }) =>
       ),
       spyOn(Provider, "getModel").mockImplementation((async (providerID: string, modelID: string) => {
         lookedUp = true
+        if (input.onLookup) return input.onLookup()
         throw new Provider.ModelNotFoundError({
           providerID: ProviderID.make(providerID),
           modelID: ModelID.make(modelID),
@@ -141,5 +142,23 @@ it.effect("a cancelled parent turn reports the cancellation, not the subagent mo
     expect(String(error)).not.toContain("Model not found")
     expect(lookedUp).toBe(false)
     expect(published).toHaveLength(0)
+  }),
+)
+
+it.effect("cancellation during the model lookup binds no trace and starts no child prompt", () =>
+  Effect.gen(function* () {
+    const controller = new AbortController()
+    const { error, prompted, traced } = yield* runTask({
+      abort: controller.signal,
+      // The lookup succeeds, but the parent turn is cancelled while it runs.
+      onLookup: () => {
+        controller.abort()
+        return {}
+      },
+    })
+    expect(error).toBeDefined()
+    expect(String(error)).not.toContain("Model not found")
+    expect(prompted).toBe(false)
+    expect(traced).toBe(0)
   }),
 )

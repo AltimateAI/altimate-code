@@ -470,6 +470,8 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           if (Provider.ModelNotFoundError.isInstance(error)) throw new Error(modelSelectionErrorText(error.data))
           throw error
         })
+      // The lookup awaits, so cancellation may have arrived meanwhile.
+      ctx.abort.throwIfAborted()
       // altimate_change end
       // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
       // parent assistant message's user message); none when that turn is untraced; bound only once the child prompt will run
