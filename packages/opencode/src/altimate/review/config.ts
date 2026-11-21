@@ -50,6 +50,12 @@ export const ReviewConfig = z.object({
   consumerColumnLists: z
     .array(z.object({ files: z.string(), pattern: z.string(), model: z.string().optional() }))
     .default([]),
+  /**
+   * Opt-in: vars that select the slice one incremental run processes (e.g.
+   * `tenant`, `region`). A `delete+insert`/`merge` model filtered by one of
+   * them must include the filtered column in `unique_key`.
+   */
+  incrementalSliceVars: z.array(z.string()).default([]),
   /** Allow `--force-tier` (a debug bypass of the risk classifier). Set false
    *  in gate CI so a run cannot skip checks by forcing a lower tier. */
   allowForceTier: z.boolean().default(true),
