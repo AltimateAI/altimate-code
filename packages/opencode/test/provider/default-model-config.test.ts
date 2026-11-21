@@ -1,13 +1,12 @@
 // altimate_change - new file
 import { afterEach, expect } from "bun:test"
-import { Cause, Effect, Exit, Layer } from "effect"
-import { Env } from "../../src/env"
+import { Cause, Effect, Exit } from "effect"
 import { Provider } from "@/provider/provider"
 import { ProviderID } from "@/provider/schema"
 import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
-const it = testEffect(Layer.mergeAll(Provider.defaultLayer, Env.defaultLayer))
+const it = testEffect(Provider.defaultLayer)
 
 afterEach(async () => {
   await disposeAllInstances()

@@ -10,6 +10,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { initTool } from "../altimate/tool-fixture"
+import { TraceContext } from "../../src/altimate/observability/trace-context"
 import { it } from "../lib/effect"
 
 const runTask = (input: { background?: boolean; abort: AbortSignal }) =>
@@ -26,9 +27,13 @@ const runTask = (input: { background?: boolean; abort: AbortSignal }) =>
     } as unknown as Agent.Info
     let prompted = false
     let lookedUp = false
+    let traced = 0
     let created = false
     const published: unknown[][] = []
     const mocks = [
+      spyOn(TraceContext, "inherit").mockImplementation((() => {
+        traced++
+      }) as never),
       spyOn(Agent, "list").mockResolvedValue([agent]),
       spyOn(Agent, "get").mockResolvedValue(agent),
       spyOn(Config, "get").mockResolvedValue({}),
@@ -98,12 +103,14 @@ const runTask = (input: { background?: boolean; abort: AbortSignal }) =>
           (failure: unknown) => failure,
         ),
     )
-    return { error, created, prompted, lookedUp, published }
+    return { error, created, prompted, lookedUp, published, traced }
   })
 
 it.effect("an unavailable subagent model names that agent's config as its source", () =>
   Effect.gen(function* () {
-    const { error, created, prompted, published } = yield* runTask({ abort: new AbortController().signal })
+    const { error, created, prompted, published, traced } = yield* runTask({ abort: new AbortController().signal })
+    // A rejected model leaves no trace binding for a child prompt that never runs.
+    expect(traced).toBe(0)
     expect(String(error)).toContain(
       'Model not found: missing-provider/missing-model (from agent "explore" config (model))',
     )

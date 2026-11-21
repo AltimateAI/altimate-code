@@ -447,10 +447,6 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
       // altimate_change end
 
-      // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
-      // parent assistant message's user message); none when that turn is untraced
-      TraceContext.inherit(messageID, msg.info.parentID)
-      // altimate_change end
       const promptOps = ctx.extra?.promptOps as TaskPromptOps | undefined
 
       function cancel() {
@@ -474,6 +470,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           if (Provider.ModelNotFoundError.isInstance(error)) throw new Error(modelSelectionErrorText(error.data))
           throw error
         })
+      // altimate_change end
+      // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
+      // parent assistant message's user message); none when that turn is untraced; bound only once the child prompt will run
+      TraceContext.inherit(messageID, msg.info.parentID)
       // altimate_change end
       // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
       const run = async (): Promise<TaskResult> => {
