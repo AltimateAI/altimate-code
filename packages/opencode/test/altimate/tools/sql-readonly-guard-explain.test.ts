@@ -114,6 +114,13 @@ describe("other read-only refusals carry the reason", () => {
     )
   })
 
+  test("a closed executable comment is named, not treated as an open quote", () => {
+    const reason = explainWrite("SELECT 1 /*! + 1 */", "mysql").reason
+    expect(reason).toContain("executable comment")
+    expect(reason).not.toContain("unterminated")
+    expect(writeReason("SELECT 1 /*! + 1 */", "mysql")).not.toContain("Until that quoted text")
+  })
+
   test("a hard-blocked statement is named as such", () => {
     expect(writeReason("SELECT 1; DROP DATABASE prod", "postgres")).toContain("hard-blocked statement")
     // An unclosed quote holding a blocked word names the quote first.

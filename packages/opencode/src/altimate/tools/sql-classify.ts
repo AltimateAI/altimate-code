@@ -589,6 +589,8 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
 /** What to do when the SQL classifier itself is unavailable: no rewrite of the SQL can help. */
 export const UNAVAILABLE_NEXT_STEP = "Changing the SQL will not help; ask the user to check the installation."
 
+export const EXECUTABLE_COMMENT = /\/\*(?:!|[mM]!)/
+
 // Statement keywords that may name an UNKNOWN statement in a refusal.
 const STATEMENT_KEYWORDS = new Set([
   "ATTACH", "DETACH", "INSTALL", "LOAD", "SET", "RESET", "PRAGMA", "COPY", "CALL", "EXEC", "EXECUTE", "GRANT", "REVOKE",
@@ -623,6 +625,10 @@ export function explainWrite(
   if (residue) return unreadable(`it contains shell syntax (\`${residue}\`), which is not SQL. Remove it and send only the SQL`)
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
+    // An executable comment (/*! ... */) is closed but runs as SQL on some engines, so it is never read as one.
+    if (EXECUTABLE_COMMENT.test(sql)) {
+      return unreadable("it contains an executable comment (/*! ... */), which some engines run as SQL; remove it or use a plain comment")
+    }
     return unreadable(
       "it has unterminated or unsupported quoted text or comments, so it cannot be proven read-only. Check that every " +
       "quote and comment is closed; inside a string literal, write a single quote as ''"
