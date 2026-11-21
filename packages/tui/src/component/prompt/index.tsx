@@ -1462,8 +1462,9 @@ export function Prompt(props: PromptProps) {
           { throwOnError: true },
         )
         .catch((error) => {
-          // altimate_change — the session error event already carries the guided model message
+          // altimate_change start — the session error event already carries the guided model message
           if (isServerReportedModelError(error)) return
+          // altimate_change end
           toast.show({
             title: "Failed to send prompt",
             message: errorMessage(error),
