@@ -5,6 +5,7 @@ import {
   captureDraftRevision,
   catalogGate,
   isModelMetadataOnly,
+  invalidModelOpensPicker,
   isServerReportedModelError,
   resolveCommandAgent,
   submissionModel,
@@ -160,4 +161,10 @@ test("a server-reported model rejection is not toasted a second time", () => {
   expect(isServerReportedModelError(wrapClientError({ name: "UnknownError", data: { message: "boom" } }, new Response(null, { status: 500 }), undefined, { throwOnError: true })))
     .toBe(false)
   expect(isServerReportedModelError(undefined)).toBe(false)
+})
+
+test("an unavailable model opens the picker only for a user without a usable provider", () => {
+  expect(invalidModelOpensPicker({ ready: false, readyPending: false })).toBe(true)
+  expect(invalidModelOpensPicker({ ready: true, readyPending: false })).toBe(false)
+  expect(invalidModelOpensPicker({ ready: false, readyPending: true })).toBe(false)
 })

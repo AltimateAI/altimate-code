@@ -314,6 +314,8 @@ for (const scenario of [
         )
         expect(mounted.toast.currentToast?.message).toContain("/models")
         expect(mounted.toast.currentToast?.message).toContain("~/.config/altimate-code/")
+        if (!scenario.expected.providerID && !scenario.expected.modelID)
+          expect(mounted.toast.currentToast?.message).toContain("check that the variable is set")
         mounted.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" })
         expect(mounted.local.model.validate()).toBe(true)
         expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })

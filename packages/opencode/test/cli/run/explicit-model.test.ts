@@ -41,6 +41,7 @@ describe("run model resolution", () => {
             requested ? `Model not found: ${requested} (from ${sourceHint})` : `Empty model value (from ${sourceHint})`,
           )
           expect(result.stderr + result.stdout).toContain("at the project root")
+          if (!requested) expect(result.stderr + result.stdout).toContain("check that the variable is set")
         }),
       30_000,
     )

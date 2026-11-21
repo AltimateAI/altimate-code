@@ -375,7 +375,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
       const key = JSON.stringify([model.providerID, model.modelID])
       if (passive && reportedInvalidModel === key) return false
-      const message = `${!model.providerID && !model.modelID ? "Empty model value" : `Model ${model.providerID}/${model.modelID} is not available`}. Choose an available model with /models or correct --model. Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).`
+      const message = `${!model.providerID && !model.modelID ? 'Empty model value: the model key is set to "". If it references an environment variable, check that the variable is set, or remove the key' : `Model ${model.providerID}/${model.modelID} is not available`}. Choose an available model with /models or correct --model. Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).`
       reportedInvalidModel = key
       if (toast.currentToast?.message !== message) toast.show({ variant: "error", message, duration: 10000 })
       return false

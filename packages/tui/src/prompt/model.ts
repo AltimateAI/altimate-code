@@ -78,3 +78,8 @@ export function isServerReportedModelError(error: unknown): boolean {
   const cause = (error as { cause?: unknown }).cause
   return typeof cause === "object" && cause !== null && isServerReportedModelError((cause as { body?: unknown }).body)
 }
+
+// A user with no usable provider yet gets the model picker alongside the error, so one step recovers.
+export function invalidModelOpensPicker(input: { ready: boolean; readyPending: boolean }) {
+  return !input.ready && !input.readyPending
+}

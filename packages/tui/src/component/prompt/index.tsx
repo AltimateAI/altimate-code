@@ -4,6 +4,7 @@ import {
   catalogGate,
   deferredSubmitRevision,
   isModelMetadataOnly,
+  invalidModelOpensPicker,
   isServerReportedModelError,
   resolveCommandAgent,
   submissionModel,
@@ -1207,7 +1208,19 @@ export function Prompt(props: PromptProps) {
         deferredSubmit.defer()
         return false
       }
-      if (selection.model && !local.model.validate(selection.model)) return false
+      if (selection.model && !local.model.validate(selection.model)) {
+        // The draft stays; a first-time user also gets the picker so they can choose an available model.
+        if (invalidModelOpensPicker({ ready: ready(), readyPending: readyPending() })) {
+          const shown = dialog.replace(() => (
+            <DialogModelWelcome
+              intro="The configured model isn't available. Pick a model to continue; your message is kept."
+              trigger="prompt_gate"
+            />
+          ))
+          if (shown) markFirstRunActive()
+        }
+        return false
+      }
       if (selection.subtask) {
         if (!selection.parent) {
           void promptModelWarning()

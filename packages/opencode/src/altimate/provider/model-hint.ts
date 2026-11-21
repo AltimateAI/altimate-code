@@ -12,10 +12,14 @@ export function modelNotFoundHint(providerID: string | undefined, providerMissin
   return "The Anthropic provider needs an API key. For a Claude Pro or Max plan, run /connect and pick Claude subscription."
 }
 
+// An environment variable that is not set substitutes to "", which is the usual cause of an empty value.
+export const EMPTY_MODEL_HINT =
+  'If it references an environment variable such as "${ALTIMATE_MODEL}", check that the variable is set; otherwise set a provider/model-name value or remove the key.'
+
 export function modelNotFoundMessage(providerID: string | undefined, modelID: string | undefined, source?: string) {
   const sourceHint = source ? ` (from ${source})` : ""
   if (providerID === "" && modelID === "") {
-    return `Empty model value${sourceHint}. Use a provider/model-name value.`
+    return `Empty model value${sourceHint}: the model key is set to "". ${EMPTY_MODEL_HINT}`
   }
   return `Model not found: ${providerID}/${modelID}${sourceHint}`
 }
