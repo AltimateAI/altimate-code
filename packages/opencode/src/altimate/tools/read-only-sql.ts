@@ -8,43 +8,40 @@ import { hasSideEffectFunction } from "./sql-function-policy"
  * CTE or subquery it is placed in), it has no statement separator, and it calls no function
  * that writes or runs SQL (dynamic query() included). Undefined otherwise. */
 function readOnlyBody(sql: string, dialect?: string): { masked: string; body: string } | undefined {
+  const checked = embeddable(sql, dialect)
+  return "refused" in checked ? undefined : checked
+}
+
+/** readOnlyBody's checks, in order, with the first failed one named in fixed words (no SQL text). A write or
+ * hard block is refused without a reason: the classifier explains those. */
+function embeddable(sql: string, dialect?: string): { masked: string; body: string } | { refused: string } {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
   // Settled already; the function scan below is costly on deeply nested input.
-  if (blocked || queryType !== "read") return undefined
+  if (blocked || queryType !== "read") return { refused: "" }
   const { tokens, complete } = tokenizeSql(sql, dialect)
   const masked = maskSql(tokens)
   // All calls use real code '(' tokens.
-  const unsafeFunction = sqlFunctionCalls(sql, dialect).some(
-    (call) => call.escaped || call.name === "query" || hasSideEffectFunction(call.name),
-  )
+  const calls = sqlFunctionCalls(sql, dialect)
+  if (calls.some((call) => call.name === "query")) {
+    return { refused: "it calls query(), whose argument this check cannot verify; query the tables directly" }
+  }
+  if (calls.some((call) => call.escaped)) return { refused: "it has an escaped function call, which cannot be checked" }
+  if (calls.some((call) => hasSideEffectFunction(call.name))) {
+    return { refused: "it calls a function that is not known to be read-only" }
+  }
   const body = masked.trim().replace(/;$/, "").trim()
+  if (body.includes(";")) return { refused: "it holds more than one statement" }
+  if (!isSingleQuery(sql, dialect)) {
+    return { refused: "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)" }
+  }
   let depth = 0
   let balanced = true
   for (const char of body) {
     if (char === "(") depth++
     if (char === ")" && --depth < 0) balanced = false
   }
-  const safe =
-    !blocked &&
-    queryType === "read" &&
-    isSingleQuery(sql, dialect) &&
-    complete &&
-    !unsafeFunction &&
-    balanced &&
-    depth === 0 &&
-    !body.includes(";")
-  return safe ? { masked, body } : undefined
-}
-
-/** Why readOnlyBody refused a classifier read, in fixed words (function names only from fixed lists). */
-function unembeddableReason(sql: string, dialect?: string): string {
-  const calls = sqlFunctionCalls(sql, dialect)
-  if (calls.some((call) => call.name === "query")) return "it calls query(), which runs SQL text that cannot be checked; query the tables directly"
-  if (calls.some((call) => call.escaped)) return "it has an escaped function call, which cannot be checked"
-  if (calls.some((call) => hasSideEffectFunction(call.name))) return "it calls a function that is not known to be read-only"
-  if (statementsOf(sql, dialect).length > 1) return "it holds more than one statement"
-  if (!isSingleQuery(sql, dialect)) return "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)"
-  return "its parentheses, quotes or comments do not balance"
+  if (!complete || !balanced || depth !== 0) return { refused: "its parentheses, quotes or comments do not balance" }
+  return { masked, body }
 }
 
 /** Throws unless sql is one read-only query that is safe to embed in a larger query. */
@@ -122,9 +119,11 @@ export function writeReason(sql: string, dialect?: string): string {
     return ` ${head} ${reason}.${unavailable ? ` ${UNAVAILABLE_NEXT_STEP}` : ""}`
   }
   // Name the word only when it is the sole reason: the body is otherwise one SELECT or WITH query.
-  const body = readOnlyBody(sql, dialect)?.body
+  const checked = embeddable(sql, dialect)
+  const body = "refused" in checked ? undefined : checked.body
   if (!body || !/^(SELECT|WITH)\b/i.test(body)) {
-    return ` This read is invalid here because ${body ? "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)" : unembeddableReason(sql, dialect)}; send a single SELECT or WITH query that can be embedded.`
+    const cause = "refused" in checked ? checked.refused : "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)"
+    return ` This read is invalid here because ${cause}; send a single SELECT or WITH query that can be embedded.`
   }
   const [statement, replace] = wordPatterns(dialect)
   const word = (statement.exec(body) ?? replace.exec(body))?.[0]
