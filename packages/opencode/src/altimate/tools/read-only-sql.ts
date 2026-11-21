@@ -77,11 +77,23 @@ export function readSql(sql: string, dialect?: string, options: { explain?: bool
   return semicolon < 0 ? sql : sql.slice(0, semicolon) + sql.slice(semicolon + 1)
 }
 
-/** Why sql is refused as a read, as a sentence to append to a refusal: the classifier's reason for a write,
+/** Why sql is refused as a read, as a sentence to append to a refusal: a hard block, the classifier's reason for a write,
  * or, for a read that only the stricter statement-word list refuses, that word (no SQL text). Empty otherwise. */
 export function writeReason(sql: string, dialect?: string): string {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
-  if (blocked) return ""
+  if (blocked) {
+    // Text that cannot be read is blocked on its words alone, even inside an unclosed literal: name the
+    // unreadable text first, since closing the quote may be the whole fix.
+    const hard =
+      " It holds a hard-blocked statement, such as DROP DATABASE, DROP SCHEMA, TRUNCATE, SQL run from a string" +
+      " literal or an executable comment; those never run and cannot be allowed."
+    const untilClosed =
+      " Until it is closed, words inside the open quote or comment such as DROP DATABASE or TRUNCATE count as a" +
+      " hard-blocked statement, which never runs."
+    return tokenizeSql(sql, dialect).complete
+      ? hard
+      : ` It counts as a write because ${explainWrite(sql, dialect).reason}.${untilClosed}`
+  }
   if (queryType === "write") {
     const { reason, unavailable } = explainWrite(sql, dialect)
     return ` It counts as a write because ${reason}.${unavailable ? ` ${UNAVAILABLE_NEXT_STEP}` : ""}`
