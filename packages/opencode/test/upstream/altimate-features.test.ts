@@ -407,6 +407,14 @@ describe("altimate features: telemetry fail-safe init", () => {
     expect(config).toContain("ALTIMATE_TELEMETRY_DISABLED")
   })
 
+  test("the TUI main thread adopts the worker's resolved opt-out", async () => {
+    const tui = await readSrc("cli", "cmd", "tui.ts")
+    const worker = await readSrc("cli", "tui", "worker.ts")
+    expect(tui).toMatch(/\.call\("telemetryOptOut", undefined\)\s*\.then\(async \(state\) => Telemetry\.adoptOptOut\(await state\)\)/)
+    expect(worker).toMatch(/async telemetryOptOut\(\) \{[\s\S]*?await telemetryInit\s*return Telemetry\.optOutState\(\)/)
+    expect(worker).toContain("telemetryInit = Telemetry.init()")
+  })
+
   test("telemetry/index.ts no longer reads the account; identity comes from the stored credential", async () => {
     const src = await readSrc("altimate", "telemetry", "index.ts")
     // The hashed account email left with the user-identity change: events carry the backend

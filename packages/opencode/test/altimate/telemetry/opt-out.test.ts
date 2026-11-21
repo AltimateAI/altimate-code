@@ -349,6 +349,81 @@ describe("telemetry opt-out", () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
+  function wellKnownAuth() {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      "https://config.example.invalid": { type: "wellknown", key: "TEST_CONFIG_TOKEN", token: "test-token" },
+    })
+  }
+
+  test("a thread that cannot read a remote config sends its held events once the worker resolves enabled", async () => {
+    const names = recordIngestion()
+    signOut()
+    wellKnownAuth()
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.flush()
+    expect(Telemetry.optOutState()).toBe("pending")
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    await Telemetry.adoptOptOut("pending")
+    expect(Telemetry.optOutState()).toBe("pending")
+    await Telemetry.adoptOptOut("enabled")
+    expect(Telemetry.isEnabled()).toBe(true)
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
+  test("an opt-out resolved by the worker drops the held events and stays off", async () => {
+    const names = recordIngestion()
+    signOut()
+    wellKnownAuth()
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.adoptOptOut("disabled")
+    await Telemetry.adoptOptOut("enabled")
+    trackStartup()
+    await Telemetry.init()
+    await Telemetry.flush()
+    await Telemetry.shutdown()
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(names).toEqual([])
+  })
+
+  test("an env opt-out wins over an enabled answer from the worker", async () => {
+    signOut()
+    wellKnownAuth()
+    trackStartup()
+    await Telemetry.init()
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.adoptOptOut("enabled")
+    await Telemetry.flush()
+    await Telemetry.shutdown()
+    expect(Telemetry.optOutState()).toBe("disabled")
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test("the retry throttle still applies after an earlier session enabled telemetry", async () => {
+    recordIngestion()
+    signOut()
+    configSpy.mockResolvedValue({})
+    await Telemetry.init()
+    await Telemetry.shutdown()
+
+    configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+    process.env.OPENCODE_CONFIG_CONTENT = "{"
+    const reads = configSpy.mock.calls.length
+    for (let i = 0; i < 5; i++) await Telemetry.init()
+    expect(configSpy.mock.calls.length - reads).toBe(1)
+  })
+
+  test("after an opt-out, events tracked between sessions are not even buffered", async () => {
+    configSpy.mockResolvedValue({ telemetry: { disabled: true } })
+    await Telemetry.init()
+    await Telemetry.shutdown()
+    for (let i = 0; i < 5; i++) trackStartup()
+    expect(Telemetry.bufferedCountForTest()).toBe(0)
+  })
+
   test("two opted-in projects in one process share one lifecycle and lose no events", async () => {
     const names = recordIngestion()
     signOut()

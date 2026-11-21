@@ -2316,12 +2316,39 @@ export namespace Telemetry {
   // While the config is unreadable, re-resolve it at most this often (each try reloads the config).
   const CONFIG_RETRY_MS = 30_000
   let configRetry: { at: number; instance: boolean } | undefined
-  /** Test seam: forget the process-wide opt-out decision and the events held for it. */
+  // An enabled opt-out resolved by another thread of this launch (the TUI worker), used by the next init.
+  let adopted: "enabled" | undefined
+  /** The opt-out as this thread has resolved it. */
+  export function optOutState() {
+    return gate
+  }
+  /** Take the opt-out another thread of this launch resolved: the TUI main thread never loads a project,
+   * so where its own probe cannot read the config (a remote or organization config) it uses the
+   * worker's answer. Does nothing once this thread has decided, or while the other has not. */
+  export function adoptOptOut(state: "pending" | "enabled" | "disabled"): Promise<void> {
+    if (gate !== "pending" || state === "pending") return Promise.resolve()
+    if (state === "disabled") {
+      gate = "disabled"
+      buffer = []
+      droppedEvents = 0
+      return Promise.resolve()
+    }
+    adopted = "enabled"
+    return (initPromise ?? Promise.resolve()).catch(() => {}).then(() => init())
+  }
+  /** Test seam: forget the process-wide opt-out decision and the events held for it. A lifecycle a
+   * test left running and enabled keeps its decision, so it goes on sending as it did before the gate. */
   export function resetGateForTest() {
-    gate = "pending"
     configRetry = undefined
+    adopted = undefined
+    if (initDone && enabled) return
+    gate = "pending"
     buffer = []
     droppedEvents = 0
+  }
+  /** Test seam. */
+  export function bufferedCountForTest() {
+    return buffer.length
   }
   /** Test seam: end the unreadable-config retry backoff so the next init() re-resolves. */
   export function retryConfigNowForTest() {
@@ -2543,8 +2570,8 @@ export namespace Telemetry {
     }
     // While the config stays unreadable, retry at most every CONFIG_RETRY_MS. The first init inside
     // an Instance is not throttled by an earlier one outside it: it reads the full config, which the
-    // instance-less probe could not.
-    if (!initPromise && gate === "pending" && configRetry && Date.now() < configRetry.at) {
+    // instance-less probe could not. An opt-out adopted from another thread needs no read.
+    if (!initPromise && !adopted && configRetry && Date.now() < configRetry.at) {
       if (configRetry.instance || !TelemetryConfig.instanceDirectory()) return Promise.resolve()
     }
     return (initPromise ??= doInit())
@@ -2564,7 +2591,7 @@ export namespace Telemetry {
         return
       }
       const instance = Boolean(TelemetryConfig.instanceDirectory())
-      const state = await TelemetryConfig.resolve(configDirectory, configRetry !== undefined)
+      const state = adopted ?? (await TelemetryConfig.resolve(configDirectory, configRetry !== undefined))
       if (state === "disabled") {
         gate = "disabled"
         buffer = []
@@ -2961,8 +2988,7 @@ export namespace Telemetry {
       }
     }
     // altimate_change end
-    // altimate_change — nothing leaves until an init resolved the opt-out to enabled
-    if (gate !== "enabled" || !enabled || buffer.length === 0 || !appInsights) return
+    if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
 
