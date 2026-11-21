@@ -2436,6 +2436,9 @@ export namespace Provider {
       return getModel(parsed.providerID, parsed.modelID)
     }
 
+    // altimate_change — use the caller's configured model when no offline small model is set
+    if (Offline.enabled()) return undefined
+
     const provider = await state().then((state) => state.providers[providerID])
     if (provider) {
       let priority = [
