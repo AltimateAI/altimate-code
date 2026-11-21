@@ -28,7 +28,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, createEffect, on, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 // altimate_change start - yolo mode + smooth streaming
@@ -76,7 +76,7 @@ export const {
       agent: Agent[]
       command: Command[]
       // altimate_change start — local actions can start once agents and commands are known
-      agentsLoading: boolean
+      agentCatalog: { workspace?: string; status: "loading" | "ready" | "failed" }
       commandCatalog: { workspace?: string; status: "loading" | "ready" | "failed" }
       // altimate_change end
       permission: {
@@ -153,7 +153,7 @@ export const {
       question: {},
       command: [],
       // altimate_change start — do not infer the meaning of a slash command from stale data
-      agentsLoading: true,
+      agentCatalog: { status: "loading" },
       commandCatalog: { status: "loading" },
       // altimate_change end
       provider: [],
@@ -714,9 +714,29 @@ export const {
     const exit = useExit()
     const args = useArgs()
 
-    // altimate_change start — refresh commands independently of the provider catalog
+    // altimate_change start — refresh agents and commands independently of the provider catalog
     let commandRequest = 0
     let agentRequest = 0
+    // A failed refresh keeps a list already loaded for the same workspace; otherwise it reports failure.
+    async function refreshAgents() {
+      const workspace = project.workspace.current()
+      const request = ++agentRequest
+      const isCurrent = () => request === agentRequest && workspace === project.workspace.current()
+      const previous = store.agentCatalog
+      const retained = previous.workspace === workspace && previous.status === "ready"
+      setStore("agentCatalog", { workspace, status: "loading" })
+      try {
+        const response = await sdk.client.app.agents({ workspace }, { throwOnError: true })
+        if (!isCurrent()) return
+        batch(() => {
+          setStore("agent", reconcile(response.data ?? []))
+          setStore("agentCatalog", { workspace, status: "ready" })
+        })
+      } catch (error) {
+        if (isCurrent()) setStore("agentCatalog", { workspace, status: retained ? "ready" : "failed" })
+        throw error
+      }
+    }
     async function refreshCommands() {
       const workspace = project.workspace.current()
       const request = ++commandRequest
@@ -741,8 +761,7 @@ export const {
       const workspace = project.workspace.current()
       // altimate_change start — load local command prerequisites without waiting for providers
       const catalog = refreshCommands()
-      const agentLoad = ++agentRequest
-      setStore("agentsLoading", true)
+      const agentsPromise = refreshAgents()
       // altimate_change end
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
@@ -758,23 +777,6 @@ export const {
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
         .catch(() => emptyConsoleState)
-      // altimate_change start — publish agents as soon as they arrive
-      const agentsCurrent = () => agentLoad === agentRequest && workspace === project.workspace.current()
-      const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true }).then(
-        (response) => {
-          if (!agentsCurrent()) return
-          batch(() => {
-            setStore("agent", reconcile(response.data ?? []))
-            setStore("agentsLoading", false)
-          })
-        },
-        (error) => {
-          // A failed refresh keeps the previous agent list usable instead of blocking every submit.
-          if (agentsCurrent()) setStore("agentsLoading", false)
-          throw error
-        },
-      )
-      // altimate_change end
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
       await Promise.all([
         providersPromise,
@@ -861,6 +863,19 @@ export const {
       void bootstrap()
     })
 
+    // altimate_change start — a workspace change without a bootstrap still reloads both catalogs
+    createEffect(
+      on(
+        () => project.workspace.current(),
+        (workspace) => {
+          if (store.commandCatalog.workspace !== workspace) void refreshCommands()
+          if (store.agentCatalog.workspace !== workspace) void refreshAgents().catch(() => undefined)
+        },
+        { defer: true },
+      ),
+    )
+    // altimate_change end
+
     const result = {
       data: store,
       set: setStore,
@@ -868,10 +883,15 @@ export const {
         return store.status
       },
       // altimate_change start — check workspace identity even before bootstrap restarts
+      get agentStatus() {
+        const catalog = store.agentCatalog
+        return catalog.workspace === project.workspace.current() ? catalog.status : "loading"
+      },
       get commandStatus() {
         const catalog = store.commandCatalog
         return catalog.workspace === project.workspace.current() ? catalog.status : "loading"
       },
+      refreshAgents,
       refreshCommands,
       // altimate_change end
       get ready() {

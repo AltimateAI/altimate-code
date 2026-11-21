@@ -135,9 +135,14 @@ test("keeps the original draft if a pasted marker is ambiguous before or after e
 
 test("shell and MCP admin submissions wait only for catalogs, never for model readiness", () => {
   expect(submissionModel({ shell: true, text: "pwd" })).toEqual({ required: false })
-  expect(catalogGate({ agentsLoading: false, needsCommands: false, commandStatus: "loading" })).toBe("ready")
-  expect(catalogGate({ agentsLoading: true, needsCommands: false, commandStatus: "ready" })).toBe("wait")
-  expect(catalogGate({ agentsLoading: false, needsCommands: true, commandStatus: "loading" })).toBe("wait")
-  expect(catalogGate({ agentsLoading: false, needsCommands: true, commandStatus: "failed" })).toBe("commands-failed")
-  expect(catalogGate({ agentsLoading: false, needsCommands: true, commandStatus: "ready" })).toBe("ready")
+  expect(catalogGate({ agentStatus: "ready", needsCommands: false, commandStatus: "loading" })).toBe("ready")
+  expect(catalogGate({ agentStatus: "loading", needsCommands: false, commandStatus: "ready" })).toBe("wait")
+  expect(catalogGate({ agentStatus: "failed", needsCommands: false, commandStatus: "ready" })).toBe("agents-failed")
+  expect(catalogGate({ agentStatus: "ready", needsCommands: true, commandStatus: "loading" })).toBe("wait")
+  expect(catalogGate({ agentStatus: "ready", needsCommands: true, commandStatus: "failed" })).toBe("commands-failed")
+  expect(catalogGate({ agentStatus: "ready", needsCommands: true, commandStatus: "ready" })).toBe("ready")
+})
+
+test("enhancement without pasted text uses the rewritten prompt", () => {
+  expect(expandEnhancedPrompt("draft", "rewritten", [], "draft")).toBe("rewritten")
 })

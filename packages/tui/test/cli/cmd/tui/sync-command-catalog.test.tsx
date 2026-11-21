@@ -44,39 +44,74 @@ describe("tui sync command catalog", () => {
       project.workspace.set("ws_a")
       expect(sync.commandStatus).toBe("loading")
 
-      await sync.refreshCommands()
-      expect(sync.commandStatus).toBe("ready")
+      await wait(() => sync.commandStatus === "ready")
       expect(sync.data.command.map((item) => item.name)).toEqual(["cmd-ws_a"])
     } finally {
       app.renderer.destroy()
     }
   })
 
-  test("a failed agent refresh releases the agent wait and keeps the previous agents", async () => {
+  test("a failed agent refresh keeps the agents already loaded for that workspace", async () => {
     await using tmp = await tmpdir()
     await Bun.write(`${tmp.path}/kv.json`, "{}")
     let failAgents = false
-    const { app, emit, sync } = await mount((url) => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { app, sync } = await mount((url) => {
       if (url.pathname !== "/agent") return
-      if (failAgents) return new Response("<html>bad gateway</html>", { status: 502 })
-      return json([{ name: "builder", mode: "primary", permission: [], options: {} }])
+      if (!failAgents) return json([{ name: "builder", mode: "primary", permission: [], options: {} }])
+      return held.then(() => new Response("<html>bad gateway</html>", { status: 502 }))
     }, tmp.path)
-    const swallow = () => {}
-    process.on("unhandledRejection", swallow)
 
     try {
-      expect(sync.data.agentsLoading).toBe(false)
+      expect(sync.agentStatus).toBe("ready")
       failAgents = true
-      emit({
-        directory: "/tmp/opencode/packages/tui",
-        project: "proj_test",
-        payload: { id: "evt_disposed", type: "server.instance.disposed", properties: { directory: "/tmp/opencode" } },
-      } as Parameters<typeof emit>[0])
-      await wait(() => sync.data.agentsLoading === true, 500).catch(() => {})
-      await wait(() => sync.data.agentsLoading === false)
+      const refresh = sync.refreshAgents()
+      expect(sync.agentStatus).toBe("loading")
+      release()
+      await expect(refresh).rejects.toThrow()
+      expect(sync.agentStatus).toBe("ready")
       expect(sync.data.agent.map((agent) => agent.name)).toEqual(["builder"])
     } finally {
-      process.off("unhandledRejection", swallow)
+      app.renderer.destroy()
+    }
+  })
+
+  test("a failed agent load for a new workspace is reported instead of reusing the previous agents", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, project, sync } = await mount((url) => {
+      if (url.pathname !== "/agent") return
+      if (url.searchParams.get("workspace") === "ws_a") return new Response("<html>bad gateway</html>", { status: 502 })
+      return json([{ name: "builder", mode: "primary", permission: [], options: {} }])
+    }, tmp.path)
+
+    try {
+      expect(sync.agentStatus).toBe("ready")
+      project.workspace.set("ws_a")
+      expect(sync.agentStatus).toBe("loading")
+      await wait(() => sync.agentStatus === "failed")
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("a workspace reset without a bootstrap reloads the command catalog", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, project, sync } = await mount((url) => {
+      if (url.pathname !== "/command") return
+      return json([command(`cmd-${url.searchParams.get("workspace") ?? "root"}`)])
+    }, tmp.path)
+
+    try {
+      project.workspace.set("ws_a")
+      await wait(() => sync.commandStatus === "ready" && sync.data.command[0]?.name === "cmd-ws_a")
+      project.workspace.set(undefined)
+      await wait(() => sync.commandStatus === "ready" && sync.data.command[0]?.name === "cmd-root")
+    } finally {
       app.renderer.destroy()
     }
   })

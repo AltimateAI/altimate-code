@@ -1099,7 +1099,7 @@ export function Prompt(props: PromptProps) {
   const modelPending = () => sync.status === "loading" || !local.model.ready
   const deferredSubmit = createDeferredRetry(
     () =>
-      sync.data.agentsLoading ||
+      sync.agentStatus === "loading" ||
       (waitForCommands() && sync.commandStatus === "loading") ||
       (waitForModel() && (modelPending() || readyPending())),
     () => void submit(),
@@ -1166,10 +1166,15 @@ export function Prompt(props: PromptProps) {
     setWaitForCommands(needsCommands)
     setWaitForModel(false)
     const gate = catalogGate({
-      agentsLoading: sync.data.agentsLoading,
+      agentStatus: sync.agentStatus,
       needsCommands,
       commandStatus: sync.commandStatus,
     })
+    if (gate === "agents-failed") {
+      toast.show({ message: "Could not load agents. Press Enter to retry after the list refreshes.", variant: "error" })
+      void sync.refreshAgents().catch(() => undefined)
+      return false
+    }
     if (gate === "commands-failed") {
       toast.show({
         message: "Could not load workspace commands. Press Enter to retry after the list refreshes.",

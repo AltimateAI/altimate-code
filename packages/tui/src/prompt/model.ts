@@ -57,12 +57,14 @@ export function deferredSubmitRevision<Prompt extends object>(prompt: Prompt, mo
 
 // Agent and command catalogs gate every submission; model readiness is checked only after
 // `submissionModel` says the submission needs a model, so shell and MCP admin forms never wait on it.
+type CatalogStatus = "loading" | "ready" | "failed"
 export function catalogGate(input: {
-  agentsLoading: boolean
+  agentStatus: CatalogStatus
   needsCommands: boolean
-  commandStatus: "loading" | "ready" | "failed"
-}): "ready" | "wait" | "commands-failed" {
+  commandStatus: CatalogStatus
+}): "ready" | "wait" | "agents-failed" | "commands-failed" {
+  if (input.agentStatus === "failed") return "agents-failed"
   if (input.needsCommands && input.commandStatus === "failed") return "commands-failed"
-  if (input.agentsLoading || (input.needsCommands && input.commandStatus === "loading")) return "wait"
+  if (input.agentStatus === "loading" || (input.needsCommands && input.commandStatus === "loading")) return "wait"
   return "ready"
 }
