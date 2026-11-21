@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 // altimate_change start — debug report: gathers the facts `report.ts` analyses
 /**
  * Every probe here is read-only and independently guarded: a failing probe is
@@ -91,7 +94,8 @@ function envFlags(): string[] {
 
 /** With `network`, telemetry has been started by the CLI; its start is awaited here so the answer is not read
  * before it settles. Without, it is not started (it would send), so only the environment switches are checked. */
-async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
+export async function telemetryFacts(network: boolean): Promise<Facts["telemetry"]> {
+  if (Offline.enabled()) return { enabled: false, checked: false, reason: "offline mode" }
   if (/^(1|true)$/i.test(process.env["ALTIMATE_TELEMETRY_DISABLED"] ?? "")) return { enabled: false, reason: "ALTIMATE_TELEMETRY_DISABLED is set" }
   if (/^(1|true)$/i.test(process.env["OPENCODE_DISABLE_TELEMETRY"] ?? "")) return { enabled: false, reason: "OPENCODE_DISABLE_TELEMETRY is set" }
   if (!network) return { enabled: false, checked: false, reason: "not started with --no-network" }
@@ -310,6 +314,7 @@ export async function probe(
   opts: { proxy?: boolean; timeoutMs?: number } = {},
   deps: ProbeDeps = defaultProbeDeps,
 ): Promise<NetworkCheck> {
+  if (Offline.enabled()) return { target, host, ok: false, detail: "Skipped in offline mode", ms: 0 }
   const timeoutMs = opts.timeoutMs ?? NETWORK_TIMEOUT_MS
   const started = Date.now()
   const deadline = AbortSignal.timeout(timeoutMs)
@@ -409,9 +414,9 @@ export function readLogTail(file: string, maxBytes = LOG_READ_BYTES): string | u
 export async function collect(opts: { network: boolean }): Promise<Facts> {
   const ctx = redactContext()
   const mcpServers = mcpFacts()
-  const [account, connections, telemetry] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network)])
+  const [account, connections, telemetry] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network && !Offline.enabled())])
   const proxy = PROXY_VARS.some((k) => k.toLowerCase() !== "no_proxy" && process.env[k])
-  const network = opts.network
+  const network = opts.network && !Offline.enabled()
     ? await Promise.all(networkTargets(connections, account, telemetry).map((t) => probe(t.target, t.host, { proxy })))
     : []
   const logPath = path.join(Global.Path.log, "opencode.log")

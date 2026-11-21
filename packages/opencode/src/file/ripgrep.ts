@@ -1,3 +1,6 @@
+// altimate_change start — prevent ripgrep downloads in offline mode
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start — restore the fork's async-generator Ripgrep namespace
 // (files/tree/search/Match/filepath). Upstream v1.17.9 moved ripgrep to an
 // Effect Service (find/glob/grep) in @opencode-ai/core/ripgrep, but our tools
@@ -96,6 +99,7 @@ export namespace Ripgrep {
     const filepath = path.join(Global.Path.bin, "rg" + (process.platform === "win32" ? ".exe" : ""))
 
     if (!(await Filesystem.exists(filepath))) {
+      if (offlineModeEnabled()) throw new Error("Install ripgrep while online to use file search in offline mode.")
       const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
       const config = PLATFORM[platformKey]
       if (!config) throw new UnsupportedPlatformError({ platform: platformKey })

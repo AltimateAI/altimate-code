@@ -1,3 +1,6 @@
+// altimate_change start — offline mode skips worktree network steps
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { path } from "@opencode-ai/core/effect/layer-node-platform"
 import { Global } from "@opencode-ai/core/global"
@@ -12,7 +15,9 @@ import { Slug } from "@opencode-ai/core/util/slug"
 import { errorMessage } from "../util/error"
 import { EventV2 } from "@opencode-ai/core/event"
 import { GlobalBus } from "@/bus/global"
-import { Git } from "@/git"
+// altimate_change start — offline Git transport policy
+import { Git, localGitEnv } from "@/git"
+// altimate_change end
 import { Effect, Layer, Path, Schema, Scope, Context } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { NodePath } from "@effect/platform-node"
@@ -173,7 +178,9 @@ export const layer: Layer.Layer<
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
         const result = yield* appProcess.run(
-          ChildProcess.make("git", args, { cwd: opts?.cwd, extendEnv: true, stdin: "ignore" }),
+          // altimate_change start — offline Git transport policy
+          ChildProcess.make("git", args, { cwd: opts?.cwd, env: localGitEnv(), extendEnv: true, stdin: "ignore" }),
+          // altimate_change end
         )
         return {
           code: result.exitCode,
@@ -483,7 +490,15 @@ export const layer: Layer.Layer<
       function* (directory: string, cmd: string) {
         const [shell, args] = process.platform === "win32" ? ["cmd", ["/c", cmd]] : ["bash", ["-lc", cmd]]
         const result = yield* appProcess.run(
-          ChildProcess.make(shell, args as string[], { cwd: directory, extendEnv: true, stdin: "ignore" }),
+          // altimate_change start — offline mode keeps the user's proxy settings for their start commands
+          ChildProcess.make(shell, args as string[], {
+            cwd: directory,
+            ...(Offline.enabled()
+              ? { env: Offline.userEnv({ ...process.env }) as Record<string, string>, extendEnv: false }
+              : { extendEnv: true }),
+            stdin: "ignore",
+          }),
+          // altimate_change end
         )
         return { code: result.exitCode, stderr: result.stderr.toString("utf8") }
       },
@@ -573,7 +588,8 @@ export const layer: Layer.Layer<
       }
 
       const sep = base.ref.indexOf("/")
-      if (base.ref !== base.name && sep > 0) {
+      // altimate_change — reset to the cached ref when offline
+      if (!Offline.enabled() && base.ref !== base.name && sep > 0) {
         const remote = base.ref.slice(0, sep)
         const branch = base.ref.slice(sep + 1)
         yield* gitExpect(
@@ -596,11 +612,14 @@ export const layer: Layer.Layer<
         })
       }
 
+      // altimate_change start — update existing submodules from objects already on disk offline
+      const submoduleMode = Offline.enabled() ? "--no-fetch" : "--init"
       yield* gitExpect(
-        ["submodule", "update", "--init", "--recursive", "--force"],
+        ["submodule", "update", submoduleMode, "--recursive", "--force"],
         { cwd: worktreePath },
         (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
       )
+      // altimate_change end
 
       yield* gitExpect(
         ["submodule", "foreach", "--recursive", "git", "reset", "--hard"],

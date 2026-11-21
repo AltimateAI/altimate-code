@@ -1,3 +1,8 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+import { createHash } from "node:crypto"
+import { SkillDiscovery } from "@opencode-ai/core/skill/discovery"
+// altimate_change end
 import { NodePath } from "@effect/platform-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Path, Schema, Context } from "effect"
@@ -57,6 +62,22 @@ export namespace Discovery {
         const pull = Effect.fn("Discovery.pull")(function* (url: string) {
           const base = url.endsWith("/") ? url : `${url}/`
           const index = new URL("index.json", base).href
+          // altimate_change start — reuse the cached index for this source without contacting it
+          const sourceKey = createHash("sha256").update(index).digest("hex")
+          const sourceCache = path.join(cache, ".sources", sourceKey)
+          // Beside the source directory, not inside it, so no skill name can collide with it.
+          const indexPath = path.join(cache, ".sources", `${sourceKey}.json`)
+          if (Offline.enabled()) {
+            const cached = yield* fs.readJson(indexPath).pipe(Effect.catch(() => Effect.void))
+            const directories = Array.isArray(cached) ? cached : []
+            const local = directories.filter((dir): dir is string =>
+              typeof dir === "string" && path.dirname(dir) === sourceCache,
+            )
+            return yield* Effect.filter(local, (dir) =>
+              fs.exists(path.join(dir, "SKILL.md")).pipe(Effect.orElseSucceed(() => false)),
+            )
+          }
+          // altimate_change end
           const host = base.slice(0, -1)
 
           log.info("fetching index", { url: index })
@@ -76,6 +97,16 @@ export namespace Discovery {
           if (!data) return []
 
           const list = data.skills.filter((skill) => {
+            // altimate_change start — reject unsafe skill names and file paths
+            if (
+              skill.name.includes("/") ||
+              !SkillDiscovery.isSafeRelativePath(skill.name) ||
+              !skill.files.every(SkillDiscovery.isSafeRelativePath)
+            ) {
+              log.warn("skill entry has an unsafe name or file path", { url: index, skill: skill.name })
+              return false
+            }
+            // altimate_change end
             if (!skill.files.includes("SKILL.md")) {
               log.warn("skill entry missing SKILL.md", { url: index, skill: skill.name })
               return false
@@ -87,7 +118,9 @@ export namespace Discovery {
             list,
             (skill) =>
               Effect.gen(function* () {
-                const root = path.join(cache, skill.name)
+                // altimate_change start — per-source cache for offline reuse
+                const root = path.join(sourceCache, skill.name)
+                // altimate_change end
 
                 yield* Effect.forEach(
                   skill.files,
@@ -103,7 +136,13 @@ export namespace Discovery {
             { concurrency: skillConcurrency },
           )
 
-          return dirs.filter((dir): dir is string => dir !== null)
+          // altimate_change start — per-source cache for offline reuse
+          const available = dirs.filter((dir): dir is string => dir !== null)
+          // altimate_change end
+          // altimate_change start — store the directory list for a later offline run
+          yield* fs.writeWithDirs(indexPath, JSON.stringify(available)).pipe(Effect.ignore)
+          // altimate_change end
+          return available
         })
 
         return Service.of({ pull })

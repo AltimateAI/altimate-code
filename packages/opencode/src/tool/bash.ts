@@ -1,3 +1,6 @@
+// altimate_change start — offline mode user environment
+import { Offline } from "@/config/offline"
+// altimate_change end
 import z from "zod"
 import { spawn } from "child_process"
 import { Tool } from "./tool"
@@ -453,7 +456,8 @@ export const BashTool = Tool.define("bash", async () => {
       )
 
       // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) and user tools dirs to PATH
-      const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
+      // Offline mode restores the user's proxy settings before plugin overrides.
+      const mergedEnv: Record<string, string | undefined> = { ...Offline.userEnv({ ...process.env }), ...shellEnv.env }
       // Strip the markers that describe this host, not the child. See `stripHostMarkers`
       // for what each one is and why (PR #937 review, Issue #3, for the first of them).
       stripHostMarkers(mergedEnv)

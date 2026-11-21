@@ -1,3 +1,6 @@
+// altimate_change start — explicit upgrade requires a connection
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import type { Argv } from "yargs"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
@@ -31,6 +34,9 @@ export const UpgradeCommand = {
       })
   },
   handler: async (args: { target?: string; method?: string }) => {
+    // altimate_change start — fail before checking installation or versions
+    if (offlineModeEnabled()) throw new Error("Run the upgrade while online.")
+    // altimate_change end
     UI.empty()
     UI.println(UI.logo("  "))
     UI.empty()

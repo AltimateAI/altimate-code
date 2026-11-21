@@ -1,3 +1,7 @@
+// altimate_change start — validate offline dbt targets before spawning dbt
+import { Offline } from "@/config/offline"
+import { assertLocalDbt } from "./offline"
+// altimate_change end
 /**
  * dbt CLI wrapper — spawn dbt commands as subprocesses.
  *
@@ -24,7 +28,39 @@ function ensureUpstreamSelector(select: string, command: string): string {
 /**
  * Run a dbt CLI command via subprocess.
  */
-export function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
+export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
+  // Offline: dbt runs with the exact profiles directory checked here and without its
+  // usage-stats and PyPI version-check requests.
+  let offlineEnv: NodeJS.ProcessEnv | undefined
+  if (Offline.enabled()) {
+    try {
+      const command = params.command || "run"
+      if (command === "deps") throw new Error("Offline mode disables dbt dependency installation.")
+      if ((params.args ?? []).some((arg) => arg === "--send-anonymous-usage-stats" || arg.startsWith("--send-anonymous-usage-stats=")))
+        throw new Error("Offline mode disables dbt usage reporting.")
+      // dbt's version flags look up the latest release on PyPI whatever DBT_VERSION_CHECK says.
+      if ((params.args ?? []).some((arg) => ["--version", "-V", "-v"].includes(arg)))
+        throw new Error("Offline mode disables dbt version reporting.")
+      // `dbt init` creates a project and `dbt clean` deletes local folders; neither opens a connection.
+      const checked = command === "init" || command === "clean"
+        ? undefined
+        : await assertLocalDbt(params.project_dir || process.cwd(), [
+            ...(params.args ?? []),
+            ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
+          ])
+      // libpq reads these destinations from the environment, overriding the checked profile host.
+      const { PGHOSTADDR: _hostaddr, PGSERVICE: _service, PGSERVICEFILE: _serviceFile, ...inherited } = process.env
+      offlineEnv = {
+        ...inherited,
+        ...(checked ? { DBT_PROFILES_DIR: checked.profilesDir } : {}),
+        DBT_SEND_ANONYMOUS_USAGE_STATS: "false",
+        DO_NOT_TRACK: "1",
+        DBT_VERSION_CHECK: "false",
+      }
+    } catch (error) {
+      return { stdout: "", stderr: String(error), exit_code: 1 }
+    }
+  }
   return new Promise((resolve) => {
     const command = params.command || "run"
     const args: string[] = [command]
@@ -42,7 +78,7 @@ export function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
       args.push("--project-dir", params.project_dir)
     }
 
-    execFile("dbt", args, { timeout: 300_000 }, (error, stdout, stderr) => {
+    execFile("dbt", args, { timeout: 300_000, env: offlineEnv ?? process.env }, (error, stdout, stderr) => {
       if (error) {
         if ((error as any).code === "ENOENT") {
           resolve({

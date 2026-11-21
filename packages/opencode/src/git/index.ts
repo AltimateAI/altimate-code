@@ -1,3 +1,8 @@
+// altimate_change start — restrict Git transport offline
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+import { gitCommandUsesNetwork, localGitEnv } from "@opencode-ai/core/git"
+export { localGitEnv }
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
 import { Effect, Layer, Context, Stream } from "effect"
@@ -109,10 +114,17 @@ export const layer = Layer.effect(
 
     const run = Effect.fn("Git.run")(
       function* (args: string[], opts: Options) {
+        // altimate_change start — allow local Git and deny transports, including lazy object fetches
+        const offline = offlineModeEnabled()
+        if (offline && gitCommandUsesNetwork(args))
+          return fail(new Error("Git remote operations require an online run."))
+        // altimate_change end
         const result = yield* appProcess.run(
           ChildProcess.make("git", [...cfg, ...args], {
             cwd: opts.cwd,
-            env: opts.env,
+            // altimate_change start — prevent Git and Git LFS network requests
+            env: localGitEnv(opts.env),
+            // altimate_change end
             extendEnv: true,
             stdin: opts.stdin ?? "ignore",
             stdout: "pipe",

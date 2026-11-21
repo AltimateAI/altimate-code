@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import fs from "fs"
 import os from "os"
 import path from "path"
-import { configFiles, connectionFact, credentialFieldsFor, mcpFacts, pidAlive, probe } from "../../../src/altimate/debug/collect"
+import { configFiles, connectionFact, credentialFieldsFor, mcpFacts, pidAlive, probe, telemetryFacts } from "../../../src/altimate/debug/collect"
 import { detectProblems } from "../../../src/altimate/debug/report"
 
 describe("connection facts", () => {
@@ -188,6 +188,20 @@ describe("process liveness", () => {
   test("this process is alive; an unused pid is not", () => {
     expect(pidAlive(process.pid)).toBe(true)
     expect(pidAlive(2 ** 22 + 12345)).toBe(false)
+  })
+})
+describe("offline mode", () => {
+  test("offline telemetry reports the offline policy rather than --no-network", async () => {
+    const prior = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      for (const network of [true, false]) {
+        expect(await telemetryFacts(network)).toEqual({ enabled: false, checked: false, reason: "offline mode" })
+      }
+    } finally {
+      if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = prior
+    }
   })
 })
 // altimate_change end

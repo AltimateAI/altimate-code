@@ -1,4 +1,5 @@
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Notices for the person's own workspace review requests (skills and knowledge bases): when the owner approves or
 // rejects one, it is kept and shown the same way a rule review is. Like a rule review notice (`state.notices` of the
@@ -289,7 +290,7 @@ export async function poll(directory: string, deps: PollDeps = {}): Promise<Poll
 }
 
 async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult> {
-  if (!workspacesOn()) return { status: "off" }
+  if (Offline.enabled() || !workspacesOn()) return { status: "off" }
   const [{ WorkspaceApi }, { resolveBindingOutcome, credentialDigest, accountDigest }, { RulesSync }] = await Promise.all([
     import("./api-client"),
     import("./state"),

@@ -1,3 +1,7 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+import { assertLocalConnection } from "./offline"
+// altimate_change end
 /**
  * ConnectionRegistry — manages database connections.
  *
@@ -78,6 +82,10 @@ function createState(dir: string): State {
 
 /** Registry state per resolved project directory. */
 const states = new Map<string, State>()
+
+// Classify the resolved target before SSH rewrites or driver construction. Keep only
+// the verdict, not credentials, and never consult the keychain again on cache hits.
+const offlineVerdicts = new WeakMap<Connector, { error?: Error }>()
 
 /** Invalidate the in-flight connect for `name`, closing the tunnel it opened. Synchronous. */
 function dropAttempt(s: State, name: string): void {
@@ -446,6 +454,14 @@ async function createConnector(
 
   // Resolve credentials from keychain
   resolvedConfig = await resolveConfig(name, resolvedConfig)
+  // altimate_change — check the effective target after restoring stored credentials
+  const offlineVerdict: { error?: Error } = {}
+  try {
+    assertLocalConnection(resolvedConfig)
+  } catch (error) {
+    offlineVerdict.error = error instanceof Error ? error : new Error(String(error))
+  }
+  if (Offline.enabled() && offlineVerdict.error) throw offlineVerdict.error
 
   // altimate_change start — validate password is a string for drivers that require it
   // Prevents cryptic SASL/SCRAM errors from database drivers
@@ -545,6 +561,7 @@ async function createConnector(
         throw new Error(`No static import available for driver: ${driverPath}`)
     }
     connector = await mod.connect(resolvedConfig)
+    offlineVerdicts.set(connector, offlineVerdict)
   } catch (e) {
     // Clean up SSH tunnel if driver creation fails
     // altimate_change start — this attempt's own tunnel, never another attempt's
@@ -673,6 +690,14 @@ export async function get(name: string): Promise<Connector> {
 
   const cached = connectors.get(name)
   if (cached) {
+    // altimate_change — apply the offline policy before using a cached connection
+    if (Offline.enabled()) {
+      const verdict = offlineVerdicts.get(cached)
+      if (!verdict || verdict.error) {
+        await detachCached(s, name)()
+        throw verdict?.error ?? new Error("Offline mode could not verify the cached connection target.")
+      }
+    }
     // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
     SignInNotice.rememberOrigin(accountOf(configs.get(name)))
     // altimate_change end

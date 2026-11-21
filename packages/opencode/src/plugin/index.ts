@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import type { Hooks, PluginInput, Plugin as PluginInstance } from "@opencode-ai/plugin"
 import { Config } from "../config/config"
 import { Bus } from "../bus"
@@ -111,7 +114,10 @@ export namespace Plugin {
       $: Bun.$,
     }
 
-    for (const plugin of INTERNAL_PLUGINS) {
+    // altimate_change start — skip built-in authentication and telemetry plugins offline
+    const internal = Offline.enabled() ? [] : INTERNAL_PLUGINS
+    // altimate_change end
+    for (const plugin of internal) {
       log.info("loading internal plugin", { name: plugin.name })
       const init = await plugin(input).catch((err) => {
         log.error("failed to load internal plugin", { name: plugin.name, error: err })

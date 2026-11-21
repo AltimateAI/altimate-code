@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Bus } from "@/bus"
 import { Account } from "@/account"
 import { Config } from "@/config/config"
@@ -75,7 +78,9 @@ export namespace ShareNext {
   const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
 
   export async function init() {
-    if (disabled) return
+    // altimate_change start — skip session sharing in offline mode
+    if (Offline.enabled() || disabled) return
+    // altimate_change end
     Bus.subscribe(Session.Event.Updated, async (evt) => {
       await sync(evt.properties.info.id, [
         {
@@ -123,7 +128,10 @@ export namespace ShareNext {
   }
 
   export async function create(sessionID: SessionID) {
+    // altimate_change start — skip session sharing in offline mode
+    if (Offline.enabled()) throw new Offline.OfflinePolicyError("Sharing sessions requires an online run.")
     if (disabled) return { id: "", url: "", secret: "" }
+    // altimate_change end
     log.info("creating share", { sessionID })
     const req = await request()
     const response = await fetch(`${req.baseUrl}${req.api.create}`, {
@@ -204,7 +212,9 @@ export namespace ShareNext {
 
   const queue = new Map<string, { timeout: NodeJS.Timeout; data: Map<string, Data> }>()
   async function sync(sessionID: SessionID, data: Data[]) {
-    if (disabled) return
+    // altimate_change start — skip session sharing in offline mode
+    if (Offline.enabled() || disabled) return
+    // altimate_change end
     const existing = queue.get(sessionID)
     if (existing) {
       for (const item of data) {
@@ -249,6 +259,10 @@ export namespace ShareNext {
   }
 
   export async function remove(sessionID: SessionID) {
+    // altimate_change start — keep the local share state until the server revokes it
+    if (Offline.enabled())
+      throw new Offline.OfflinePolicyError("Offline mode cannot revoke a share. Run unshare while online.")
+    // altimate_change end
     if (disabled) return
     log.info("removing share", { sessionID })
     const share = get(sessionID)

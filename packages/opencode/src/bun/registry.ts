@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import semver from "semver"
 import { Log } from "../util/log"
 import { Process } from "../util/process"
@@ -10,6 +13,9 @@ export namespace PackageRegistry {
   }
 
   export async function info(pkg: string, field: string, cwd?: string): Promise<string | null> {
+    // altimate_change start — do not query the package registry in offline mode
+    if (Offline.enabled()) return null
+    // altimate_change end
     const { code, stdout, stderr } = await Process.run([which(), "info", pkg, field], {
       cwd,
       env: {

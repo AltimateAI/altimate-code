@@ -1,3 +1,6 @@
+// altimate_change start — offline mode user environment
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
@@ -86,10 +89,16 @@ export const layer = Layer.effect(
               const dir = yield* InstanceState.directory
               const result = yield* appProcess
                 .run(
+                  // altimate_change start — offline mode keeps the user's proxy settings for formatters
                   ChildProcess.make(replaced[0]!, replaced.slice(1), {
                     cwd: dir,
-                    env: item.environment,
-                    extendEnv: true,
+                    ...(Offline.enabled()
+                      ? {
+                          env: { ...Offline.userEnv({ ...process.env }), ...item.environment } as Record<string, string>,
+                          extendEnv: false,
+                        }
+                      : { env: item.environment, extendEnv: true }),
+                    // altimate_change end
                     stdin: "ignore",
                     stdout: "ignore",
                     stderr: "ignore",

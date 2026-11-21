@@ -1,4 +1,5 @@
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // The workspace engine overlay.
 //
@@ -230,7 +231,7 @@ export async function overlay(
   state.managed = opts.managed === true
   state.linked = null
   try {
-    if (!isEnabled() || isServe()) {
+    if (Offline.enabled() || !isEnabled() || isServe()) {
       state.current = null
       return
     }
@@ -499,7 +500,7 @@ export async function beforeTurn(sessionID: string): Promise<void> {
  * between this session's reconcile and its catalog snapshot. The hook's own
  * failures are logged and swallowed; `body`'s propagate. */
 export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>): Promise<T> {
-  if (!isEnabled() || isServe()) {
+  if (Offline.enabled() || !isEnabled() || isServe()) {
     record(sessionID, { kind: "disabled" })
     return body()
   }

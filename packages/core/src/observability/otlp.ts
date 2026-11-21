@@ -1,6 +1,8 @@
 import { Layer } from "effect"
 import { OtlpLogger } from "effect/unstable/observability"
-import { Flag } from "../flag/flag"
+// altimate_change start — offline mode
+import { Flag, offlineModeEnabled } from "../flag/flag"
+// altimate_change end
 import { InstallationChannel, InstallationVersion } from "../installation/version"
 import { runID } from "./shared"
 
@@ -48,12 +50,16 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
 }
 
 export function loggers() {
-  if (!endpoint) return []
+  // altimate_change start — offline mode disables OTLP export
+  if (offlineModeEnabled() || !endpoint) return []
+  // altimate_change end
   return [OtlpLogger.make({ url: `${endpoint}/v1/logs`, resource: resource(), headers })]
 }
 
 export async function tracingLayer() {
-  if (!endpoint) return Layer.empty
+  // altimate_change start — offline mode disables OTLP export
+  if (offlineModeEnabled() || !endpoint) return Layer.empty
+  // altimate_change end
   const NodeSdk = await import("@effect/opentelemetry/NodeSdk")
   const OTLP = await import("@opentelemetry/exporter-trace-otlp-http")
   const SdkBase = await import("@opentelemetry/sdk-trace-base")

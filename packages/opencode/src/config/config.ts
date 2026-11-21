@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -501,6 +504,9 @@ export const layer = Layer.effect(
 
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
+        // altimate_change start — skip network work in offline mode
+        yield* Effect.promise(() => Offline.assertStartupPolicy(ctx.directory))
+        // altimate_change end
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
         let result: Info = {}
@@ -564,6 +570,9 @@ export const layer = Layer.effect(
           if (value.type === "wellknown") {
             const url = key.replace(/\/+$/, "")
             authEnv[value.key] = value.token
+            // altimate_change start — keep the local token available without fetching remote config
+            if (Offline.enabled()) continue
+            // altimate_change end
             const wellknownURL = `${url}/.well-known/opencode`
             yield* Effect.logDebug("fetching remote config", { url: wellknownURL })
             const wellknown = yield* fetchRemoteJson(wellknownURL, undefined, ConfigV1.WellKnown, url)
@@ -695,6 +704,9 @@ export const layer = Layer.effect(
           const orgID = activeAccount.active_org_id
           const url = activeAccount.url
           yield* Effect.gen(function* () {
+            // altimate_change start — skip the remote account config and token lookup offline
+            if (Offline.enabled()) return
+            // altimate_change end
             const [configOpt, tokenOpt] = yield* Effect.all(
               [accountSvc.config(accountID, orgID), accountSvc.token(accountID)],
               { concurrency: 2 },
@@ -777,7 +789,7 @@ export const layer = Layer.effect(
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
-          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+          if (!Offline.enabled() && ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
             const dep = yield* npmSvc
               .install(dir, {
                 add: [
@@ -839,6 +851,12 @@ export const layer = Layer.effect(
           }
         }
 
+        // altimate_change start — disable runtime sharing in offline mode
+        if (Offline.enabled()) {
+          result.offline = true
+          result.share = "disabled"
+        }
+        // altimate_change end
         if (result.autoshare === true && !result.share) {
           result.share = "auto"
         }
@@ -889,7 +907,7 @@ export const layer = Layer.effect(
         // workspace's pinned local engine — derived here, after discovery, so it has
         // the last word over IDE-written, hosted and stale entries, and never written
         // to any file. See altimate/workspace/engine-overlay.ts.
-        if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
+        if (!Offline.enabled() && !Flag.ALTIMATE_DISABLE_WORKSPACE) {
           const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
           yield* Effect.promise(() =>
             overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),

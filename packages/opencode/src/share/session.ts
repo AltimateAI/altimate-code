@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
 import { SessionID } from "@/session/schema"
@@ -24,6 +27,9 @@ export const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
 
     const share = Effect.fn("SessionShare.share")(function* (sessionID: SessionID) {
+      // altimate_change start — offline mode refuses sharing with its own message, before the config check
+      if (Offline.enabled()) return yield* new Session.OfflinePolicyError({ message: "Sharing sessions requires an online run." })
+      // altimate_change end
       const conf = yield* cfg.get()
       if (conf.share === "disabled") throw new Error("Sharing is disabled in configuration")
       const result = yield* shareNext.create(sessionID)

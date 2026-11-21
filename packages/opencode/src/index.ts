@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 // altimate_change start - stdin tool arguments
@@ -167,6 +170,38 @@ let cli = yargs(args)
     }
     // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
     if (opts._[0] === "mcp" && opts._[1] === "serve") return
+    // altimate_change end
+
+    // altimate_change start — skip network work in offline mode
+    const command = String(opts._[0] ?? "")
+    const args = opts as {
+      dir?: string
+      cwd?: string
+      directory?: string
+      project?: string
+      attach?: string
+      url?: string
+      model?: string
+    }
+    const offlineTarget = (command === "run" && !args.attach ? args.dir : undefined)
+      ?? (command === "acp" ? args.cwd : undefined)
+      ?? (command === "workspace" ? args.directory : undefined)
+    const directory = offlineTarget ? path.resolve(offlineTarget) : resolveThreadDirectory(args.project)
+    await Offline.start(directory, args.model)
+    // Attaching to a server on this machine is local; any other server is a network peer.
+    const attachURL = command === "attach" ? args.url : command === "run" ? args.attach || undefined : undefined
+    if (Offline.enabled() && (
+      ["github", "gitlab", "pr", "link", "workspace-client", "web", "integrations"].includes(command) ||
+      // A local review runs offline; posting it to GitHub does not.
+      (command === "review" && (opts as { post?: boolean }).post === true) ||
+      (attachURL !== undefined && !Offline.isLocalURL(attachURL)) ||
+      (command === "learn" && opts._[1] === "import-reviews") ||
+      (command === "console" && opts._[1] === "open") ||
+      (["providers", "auth", "console"].includes(command) && opts._[1] === "login") ||
+      (command === "mcp" && opts._[1] === "auth")
+    )) throw new Error("This command requires network access. Run it while online.")
+    if (Offline.enabled() && attachURL)
+      process.stderr.write("Offline mode: the attached server applies its own network policy; start it with offline mode too.\n")
     // altimate_change end
 
     Heap.start()

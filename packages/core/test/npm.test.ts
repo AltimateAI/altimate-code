@@ -64,6 +64,36 @@ describe("Npm.add", () => {
   })
 })
 
+test("offline npm uses the cache and skips installation", async () => {
+  await using tmp = await tmpdir()
+  const cache = path.join(tmp.path, "cache")
+  const dir = path.join(cache, "packages", "fixture", "node_modules", "fixture")
+  await writePackage(dir, { name: "fixture", main: "index.js" })
+  await Bun.write(path.join(dir, "index.js"), "export const fixture = true\n")
+  const binary = path.join(path.dirname(dir), ".bin", "fixture")
+  await Bun.write(binary, "fixture")
+  const lock = path.join(cache, "packages", "not-in-cache", "package-lock.json")
+  await Bun.write(lock, "{}")
+  const before = process.env.ALTIMATE_OFFLINE
+  process.env.ALTIMATE_OFFLINE = "1"
+  try {
+    await Effect.gen(function* () {
+      const npm = yield* Npm.Service
+      expect(Option.isSome((yield* npm.add("fixture")).entrypoint)).toBe(true)
+      expect(yield* npm.which("fixture")).toEqual(Option.some(binary))
+      expect(yield* npm.which("not-in-cache")).toEqual(Option.none())
+      expect(yield* Effect.promise(() => Bun.file(lock).exists())).toBe(true)
+      const missing = yield* Effect.flip(npm.add("not-in-cache"))
+      expect(missing.cause).toEqual(new Error("Install not-in-cache while online."))
+      yield* npm.install(tmp.path, { add: [{ name: "not-in-cache" }] })
+    }).pipe(Effect.scoped, Effect.provide(npmLayer(cache)), Effect.runPromise)
+    await expect(fs.stat(path.join(tmp.path, "node_modules"))).rejects.toThrow()
+  } finally {
+    if (before === undefined) delete process.env.ALTIMATE_OFFLINE
+    else process.env.ALTIMATE_OFFLINE = before
+  }
+})
+
 describe("Npm.install", () => {
   test("respects omit from project .npmrc", async () => {
     await using tmp = await tmpdir()

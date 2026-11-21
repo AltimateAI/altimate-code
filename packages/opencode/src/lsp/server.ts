@@ -12,6 +12,8 @@ import { which } from "@opencode-ai/core/util/which"
 import { Module } from "@opencode-ai/core/util/module"
 import { spawn } from "./launch"
 import { Npm } from "@opencode-ai/core/npm"
+// altimate_change — npm can resolve existing language servers without downloading offline
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
 
 const pathExists = async (p: string) =>
@@ -156,7 +158,8 @@ export const Vue: Info = {
     let binary = which("vue-language-server")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("@vue/language-server")
       if (!resolved) return
       binary = resolved
@@ -497,7 +500,8 @@ export const Pyright: Info = {
     let binary = which("pyright-langserver")
     const args = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("pyright", "pyright-langserver")
       if (!resolved) return
       binary = resolved
@@ -1081,7 +1085,8 @@ export const Svelte: Info = {
     let binary = which("svelteserver")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("svelte-language-server")
       if (!resolved) return
       binary = resolved
@@ -1114,7 +1119,8 @@ export const Astro: Info = {
     let binary = which("astro-ls")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("@astrojs/language-server")
       if (!resolved) return
       binary = resolved
@@ -1373,7 +1379,8 @@ export const YamlLS: Info = {
     let binary = which("yaml-language-server")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("yaml-language-server")
       if (!resolved) return
       binary = resolved
@@ -1527,7 +1534,8 @@ export const PHPIntelephense: Info = {
     let binary = which("intelephense")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("intelephense")
       if (!resolved) return
       binary = resolved
@@ -1608,7 +1616,8 @@ export const BashLS: Info = {
     let binary = which("bash-language-server")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("bash-language-server")
       if (!resolved) return
       binary = resolved
@@ -1786,7 +1795,8 @@ export const DockerfileLS: Info = {
     let binary = which("docker-langserver")
     const args: string[] = []
     if (!binary) {
-      if (flags.disableLspDownload) return
+      // altimate_change — the offline Npm service only reads the installed cache
+      if (flags.disableLspDownload && !offlineModeEnabled()) return
       const resolved = await Npm.which("dockerfile-language-server-nodejs")
       if (!resolved) return
       binary = resolved

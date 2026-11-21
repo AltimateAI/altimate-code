@@ -142,7 +142,12 @@ function dir(input: ParseSource) {
 }
 
 /** Apply ${VAR}/${VAR:-default}/$${VAR}/{env:VAR} and {file:path} substitutions to config text. */
-async function substitute(text: string, input: ParseSource, missing: "error" | "empty" = "error", track = true) {
+async function substitute(
+  text: string,
+  input: ParseSource,
+  missing: "error" | "empty" = "error",
+  opts: { track?: boolean; expandFiles?: boolean } = {},
+) {
   // Single-pass substitution against the ORIGINAL text prevents output of one
   // pattern being re-matched by another (e.g. {env:A}="${B}" expanding B).
   // Uses the shared ENV_VAR_PATTERN grammar, adding JSON-escaping for values
@@ -186,7 +191,7 @@ async function substitute(text: string, input: ParseSource, missing: "error" | "
   // the telemetry schema). Dynamic import avoids a circular dep with @/altimate/telemetry (which
   // imports @/config/config). Matches main's single emit site in substitute().
   const { dollarRefs, dollarUnresolved, dollarDefaulted, dollarEscaped, legacyBraceRefs, legacyBraceUnresolved } = stats
-  if (track && (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0)) {
+  if (opts.track !== false && (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0)) {
     import("@/altimate/telemetry")
       .then(({ Telemetry }) => {
         Telemetry.track({
@@ -205,6 +210,9 @@ async function substitute(text: string, input: ParseSource, missing: "error" | "
   }
   // altimate_change end
 
+  // altimate_change start — offline opt-in probe reads text without file substitution
+  if (opts.expandFiles === false) return text
+  // altimate_change end
   const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
   if (!fileMatches.length) return text
 
@@ -264,10 +272,12 @@ export async function parseText(
   text: string,
   input: ParseSource,
   missing: "error" | "empty" = "error",
-  opts: { track?: boolean } = {},
+  // altimate_change start — options gain expandFiles for the offline opt-in probe
+  opts: { track?: boolean; expandFiles?: boolean } = {},
 ): Promise<any> {
   const configSource = source(input)
-  text = await substitute(text, input, missing, opts.track !== false)
+  text = await substitute(text, input, missing, opts)
+  // altimate_change end
 
   const errors: JsoncParseError[] = []
   const data = parseJsonc(text, errors, { allowTrailingComma: true })

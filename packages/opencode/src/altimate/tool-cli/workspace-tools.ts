@@ -1,4 +1,5 @@
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Whether the `tool` CLI exposes the linked-workspace tools, and the workspace section of `tool context`.
 // An explicit flag always wins; without one the tools are on exactly when the project is linked.
@@ -22,6 +23,13 @@ export async function resolveWorkspaceTools(
   directory: string,
   linked: (directory: string) => Promise<boolean> = projectIsLinked,
 ): Promise<boolean> {
+  // Workspace tools call the workspace service, which offline mode does not reach. The target project's
+  // own offline setting applies too (tool daemon --dir can name another project).
+  await Offline.start(directory)
+  if (Offline.enabled()) {
+    if (flag === true) process.stderr.write("Workspace tools are unavailable in offline mode.\n")
+    return false
+  }
   return flag ?? (await linked(directory))
 }
 

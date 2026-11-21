@@ -126,6 +126,26 @@ const initialState: MockState = {
 }
 
 describe("ModelsDev Service", () => {
+  it.live("offline mode keeps the cached catalog even on forced refresh", () =>
+    Effect.gen(function* () {
+      const original = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        yield* writeCache(fixture2)
+        const state = yield* Ref.make(initialState)
+        const result = yield* provided(
+          state,
+          ModelsDev.Service.use((s) => s.refresh(true).pipe(Effect.andThen(s.get()))),
+        )
+        expect((yield* Ref.get(state)).calls).toEqual([])
+        expect(result).toEqual(fixture2)
+      } finally {
+        if (original === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = original
+      }
+    }),
+  )
+
   it.live("get() returns providers from disk when cache file exists", () =>
     Effect.gen(function* () {
       yield* writeCache(fixture)

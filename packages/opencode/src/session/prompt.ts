@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import path from "path"
 import { Token } from "@/util/token"
 import { existsSync, readFileSync, statSync } from "node:fs"
@@ -135,6 +138,7 @@ import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_chan
 import {
   canonicalDirectory,
   endTurnBinding,
+  resolveBindingOutcome,
   turnBinding,
   unvalidatedTurnBinding,
   type AccountKey,
@@ -475,7 +479,32 @@ export namespace SessionPrompt {
     // snapshot is actually there keeps the tick off the path that regressed —
     // a user who never used workspaces has no directory, so this costs one `stat` and
     // does not even load the sync module.
-    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
+    if (Offline.enabled()) {
+      const dir = Instance.directory
+      const writeOfflineNotice = async () => {
+        const { ownManifest, snapshotKnownEmpty } = await import("../altimate/workspace/skill-sync")
+        const snapshot = await ownManifest(dir)
+        // A withheld snapshot (rebound project, other account) must not stay visible through .claude/skills copies.
+        if (!snapshot && existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) {
+          const { mirrorClaudeSkills } = await import("../altimate/workspace/claude-skill-mirror")
+          await mirrorClaudeSkills(dir, { withdraw: true })
+        }
+        const binding = snapshot ? null : await resolveBindingOutcome(dir)
+        // Only a project that uses a workspace hears about workspace skills.
+        // A serve pin counts only for the tree it was launched for.
+        const { readPin, resolveWithinRoot } = await import("../altimate/workspace/pin")
+        const pin = readPin()
+        const pinned = pin.kind === "valid" && resolveWithinRoot(dir, pin.root) !== null ? pin.datamateId : undefined
+        const datamateId = binding?.status === "bound" ? binding.binding.datamateId : pinned
+        if (snapshot || datamateId !== undefined) {
+          const empty = datamateId !== undefined && (await snapshotKnownEmpty(dir, datamateId))
+          await Offline.announce(snapshot !== null, empty)
+        }
+        await refreshSkillRegistry(dir)
+      }
+      const notice = writeOfflineNotice().catch((error) => log.warn("offline skill snapshot setup failed", { error }))
+      if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) await notice
+    } else if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
       // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
       // rather than imported so the opted-out path stays free of that module.
@@ -4490,11 +4519,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       detached: process.platform !== "win32",
       windowsHide: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
+      // altimate_change start — offline mode leaves the user's own commands with their proxy settings
       env: {
-        ...process.env,
+        ...Offline.userEnv({ ...process.env }),
         ...shellEnv.env,
         TERM: "dumb",
       },
+      // altimate_change end
     })
 
     let output = ""
@@ -4838,6 +4869,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const proc = Bun.spawn([sh, ...Shell.args(sh, cmd, Instance.directory)], {
               // altimate_change start — upstream_fix: non-bash command-template shells need an explicit cwd.
               cwd: Instance.directory,
+              // altimate_change end
+              // altimate_change start — offline mode leaves the user's own commands with their proxy settings
+              ...(Offline.enabled() ? { env: Offline.userEnv({ ...process.env }) } : {}),
               // altimate_change end
               stdout: "pipe",
               stderr: "pipe",

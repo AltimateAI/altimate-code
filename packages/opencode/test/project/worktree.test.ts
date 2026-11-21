@@ -82,6 +82,30 @@ const gitResult = Effect.fn("WorktreeTest.gitResult")(function* (cwd: string, ar
 describe("Worktree", () => {
   afterEach(() => disposeAllInstances())
 
+  wintest(
+    "creates, resets, and removes a local worktree offline",
+    Effect.gen(function* () {
+      const previous = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        const svc = yield* Worktree.Service
+        const fs = yield* FSUtil.Service
+        yield* withCreatedWorktree({ name: "offline" }, ({ info }) =>
+          Effect.gen(function* () {
+            const file = path.join(info.directory, "offline-change")
+            yield* fs.writeWithDirs(file, "fixture")
+            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
+            expect(yield* fs.existsSafe(file)).toBe(false)
+          }),
+        )
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+      }
+    }),
+    { git: true },
+  )
+
   describe("makeWorktreeInfo", () => {
     it.instance(
       "returns info with name, branch, and directory",

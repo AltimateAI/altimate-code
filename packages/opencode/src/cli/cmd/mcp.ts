@@ -1,3 +1,6 @@
+// altimate_change start — check offline policy before starting the standalone MCP server
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { cmd } from "./cmd"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { effectCmd } from "../effect-cmd"
@@ -137,8 +140,17 @@ export const McpServeCommand = cmd({
     .option("workspace-tools", { type: "boolean", default: false, describe: "Expose linked workspace context, skills and read tools" })
     .option("all-tools", { type: "boolean", default: false, describe: "Expose every tool on the allow-list, not just the default set" }),
   async handler(args) {
+    await Offline.start(process.cwd())
+    if (Offline.enabled() && args.workspaceTools) {
+      process.stderr.write("Workspace tools are unavailable in offline mode.\n")
+    }
     const { serveStdio } = await import("../../altimate/mcp-server/server")
-    await serveStdio({ connections: args.connections, allowWrite: args.allowWrite, allTools: args.allTools, workspaceTools: args.workspaceTools })
+    await serveStdio({
+      connections: args.connections,
+      allowWrite: args.allowWrite,
+      allTools: args.allTools,
+      workspaceTools: !Offline.enabled() && args.workspaceTools,
+    })
   },
 })
 // altimate_change end
@@ -506,6 +518,9 @@ async function resolveConfigPath(baseDir: string, global = false) {
 }
 
 async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configPath: string) {
+  // altimate_change start — offline mode refuses remote MCP servers
+  Offline.assertLocalMcp(mcpConfig)
+  // altimate_change end
   let text = "{}"
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
@@ -542,7 +557,11 @@ export const McpAddCommand = effectCmd({
       .option("env", { type: "array", string: true, describe: "Environment variables as key=value (repeatable)" })
       .option("header", { type: "array", string: true, describe: "HTTP headers as key=value (repeatable)" })
       .option("oauth", { type: "boolean", describe: "Enable OAuth", default: true })
-      .option("global", { type: "boolean", describe: "Add to global config", default: false }),
+      .option("global", { type: "boolean", describe: "Add to global config", default: false })
+      .middleware((args) => {
+        // Reject before effectCmd initializes config (which can add its schema field).
+        if (args.url && args.type !== "local") Offline.assertLocalMcp({ type: "remote", url: args.url })
+      }),
   // altimate_change end
   handler: Effect.fn("Cli.mcp.add")(function* (args) {
     const maybeCtx = yield* InstanceRef
@@ -877,6 +896,9 @@ export const McpDebugCommand = effectCmd({
         return
       }
 
+      // altimate_change start — offline mode refuses remote MCP servers
+      Offline.assertLocalMcp(serverConfig)
+      // altimate_change end
       prompts.log.info(`Server: ${serverName}`)
       prompts.log.info(`URL: ${serverConfig.url}`)
 
@@ -913,7 +935,9 @@ export const McpDebugCommand = effectCmd({
 
       // Test basic HTTP connectivity first
       try {
-        const response = await fetch(serverConfig.url, {
+        // altimate_change start — offline mode keeps the probe on loopback
+        const response = await (Offline.enabled() ? Offline.localFetch() : fetch)(serverConfig.url, {
+        // altimate_change end
           method: "POST",
           headers: {
             ...serverConfig.headers,
@@ -967,6 +991,9 @@ export const McpDebugCommand = effectCmd({
           // Try creating transport with auth provider to trigger discovery
           const transport = new StreamableHTTPClientTransport(new URL(serverConfig.url), {
             authProvider,
+            // altimate_change start — offline mode keeps the probe on loopback
+            fetch: Offline.enabled() ? Offline.localFetch() : undefined,
+            // altimate_change end
             requestInit: serverConfig.headers ? { headers: serverConfig.headers } : undefined,
           })
 

@@ -809,7 +809,14 @@ export const layer = Layer.effect(
       yield* Effect.forEach(
         sessions.filter((sessionInfo) => !sessionInfo.parentID || !sessionIDs.has(sessionInfo.parentID)),
         (sessionInfo) =>
-          session.remove(sessionInfo.id).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.void)),
+          session.remove(sessionInfo.id).pipe(
+            Effect.catchIf(NotFoundError.isInstance, () => Effect.void),
+            // altimate_change start — offline mode keeps a shared session (its share cannot be revoked offline)
+            Effect.catchTag("Session.OfflinePolicyError", (error) =>
+              Effect.logWarning("kept a shared session while offline", { sessionID: sessionInfo.id, error: error.message }),
+            ),
+            // altimate_change end
+          ),
         { discard: true },
       )
 

@@ -1,3 +1,7 @@
+// altimate_change start — validate offline dbt profiles before starting adapters
+import { Offline } from "@/config/offline"
+import { assertLocalDbt, OfflineDbtError } from "../dbt/offline"
+// altimate_change end
 /**
  * Register native connection handlers with the Dispatcher.
  *
@@ -66,7 +70,7 @@ export const dbtAdapterInternals: {
   /** Replaces the dbt config read, so a test can hold an attempt open. */
   readConfig?: () => Promise<unknown>
   /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
-  create?: (config: any, options?: { targetPath?: string }) => Promise<any>
+  create?: (config: any, options?: { targetPath?: string; offline?: boolean; profilesDir?: string }) => Promise<any>
   /** Replaces the check for dbt-integration's lineage, which a test's fake adapter provides itself. */
   hasModelLineage?: (adapter?: unknown) => boolean
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
@@ -124,6 +128,11 @@ async function ensureDbtAdapter(): Promise<any | null> {
         return publish(null)
       }
 
+      // The integration reads profiles.yml relative to the project, so check from there.
+      const offline = Offline.enabled()
+        ? await assertLocalDbt(dbtConfig.projectRoot, ["--project-dir", dbtConfig.projectRoot], dbtConfig.dbtIntegration, dbtConfig.projectRoot)
+        : undefined
+
       // Create the adapter. Its dbt commands write their artifacts to a folder of their own: the project's
       // target/manifest.json is the user's (and other tools'), and a tool's compile or show would rewrite
       // it with compiled SQL for only the nodes that command compiled.
@@ -132,8 +141,13 @@ async function ensureDbtAdapter(): Promise<any | null> {
       const options = SEPARATE_TARGET_MODES.has(dbtConfig.dbtIntegration || "core")
         ? { targetPath: await dbtToolTargetPath(dbtConfig.projectRoot) }
         : {}
-      return publish(await create(dbtConfig, options), dbtConfig.projectRoot)
-    } catch {
+      // Offline, dbt reads exactly the profiles directory that was checked.
+      return publish(
+        await create(dbtConfig, { ...options, ...(offline ? { offline: true, profilesDir: offline.profilesDir } : {}) }),
+        dbtConfig.projectRoot,
+      )
+    } catch (error) {
+      if (error instanceof OfflineDbtError) throw error
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
     } finally {
@@ -289,7 +303,7 @@ async function tryExecuteViaDbt(
   } catch (e) {
     // A deadline or abort is not "dbt unavailable": the query may still be running, and
     // re-running it on the native driver would double the work and the wait.
-    if (isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
+    if (e instanceof OfflineDbtError || isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
     // dbt execution failed — fall back to native driver silently
     return null
   }

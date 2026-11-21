@@ -1,3 +1,6 @@
+// altimate_change start — offline mode skips multicast discovery
+import { Offline } from "@/config/offline"
+// altimate_change end
 import type { Argv, InferredOptionTypes } from "yargs"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import type { Config } from "@/config/config"
@@ -52,7 +55,11 @@ export function resolveNetworkOptionsNoConfig(args: NetworkOptions, config?: Con
   const hostnameExplicitlySet = process.argv.includes("--hostname")
   const mdnsExplicitlySet = process.argv.includes("--mdns")
   const mdnsDomainExplicitlySet = process.argv.includes("--mdns-domain")
-  const mdns = mdnsExplicitlySet ? args.mdns : (config?.server?.mdns ?? args.mdns)
+  // altimate_change start — offline mode skips multicast discovery
+  const wantsMdns = mdnsExplicitlySet ? args.mdns : (config?.server?.mdns ?? args.mdns)
+  if (wantsMdns && Offline.enabled()) process.stderr.write("mDNS discovery skipped in offline mode.\n")
+  const mdns = wantsMdns && !Offline.enabled()
+  // altimate_change end
   const mdnsDomain = mdnsDomainExplicitlySet ? args["mdns-domain"] : (config?.server?.mdnsDomain ?? args["mdns-domain"])
   const port = portExplicitlySet ? args.port : (config?.server?.port ?? args.port)
   const hostname = hostnameExplicitlySet

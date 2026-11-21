@@ -17,6 +17,7 @@ import fs from "fs"
 import path from "path"
 import os from "os"
 import { fileLog } from "@/altimate/util/file-log"
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
 
 const log = Log.create({ service: "telemetry" })
 
@@ -2516,6 +2517,7 @@ export namespace Telemetry {
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
+    if (offlineModeEnabled()) return Promise.resolve()
     // altimate_change start — never re-init across an in-flight shutdown.
     //
     // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
@@ -2980,6 +2982,7 @@ export namespace Telemetry {
     // running, now: the event is serialised at flush time, when that turn may be over. Only an
     // explicit per-event `session_id` is used — the process-global session can be another one.
     // Becomes the envelope's `ai.operation.id`, joining it to the extension's and backend's records.
+    if (offlineModeEnabled()) return
     const eventSession = (event as { session_id?: unknown }).session_id
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
