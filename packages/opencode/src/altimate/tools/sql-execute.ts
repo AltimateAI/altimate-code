@@ -293,6 +293,7 @@ export const SqlExecuteTool = Tool.define(
                 })
               } catch (error) {
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
+                const rules: Array<{ permission?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
                 throw new Error(
                   deniedWriteMessage({
                     sql,
@@ -301,6 +302,8 @@ export const SqlExecuteTool = Tool.define(
                     mongo: mongo !== null,
                     scratch: isScratch(args.warehouse),
                     warehouseGiven: !!args.warehouse,
+                    // Read-only unless a rule of its own allows or asks for some writes (a pattern deny).
+                    readOnly: !rules.some((rule) => rule.permission !== "*" && rule.action !== "deny"),
                   }),
                 )
               }
@@ -750,8 +753,12 @@ export function deniedWriteMessage(input: {
   mongo: boolean
   scratch: boolean
   warehouseGiven: boolean
+  readOnly?: boolean
 }): string {
-  const head = "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
+  const readOnly = input.readOnly !== false
+  const head = readOnly
+    ? "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
+    : "sql_execute did not run this query. A sql_execute_write rule denies it, and the query counts as a write because"
   if (input.jinja) {
     return `${head} it contains Jinja ({{ }}, {% %} or {# #}), which dbt renders and runs before the SQL. Send plain SQL without Jinja.`
   }
@@ -765,7 +772,9 @@ export function deniedWriteMessage(input: {
       (input.warehouseGiven || input.dialects.length < 2
         ? ""
         : " No warehouse was given, so the query was read in every dialect it could reach; pass warehouse to read it in that warehouse's dialect only.")
-    : input.scratch
+    : !readOnly
+      ? "Change it to a statement the configured sql_execute_write rules allow, or ask the user to change the rules."
+      : input.scratch
       ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."
       : "Rewrite it as a single read (SELECT, or WITH ... SELECT). To keep an intermediate result, store it in scratch with sql_materialize if that tool is available."
   return `${head} ${reason}. ${next}`

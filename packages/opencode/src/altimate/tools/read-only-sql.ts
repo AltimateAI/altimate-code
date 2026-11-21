@@ -45,7 +45,7 @@ export function requireReadOnlyQuery(sql: string, dialect?: string): void {
 /** Ignore quoted content while checking structure; preserve the original SELECT and its LIMIT.
  * Stricter than requireReadOnlyQuery: sql_check also requires SELECT or WITH and refuses
  * write keywords anywhere, even where the parser reports a query. */
-export function readSql(sql: string, dialect?: string): string {
+export function readSql(sql: string, dialect?: string, options: { explain?: boolean } = {}): string {
   const checked = readOnlyBody(sql, dialect)
   const body = checked?.body ?? ""
   if (
@@ -59,7 +59,7 @@ export function readSql(sql: string, dialect?: string): string {
   ) {
     throw new Error(
       "This operation only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data." +
-        writeReason(sql, dialect),
+        (options.explain === false ? "" : writeReason(sql, dialect)),
     )
   }
   const semicolon = checked.masked.indexOf(";")

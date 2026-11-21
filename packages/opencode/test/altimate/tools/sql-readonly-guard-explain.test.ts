@@ -82,6 +82,12 @@ describe("other read-only refusals carry the reason", () => {
     expect(() => readSql("SELECT 1. INTO c FROM orders", "postgres")).toThrow()
   })
 
+  test("the result lint path can skip the explanation", () => {
+    expect(() => readSql("SELECT 1; DELETE FROM t", "postgres", { explain: false })).toThrow(
+      /^This operation only accepts a single read-only SELECT \(or WITH \.\.\. SELECT\); it never writes or fixes data\.$/,
+    )
+  })
+
   test("a refusal that is not about writing stays as it was", () => {
     expect(writeReason("SELECT 1", "postgres")).toBe("")
   })
@@ -128,6 +134,7 @@ describe("explainWrite", () => {
     const reason = explainWrite("SELECT set FROM t", "sqlserver").reason
     expect(reason).toContain("line 1, column")
     expect(reason).not.toContain("Set")
+    expect(reason).not.toContain("a token")
     for (const sql of [
       "SELECT len(DISTINCT customer_secret_name(a)) FROM t",
       "SELECT customer_secret_name customer_x customer_y FROM t",

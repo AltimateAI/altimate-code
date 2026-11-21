@@ -210,6 +210,25 @@ describe("denied write message branches", () => {
     expect(deniedWriteMessage({ ...base, sql: '{"command":"insertOne"}', mongo: true })).toContain("Use a read command")
   })
 
+  test("a pattern-scoped deny does not claim the agent may only read", () => {
+    const message = deniedWriteMessage({ ...base, sql: "DROP TABLE stg_tmp", readOnly: false })
+    expect(message).toContain("A sql_execute_write rule denies it")
+    expect(message).not.toContain("may only read")
+    expect(message).toContain("rules allow")
+  })
+
+  test("sql_execute reads the denial's rules to choose the wording", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ruleset = [
+      { permission: "sql_execute_write", pattern: "*", action: "allow" },
+      { permission: "sql_execute_write", pattern: "DROP*", action: "deny" },
+    ]
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
+    await expect(
+      tool.execute({ query: "DROP TABLE stg_tmp", warehouse: "guard_db", limit: 10 }, ctx as any),
+    ).rejects.toThrow("A sql_execute_write rule denies it")
+  })
+
   test("an unreadable query without a warehouse suggests passing one", () => {
     const message = deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((", dialects: ["postgres", "snowflake"], warehouseGiven: false })
     expect(message).toContain("pass warehouse")

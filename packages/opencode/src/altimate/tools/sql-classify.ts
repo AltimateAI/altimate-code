@@ -587,7 +587,7 @@ function parserMessage(message: string): string {
   return message
     .replace(/\s*near \[[^\]]*\]?/gi, "")
     .replace(/\s*\('[^']*'\)/g, "")
-    .replace(/(Unexpected token|found|got):\s*[^\s,)]+/gi, "$1 a token")
+    .replace(/(Unexpected token|found|got):\s*[^\s,)]+/gi, "$1")
 }
 
 /**
