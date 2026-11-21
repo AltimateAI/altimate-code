@@ -253,7 +253,7 @@ When prompted, you have three choices:
 
 ### How SQL is classified for `sql_execute_write`
 
-`sql_execute` parses each query and asks for `sql_execute_write` only when a statement is not a read. Comments, string literals, and column names such as `update_ts`, `t.update` or `s.t.update` do not count (dotted names still count on ClickHouse); a quoted or bracketed qualifier (`"t".update`) still asks. SQL the parser cannot read is treated as a write, so it is never run without write permission. On a dbt target, any Jinja (`{{ }}`, `{% %}`, `{# #}`) counts as a write too, even inside a comment or literal, because dbt renders and runs it first.
+`sql_execute` parses each query and asks for `sql_execute_write` only when a statement is not a read. Comments, string literals, and column names such as `update_ts`, `t.update` or `s.t.update` do not count (dotted names still count on ClickHouse); a quoted, bracketed or spaced qualifier (`"t".update`, `t . update`) still asks. SQL the parser cannot read is treated as a write, so it is never run without write permission. On a dbt target, any Jinja (`{{ }}`, `{% %}`, `{# #}`) counts as a write too, even inside a comment or literal, because dbt renders and runs it first.
 
 When a query reaches the `sql_execute_write` check and a `"deny"` rule refuses it, the tool error tells the agent why the query counted as a write and what to change (hard-blocked statements such as `DROP DATABASE`, and writes inside a batch, fail earlier with their own messages): the statement that writes, the parser error and its position, or shell syntax such as `2>/dev/null` to remove.
 
