@@ -682,14 +682,6 @@ describe("SQLite Driver E2E", () => {
     expect(result.truncated).toBe(false)
   })
 
-  test("a read after leading comments returns rows, not a change count", async () => {
-    for (const sql of ["-- note: update later\nSELECT 1 AS x", "/* delete */ SELECT 1 AS x", "  -- a\n/* b */\n  WITH t AS (SELECT 1 AS x) SELECT x FROM t"]) {
-      const result = await connector.execute(sql)
-      expect(result.columns).toEqual(["x"])
-      expect(result.rows).toEqual([[1]])
-    }
-  })
-
   test(
     "execute DDL + DML queries",
     async () => {

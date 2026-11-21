@@ -35,6 +35,8 @@ describe("shellResidue", () => {
     for (const sql of ["SELECT a > 2 FROM t", "SELECT '2>/dev/null'", "SELECT 1 -- 2>/dev/null", "SELECT a || tail FROM t"]) {
       expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("read")
     }
+    // A write keeps its own reason rather than a parser failure.
+    expect(explainWrite("DELETE FROM t 2>/dev/null", "clickhouse").reason).toBe("it is not a read (DELETE)")
   })
 
   test("a comparison is not a redirect", () => {

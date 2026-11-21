@@ -534,7 +534,12 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     const masked = maskSql(lexical.tokens)
     // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
     // (never SQL) would pass as a read. Treat it as unreadable so the residue is named, as on other dialects.
-    if (dialect?.toLowerCase() === "clickhouse" && masked.search(SHELL_REDIRECT) >= 0) {
+    // Only for queries: a write is already refused and named by its type.
+    if (
+      dialect?.toLowerCase() === "clickhouse" &&
+      result.statements.every((s: { category?: string }) => s.category === "query") &&
+      masked.search(SHELL_REDIRECT) >= 0
+    ) {
       return { ...classifyFallback(sql, dialect), parseError: "shell redirect after the SQL" }
     }
     const hardType = result.statements.find(
