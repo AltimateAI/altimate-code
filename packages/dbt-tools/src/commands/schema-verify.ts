@@ -283,6 +283,14 @@ function legacyTestModel(model: unknown, dependencies: string[]): string | undef
   return dependencies.length === 1 ? dependencies[0] : undefined
 }
 
+function testColumnName(column: string): string {
+  if (column.length < 2) return column
+  if (column.startsWith("`") && column.endsWith("`")) return column.slice(1, -1).replace(/\\`/g, "`")
+  if (column.startsWith('"') && column.endsWith('"')) return column.slice(1, -1).replace(/""/g, '"')
+  if (column.startsWith("[") && column.endsWith("]")) return column.slice(1, -1).replace(/\]\]/g, "]")
+  return column
+}
+
 function columnTests(testMetaMap: Map<string, TestMetaData> | undefined, modelUniqueId: string) {
   const attached = new Map<string, string[]>()
   const unverified = new Map<string, string[]>()
@@ -301,7 +309,7 @@ function columnTests(testMetaMap: Map<string, TestMetaData> | undefined, modelUn
       if (model && model !== modelUniqueId) continue
       destination = model ? attached : unverified
     }
-    const column = test.column_name.toLowerCase()
+    const column = testColumnName(test.column_name).toLowerCase()
     destination.set(column, [...(destination.get(column) ?? []), name])
   }
   return { attached, unverified }

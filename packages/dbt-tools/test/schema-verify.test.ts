@@ -176,6 +176,19 @@ describe("schema-verify command", () => {
     expect(result.spec).toEqual({ declared_in: "models/schema.yml", package: "proj", contract_enforced: false })
   })
 
+  test.each(["`email`", '"email"', "[email]"])("a missing column with a quoted test column %s is a mismatch", async (name) => {
+    const adapter = makeAdapter({
+      expectedColumns: { id: col("id"), email: col("email") },
+      actualColumns: [db("id")],
+      columnTests: { [name]: ["not_null_target_email"] },
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"])
+    expect(result).toMatchObject({
+      verdict: "mismatch",
+      findings: [{ kind: "tested-column-missing", columns: ["email"] }],
+    })
+  })
+
   test("a manifest without attached_node (older dbt) still finds the tested model through depends_on", async () => {
     const adapter = makeAdapter({
       expectedColumns: { id: col("id"), email: col("email") },
