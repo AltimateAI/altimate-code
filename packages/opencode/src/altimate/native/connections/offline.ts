@@ -29,8 +29,14 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   // warehouses (Snowflake, BigQuery, Databricks and others) are refused.
   if (!HOST_ADDRESSED.has(type) || config.replica_set || config.direct_connection === false) throw new Error(DENIED)
   // Trino and ClickHouse build `${protocol}://${host}`, so a protocol value could carry its own authority.
-  if (config.protocol !== undefined && !["http", "https"].includes(String(config.protocol).trim().toLowerCase()))
+  if (
+    ["trino", "clickhouse"].includes(type) &&
+    config.protocol !== undefined &&
+    !["http", "https"].includes(String(config.protocol).trim().toLowerCase())
+  )
     throw new Error(DENIED)
+  // A TNS alias or DSN names a host through tnsnames.ora or odbc.ini, which this check cannot see.
+  if (config.tns_name !== undefined || config.dsn !== undefined) throw new Error(DENIED)
   // Cloud sign-in contacts an identity provider even for a loopback host. SQL Server's driver and dbt map many
   // values (cli, default, msi, ActiveDirectory*, ServicePrincipal) to Azure AD, so only local methods pass.
   if (
@@ -81,4 +87,4 @@ const HOST_ADDRESSED = new Set([
   "postgres", "postgresql", "redshift", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "trino", "oracle", "mongodb", "mongo",
 ])
 
-const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo", "trino", "oracle", "redshift"])
+const LOCALHOST_BY_DEFAULT = new Set(["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "clickhouse", "mongodb", "mongo", "trino", "redshift"])

@@ -37,6 +37,7 @@ test("offline permits local files, loopback hosts and Unix sockets", () => {
     { type: "redshift" },
     { type: "clickhouse", host: "127.0.0.1", protocol: "HTTPS" },
     { type: "sqlserver", host: "localhost", authentication: "sql" },
+    { type: "oracle", host: "localhost", protocol: "tcp" },
   ]) expect(() => assertLocalConnection(config)).not.toThrow()
 })
 
@@ -76,6 +77,8 @@ test("offline refuses remote hosts, remote storage, SSH and what it cannot parse
     { type: "clickhouse", host: "127.0.0.1", protocol: "http://evil.example/#" },
     { type: "trino", host: "localhost", protocol: "https://evil.example" },
     { type: "mongodb", host: "localhost", direct_connection: false },
+    { type: "oracle", tns_name: "PROD_DB" },
+    { type: "oracle" },
   ]) expect(() => assertLocalConnection(config)).toThrow("Offline mode")
 })
 
