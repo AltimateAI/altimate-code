@@ -428,9 +428,6 @@ async function createConnector(
   isCurrent: () => boolean,
 ): Promise<Connector> {
   // altimate_change end
-  // altimate_change start — skip network work in offline mode
-  if (Offline.enabled()) assertLocalConnection(config)
-  // altimate_change end
   const driverPath = DRIVER_MAP[config.type.toLowerCase()]
   if (!driverPath) {
     // altimate_change start — friendlier error for known-but-unsupported databases
@@ -453,6 +450,7 @@ async function createConnector(
 
   // Resolve credentials from keychain
   resolvedConfig = await resolveConfig(name, resolvedConfig)
+  // altimate_change — check the effective target after restoring stored credentials
   if (Offline.enabled()) assertLocalConnection(resolvedConfig)
 
   // altimate_change start — validate password is a string for drivers that require it
@@ -679,11 +677,11 @@ export async function get(name: string): Promise<Connector> {
     return getScratch()
   }
 
-  const configured = configs.get(name)
-  if (Offline.enabled() && configured) assertLocalConnection(configured)
-
   const cached = connectors.get(name)
   if (cached) {
+    // altimate_change — apply the offline policy before using a cached connection
+    const configured = configs.get(name)
+    if (Offline.enabled() && configured) assertLocalConnection(await resolveConfig(name, normalizeConfig(configured)))
     // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
     SignInNotice.rememberOrigin(accountOf(configs.get(name)))
     // altimate_change end

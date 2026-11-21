@@ -128,7 +128,7 @@ describe("resolveBindingOutcome — extension pin", () => {
     }
     try {
       expect(await resolveBindingOutcome(directory)).toEqual({ status: "unknown" })
-      const binding = { datamateId: 17, datamateName: "local", linkedAt: Date.now(), repoRemote: null, projectPath: null }
+      const binding = { datamateId: 17, datamateName: "local", linkedAt: Date.now(), repoRemote: null, projectPath: directory }
       await recordApprovedBinding(directory, binding, { seed: false, awaitBackfill: true })
       expect(await resolveBindingOutcome(directory)).toMatchObject({ status: "bound", stale: true, binding })
       setPin({ ALTIMATE_PINNED_WORKSPACE_ROOT: directory })

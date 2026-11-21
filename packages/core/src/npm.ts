@@ -233,6 +233,8 @@ export const layer = Layer.effect(
           return Option.some(path.join(binDir, bin.value))
         }
 
+        // altimate_change — a missing offline binary should leave the cache untouched
+        if (offlineModeEnabled()) return Option.none<string>()
         yield* fs.remove(path.join(dir, "package-lock.json")).pipe(Effect.orElseSucceed(() => {}))
 
         yield* add(pkg)

@@ -18,11 +18,13 @@ function resolve(value: unknown): any {
 /** Resolve exactly the selected profile/target before starting dbt-owned network work. */
 export async function assertLocalDbt(projectRoot: string, args: string[] = [], integration = "core"): Promise<void> {
   if (!["core", "corecommand", "fusion"].includes(integration)) throw new Error("Offline mode disables cloud dbt integrations.")
-  const option = (name: string) => {
+  const option = (...names: string[]) => {
     let result: string | undefined
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === name) result = args[++i]
-      else if (args[i].startsWith(name + "=")) result = args[i].slice(name.length + 1)
+      const arg = args[i]
+      const equals = arg.indexOf("=")
+      const name = equals < 0 ? arg : arg.slice(0, equals)
+      if (names.includes(name)) result = equals < 0 ? args[++i] : arg.slice(equals + 1)
     }
     return result
   }
@@ -35,7 +37,7 @@ export async function assertLocalDbt(projectRoot: string, args: string[] = [], i
   const profiles = resolve(parse(await fs.readFile(profilesPath, "utf8")))
   const profileName = option("--profile") ?? process.env.DBT_PROFILE ?? project.profile
   const profile = profiles?.[profileName]
-  const target = option("--target") ?? option("-t") ?? process.env.DBT_TARGET ?? profile?.target ?? "default"
+  const target = option("--target", "-t") ?? process.env.DBT_TARGET ?? profile?.target ?? "default"
   const output = profile?.outputs?.[target]
   if (!output || typeof output.type !== "string") throw new Error("Offline mode could not resolve a local dbt profile and target.")
   if (!["duckdb", "sqlite"].includes(output.type)) {

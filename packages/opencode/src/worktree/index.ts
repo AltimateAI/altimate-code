@@ -600,14 +600,13 @@ export const layer: Layer.Layer<
         })
       }
 
-      // altimate_change start — submodule initialization can fetch missing objects
-      if (!Offline.enabled()) {
-        yield* gitExpect(
-          ["submodule", "update", "--init", "--recursive", "--force"],
-          { cwd: worktreePath },
-          (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
-        )
-      }
+      // altimate_change start — update existing submodules from objects already on disk offline
+      const submoduleMode = Offline.enabled() ? "--no-fetch" : "--init"
+      yield* gitExpect(
+        ["submodule", "update", submoduleMode, "--recursive", "--force"],
+        { cwd: worktreePath },
+        (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
+      )
       // altimate_change end
 
       yield* gitExpect(

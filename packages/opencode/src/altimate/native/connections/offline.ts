@@ -35,7 +35,7 @@ export function assertLocalConnection(raw: ConnectionConfig): void {
   }
   if (!["postgres", "postgresql", "mysql", "mariadb", "sqlserver", "mssql", "oracle", "redshift", "clickhouse", "trino", "mongodb", "mongo"].includes(type)) deny()
   // Cloud authentication may contact an identity provider even for a loopback host.
-  if (config.authentication && !["default", "sql", "ntlm"].includes(String(config.authentication).toLowerCase())) deny()
+  if (config.authentication && !["sql", "ntlm"].includes(String(config.authentication).toLowerCase())) deny()
   const mongo = type === "mongodb" || type === "mongo"
   if (mongo && config.direct_connection !== undefined && config.direct_connection !== true) deny()
   if (config.host !== undefined && !isLoopbackHost(config.host)) deny()

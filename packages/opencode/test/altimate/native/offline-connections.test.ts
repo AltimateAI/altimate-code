@@ -24,6 +24,7 @@ test("offline rejects remote targets, SSH, cloud auth, and URI host overrides", 
     { type: "postgres", host: "127.0.0.1", ssh_host: "remote" },
     { type: "snowflake", host: "localhost" },
     { type: "sqlserver", host: "localhost", authentication: "azure-active-directory-default" },
+    { type: "sqlserver", host: "localhost", authentication: "default" },
     { type: "postgres", connection_string: "postgres://localhost/db?host=remote" },
     { type: "mongodb", connection_string: "mongodb+srv://localhost/db" },
     { type: "mongodb", connection_string: "mongodb://localhost/db?directConnection=true", direct_connection: false },
@@ -39,6 +40,8 @@ test("dbt checks selected target and CLI overrides", async () => {
     const args = ["--profiles-dir", root]
     await expect(assertLocalDbt(root, args)).resolves.toBeUndefined()
     await expect(assertLocalDbt(root, [...args, "--target=remote"])).rejects.toThrow("Offline mode")
+    await expect(assertLocalDbt(root, [...args, "--target", "local", "-t", "remote"])).rejects.toThrow("Offline mode")
+    await expect(assertLocalDbt(root, [...args, "-t", "remote", "--target", "local"])).resolves.toBeUndefined()
     await expect(assertLocalDbt(root, args, "cloud")).rejects.toThrow("Offline mode")
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
