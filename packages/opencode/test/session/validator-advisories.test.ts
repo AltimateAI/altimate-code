@@ -27,7 +27,7 @@ test("a failed advisory write keeps delivered state until recovery or session de
     expect(await ValidatorEnforcement.loadAdvisories(sessionID)).toEqual(delivered)
     const folder = path.join(Global.Path.state, "validator-advisories")
     const [file] = await readdir(folder)
-    expect(await Filesystem.readJson(path.join(folder, file!))).toEqual(delivered)
+    expect(await Filesystem.readJson<typeof delivered>(path.join(folder, file!))).toEqual(delivered)
 
     const failedWrite = spyOn(Filesystem, "writeJsonAtomic").mockImplementation(() => {
       throw new Error("state directory is temporarily unwritable")
