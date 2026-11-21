@@ -93,20 +93,14 @@ export function instanceDirectory(): string | undefined {
 }
 
 /** The opt-out from the full config; throws where `Config` cannot load (outside an Instance). */
-const AUTH_REREAD_MS = 100
 
 export async function loadedState(): Promise<State> {
   const config = await Config.get()
   // An opt-out the readable sources already set stands, even if another source could not be read.
   if (config.telemetry?.disabled === true) return "disabled"
-  // Config marks a load whose auth store could not be read (its well-known remote configs were skipped).
+  // Config marks a load whose auth store could not be read (Auth.all() records it), so the store is
+  // not read again here: the load that built this config is what counts.
   if (Config.telemetryConfigUnresolved(config)) return "unreadable"
-  // A store unreadable now leaves this read unknown; it throws. Auth.set truncates then writes, so a
-  // read can land mid-write: look again before deciding. The result itself does not matter here.
-  await hasWellKnownAuth().catch(async () => {
-    await new Promise((resolve) => setTimeout(resolve, AUTH_REREAD_MS))
-    return hasWellKnownAuth()
-  })
   return "enabled"
 }
 

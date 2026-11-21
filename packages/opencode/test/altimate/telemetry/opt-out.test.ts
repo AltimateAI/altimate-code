@@ -842,12 +842,9 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.disabledState(home)).toBe("unreadable")
   })
 
-  test("an auth store unreadable at read time leaves that read unknown, not the config", async () => {
+  test("inside a project the load decides: a later unreadable auth read does not hold a config that loaded fine", async () => {
     configSpy.mockResolvedValue({})
     writeFileSync(Auth.filepath(), "{")
-    await expect(TelemetryConfig.loadedState()).rejects.toThrow()
-    // The store recovers: the config itself was loaded fine (Config marks a load that missed it).
-    writeFileSync(Auth.filepath(), "{}")
     expect(await TelemetryConfig.loadedState()).toBe("enabled")
   })
 
@@ -919,12 +916,6 @@ describe("telemetry opt-out", () => {
     // B joined the running lifecycle: no shutdown and re-init, so the config was resolved once.
     expect(configSpy).toHaveBeenCalledTimes(1)
     expect(names.sort()).toEqual(["A1", "A2", "B1"])
-  })
-
-  test("malformed auth prevents an otherwise loaded config from enabling telemetry", async () => {
-    writeFileSync(Auth.filepath(), "null")
-    configSpy.mockResolvedValue({})
-    await expectSilentLifecycle()
   })
 
   test("an unreadable config suppresses all requests", async () => {
