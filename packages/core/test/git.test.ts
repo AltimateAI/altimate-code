@@ -52,6 +52,26 @@ describe("Git", () => {
     ),
   )
 
+  it.live("offline LFS override is read after inherited -c parameters", () =>
+    Effect.sync(() => {
+      const previous = { offline: process.env.ALTIMATE_OFFLINE, parameters: process.env.GIT_CONFIG_PARAMETERS }
+      process.env.ALTIMATE_OFFLINE = "1"
+      process.env.GIT_CONFIG_PARAMETERS = "'lfs.url'='https://inherited.example/'"
+      try {
+        const env = localGitEnv()!
+        expect(env.GIT_CONFIG_PARAMETERS).toBe("'lfs.url'='https://inherited.example/' 'lfs.url'='http://127.0.0.1:9/'")
+        // Git reads the last value of a key, so the closed loopback endpoint wins.
+        const read = Bun.spawnSync(["git", "config", "--get", "lfs.url"], { env: { ...process.env, ...env }, stdout: "pipe" })
+        expect(read.stdout.toString().trim()).toBe("http://127.0.0.1:9/")
+      } finally {
+        if (previous.offline === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous.offline
+        if (previous.parameters === undefined) delete process.env.GIT_CONFIG_PARAMETERS
+        else process.env.GIT_CONFIG_PARAMETERS = previous.parameters
+      }
+    }),
+  )
+
   // Offline Git must not download LFS objects, but objects already in the local cache still check out.
   const hasLfs = Bun.spawnSync(["git", "lfs", "version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
   const liveIfLfs = hasLfs ? it.live : it.live.skip

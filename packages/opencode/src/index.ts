@@ -200,6 +200,8 @@ let cli = yargs(args)
       (["providers", "auth", "console"].includes(command) && opts._[1] === "login") ||
       (command === "mcp" && opts._[1] === "auth")
     )) throw new Error("This command requires network access. Run it while online.")
+    if (Offline.enabled() && attachURL)
+      process.stderr.write("Offline mode: the attached server applies its own network policy; start it with offline mode too.\n")
     // altimate_change end
 
     Heap.start()

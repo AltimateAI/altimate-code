@@ -184,7 +184,7 @@ While still online:
 - dbt commands, when the selected profile and target point at a local database.
 - The shell tool, installed language servers, and MCP servers that use stdio or a loopback HTTP(S) URL.
 - Git diffs, session snapshots and revert, and worktree create, remove and reset. Reset uses the locally cached base branch and submodule commits. Git LFS files check out from the local LFS cache; a file whose content is not cached fails with a clear error instead of downloading.
-- `attach` and `run --attach` to a server on this machine.
+- `attach` and `run --attach` to a server on this machine. The attached server applies its own policy, so start it with offline mode too.
 
 ### What is blocked
 

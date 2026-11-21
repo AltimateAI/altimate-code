@@ -38,6 +38,9 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
       if (command === "deps") throw new Error("Offline mode disables dbt dependency installation.")
       if ((params.args ?? []).some((arg) => arg === "--send-anonymous-usage-stats" || arg.startsWith("--send-anonymous-usage-stats=")))
         throw new Error("Offline mode disables dbt usage reporting.")
+      // dbt's version flags look up the latest release on PyPI whatever DBT_VERSION_CHECK says.
+      if ((params.args ?? []).some((arg) => ["--version", "-V", "-v"].includes(arg)))
+        throw new Error("Offline mode disables dbt version reporting.")
       // `dbt init` creates a project and `dbt clean` deletes local folders; neither opens a connection.
       const checked = command === "init" || command === "clean"
         ? undefined
@@ -45,8 +48,10 @@ export async function runDbt(params: DbtRunParams): Promise<DbtRunResult> {
             ...(params.args ?? []),
             ...(params.project_dir ? ["--project-dir", params.project_dir] : []),
           ])
+      // libpq reads these destinations from the environment, overriding the checked profile host.
+      const { PGHOSTADDR: _hostaddr, PGSERVICE: _service, PGSERVICEFILE: _serviceFile, ...inherited } = process.env
       offlineEnv = {
-        ...process.env,
+        ...inherited,
         ...(checked ? { DBT_PROFILES_DIR: checked.profilesDir } : {}),
         DBT_SEND_ANONYMOUS_USAGE_STATS: "false",
         DO_NOT_TRACK: "1",

@@ -491,9 +491,13 @@ export namespace SessionPrompt {
         }
         const binding = snapshot ? null : await resolveBindingOutcome(dir)
         // Only a project that uses a workspace hears about workspace skills.
-        const { readPin } = await import("../altimate/workspace/pin")
-        if (snapshot || binding?.status === "bound" || readPin().kind === "valid") {
-          const empty = binding?.status === "bound" && await snapshotKnownEmpty(dir, binding.binding.datamateId)
+        // A serve pin counts only for the tree it was launched for.
+        const { readPin, resolveWithinRoot } = await import("../altimate/workspace/pin")
+        const pin = readPin()
+        const pinned = pin.kind === "valid" && resolveWithinRoot(dir, pin.root) !== null ? pin.datamateId : undefined
+        const datamateId = binding?.status === "bound" ? binding.binding.datamateId : pinned
+        if (snapshot || datamateId !== undefined) {
+          const empty = datamateId !== undefined && (await snapshotKnownEmpty(dir, datamateId))
           await Offline.announce(snapshot !== null, empty)
         }
         await refreshSkillRegistry(dir)

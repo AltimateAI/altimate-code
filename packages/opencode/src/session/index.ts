@@ -748,31 +748,34 @@ export namespace Session {
     return rows.map(fromRow)
   })
 
-  // altimate_change start — descendants already checked by an offline removal of their ancestor
-  const offlineTreeChecked = new Set<SessionID>()
-  // altimate_change end
+  // altimate_change start — offline mode cannot revoke a public share, so it refuses to delete a shared
+  // session (or one with a shared descendant) before anything is removed; the tree is checked once
   export const remove = fn(SessionID.zod, async (sessionID) => {
-    const project = Instance.project
-    // altimate_change start — offline mode cannot revoke a public share, so it refuses to delete a shared
-    // session (or one with a shared descendant) before anything is removed
-    if (Offline.enabled() && !offlineTreeChecked.delete(sessionID)) {
-      const tree: SessionID[] = []
+    if (Offline.enabled()) {
       const pending = [sessionID]
       while (pending.length) {
         const id = pending.pop()!
-        tree.push(id)
-        if ((await get(id)).share?.url)
+        // A missing root behaves as online (logged by removeTree); other read failures stop the removal.
+        const info = await get(id).catch((error) => {
+          if (id === sessionID && NotFoundError.isInstance(error)) return undefined
+          throw error
+        })
+        if (!info) break
+        if (info.share?.url)
           throw new Offline.OfflinePolicyError("This session is shared. Delete it while online so its share can be revoked.")
         pending.push(...(await children(id)).map((child) => child.id))
       }
-      // The recursive removal of each descendant skips the scan it has already passed.
-      for (const id of tree.slice(1)) offlineTreeChecked.add(id)
     }
+    await removeTree(sessionID)
+  })
+
+  async function removeTree(sessionID: SessionID): Promise<void> {
     // altimate_change end
+    const project = Instance.project
     try {
       const session = await get(sessionID)
       for (const child of await children(sessionID)) {
-        await remove(child.id)
+        await removeTree(child.id)
       }
       await unshare(sessionID).catch(() => {})
       // altimate_change start — release only the deleted session's scratch store
@@ -790,7 +793,7 @@ export namespace Session {
     } catch (e) {
       log.error(e)
     }
-  })
+  }
 
   export const updateMessage = fn(MessageV2.Info, async (msg) => {
     const time_created = msg.time.created

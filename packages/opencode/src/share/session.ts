@@ -28,7 +28,7 @@ export const layer = Layer.effect(
 
     const share = Effect.fn("SessionShare.share")(function* (sessionID: SessionID) {
       // altimate_change start — offline mode refuses sharing with its own message, before the config check
-      if (Offline.enabled()) return yield* Effect.die(new Offline.OfflinePolicyError("Sharing sessions requires an online run."))
+      if (Offline.enabled()) return yield* new Session.OfflinePolicyError({ message: "Sharing sessions requires an online run." })
       // altimate_change end
       const conf = yield* cfg.get()
       if (conf.share === "disabled") throw new Error("Sharing is disabled in configuration")

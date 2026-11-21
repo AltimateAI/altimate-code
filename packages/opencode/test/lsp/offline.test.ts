@@ -53,8 +53,9 @@ test.skipIf(process.platform === "win32")("offline language servers get the user
     process.env.NO_PROXY = process.env.no_proxy = "*"
     for (const opts of [{}, { env: { ...process.env } }]) {
       const proc = spawn("sh", ["-c", 'printf "%s|%s|%s" "$NO_PROXY" "$no_proxy" "$ALTIMATE_OFFLINE_USER_PROXY"'], opts)
+      const exited = proc.exited
       const out = await new Response(proc.stdout as any).text()
-      await new Promise((resolve) => proc.once("exit", resolve))
+      await exited
       expect(out).toBe("corp.example||")
     }
   } finally {

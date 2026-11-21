@@ -54,6 +54,9 @@ test("user programs get their own proxy exclusions back, not the offline bypass"
     expect(env.no_proxy).toBeUndefined()
     expect(env.ALTIMATE_OFFLINE_USER_PROXY).toBeUndefined()
     expect(env.PATH).toBe("/bin")
+    // A copied env that lacks the key (Bun omits variables assigned after startup) still gets the saved value.
+    const copy: Record<string, string | undefined> = { PATH: "/bin" }
+    expect(Offline.userEnv(copy).NO_PROXY).toBe("corp.example")
     // A value the program's own configuration set is kept.
     expect(Offline.userEnv({ ...process.env, NO_PROXY: "mcp.local" }).NO_PROXY).toBe("mcp.local")
     // Without offline state, the environment is unchanged.

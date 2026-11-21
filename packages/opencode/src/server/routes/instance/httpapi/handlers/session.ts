@@ -1,3 +1,6 @@
+// altimate_change start — offline policy refusals
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -203,7 +206,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const remove = Effect.fn("SessionHttpApi.remove")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* SessionError.mapStorageNotFound(session.remove(ctx.params.sessionID))
+      yield* SessionError.mapStorageNotFound(
+        // altimate_change start — the offline refusal reaches the client as a 400 with its message (error middleware)
+        session
+          .remove(ctx.params.sessionID)
+          .pipe(Effect.catchTag("Session.OfflinePolicyError", (error) => Effect.die(new Offline.OfflinePolicyError(error.message)))),
+        // altimate_change end
+      )
       return true
     })
 
@@ -285,7 +294,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     // every failure to a 400 BadRequest.
     const share = Effect.fn("SessionHttpApi.share")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* shareSvc.share(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.InternalServerError({})))
+      yield* shareSvc.share(ctx.params.sessionID).pipe(
+        // altimate_change start — the offline refusal reaches the client as a 400 with its message (error middleware)
+        Effect.catchIf(
+          (error): error is Session.OfflinePolicyError => error instanceof Session.OfflinePolicyError,
+          (error) => Effect.die(new Offline.OfflinePolicyError(error.message)),
+        ),
+        // altimate_change end
+        Effect.mapError(() => new HttpApiError.InternalServerError({})),
+      )
       return yield* requireSession(ctx.params.sessionID)
     })
 

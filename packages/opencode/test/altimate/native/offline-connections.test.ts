@@ -112,15 +112,31 @@ test.skipIf(process.platform === "win32")("offline dbt runs with the checked pro
   try {
     const bin = path.join(root, "bin")
     await fs.mkdir(bin)
-    await fs.writeFile(path.join(bin, "dbt"), "#!/bin/sh\necho \"$DBT_PROFILES_DIR|$DBT_VERSION_CHECK|$DBT_SEND_ANONYMOUS_USAGE_STATS\"\n", { mode: 0o755 })
+    await fs.writeFile(path.join(bin, "dbt"), "#!/bin/sh\necho \"$DBT_PROFILES_DIR|$DBT_VERSION_CHECK|$DBT_SEND_ANONYMOUS_USAGE_STATS|$DO_NOT_TRACK|$PGHOSTADDR\"\n", { mode: 0o755 })
     await fs.writeFile(path.join(root, "dbt_project.yml"), "profile: test\n")
     await fs.writeFile(path.join(root, "profiles.yml"), "test:\n  outputs:\n    default:\n      type: duckdb\n      path: ':memory:'\n")
     process.env.PATH = `${bin}${path.delimiter}${previousPath}`
     process.env.ALTIMATE_OFFLINE = "1"
-    const result = await runDbt({ command: "ls", project_dir: root, args: ["--profiles-dir", root] })
-    expect(result.exit_code).toBe(0)
-    expect(result.stdout.trim()).toBe(`${root}|false|false`)
+    const previousHostaddr = process.env.PGHOSTADDR
+    process.env.PGHOSTADDR = "198.51.100.20"
+    try {
+      const result = await runDbt({ command: "ls", project_dir: root, args: ["--profiles-dir", root] })
+      expect(result.exit_code).toBe(0)
+      // libpq's destination override is dropped; usage reporting and the version check are off.
+      expect(result.stdout.trim()).toBe(`${root}|false|false|1|`)
+    } finally {
+      if (previousHostaddr === undefined) delete process.env.PGHOSTADDR
+      else process.env.PGHOSTADDR = previousHostaddr
+    }
     expect((await runDbt({ command: "deps", project_dir: root })).stderr).toContain("Offline mode")
+    expect((await runDbt({ command: "ls", project_dir: root, args: ["--send-anonymous-usage-stats"] })).stderr).toContain(
+      "Offline mode disables dbt usage reporting.",
+    )
+    expect((await runDbt({ command: "init", args: ["--version"] })).stderr).toContain("Offline mode disables dbt version reporting.")
+    // `dbt init` needs no existing project or profile.
+    const empty = path.join(root, "new")
+    await fs.mkdir(empty)
+    expect((await runDbt({ command: "init", project_dir: empty })).exit_code).toBe(0)
   } finally {
     process.env.PATH = previousPath
     await fs.rm(root, { recursive: true, force: true })

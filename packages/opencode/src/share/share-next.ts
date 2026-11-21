@@ -260,7 +260,8 @@ export namespace ShareNext {
 
   export async function remove(sessionID: SessionID) {
     // altimate_change start — keep the local share state until the server revokes it
-    if (Offline.enabled()) throw new Offline.OfflinePolicyError("Offline mode cannot revoke a share. Run unshare while online.")
+    if (Offline.enabled())
+      throw new Offline.OfflinePolicyError("Offline mode cannot revoke a share. Run unshare while online.")
     // altimate_change end
     if (disabled) return
     log.info("removing share", { sessionID })

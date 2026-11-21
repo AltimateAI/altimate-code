@@ -493,7 +493,9 @@ export const layer: Layer.Layer<
           // altimate_change start — offline mode keeps the user's proxy settings for their start commands
           ChildProcess.make(shell, args as string[], {
             cwd: directory,
-            ...(Offline.enabled() ? { env: Offline.userEnv({ ...process.env }) as Record<string, string>, extendEnv: false } : { extendEnv: true }),
+            ...(Offline.enabled()
+              ? { env: Offline.userEnv({ ...process.env }) as Record<string, string>, extendEnv: false }
+              : { extendEnv: true }),
             stdin: "ignore",
           }),
           // altimate_change end
