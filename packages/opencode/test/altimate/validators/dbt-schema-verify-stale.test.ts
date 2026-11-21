@@ -20,6 +20,7 @@ const MISMATCH = {
   model: "orders",
   verdict: "mismatch",
   columns_extra: ["note"],
+  findings: [{ kind: "contract", columns: ["note"], evidence: "An enforced contract in models/schema.yml excludes note." }],
   columns_missing: [],
   columns_reordered: [],
   type_mismatches: [],

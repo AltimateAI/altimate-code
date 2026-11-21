@@ -1,12 +1,18 @@
 import type { DBTProjectIntegrationAdapter, CommandProcessResult } from "@altimateai/dbt-integration"
 import { schemaVerify } from "./schema-verify"
 
-export async function build(adapter: DBTProjectIntegrationAdapter, args: string[]) {
+type WithVerifier = <T>(verify: (adapter: DBTProjectIntegrationAdapter) => Promise<T>) => Promise<T>
+
+export async function build(
+  adapter: DBTProjectIntegrationAdapter,
+  args: string[],
+  withVerifier: WithVerifier = (verify) => verify(adapter),
+) {
   const model = flag(args, "model")
   const downstream = args.includes("--downstream")
   if (!model) {
     if (downstream) return { error: "--downstream requires --model" }
-    return project(adapter)
+    return project(adapter, withVerifier)
   }
   const result = await adapter.unsafeBuildModelImmediately({
     plusOperatorLeft: "",
@@ -20,7 +26,7 @@ export async function build(adapter: DBTProjectIntegrationAdapter, args: string[
   // closest a CLI command can get to harness-level enforcement: the agent
   // cannot see a green build without also seeing the schema-verify diff.
   if (!("error" in formatted)) {
-    return { ...formatted, schema_verify: await safeVerify(adapter, model) }
+    return { ...formatted, schema_verify: await safeVerify(withVerifier, model) }
   }
   return formatted
 }
@@ -41,10 +47,20 @@ export async function test(adapter: DBTProjectIntegrationAdapter, args: string[]
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
   const result = await adapter.unsafeRunModelTestImmediately(model)
-  return format(result)
+  const formatted = format(result)
+  if (
+    "error" in formatted ||
+    /does not match any (?:enabled )?nodes?|Encountered an error|Compilation Error|Parsing Error|Runtime Error|Database Error|Could not set lock|Done\.\s+PASS=/i.test(formatted.stdout)
+  ) {
+    return formatted
+  }
+  return { stdout: formatted.stdout.replace(/\bNothing to do\b/i, "Model has no tests") }
 }
 
-export async function project(adapter: DBTProjectIntegrationAdapter) {
+export async function project(
+  adapter: DBTProjectIntegrationAdapter,
+  withVerifier: WithVerifier = (verify) => verify(adapter),
+) {
   const result = await adapter.unsafeBuildProjectImmediately()
   const formatted = format(result)
   if ("error" in formatted) return formatted
@@ -56,49 +72,7 @@ export async function project(adapter: DBTProjectIntegrationAdapter) {
   // Only the mismatches and verify errors are reported back. `no-spec`
   // models are summarised as a count to keep the response compact.
   try {
-    const parsed = await adapter.parseManifest()
-    const nodes = parsed?.nodeMetaMap?.nodes ? Array.from(parsed.nodeMetaMap.nodes()) : []
-    const verified: Array<{ model: string; verdict: string; columns_extra?: unknown; columns_missing?: unknown; columns_reordered?: unknown; type_mismatches?: unknown }> = []
-    const errored: Array<{ model: string; error: string }> = []
-    let nospec_count = 0
-    for (const node of nodes) {
-      // Only models, only those with declared columns. Sources/seeds/snapshots/tests skipped.
-      const resType = (node as { resource_type?: string }).resource_type
-      if (resType !== "model") continue
-      const name = (node as { name?: string }).name
-      if (!name) continue
-      const cols = (node as { columns?: Record<string, unknown> }).columns ?? {}
-      if (Object.keys(cols).length === 0) {
-        nospec_count++
-        continue
-      }
-      try {
-        const v = await schemaVerify(adapter, ["--model", name])
-        if ("error" in v) {
-          errored.push({ model: name, error: String((v as { error: unknown }).error) })
-        } else if ((v as { verdict: string }).verdict === "no-spec") {
-          nospec_count++
-        } else {
-          verified.push(v as { model: string; verdict: string })
-        }
-      } catch (e) {
-        errored.push({ model: name, error: e instanceof Error ? e.message : String(e) })
-      }
-    }
-    const mismatches = verified.filter((r) => r.verdict === "mismatch")
-    const matches = verified.filter((r) => r.verdict === "match")
-    return {
-      ...formatted,
-      schema_verify_summary: {
-        models_checked: verified.length + errored.length,
-        match: matches.length,
-        mismatch: mismatches.length,
-        no_spec: nospec_count,
-        errored: errored.length,
-        mismatches,
-        ...(errored.length > 0 && { errors: errored }),
-      },
-    }
+    return await withVerifier(async (verifier) => ({ ...formatted, schema_verify_summary: await verifyProject(verifier) }))
   } catch (e) {
     return {
       ...formatted,
@@ -109,9 +83,52 @@ export async function project(adapter: DBTProjectIntegrationAdapter) {
   }
 }
 
-async function safeVerify(adapter: DBTProjectIntegrationAdapter, model: string) {
+async function verifyProject(adapter: DBTProjectIntegrationAdapter) {
+  const parsed = await adapter.parseManifest()
+  const nodes = parsed?.nodeMetaMap?.nodes ? Array.from(parsed.nodeMetaMap.nodes()) : []
+  const verified: Array<{ model: string; verdict: string; columns_extra?: unknown; columns_missing?: unknown; columns_reordered?: unknown; type_mismatches?: unknown }> = []
+  const errored: Array<{ model: string; error: string }> = []
+  let nospec_count = 0
+  for (const node of nodes) {
+    // Only models, only those with declared columns. Sources/seeds/snapshots/tests skipped.
+    const resType = (node as { resource_type?: string }).resource_type
+    if (resType !== "model") continue
+    const name = (node as { name?: string }).name
+    if (!name) continue
+    const cols = (node as { columns?: Record<string, unknown> }).columns ?? {}
+    if (Object.keys(cols).length === 0) {
+      nospec_count++
+      continue
+    }
+    try {
+      const v = await schemaVerify(adapter, ["--model", name])
+      if ("error" in v) {
+        errored.push({ model: name, error: String((v as { error: unknown }).error) })
+      } else if ((v as { verdict: string }).verdict === "no-spec") {
+        nospec_count++
+      } else {
+        verified.push(v as { model: string; verdict: string })
+      }
+    } catch (e) {
+      errored.push({ model: name, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  const mismatches = verified.filter((r) => r.verdict === "mismatch")
+  const matches = verified.filter((r) => r.verdict === "match")
+  return {
+    models_checked: verified.length + errored.length,
+    match: matches.length,
+    mismatch: mismatches.length,
+    no_spec: nospec_count,
+    errored: errored.length,
+    mismatches,
+    ...(errored.length > 0 && { errors: errored }),
+  }
+}
+
+async function safeVerify(withVerifier: WithVerifier, model: string) {
   try {
-    return await schemaVerify(adapter, ["--model", model])
+    return await withVerifier((adapter) => schemaVerify(adapter, ["--model", model]))
   } catch (e) {
     return {
       error: `schema-verify failed: ${e instanceof Error ? e.message : String(e)}. Run \`altimate-dbt schema-verify --model ${model}\` manually to inspect.`,

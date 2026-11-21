@@ -1,5 +1,7 @@
 import { join, resolve } from "path"
 import { existsSync } from "fs"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { read, type Config } from "./config"
 import { init } from "./commands/init"
 import { validate } from "./check"
@@ -71,6 +73,7 @@ function output(result: unknown) {
   const fmt = rest.includes("--format") && rest[rest.indexOf("--format") + 1] === "text"
   if (fmt && typeof result === "object" && result !== null) {
     const obj = result as Record<string, unknown>
+    if (Array.isArray(obj.notes)) for (const note of obj.notes) console.log(note)
     if ("error" in obj) {
       console.error(failureLines(obj).join("\n"))
       process.exit(1)
@@ -143,14 +146,20 @@ async function main() {
   configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
 
   // Lazy import: the adapter loads dbt-integration, which commands above don't need
+  const { create } = await import("./adapter")
   let adapter
+  const buildNotes: string[] = []
   try {
-    const { create } = await import("./adapter")
-    adapter = await create(cfg)
+    adapter = await create(cfg, {
+      onPackagesInstalled: () => {
+        if (cmd === "build") buildNotes.push("Build re-installed packages and reset the package directory (dbt_packages by default). Edits inside it may have been lost.")
+      },
+    })
   } catch (err) {
-    return failure(err)
+    return { ...failure(err), ...(buildNotes.length > 0 && { notes: buildNotes }) }
   }
 
+  let adapterDisposed = false
   let result: unknown
   try {
     switch (cmd) {
@@ -164,7 +173,23 @@ async function main() {
         result = await (await import("./commands/compile")).query(adapter, rest)
         break
       case "build":
-        result = await (await import("./commands/build")).build(adapter, rest)
+        result = await (await import("./commands/build")).build(adapter, rest, async (verify) => {
+          await adapter.dispose()
+          adapterDisposed = true
+          const targetPath = await mkdtemp(join(tmpdir(), "altimate-dbt-verify-"))
+          try {
+            const verifier = await create(cfg, { targetPath })
+            try {
+              const answer = await verify(verifier)
+              buildNotes.push("Schema verification ran after build. Its compile artifacts use a separate target directory so the build artifacts remain available.")
+              return answer
+            } finally {
+              await verifier.dispose()
+            }
+          } finally {
+            await rm(targetPath, { recursive: true, force: true })
+          }
+        })
         break
       case "run":
         result = await (await import("./commands/build")).run(adapter, rest)
@@ -194,19 +219,21 @@ async function main() {
         result = await (await import("./commands/graph")).parents(adapter, rest)
         break
       case "deps":
-        result = await (await import("./commands/deps")).deps(adapter)
+        result = await (await import("./commands/deps")).deps(adapter, cfg.projectRoot)
         break
       case "add-packages":
-        result = await (await import("./commands/deps")).add(adapter, rest)
+        result = await (await import("./commands/deps")).add(adapter, rest, cfg.projectRoot)
         break
       default:
         result = { error: `Unknown command: ${cmd}`, usage: USAGE }
     }
   } finally {
-    try { await adapter.dispose() } catch {}
+    if (!adapterDisposed) {
+      try { await adapter.dispose() } catch {}
+    }
   }
 
-  return result
+  return buildNotes.length && result && typeof result === "object" ? { ...result, notes: buildNotes } : result
 }
 
 main().then(output).catch(bail)
