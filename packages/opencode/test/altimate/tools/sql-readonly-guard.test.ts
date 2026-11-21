@@ -172,10 +172,10 @@ describe("sql_execute on a read-only agent", () => {
 
   test("a denial that fails an Effect, as the tool bridge runs it, is explained", async () => {
     const tool = await initTool(SqlExecuteTool)
-    // The production context runs ctx.ask through Effect.runPromise (EffectBridge.promise).
+    // Production runs permission.ask(...).pipe(Effect.orDie) through Effect.runPromise (EffectBridge.promise).
     const ctx = {
       ...deniedCtx([]),
-      ask: () => Effect.runPromise(Effect.fail(new PermissionV1.DeniedError({ ruleset: [] }))),
+      ask: () => Effect.runPromise(Effect.fail(new PermissionV1.DeniedError({ ruleset: [] })).pipe(Effect.orDie)),
     }
     await expect(
       tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),

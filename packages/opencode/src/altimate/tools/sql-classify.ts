@@ -587,7 +587,9 @@ export function shellResidue(sql: string, dialect?: string): string | undefined 
 function parserMessage(message: string): string {
   const located = /^(.*?line \d+, column \d+:\s*)([\s\S]*)$/.exec(message)
   const prefix = located ? located[1] : ""
-  const detail = (located ? located[2] : message).split(/\s+(?:got|found|near)\b|\s*[('"`[:]/i)[0].trim()
+  const detail = (located ? located[2] : message)
+    .split(/\s+(?:got|found|near)\b|\s*[('"`[:]/i)[0]
+    .replace(/[\s,;:]+$/, "")
   return `${prefix}${detail}`.trim() || "parse error"
 }
 
@@ -618,7 +620,7 @@ export function explainWrite(sql: string, dialect?: string): { reason: string; u
     if (result.parseError) {
       return unreadable(
         `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
-        "The position counts from the start of that statement with comments removed. " +
+        "The position is approximate: it counts within that statement, with each comment read as one space. " +
         'Fix the syntax there: quote identifiers that contain spaces or are keywords ("order date"), ' +
         "check the clause order, and replace any placeholder text such as ..."
       )

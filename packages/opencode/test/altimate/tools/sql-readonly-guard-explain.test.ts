@@ -83,6 +83,14 @@ describe("other read-only refusals carry the reason", () => {
     expect(() => readSql("SELECT 1. INTO c FROM orders", "postgres")).toThrow()
   })
 
+  test("a word only the stricter sql_check list refuses is named", () => {
+    expect(() => readSql("SELECT x AS load FROM t", "postgres")).toThrow("statement word LOAD")
+  })
+
+  test("parser details end without stray punctuation", () => {
+    expect(explainWrite("SELECT a FROM WHERE (((", "postgres").reason).not.toMatch(/,\)/)
+  })
+
   test("the result lint path can skip the explanation", () => {
     expect(() => readSql("SELECT 1; DELETE FROM t", "postgres", { explain: false })).toThrow(
       /^This operation only accepts a single read-only SELECT \(or WITH \.\.\. SELECT\); it never writes or fixes data\.$/,
