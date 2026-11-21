@@ -2375,7 +2375,8 @@ export namespace Telemetry {
       activeFlushAbort?.abort() // a batch already taken must not post after the opt-out
       return Promise.resolve()
     }
-    if (gate !== "pending") return Promise.resolve()
+    // Not during a shutdown: a re-init chained behind the exit flush would start a lifecycle nobody ends.
+    if (gate !== "pending" || shutdownPromise) return Promise.resolve()
     adopted = "enabled"
     return (initPromise ?? Promise.resolve()).catch(() => {}).then(() => init())
   }
@@ -2654,7 +2655,11 @@ export namespace Telemetry {
         droppedEvents = 0
         return
       }
-      const state = adopted ?? (await TelemetryConfig.resolve(configDirectory))
+      let state = adopted ?? (await TelemetryConfig.resolve(configDirectory))
+      // Outside an Instance only the files can be read. Where they cannot settle it (a remote or
+      // organization config), an enabled decision a full config already made in this process stands;
+      // an opt-out the files do show still wins.
+      if (state === "unreadable" && gate === "enabled" && !TelemetryConfig.instanceDirectory()) state = "enabled"
       // Another thread's opt-out may have been adopted while the read ran: it still wins.
       if (state === "disabled" || optOutState() === "disabled") {
         decide("disabled")

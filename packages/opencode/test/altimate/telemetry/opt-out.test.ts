@@ -509,6 +509,24 @@ describe("telemetry opt-out", () => {
     }
   })
 
+  test("an enabled decision from the full config stands for later inits outside a project", async () => {
+    const names = recordIngestion()
+    signOut()
+    wellKnownAuth() // the files alone cannot settle this user's opt-out
+    await using dir = await tmpdir({ git: true })
+    configSpy.mockResolvedValue({})
+    await Instance.provide({ directory: dir.path, fn: () => Telemetry.init() })
+    expect(Telemetry.optOutState()).toBe("enabled")
+    await Telemetry.shutdown()
+
+    // Between sessions, outside any project.
+    trackStartup()
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
+    await Telemetry.flush()
+    expect(names).toEqual(["startup_ready"])
+  })
+
   test("an opt-out adopted while this thread's own read runs still wins", async () => {
     const names = recordIngestion()
     signOut()
@@ -759,7 +777,7 @@ describe("telemetry opt-out", () => {
     expect(await TelemetryConfig.loadedState()).toBe("enabled")
   })
 
-  test("the retry throttle still applies after an earlier session enabled telemetry", async () => {
+  test("after a session enabled telemetry, an unreadable read outside a project keeps that decision", async () => {
     recordIngestion()
     signOut()
     configSpy.mockResolvedValue({})
@@ -769,7 +787,8 @@ describe("telemetry opt-out", () => {
     configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
     process.env.OPENCODE_CONFIG_CONTENT = "{"
     const reads = configSpy.mock.calls.length
-    for (let i = 0; i < 5; i++) await Telemetry.init()
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(true)
     expect(configSpy.mock.calls.length - reads).toBe(1)
   })
 

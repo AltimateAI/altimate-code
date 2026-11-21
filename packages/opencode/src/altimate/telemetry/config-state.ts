@@ -93,6 +93,7 @@ export function instanceDirectory(): string | undefined {
 // Loaded configs built while the auth store could not be read: they lack its well-known remote
 // configs even after the store is repaired, until the app reloads its config.
 const loadedWithoutAuth = new WeakSet<object>()
+const AUTH_REREAD_MS = 100
 
 export async function loadedState(): Promise<State> {
   const config = await Config.get()
@@ -100,7 +101,11 @@ export async function loadedState(): Promise<State> {
   // Auth.all() returns an empty store when its read or parse fails, hiding well-known remote config.
   // Called only for that throw (an unparseable auth file); its result does not matter here.
   try {
-    await hasWellKnownAuth()
+    await hasWellKnownAuth().catch(async () => {
+      // Auth.set truncates then writes, so a read can land mid-write: look again before deciding.
+      await new Promise((resolve) => setTimeout(resolve, AUTH_REREAD_MS))
+      return hasWellKnownAuth()
+    })
   } catch (error) {
     loadedWithoutAuth.add(config)
     throw error
