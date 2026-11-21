@@ -1,4 +1,4 @@
-import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, ruleTitle } from "./finding"
+import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, ruleTitle, verifierDemoted } from "./finding"
 import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY } from "./verdict"
 
 /**
@@ -393,10 +393,12 @@ export function postingPolicy(env: VerdictEnvelope): PostingPolicy {
 const CONFIDENCE_ORDER: Record<Confidence, number> = { high: 3, medium: 2, low: 1, unknown: 0 }
 
 /** Whether a finding may be posted as an inline comment: an inline-tier rule
- *  (AI findings default to inline in `ruleTier`), on a line the PR added, at or
- *  above the severity floor. */
+ *  (AI findings default to inline in `ruleTier`) that the verifier did not move
+ *  to the summary, on a line the PR added, at or above the severity floor. */
 export function inlineEligible(f: Finding, posting: PostingPolicy): boolean {
-  if (f.tier !== "inline") return false
+  // The verifier's demotion wins over any tier, including a config rule that
+  // re-tiers AI findings to `inline` after the AI lane ran.
+  if (verifierDemoted(f) || f.tier !== "inline") return false
   if (f.preExisting || typeof f.startLine !== "number") return false
   return SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[posting.inlineSeverityFloor]
 }

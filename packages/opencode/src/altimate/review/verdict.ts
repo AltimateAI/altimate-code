@@ -1,6 +1,6 @@
 import z from "zod"
 import { createHmac, createHash } from "node:crypto"
-import { Finding, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
+import { Finding, ReviewCategory, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
 
 /**
@@ -162,6 +162,15 @@ export const ReviewScope = z.object({
 })
 export type ReviewScope = z.infer<typeof ReviewScope>
 
+/** Tokens spent by model calls (`input` excludes cached tokens). */
+const AiTokensSchema = z.object({
+  input: z.number().nonnegative(),
+  inputTotal: z.number().nonnegative(),
+  output: z.number().nonnegative(),
+  reasoning: z.number().nonnegative(),
+  cacheRead: z.number().nonnegative(),
+})
+
 export const VerdictEnvelope = z.object({
   version: z.literal("1"),
   verdict: Verdict,
@@ -220,18 +229,80 @@ export const VerdictEnvelope = z.object({
       model: z.string().optional(),
       durationMs: z.number().int().nonnegative().optional(),
       /** Tokens spent by the lane's model calls (`input` excludes cached tokens). */
-      tokens: z
-        .object({
-          input: z.number().nonnegative(),
-          inputTotal: z.number().nonnegative(),
-          output: z.number().nonnegative(),
-          reasoning: z.number().nonnegative(),
-          cacheRead: z.number().nonnegative(),
-        })
-        .optional(),
+      tokens: AiTokensSchema.optional(),
       /** Estimated USD cost from the model's price table. */
       cost: z.number().nonnegative().optional(),
       calls: z.number().int().nonnegative().optional(),
+      /** Generator findings replayed from an earlier envelope: tokens, cost and calls are that run's. */
+      replayed: z.boolean().optional(),
+      /** The replayed envelope did not list every generator finding. */
+      replayIncomplete: z.boolean().optional(),
+      /** The opt-in dbt-grounded verifier (`ALTIMATE_REVIEW_AI_VERIFY=1`): what it kept and dropped. */
+      verifier: z
+        .object({
+          state: z.enum(["ok", "skipped", "timeout", "error", "budget"]),
+          reason: z.string().optional(),
+          durationMs: z.number().int().nonnegative().optional(),
+          tokens: AiTokensSchema.optional(),
+          cost: z.number().nonnegative().optional(),
+          turns: z.number().int().nonnegative().optional(),
+          toolCalls: z.number().int().nonnegative().optional(),
+          reviewed: z.number().int().nonnegative().optional(),
+          kept: z.number().int().nonnegative().optional(),
+          discarded: z.number().int().nonnegative().optional(),
+          summary: z.number().int().nonnegative().optional(),
+          unreviewed: z.number().int().nonnegative().optional(),
+          /** Discarded findings (at most 20), for auditing the verifier's precision. */
+          dropped: z
+            .array(
+              z.object({
+                id: z.string(),
+                file: z.string(),
+                startLine: z.number().int().positive().optional(),
+                title: z.string(),
+                body: z.string(),
+                category: z.string(),
+                severity: z.string(),
+                decision: z.enum(["keep", "discard", "summary"]),
+                rule: z.string(),
+                verdict: z.string().optional(),
+                claimType: z.string().optional(),
+                evidence: z.string().optional(),
+              }),
+            )
+            .optional(),
+          /** Every AI finding's features, verdict (absent when unreviewed) and outcome, uncapped, for offline re-triage. */
+          decisions: z
+            .array(
+              z.object({
+                id: z.string(),
+                category: ReviewCategory,
+                decision: z.enum(["keep", "discard", "summary"]),
+                rule: z.string(),
+                ts: z.object({
+                  evidenceLineValid: z.boolean().nullable(),
+                  targetsUnchangedCode: z.boolean(),
+                  restatesGrounding: z.boolean(),
+                  claimsOtherFile: z.boolean(),
+                  styleOnly: z.boolean(),
+                  lowConfidence: z.boolean(),
+                  hedgedDataDiff: z.boolean(),
+                }),
+                model: z
+                  .object({
+                    claimType: z.enum(["code_fact", "cross_file", "convention", "intent", "test_gap", "speculation"]),
+                    verdict: z.enum(["confirmed", "refuted", "unverifiable"]),
+                    value: z.enum(["actionable", "informational", "nit"]),
+                    requiresAssumedInput: z.boolean(),
+                    toolsUsed: z.array(z.string()),
+                    hasEvidence: z.boolean(),
+                  })
+                  .optional(),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */

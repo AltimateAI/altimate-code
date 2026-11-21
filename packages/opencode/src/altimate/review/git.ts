@@ -203,6 +203,62 @@ export async function grepMatchesAt(cwd: string, ref: string | undefined, patter
   }
 }
 
+/**
+ * Fixed-string matches of `pattern` in tracked text files at `ref` (the working
+ * tree when omitted) under the repo-root-relative `pathspecs`, at most
+ * `maxHits`, bounded by a timeout. Never throws: no match returns `[]`; a git
+ * failure or a timeout returns what was found, or undefined when that is nothing,
+ * so a failed search never reads as "no matches".
+ */
+export async function grepFixedAt(
+  gitRoot: string,
+  ref: string | undefined,
+  pattern: string,
+  pathspecs: string[],
+  opts: { maxHits?: number; timeoutMs?: number } = {},
+): Promise<Array<{ path: string; line: number; text: string }> | undefined> {
+  // No pathspec would search the whole repository.
+  if (!pathspecs.length) return undefined
+  const maxHits = opts.maxHits ?? 50
+  const args = ["grep", "-n", "-I", "-F", "--full-name", "-m", String(maxHits), "-e", pattern, ...(ref ? [ref] : []), "--"]
+  args.push(...pathspecs.map((p) => `:(top)${p}`))
+  let out: string
+  let failed = false
+  try {
+    out = (await exec("git", args, { cwd: gitRoot, timeout: opts.timeoutMs ?? 5_000, maxBuffer: 4 * 1024 * 1024 })).stdout
+  } catch (e) {
+    // git grep exits 1 when nothing matches; anything else (timeout, bad ref) is a failed search.
+    const err = e as { stdout?: string; code?: number | string }
+    out = err.stdout ?? ""
+    failed = err.code !== 1
+  }
+  const hits: Array<{ path: string; line: number; text: string }> = []
+  for (const row of out.split("\n")) {
+    const rest = ref && row.startsWith(ref + ":") ? row.slice(ref.length + 1) : row
+    const m = /^(.+?):(\d+):(.*)$/.exec(rest)
+    if (!m) continue
+    hits.push({ path: m[1], line: Number(m[2]), text: m[3].slice(0, 300) })
+    if (hits.length >= maxHits) break
+  }
+  return failed && !hits.length ? undefined : hits
+}
+
+/**
+ * Repo-relative pathspecs for a project search: the project's dbt `dirs`, or one
+ * `glob` inside the project. A glob that already carries the project prefix (the
+ * verifier sees repo-relative paths) is not prefixed again. Undefined for a glob
+ * that would leave the project (`..` segments).
+ */
+export function projectGrepSpecs(rootRel: string | undefined, dirs: string[], glob?: string): string[] | undefined {
+  const root = rootRel ? rootRel.replace(/\/+$/, "") + "/" : ""
+  if (glob) {
+    const g = glob.trim().replace(/^\.?\/+/, "")
+    if (!g || g.split("/").includes("..")) return undefined
+    return [root && !g.startsWith(root) ? root + g : g]
+  }
+  return dirs.map((d) => path.posix.normalize(root + d)).filter((d) => !d.startsWith(".."))
+}
+
 /** Where the review's base came from, recorded on the verdict envelope. */
 export type BaseSource =
   | "flag" // --base

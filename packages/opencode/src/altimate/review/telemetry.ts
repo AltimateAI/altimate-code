@@ -120,6 +120,14 @@ export function emitReviewRun(input: {
       ai_tokens_output: env.ai?.tokens?.output,
       ai_cost: env.ai?.cost,
       ai_calls: env.ai?.calls,
+      ai_replayed: env.ai?.replayed,
+      ai_verify_state: env.ai?.verifier?.state,
+      ai_verify_tokens_total: env.ai?.verifier?.tokens
+        ? env.ai.verifier.tokens.inputTotal + env.ai.verifier.tokens.output
+        : undefined,
+      ai_verify_tool_calls: env.ai?.verifier?.toolCalls,
+      ai_verify_kept: env.ai?.verifier?.kept,
+      ai_verify_discarded: env.ai?.verifier?.discarded,
       base_source: env.scope?.baseSource,
       out_of_scope_files: env.scope?.outOfScopeFiles ?? 0,
       engine_errors: env.engineErrors?.reduce((n, e) => n + e.count, 0) ?? 0,

@@ -136,6 +136,11 @@ export function normalizeRuleId(id: string): string {
   return id.trim().toLowerCase().replace(/_/g, "-")
 }
 
+/** Whether the AI verifier moved a finding to the summary (it is then never posted inline). */
+export function verifierDemoted(f: Pick<Finding, "evidence">): boolean {
+  return (f.evidence?.result as { verification?: { decision?: unknown } } | undefined)?.verification?.decision === "summary"
+}
+
 /** The catalog rule id behind a finding (`evidence.result.rule`), if any. */
 export function catalogRuleId(f: Pick<Finding, "evidence">): string | undefined {
   const rule = (f.evidence?.result as { rule?: unknown } | undefined)?.rule
