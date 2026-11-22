@@ -153,3 +153,24 @@ test("omits credential-bearing attachment bytes while preserving clean media", (
     }),
   ).toEqual({ content: [{ type: "resource", resource: { uri: "test://file", text: "context\n[REDACTED]" } }] })
 })
+
+test("redacts credential values in symbol-keyed error properties", () => {
+  const detail = Symbol("detail")
+  const credential = "fixture-symbol-credential"
+  const error = Object.assign(new Error("Could not load fixture"), { [detail]: credential })
+  const safe = createCredentialRedactor([credential]).failure(error) as typeof error
+  expect(safe).toBeInstanceOf(Error)
+  expect(safe[detail]).toBe("[REDACTED]")
+  expect(error[detail]).toBe(credential)
+})
+
+test("omits attachments with a credential in percent-encoded data bytes", () => {
+  const credential = "fixture/percent+credential"
+  const redact = createCredentialRedactor([credential])
+  const unsafe = { type: "file", mime: "text/plain", url: "data:text/plain,%FF" + encodeURIComponent(credential) }
+  const clean = { ...unsafe, url: "data:text/plain,ordinary%2Fcontent" }
+  expect(redact.output({ output: "Attached files", attachments: [unsafe, clean] })).toEqual({
+    output: "Attached files\n[REDACTED]",
+    attachments: [clean],
+  })
+})

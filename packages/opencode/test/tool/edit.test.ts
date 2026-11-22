@@ -643,3 +643,37 @@ describe("tool.edit", () => {
     )
   })
 })
+
+it.instance("refuses a fuzzy block replacement that copies a redacted credential placeholder", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const filepath = path.join(test.directory, "profiles.yml")
+    const secret = "hunter2-prod-pw"
+    const original = `outputs:\n  user: dev\n  password: ${secret}\n  port: 5432\n`
+    const oldString = original.replace(secret, "[REDACTED]")
+    const newString = oldString.replace("5432", "5433")
+    const { replace } = yield* Effect.promise(() => import("@/tool/edit"))
+    // Confirm that the real fuzzy matcher accepts this redacted block. The
+    // regression must exercise the guard, rather than a no-match failure.
+    expect(replace(original, oldString, newString)).toContain(newString)
+    yield* put(filepath, original)
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    let approvals = 0
+    const exit = yield* run(
+      { filePath: filepath, oldString, newString },
+      {
+        ...ctx,
+        redactCredentials: createCredentialRedactor([secret]),
+        ask: () =>
+          Effect.sync(() => {
+            approvals++
+          }),
+      },
+    ).pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isFailure(exit))
+      expect(String(Cause.squash(exit.cause))).toContain("Refusing to overwrite a known credential")
+    expect(approvals).toBe(0)
+    expect(yield* load(filepath)).toBe(original)
+  }),
+)

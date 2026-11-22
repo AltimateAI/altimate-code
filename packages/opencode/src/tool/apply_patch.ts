@@ -134,6 +134,7 @@ export const ApplyPatchTool = Tool.define(
               return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
             }
 
+            assertNoCredentialPlaceholderOverwrite(oldContent, newContent, ctx.redactCredentials)
             const diff = toolFileDiff(filePath, oldContent, newContent, ctx.redactCredentials)
 
             let additions = 0

@@ -116,10 +116,10 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return start
   }
 
-  function progress(value: string) {
+  function progressStatus(value: string) {
     // Keep the tail private until more output arrives or the stream ends.
     // Alternate JSON escape spellings can require a longer holdback.
-    if (!pattern) return value
+    if (!pattern) return { output: value, withheld: false }
     const unfinishedEscape = /\\(?:u[\da-fA-F]{0,3})?$/.exec(value)
     const completePrefix = unfinishedEscape ? value.slice(0, unfinishedEscape.index) : value
     const decoded = completePrefix.includes("\\") ? decodeEscapes(completePrefix) : undefined
@@ -130,24 +130,40 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     const start = Math.min(Math.max(0, value.length - longest + 1), escapedStart)
     // Match complete credentials against the original string, including a
     // credential whose tail is also a prefix of another credential.
-    return replaceMatches(value, matches(value), 0, start)
+    const found = matches(value)
+    const lastVisible = found.find(({ start: matchStart, end }) => matchStart < start && end > start)
+    return {
+      output: replaceMatches(value, found, 0, start),
+      withheld: (lastVisible?.end ?? start) < value.length,
+    }
+  }
+
+  function previewStatus(value: string, limit: number) {
+    // Read enough beyond the cap to match any literal crossing it.
+    const scan = value.slice(0, limit + lookahead)
+    const progress = scan.length === value.length ? progressStatus(scan) : { output: text(scan), withheld: false }
+    const truncated = scan.length < value.length || progress.output.length > limit
+    return { ...progress, output: truncated ? progress.output.slice(0, limit) + "\n\n..." : progress.output }
   }
 
   // Binary attachments must stay valid. When their transport or decoded bytes
   // contain an exact credential, omit the bytes and leave a text placeholder.
   let binaryLiterals: Buffer[] | undefined
   const binaryMatches = new Map<string, boolean>()
-  function containsCredentialBytes(encoded: string) {
+  function containsCredentialBytes(encoded: string, encoding: "base64" | "percent" = "base64") {
     if (!encoded || !pattern) return false
     // Replay may allocate new attachment objects on every turn. Cache only a
     // digest and a match bit, without retaining the attachment itself.
-    const digest = encoded.length >= 4096 ? createHash("sha256").update(encoded).digest("hex") : undefined
+    const digest =
+      encoded.length >= 4096
+        ? createHash("sha256").update(encoding).update(encoded, "utf16le").digest("hex")
+        : undefined
     const cached = digest ? binaryMatches.get(digest) : undefined
     if (cached !== undefined) return cached
     binaryLiterals ??= ordered.map((literal) => Buffer.from(literal, "utf8"))
     let contains = text(encoded) !== encoded
     if (!contains) {
-      const bytes = Buffer.from(encoded, "base64")
+      const bytes = encoding === "base64" ? Buffer.from(encoded, "base64") : decodePercentBytes(encoded)
       contains = binaryLiterals.some((literal) => bytes.includes(literal))
     }
     if (digest) {
@@ -157,13 +173,30 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return contains
   }
 
+  function decodePercentBytes(encoded: string) {
+    const bytes = Buffer.allocUnsafe(Buffer.byteLength(encoded))
+    let offset = 0
+    let written = 0
+    for (const match of encoded.matchAll(/(?:%[\da-f]{2})+/gi)) {
+      written += bytes.write(encoded.slice(offset, match.index), written, "utf8")
+      for (let index = 0; index < match[0].length; index += 3) {
+        bytes[written++] = Number.parseInt(match[0].slice(index + 1, index + 3), 16)
+      }
+      offset = match.index + match[0].length
+    }
+    written += bytes.write(encoded.slice(offset), written, "utf8")
+    return bytes.subarray(0, written)
+  }
+
   const omitAttachment = Symbol("omitAttachment")
   function filterMedia(value: unknown): unknown {
     if (!value || typeof value !== "object") return value
     const item = value as Record<string, unknown>
     if (item.type === "file" && typeof item.url === "string") {
-      const data = /^data:[^,]*;base64,(.*)$/is.exec(item.url)?.[1]
-      if (data && containsCredentialBytes(data)) return omitAttachment
+      const data = /^data:([^,]*),(.*)$/is.exec(item.url)
+      if (data && containsCredentialBytes(data[2], /;base64$/i.test(data[1]) ? "base64" : "percent")) {
+        return omitAttachment
+      }
     }
     if ((item.type === "image" || item.type === "audio") && typeof item.data === "string") {
       if (containsCredentialBytes(item.data)) return { type: "text", text: replacement }
@@ -212,7 +245,8 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
       const next = dom ?? Object.create(Object.getPrototypeOf(value))
       seen.set(value, next)
       let changed = !!dom && (dom.message !== value.message || dom.name !== value.name)
-      for (const descriptor of Object.values(descriptors)) {
+      for (const key of Reflect.ownKeys(descriptors)) {
+        const descriptor: PropertyDescriptor = Reflect.get(descriptors, key)
         if (!("value" in descriptor)) continue
         const safe = visit(descriptor.value, seen, "data")
         changed ||= safe !== descriptor.value
@@ -271,13 +305,9 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     multilineLookaround: ordered.find((value) => value.includes("\n"))?.length ?? 0,
     windowLookaround: lookahead,
     lines: (value: string) => replaceMatches(value, matches(value), 0, value.length, true),
-    progress,
-    preview(value: string, limit: number) {
-      // Read enough beyond the cap to match any literal crossing it.
-      const scan = value.slice(0, limit + lookahead)
-      const prefix = scan.length === value.length ? progress(scan) : text(scan)
-      return scan.length < value.length || prefix.length > limit ? prefix.slice(0, limit) + "\n\n..." : prefix
-    },
+    progress: (value: string) => progressStatus(value).output,
+    previewStatus,
+    preview: (value: string, limit: number) => previewStatus(value, limit).output,
     window(value: string, from: number, to: number) {
       if (!pattern) return value.slice(from, to)
       const start = Math.max(0, from - lookahead)
@@ -423,6 +453,11 @@ function authFileSnapshot<T>() {
       cached = undefined
       return undefined
     }
+    // Whole-second timestamps cannot distinguish same-size rewrites within a second.
+    if (info.mtimeNs % 1_000_000_000n === 0n) {
+      cached = undefined
+      return load().catch(() => undefined)
+    }
     const version = `${file}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`
     if (cached?.version === version) return cached.data
     const data = load().catch(() => {
@@ -438,93 +473,96 @@ const readProviderAuth = authFileSnapshot<Awaited<ReturnType<typeof import("@/au
 const readMcpAuth = authFileSnapshot<Awaited<ReturnType<typeof import("@/mcp/auth").all>>>()
 let lastSnapshot: { values: Set<string>; redactor: CredentialRedactor } | undefined
 
-export const loadToolCredentialRedactor = withAlsInstanceRef(
-  Effect.gen(function* () {
-    // Message projection is below configuration and the connection registry in the import graph.
-    const [{ Auth }, { Config }, { Env }, Connections, { McpAuth }, { knownMcpHeaders }] = yield* Effect.promise(() =>
-      Promise.all([
-        import("@/auth"),
-        import("@/config/config"),
-        import("@/env"),
-        import("@/altimate/native/connections/registry"),
-        import("@/mcp/auth"),
-        import("@/mcp"),
-      ]),
-    )
-    const instance = yield* InstanceRef
-    const values = new Set<string>()
-    const add = (value: unknown) => {
-      if (typeof value === "string") values.add(value)
+const collectToolCredentialRedactor = Effect.gen(function* () {
+  // Message projection is below configuration and the connection registry in the import graph.
+  const [{ Auth }, { Config }, { Env }, Connections, { McpAuth }, { knownMcpHeaders }] = yield* Effect.promise(() =>
+    Promise.all([
+      import("@/auth"),
+      import("@/config/config"),
+      import("@/env"),
+      import("@/altimate/native/connections/registry"),
+      import("@/mcp/auth"),
+      import("@/mcp"),
+    ]),
+  )
+  const instance = yield* InstanceRef
+  const values = new Set<string>()
+  const add = (value: unknown) => {
+    if (typeof value === "string") values.add(value)
+  }
+  const [config, auth, mcpAuth] = yield* Effect.promise(() =>
+    Promise.all([
+      instance ? Config.get().catch(() => undefined) : undefined,
+      process.env.OPENCODE_AUTH_CONTENT
+        ? Auth.all().catch(() => undefined)
+        : readProviderAuth(Auth.filepath(), Auth.all),
+      readMcpAuth(McpAuth.credentialFile, McpAuth.all),
+    ]),
+  )
+  const environment = [...Object.entries(process.env), ...Object.entries(instance ? Env.all() : {})]
+  const configuredVariables = new Set<string>()
+  for (const provider of Object.values(config?.provider ?? {})) {
+    for (const name of provider.env ?? []) {
+      if (!providerLocationVariables.test(name)) configuredVariables.add(name)
     }
-    const [config, auth, mcpAuth] = yield* Effect.promise(() =>
-      Promise.all([
-        instance ? Config.get().catch(() => undefined) : undefined,
-        process.env.OPENCODE_AUTH_CONTENT
-          ? Auth.all().catch(() => undefined)
-          : readProviderAuth(Auth.filepath(), Auth.all),
-        readMcpAuth(McpAuth.credentialFile, McpAuth.all),
-      ]),
-    )
-    const environment = [...Object.entries(process.env), ...Object.entries(instance ? Env.all() : {})]
-    const configuredVariables = new Set<string>()
-    for (const provider of Object.values(config?.provider ?? {})) {
-      for (const name of provider.env ?? []) {
-        if (!providerLocationVariables.test(name)) configuredVariables.add(name)
-      }
-      addProviderOptions(provider.options, add)
-      for (const model of Object.values(provider.models ?? {})) {
-        addProviderOptions(model.options, add)
-        addCredentialHeaders(model.headers, add)
-      }
+    addProviderOptions(provider.options, add)
+    for (const model of Object.values(provider.models ?? {})) {
+      addProviderOptions(model.options, add)
+      addCredentialHeaders(model.headers, add)
     }
-    for (const [name, value] of environment) {
-      if (name.startsWith(Connections.CONN_ENV_PREFIX)) {
-        if (value) addConnectionFields(readJson(value), add)
-      } else if (isCredentialName(name) || providerCredentialVariables.has(name) || configuredVariables.has(name)) {
-        add(value)
-      }
+  }
+  for (const [name, value] of environment) {
+    if (name.startsWith(Connections.CONN_ENV_PREFIX)) {
+      if (value) addConnectionFields(readJson(value), add)
+    } else if (isCredentialName(name) || providerCredentialVariables.has(name) || configuredVariables.has(name)) {
+      add(value)
     }
-    for (const entry of Object.values(auth ?? {})) {
-      if (entry.type === "oauth") {
-        add(entry.access)
-        add(entry.refresh)
-      } else {
-        add(entry.key)
-        if (entry.type === "wellknown") add(entry.token)
-      }
+  }
+  for (const entry of Object.values(auth ?? {})) {
+    if (entry.type === "oauth") {
+      add(entry.access)
+      add(entry.refresh)
+    } else {
+      add(entry.key)
+      if (entry.type === "wellknown") add(entry.token)
     }
-    for (const entry of Object.values(mcpAuth ?? {})) {
-      add(entry.tokens?.accessToken)
-      add(entry.tokens?.refreshToken)
-      add(entry.clientInfo?.clientSecret)
-      add(entry.codeVerifier)
-    }
-    for (const server of Object.values(config?.mcp ?? {})) {
-      if (!("type" in server)) continue
-      if (server.type === "remote") {
-        addCredentialHeaders(server.headers, add)
-        if (typeof server.oauth === "object") add(server.oauth.clientSecret)
-      } else {
-        for (const [name, value] of Object.entries(server.environment ?? {})) {
-          if (isCredentialName(name)) add(value)
-        }
+  }
+  for (const entry of Object.values(mcpAuth ?? {})) {
+    add(entry.tokens?.accessToken)
+    add(entry.tokens?.refreshToken)
+    add(entry.clientInfo?.clientSecret)
+    add(entry.codeVerifier)
+  }
+  for (const server of Object.values(config?.mcp ?? {})) {
+    if (!("type" in server)) continue
+    if (server.type === "remote") {
+      addCredentialHeaders(server.headers, add)
+      if (typeof server.oauth === "object") add(server.oauth.clientSecret)
+    } else {
+      for (const [name, value] of Object.entries(server.environment ?? {})) {
+        if (isCredentialName(name)) add(value)
       }
     }
-    if (instance) {
-      for (const headers of knownMcpHeaders(instance)) addCredentialHeaders(headers, add)
-      const connections = Connections.knownCredentialConfigs(instance.directory)
-      for (const connection of connections) addConnectionFields(connection, add)
-    }
-    for (const credential of knownStoredCredentials()) addConnectionCredential(credential.field, credential.value, add)
-    const previous = lastSnapshot
-    if (previous && previous.values.size === values.size && [...values].every((value) => previous.values.has(value))) {
-      return previous.redactor
-    }
-    const redactor = createCredentialRedactor(values)
-    lastSnapshot = { values, redactor }
-    return redactor
-  }),
-)
+  }
+  if (instance) {
+    for (const headers of knownMcpHeaders(instance)) addCredentialHeaders(headers, add)
+    const connections = Connections.knownCredentialConfigs(instance.directory)
+    for (const connection of connections) addConnectionFields(connection, add)
+  }
+  for (const credential of knownStoredCredentials()) addConnectionCredential(credential.field, credential.value, add)
+  const previous = lastSnapshot
+  if (previous && previous.values.size === values.size && [...values].every((value) => previous.values.has(value))) {
+    return previous.redactor
+  }
+  const redactor = createCredentialRedactor(values)
+  lastSnapshot = { values, redactor }
+  return redactor
+})
+
+export const loadToolCredentialRedactor = Effect.gen(function* () {
+  if (yield* InstanceRef) return yield* collectToolCredentialRedactor
+  return yield* withAlsInstanceRef(collectToolCredentialRedactor)
+})
 
 export function toolCredentialRedactor() {
   return Effect.runPromise(attach(loadToolCredentialRedactor))

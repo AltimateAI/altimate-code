@@ -304,15 +304,14 @@ export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID>
 // factory runs inside this init Effect's fiber, attach would read an unset InstanceRef and fail
 // ("InstanceRef not provided"). Provide the ALS instance as InstanceRef so attach finds it.
 export function withAlsInstanceRef<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
-  return Effect.gen(function* () {
-    if (yield* InstanceRef) return yield* effect
+  return Effect.suspend(() => {
     let instance: InstanceContext | undefined
     try {
       instance = Instance.current
     } catch {
       instance = undefined
     }
-    return yield* (instance ? effect.pipe(Effect.provideService(InstanceRef, instance)) : effect)
+    return instance ? effect.pipe(Effect.provideService(InstanceRef, instance)) : effect
   })
 }
 // altimate_change end

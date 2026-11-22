@@ -146,10 +146,13 @@ test("bash progress holds a split credential until the next chunk and redacts fi
         abort: new AbortController().signal,
         messages: [],
         ask: async () => {},
-        metadata: (update: { metadata?: { output?: string } }) => {
+        metadata: (update: { metadata?: { output?: string; credentialPreviewWithheld?: boolean } }) => {
           if (update.metadata?.output === undefined) return
           previews.push(update.metadata.output)
-          if (previews.length === 2) return Bun.write(path.join(directory, "release"), "ready").then(() => {})
+          if (previews.length === 2) {
+            expect(update.metadata.credentialPreviewWithheld).toBe(true)
+            return Bun.write(path.join(directory, "release"), "ready").then(() => {})
+          }
         },
       },
     )
@@ -185,5 +188,34 @@ test("model replay marks an omitted credential-bearing attachment", async () => 
     expect(request).not.toContain(encoded)
     expect(request).not.toContain(configuredKey)
     expect(part.state.attachments).toHaveLength(1)
+  })
+})
+
+test("interrupted bash replay identifies a potentially withheld preview tail", async () => {
+  await inConfiguredInstance(async (directory) => {
+    const { interruptedToolPart } = await import("@/session/processor")
+    const history = rawHistory(directory)
+    const part = history[1].parts[0] as MessageV2.ToolPart
+    part.state = {
+      status: "running",
+      input: { command: "fixture" },
+      time: { start: 1 },
+      metadata: { output: "Partial safe output" },
+    }
+    const completePreview = await interruptedToolPart(part, 1000)
+    expect(completePreview.state).toMatchObject({ metadata: { output: "Partial safe output" } })
+    part.state.metadata = { ...part.state.metadata, credentialPreviewWithheld: true }
+    const interrupted = await interruptedToolPart(part, 1000)
+    expect(interrupted.state).toMatchObject({
+      status: "error",
+      metadata: {
+        interrupted: true,
+        output: "Partial safe output\n[Interrupted shell preview may omit the last part of the output.]",
+      },
+    })
+    history[1].parts = [interrupted]
+    const model = await Provider.getModel(providerID, modelID)
+    const request = JSON.stringify(await MessageV2.toModelMessages(history, model))
+    expect(request).toContain("preview may omit the last part")
   })
 })

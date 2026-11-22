@@ -1,6 +1,6 @@
 // altimate_change — synthetic fixtures for known credential sources.
 import path from "node:path"
-import { mkdir } from "node:fs/promises"
+import { mkdir, utimes } from "node:fs/promises"
 import { Effect } from "effect"
 import { InstanceRef } from "@/effect/instance-ref"
 import { expect, spyOn, test } from "bun:test"
@@ -38,6 +38,12 @@ test("collects provider token environment names and MCP OAuth credentials", asyn
     expect(updated.text(rotated)).toBe("[REDACTED]")
     expect(updated.text(accessToken)).toBe(accessToken)
     expect(reads).toHaveBeenCalledTimes(2)
+
+    // Whole-second timestamps cannot safely cache rewrites of equal size.
+    await utimes(McpAuth.credentialFile, 1_700_000_000, 1_700_000_000)
+    await toolCredentialRedactor()
+    await toolCredentialRedactor()
+    expect(reads).toHaveBeenCalledTimes(4)
   } finally {
     reads.mockRestore()
     if (previous === undefined) delete process.env.CF_AIG_TOKEN

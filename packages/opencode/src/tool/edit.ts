@@ -166,6 +166,7 @@ export const EditTool = Tool.define(
               const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
               const desiredBom = source.bom || next.bom
               contentNew = next.text
+              assertNoCredentialPlaceholderOverwrite(contentOld, contentNew, ctx.redactCredentials)
 
               diff = toolFileDiff(
                 filePath,

@@ -53,12 +53,20 @@ import { abortableStream } from "./abortable-stream"
 // altimate_change start — upstream_fix: preserve child findings even when parent cancellation wins the tool-result race
 import { interruptedTaskOutput } from "./task-output"
 
-async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number): Promise<MessageV2.ToolPart> {
+export async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number): Promise<MessageV2.ToolPart> {
   const state = part.state
   if (state.status !== "running" && state.status !== "pending") return part
   const metadata = state.status === "running"
     ? ToolResultCap.capInterruptedMetadata(state.metadata, capTokens)
     : { interrupted: true }
+  if (
+    part.tool === "bash" &&
+    state.status === "running" &&
+    state.metadata?.credentialPreviewWithheld === true &&
+    typeof metadata.output === "string"
+  ) {
+    metadata.output += "\n[Interrupted shell preview may omit the last part of the output.]"
+  }
   const time = { start: state.status === "running" ? state.time.start : Date.now(), end: Date.now() }
   if (
     part.tool === "task" && state.status === "running" &&
