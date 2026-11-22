@@ -280,7 +280,7 @@ test("unavailable", async () => {
 describe("explainWrite", () => {
   test("names shell residue", () => {
     const result = explainWrite("SELECT 1 2>/dev/null", "postgres")
-    expect(result).toEqual({ unreadable: true, reason: expect.stringContaining("`2>/dev/null`") })
+    expect(result).toEqual({ unreadable: true, residue: true, reason: expect.stringContaining("`2>/dev/null`") })
   })
 
   test("carries the parser's position", () => {
@@ -347,7 +347,7 @@ describe("explainWrite", () => {
     expect(explainWrite("SELECT t . update FROM t", "sqlserver").reason).toContain("spaced dot")
     expect(explainWrite('SELECT a INTO newt FROM t -- "t".update', "postgres").reason).not.toContain("spaced dot")
     expect(explainWrite(`SELECT '"t".update' INTO c FROM t`, "postgres").reason).not.toContain("spaced dot")
-    for (const sql of ["SELECT 1. INTO c FROM t", "SELECT 1 . INTO c FROM t"]) {
+    for (const sql of ["SELECT 1. INTO c FROM t", "SELECT 1 . INTO c FROM t", "SELECT .5 INTO c FROM t", "SELECT -.5 INTO c FROM t"]) {
       expect(explainWrite(sql, "postgres").reason).not.toContain("spaced dot")
     }
   })

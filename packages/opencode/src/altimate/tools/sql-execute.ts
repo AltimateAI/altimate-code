@@ -824,12 +824,11 @@ export function deniedWriteMessage(input: {
     }
     chosen ??= explanation
   }
-  const { reason, unreadable, unavailable } = chosen ?? explainWrite(input.sql, undefined)
+  const { reason, unreadable, unavailable, residue } = chosen ?? explainWrite(input.sql, undefined)
   // Without a warehouse (and off the dbt route, where a warehouse also moves the query off dbt), a query the
   // reachable dialects disagree on, or cannot read, may be fine in the real warehouse's dialect.
   const disagree = results.some((result) => result.queryType === "read" && !result.blocked)
   // Shell syntax is not SQL in any dialect, so checking another dialect cannot help.
-  const residue = reason.startsWith("it contains shell syntax")
   const dialectHint =
     residue || input.warehouseGiven || input.dbt || input.dialects.length < 2
       ? ""

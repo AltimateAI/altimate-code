@@ -685,11 +685,13 @@ function batchKeywordExplanation(dialect?: string): string {
 export function explainWrite(
   sql: string,
   dialect?: string,
-): { reason: string; unreadable: boolean; unavailable?: boolean } {
+): { reason: string; unreadable: boolean; unavailable?: boolean; residue?: boolean } {
   const unreadable = (reason: string) => ({ reason, unreadable: true })
   const writes = (reason: string) => ({ reason, unreadable: false })
   const residue = shellResidue(sql, dialect)
-  if (residue) return unreadable(`it contains shell syntax (\`${residue}\`), which is not SQL. Remove it and send only the SQL`)
+  if (residue) {
+    return { ...unreadable(`it contains shell syntax (\`${residue}\`), which is not SQL. Remove it and send only the SQL`), residue: true }
+  }
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     // An executable comment (/*! ... */) is closed but runs as SQL on some engines, so it is never read as one.
@@ -769,9 +771,9 @@ export function explainWrite(
       // name, or any name on ClickHouse); otherwise the hint would point away from the real write clause.
       const clickhouse = dialect?.toLowerCase() === "clickhouse"
       // Read on masked code (quoted names blanked, literals and comments ignored) with numbers blanked too, so
-      // `1. INTO` stays a SELECT INTO: a keyword after a quoted name or a spaced dot counts; an unquoted t.update
+      // `1. INTO` and `.5 INTO` stay a SELECT INTO: a keyword after a quoted name or a spaced dot counts; an unquoted t.update
       // is a column and never reaches here.
-      const statementMasked = masked.replace(/\b\d+(?:\.\d*|\s*\.)?/g, (number) => " ".repeat(number.length))
+      const statementMasked = masked.replace(/(?<![\w$])\.\d+|\b\d+(?:\.\d*|\s*\.)?/g, (number) => " ".repeat(number.length))
       const dotted = (
         clickhouse ? /\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i : /(?:(?:^|[^\w$])\s*|\s)\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b|\.\s+(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i
       ).test(statementMasked)
