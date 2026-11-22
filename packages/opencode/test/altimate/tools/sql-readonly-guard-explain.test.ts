@@ -252,8 +252,10 @@ test("unavailable", async () => {
     expect(reason).toContain("send a single SELECT or WITH query")
   })
 
-  test("a parenthesized SELECT is told to drop the parentheses", () => {
-    expect(() => readSql("(SELECT 1)", "postgres")).toThrow("remove the outer parentheses")
+  test("a read starting with a parenthesis is told to start with SELECT or WITH", () => {
+    for (const sql of ["(SELECT 1)", "(SELECT 1) UNION ALL (SELECT 2)"]) {
+      expect(() => readSql(sql, "postgres")).toThrow("start it with SELECT or WITH")
+    }
   })
 
   test("a check on SQL built around user input names the input, not positions in the built text", () => {
