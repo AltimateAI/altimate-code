@@ -186,9 +186,11 @@ function hardDenyLabel(match: string): string {
   return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
 }
 
-/** A name quoted the way the dialect quotes identifiers: backticks where double quotes make a string. */
+/** A name quoted the way the dialect always reads as an identifier: backticks where double quotes can make a
+ * string (or, on ClickHouse, as data_diff quotes), brackets on SQL Server, where QUOTED_IDENTIFIER may be off. */
 function quoteName(name: string, dialect?: string): string {
-  return /^(mysql|mariadb|bigquery|spark|databricks|hive)$/i.test(dialect ?? "") ? `\`${name}\`` : `"${name}"`
+  if (isSqlServerDialect(dialect)) return `[${name}]`
+  return /^(mysql|mariadb|clickhouse|bigquery|spark|databricks|hive)$/i.test(dialect ?? "") ? `\`${name}\`` : `"${name}"`
 }
 
 /** SQL Server and its aliases, whose batches run statements without separators and whose XML .query() takes XQuery. */

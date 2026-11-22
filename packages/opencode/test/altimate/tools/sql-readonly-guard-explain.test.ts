@@ -342,6 +342,7 @@ describe("explainWrite", () => {
     expect(explainWrite("SELECT `t`.update FROM t", "mysql").reason).toContain("`t`.`update`")
     expect(explainWrite("SELECT Order Date FROM orders", "mysql").reason).toContain("(`order date`)")
     expect(explainWrite("SELECT Order Date FROM orders", "postgres").reason).toContain('("order date")')
+    expect(explainWrite("SELECT Order Date FROM orders", "sqlserver").reason).toContain("([order date])")
   })
 
   test("every write in the guard corpus is a write with a specific reason", () => {
