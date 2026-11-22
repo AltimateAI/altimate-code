@@ -111,3 +111,22 @@ test("filters arbitrary structured keys without renaming result protocol fields"
     metadata: { truncated: true, "[REDACTED]": "detail" },
   })
 })
+
+test("filters serializable plugin class fields and retains clean instances", () => {
+  class Details {
+    constructor(readonly token: string) {}
+  }
+
+  const value = "fixture-class-value"
+  const redact = createCredentialRedactor([value])
+  expect(JSON.stringify(redact.output({ metadata: { details: new Details(value) } }))).toBe(
+    '{"metadata":{"details":{"token":"[REDACTED]"}}}',
+  )
+  const clean = { metadata: { details: new Details("ordinary detail") } }
+  expect(redact.output(clean)).toBe(clean)
+})
+
+test("redacts normalized CRLF variants based on the source credential length", () => {
+  const redact = createCredentialRedactor(["abc\r\ndef"])
+  expect(redact.lines("abc\ndef")).toBe("[REDACTED]\n")
+})

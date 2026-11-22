@@ -49,8 +49,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   for (const value of values) {
     if (!value || value.length < minLength) continue
     literals.add(value)
-    const normalized = value.replace(/\r\n?/g, "\n")
-    if (normalized.length >= minLength) literals.add(normalized)
+    literals.add(value.replace(/\r\n?/g, "\n"))
     literals.add(JSON.stringify(value).slice(1, -1))
   }
   const ordered = [...literals].sort((a, b) => b.length - a.length)
@@ -152,13 +151,23 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     if (Array.isArray(value)) {
       const next: unknown[] = []
       seen.set(value, next)
-      for (const item of value) next.push(visit(item, seen, frame))
-      return next
+      let changed = false
+      for (const item of value) {
+        const safeItem = visit(item, seen, frame)
+        changed ||= safeItem !== item
+        next.push(safeItem)
+      }
+      if (changed) return next
+      seen.set(value, value)
+      return value
     }
     const prototype = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) return value
-    const next = Object.create(prototype)
+    const plain = prototype === Object.prototype || prototype === null
+    // SDK media and native values such as dates and typed arrays retain their representation.
+    if (!plain && Object.prototype.toString.call(value) !== "[object Object]") return value
+    const next = Object.create(plain ? prototype : Object.prototype)
     seen.set(value, next)
+    let changed = false
     for (const [key, item] of Object.entries(value)) {
       const toolField = frame === "envelope" || frame === "content" || (frame === "metadata" && metadataFields.has(key))
       const childFrame: Frame =
@@ -177,14 +186,18 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
           safeKey = baseKey + " (" + n + ")"
         }
       }
+      const safeItem = discriminator ? item : visit(item, seen, childFrame)
+      changed ||= safeKey !== key || safeItem !== item
       Object.defineProperty(next, safeKey, {
-        value: discriminator ? item : visit(item, seen, childFrame),
+        value: safeItem,
         enumerable: true,
         writable: true,
         configurable: true,
       })
     }
-    return next
+    if (changed) return next
+    seen.set(value, value)
+    return value
   }
 
   function failure(error: unknown): unknown {
