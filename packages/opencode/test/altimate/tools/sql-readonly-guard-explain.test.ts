@@ -254,7 +254,7 @@ test("unavailable", async () => {
 
   test("a read starting with a parenthesis is told to start with SELECT or WITH", () => {
     for (const sql of ["(SELECT 1)", "(SELECT 1) UNION ALL (SELECT 2)"]) {
-      expect(() => readSql(sql, "postgres")).toThrow("start it with SELECT or WITH")
+      expect(() => readSql(sql, "postgres")).toThrow("it starts with a parenthesis")
     }
   })
 

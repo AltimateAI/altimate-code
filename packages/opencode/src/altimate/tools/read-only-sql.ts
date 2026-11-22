@@ -133,7 +133,7 @@ export function writeReason(sql: string, dialect?: string): string {
       "refused" in checked
         ? checked.refused
         : body!.startsWith("(")
-          ? "it starts with a parenthesis; start it with SELECT or WITH (for UNION or a similar set operation, put the parenthesized branches in a WITH query or drop their parentheses)"
+          ? "it starts with a parenthesis (for UNION or a similar set operation, move the parenthesized branches into a WITH query or drop their parentheses)"
           : "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)"
     return ` This read is invalid here because ${cause}; send a single SELECT or WITH query that can be embedded.`
   }
