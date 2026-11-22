@@ -146,7 +146,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     if (!value || typeof value !== "object") return value
     const item = value as Record<string, unknown>
     if (item.type === "file" && typeof item.url === "string") {
-      const data = /^data:[^,]*;base64,(.*)$/s.exec(item.url)?.[1]
+      const data = /^data:[^,]*;base64,(.*)$/is.exec(item.url)?.[1]
       if (data && containsCredentialBytes(data)) return omitAttachment
     }
     if ((item.type === "image" || item.type === "audio") && typeof item.data === "string") {

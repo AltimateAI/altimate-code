@@ -137,7 +137,8 @@ test("omits credential-bearing attachment bytes while preserving clean media", (
   const encoded = Buffer.from("PDF " + value).toString("base64")
   const unsafe = { type: "file", mime: "application/pdf", url: "data:application/pdf;base64," + encoded }
   const clean = { type: "file", mime: "application/pdf", url: "data:application/pdf;base64,Y2xlYW4=" }
-  expect(redact.output({ output: "Attached files", attachments: [unsafe, clean] })).toEqual({
+  const uppercase = { ...unsafe, url: "DATA:application/pdf;BASE64," + encoded }
+  expect(redact.output({ output: "Attached files", attachments: [unsafe, uppercase, clean] })).toEqual({
     output: "Attached files\n[REDACTED]",
     attachments: [clean],
   })
