@@ -337,13 +337,13 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
     // Estimate the seeded history as it was before the measured assistant answered.
     const history: { role: "user" | "assistant"; content: { type: "text"; text: string }[] }[] = []
-    let olderFile: { id: PartID; messageID: MessageID; mime: string; url: string } | undefined
+    const measuredFiles: { id: PartID; messageID: MessageID; mime: string; url: string }[] = []
     for (const [index, text] of turns.entries()) {
       const msg = yield* user(text)
-      if (index === 0 && seeded.olderFile) olderFile = yield* attachImage(msg.id)
+      if (index === 0 && seeded.olderFile) measuredFiles.push(yield* attachImage(msg.id))
       history.push({ role: "user", content: [{ type: "text", text }] })
       const last = index === turns.length - 1
-      if (last && seeded.userFile) yield* attachImage(msg.id)
+      if (last && seeded.userFile) measuredFiles.push(yield* attachImage(msg.id))
       if (!last) {
         yield* answer(msg.id, 0, null, index === 0 ? { toolOutput: seeded.earlierToolOutput } : undefined)
         history.push({ role: "assistant", content: [{ type: "text", text: answerText }] })
@@ -352,12 +352,13 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         const toolOutput = seeded.earlierToolOutput
         const measuredHistory = toolOutput === undefined ? history : [...history, { role: "tool", content: toolOutput }]
         const estimate = override === undefined ? estimateInputTokens({ system: [], messages: measuredHistory }) : override
-        const media = olderFile
-          ? [`${olderFile.messageID}:${olderFile.id}:${Bun.hash(`${olderFile.mime}\n${olderFile.url}`).toString(16)}`]
-          : undefined
+        const media = measuredFiles.map(
+          (file) => `${file.messageID}:${file.id}:${Bun.hash(`${file.mime}\n${file.url}`).toString(16)}`,
+        )
         yield* answer(msg.id, seeded.assistantUsage, estimate, seeded.last, media)
       }
     }
+    const olderFile = measuredFiles[0]
     if (olderFile && seeded.olderFile === "replace") {
       yield* sessions.updatePart({ ...olderFile, url: "https://example.test/revised.png" } as any)
     }
