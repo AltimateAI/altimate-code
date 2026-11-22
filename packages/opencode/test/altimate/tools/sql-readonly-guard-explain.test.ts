@@ -336,13 +336,16 @@ describe("explainWrite", () => {
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).toContain('"t"."update"')
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).not.toContain("uppercase")
     const upper = explainWrite('SELECT "T".update FROM t', "snowflake").reason
-    expect(upper).toContain('"T"."UPDATE"')
+    expect(upper).toContain('"t"."UPDATE", keeping the qualifier as written')
     expect(upper).not.toContain('"t"."update"')
+    expect(writeReason("SELECT x AS load FROM t", "snowflake")).toContain("in uppercase")
+    expect(writeReason("SELECT x AS load FROM t", "postgres")).not.toContain("uppercase")
     // Where double quotes make a string, the hints use backticks.
     expect(explainWrite("SELECT `t`.update FROM t", "mysql").reason).toContain("`t`.`update`")
     expect(explainWrite("SELECT Order Date FROM orders", "mysql").reason).toContain("(`order date`)")
     expect(explainWrite("SELECT Order Date FROM orders", "postgres").reason).toContain('("order date")')
     expect(explainWrite("SELECT Order Date FROM orders", "sqlserver").reason).toContain("([order date])")
+    expect(explainWrite("SELECT t.update FROM t", "clickhouse").reason).toContain("t.`update`")
   })
 
   test("every write in the guard corpus is a write with a specific reason", () => {

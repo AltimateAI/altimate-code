@@ -754,12 +754,12 @@ export function explainWrite(
     if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
       // Quoted names keep their case; engines that store unquoted names in uppercase need it written so.
       const quoted = /^(snowflake|oracle)$/i.test(dialect ?? "")
-        ? `${quoteName("T", dialect)}.${quoteName("UPDATE", dialect)} (this engine stores unquoted names in uppercase)`
+        ? `${quoteName("t", dialect)}.${quoteName("UPDATE", dialect)}, keeping the qualifier as written and the column in uppercase, as this engine stores unquoted names`
         : `${quoteName("t", dialect)}.${quoteName("update", dialect)}`
       return writes(
         dialect?.toLowerCase() === "clickhouse"
           ? `${where} contains a write clause (SELECT ... INTO or a modifying CTE), or a write keyword that on ClickHouse ` +
-              'counts even after a dot: quote the column, t."update"'
+              `counts even after a dot: quote the column, t.${quoteName("update", dialect)}`
           : `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
               `or a write keyword after a quoted name such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted})`,
       )

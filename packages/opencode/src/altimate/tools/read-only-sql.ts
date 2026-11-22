@@ -131,5 +131,5 @@ export function writeReason(sql: string, dialect?: string): string {
   }
   const [statement, replace] = wordPatterns(dialect)
   const word = (statement.exec(body) ?? replace.exec(body))?.[0]
-  return word ? ` It contains the statement word ${word.toUpperCase()} outside a literal or comment, so the read-only permission does not cover it; quote it if it is a column name.` : ""
+  return word ? ` It contains the statement word ${word.toUpperCase()} outside a literal or comment, so the read-only permission does not cover it; quote it if it is a column name${/^(snowflake|oracle)$/i.test(dialect ?? "") ? ", in uppercase as this engine stores unquoted names" : ""}.` : ""
 }
