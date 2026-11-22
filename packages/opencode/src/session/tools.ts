@@ -54,6 +54,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     args: Record<string, unknown>,
     options: ToolExecutionOptions,
     redact?: CredentialRedactor,
+    external = false,
   ): Tool.Context => ({
     redactCredentials: redact,
     // altimate_change end
@@ -68,20 +69,23 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     permissions: Permission.merge(input.agent.permission, input.session.permission ?? []),
     // altimate_change end
     metadata: (val) =>
-      input.processor.updateToolCall(options.toolCallId, (match) => {
-        if (!["running", "pending"].includes(match.state.status)) return match
-        return {
-          ...match,
-          state: {
-            // altimate_change start — sanitize custom tool progress before persistence
-            title: redact?.output(val.title) ?? val.title,
-            metadata: redact?.output(val.metadata) ?? val.metadata,
-            // altimate_change end
-            status: "running",
-            input: args,
-            time: { start: Date.now() },
-          },
-        }
+      Effect.gen(function* () {
+        const progressRedactor = external ? yield* loadToolCredentialRedactor : redact
+        yield* input.processor.updateToolCall(options.toolCallId, (match) => {
+          if (!["running", "pending"].includes(match.state.status)) return match
+          return {
+            ...match,
+            state: {
+              // altimate_change start — sanitize custom tool progress before persistence
+              title: progressRedactor?.output(val.title) ?? val.title,
+              metadata: progressRedactor?.output(val.metadata) ?? val.metadata,
+              // altimate_change end
+              status: "running",
+              input: args,
+              time: { start: Date.now() },
+            },
+          }
+        })
       }),
     ask: (req) =>
       permission
@@ -124,14 +128,16 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const redact = yield* loadToolCredentialRedactor // altimate_change — collect before tool execution
-            const ctx = context(args, options, redact) // altimate_change — protect progress too
+            const ctx = context(args, options, redact, item.registrySource === "external") // altimate_change
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
               { args },
             )
             // altimate_change start — custom and built-in results use the same filter
-            const result = redact.output(yield* item.execute(args, ctx))
+            const raw = yield* item.execute(args, ctx)
+            const resultRedactor = item.registrySource === "external" ? yield* loadToolCredentialRedactor : redact
+            const result = resultRedactor.output(redact.output(raw))
             // altimate_change end
             const output = {
               ...result,
@@ -153,7 +159,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               // altimate_change end
             )
             // altimate_change start — propagate the source-stamped output
-            const safeResult = redact.output(stamped)
+            const safeResult = resultRedactor.output(stamped)
             if (options.abortSignal?.aborted) {
               yield* input.processor.completeToolCall(options.toolCallId, safeResult)
             }

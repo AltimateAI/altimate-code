@@ -357,9 +357,10 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           ctx = { ...ctx, redactCredentials: redact, metadata: (value) => metadata(redact.output(value)) }
           const executed = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
             Effect.onError((cause) =>
-              Effect.sync(() => {
-                const error = Cause.squash(cause)
-                endTrace("error", redact.text(error instanceof Error ? error.message : String(error)))
+              Effect.gen(function* () {
+                const fresh = yield* loadToolCredentialRedactor
+                const error = fresh.failure(redact.failure(Cause.squash(cause)))
+                endTrace("error", error instanceof Error ? error.message : String(error))
                 altimateTrackError(id, decoded, ctx, startTime, error)
               }),
             ),

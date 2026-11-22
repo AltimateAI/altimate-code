@@ -150,7 +150,13 @@ export const ReadTool = Tool.define<
     // altimate_change start — character windows preserve the existing line and byte limits
     const lines = Effect.fn("ReadTool.lines")(function* (
       filepath: string,
-      opts: { limit: number; offset: number; char_offset?: number; max_chars?: number },
+      opts: {
+        limit: number
+        offset: number
+        char_offset?: number
+        max_chars?: number
+        redactCredentials?: Tool.Context["redactCredentials"]
+      },
     ) {
       const start = opts.offset - 1
       const raw: string[] = []
@@ -201,9 +207,13 @@ export const ReadTool = Tool.define<
             }
             const end = windowStart + chunk.length
             const clipped = end < text.length
+            // Match against the source before displaying its character window. Keep the
+            // continuation offsets in source coordinates, even when the placeholder is shorter.
+            const visible =
+              clipped || windowStart > 0 ? (opts.redactCredentials?.window(text, windowStart, end) ?? chunk) : chunk
             const line = clipped
-              ? `${chunk}... (line truncated to ${chunk.length} chars) (Use offset=${flags.count}, limit=1, char_offset=${end}, max_chars=${Math.min(maxChars, chunk.length)} to continue this line.)`
-              : chunk
+              ? `${visible}... (line truncated to ${chunk.length} chars) (Use offset=${flags.count}, limit=1, char_offset=${end}, max_chars=${Math.min(maxChars, chunk.length)} to continue this line.)`
+              : visible
             flags.lineCut ||= clipped
             // altimate_change end
             const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
@@ -392,6 +402,7 @@ export const ReadTool = Tool.define<
         offset: params.offset || 1,
         char_offset: params.char_offset,
         max_chars: params.max_chars,
+        redactCredentials: ctx.redactCredentials,
       })
       // altimate_change end
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {

@@ -162,6 +162,31 @@ export const GrepTool = Tool.define(
             line: item.line,
             text: item.text,
           }))
+          // Restore adjacency before adding line-number labels. A gap or a
+          // pre-clipped ripgrep record cannot supply an actual line boundary.
+          const redact = ctx.redactCredentials
+          if (redact) {
+            for (let start = 0; start < final.length; ) {
+              let end = start + 1
+              while (end < final.length) {
+                const previous = final[end - 1]
+                const next = final[end]
+                if (next.path !== previous.path || next.line !== previous.line + 1 || !previous.text.endsWith("\n")) {
+                  break
+                }
+                end++
+              }
+              if (end - start > 1) {
+                const joined = final.slice(start, end).map((match) => match.text).join("")
+                const redacted = redact.lines(joined)
+                if (redacted !== joined) {
+                  const lines = redacted.split(/(?<=\n)/)
+                  for (let i = start; i < end; i++) final[i].text = lines[i - start] ?? ""
+                }
+              }
+              start = end
+            }
+          }
           const total = final.length
           const hasMore = permitted > limit
           // altimate_change end

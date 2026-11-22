@@ -36,13 +36,16 @@ test("known credential values are redacted in bash results", async () => {
       Instance.restore(instance, async () => {
         expect((await Config.get()).provider?.test?.options?.apiKey === configuredKey).toBe(true)
         const bash = await initTool(BashTool)
+        const previews: string[] = []
         const ctx = {
           sessionID: SessionID.make("ses_test"),
           messageID: MessageID.make("msg_test"),
           agent: "build",
           abort: new AbortController().signal,
           messages: [],
-          metadata: () => {},
+          metadata: (update: { metadata?: { output?: string } }) => {
+            if (update.metadata?.output) previews.push(update.metadata.output)
+          },
           ask: async () => {},
         }
         const bashResult = await bash.execute({ command: "cat fixture.txt", description: "Print fixture" }, ctx)
@@ -80,7 +83,7 @@ test("known credential values are redacted in bash results", async () => {
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           time: { created: 1, completed: 2 },
         })
-        await Session.updatePart({
+        const toolPart = {
           id: PartID.ascending(),
           sessionID: session.id,
           messageID,
@@ -91,29 +94,42 @@ test("known credential values are redacted in bash results", async () => {
             status: "completed",
             input: { command: "cat fixture.txt" },
             title: bashResult.title,
-            output: bashResult.output,
-            metadata: bashResult.metadata,
+            output: "prefix-" + configuredKey + "-suffix",
+            metadata: { output: configuredKey },
             time: { start: 1, end: 2 },
           },
-        })
+        } satisfies MessageV2.ToolPart
+        await Session.updatePart(toolPart)
         const persisted = await Session.messages({ sessionID: session.id })
         const stored = JSON.stringify(persisted)
         const model = await Provider.getModel(providerID, modelID)
         const request = JSON.stringify(await MessageV2.toModelMessages(persisted, model))
+        const historical = persisted.map((message) =>
+          message.info.id === messageID ? { ...message, parts: [toolPart] } : message,
+        )
+        const replay = JSON.stringify(await MessageV2.toModelMessages(historical, model))
         expect({
           bashRaw: bashResult.output.includes(configuredKey),
           storedRaw: stored.includes(configuredKey),
           requestRaw: request.includes(configuredKey),
+          replayRaw: replay.includes(configuredKey),
+          previewRaw: previews.some((preview) => preview.includes(configuredKey)),
           bashRedacted: bashResult.output.includes(marker),
           storedRedacted: stored.includes(marker),
           requestRedacted: request.includes(marker),
+          replayRedacted: replay.includes(marker),
+          previewRedacted: previews.some((preview) => preview.includes("[REDACTED]")),
         }).toEqual({
           bashRaw: false,
           storedRaw: false,
           requestRaw: false,
+          replayRaw: false,
+          previewRaw: false,
           bashRedacted: true,
           storedRedacted: true,
           requestRedacted: true,
+          replayRedacted: true,
+          previewRedacted: true,
         })
       }),
   })

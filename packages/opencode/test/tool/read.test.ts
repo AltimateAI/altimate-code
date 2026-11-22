@@ -828,4 +828,20 @@ it.instance("redacts raw multiline and JSON-escaped credentials in a file", () =
     expect(result.metadata.preview).toBe('[REDACTED]\n\n{"value":"[REDACTED]"}\nunchanged')
   }),
 )
+
+it.instance("redacts a credential even when each character window contains only a fragment", () =>
+  Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const file = path.join(instance.directory, "credential-window.txt")
+    const value = "fixture-window-value"
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    yield* Effect.promise(() => Bun.write(file, "start " + value + " finish"))
+    const next = { ...ctx, redactCredentials: createCredentialRedactor([value]) }
+    const first = yield* run({ filePath: file, max_chars: 15 }, next)
+    expect(first.output).toContain("1: start [REDACTED]... (line truncated to 15 chars)")
+    expect(first.output).toContain("char_offset=15")
+    const last = yield* run({ filePath: file, char_offset: 15 }, next)
+    expect(last.output).toContain("1: [REDACTED] finish")
+  }),
+)
 // altimate_change end

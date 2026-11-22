@@ -136,6 +136,27 @@ describe("tool.grep", () => {
     }),
   )
 
+  // altimate_change start — grep matches a multiline credential before inserting line labels
+  it.instance("redacts a known credential across adjacent grep matches", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const value = "fixture-first\nfixture-second"
+      const file = path.join(test.directory, "match.txt")
+      const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+      yield* Effect.promise(() => Bun.write(file, "start " + value + " finish\n"))
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const args = { pattern: "fixture", path: file }
+      const ordinary = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([]) })
+      const redacted = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([value]) })
+      expect(redacted.output).toBe(
+        ordinary.output.replace("start fixture-first", "start [REDACTED]").replace("fixture-second finish", " finish"),
+      )
+      expect(redacted.metadata.matches).toBe(2)
+    }),
+  )
+  // altimate_change end
+
   it.instance("does not report an unknown total when results are truncated", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance

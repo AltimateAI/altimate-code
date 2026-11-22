@@ -5,6 +5,9 @@ import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Context, Option, Schema } from "effect"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
+// altimate_change start — allow a read without initializing the application runtime
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 export const Tokens = Schema.Struct({
   accessToken: Schema.mutableKey(Schema.String),
@@ -206,6 +209,13 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EffectF
 
 // altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
 export const node = LayerNode.make(layer, () => [FSUtil.node, EffectFlock.node])
+// altimate_change end
+
+// altimate_change start — expose stored credentials without starting MCP
+const run = makeRuntime(Service, defaultLayer)
+export function all() {
+  return run.runPromise((service) => service.all())
+}
 // altimate_change end
 
 export * as McpAuth from "./auth"

@@ -44,6 +44,9 @@ import * as Result from "effect/Result"
 // altimate_change end
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
+// altimate_change start — read credentials from live clients without initializing MCP
+import type { InstanceContext } from "@/project/instance-context"
+// altimate_change end
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { McpCatalog } from "./catalog"
@@ -310,6 +313,18 @@ interface State {
   generation: Record<string, number>
   // altimate_change end
 }
+
+// altimate_change start — use the actual request headers, including command-resolved values
+const credentialStates = new WeakMap<InstanceContext, State>()
+const requestHeaders = new WeakMap<MCPClient, Record<string, string>>()
+
+export function* knownMcpHeaders(instance: InstanceContext): Iterable<Record<string, string>> {
+  for (const client of Object.values(credentialStates.get(instance)?.clients ?? {})) {
+    const headers = requestHeaders.get(client)
+    if (headers) yield headers
+  }
+}
+// altimate_change end
 
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
@@ -579,6 +594,8 @@ export const layer = Layer.effect(
             duration_ms: Date.now() - connectStart,
           })
           // altimate_change end
+          // altimate_change — retain the headers for this client only while it stays live
+          requestHeaders.set(result.client, mergedHeaders)
           return { client: result.client, status: { status: "connected" } as Status, transport: transportLabel }
         }
         // If this was an auth error, stop trying other transports
@@ -822,7 +839,7 @@ export const layer = Layer.effect(
     }
 
     const state = yield* InstanceState.make<State>(
-      Effect.fn("MCP.state")(function* () {
+      Effect.fn("MCP.state")(function* (instance) {
         const cfg = yield* cfgSvc.get()
         const bridge = yield* EffectBridge.make()
         const config = cfg.mcp ?? {}
@@ -836,6 +853,9 @@ export const layer = Layer.effect(
           generation: {},
           // altimate_change end
         }
+
+        // altimate_change — lookup is observational and never initiates an MCP connection
+        credentialStates.set(instance, s)
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
         let discoveryResult: { serverNames: string[]; sources: string[] } | null = null

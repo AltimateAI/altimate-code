@@ -2910,7 +2910,7 @@ export namespace SessionPrompt {
     const tools: Record<string, AITool> = {}
 
     // altimate_change start — carry tool identity into repeated-id metadata lookup
-    const context = (toolName: string, args: any, options: ToolCallOptions) => {
+    const context = (toolName: string, args: any, options: ToolCallOptions, external = false) => {
       const execution = input.processor.beginToolExecution(options.toolCallId)
       const ctx: Tool.Context = {
         sessionID: input.session.id,
@@ -2934,6 +2934,8 @@ export namespace SessionPrompt {
         metadata: (val: { title?: string; metadata?: any }) =>
           // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
           Effect.promise(async () => {
+            // altimate_change — an external tool can register a credential before reporting progress
+            const redact = external ? await toolCredentialRedactor() : ctx.redactCredentials
             const match =
               input.processor.partFromToolExecution(execution) ??
               input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
@@ -2941,8 +2943,8 @@ export namespace SessionPrompt {
               await Session.updatePart({
                 ...match,
                 state: {
-                  title: ctx.redactCredentials?.output(val.title) ?? val.title, // altimate_change — plugin progress
-                  metadata: ctx.redactCredentials?.output(val.metadata) ?? val.metadata, // altimate_change — plugin progress
+                  title: redact?.output(val.title) ?? val.title, // altimate_change — plugin progress
+                  metadata: redact?.output(val.metadata) ?? val.metadata, // altimate_change — plugin progress
                   status: "running",
                   input: args,
                   time: {
@@ -2998,7 +3000,7 @@ export namespace SessionPrompt {
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           // altimate_change start — disambiguate repeated concurrent tool-call ids
-          const { ctx, execution } = context(item.id, args, options)
+          const { ctx, execution } = context(item.id, args, options, item.registrySource === "external") // altimate_change
           // altimate_change end
           // altimate_change start — release the execution identity on every exit path
           try {
@@ -3017,7 +3019,9 @@ export namespace SessionPrompt {
             // altimate_change start — cover custom tools as well as the shared built-in wrapper
             const redact = await toolCredentialRedactor()
             ctx.redactCredentials = redact
-            const result = redact.output(await AppRuntime.runPromise(item.execute(args, ctx)))
+            const raw = await AppRuntime.runPromise(item.execute(args, ctx))
+            const resultRedactor = item.registrySource === "external" ? await toolCredentialRedactor() : redact
+            const result = resultRedactor.output(redact.output(raw))
             // altimate_change end
             // altimate_change end
             const output = {
@@ -3052,12 +3056,12 @@ export namespace SessionPrompt {
             await input.lessons?.appendFileLessons(ctx.sessionID, item.id, args, stamped)
             // altimate_change end
             // altimate_change start — return the source-stamped output
-            const safeResult = redact.output(stamped)
+            const safeResult = resultRedactor.output(stamped)
             Tool.assertSuccess(safeResult)
             return safeResult
           } catch (error) {
-            const redact = ctx.redactCredentials ?? (await toolCredentialRedactor())
-            throw redact.failure(error)
+            const fresh = await toolCredentialRedactor()
+            throw fresh.failure(ctx.redactCredentials?.failure(error) ?? error)
             // altimate_change end
           } finally {
             input.processor.finishToolExecution(execution)
@@ -4524,7 +4528,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       output += chunk.toString()
       if (part.state.status === "running") {
         part.state.metadata = {
-          output: redact.text(output), // altimate_change — persisted shell progress
+          output: redact.progress(output), // altimate_change — persisted shell progress
           description: "",
         }
         Session.updatePart(part)
@@ -4535,7 +4539,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       output += chunk.toString()
       if (part.state.status === "running") {
         part.state.metadata = {
-          output: redact.text(output), // altimate_change — persisted shell progress
+          output: redact.progress(output), // altimate_change — persisted shell progress
           description: "",
         }
         Session.updatePart(part)

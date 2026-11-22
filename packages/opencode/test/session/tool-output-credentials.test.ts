@@ -69,3 +69,25 @@ test("collects environment, provider auth and observed warehouse credentials", a
     else process.env[connectionName] = previousConnection
   }
 })
+
+test("matches alternate JSON escapes without reserializing clean text", () => {
+  const redact = createCredentialRedactor(["fixture/key"])
+  const escaped = String.raw`{"one":"fi\u0078ture\/key","two":"fi\u0078ture\/other"}`
+  expect(redact.text(escaped)).toBe(String.raw`{"one":"[REDACTED]","two":"fi\u0078ture\/other"}`)
+})
+
+test("holds credential fragments out of streamed Bash previews", () => {
+  const redact = createCredentialRedactor(["fixture-key-value"])
+  expect(redact.preview("out: fixture-key", 80)).toBe("out: ")
+  expect(redact.preview("out: fixture-key-value", 80)).toBe("out: [REDACTED]")
+  expect(redact.preview("out: fixture-results", 80)).toBe("out: fixture-results")
+  expect(redact.preview("line with \\", 80)).toBe("line with \\")
+  expect(redact.preview("prefix fixture-key-value", 18)).toBe("prefix [REDACTED]")
+})
+
+test("preserves tool result envelope keys and MCP discriminators", () => {
+  const redact = createCredentialRedactor(["metadata", "resource"])
+  expect(
+    redact.output({ metadata: { detail: "metadata" }, content: [{ type: "resource", text: "resource" }] }),
+  ).toEqual({ metadata: { detail: "[REDACTED]" }, content: [{ type: "resource", text: "[REDACTED]" }] })
+})

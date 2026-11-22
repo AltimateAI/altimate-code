@@ -19,9 +19,9 @@ import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig } from "@altimateai/drivers"
 
 // altimate_change start — credentials this process has already read or written
-const knownCredentials = new Map<string, string>()
+const knownCredentials = new Map<string, { field: string; value: string }>()
 
-export function knownStoredCredentials(): Iterable<string> {
+export function knownStoredCredentials(): Iterable<{ field: string; value: string }> {
   return knownCredentials.values()
 }
 // altimate_change end
@@ -126,7 +126,7 @@ export async function storeCredential(
   try {
     await store.set(`${connectionName}/${field}`, value)
     // altimate_change — retain the current credential for exact tool-result redaction
-    knownCredentials.set(`${connectionName}/${field}`, value)
+    knownCredentials.set(`${connectionName}/${field}`, { field, value })
     return true
   } catch (e) {
     // e.g. no libsecret on Linux, or a locked keychain: report "not stored" so
@@ -150,7 +150,7 @@ export async function getCredential(
     const account = `${connectionName}/${field}`
     const value = await store.get(account)
     if (value === null) knownCredentials.delete(account)
-    else knownCredentials.set(account, value)
+    else knownCredentials.set(account, { field, value })
     return value
     // altimate_change end
   } catch (e) {

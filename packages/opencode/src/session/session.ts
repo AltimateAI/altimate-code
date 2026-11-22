@@ -1,5 +1,7 @@
 // altimate_change start — release session-owned scratch stores on deletion
 import { closeScratch } from "@/altimate/native/connections/scratch"
+// altimate_change — sanitize tool results updated through the Effect session API
+import { loadToolCredentialRedactor, redactToolResultState } from "@/altimate/tool-output-credentials"
 // altimate_change end
 // altimate_change start — upstream_fix: normalize native integers before part persistence and events
 import { normalizeBigInts } from "@/altimate/util/json"
@@ -694,6 +696,9 @@ export const layer: Layer.Layer<
     const updatePart = <T extends SessionV1.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
         // altimate_change start — upstream_fix: keep stored, published, and returned parts JSON-safe
+        if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
+          part = { ...part, state: redactToolResultState(part.state, yield* loadToolCredentialRedactor) }
+        }
         part = normalizeBigInts(part, "safe-number")
         // altimate_change end
         yield* events.publish(SessionV1.Event.PartUpdated, {
