@@ -31,7 +31,12 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 // altimate_change start — read the persisted request estimate for context calibration
-import { REQUEST_ESTIMATE_METADATA_KEY } from "@/provider/output-token-budget"
+import {
+  REQUEST_ESTIMATE_METADATA_KEY,
+  REQUEST_MEDIA_METADATA_KEY,
+  REQUEST_SHAPE_METADATA_KEY,
+  requestEstimateShape,
+} from "@/provider/output-token-budget"
 // altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
@@ -2244,19 +2249,25 @@ export namespace SessionPrompt {
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
       const recordedEstimate = measured?.metadata?.[REQUEST_ESTIMATE_METADATA_KEY]
+      const measuredEstimateShape = requestEstimateShape(measured?.metadata?.[REQUEST_SHAPE_METADATA_KEY])
       // Compaction drops images and PDFs, so keep a refusal as a budget error if the
-      // current request includes media the model has not seen yet.
-      const unseenMedia = msgs.some(
-        (msg) =>
-          (msg.info.id === measuredID || isAfterMeasured(msg.info.id)) &&
-          msg.parts.some(
-            (part) =>
-              (msg.info.role === "user" && part.type === "file" && MessageV2.isMedia(part.mime)) ||
-              (part.type === "tool" &&
-                part.state.status === "completed" &&
-                part.state.attachments?.some((attachment) => MessageV2.isMedia(attachment.mime))),
-          ),
+      // current request includes media the model has not seen yet, including an edited attachment.
+      const requestMedia = msgs.flatMap(({ info, parts }) =>
+        parts.flatMap((part) => {
+          const files =
+            info.role === "user" && part.type === "file"
+              ? [part]
+              : part.type === "tool" && part.state.status === "completed" && !part.state.time.compacted
+                ? part.state.attachments ?? []
+                : []
+          return files
+            .filter((file) => MessageV2.isMedia(file.mime))
+            .map((file) => `${info.id}:${part.id}:${Bun.hash(`${file.mime}\n${file.url}`).toString(16)}`)
+        }),
       )
+      const recordedMedia = measured?.metadata?.[REQUEST_MEDIA_METADATA_KEY]
+      const seenMedia = new Set(Array.isArray(recordedMedia) ? recordedMedia : [])
+      const unseenMedia = requestMedia.some((fingerprint) => !seenMedia.has(fingerprint))
       const canAutoCompact = measured !== undefined && loopConfig.compaction?.auto !== false
       const measuredInputTokens =
         measured &&
@@ -2275,6 +2286,8 @@ export namespace SessionPrompt {
         compactBlockedByMedia: canAutoCompact && unseenMedia,
         measuredInputTokens,
         measuredEstimateTokens: typeof recordedEstimate === "number" ? recordedEstimate : undefined,
+        measuredEstimateShape,
+        requestMedia,
         // altimate_change end
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message

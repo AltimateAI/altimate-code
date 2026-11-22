@@ -34,6 +34,9 @@ import {
   OutputTokenBudgetError,
   ReasoningTokenBudgetError,
   REQUEST_ESTIMATE_METADATA_KEY,
+  REQUEST_MEDIA_METADATA_KEY,
+  REQUEST_SHAPE_METADATA_KEY,
+  type RequestEstimateShape,
   calibratedInputTokens,
   clampReasoningBudget,
   estimateInputTokens,
@@ -201,6 +204,7 @@ type Seeded = {
   assistantUsage?: number
   next?: string
   nextSystem?: string
+  measureBeforeNext?: boolean
   earlierToolOutput?: string
   last?: {
     modelID?: string
@@ -215,11 +219,13 @@ type Seeded = {
     toolImage?: boolean
     /** Override the seeded request estimate. Null represents a message without one. */
     requestEstimateTokens?: number | null
+    requestShape?: RequestEstimateShape
   }
   /** An image attached to the `next` user turn. */
   nextFile?: boolean
   /** An image attached to the last `user` turn (sent before the measured step). */
   userFile?: boolean
+  olderFile?: "keep" | "replace"
 }
 
 /** Seed [user history, finished assistant with provider usage, new user turn] and run the loop. */
@@ -261,6 +267,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       usage: number,
       requestEstimateTokens: number | null,
       last: Seeded["last"] = {},
+      media?: string[],
     ) {
       const msg = yield* sessions.updateMessage({
         id: MessageID.ascending(),
@@ -277,7 +284,13 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         finish: last.finish ?? "stop",
         time: { created: Date.now(), completed: Date.now() },
         metadata:
-          requestEstimateTokens === null ? undefined : { [REQUEST_ESTIMATE_METADATA_KEY]: requestEstimateTokens },
+          requestEstimateTokens === null
+            ? undefined
+            : {
+                [REQUEST_ESTIMATE_METADATA_KEY]: requestEstimateTokens,
+                [REQUEST_SHAPE_METADATA_KEY]: last.requestShape,
+                [REQUEST_MEDIA_METADATA_KEY]: media,
+              },
       } as any)
       yield* sessions.updatePart({
         id: PartID.ascending(),
@@ -324,8 +337,10 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
     // Estimate the seeded history as it was before the measured assistant answered.
     const history: { role: "user" | "assistant"; content: { type: "text"; text: string }[] }[] = []
+    let olderFile: { id: PartID; messageID: MessageID; mime: string; url: string } | undefined
     for (const [index, text] of turns.entries()) {
       const msg = yield* user(text)
+      if (index === 0 && seeded.olderFile) olderFile = yield* attachImage(msg.id)
       history.push({ role: "user", content: [{ type: "text", text }] })
       const last = index === turns.length - 1
       if (last && seeded.userFile) yield* attachImage(msg.id)
@@ -337,10 +352,17 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         const toolOutput = seeded.earlierToolOutput
         const measuredHistory = toolOutput === undefined ? history : [...history, { role: "tool", content: toolOutput }]
         const estimate = override === undefined ? estimateInputTokens({ system: [], messages: measuredHistory }) : override
-        yield* answer(msg.id, seeded.assistantUsage, estimate, seeded.last)
+        const media = olderFile
+          ? [`${olderFile.messageID}:${olderFile.id}:${Bun.hash(`${olderFile.mime}\n${olderFile.url}`).toString(16)}`]
+          : undefined
+        yield* answer(msg.id, seeded.assistantUsage, estimate, seeded.last, media)
       }
     }
+    if (olderFile && seeded.olderFile === "replace") {
+      yield* sessions.updatePart({ ...olderFile, url: "https://example.test/revised.png" } as any)
+    }
     if (seeded.next !== undefined) {
+      if (seeded.measureBeforeNext) yield* prompt.loop({ sessionID })
       const next = yield* user(seeded.next, seeded.nextSystem)
       if (seeded.nextFile) yield* attachImage(next.id)
     }
@@ -478,6 +500,32 @@ it.live(
 )
 
 it.live(
+  "a changed measured request with no net estimate growth forces compaction",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Summary of the earlier turns.")
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(130_000),
+          assistantUsage: 108_000,
+          last: {
+            requestEstimateTokens: 137_000,
+            requestShape: { messageCount: 2, messageHash: "prior history", overheadHash: "prior system and tools" },
+          },
+          next: "Answer the follow-up question.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries).toHaveLength(1)
+        expect(result.hits).toHaveLength(2)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
   "a measured step without a recorded request estimate cannot calibrate the guard",
   () =>
     provideTmpdirServerLegacy(
@@ -558,19 +606,31 @@ it.live(
 )
 
 it.live(
-  "the processor records the full request estimate on the sent assistant message",
+  "an append-only follow-up reuses the recorded request estimate",
   () =>
     provideTmpdirServerLegacy(
       Effect.fnUntraced(function* ({ dir, llm }) {
-        yield* llm.text("Here is the answer.")
-        const result = yield* runSession(dir, llm, { user: sqlJsonHistory(20_000) })
+        yield* llm.text("Here is the answer.", { usage: { input: 90_000, output: 5 } })
+        yield* llm.text("Here is the follow-up.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonHistory(116_000),
+          next: "Why?",
+          measureBeforeNext: true,
+        })
 
         expect(result.errors).toEqual([])
-        expect(result.hits.length).toBe(1)
-        const answer = result.messages.at(-1)?.info
+        expect(result.hits).toHaveLength(2)
+        expect(result.hits[0]!.body.max_tokens).toBeLessThan(LARGE_WINDOW.output)
+        expect(result.hits[1]!.body.max_tokens).toBe(LARGE_WINDOW.output)
+        const answer = result.messages.find(({ info }) => info.role === "assistant" && info.tokens.input === 90_000)?.info
         expect(
           answer?.role === "assistant" ? answer.metadata?.[REQUEST_ESTIMATE_METADATA_KEY] : undefined,
-        ).toBeGreaterThan(20_000)
+        ).toBeGreaterThan(116_000)
+        expect(answer?.role === "assistant" && answer.metadata?.[REQUEST_SHAPE_METADATA_KEY]).toMatchObject({
+          messageCount: 1,
+          messageHash: expect.any(String),
+          overheadHash: expect.any(String),
+        })
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
@@ -948,6 +1008,50 @@ it.live(
         expect(result.compactions.length).toBe(0)
         expect(result.errors.length).toBe(1)
         expect(result.errors[0]).toContain(MEDIA_GUIDANCE)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "replacing an image on an older turn keeps the pre-send refusal fatal",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(135_000),
+          assistantUsage: 0,
+          olderFile: "replace",
+          next: "Describe the revised image.",
+        })
+
+        expect(result.hits).toHaveLength(0)
+        expect(result.compactions).toHaveLength(0)
+        expect(result.errors[0]).toContain(MEDIA_GUIDANCE)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "an unchanged older user image does not block compaction",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("Summary of the earlier turns.")
+        yield* llm.text("Here is the answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(135_000),
+          assistantUsage: 0,
+          olderFile: "keep",
+          next: "Answer the follow-up question.",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.summaries).toHaveLength(1)
+        expect(result.hits).toHaveLength(2)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
     ),

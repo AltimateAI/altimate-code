@@ -10,6 +10,27 @@ const log = Log.create({ service: "provider.output-token-budget" })
 export const OUTPUT_TOKEN_FLOOR = 1_024
 
 export const REQUEST_ESTIMATE_METADATA_KEY = "request_estimate_tokens"
+export const REQUEST_SHAPE_METADATA_KEY = "request_estimate_shape"
+export const REQUEST_MEDIA_METADATA_KEY = "request_media_fingerprints"
+
+export type RequestEstimateShape = {
+  readonly messageCount: number
+  readonly messageHash: string
+  readonly overheadHash: string
+}
+
+export function requestEstimateShape(value: unknown): RequestEstimateShape | undefined {
+  if (!isRecord(value)) return undefined
+  const { messageCount, messageHash, overheadHash } = value
+  if (typeof messageCount !== "number" || !Number.isSafeInteger(messageCount) || messageCount < 0) return undefined
+  if (typeof messageHash !== "string" || typeof overheadHash !== "string") return undefined
+  return { messageCount, messageHash, overheadHash }
+}
+
+export function requestEstimateHash(value: unknown, mediaMessages?: readonly unknown[]): string {
+  const media = mediaMessages && messageMediaAllowances(mediaMessages)
+  return Bun.hash(serializeForEstimate(value, media, true).text).toString(16)
+}
 
 const CLAMP_MARGIN_FRACTION = 0.02
 const CLAMP_MARGIN_MIN = 512
@@ -34,11 +55,9 @@ const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
 const DENSE_ASCII_MIN_LENGTH = 32
 const DENSE_ASCII_MIN_UNIQUE = 6
 const DENSE_ASCII_EXTRA_FRACTION = 0.75
-// altimate_change start — distinguish recursive path listings from opaque ASCII
 // The estimator scans JSON, so a listing line starts after a quote or an escaped newline.
 // Require a dot on absolute paths to distinguish them from slash-prefixed encoded data.
-const LISTING_PATH = /("|\\n)(\.\/(?:[\w.-]+\/)+[\w.-]+|\/(?:[\w.-]+\/)+[\w.-]+\.[\w-]+)(?="|\\n)/g
-// altimate_change end
+const LISTING_PATH = /("|\\n)(\.\/(?:[\w.-]+\/)+[\w.-]+|\/?(?:[\w.-]+\/)+[\w.-]+\.[\w-]+)(?=\\?"|(?:\\r)?\\n)/g
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
 const CONTEXT_WINDOW_BETAS = new Map([["context-1m-2025-08-07", 1_000_000]])
 const MEDIA_PART_TYPES = new Set([
@@ -174,12 +193,10 @@ function denseAsciiCharacters(input: string): number {
     length = 0
     unique.clear()
   }
-  // altimate_change start — split directory components for the dense surcharge
   // Directory separators in listing lines break dense runs. Long opaque filenames and
   // directory names still get the same surcharge as other dense text.
   const text = input.replace(LISTING_PATH, (_, prefix: string, path: string) => prefix + path.replaceAll("/", " "))
   for (const character of text) {
-    // altimate_change end
     if (!DENSE_ASCII_CHARACTER.test(character)) {
       flush()
       continue
@@ -324,6 +341,7 @@ function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, n
 function serializeForEstimate(
   value: unknown,
   mediaContainers?: WeakMap<object, number>,
+  fingerprintMedia = false,
 ): { readonly text: string; readonly mediaTokens: number } {
   let mediaTokens = 0
   const ancestors: object[] = []
@@ -334,6 +352,14 @@ function serializeForEstimate(
       const mediaField =
         typeof this === "object" && this !== null && mediaContainers?.has(this) && MEDIA_PAYLOAD_KEYS.has(key)
       if (mediaField && child !== undefined && child !== null) {
+        if (fingerprintMedia) {
+          const original = (this as JsonRecord)[key]
+          if (ArrayBuffer.isView(original)) {
+            return Bun.hash(new Uint8Array(original.buffer, original.byteOffset, original.byteLength)).toString(16)
+          }
+          if (original instanceof ArrayBuffer) return Bun.hash(original).toString(16)
+          if (typeof child === "string") return Bun.hash(child).toString(16)
+        }
         return "[media omitted]"
       }
       if (typeof child === "object" && child !== null) {

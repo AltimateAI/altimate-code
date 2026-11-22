@@ -21,6 +21,8 @@ import {
   effectiveContextWindow,
   estimateInputTokens,
   mergeRequestHeaders,
+  requestEstimateHash,
+  type RequestEstimateShape,
 } from "@/provider/output-token-budget"
 // altimate_change end
 // altimate_change start — tool retrieval
@@ -86,7 +88,8 @@ export namespace LLM {
     /** Provider-reported input usage for the measured request, including cache reads and writes. */
     measuredInputTokens?: number
     measuredEstimateTokens?: number
-    onRequestEstimate?: (tokens: number) => void
+    measuredEstimateShape?: RequestEstimateShape
+    onRequestEstimate?: (tokens: number, shape: RequestEstimateShape) => void
     // altimate_change end
   }
 
@@ -364,15 +367,22 @@ export namespace LLM {
         headerSources: [provider.options, requestHeaders],
       }),
       inputTokens: () => {
-        const estimate = estimateInputTokens({
-          system,
-          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-          tools,
-          instructions: params.options.instructions,
-        })
-        input.onRequestEstimate?.(estimate)
-        const { measuredInputTokens, measuredEstimateTokens } = input
+        const messages = ProviderTransform.messagesForInputEstimate(input.messages, input.model)
+        const overhead = { system, tools, instructions: params.options.instructions }
+        const estimate = estimateInputTokens({ ...overhead, messages })
+        const { measuredInputTokens, measuredEstimateTokens, measuredEstimateShape } = input
+        const overheadHash = requestEstimateHash(overhead)
+        const messageHash = requestEstimateHash(messages, messages)
+        input.onRequestEstimate?.(estimate, { messageCount: messages.length, messageHash, overheadHash })
+        // Removed text must not cancel the estimate of new, unmeasured content.
+        const prefix = measuredEstimateShape && messages.slice(0, measuredEstimateShape.messageCount)
+        const unchanged =
+          !measuredEstimateShape ||
+          (overheadHash === measuredEstimateShape.overheadHash &&
+            prefix?.length === measuredEstimateShape.messageCount &&
+            requestEstimateHash(prefix, prefix) === measuredEstimateShape.messageHash)
         const calibrated =
+          unchanged &&
           typeof measuredInputTokens === "number" &&
           Number.isFinite(measuredInputTokens) &&
           typeof measuredEstimateTokens === "number" &&

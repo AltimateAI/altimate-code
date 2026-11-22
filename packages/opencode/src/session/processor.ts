@@ -21,7 +21,12 @@ import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 // altimate_change start — recognize pre-send context budget refusals
-import { isContextBudgetError, REQUEST_ESTIMATE_METADATA_KEY } from "@/provider/output-token-budget"
+import {
+  isContextBudgetError,
+  REQUEST_ESTIMATE_METADATA_KEY,
+  REQUEST_MEDIA_METADATA_KEY,
+  REQUEST_SHAPE_METADATA_KEY,
+} from "@/provider/output-token-budget"
 import { NamedError } from "@opencode-ai/util/error"
 // altimate_change end
 import { SessionCompaction } from "./compaction"
@@ -399,12 +404,14 @@ export namespace SessionProcessor {
         deferText,
         compactable,
         compactBlockedByMedia,
+        requestMedia,
         ...streamInput
       }: LLM.StreamInput & {
         deferText?: MessageV2.TextPart[]
         // The prompt loop can compact this conversation (a finished non-summary turn exists).
         compactable?: boolean
         compactBlockedByMedia?: boolean
+        requestMedia?: string[]
       }) {
         // altimate_change end
         log.info("process")
@@ -523,6 +530,7 @@ export namespace SessionProcessor {
           let interruptRequested = false
           let currentText: MessageV2.TextPart | undefined
           const reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+          let requestEstimate: Record<string, unknown> | undefined
           const interruptRequest = () => {
             if (!interruptRequested || requestController.signal.aborted || input.abort.aborted) return
             if (pendingToolExecutions || [...toolcalls.values()].some((part) => part.state.status === "running")) return
@@ -552,10 +560,11 @@ export namespace SessionProcessor {
                   await LLM.stream({
                     ...effectiveStreamInput,
                     abort: signal,
-                    onRequestEstimate: (tokens) => {
-                      input.assistantMessage.metadata = {
-                        ...input.assistantMessage.metadata,
+                    onRequestEstimate: (tokens, shape) => {
+                      requestEstimate = {
                         [REQUEST_ESTIMATE_METADATA_KEY]: tokens,
+                        [REQUEST_SHAPE_METADATA_KEY]: shape,
+                        [REQUEST_MEDIA_METADATA_KEY]: requestMedia,
                       }
                     },
                   })
@@ -1091,6 +1100,12 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  // altimate_change start — persist a request estimate only after the provider responds
+                  // Only a completed provider step can confirm which request and media it saw.
+                  if (requestEstimate) {
+                    input.assistantMessage.metadata = { ...input.assistantMessage.metadata, ...requestEstimate }
+                  }
+                  // altimate_change end
                   if (value.finishReason === "content-filter") {
                     // altimate_change start — upstream_fix: content-filter
                     // finishes are session errors, not successful stops.
