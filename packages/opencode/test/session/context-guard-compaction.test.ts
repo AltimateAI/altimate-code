@@ -201,6 +201,7 @@ type Seeded = {
   assistantUsage?: number
   next?: string
   nextSystem?: string
+  earlierToolOutput?: string
   last?: {
     modelID?: string
     providerID?: string
@@ -329,11 +330,13 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       const last = index === turns.length - 1
       if (last && seeded.userFile) yield* attachImage(msg.id)
       if (!last) {
-        yield* answer(msg.id, 0, null)
+        yield* answer(msg.id, 0, null, index === 0 ? { toolOutput: seeded.earlierToolOutput } : undefined)
         history.push({ role: "assistant", content: [{ type: "text", text: answerText }] })
       } else if (seeded.assistantUsage !== undefined) {
         const override = seeded.last?.requestEstimateTokens
-        const estimate = override === undefined ? estimateInputTokens({ system: [], messages: history }) : override
+        const toolOutput = seeded.earlierToolOutput
+        const measuredHistory = toolOutput === undefined ? history : [...history, { role: "tool", content: toolOutput }]
+        const estimate = override === undefined ? estimateInputTokens({ system: [], messages: measuredHistory }) : override
         yield* answer(msg.id, seeded.assistantUsage, estimate, seeded.last)
       }
     }
@@ -387,6 +390,38 @@ it.live(
         expect(result.compactions.length).toBe(0)
         // The output reservation was not squeezed by the inflated estimate either.
         expect(result.hits[0]!.body.max_tokens).toBe(LARGE_WINDOW.output)
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "keeps the full output reservation after large recursive file listings",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const listing = (root: string) =>
+          Array.from(
+            { length: 540 },
+            (_, index) => `${root}/packages/warehouse/src/models/reporting/daily_orders_${index}.sql`,
+          ).join("\n")
+        const toolOutput = [listing("./current"), listing("/archive")].join("\n\n")
+
+        yield* llm.text("The files are listed by tree.")
+        yield* llm.text("The files are listed by tree.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(49_000),
+          earlierToolOutput: toolOutput,
+          assistantUsage: 49_000,
+          next: "Which files are present in both trees?",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.compactions.length).toBe(0)
+        expect(result.hits.length).toBe(1)
+        expect(result.hits[0]!.body.max_tokens).toBe(LARGE_WINDOW.output)
+        expect(JSON.stringify(result.hits[0]!.body)).toContain("/archive/packages/warehouse")
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
