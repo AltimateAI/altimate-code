@@ -2248,6 +2248,7 @@ export namespace SessionPrompt {
       // altimate_change start — calibrate from the last measured request and protect unseen media
       const loopConfig = await Config.get()
       const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
+      const sameModel = measured?.providerID === model.providerID && measured.modelID === model.id
       const recordedEstimate = measured?.metadata?.[REQUEST_ESTIMATE_METADATA_KEY]
       const measuredEstimateShape = requestEstimateShape(measured?.metadata?.[REQUEST_SHAPE_METADATA_KEY])
       // Compaction drops images and PDFs, so keep a refusal as a budget error if the
@@ -2266,15 +2267,14 @@ export namespace SessionPrompt {
         }),
       )
       const recordedMedia = measured?.metadata?.[REQUEST_MEDIA_METADATA_KEY]
-      const seenMedia = new Set(Array.isArray(recordedMedia) ? recordedMedia : [])
+      const seenMedia = new Set(sameModel && Array.isArray(recordedMedia) ? recordedMedia : [])
       const unseenMedia = requestMedia.some((fingerprint) => !seenMedia.has(fingerprint))
       const canAutoCompact = measured !== undefined && loopConfig.compaction?.auto !== false
       const measuredInputTokens =
         measured &&
         typeof recordedEstimate === "number" &&
         Number.isFinite(recordedEstimate) &&
-        measured.providerID === model.providerID &&
-        measured.modelID === model.id &&
+        sameModel &&
         measured.agent === lastUser.agent &&
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
           ? measured.tokens.input + measured.tokens.cache.read + measured.tokens.cache.write
