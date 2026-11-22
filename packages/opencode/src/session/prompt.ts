@@ -2944,7 +2944,7 @@ export namespace SessionPrompt {
                 ...match,
                 state: {
                   title: redact?.output(val.title) ?? val.title, // altimate_change — plugin progress
-                  metadata: redact?.output(val.metadata) ?? val.metadata, // altimate_change — plugin progress
+                  metadata: redact?.metadata(val.metadata) ?? val.metadata, // altimate_change — plugin progress
                   status: "running",
                   input: args,
                   time: {

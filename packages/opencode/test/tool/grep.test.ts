@@ -155,6 +155,25 @@ describe("tool.grep", () => {
       expect(redacted.metadata.matches).toBe(2)
     }),
   )
+
+  it.instance("redacts a credential crossing the retained grep line window", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const value = "fixture-overlapping-credential"
+      const file = path.join(test.directory, "match.txt")
+      const prefix = "needle".padEnd(1_996, "x")
+      const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+      yield* Effect.promise(() => Bun.write(file, prefix + value + "\n"))
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const args = { pattern: "needle", path: file }
+      const ordinary = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([]) })
+      const redacted = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([value]) })
+      expect(ordinary.output).toBe(`Found 1 matches\n${file}:\n  Line 1: ${prefix}fixt...`)
+      expect(redacted.output).toBe(`Found 1 matches\n${file}:\n  Line 1: ${prefix}[REDACTED]...`)
+      expect(redacted.metadata).toEqual(ordinary.metadata)
+    }),
+  )
   // altimate_change end
 
   it.instance("does not report an unknown total when results are truncated", () =>

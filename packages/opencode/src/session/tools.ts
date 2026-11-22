@@ -78,7 +78,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             state: {
               // altimate_change start — sanitize custom tool progress before persistence
               title: progressRedactor?.output(val.title) ?? val.title,
-              metadata: progressRedactor?.output(val.metadata) ?? val.metadata,
+              metadata: progressRedactor?.metadata(val.metadata) ?? val.metadata,
               // altimate_change end
               status: "running",
               input: args,

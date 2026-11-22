@@ -172,6 +172,26 @@ describe("tool.edit", () => {
       }),
     )
 
+    // altimate_change start — the diff is redacted independently of the written file
+    it.instance("redacts multiline credentials in neighboring diff context", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "diff-fixture.txt")
+        const value = "fixture-beginning\nfixture-ending"
+        yield* put(filepath, value + "\nchange this\n")
+        const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+        const result = yield* run(
+          { filePath: filepath, oldString: "change this", newString: "changed" },
+          { ...ctx, redactCredentials: createCredentialRedactor([value]) },
+        )
+        expect(result.metadata.diff).toContain("[REDACTED]")
+        expect(result.metadata.diff.includes("fixture-beginning")).toBe(false)
+        expect(result.metadata.diff.includes("fixture-ending")).toBe(false)
+        expect((yield* load(filepath)) === value + "\nchanged\n").toBe(true)
+      }),
+    )
+    // altimate_change end
+
     it.instance("rejects editing an existing file modified after it was read", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance

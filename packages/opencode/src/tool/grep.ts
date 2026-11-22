@@ -113,11 +113,22 @@ export const GrepTool = Tool.define(
             permitted++
             return true
           }
+          const redact = ctx.redactCredentials
+          const renderClippedLine = redact ? (text: string, end: number) => redact.window(text, 0, end) : undefined
           const result: Match[] = []
           if (!listedToLimit && approved.size === candidates.length) {
             // Every candidate was listed and approved: one content search, as before. A listing cut at
             // the cap may hide unlisted files, so it always takes the restricted path below.
-            result.push(...(yield* ripgrep.grep({ cwd, pattern: params.pattern, file, include, limit, scanLimit, filterPath })))
+            result.push(...(yield* ripgrep.grep({
+              cwd,
+              pattern: params.pattern,
+              file,
+              include,
+              limit,
+              scanLimit,
+              filterPath,
+              renderClippedLine,
+            })))
           } else {
             // Some candidates are denied or unapproved: restrict ripgrep to the approved files so a denied
             // file with many matches neither gets read nor consumes the scan ceiling. Literal, rooted globs
@@ -144,6 +155,7 @@ export const GrepTool = Tool.define(
                 limit: limit - result.length,
                 scanLimit: scanLimit - scanned,
                 filterPath,
+                renderClippedLine,
               })))
             }
           }
@@ -164,7 +176,6 @@ export const GrepTool = Tool.define(
           }))
           // Restore adjacency before adding line-number labels. A gap or a
           // pre-clipped ripgrep record cannot supply an actual line boundary.
-          const redact = ctx.redactCredentials
           if (redact) {
             for (let start = 0; start < final.length; ) {
               let end = start + 1

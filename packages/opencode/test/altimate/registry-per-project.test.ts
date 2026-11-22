@@ -188,6 +188,28 @@ describe("project-local connections are per project", () => {
     expect(inProject(projectB, () => Registry.names())).toEqual(["b1"])
   })
 
+  // altimate_change start — tool-output filtering reads current files without loading the registry
+  test("credential observation leaves the first warehouse load fresh", () => {
+    writeGlobal({ shared: { type: "postgres", host: "global" } })
+    writeLocal(projectA, { shared: { type: "postgres", host: "initial-local" } })
+    const observedHosts = () => [...Registry.knownCredentialConfigs()].map((config) => config.host)
+
+    inProject(projectA, () => {
+      expect(observedHosts()).toEqual(["global", "initial-local"])
+      writeLocal(projectA, { shared: { type: "postgres", host: "first-warehouse-use" } })
+      expect(Registry.getConfig("shared")?.host).toBe("first-warehouse-use")
+
+      writeLocal(projectA, { shared: { type: "postgres", host: "updated-local" } })
+      expect(observedHosts()).toEqual(["first-warehouse-use", "global", "updated-local"])
+      expect(Registry.getConfig("shared")?.host).toBe("first-warehouse-use")
+
+      Registry.setConfigs({ shared: { type: "postgres", host: "injected" } })
+      expect(observedHosts()).toEqual(["injected", "global", "updated-local"])
+      expect(Registry.getConfig("shared")?.host).toBe("injected")
+    })
+  })
+  // altimate_change end
+
   test("global and env entries are visible in both projects", () => {
     writeGlobal({ shared_global: { type: "postgres", host: "g" } })
     process.env.ALTIMATE_CODE_CONN_SHARED_ENV = JSON.stringify({ type: "postgres", host: "e" })

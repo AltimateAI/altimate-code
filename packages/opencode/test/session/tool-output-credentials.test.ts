@@ -91,3 +91,23 @@ test("preserves tool result envelope keys and MCP discriminators", () => {
     redact.output({ metadata: { detail: "metadata" }, content: [{ type: "resource", text: "resource" }] }),
   ).toEqual({ metadata: { detail: "[REDACTED]" }, content: [{ type: "resource", text: "[REDACTED]" }] })
 })
+
+test("redacts the full union of overlapping exact credential values", () => {
+  const redact = createCredentialRedactor(["first-fixture", "fixture-tail"])
+  expect(redact.text("before first-fixture-tail after")).toBe("before [REDACTED] after")
+  expect(redact.window("first-fixture-tail/visible", 14, 26)).toBe("[REDACTED]/visible")
+})
+
+test("filters arbitrary structured keys without renaming result protocol fields", () => {
+  const credential = "fixture-header-value"
+  const redact = createCredentialRedactor([credential, "structuredContent", "truncated"])
+  expect<unknown>(
+    redact.output({
+      structuredContent: { [credential]: "value", "[REDACTED]": "existing" },
+      metadata: { truncated: true, [credential]: "detail" },
+    }),
+  ).toEqual({
+    structuredContent: { "[REDACTED] (2)": "value", "[REDACTED]": "existing" },
+    metadata: { truncated: true, "[REDACTED]": "detail" },
+  })
+})

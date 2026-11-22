@@ -125,7 +125,7 @@ export const EditTool = Tool.define(
                 const desiredBom = next.bom
                 contentOld = ""
                 contentNew = next.text
-                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+                diff = toolFileDiff(filePath, contentOld, contentNew, ctx.redactCredentials)
                 yield* ctx.ask({
                   permission: "edit",
                   patterns: [path.relative(instance.worktree, filePath)],
@@ -167,13 +167,11 @@ export const EditTool = Tool.define(
               const desiredBom = source.bom || next.bom
               contentNew = next.text
 
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
+              diff = toolFileDiff(
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+                ctx.redactCredentials,
               )
               yield* ctx.ask({
                 permission: "edit",
@@ -194,13 +192,11 @@ export const EditTool = Tool.define(
                 file: filePath,
                 event: "change",
               })
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
+              diff = toolFileDiff(
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+                ctx.redactCredentials,
               )
               // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
               Instance.restore(instance, () => FileTime.read(ctx.sessionID, filePath))
@@ -678,6 +674,12 @@ export const ContextAwareReplacer: Replacer = function* (content, find) {
     }
   }
 }
+
+// altimate_change start — diff prefixes must not split known multiline credentials
+export function toolFileDiff(path: string, before: string, after: string, redact?: Tool.Context["redactCredentials"]) {
+  return trimDiff(createTwoFilesPatch(path, path, redact?.lines(before) ?? before, redact?.lines(after) ?? after))
+}
+// altimate_change end
 
 export function trimDiff(diff: string): string {
   const lines = diff.split("\n")

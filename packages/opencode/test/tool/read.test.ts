@@ -824,8 +824,8 @@ it.instance("redacts raw multiline and JSON-escaped credentials in a file", () =
       { filePath: file },
       { ...ctx, redactCredentials: createCredentialRedactor([value]) },
     )
-    expect(result.output).toContain('1: [REDACTED]\n2: \n3: {"value":"[REDACTED]"}\n4: unchanged')
-    expect(result.metadata.preview).toBe('[REDACTED]\n\n{"value":"[REDACTED]"}\nunchanged')
+    expect(result.output).toContain('1: [REDACTED]\n2: [REDACTED]\n3: {"value":"[REDACTED]"}\n4: unchanged')
+    expect(result.metadata.preview).toBe('[REDACTED]\n[REDACTED]\n{"value":"[REDACTED]"}\nunchanged')
   }),
 )
 
@@ -836,12 +836,48 @@ it.instance("redacts a credential even when each character window contains only 
     const value = "fixture-window-value"
     const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
     yield* Effect.promise(() => Bun.write(file, "start " + value + " finish"))
-    const next = { ...ctx, redactCredentials: createCredentialRedactor([value]) }
+    const next = { ...ctx, redactCredentials: createCredentialRedactor([value, "short\nkey"]) }
     const first = yield* run({ filePath: file, max_chars: 15 }, next)
     expect(first.output).toContain("1: start [REDACTED]... (line truncated to 15 chars)")
     expect(first.output).toContain("char_offset=15")
     const last = yield* run({ filePath: file, char_offset: 15 }, next)
     expect(last.output).toContain("1: [REDACTED] finish")
+  }),
+)
+
+it.instance("redacts a literal multiline credential across read pages", () =>
+  Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const file = path.join(instance.directory, "credential-pages.txt")
+    const value = "first-fragment\n\nlast-fragment"
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    yield* Effect.promise(() => Bun.write(file, "start " + value + " finish"))
+    const next = { ...ctx, redactCredentials: createCredentialRedactor([value]) }
+    const first = yield* run({ filePath: file, limit: 1 }, next)
+    expect(first.output).toContain("1: start [REDACTED]")
+    expect(first.output).toContain("Showing lines 1-1 of 3")
+    const second = yield* run({ filePath: file, offset: 2, limit: 1 }, next)
+    expect(second.metadata.preview).toBe("")
+    const last = yield* run({ filePath: file, offset: 3, limit: 1 }, next)
+    expect(last.output).toContain("3: [REDACTED] finish")
+    expect(last.output).toContain("(End of file - total 3 lines)")
+  }),
+)
+
+it.instance("redacts a literal multiline credential when its last line exceeds the current byte budget", () =>
+  Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const file = path.join(instance.directory, "credential-at-cap.txt")
+    const value = "first-fragment\nlast-fragment"
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    const padding = ("x".repeat(2000) + "\n").repeat(25)
+    yield* Effect.promise(() => Bun.write(file, padding + value + " " + "y".repeat(1800)))
+    const next = { ...ctx, redactCredentials: createCredentialRedactor([value]) }
+    const first = yield* run({ filePath: file }, next)
+    expect(first.output).toContain("26: [REDACTED]")
+    expect(first.output).toContain("Use offset=27 to continue.")
+    const rest = yield* run({ filePath: file, offset: 27 }, next)
+    expect(rest.output).toContain("27: [REDACTED] " + "y".repeat(1800))
   }),
 )
 // altimate_change end

@@ -136,7 +136,7 @@ const decodeField = (value: unknown): { text: string; raw?: Buffer } | undefined
  * than silently switching these records to a different unit: without it, a line beginning with one
  * bad byte reports `needle` at [3,9) of a string where [3,9) reads "edle t".
  */
-const normalizeMatch = (json: object): unknown => {
+const normalizeMatch = (json: object, renderClippedLine?: GrepInput["renderClippedLine"]): unknown => {
   const data = readProp(json, "data")
   if (!data || typeof data !== "object") return json
   const lines = decodeField(readProp(data, "lines"))
@@ -190,7 +190,12 @@ const normalizeMatch = (json: object): unknown => {
       ...data,
       // Capped here rather than after decoding: the full line is retained by `Stream.runCollect`
       // until the search ends, and nothing downstream ever shows more than this. See LINE_TEXT_CAP.
-      lines: { text: capLineText(lines.text) },
+      lines: {
+        text:
+          renderClippedLine && lines.text.length > LINE_TEXT_CAP
+            ? renderClippedLine(lines.text, LINE_TEXT_CAP) + "..."
+            : capLineText(lines.text),
+      },
       // Sliced BEFORE decoding so a pathological submatch count is not decoded only to be dropped.
       submatches: Array.isArray(submatches)
         ? submatches.slice(0, MAX_SUBMATCHES).flatMap((submatch) => {
@@ -255,6 +260,9 @@ export interface GrepInput {
   // altimate_change start — filter streamed paths before retaining bounded grep results
   readonly filterPath?: (relativePath: string) => boolean
   readonly scanLimit?: number
+  // altimate_change end
+  // altimate_change start — let the tool render the visible window from the full source line
+  readonly renderClippedLine?: (text: string, end: number) => string
   // altimate_change end
 }
 
@@ -486,7 +494,7 @@ export const layer = Layer.effect(
                 // which `Effect.catch` deliberately does not catch — so it would abort the
                 // stream rather than skip one record, defeating the point of this change.
                 const normalized = yield* Effect.try({
-                  try: () => normalizeMatch(json),
+                  try: () => normalizeMatch(json, input.renderClippedLine),
                   catch: (cause) => failure("record could not be normalized", cause),
                 })
                 const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalized).pipe(
@@ -537,9 +545,9 @@ export const layer = Layer.effect(
                   }),
                   line: match.line_number,
                   offset: match.absolute_offset,
-                  // altimate_change start — upstream_fix: capped at parse time, see LINE_TEXT_CAP.
-                  // Re-applied here so the cap still holds if the parser ever stops trimming.
-                  text: capLineText(match.lines.text),
+                  // altimate_change start — the parser caps the source window before collection.
+                  // Keep the rendered window intact when a replacement lengthens that slice.
+                  text: match.lines.text,
                   // altimate_change end
                   submatches: match.submatches.map((submatch) => ({
                     text: submatch.match.text,

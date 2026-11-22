@@ -49,6 +49,8 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   for (const value of values) {
     if (!value || value.length < minLength) continue
     literals.add(value)
+    const normalized = value.replace(/\r\n?/g, "\n")
+    if (normalized.length >= minLength) literals.add(normalized)
     literals.add(JSON.stringify(value).slice(1, -1))
   }
   const ordered = [...literals].sort((a, b) => b.length - a.length)
@@ -57,19 +59,21 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
 
   function matches(value: string): Match[] {
     if (!pattern) return []
-    const found = Array.from(value.matchAll(pattern), (match) => ({
-      start: match.index,
-      end: match.index + match[0].length,
-    }))
-    const decoded = value.includes("\\") ? decodeEscapes(value) : undefined
-    if (!decoded) return found
-    for (const match of decoded.value.matchAll(pattern)) {
-      found.push({
-        start: decoded.sourceOffset(match.index),
-        end: decoded.sourceOffset(match.index + match[0].length),
-      })
+    const found: Match[] = []
+    const collect = (source: string, offset: (index: number) => number) => {
+      let match: RegExpExecArray | null
+      while ((match = pattern.exec(source))) {
+        found.push({ start: offset(match.index), end: offset(match.index + match[0].length) })
+        // Continue at the next start, so a second credential can extend past this match.
+        pattern.lastIndex = match.index + 1
+      }
     }
-    found.sort((a, b) => a.start - b.start || b.end - a.end)
+    collect(value, (index) => index)
+    const decoded = value.includes("\\") ? decodeEscapes(value) : undefined
+    if (decoded) {
+      collect(decoded.value, decoded.sourceOffset)
+      found.sort((a, b) => a.start - b.start || b.end - a.end)
+    }
     const merged: Match[] = []
     for (const match of found) {
       const previous = merged.at(-1)
@@ -94,11 +98,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return parts.join("")
   }
 
-  const text = (value: string) => {
-    if (!pattern) return value
-    if (!value.includes("\\")) return value.replace(pattern, replacement)
-    return replaceMatches(value, matches(value))
-  }
+  const text = (value: string) => (pattern ? replaceMatches(value, matches(value)) : value)
 
   function unfinishedStart(value: string) {
     let start = value.length
@@ -131,14 +131,28 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return replaceMatches(value, matches(value), 0, start)
   }
 
-  function visit(value: unknown, seen: WeakMap<object, unknown>): unknown {
+  type Frame = "envelope" | "content" | "metadata" | "data"
+  // These metadata keys are consumed by the framework after redaction. Other
+  // keys can be arbitrary tool output, including credentials used as keys.
+  const metadataFields = new Set([
+    "error",
+    "success",
+    "truncated",
+    "outputPath",
+    "observation_mask",
+    "interrupted",
+    "rejected",
+    "source",
+  ])
+
+  function visit(value: unknown, seen: WeakMap<object, unknown>, frame: Frame): unknown {
     if (typeof value === "string") return text(value)
     if (!value || typeof value !== "object") return value
     if (seen.has(value)) return seen.get(value)
     if (Array.isArray(value)) {
       const next: unknown[] = []
       seen.set(value, next)
-      for (const item of value) next.push(visit(item, seen))
+      for (const item of value) next.push(visit(item, seen, frame))
       return next
     }
     const prototype = Object.getPrototypeOf(value)
@@ -146,9 +160,25 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     const next = Object.create(prototype)
     seen.set(value, next)
     for (const [key, item] of Object.entries(value)) {
-      const discriminator = key === "type" && typeof item === "string" && contentKinds.has(item)
-      Object.defineProperty(next, key, {
-        value: discriminator ? item : visit(item, seen),
+      const toolField = frame === "envelope" || frame === "content" || (frame === "metadata" && metadataFields.has(key))
+      const childFrame: Frame =
+        frame === "envelope" && key === "metadata"
+          ? "metadata"
+          : (frame === "envelope" && (key === "content" || key === "attachments")) ||
+              (frame === "content" && key === "resource")
+            ? "content"
+            : "data"
+      const discriminator = frame === "content" && key === "type" && typeof item === "string" && contentKinds.has(item)
+      let safeKey = toolField ? key : text(key)
+      if (safeKey !== key) {
+        // Keep distinct entries when two arbitrary keys collapse to the same placeholder.
+        const baseKey = safeKey
+        for (let n = 2; Object.hasOwn(next, safeKey) || Object.hasOwn(value, safeKey); n++) {
+          safeKey = baseKey + " (" + n + ")"
+        }
+      }
+      Object.defineProperty(next, safeKey, {
+        value: discriminator ? item : visit(item, seen, childFrame),
         enumerable: true,
         writable: true,
         configurable: true,
@@ -158,7 +188,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   }
 
   function failure(error: unknown): unknown {
-    if (!(error instanceof Error)) return pattern ? visit(error, new WeakMap()) : error
+    if (!(error instanceof Error)) return pattern ? visit(error, new WeakMap(), "data") : error
     const message = text(error.message)
     const stack = error.stack === undefined ? undefined : text(error.stack)
     if (message === error.message && stack === error.stack) return error
@@ -173,6 +203,8 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   return {
     failure,
     text,
+    multilineLookaround: ordered.find((value) => value.includes("\n"))?.length ?? 0,
+    windowLookaround: lookahead,
     lines: (value: string) => replaceMatches(value, matches(value), 0, value.length, true),
     progress,
     preview(value: string, limit: number) {
@@ -188,7 +220,10 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
       return replaceMatches(scan, matches(scan), from - start, to - start)
     },
     output<T>(value: T): T {
-      return pattern ? (visit(value, new WeakMap()) as T) : value
+      return pattern ? (visit(value, new WeakMap(), Array.isArray(value) ? "content" : "envelope") as T) : value
+    },
+    metadata<T>(value: T): T {
+      return pattern ? (visit(value, new WeakMap(), "metadata") as T) : value
     },
   }
 }

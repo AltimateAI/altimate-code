@@ -5,9 +5,9 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { InstanceState } from "@/effect/instance-state"
 import { Patch } from "../patch"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { diffLines } from "diff"
 import { assertExternalDirectoryEffect, assertSensitiveWriteEffect } from "./external-directory"
-import { trimDiff } from "./edit"
+import { toolFileDiff } from "./edit" // altimate_change — redact diff source before rendering
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import DESCRIPTION from "./apply_patch.txt"
@@ -82,7 +82,7 @@ export const ApplyPatchTool = Tool.define(
             const newContent =
               hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
             const next = Bom.split(newContent)
-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, next.text))
+            const diff = toolFileDiff(filePath, oldContent, next.text, ctx.redactCredentials)
 
             let additions = 0
             let deletions = 0
@@ -133,7 +133,7 @@ export const ApplyPatchTool = Tool.define(
               return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
             }
 
-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, newContent))
+            const diff = toolFileDiff(filePath, oldContent, newContent, ctx.redactCredentials)
 
             let additions = 0
             let deletions = 0
@@ -175,7 +175,7 @@ export const ApplyPatchTool = Tool.define(
               ),
             )
             const contentToDelete = source.text
-            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, contentToDelete, ""))
+            const deleteDiff = toolFileDiff(filePath, contentToDelete, "", ctx.redactCredentials)
 
             const deletions = contentToDelete.split("\n").length
 
