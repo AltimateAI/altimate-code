@@ -320,12 +320,16 @@ export const SqlExecuteTool = Tool.define(
                 // The MCP server and `altimate tool` refuse writes unless --allow-write was given.
                 if (error instanceof WriteDeniedError) throw new Error(`${explain(true, true)} ${error.message}`)
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
-                const rules: Array<{ pattern?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
+                const rules: Array<{ permission?: string; pattern?: string; action?: string }> = Array.isArray(error.ruleset)
+                  ? error.ruleset
+                  : []
+                // Only this permission's own rules name statements; wildcard-permission rules (the builder's
+                // "*": "allow") are about every tool.
                 // Name specific patterns only: a catch-all "*" would read as "everything is allowed". Allow before ask.
-                permitted = [
-                  ...rules.filter((rule) => rule.action === "allow" && rule.pattern && rule.pattern !== "*"),
-                  ...rules.filter((rule) => rule.action === "ask" && rule.pattern && rule.pattern !== "*"),
-                ].map((rule) => rule.pattern!)
+                const own = rules.filter((rule) => rule.permission === "sql_execute_write" && rule.pattern && rule.pattern !== "*")
+                permitted = [...own.filter((rule) => rule.action === "allow"), ...own.filter((rule) => rule.action === "ask")].map(
+                  (rule) => rule.pattern!,
+                )
                 // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
                 // nothing after it allows or asks (an agent's own deny can override a user's earlier "ask").
                 let lastCatchAllDeny = -1

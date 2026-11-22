@@ -366,6 +366,7 @@ describe("denied write message branches", () => {
   test("a catch-all deny followed by an allow is a rule, not read-only", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ruleset = [
+      { permission: "*", pattern: "prod_*", action: "allow" },
       { permission: "sql_execute_write", pattern: "*", action: "deny" },
       { permission: "sql_execute_write", pattern: "INSERT INTO audit*", action: "allow" },
     ]
@@ -377,6 +378,8 @@ describe("denied write message branches", () => {
     // The allowed pattern comes from the denial's own rules.
     expect(error).toContain("'INSERT INTO audit*'")
     expect(error).not.toContain("'*'")
+    // Rules for other permissions are not named.
+    expect(error).not.toContain("prod_")
   })
 
   test("a pattern-only deny leaves other writes to the default ask, so it is not read-only", async () => {

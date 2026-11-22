@@ -346,6 +346,7 @@ describe("explainWrite", () => {
   test("a spaced dot gets the quoting hint; a quoted name inside a comment does not", () => {
     expect(explainWrite("SELECT t . update FROM t", "sqlserver").reason).toContain("spaced dot")
     expect(explainWrite('SELECT a INTO newt FROM t -- "t".update', "postgres").reason).not.toContain("spaced dot")
+    expect(explainWrite(`SELECT '"t".update' INTO c FROM t`, "postgres").reason).not.toContain("spaced dot")
   })
 
   test("a quoted qualifier gets a specific hint", () => {
