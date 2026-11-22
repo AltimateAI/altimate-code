@@ -768,9 +768,10 @@ export function explainWrite(
       // Name the dotted-keyword case only when the statement has a keyword right after a dot (after a quoted
       // name, or any name on ClickHouse); otherwise the hint would point away from the real write clause.
       const clickhouse = dialect?.toLowerCase() === "clickhouse"
-      // Read on masked code (quoted names blanked, literals and comments ignored): a keyword after a quoted
-      // name or a spaced dot counts; an unquoted t.update is a column and never reaches here.
-      const statementMasked = maskSql(tokenizeSql(statement, dialect).tokens)
+      // Read on masked code (quoted names blanked, literals and comments ignored) with numbers blanked too, so
+      // `1. INTO` stays a SELECT INTO: a keyword after a quoted name or a spaced dot counts; an unquoted t.update
+      // is a column and never reaches here.
+      const statementMasked = masked.replace(/\b\d+(?:\.\d*|\s*\.)?/g, (number) => " ".repeat(number.length))
       const dotted = (
         clickhouse ? /\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i : /(?:(?:^|[^\w$])\s*|\s)\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b|\.\s+(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i
       ).test(statementMasked)

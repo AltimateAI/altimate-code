@@ -432,6 +432,12 @@ describe("denied write message branches", () => {
     expect(error).not.toContain("allow or ask for")
   })
 
+  test("shell residue without a warehouse does not suggest passing one", () => {
+    const message = deniedWriteMessage({ ...base, sql: "SELECT a FROM t 2>/dev/null", dialects: ["postgres", "snowflake"], warehouseGiven: false })
+    expect(message).toContain("shell syntax")
+    expect(message).not.toContain("pass warehouse")
+  })
+
   test("an unreadable query without a warehouse suggests passing one", () => {
     const message = deniedWriteMessage({ ...base, sql: "SELECT FROM WHERE (((", dialects: ["postgres", "snowflake"], warehouseGiven: false })
     expect(message).toContain("pass warehouse")

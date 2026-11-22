@@ -828,8 +828,10 @@ export function deniedWriteMessage(input: {
   // Without a warehouse (and off the dbt route, where a warehouse also moves the query off dbt), a query the
   // reachable dialects disagree on, or cannot read, may be fine in the real warehouse's dialect.
   const disagree = results.some((result) => result.queryType === "read" && !result.blocked)
+  // Shell syntax is not SQL in any dialect, so checking another dialect cannot help.
+  const residue = reason.startsWith("it contains shell syntax")
   const dialectHint =
-    input.warehouseGiven || input.dbt || input.dialects.length < 2
+    residue || input.warehouseGiven || input.dbt || input.dialects.length < 2
       ? ""
       : disagree
         ? " No warehouse was given and the reachable dialects disagree on whether this is a write; pass warehouse to check it in that warehouse's dialect only."
@@ -843,7 +845,7 @@ export function deniedWriteMessage(input: {
       (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
       dialectHint
     : input.cli
-      ? "If a write is intended, see the --allow-write note below; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
+      ? "If a write is intended, see the --allow-write note at the end; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
     : !readOnly
       ? "Change it to a statement the configured sql_execute_write rules allow" +
         (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `'${p.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`).join(", ")})` : "") +

@@ -347,6 +347,9 @@ describe("explainWrite", () => {
     expect(explainWrite("SELECT t . update FROM t", "sqlserver").reason).toContain("spaced dot")
     expect(explainWrite('SELECT a INTO newt FROM t -- "t".update', "postgres").reason).not.toContain("spaced dot")
     expect(explainWrite(`SELECT '"t".update' INTO c FROM t`, "postgres").reason).not.toContain("spaced dot")
+    for (const sql of ["SELECT 1. INTO c FROM t", "SELECT 1 . INTO c FROM t"]) {
+      expect(explainWrite(sql, "postgres").reason).not.toContain("spaced dot")
+    }
   })
 
   test("a quoted qualifier gets a specific hint", () => {
