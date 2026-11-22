@@ -900,8 +900,11 @@ export async function runDataDiff(params: DataDiffParams): Promise<DataDiffResul
     ] as const) {
       const type = warehouse ? Registry.getConfig(warehouse)?.type : Registry.list().warehouses[0]?.type
       const dialect = warehouseTypeToDialect(type ?? "generic")
-      requireReadOnlyQuery(isQuery(source) ? source : `SELECT * FROM ${source}`, dialect)
-      if (params.where_clause) requireReadOnlyQuery(`SELECT 1 WHERE (${params.where_clause})`, dialect)
+      // A query source is checked as sent; a table name and the filter are named, since the SQL wrapped around them
+      // is not what the user wrote.
+      if (isQuery(source)) requireReadOnlyQuery(source, dialect)
+      else requireReadOnlyQuery(`SELECT * FROM ${source}`, dialect, "source or target table name")
+      if (params.where_clause) requireReadOnlyQuery(`SELECT 1 WHERE (${params.where_clause})`, dialect, "where_clause")
     }
   } catch (error) {
     return { success: false, error: `Data diff requires read-only inputs: ${error instanceof Error ? error.message : String(error)}`, steps: 0 }

@@ -252,6 +252,21 @@ test("unavailable", async () => {
     expect(reason).toContain("send a single SELECT or WITH query")
   })
 
+  test("a parenthesized SELECT is told to drop the parentheses", () => {
+    expect(() => readSql("(SELECT 1)", "postgres")).toThrow("remove the outer parentheses")
+  })
+
+  test("a check on SQL built around user input names the input, not positions in the built text", () => {
+    let message = ""
+    try {
+      requireReadOnlyQuery("SELECT 1 WHERE (a = 1; DELETE FROM t)", "postgres", "where_clause")
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain("The where_clause must be part of a single read-only query")
+    expect(message).not.toContain("column")
+  })
+
   test("data_diff's embedded-query check names its reason too", () => {
     expect(() => requireReadOnlyQuery("SELECT 1; DELETE FROM t", "postgres")).toThrow("statement 2 of 2 is not a read (DELETE)")
     expect(() => requireReadOnlyQuery("SELECT 1; SELECT 2", "postgres")).toThrow("more than one statement")

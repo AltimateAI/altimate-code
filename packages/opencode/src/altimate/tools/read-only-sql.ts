@@ -46,9 +46,12 @@ function embeddable(sql: string, dialect?: string): { masked: string; body: stri
 }
 
 /** Throws unless sql is one read-only query that is safe to embed in a larger query. */
-export function requireReadOnlyQuery(sql: string, dialect?: string): void {
-  if (readOnlyBody(sql, dialect) === undefined)
-    throw new Error(`Only a single read-only query is accepted here; it never writes data.${writeReason(sql, dialect)}`)
+export function requireReadOnlyQuery(sql: string, dialect?: string, input?: string): void {
+  if (readOnlyBody(sql, dialect) !== undefined) return
+  // When the caller wrapped user input in SQL it built, name that input: a reason with positions or "it" would
+  // describe text the user never wrote.
+  if (input) throw new Error(`The ${input} must be part of a single read-only query; it never writes data.`)
+  throw new Error(`Only a single read-only query is accepted here; it never writes data.${writeReason(sql, dialect)}`)
 }
 
 // Statement words refused anywhere in a read handed to sql_check. A column qualified by a whole
@@ -126,7 +129,12 @@ export function writeReason(sql: string, dialect?: string): string {
   const checked = embeddable(sql, dialect)
   const body = "refused" in checked ? undefined : checked.body
   if (!body || !/^(SELECT|WITH)\b/i.test(body)) {
-    const cause = "refused" in checked ? checked.refused : "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)"
+    const cause =
+      "refused" in checked
+        ? checked.refused
+        : body!.startsWith("(")
+          ? "it is wrapped in parentheses; remove the outer parentheses"
+          : "it is not a SELECT or WITH query (a command such as SHOW cannot be embedded)"
     return ` This read is invalid here because ${cause}; send a single SELECT or WITH query that can be embedded.`
   }
   const [statement, replace] = wordPatterns(dialect)
