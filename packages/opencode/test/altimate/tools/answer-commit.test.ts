@@ -154,11 +154,11 @@ describe("answer_commit validation repair", () => {
   )
 })
 
-test("answer_commit executes synchronously with native Effect permissions", async () => {
+test("answer_commit executes with native Effect permissions and credential filtering", async () => {
   const info = await toolInfo(AnswerCommit.AnswerCommitTool)
   const tool = await Effect.runPromise(info.init())
   const asks: unknown[] = []
-  const result = Effect.runSync(
+  const result = await Effect.runPromise(
     tool.execute(
       { fields: [{ name: "Count", value: 2 }], basis: "Counted records at record grain using records.id." },
       {

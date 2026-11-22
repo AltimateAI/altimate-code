@@ -1,11 +1,13 @@
 // altimate_change — synthetic fixtures for known credential sources.
+import path from "node:path"
+import { mkdir } from "node:fs/promises"
+import { Effect } from "effect"
+import { InstanceRef } from "@/effect/instance-ref"
 import { expect, test } from "bun:test"
-import { toolCredentialRedactor } from "@/altimate/tool-output-credentials"
+import { loadToolCredentialRedactor, toolCredentialRedactor } from "@/altimate/tool-output-credentials"
 import * as Store from "@/altimate/native/connections/credential-store"
 import { AppRuntime } from "@/effect/app-runtime"
-import { MCP } from "@/mcp"
 import { McpAuth } from "@/mcp/auth"
-import { Instance } from "@/project/instance"
 import { provideTestInstance, tmpdir } from "../fixture/fixture"
 
 test("collects provider token environment names and MCP OAuth credentials", async () => {
@@ -55,10 +57,14 @@ test("collects warehouse credential leaves without changing a password-free conn
   try {
     await Store.getCredential("fixture-output-redaction", "credentials_json")
     const redact = await toolCredentialRedactor()
-    for (const value of [privateKey, storedKey, config, stored]) {
+    for (const value of [privateKey, storedKey]) {
       expect(redact.text(value)).toBe("[REDACTED]")
     }
     expect(redact.text(JSON.stringify({ key: storedKey }))).toBe('{"key":"[REDACTED]"}')
+    expect(redact.text(config)).toBe(
+      JSON.stringify({ type: "bigquery", credentials_json: JSON.stringify({ private_key: "[REDACTED]" }) }),
+    )
+    expect(redact.text(stored)).toBe(JSON.stringify({ private_key: "[REDACTED]", client_email: accountId }))
     expect(redact.text(clean)).toBe(clean)
     expect(redact.text(accountId)).toBe(accountId)
   } finally {
@@ -70,72 +76,57 @@ test("collects warehouse credential leaves without changing a password-free conn
   }
 })
 
-test("collects configured and command-resolved MCP authorization without changing ordinary headers", async () => {
-  const configuredToken = "fixture-configured-token"
-  const resolvedToken = "fixture-command-resolved-token"
-  const traceHeader = "fixture-not-a-credential"
-  const serverName = "fixture-output-redaction"
-  using server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      if (request.method !== "POST") return new Response(null, { status: 405 })
-      const message = (await request.json()) as {
-        id?: number
-        method: string
-        params?: { protocolVersion: string }
-      }
-      if (message.id === undefined) return new Response(null, { status: 202 })
-      return Response.json({
-        jsonrpc: "2.0",
-        id: message.id,
-        result: {
-          protocolVersion: message.params?.protocolVersion,
-          capabilities: {},
-          serverInfo: { name: serverName, version: "1" },
-        },
-      })
-    },
-  })
+test("collects configured and command-resolved MCP authorization in an isolated SDK process", async () => {
+  // Other MCP suites replace the SDK transports in the parent process.
+  const child = Bun.spawn(
+    [process.execPath, "test", path.join(import.meta.dir, "tool-output-mcp-credentials.fixture.ts")],
+    { cwd: path.resolve(import.meta.dir, "../.."), stdout: "ignore", stderr: "pipe" },
+  )
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  expect({ code, error: code === 0 ? "" : stderr }).toEqual({ code: 0, error: "" })
+}, 40_000)
+
+test("collects serialized connection URL credentials without masking ordinary URL fields", async () => {
+  const envName = "ALTIMATE_CODE_CONN_REDACTION_URL_TEST"
+  const previous = process.env[envName]
+  const password = "fixture/url-password"
+  const encodedPassword = encodeURIComponent(password)
+  const token = "fixture-url-token"
+  const connection = `postgres://reader:${encodedPassword}@warehouse.example/db?token=${token}&region=west`
+  const clean = "postgres://reader@warehouse.example/db?region=west"
+  process.env[envName] = JSON.stringify({ type: "postgres", connection_string: connection, host: "warehouse.example" })
+  try {
+    const redact = await toolCredentialRedactor()
+    expect(redact.text(password)).toBe("[REDACTED]")
+    expect(redact.text(connection)).toBe(
+      `postgres://reader:[REDACTED]@warehouse.example/db?token=[REDACTED]&region=west`,
+    )
+    expect(redact.text(clean)).toBe(clean)
+  } finally {
+    if (previous === undefined) delete process.env[envName]
+    else process.env[envName] = previous
+  }
+})
+
+test("collects local warehouse credentials with only InstanceRef context", async () => {
+  const password = "fixture-instance-ref-password"
   await using tmp = await tmpdir({
-    config: {
-      mcp: {
-        configured: {
-          type: "remote",
-          enabled: false,
-          url: String(server.url),
-          headers: { Authorization: "Bearer " + configuredToken, "X-Trace-Id": traceHeader },
-        },
-      },
+    init: async (directory) => {
+      const configDir = path.join(directory, ".altimate-code")
+      await mkdir(configDir)
+      await Bun.write(
+        path.join(configDir, "connections.json"),
+        JSON.stringify({ fixture: { type: "postgres", password } }),
+      )
     },
   })
   await provideTestInstance({
     directory: tmp.path,
-    fn: (instance) =>
-      Instance.restore(instance, async () => {
-        await MCP.add(serverName, {
-          type: "remote",
-          url: String(server.url),
-          timeout: 1_000,
-          headersCommand: {
-            Authorization: [
-              process.execPath,
-              "-e",
-              `process.stdout.write("Bearer " + ${JSON.stringify(resolvedToken)})`,
-            ],
-          },
-        })
-        try {
-          expect((await MCP.status())[serverName]?.status).toBe("connected")
-          const redact = await toolCredentialRedactor()
-          for (const value of [configuredToken, resolvedToken, "Bearer " + resolvedToken]) {
-            expect(redact.text(value)).toBe("[REDACTED]")
-          }
-          expect(redact.text(traceHeader)).toBe(traceHeader)
-        } finally {
-          await MCP.remove(serverName)
-        }
-        expect((await toolCredentialRedactor()).text(resolvedToken)).toBe(resolvedToken)
-      }),
+    fn: async (instance) => {
+      const redact = await Effect.runPromise(
+        loadToolCredentialRedactor.pipe(Effect.provideService(InstanceRef, instance)),
+      )
+      expect(redact.text(password)).toBe("[REDACTED]")
+    },
   })
-}, 25_000)
+})

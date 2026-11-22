@@ -2935,7 +2935,9 @@ export namespace SessionPrompt {
           // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
           Effect.promise(async () => {
             // altimate_change — an external tool can register a credential before reporting progress
-            const redact = external ? await toolCredentialRedactor() : ctx.redactCredentials
+            const redact = external ? await toolCredentialRedactor() : undefined
+            const title = ctx.redactCredentials?.output(val.title) ?? val.title // altimate_change
+            const metadata = ctx.redactCredentials?.metadata(val.metadata) ?? val.metadata // altimate_change
             const match =
               input.processor.partFromToolExecution(execution) ??
               input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
@@ -2943,8 +2945,8 @@ export namespace SessionPrompt {
               await Session.updatePart({
                 ...match,
                 state: {
-                  title: redact?.output(val.title) ?? val.title, // altimate_change — plugin progress
-                  metadata: redact?.metadata(val.metadata) ?? val.metadata, // altimate_change — plugin progress
+                  title: redact?.output(title) ?? title, // altimate_change — plugin progress
+                  metadata: redact?.metadata(metadata) ?? metadata, // altimate_change — plugin progress
                   status: "running",
                   input: args,
                   time: {
@@ -3004,6 +3006,8 @@ export namespace SessionPrompt {
           // altimate_change end
           // altimate_change start — release the execution identity on every exit path
           try {
+            const redact = await toolCredentialRedactor() // altimate_change — capture credentials before execution and hooks
+            ctx.redactCredentials = redact // altimate_change
             await Plugin.trigger(
               "tool.execute.before",
               {
@@ -3017,8 +3021,6 @@ export namespace SessionPrompt {
             )
             // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
             // altimate_change start — cover custom tools as well as the shared built-in wrapper
-            const redact = await toolCredentialRedactor()
-            ctx.redactCredentials = redact
             const raw = await AppRuntime.runPromise(item.execute(args, ctx))
             const resultRedactor = item.registrySource === "external" ? await toolCredentialRedactor() : redact
             const result = resultRedactor.output(redact.output(raw))
@@ -3056,7 +3058,8 @@ export namespace SessionPrompt {
             await input.lessons?.appendFileLessons(ctx.sessionID, item.id, args, stamped)
             // altimate_change end
             // altimate_change start — return the source-stamped output
-            const safeResult = resultRedactor.output(stamped)
+            const fresh = await toolCredentialRedactor()
+            const safeResult = fresh.output(resultRedactor.output(redact.output(stamped)))
             Tool.assertSuccess(safeResult)
             return safeResult
           } catch (error) {

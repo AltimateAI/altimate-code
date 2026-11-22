@@ -77,8 +77,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             ...match,
             state: {
               // altimate_change start — sanitize custom tool progress before persistence
-              title: progressRedactor?.output(val.title) ?? val.title,
-              metadata: progressRedactor?.metadata(val.metadata) ?? val.metadata,
+              title: progressRedactor?.output(redact?.output(val.title) ?? val.title) ?? val.title,
+              metadata: progressRedactor?.metadata(redact?.metadata(val.metadata) ?? val.metadata) ?? val.metadata,
               // altimate_change end
               status: "running",
               input: args,
@@ -135,7 +135,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { args },
             )
             // altimate_change start — custom and built-in results use the same filter
-            const raw = yield* item.execute(args, ctx)
+            const raw = yield* item.execute(args, ctx).pipe(
+              Effect.catchCause((cause) =>
+                Effect.gen(function* () {
+                  const fresh = yield* loadToolCredentialRedactor
+                  return yield* Effect.failCause(Tool.redactFailureCause(Tool.redactFailureCause(cause, redact), fresh))
+                }),
+              ),
+            )
             const resultRedactor = item.registrySource === "external" ? yield* loadToolCredentialRedactor : redact
             const result = resultRedactor.output(redact.output(raw))
             // altimate_change end
@@ -159,7 +166,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               // altimate_change end
             )
             // altimate_change start — propagate the source-stamped output
-            const safeResult = resultRedactor.output(stamped)
+            const fresh = yield* loadToolCredentialRedactor
+            const safeResult = fresh.output(resultRedactor.output(redact.output(stamped)))
             if (options.abortSignal?.aborted) {
               yield* input.processor.completeToolCall(options.toolCallId, safeResult)
             }

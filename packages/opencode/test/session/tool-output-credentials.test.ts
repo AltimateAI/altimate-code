@@ -56,10 +56,10 @@ test("collects environment, provider auth and observed warehouse credentials", a
     await Auth.set(provider, { type: "api", key: authValue })
     expect((await Store.getCredential("fixture-connection", "password")) === warehouseValue).toBe(true)
     const redact = await toolCredentialRedactor()
-    for (const value of [envValue, authValue, warehouseValue, envPassword, connection]) {
+    for (const value of [envValue, authValue, warehouseValue, envPassword]) {
       expect(redact.text(value) === "[REDACTED]").toBe(true)
     }
-    expect(redact.text("sample-database")).toBe("sample-database")
+    expect(redact.text(connection)).toBe(connection.replace(envPassword, "[REDACTED]"))
   } finally {
     await Auth.remove(provider)
     Store.setSecretBackendForTests(undefined)
@@ -78,10 +78,11 @@ test("matches alternate JSON escapes without reserializing clean text", () => {
 
 test("holds credential fragments out of streamed Bash previews", () => {
   const redact = createCredentialRedactor(["fixture-key-value"])
-  expect(redact.preview("out: fixture-key", 80)).toBe("out: ")
+  expect(redact.preview("ordinary output: fixture-key", 80)).toBe("ordinary out")
   expect(redact.preview("out: fixture-key-value", 80)).toBe("out: [REDACTED]")
-  expect(redact.preview("out: fixture-results", 80)).toBe("out: fixture-results")
-  expect(redact.preview("line with \\", 80)).toBe("line with \\")
+  expect(redact.preview("out: fixture-results", 80)).toBe("out:")
+  expect(redact.text("out: fixture-results")).toBe("out: fixture-results")
+  expect(redact.preview("line with \\", 80)).toBe("")
   expect(redact.preview("prefix fixture-key-value", 18)).toBe("prefix [REDACTED]")
 })
 
@@ -98,17 +99,17 @@ test("redacts the full union of overlapping exact credential values", () => {
   expect(redact.window("first-fixture-tail/visible", 14, 26)).toBe("[REDACTED]/visible")
 })
 
-test("filters arbitrary structured keys without renaming result protocol fields", () => {
+test("preserves names throughout tool result and metadata schemas", () => {
   const credential = "fixture-header-value"
   const redact = createCredentialRedactor([credential, "structuredContent", "truncated"])
   expect<unknown>(
     redact.output({
-      structuredContent: { [credential]: "value", "[REDACTED]": "existing" },
+      structuredContent: { [credential]: credential, "[REDACTED]": "existing" },
       metadata: { truncated: true, [credential]: "detail" },
     }),
   ).toEqual({
-    structuredContent: { "[REDACTED] (2)": "value", "[REDACTED]": "existing" },
-    metadata: { truncated: true, "[REDACTED]": "detail" },
+    structuredContent: { [credential]: "[REDACTED]", "[REDACTED]": "existing" },
+    metadata: { truncated: true, [credential]: "detail" },
   })
 })
 

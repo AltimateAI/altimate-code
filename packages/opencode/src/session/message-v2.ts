@@ -909,7 +909,7 @@ export namespace MessageV2 {
                   ? storedMask
                   : "[Old tool result content cleared]"
                 : part.state.output
-              const rawOutputText = redact?.text(storedOutputText) ?? storedOutputText
+              const rawOutputText = redact?.output(storedOutputText) ?? storedOutputText
               const maxChars = options?.toolOutputMaxChars
               const outputText =
                 !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars

@@ -1,5 +1,5 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Context as EffectContext, Effect, Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import type { SessionID, MessageID } from "../session/schema"
@@ -168,6 +168,25 @@ export type InferDef<T> =
     : T extends Effect.Effect<Info<infer P, infer M>, any, any>
       ? Def<P, M>
       : never
+
+// altimate_change start — preserve failures, defects, and cancellation while redacting their values.
+export function redactFailureCause<E>(cause: Cause.Cause<E>, redact: CredentialRedactor): Cause.Cause<E> {
+  return Cause.fromReasons(
+    cause.reasons.map((reason) => {
+      if (Cause.isFailReason(reason))
+        return Cause.makeFailReason(redact.failure(reason.error) as E).annotate(
+          EffectContext.makeUnsafe(new Map(reason.annotations)),
+        )
+      if (Cause.isDieReason(reason))
+        return Cause.makeDieReason(redact.failure(reason.defect)).annotate(
+          EffectContext.makeUnsafe(new Map(reason.annotations)),
+        )
+      return reason
+    }),
+  )
+}
+
+// altimate_change end
 
 // altimate_change start — telemetry helpers (ported from the fork's pre-1.17 Tool.define wrapper)
 function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: number, error: unknown) {
@@ -356,12 +375,14 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           const metadata = ctx.metadata
           ctx = { ...ctx, redactCredentials: redact, metadata: (value) => metadata(redact.output(value)) }
           const executed = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
-            Effect.onError((cause) =>
+            Effect.catchCause((cause) =>
               Effect.gen(function* () {
                 const fresh = yield* loadToolCredentialRedactor
-                const error = fresh.failure(redact.failure(Cause.squash(cause)))
+                const safeCause = redactFailureCause(redactFailureCause(cause, redact), fresh)
+                const error = Cause.squash(safeCause)
                 endTrace("error", error instanceof Error ? error.message : String(error))
                 altimateTrackError(id, decoded, ctx, startTime, error)
+                return yield* Effect.failCause(safeCause)
               }),
             ),
           )

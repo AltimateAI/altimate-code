@@ -2712,15 +2712,21 @@ unixNoLLMServer(
   { config: cfg },
 )
 
+// altimate_change — running output may hold a trailing chunk until shell completion
 unixNoLLMServer(
   "shell updates running metadata before process exit",
   () =>
     withSh(() =>
       Effect.gen(function* () {
         const { prompt, chat } = yield* boot()
+        const instance = yield* TestInstance
 
         const fiber = yield* prompt
-          .shell({ sessionID: chat.id, agent: "build", command: "printf first && sleep 0.2 && printf second" })
+          .shell({
+            sessionID: chat.id,
+            agent: "build",
+            command: 'printf first; while [ ! -f shell-progress-release ]; do sleep 0.02; done; printf second',
+          })
           .pipe(Effect.forkChild)
 
         yield* pollWithTimeout(
@@ -2728,13 +2734,14 @@ unixNoLLMServer(
             const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
             const taskMsg = msgs.find((item) => item.info.role === "assistant")
             const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
-            if (tool?.state.status === "running" && tool.state.metadata?.output.includes("first")) return true
+            if (tool?.state.status === "running" && typeof tool.state.metadata?.output === "string") return true
           }),
           "timed out waiting for running shell metadata",
         )
 
-        const exit = yield* Fiber.await(fiber)
-        expect(Exit.isSuccess(exit)).toBe(true)
+        yield* Effect.promise(() => Bun.write(path.join(instance.directory, "shell-progress-release"), "ready"))
+        const result = yield* Fiber.join(fiber)
+        expect(completedTool(result.parts)?.state.output).toBe("firstsecond")
       }),
     ),
   { config: cfg },

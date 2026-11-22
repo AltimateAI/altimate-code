@@ -1095,8 +1095,8 @@ function observeFile(file: string, source: FileSource): Record<string, Connectio
   return {}
 }
 
-export function* knownCredentialConfigs(): Iterable<ConnectionConfig> {
-  const dir = path.resolve(projectRoot())
+export function* knownCredentialConfigs(projectDir = projectRoot()): Iterable<ConnectionConfig> {
+  const dir = path.resolve(projectDir)
   const active = injectionActive ? injectedState : states.get(dir)
   if (active?.loaded) yield* active.configs.values()
   // A file can be read by tools even when another source shadows its connection name.

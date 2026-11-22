@@ -13,7 +13,7 @@
  *      missing" Bun throws; GitInfo.gitAvailable + gitError surface the
  *      three states (missing / corrupted / not-a-repo) distinctly. remoteUrl
  *      now strips embedded HTTPS userinfo (creds-leak hardening, pre-release).
- *      gitError.stderr is masked via Telemetry.maskString before persisting
+ *      gitError.stderr is capped after masking
  *      (PII hardening, pre-release).
  *
  *   3. build agent name normalization (#833). normalizeAgentName helper at
@@ -172,13 +172,7 @@ describe("project_scan privacy hardening", () => {
     expect(PROJECT_SCAN_SRC).toMatch(/parsed\.password\s*=\s*""/)
   })
 
-  test("gitError.stderr is masked via Telemetry.maskString before persisting", () => {
-    // Raw git stderr contains paths-with-usernames, commit emails on bad-object
-    // errors, and unmasked HTTPS remote URLs on auth failures. Pre-release
-    // fix routes it through the existing masker.
-    expect(PROJECT_SCAN_SRC).toMatch(/Telemetry\.maskString\(\s*isRepoResult\.stderr/)
-  })
-
+  // altimate_change — tool/project-scan.test.ts checks actual stderr masking.
   test("gitError.stderr is length-capped after masking (not before)", () => {
     // Mask first, then slice — otherwise we could slice mid-mask-replacement
     // and surface a half-redacted email. The mask replacements can shift

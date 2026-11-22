@@ -54,7 +54,8 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   }
   const ordered = [...literals].sort((a, b) => b.length - a.length)
   const pattern = ordered.length ? new RegExp(ordered.map((value) => RegExp.escape(value)).join("|"), "g") : undefined
-  const lookahead = (ordered[0]?.length ?? 0) * 6
+  const longest = ordered[0]?.length ?? 0
+  const lookahead = longest * 6
 
   function matches(value: string): Match[] {
     if (!pattern) return []
@@ -114,8 +115,8 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   }
 
   function progress(value: string) {
-    // A preview can be published again after the next chunk. Hold a trailing
-    // credential prefix until it is either complete or distinguishable.
+    // Keep the tail private until more output arrives or the stream ends.
+    // Alternate JSON escape spellings can require a longer holdback.
     if (!pattern) return value
     const unfinishedEscape = /\\(?:u[\da-fA-F]{0,3})?$/.exec(value)
     const completePrefix = unfinishedEscape ? value.slice(0, unfinishedEscape.index) : value
@@ -124,7 +125,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     const unfinished = unfinishedStart(comparison)
     const escapedStart =
       unfinished < comparison.length ? (decoded?.sourceOffset(unfinished) ?? unfinished) : value.length
-    const start = Math.min(unfinishedStart(value), escapedStart)
+    const start = Math.min(Math.max(0, value.length - longest + 1), escapedStart)
     // Match complete credentials against the original string, including a
     // credential whose tail is also a prefix of another credential.
     return replaceMatches(value, matches(value), 0, start)
@@ -165,19 +166,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return value
   }
 
-  type Frame = "envelope" | "content" | "metadata" | "data"
-  // These metadata keys are consumed by the framework after redaction. Other
-  // keys can be arbitrary tool output, including credentials used as keys.
-  const metadataFields = new Set([
-    "error",
-    "success",
-    "truncated",
-    "outputPath",
-    "observation_mask",
-    "interrupted",
-    "rejected",
-    "source",
-  ])
+  type Frame = "envelope" | "content" | "data"
 
   function visit(value: unknown, seen: WeakMap<object, unknown>, frame: Frame): unknown {
     if (typeof value === "string") return text(value)
@@ -201,6 +190,21 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
       seen.set(value, value)
       return value
     }
+    if (value instanceof Error) {
+      const descriptors = Object.getOwnPropertyDescriptors(value)
+      const next = Object.create(Object.getPrototypeOf(value))
+      seen.set(value, next)
+      let changed = false
+      for (const descriptor of Object.values(descriptors)) {
+        if (!("value" in descriptor)) continue
+        const safe = visit(descriptor.value, seen, "data")
+        changed ||= safe !== descriptor.value
+        descriptor.value = safe
+      }
+      if (changed) return Object.defineProperties(next, descriptors)
+      seen.set(value, value)
+      return value
+    }
     const prototype = Object.getPrototypeOf(value)
     const plain = prototype === Object.prototype || prototype === null
     // SDK media and native values such as dates and typed arrays retain their representation.
@@ -209,26 +213,15 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     seen.set(value, next)
     let changed = false
     for (const [key, item] of Object.entries(value)) {
-      const toolField = frame === "envelope" || frame === "content" || (frame === "metadata" && metadataFields.has(key))
       const childFrame: Frame =
-        frame === "envelope" && key === "metadata"
-          ? "metadata"
-          : (frame === "envelope" && (key === "content" || key === "attachments")) ||
-              (frame === "content" && key === "resource")
-            ? "content"
-            : "data"
+        (frame === "envelope" && (key === "content" || key === "attachments")) ||
+        (frame === "content" && key === "resource")
+          ? "content"
+          : "data"
       const discriminator = frame === "content" && key === "type" && typeof item === "string" && contentKinds.has(item)
-      let safeKey = toolField ? key : text(key)
-      if (safeKey !== key) {
-        // Keep distinct entries when two arbitrary keys collapse to the same placeholder.
-        const baseKey = safeKey
-        for (let n = 2; Object.hasOwn(next, safeKey) || Object.hasOwn(value, safeKey); n++) {
-          safeKey = baseKey + " (" + n + ")"
-        }
-      }
       const safeItem = discriminator ? item : visit(item, seen, childFrame)
-      changed ||= safeKey !== key || safeItem !== item
-      Object.defineProperty(next, safeKey, {
+      changed ||= safeItem !== item
+      Object.defineProperty(next, key, {
         value: safeItem,
         enumerable: true,
         writable: true,
@@ -253,21 +246,10 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return value
   }
 
-  function failure(error: unknown): unknown {
-    if (!(error instanceof Error)) return pattern ? visit(error, new WeakMap(), "data") : error
-    const message = text(error.message)
-    const stack = error.stack === undefined ? undefined : text(error.stack)
-    if (message === error.message && stack === error.stack) return error
-    const descriptors = Object.getOwnPropertyDescriptors(error)
-    return Object.create(Object.getPrototypeOf(error), {
-      ...descriptors,
-      message: { value: message, writable: true, configurable: true },
-      stack: { value: stack, writable: true, configurable: true },
-    })
-  }
-
   return {
-    failure,
+    failure(error: unknown): unknown {
+      return pattern ? visit(error, new WeakMap(), "data") : error
+    },
     text,
     multilineLookaround: ordered.find((value) => value.includes("\n"))?.length ?? 0,
     windowLookaround: lookahead,
@@ -289,7 +271,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
       return pattern ? (visit(value, new WeakMap(), Array.isArray(value) ? "content" : "envelope") as T) : value
     },
     metadata<T>(value: T): T {
-      return pattern ? (visit(value, new WeakMap(), "metadata") as T) : value
+      return pattern ? (visit(value, new WeakMap(), "data") as T) : value
     },
   }
 }
@@ -347,40 +329,59 @@ function readJson(value: string): unknown {
 
 function addConnectionCredential(name: string, value: unknown, add: AddCredential) {
   if (typeof value !== "string" || !value) return
-  add(value)
-  // BigQuery accepts service-account credentials both as JSON objects and serialized strings.
-  if (name === "credentials_json" || name === "keyfile_json") addConnectionFields(readJson(value), add)
-}
-
-function addConnectionFields(value: unknown, add: AddCredential): boolean {
-  if (!value || typeof value !== "object") return false
-  let hasCredential = false
-  for (const [key, field] of Object.entries(value)) {
-    if (isSensitiveField(key) && typeof field === "string" && field.length >= minLength) {
-      hasCredential = true
-      addConnectionCredential(key, field, add)
-    } else if (addConnectionFields(field, add)) {
-      hasCredential = true
+  if (name === "credentials_json" || name === "keyfile_json") {
+    const fields = readJson(value)
+    if (fields && typeof fields === "object") {
+      addConnectionFields(fields, add)
+      return
     }
   }
-  return hasCredential
+  if (name === "connection_string" && value.includes("://")) {
+    const url = URL.parse(value)
+    if (url) {
+      if (url.password) {
+        add(url.password)
+        try {
+          add(decodeURIComponent(url.password))
+        } catch {
+          // The encoded password still matches if a percent escape is invalid.
+        }
+      }
+      for (const query of url.search.slice(1).split("&")) {
+        for (const [key, field] of new URLSearchParams(query)) {
+          const normalized = key.toLowerCase()
+          if (!isSensitiveField(normalized) && !isCredentialName(normalized)) continue
+          add(field)
+          add(query.slice(query.indexOf("=") + 1))
+        }
+      }
+      return
+    }
+  }
+  add(value)
+}
+
+function addConnectionFields(value: unknown, add: AddCredential) {
+  if (!value || typeof value !== "object") return
+  for (const [key, field] of Object.entries(value)) {
+    if (isSensitiveField(key)) addConnectionCredential(key, field, add)
+    addConnectionFields(field, add)
+  }
 }
 
 export const loadToolCredentialRedactor = withAlsInstanceRef(
   Effect.gen(function* () {
     // Message projection is below configuration and the connection registry in the import graph.
-    const [{ Auth }, { Config }, { Env }, Connections, { Instance }, { McpAuth }, { knownMcpHeaders }] =
-      yield* Effect.promise(() =>
-        Promise.all([
-          import("@/auth"),
-          import("@/config/config"),
-          import("@/env"),
-          import("@/altimate/native/connections/registry"),
-          import("@/project/instance"),
-          import("@/mcp/auth"),
-          import("@/mcp"),
-        ]),
-      )
+    const [{ Auth }, { Config }, { Env }, Connections, { McpAuth }, { knownMcpHeaders }] = yield* Effect.promise(() =>
+      Promise.all([
+        import("@/auth"),
+        import("@/config/config"),
+        import("@/env"),
+        import("@/altimate/native/connections/registry"),
+        import("@/mcp/auth"),
+        import("@/mcp"),
+      ]),
+    )
     const instance = yield* InstanceRef
     const values = new Set<string>()
     const add = (value: unknown) => {
@@ -405,11 +406,7 @@ export const loadToolCredentialRedactor = withAlsInstanceRef(
     }
     for (const [name, value] of environment) {
       if (name.startsWith(Connections.CONN_ENV_PREFIX)) {
-        if (!value) continue
-        const connection = readJson(value)
-        // Only credential-bearing connection configurations contribute a composite literal.
-        // Keep opaque values for the credential-prefixed variables supported by headless callers.
-        if (!connection || typeof connection !== "object" || addConnectionFields(connection, add)) add(value)
+        if (value) addConnectionFields(readJson(value), add)
       } else if (isCredentialName(name) || providerCredentialVariables.has(name) || configuredVariables.has(name)) {
         add(value)
       }
@@ -442,7 +439,7 @@ export const loadToolCredentialRedactor = withAlsInstanceRef(
     }
     if (instance) {
       for (const headers of knownMcpHeaders(instance)) addCredentialHeaders(headers, add)
-      const connections = Instance.restore(instance, () => Connections.knownCredentialConfigs())
+      const connections = Connections.knownCredentialConfigs(instance.directory)
       for (const connection of connections) addConnectionFields(connection, add)
     }
     for (const credential of knownStoredCredentials()) addConnectionCredential(credential.field, credential.value, add)
