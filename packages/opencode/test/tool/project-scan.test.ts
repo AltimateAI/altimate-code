@@ -1,5 +1,6 @@
 // @ts-nocheck
-import { describe, expect, test, beforeAll, beforeEach, afterEach, afterAll } from "bun:test"
+// altimate_change — scoped Git stderr fixture
+import { describe, expect, test, beforeAll, beforeEach, afterEach, afterAll, spyOn } from "bun:test"
 import path from "path"
 import os from "os"
 import fsp from "fs/promises"
@@ -160,6 +161,26 @@ describe("detectGit", () => {
       process.chdir(originalCwd)
     }
   })
+
+  // altimate_change start — use synthetic credentials that span the Git output caps
+  test("redacts known Git stderr before clipping it for metadata and display", async () => {
+    const { createCredentialRedactor } = await import("@/altimate/tool-output-credentials")
+    const value = "fixture-git-credential"
+    const redact = createCredentialRedactor([value])
+    const spawn = spyOn(Bun, "spawnSync")
+    try {
+      for (const cap of [120, 240]) {
+        const prefix = "x".repeat(cap - 11) + " "
+        const fixture = { exitCode: 2, stdout: Buffer.alloc(0), stderr: Buffer.from(prefix + value) }
+        spawn.mockReturnValueOnce(fixture).mockReturnValueOnce(fixture)
+        expect((await detectGit()).gitError?.stderr?.slice(0, cap)).toBe((prefix + value).slice(0, cap))
+        expect((await detectGit(redact)).gitError?.stderr?.slice(0, cap)).toBe(prefix + "[REDACTED]")
+      }
+    } finally {
+      spawn.mockRestore()
+    }
+  })
+  // altimate_change end
 
   afterAll(async () => {
     await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})

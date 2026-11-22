@@ -177,6 +177,7 @@ export const ReadTool = Tool.define<
       const pending: { text: string; end: number }[] = []
       let position = 0
       let before = ""
+      let terminalNewline = false
 
       const render = (text: string, after: string) => {
         flags.count += 1
@@ -255,6 +256,8 @@ export const ReadTool = Tool.define<
           for (let next = index + 1; next < pending.length && after.length < lookaround; next++) {
             after += "\n" + pending[next].text.slice(0, lookaround - after.length - 1)
           }
+          // splitLines drops the final delimiter. Restore it for matching only.
+          if (eof && terminalNewline && after.length < lookaround) after += "\n"
           render(current.text, after)
           remember(current.text)
           index++
@@ -263,7 +266,11 @@ export const ReadTool = Tool.define<
       }
 
       yield* fs.stream(filepath).pipe(
-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+        Stream.map((bytes) => {
+          const text = decoder.decode(bytes, { stream: true })
+          if (lookaround && text.length > 0) terminalNewline = text.endsWith("\n") || text.endsWith("\r")
+          return text
+        }),
         Stream.splitLines,
         Stream.runForEach((text) =>
           Effect.gen(function* () {

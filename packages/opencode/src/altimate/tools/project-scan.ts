@@ -4,6 +4,8 @@ import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
 import { Telemetry } from "@/telemetry"
+// altimate_change — use exact credentials before clipping Git output
+import type { CredentialRedactor } from "@/altimate/tool-output-credentials"
 // altimate_change — onboarding funnel: environment_scan_completed
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 import { Config } from "@/config/config"
@@ -115,7 +117,8 @@ export function safeSpawnSync(
   }
 }
 
-export async function detectGit(): Promise<GitInfo> {
+// altimate_change — redact full Git stderr before bounding its tool result
+export async function detectGit(redact?: CredentialRedactor): Promise<GitInfo> {
   const isRepoResult = safeSpawnSync(["git", "rev-parse", "--is-inside-work-tree"])
   // Distinguish three cases that all produce isRepo=false:
   //   1. Git binary missing (null result) — record "git" in degraded.
@@ -141,9 +144,10 @@ export async function detectGit(): Promise<GitInfo> {
     // session transcripts, or App Insights via `metadata.git.gitError`.
     // Cap at 240 chars after masking (mask replacements can shorten or
     // lengthen the input minimally).
-    const maskedStderr = isRepoResult.stderr
-      ? Telemetry.maskString(isRepoResult.stderr.trim()).slice(0, 240) || undefined
-      : undefined
+    // altimate_change start — match against the full source before either masker or display clips it.
+    const stderr = redact?.text(isRepoResult.stderr) ?? isRepoResult.stderr
+    const maskedStderr = stderr ? Telemetry.maskString(stderr.trim()).slice(0, 240) || undefined : undefined
+    // altimate_change end
     return {
       isRepo: false,
       gitAvailable: true,
@@ -608,7 +612,8 @@ export const ProjectScanTool = Tool.define("project_scan", {
     // expected to fail-safe (return a "not found" or empty result) rather
     // than throw — see detectGit + detectDataTools.
     const [git, dbtProject, envVars, dataTools, configFiles] = await Promise.all([
-      detectGit().catch(() => {
+      // altimate_change — retain exact matching across the Git stderr display limits
+      detectGit(ctx.redactCredentials).catch(() => {
         degraded.add("git")
         return { isRepo: false } as GitInfo
       }),

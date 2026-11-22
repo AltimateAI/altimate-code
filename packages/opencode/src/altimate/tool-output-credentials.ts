@@ -130,6 +130,41 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     return replaceMatches(value, matches(value), 0, start)
   }
 
+  // Binary attachments must stay valid. When their transport or decoded bytes
+  // contain an exact credential, omit the bytes and leave a text placeholder.
+  let binaryLiterals: Buffer[] | undefined
+  function containsCredentialBytes(encoded: string) {
+    if (!encoded || !pattern) return false
+    if (text(encoded) !== encoded) return true
+    binaryLiterals ??= ordered.map((literal) => Buffer.from(literal, "utf8"))
+    const bytes = Buffer.from(encoded, "base64")
+    return binaryLiterals.some((literal) => bytes.includes(literal))
+  }
+
+  const omitAttachment = Symbol("omitAttachment")
+  function filterMedia(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value
+    const item = value as Record<string, unknown>
+    if (item.type === "file" && typeof item.url === "string") {
+      const data = /^data:[^,]*;base64,(.*)$/s.exec(item.url)?.[1]
+      if (data && containsCredentialBytes(data)) return omitAttachment
+    }
+    if ((item.type === "image" || item.type === "audio") && typeof item.data === "string") {
+      if (containsCredentialBytes(item.data)) return { type: "text", text: replacement }
+    }
+    if (item.type === "resource" && item.resource && typeof item.resource === "object") {
+      const resource = item.resource as Record<string, unknown>
+      if (typeof resource.blob === "string" && containsCredentialBytes(resource.blob)) {
+        const { blob, ...rest } = resource
+        return {
+          ...item,
+          resource: { ...rest, text: resource.text ? text(String(resource.text)) + "\n" + replacement : replacement },
+        }
+      }
+    }
+    return value
+  }
+
   type Frame = "envelope" | "content" | "metadata" | "data"
   // These metadata keys are consumed by the framework after redaction. Other
   // keys can be arbitrary tool output, including credentials used as keys.
@@ -153,7 +188,12 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
       seen.set(value, next)
       let changed = false
       for (const item of value) {
-        const safeItem = visit(item, seen, frame)
+        const filtered = frame === "content" ? filterMedia(item) : item
+        if (filtered === omitAttachment) {
+          changed = true
+          continue
+        }
+        const safeItem = visit(filtered, seen, frame)
         changed ||= safeItem !== item
         next.push(safeItem)
       }
@@ -195,7 +235,20 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
         configurable: true,
       })
     }
-    if (changed) return next
+    if (changed) {
+      if (frame === "envelope") {
+        const attachments = Object.getOwnPropertyDescriptor(value, "attachments")?.value
+        if (
+          Array.isArray(attachments) &&
+          Array.isArray(next.attachments) &&
+          next.attachments.length < attachments.length &&
+          typeof next.output === "string"
+        ) {
+          next.output += "\n" + replacement
+        }
+      }
+      return next
+    }
     seen.set(value, value)
     return value
   }

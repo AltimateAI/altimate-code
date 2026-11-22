@@ -7,7 +7,7 @@ import * as path from "path"
 import { Effect, Schema, Semaphore } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { createTwoFilesPatch, diffLines, formatPatch, structuredPatch } from "diff"
 import DESCRIPTION from "./edit.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
@@ -675,9 +675,36 @@ export const ContextAwareReplacer: Replacer = function* (content, find) {
   }
 }
 
-// altimate_change start — diff prefixes must not split known multiline credentials
+// altimate_change start — preserve diff structure while masking lines from the original source
 export function toolFileDiff(path: string, before: string, after: string, redact?: Tool.Context["redactCredentials"]) {
-  return trimDiff(createTwoFilesPatch(path, path, redact?.lines(before) ?? before, redact?.lines(after) ?? after))
+  const safeBefore = redact?.lines(before) ?? before
+  const safeAfter = redact?.lines(after) ?? after
+  if (safeBefore === before && safeAfter === after) {
+    return trimDiff(createTwoFilesPatch(path, path, before, after))
+  }
+
+  const patch = structuredPatch(path, path, before, after)
+  const oldLines = safeBefore.split("\n")
+  const newLines = safeAfter.split("\n")
+  for (const hunk of patch.hunks) {
+    let oldIndex = hunk.oldStart - 1
+    let newIndex = hunk.newStart - 1
+    hunk.lines = hunk.lines.map((line) => {
+      const prefix = line[0]
+      if (prefix === "-") return prefix + oldLines[oldIndex++]
+      if (prefix === "+") return prefix + newLines[newIndex++]
+      if (prefix !== " ") return line
+      const original = line.slice(1)
+      const oldLine = oldLines[oldIndex++]
+      const newLine = newLines[newIndex++]
+      if (oldLine === newLine) return prefix + oldLine
+      if (oldLine === original) return prefix + newLine
+      if (newLine === original) return prefix + oldLine
+      // A context line can intersect different credentials on the two sides.
+      return prefix + "[REDACTED]"
+    })
+  }
+  return trimDiff(formatPatch(patch))
 }
 // altimate_change end
 

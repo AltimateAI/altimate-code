@@ -130,3 +130,20 @@ test("redacts normalized CRLF variants based on the source credential length", (
   const redact = createCredentialRedactor(["abc\r\ndef"])
   expect(redact.lines("abc\ndef")).toBe("[REDACTED]\n")
 })
+
+test("omits credential-bearing attachment bytes while preserving clean media", () => {
+  const value = "fixture-media-value"
+  const redact = createCredentialRedactor([value])
+  const encoded = Buffer.from("PDF " + value).toString("base64")
+  const unsafe = { type: "file", mime: "application/pdf", url: "data:application/pdf;base64," + encoded }
+  const clean = { type: "file", mime: "application/pdf", url: "data:application/pdf;base64,Y2xlYW4=" }
+  expect(redact.output({ output: "Attached files", attachments: [unsafe, clean] })).toEqual({
+    output: "Attached files\n[REDACTED]",
+    attachments: [clean],
+  })
+  expect<unknown>(
+    redact.output({
+      content: [{ type: "resource", resource: { uri: "test://file", blob: encoded, text: "context" } }],
+    }),
+  ).toEqual({ content: [{ type: "resource", resource: { uri: "test://file", text: "context\n[REDACTED]" } }] })
+})

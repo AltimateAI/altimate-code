@@ -190,6 +190,22 @@ describe("tool.edit", () => {
         expect((yield* load(filepath)) === value + "\nchanged\n").toBe(true)
       }),
     )
+    it.instance("keeps an approval diff hunk when only a credential changes", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "credential-diff-fixture.txt")
+        const before = "fixture-before-value"
+        const after = "fixture-after-value"
+        yield* put(filepath, before + "\n")
+        const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+        const result = yield* run(
+          { filePath: filepath, oldString: before, newString: after },
+          { ...ctx, redactCredentials: createCredentialRedactor([before, after]) },
+        )
+        expect(result.metadata.diff).toContain("-[REDACTED]\n+[REDACTED]")
+        expect((yield* load(filepath)) === after + "\n").toBe(true)
+      }),
+    )
     // altimate_change end
 
     it.instance("rejects editing an existing file modified after it was read", () =>

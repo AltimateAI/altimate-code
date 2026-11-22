@@ -880,4 +880,24 @@ it.instance("redacts a literal multiline credential when its last line exceeds t
     expect(rest.output).toContain("27: [REDACTED] " + "y".repeat(1800))
   }),
 )
+
+it.instance("matches a multiline credential that includes the file's final newline", () =>
+  Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const file = path.join(instance.directory, "credential-final-newline.txt")
+    const value = "first-fragment\nlast-fragment\n"
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    const next = { ...ctx, redactCredentials: createCredentialRedactor([value]) }
+    yield* Effect.promise(() => Bun.write(file, "start " + value))
+    const first = yield* run({ filePath: file, limit: 1 }, next)
+    expect(first.metadata.preview).toBe("start [REDACTED]")
+    const last = yield* run({ filePath: file, offset: 2 }, next)
+    expect(last.output).toContain("2: [REDACTED]\n\n(End of file - total 2 lines)")
+    expect(last.metadata.preview).toBe("[REDACTED]")
+
+    yield* Effect.promise(() => Bun.write(file, "start " + value.slice(0, -1)))
+    const unterminated = yield* run({ filePath: file }, next)
+    expect(unterminated.metadata.preview).toBe("start first-fragment\nlast-fragment")
+  }),
+)
 // altimate_change end
