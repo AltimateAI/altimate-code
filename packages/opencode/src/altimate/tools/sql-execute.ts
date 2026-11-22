@@ -321,7 +321,11 @@ export const SqlExecuteTool = Tool.define(
                 if (error instanceof WriteDeniedError) throw new Error(`${explain(true, true)} ${error.message}`)
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
                 const rules: Array<{ pattern?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
-                permitted = rules.filter((rule) => rule.action !== "deny" && rule.pattern).map((rule) => rule.pattern!)
+                // Name specific patterns only: a catch-all "*" would read as "everything is allowed". Allow before ask.
+                permitted = [
+                  ...rules.filter((rule) => rule.action === "allow" && rule.pattern && rule.pattern !== "*"),
+                  ...rules.filter((rule) => rule.action === "ask" && rule.pattern && rule.pattern !== "*"),
+                ].map((rule) => rule.pattern!)
                 // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
                 // nothing after it allows or asks (an agent's own deny can override a user's earlier "ask").
                 let lastCatchAllDeny = -1
@@ -785,7 +789,8 @@ export function deniedWriteMessage(input: {
   cli?: boolean
   /** The default route is dbt: passing a warehouse would also move the query off dbt, so no hint names it. */
   dbt?: boolean
-  /** Configured sql_execute_write patterns that allow or ask (not user SQL), named so the agent can comply. */
+  /** Configured sql_execute_write patterns that allow or ask, named so the agent can comply. Single-quoted, so
+   * telemetry's literal masking keeps config text out of recorded errors. */
   permitted?: string[]
 }): string {
   const readOnly = input.readOnly !== false
@@ -832,10 +837,10 @@ export function deniedWriteMessage(input: {
       (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
       dialectHint
     : input.cli
-      ? "To write, re-run with --allow-write; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
+      ? "If a write is intended, see the --allow-write note below; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
     : !readOnly
       ? "Change it to a statement the configured sql_execute_write rules allow" +
-        (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `\`${p}\``).join(", ")})` : "") +
+        (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `'${p.replaceAll("'", "''")}'`).join(", ")})` : "") +
         ", or ask the user to change the rules."
       : input.scratch
       ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."

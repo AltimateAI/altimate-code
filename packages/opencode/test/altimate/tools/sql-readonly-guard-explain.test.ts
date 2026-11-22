@@ -40,6 +40,11 @@ describe("shellResidue", () => {
     for (const sql of ["SELECT a > 2 FROM t", "SELECT '2>/dev/null'", "SELECT 1 -- 2>/dev/null", "SELECT a || tail FROM t"]) {
       expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("read")
     }
+    expect(classifyAndCheck("SELECT * FROM t | head -5", "clickhouse").queryType).toBe("write")
+    expect(shellResidue("SELECT * FROM t | head -5", "clickhouse")).toBe("| head ...")
+    for (const sql of ["SELECT a || tail FROM t", "SELECT * FROM t WHERE a > b.csv"]) {
+      expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("read")
+    }
     // A write keeps its own reason rather than a parser failure.
     expect(explainWrite("DELETE FROM t 2>/dev/null", "clickhouse").reason).toBe("it is not a read (DELETE)")
   })
@@ -336,6 +341,11 @@ describe("explainWrite", () => {
     const reason = explainWrite("SELECT a INTO newt FROM t", "postgres").reason
     expect(reason).toContain("write clause")
     expect(reason).not.toContain("quoted name")
+  })
+
+  test("a spaced dot gets the quoting hint; a quoted name inside a comment does not", () => {
+    expect(explainWrite("SELECT t . update FROM t", "sqlserver").reason).toContain("spaced dot")
+    expect(explainWrite('SELECT a INTO newt FROM t -- "t".update', "postgres").reason).not.toContain("spaced dot")
   })
 
   test("a quoted qualifier gets a specific hint", () => {

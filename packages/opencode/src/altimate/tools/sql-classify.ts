@@ -566,7 +566,13 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
     // (never SQL) would pass as a read. Treat such a read as unreadable so the residue is named, as on other
     // dialects; a write is already refused and named by its type.
-    if (queryType === "read" && dialect?.toLowerCase() === "clickhouse" && masked.search(SHELL_REDIRECT) >= 0) {
+    // A single trailing pipe into a shell command counts too (never `||`, ClickHouse's concatenation). A file tail
+    // does not: `a > b.csv` compares a column there.
+    if (
+      queryType === "read" &&
+      dialect?.toLowerCase() === "clickhouse" &&
+      (masked.search(SHELL_REDIRECT) >= 0 || CLICKHOUSE_PIPE_TAIL.test(masked.slice(-400)))
+    ) {
       return { ...classifyFallback(sql, dialect), parseError: "shell redirect after the SQL" }
     }
     const writeTruncate = queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))
@@ -584,6 +590,7 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
 // `x > 1.5` and `x > t.total` never match. The tail patterns run on at most 400 characters and have no
 // nested repetition.
 const SHELL_REDIRECT = /\s(?:[12]|&)?>>?[ \t]*(?:&[12]|\/dev\/null)(?![\w/])/g
+const CLICKHOUSE_PIPE_TAIL = /(?<!\|)\|(?!\|)[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*[\s;]*$/i
 const SHELL_PIPE_TAIL = /\|[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*$/i
 const SHELL_FILE_TAIL =
   /\s(?:[12]|&)?>>?[ \t]*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp))[ \t]*$/i
@@ -759,7 +766,12 @@ export function explainWrite(
       // Name the dotted-keyword case only when the statement has a keyword right after a dot (after a quoted
       // name, or any name on ClickHouse); otherwise the hint would point away from the real write clause.
       const clickhouse = dialect?.toLowerCase() === "clickhouse"
-      const dotted = (clickhouse ? /\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i : /["`\]]\s*\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i).test(statement)
+      // Read on masked code (quoted names blanked, literals and comments ignored): a keyword after a quoted
+      // name or a spaced dot counts; an unquoted t.update is a column and never reaches here.
+      const statementMasked = maskSql(tokenizeSql(statement, dialect).tokens)
+      const dotted = (
+        clickhouse ? /\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i : /(?:(?:^|[^\w$])\s*|\s)\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b|\.\s+(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i
+      ).test(statementMasked)
       const clause = clickhouse
         ? "a write clause (SELECT ... INTO or a modifying CTE)"
         : "a write clause (SELECT ... INTO, or INSERT/UPDATE/DELETE/MERGE inside a CTE)"
@@ -768,7 +780,7 @@ export function explainWrite(
           ? `${where} contains ${clause}`
           : clickhouse
           ? `${where} contains a write keyword that on ClickHouse counts even after a dot: quote the column, t.${quoteName("update", dialect)}`
-          : `${where} contains a write keyword after a quoted name such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted}`,
+          : `${where} contains a write keyword after a quoted name or a spaced dot, such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted}`,
       )
     }
     const keyword = batchedStatement(masked, dialect)

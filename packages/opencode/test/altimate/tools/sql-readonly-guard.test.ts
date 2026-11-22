@@ -89,6 +89,11 @@ describe("reads are classified as reads in every dialect", () => {
     expect(readSql("SELECT t.alter FROM t", "postgres")).toBe("SELECT t.alter FROM t")
   })
 
+  test("a dotted word right before a real write clause stays a write", () => {
+    for (const dialect of ["postgres", "mysql"]) expect(isRead("SELECT a FROM t x.INTO t3", dialect)).toBe(false)
+    expect(isRead("SELECT a FROM t.into OUTFILE '/tmp/x'", "mysql")).toBe(false)
+  })
+
   test("ClickHouse keeps dotted write keywords as writes, since its parser accepts trailing text", () => {
     for (const sql of ["SELECT * FROM a.INTO OUTFILE '/tmp/x'", "SELECT a FROM t x.UPDATE t SET a = 1"]) {
       expect(isRead(sql, "clickhouse")).toBe(false)
@@ -334,7 +339,7 @@ describe("denied write message branches", () => {
 
   test("a pattern-rule denial names the patterns the rules allow or ask for", () => {
     const message = deniedWriteMessage({ ...base, sql: "DELETE FROM orders", readOnly: false, permitted: ["INSERT INTO audit*"] })
-    expect(message).toContain("they allow or ask for: `INSERT INTO audit*`")
+    expect(message).toContain("they allow or ask for: 'INSERT INTO audit*'")
     expect(deniedWriteMessage({ ...base, sql: "DELETE FROM orders", readOnly: false })).not.toContain("allow or ask for")
   })
 
@@ -370,8 +375,8 @@ describe("denied write message branches", () => {
       .then(() => "", (e: Error) => e.message)
     expect(error).toContain("A sql_execute_write permission rule denies it")
     // The allowed pattern comes from the denial's own rules.
-    expect(error).toContain("`INSERT INTO audit*`")
-    expect(error).not.toContain("`*`")
+    expect(error).toContain("'INSERT INTO audit*'")
+    expect(error).not.toContain("'*'")
   })
 
   test("a pattern-only deny leaves other writes to the default ask, so it is not read-only", async () => {
@@ -390,9 +395,12 @@ describe("denied write message branches", () => {
       { permission: "sql_execute_write", pattern: "DROP*", action: "deny" },
     ]
     const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
-    await expect(
-      tool.execute({ query: "DROP TABLE stg_tmp", warehouse: "guard_db", limit: 10 }, ctx as any),
-    ).rejects.toThrow("A sql_execute_write permission rule denies it")
+    const error = await tool
+      .execute({ query: "DROP TABLE stg_tmp", warehouse: "guard_db", limit: 10 }, ctx as any)
+      .then(() => "", (e: Error) => e.message)
+    expect(error).toContain("A sql_execute_write permission rule denies it")
+    // A catch-all allow is not named as a pattern to comply with.
+    expect(error).not.toContain("allow or ask for")
   })
 
   test("an unreadable query without a warehouse suggests passing one", () => {
