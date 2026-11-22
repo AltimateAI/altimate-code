@@ -332,6 +332,12 @@ describe("explainWrite", () => {
     }
   })
 
+  test("a plain SELECT INTO is named as a write clause without the quoted-name hint", () => {
+    const reason = explainWrite("SELECT a INTO newt FROM t", "postgres").reason
+    expect(reason).toContain("write clause")
+    expect(reason).not.toContain("quoted name")
+  })
+
   test("a quoted qualifier gets a specific hint", () => {
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).toContain('"t"."update"')
     expect(explainWrite('SELECT "t".update FROM t', "postgres").reason).not.toContain("uppercase")

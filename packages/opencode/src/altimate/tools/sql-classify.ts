@@ -756,12 +756,19 @@ export function explainWrite(
       const quoted = /^(snowflake|oracle)$/i.test(dialect ?? "")
         ? `${quoteName("t", dialect)}.${quoteName("UPDATE", dialect)}, keeping the qualifier as written and the column in uppercase, as this engine stores unquoted names`
         : `${quoteName("t", dialect)}.${quoteName("update", dialect)}`
+      // Name the dotted-keyword case only when the statement has a keyword right after a dot (after a quoted
+      // name, or any name on ClickHouse); otherwise the hint would point away from the real write clause.
+      const clickhouse = dialect?.toLowerCase() === "clickhouse"
+      const dotted = (clickhouse ? /\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i : /["`\]]\s*\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i).test(statement)
+      const clause = clickhouse
+        ? "a write clause (SELECT ... INTO or a modifying CTE)"
+        : "a write clause (SELECT ... INTO, or INSERT/UPDATE/DELETE/MERGE inside a CTE)"
       return writes(
-        dialect?.toLowerCase() === "clickhouse"
-          ? `${where} contains a write clause (SELECT ... INTO or a modifying CTE), or a write keyword that on ClickHouse ` +
-              `counts even after a dot: quote the column, t.${quoteName("update", dialect)}`
-          : `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
-              `or a write keyword after a quoted name such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted})`,
+        !dotted
+          ? `${where} contains ${clause}`
+          : clickhouse
+          ? `${where} contains a write keyword that on ClickHouse counts even after a dot: quote the column, t.${quoteName("update", dialect)}`
+          : `${where} contains a write keyword after a quoted name such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted}`,
       )
     }
     const keyword = batchedStatement(masked, dialect)

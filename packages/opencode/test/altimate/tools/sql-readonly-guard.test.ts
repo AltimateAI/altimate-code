@@ -332,6 +332,18 @@ describe("denied write message branches", () => {
     expect(message).toContain("rules allow")
   })
 
+  test("a pattern-rule denial names the patterns the rules allow or ask for", () => {
+    const message = deniedWriteMessage({ ...base, sql: "DELETE FROM orders", readOnly: false, permitted: ["INSERT INTO audit*"] })
+    expect(message).toContain("they allow or ask for: `INSERT INTO audit*`")
+    expect(deniedWriteMessage({ ...base, sql: "DELETE FROM orders", readOnly: false })).not.toContain("allow or ask for")
+  })
+
+  test("a CLI write refusal leads with --allow-write", () => {
+    const message = deniedWriteMessage({ ...base, sql: "CREATE TABLE t (a int)", cli: true })
+    expect(message.indexOf("--allow-write")).toBeGreaterThan(-1)
+    expect(message.indexOf("--allow-write")).toBeLessThan(message.indexOf("single read"))
+  })
+
   test("an agent deny after a user's ask is still read-only", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ruleset = [
@@ -353,9 +365,13 @@ describe("denied write message branches", () => {
       { permission: "sql_execute_write", pattern: "INSERT INTO audit*", action: "allow" },
     ]
     const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
-    await expect(
-      tool.execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any),
-    ).rejects.toThrow("A sql_execute_write permission rule denies it")
+    const error = await tool
+      .execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any)
+      .then(() => "", (e: Error) => e.message)
+    expect(error).toContain("A sql_execute_write permission rule denies it")
+    // The allowed pattern comes from the denial's own rules.
+    expect(error).toContain("`INSERT INTO audit*`")
+    expect(error).not.toContain("`*`")
   })
 
   test("a pattern-only deny leaves other writes to the default ask, so it is not read-only", async () => {

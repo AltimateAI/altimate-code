@@ -303,6 +303,7 @@ export const SqlExecuteTool = Tool.define(
                   },
                 })
               } catch (error) {
+                let permitted: string[] = []
                 const explain = (readOnly: boolean, cli = false) =>
                   deniedWriteMessage({
                     sql,
@@ -314,11 +315,13 @@ export const SqlExecuteTool = Tool.define(
                     readOnly,
                     cli,
                     dbt: target?.dbt === true,
+                    permitted,
                   })
                 // The MCP server and `altimate tool` refuse writes unless --allow-write was given.
                 if (error instanceof WriteDeniedError) throw new Error(`${explain(true, true)} ${error.message}`)
                 if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
                 const rules: Array<{ pattern?: string; action?: string }> = Array.isArray(error.ruleset) ? error.ruleset : []
+                permitted = rules.filter((rule) => rule.action !== "deny" && rule.pattern).map((rule) => rule.pattern!)
                 // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
                 // nothing after it allows or asks (an agent's own deny can override a user's earlier "ask").
                 let lastCatchAllDeny = -1
@@ -782,6 +785,8 @@ export function deniedWriteMessage(input: {
   cli?: boolean
   /** The default route is dbt: passing a warehouse would also move the query off dbt, so no hint names it. */
   dbt?: boolean
+  /** Configured sql_execute_write patterns that allow or ask (not user SQL), named so the agent can comply. */
+  permitted?: string[]
 }): string {
   const readOnly = input.readOnly !== false
   const head = input.cli
@@ -826,8 +831,12 @@ export function deniedWriteMessage(input: {
     ? "Fix the query and call sql_execute again; the same text will be refused again." +
       (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
       dialectHint
+    : input.cli
+      ? "To write, re-run with --allow-write; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
     : !readOnly
-      ? "Change it to a statement the configured sql_execute_write rules allow, or ask the user to change the rules."
+      ? "Change it to a statement the configured sql_execute_write rules allow" +
+        (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `\`${p}\``).join(", ")})` : "") +
+        ", or ask the user to change the rules."
       : input.scratch
       ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."
       : "Rewrite it as a single read (SELECT, or WITH ... SELECT). To keep an intermediate result, store it in scratch with sql_materialize if that tool is available."
