@@ -42,7 +42,7 @@ describe("shellResidue", () => {
     }
     expect(classifyAndCheck("SELECT * FROM t | head -5", "clickhouse").queryType).toBe("write")
     expect(shellResidue("SELECT * FROM t | head -5", "clickhouse")).toBe("| head ...")
-    for (const sql of ["SELECT a || tail FROM t", "SELECT * FROM t WHERE a > b.csv"]) {
+    for (const sql of ["SELECT a || tail FROM t", "SELECT * FROM t WHERE a > b.csv", "SELECT x FROM t WHERE a = b | head"]) {
       expect(classifyAndCheck(sql, "clickhouse").queryType).toBe("read")
     }
     // A write keeps its own reason rather than a parser failure.

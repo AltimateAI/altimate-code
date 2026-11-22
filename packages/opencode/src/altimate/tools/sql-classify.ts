@@ -566,8 +566,8 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
     // (never SQL) would pass as a read. Treat such a read as unreadable so the residue is named, as on other
     // dialects; a write is already refused and named by its type.
-    // A single trailing pipe into a shell command counts too (never `||`, ClickHouse's concatenation). A file tail
-    // does not: `a > b.csv` compares a column there.
+    // A trailing pipe into a shell command with a flag counts too (never `||`, ClickHouse's concatenation). A file
+    // tail does not: `a > b.csv` compares a column there.
     if (
       queryType === "read" &&
       dialect?.toLowerCase() === "clickhouse" &&
@@ -590,7 +590,9 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
 // `x > 1.5` and `x > t.total` never match. The tail patterns run on at most 400 characters and have no
 // nested repetition.
 const SHELL_REDIRECT = /\s(?:[12]|&)?>>?[ \t]*(?:&[12]|\/dev\/null)(?![\w/])/g
-const CLICKHOUSE_PIPE_TAIL = /(?<!\|)\|(?!\|)[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*[\s;]*$/i
+// ClickHouse parses `|` as an operator, so only a command with a flag argument (`| head -5`, `| wc -l`) counts:
+// `a | head` may be an expression on a column named head.
+const CLICKHOUSE_PIPE_TAIL = /(?<!\|)\|(?!\|)[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)[ \t]+-[^|;\n]*[\s;]*$/i
 const SHELL_PIPE_TAIL = /\|[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*$/i
 const SHELL_FILE_TAIL =
   /\s(?:[12]|&)?>>?[ \t]*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp))[ \t]*$/i

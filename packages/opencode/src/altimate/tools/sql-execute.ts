@@ -846,7 +846,7 @@ export function deniedWriteMessage(input: {
       ? "If a write is intended, see the --allow-write note below; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
     : !readOnly
       ? "Change it to a statement the configured sql_execute_write rules allow" +
-        (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `'${p.replaceAll("'", "''")}'`).join(", ")})` : "") +
+        (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `'${p.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`).join(", ")})` : "") +
         ", or ask the user to change the rules."
       : input.scratch
       ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."

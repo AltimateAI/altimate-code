@@ -343,6 +343,17 @@ describe("denied write message branches", () => {
     expect(deniedWriteMessage({ ...base, sql: "DELETE FROM orders", readOnly: false })).not.toContain("allow or ask for")
   })
 
+  test("named rule patterns stay masked in telemetry, even with a trailing backslash or a quote", () => {
+    const message = deniedWriteMessage({
+      ...base,
+      sql: "DELETE FROM orders",
+      readOnly: false,
+      permitted: ["INSERT INTO secret_tbl\\", "UPDATE it's_secret*"],
+    })
+    expect(message).toContain("'INSERT INTO secret_tbl\\\\'")
+    expect(Telemetry.maskString(message)).not.toMatch(/secret/)
+  })
+
   test("a pattern overridden by a later catch-all deny is not named", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ruleset = [
