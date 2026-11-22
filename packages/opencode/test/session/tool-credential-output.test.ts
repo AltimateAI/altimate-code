@@ -160,3 +160,30 @@ test("bash progress holds a split credential until the next chunk and redacts fi
     expect(result.metadata.output).toBe(safeOutput)
   })
 })
+
+test("model replay marks an omitted credential-bearing attachment", async () => {
+  await inConfiguredInstance(async (directory) => {
+    const history = rawHistory(directory)
+    const part = history[1].parts[0] as MessageV2.ToolPart
+    if (part.state.status !== "completed") throw new Error("expected completed fixture")
+    const encoded = Buffer.from(configuredKey).toString("base64")
+    part.state.output = "Attachment follows"
+    part.state.attachments = [
+      {
+        id: PartID.ascending(),
+        sessionID: part.sessionID,
+        messageID: part.messageID,
+        type: "file",
+        mime: "image/png",
+        filename: "fixture.png",
+        url: "data:image/png;base64," + encoded,
+      },
+    ]
+    const model = await Provider.getModel(providerID, modelID)
+    const request = JSON.stringify(await MessageV2.toModelMessages(history, model))
+    expect(request).toContain("Attachment follows\\n[REDACTED]")
+    expect(request).not.toContain(encoded)
+    expect(request).not.toContain(configuredKey)
+    expect(part.state.attachments).toHaveLength(1)
+  })
+})

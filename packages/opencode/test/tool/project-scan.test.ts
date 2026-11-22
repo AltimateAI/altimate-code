@@ -174,7 +174,7 @@ describe("detectGit", () => {
         stdout: Buffer.alloc(0),
         stderr: Buffer.from("failed for reader@example.test"),
       })
-      expect((await detectGit()).gitError?.stderr).not.toContain("reader@example.test")
+      expect((await detectGit()).gitError?.stderr).toMatch(/^failed for (?!reader@example\.test).+/)
       for (const cap of [120, 240]) {
         const prefix = "x".repeat(cap - 11) + " "
         const fixture = { exitCode: 2, stdout: Buffer.alloc(0), stderr: Buffer.from(prefix + value) }

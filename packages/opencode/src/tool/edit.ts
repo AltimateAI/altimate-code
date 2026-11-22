@@ -675,6 +675,30 @@ export const ContextAwareReplacer: Replacer = function* (content, find) {
   }
 }
 
+// altimate_change start — refuse whole-file rewrites with credential placeholders.
+// Targeted edits can
+// still change unrelated lines without copying credential placeholders to disk.
+export function assertNoCredentialPlaceholderOverwrite(
+  before: string,
+  after: string,
+  redact?: Tool.Context["redactCredentials"],
+) {
+  if (!redact || !after.includes("[REDACTED]")) return
+  const changes = diffLines(before, after)
+  if (!changes.some((change) => change.added && change.value.includes("[REDACTED]"))) return
+  let offset = 0
+  for (const change of changes) {
+    if (change.added) continue
+    const start = offset
+    offset += change.value.length
+    if (!change.removed || redact.window(before, start, offset) === change.value) continue
+    throw new Error(
+      "Refusing to overwrite a known credential with a [REDACTED] placeholder. Use a targeted edit that preserves credential lines.",
+    )
+  }
+}
+// altimate_change end
+
 // altimate_change start — preserve diff structure while masking lines from the original source
 export function toolFileDiff(path: string, before: string, after: string, redact?: Tool.Context["redactCredentials"]) {
   const safeBefore = redact?.lines(before) ?? before

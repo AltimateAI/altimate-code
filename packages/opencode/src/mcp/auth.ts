@@ -213,6 +213,8 @@ export const node = LayerNode.make(layer, () => [FSUtil.node, EffectFlock.node])
 
 // altimate_change start — expose stored credentials without starting MCP
 const run = makeRuntime(Service, defaultLayer)
+export const credentialFile = filepath
+
 export function all() {
   return run.runPromise((service) => service.all())
 }

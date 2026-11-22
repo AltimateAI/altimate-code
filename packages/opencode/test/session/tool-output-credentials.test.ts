@@ -116,13 +116,17 @@ test("preserves names throughout tool result and metadata schemas", () => {
 test("filters serializable plugin class fields and retains clean instances", () => {
   class Details {
     constructor(readonly token: string) {}
+    detail() {
+      return this.token
+    }
   }
 
   const value = "fixture-class-value"
   const redact = createCredentialRedactor([value])
-  expect(JSON.stringify(redact.output({ metadata: { details: new Details(value) } }))).toBe(
-    '{"metadata":{"details":{"token":"[REDACTED]"}}}',
-  )
+  const result = redact.output({ metadata: { details: new Details(value) } })
+  expect(result.metadata.details).toBeInstanceOf(Details)
+  expect(result.metadata.details.detail()).toBe("[REDACTED]")
+  expect(JSON.stringify(result)).toBe('{"metadata":{"details":{"token":"[REDACTED]"}}}')
   const clean = { metadata: { details: new Details("ordinary detail") } }
   expect(redact.output(clean)).toBe(clean)
 })

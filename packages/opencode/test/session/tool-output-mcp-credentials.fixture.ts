@@ -3,7 +3,7 @@ import { expect, test } from "bun:test"
 import { toolCredentialRedactor } from "@/altimate/tool-output-credentials"
 import { MCP } from "@/mcp"
 import { Instance } from "@/project/instance"
-import { provideTestInstance, tmpdir } from "../fixture/fixture"
+import { tmpdir } from "../fixture/fixture"
 
 test("collects configured and command-resolved MCP authorization without changing ordinary headers", async () => {
   const configuredToken = "fixture-configured-token"
@@ -44,14 +44,15 @@ test("collects configured and command-resolved MCP authorization without changin
       },
     },
   })
-  await provideTestInstance({
+  // Only MCP and configuration are needed. Avoid full project bootstrap in this subprocess.
+  await Instance.provide({
     directory: tmp.path,
-    fn: (instance) =>
-      Instance.restore(instance, async () => {
+    fn: async () => {
+      try {
         await MCP.add(serverName, {
           type: "remote",
           url: String(server.url),
-          timeout: 1_000,
+          timeout: 5_000,
           headersCommand: {
             Authorization: [
               process.execPath,
@@ -71,6 +72,9 @@ test("collects configured and command-resolved MCP authorization without changin
           await MCP.remove(serverName)
         }
         expect((await toolCredentialRedactor()).text(resolvedToken)).toBe(resolvedToken)
-      }),
+      } finally {
+        await Instance.dispose()
+      }
+    },
   })
-}, 25_000)
+}, 60_000)

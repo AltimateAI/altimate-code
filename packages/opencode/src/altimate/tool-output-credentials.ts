@@ -1,5 +1,7 @@
 // altimate_change — redact only exact known credential values in tool results.
 import { Effect } from "effect"
+import { stat } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { InstanceRef } from "@/effect/instance-ref"
 import { attach } from "@/effect/run-service"
 import { withAlsInstanceRef } from "@/altimate/tool-zod-compat"
@@ -134,12 +136,25 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
   // Binary attachments must stay valid. When their transport or decoded bytes
   // contain an exact credential, omit the bytes and leave a text placeholder.
   let binaryLiterals: Buffer[] | undefined
+  const binaryMatches = new Map<string, boolean>()
   function containsCredentialBytes(encoded: string) {
     if (!encoded || !pattern) return false
-    if (text(encoded) !== encoded) return true
+    // Replay may allocate new attachment objects on every turn. Cache only a
+    // digest and a match bit, without retaining the attachment itself.
+    const digest = encoded.length >= 4096 ? createHash("sha256").update(encoded).digest("hex") : undefined
+    const cached = digest ? binaryMatches.get(digest) : undefined
+    if (cached !== undefined) return cached
     binaryLiterals ??= ordered.map((literal) => Buffer.from(literal, "utf8"))
-    const bytes = Buffer.from(encoded, "base64")
-    return binaryLiterals.some((literal) => bytes.includes(literal))
+    let contains = text(encoded) !== encoded
+    if (!contains) {
+      const bytes = Buffer.from(encoded, "base64")
+      contains = binaryLiterals.some((literal) => bytes.includes(literal))
+    }
+    if (digest) {
+      if (binaryMatches.size >= 64) binaryMatches.clear()
+      binaryMatches.set(digest, contains)
+    }
+    return contains
   }
 
   const omitAttachment = Symbol("omitAttachment")
@@ -192,9 +207,11 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     }
     if (value instanceof Error) {
       const descriptors = Object.getOwnPropertyDescriptors(value)
-      const next = Object.create(Object.getPrototypeOf(value))
+      // DOMException's name and message live in native slots, not own descriptors.
+      const dom = value instanceof DOMException ? new DOMException(text(value.message), text(value.name)) : undefined
+      const next = dom ?? Object.create(Object.getPrototypeOf(value))
       seen.set(value, next)
-      let changed = false
+      let changed = !!dom && (dom.message !== value.message || dom.name !== value.name)
       for (const descriptor of Object.values(descriptors)) {
         if (!("value" in descriptor)) continue
         const safe = visit(descriptor.value, seen, "data")
@@ -209,7 +226,7 @@ export function createCredentialRedactor(values: Iterable<string | undefined> = 
     const plain = prototype === Object.prototype || prototype === null
     // SDK media and native values such as dates and typed arrays retain their representation.
     if (!plain && Object.prototype.toString.call(value) !== "[object Object]") return value
-    const next = Object.create(plain ? prototype : Object.prototype)
+    const next = Object.create(prototype)
     seen.set(value, next)
     let changed = false
     for (const [key, item] of Object.entries(value)) {
@@ -290,14 +307,20 @@ type AddCredential = (value: unknown) => void
 
 // Provider loaders use these environment names outside their catalog declarations.
 const providerCredentialVariables = new Set(["AICORE_SERVICE_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_SECRET_ACCESS_KEY"])
+const databaseCredentialVariables = new Set(["PGPASSWORD", "MYSQL_PWD"])
+const providerLocationVariables = /(?:^|_)(?:REGION|LOCATION|PROJECT|PROJECT_ID|ENDPOINT|BASE_URL|HOST)$/i
+const publicCertificateFields = new Set(["ssl_cert", "ssl_ca", "tls_cert", "tls_ca_cert"])
 
 function isCredentialName(name: string) {
-  return /(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION)$/i.test(name.replaceAll("-", "_"))
+  return (
+    databaseCredentialVariables.has(name) ||
+    /(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|AUTHORIZATION)$/i.test(name.replaceAll("-", "_"))
+  )
 }
 
 function addCredentialHeaders(headers: Record<string, unknown> | undefined, add: AddCredential) {
   for (const [name, value] of Object.entries(headers ?? {})) {
-    if (!/(?:^|[-_])(?:authorization|api[-_]key|auth[-_]token|access[-_]token|client[-_]secret)$/i.test(name)) {
+    if (!/(?:^|[-_])(?:authorization|api[-_]?key|(?:auth|access|api|private)[-_]token|client[-_]secret)$/i.test(name)) {
       continue
     }
     if (typeof value !== "string") continue
@@ -328,7 +351,7 @@ function readJson(value: string): unknown {
 }
 
 function addConnectionCredential(name: string, value: unknown, add: AddCredential) {
-  if (typeof value !== "string" || !value) return
+  if (typeof value !== "string" || !value || publicCertificateFields.has(name)) return
   if (name === "credentials_json" || name === "keyfile_json") {
     const fields = readJson(value)
     if (fields && typeof fields === "object") {
@@ -336,8 +359,8 @@ function addConnectionCredential(name: string, value: unknown, add: AddCredentia
       return
     }
   }
-  if (name === "connection_string" && value.includes("://")) {
-    const url = URL.parse(value)
+  if (name === "connection_string") {
+    const url = value.includes("://") ? URL.parse(value) : null
     if (url) {
       if (url.password) {
         add(url.password)
@@ -350,9 +373,30 @@ function addConnectionCredential(name: string, value: unknown, add: AddCredentia
       for (const query of url.search.slice(1).split("&")) {
         for (const [key, field] of new URLSearchParams(query)) {
           const normalized = key.toLowerCase()
-          if (!isSensitiveField(normalized) && !isCredentialName(normalized)) continue
+          if (normalized !== "pwd" && !isSensitiveField(normalized) && !isCredentialName(normalized)) continue
           add(field)
           add(query.slice(query.indexOf("=") + 1))
+        }
+      }
+      return
+    }
+    // Connection attributes can be unquoted, quoted or ODBC-braced. Parse
+    // only when the entire value is an attribute list.
+    const attributes = [
+      ...value.matchAll(/\s*([\w -]{1,80}?)\s*=\s*(\{(?:[^}]|}})*}|"(?:[^"]|"")*"|'(?:[^']|'')*'|[^;]*?)\s*(?:;|$)/gy),
+    ]
+    if (attributes.length && attributes.map((match) => match[0]).join("") === value) {
+      for (const [, key, field] of attributes) {
+        const normalized = key.trim().toLowerCase()
+        if (normalized !== "pwd" && !isSensitiveField(normalized) && !isCredentialName(normalized)) continue
+        const delimiter = field[0]
+        const closing = delimiter === "{" ? "}" : delimiter
+        if (["{", '"', "'"].includes(delimiter) && field.endsWith(closing)) {
+          const contents = field.slice(1, -1)
+          add(contents)
+          add(contents.replaceAll(closing + closing, closing))
+        } else {
+          add(field)
         }
       }
       return
@@ -368,6 +412,31 @@ function addConnectionFields(value: unknown, add: AddCredential) {
     addConnectionFields(field, add)
   }
 }
+
+// The two auth stores are shared across instances. Reuse their last stable
+// snapshots, and refresh when a writer or another process changes the file.
+function authFileSnapshot<T>() {
+  let cached: { version: string; data: Promise<T | undefined> } | undefined
+  return async (file: string, load: () => Promise<T>) => {
+    const info = await stat(file, { bigint: true }).catch(() => undefined)
+    if (!info) {
+      cached = undefined
+      return undefined
+    }
+    const version = `${file}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`
+    if (cached?.version === version) return cached.data
+    const data = load().catch(() => {
+      if (cached?.data === data) cached = undefined
+      return undefined
+    })
+    cached = { version, data }
+    return data
+  }
+}
+
+const readProviderAuth = authFileSnapshot<Awaited<ReturnType<typeof import("@/auth").all>>>()
+const readMcpAuth = authFileSnapshot<Awaited<ReturnType<typeof import("@/mcp/auth").all>>>()
+let lastSnapshot: { values: Set<string>; redactor: CredentialRedactor } | undefined
 
 export const loadToolCredentialRedactor = withAlsInstanceRef(
   Effect.gen(function* () {
@@ -390,14 +459,18 @@ export const loadToolCredentialRedactor = withAlsInstanceRef(
     const [config, auth, mcpAuth] = yield* Effect.promise(() =>
       Promise.all([
         instance ? Config.get().catch(() => undefined) : undefined,
-        Auth.all().catch(() => undefined),
-        McpAuth.all().catch(() => undefined),
+        process.env.OPENCODE_AUTH_CONTENT
+          ? Auth.all().catch(() => undefined)
+          : readProviderAuth(Auth.filepath(), Auth.all),
+        readMcpAuth(McpAuth.credentialFile, McpAuth.all),
       ]),
     )
     const environment = [...Object.entries(process.env), ...Object.entries(instance ? Env.all() : {})]
     const configuredVariables = new Set<string>()
     for (const provider of Object.values(config?.provider ?? {})) {
-      for (const name of provider.env ?? []) configuredVariables.add(name)
+      for (const name of provider.env ?? []) {
+        if (!providerLocationVariables.test(name)) configuredVariables.add(name)
+      }
       addProviderOptions(provider.options, add)
       for (const model of Object.values(provider.models ?? {})) {
         addProviderOptions(model.options, add)
@@ -443,7 +516,13 @@ export const loadToolCredentialRedactor = withAlsInstanceRef(
       for (const connection of connections) addConnectionFields(connection, add)
     }
     for (const credential of knownStoredCredentials()) addConnectionCredential(credential.field, credential.value, add)
-    return createCredentialRedactor(values)
+    const previous = lastSnapshot
+    if (previous && previous.values.size === values.size && [...values].every((value) => previous.values.has(value))) {
+      return previous.redactor
+    }
+    const redactor = createCredentialRedactor(values)
+    lastSnapshot = { values, redactor }
+    return redactor
   }),
 )
 

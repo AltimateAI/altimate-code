@@ -379,10 +379,16 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
               Effect.gen(function* () {
                 const fresh = yield* loadToolCredentialRedactor
                 const safeCause = redactFailureCause(redactFailureCause(cause, redact), fresh)
-                const error = Cause.squash(safeCause)
+                return yield* Effect.failCause(safeCause)
+              }),
+            ),
+            // onError is an uninterruptible finalizer: cancellation must close the
+            // trace even when the asynchronous failure-redaction recovery is skipped.
+            Effect.onError((cause) =>
+              Effect.sync(() => {
+                const error = Cause.squash(redactFailureCause(cause, redact))
                 endTrace("error", error instanceof Error ? error.message : String(error))
                 altimateTrackError(id, decoded, ctx, startTime, error)
-                return yield* Effect.failCause(safeCause)
               }),
             ),
           )

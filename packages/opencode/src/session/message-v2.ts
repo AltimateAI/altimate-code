@@ -909,7 +909,15 @@ export namespace MessageV2 {
                   ? storedMask
                   : "[Old tool result content cleared]"
                 : part.state.output
-              const rawOutputText = redact?.output(storedOutputText) ?? storedOutputText
+              // Redact as one result envelope so omitted credential-bearing media
+              // leaves the same visible note as newly produced tool results.
+              const storedAttachments =
+                part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+              const safeResult = redact?.output({ output: storedOutputText, attachments: storedAttachments }) ?? {
+                output: storedOutputText,
+                attachments: storedAttachments,
+              }
+              const rawOutputText = safeResult.output
               const maxChars = options?.toolOutputMaxChars
               const outputText =
                 !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars
@@ -919,8 +927,7 @@ export namespace MessageV2 {
                   : rawOutputText
               // altimate_change end
               // altimate_change start — stored attachment references may also contain credentials
-              const storedAttachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
-              const attachments = redact?.output(storedAttachments) ?? storedAttachments
+              const attachments = safeResult.attachments
               // altimate_change end
 
               // For providers that don't support media in tool results, extract media files

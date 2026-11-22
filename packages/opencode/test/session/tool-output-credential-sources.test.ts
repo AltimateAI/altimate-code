@@ -3,10 +3,11 @@ import path from "node:path"
 import { mkdir } from "node:fs/promises"
 import { Effect } from "effect"
 import { InstanceRef } from "@/effect/instance-ref"
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { loadToolCredentialRedactor, toolCredentialRedactor } from "@/altimate/tool-output-credentials"
 import * as Store from "@/altimate/native/connections/credential-store"
 import { AppRuntime } from "@/effect/app-runtime"
+import { Instance } from "@/project/instance"
 import { McpAuth } from "@/mcp/auth"
 import { provideTestInstance, tmpdir } from "../fixture/fixture"
 
@@ -18,6 +19,7 @@ test("collects provider token environment names and MCP OAuth credentials", asyn
   const clientId = "fixture-mcp-client-id"
   const entry = "fixture-output-redaction"
   const previous = process.env.CF_AIG_TOKEN
+  const reads = spyOn(McpAuth, "all")
   process.env.CF_AIG_TOKEN = providerToken
   try {
     await AppRuntime.runPromise(
@@ -28,7 +30,16 @@ test("collects provider token environment names and MCP OAuth credentials", asyn
       expect(redact.text(value)).toBe("[REDACTED]")
     }
     expect(redact.text(clientId)).toBe(clientId)
+    expect(await toolCredentialRedactor()).toBe(redact)
+    expect(reads).toHaveBeenCalledTimes(1)
+    const rotated = "fixture-mcp-rotated-token"
+    await AppRuntime.runPromise(McpAuth.use.set(entry, { tokens: { accessToken: rotated } }))
+    const updated = await toolCredentialRedactor()
+    expect(updated.text(rotated)).toBe("[REDACTED]")
+    expect(updated.text(accessToken)).toBe(accessToken)
+    expect(reads).toHaveBeenCalledTimes(2)
   } finally {
+    reads.mockRestore()
     if (previous === undefined) delete process.env.CF_AIG_TOKEN
     else process.env.CF_AIG_TOKEN = previous
     await AppRuntime.runPromise(McpAuth.use.remove(entry))
@@ -80,11 +91,16 @@ test("collects configured and command-resolved MCP authorization in an isolated 
   // Other MCP suites replace the SDK transports in the parent process.
   const child = Bun.spawn(
     [process.execPath, "test", path.join(import.meta.dir, "tool-output-mcp-credentials.fixture.ts")],
-    { cwd: path.resolve(import.meta.dir, "../.."), stdout: "ignore", stderr: "pipe" },
+    {
+      cwd: path.resolve(import.meta.dir, "../.."),
+      stdout: "ignore",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(65_000),
+    },
   )
   const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
   expect({ code, error: code === 0 ? "" : stderr }).toEqual({ code: 0, error: "" })
-}, 40_000)
+}, 70_000)
 
 test("collects serialized connection URL credentials without masking ordinary URL fields", async () => {
   const envName = "ALTIMATE_CODE_CONN_REDACTION_URL_TEST"
@@ -129,4 +145,88 @@ test("collects local warehouse credentials with only InstanceRef context", async
       expect(redact.text(password)).toBe("[REDACTED]")
     },
   })
+})
+
+test("collects warehouse credentials but preserves public certificate settings", async () => {
+  const fixtures = {
+    PGPASSWORD: "fixture-postgres-credential",
+    MYSQL_PWD: "fixture-mysql-credential",
+    FIXTURE_PRIVATE_KEY: "fixture-environment-private-key",
+    ALTIMATE_CODE_CONN_FIXTURE_DSN: JSON.stringify({
+      type: "fixture",
+      connection_string: 'Server=warehouse.example;Pwd={fixture;odbc}}password};Token="fixture-token";',
+      ssl_cert: "/fixture/client-cert.pem",
+      ssl_ca: "/fixture/root-ca.pem",
+      tls_ca_cert: "/fixture/tls-ca.pem",
+    }),
+  }
+  const previous = Object.keys(fixtures).map((key) => [key, process.env[key]] as const)
+  Object.assign(process.env, fixtures)
+  try {
+    const redact = await toolCredentialRedactor()
+    for (const value of [
+      fixtures.PGPASSWORD,
+      fixtures.MYSQL_PWD,
+      fixtures.FIXTURE_PRIVATE_KEY,
+      "fixture;odbc}password",
+      "fixture-token",
+    ]) {
+      expect(redact.text(value)).toBe("[REDACTED]")
+    }
+    const config = JSON.parse(fixtures.ALTIMATE_CODE_CONN_FIXTURE_DSN)
+    expect(redact.text(config.connection_string)).toBe('Server=warehouse.example;Pwd={[REDACTED]};Token="[REDACTED]";')
+    for (const field of [config.ssl_cert, config.ssl_ca, config.tls_ca_cert]) {
+      expect(redact.text(field)).toBe(field)
+    }
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test("preserves provider locations and collects explicit auth aliases and MCP header credentials", async () => {
+  const variables = { FIXTURE_AUTH_ALIAS: "fixture-provider-alias", GOOGLE_VERTEX_LOCATION: "fixture-central1" }
+  const previous = Object.keys(variables).map((key) => [key, process.env[key]] as const)
+  Object.assign(process.env, variables)
+  const headers = {
+    apikey: "fixture-header-api",
+    "Private-Token": "fixture-header-private",
+    "X-Api-Token": "fixture-header-token",
+    "X-Trace-Id": "fixture-header-trace",
+  }
+  try {
+    await using tmp = await tmpdir({
+      config: {
+        provider: {
+          fixture: { env: ["FIXTURE_AUTH_ALIAS", "GOOGLE_VERTEX_LOCATION"] },
+        },
+        mcp: {
+          fixture: { type: "remote", enabled: false, url: "https://fixture.invalid", headers },
+        },
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        try {
+          const redact = await toolCredentialRedactor()
+          expect(redact.text(variables.FIXTURE_AUTH_ALIAS)).toBe("[REDACTED]")
+          expect(redact.text(variables.GOOGLE_VERTEX_LOCATION)).toBe(variables.GOOGLE_VERTEX_LOCATION)
+          expect(redact.text(headers.apikey)).toBe("[REDACTED]")
+          expect(redact.text(headers["Private-Token"])).toBe("[REDACTED]")
+          expect(redact.text(headers["X-Api-Token"])).toBe("[REDACTED]")
+          expect(redact.text(headers["X-Trace-Id"])).toBe(headers["X-Trace-Id"])
+        } finally {
+          await Instance.dispose()
+        }
+      },
+    })
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
 })

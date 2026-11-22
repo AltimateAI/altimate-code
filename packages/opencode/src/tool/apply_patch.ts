@@ -7,7 +7,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { Patch } from "../patch"
 import { diffLines } from "diff"
 import { assertExternalDirectoryEffect, assertSensitiveWriteEffect } from "./external-directory"
-import { toolFileDiff } from "./edit" // altimate_change — redact diff source before rendering
+import { assertNoCredentialPlaceholderOverwrite, toolFileDiff } from "./edit" // altimate_change — redact diff source before rendering
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import DESCRIPTION from "./apply_patch.txt"
@@ -78,10 +78,11 @@ export const ApplyPatchTool = Tool.define(
 
         switch (hunk.type) {
           case "add": {
-            const oldContent = ""
+            const oldContent = (yield* afs.existsSafe(filePath)) ? (yield* Bom.readFile(afs, filePath)).text : "" // altimate_change
             const newContent =
               hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
             const next = Bom.split(newContent)
+            assertNoCredentialPlaceholderOverwrite(oldContent, next.text, ctx.redactCredentials) // altimate_change
             const diff = toolFileDiff(filePath, oldContent, next.text, ctx.redactCredentials)
 
             let additions = 0

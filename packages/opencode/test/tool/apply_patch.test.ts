@@ -531,3 +531,34 @@ EOF`
     }),
   )
 })
+
+it.instance("refuses an add-file patch that overwrites a credential with a read placeholder", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const target = path.join(test.directory, "profiles.yml")
+    const secret = "synthetic-add-file-password"
+    const original = `password: ${secret}\nport: 5432\n`
+    yield* Effect.promise(() => fs.writeFile(target, original))
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    let approvals = 0
+    const context = {
+      ...baseCtx,
+      redactCredentials: createCredentialRedactor([secret]),
+      ask: () =>
+        Effect.sync(() => {
+          approvals++
+        }),
+    }
+    const exit = yield* execute(
+      {
+        patchText: "*** Begin Patch\n*** Add File: profiles.yml\n+password: [REDACTED]\n+port: 5433\n*** End Patch",
+      },
+      context,
+    ).pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isFailure(exit))
+      expect(String(Cause.squash(exit.cause))).toContain("Refusing to overwrite a known credential")
+    expect(approvals).toBe(0)
+    expect(yield* Effect.promise(() => fs.readFile(target, "utf-8"))).toBe(original)
+  }),
+)
