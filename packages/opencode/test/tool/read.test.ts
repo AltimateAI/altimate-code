@@ -811,3 +811,21 @@ describe("tool.read binary detection", () => {
     }),
   )
 })
+
+// altimate_change start — multiline credentials are matched before numbering the read result
+it.instance("redacts raw multiline and JSON-escaped credentials in a file", () =>
+  Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const file = path.join(instance.directory, "fixture.txt")
+    const value = 'read-fixture-"value"\nline-two'
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    yield* Effect.promise(() => Bun.write(file, value + "\n" + JSON.stringify({ value }) + "\nunchanged"))
+    const result = yield* run(
+      { filePath: file },
+      { ...ctx, redactCredentials: createCredentialRedactor([value]) },
+    )
+    expect(result.output).toContain('1: [REDACTED]\n2: \n3: {"value":"[REDACTED]"}\n4: unchanged')
+    expect(result.metadata.preview).toBe('[REDACTED]\n\n{"value":"[REDACTED]"}\nunchanged')
+  }),
+)
+// altimate_change end

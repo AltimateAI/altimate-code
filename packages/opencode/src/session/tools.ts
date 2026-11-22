@@ -5,6 +5,8 @@ import { ProviderTransform } from "@/provider/transform"
 import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
 import { Tool } from "@/tool/tool"
+// altimate_change — exact credential values at the alternate tool resolver
+import { loadToolCredentialRedactor, type CredentialRedactor } from "@/altimate/tool-output-credentials"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
@@ -47,7 +49,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
 
-  const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
+  // altimate_change start — use the same exact-value filter for custom tool results and progress
+  const context = (
+    args: Record<string, unknown>,
+    options: ToolExecutionOptions,
+    redact?: CredentialRedactor,
+  ): Tool.Context => ({
+    redactCredentials: redact,
+    // altimate_change end
     sessionID: input.session.id,
     abort: options.abortSignal!,
     messageID: input.processor.message.id,
@@ -64,8 +73,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return {
           ...match,
           state: {
-            title: val.title,
-            metadata: val.metadata,
+            // altimate_change start — sanitize custom tool progress before persistence
+            title: redact?.output(val.title) ?? val.title,
+            metadata: redact?.output(val.metadata) ?? val.metadata,
+            // altimate_change end
             status: "running",
             input: args,
             time: { start: Date.now() },
@@ -112,13 +123,16 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
-            const ctx = context(args, options)
+            const redact = yield* loadToolCredentialRedactor // altimate_change — collect before tool execution
+            const ctx = context(args, options, redact) // altimate_change — protect progress too
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
               { args },
             )
-            const result = yield* item.execute(args, ctx)
+            // altimate_change start — custom and built-in results use the same filter
+            const result = redact.output(yield* item.execute(args, ctx))
+            // altimate_change end
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
@@ -139,11 +153,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               // altimate_change end
             )
             // altimate_change start — propagate the source-stamped output
+            const safeResult = redact.output(stamped)
             if (options.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(options.toolCallId, stamped)
+              yield* input.processor.completeToolCall(options.toolCallId, safeResult)
             }
-            Tool.assertSuccess(stamped)
-            return stamped
+            Tool.assertSuccess(safeResult)
+            return safeResult
             // altimate_change end
           }),
         )
@@ -174,7 +189,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
             { args },
           )
-          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
+          // altimate_change — sanitize before and after the mutable result hook
+          let result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
             yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
             return yield* Effect.promise(() => execute(args, opts))
           }).pipe(
@@ -187,12 +203,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               },
             }),
           )
+          // altimate_change start — before the hook and before text/attachment conversion
+          const redact = yield* loadToolCredentialRedactor
+          result = redact.output(result)
+          // altimate_change end
           yield* plugin.trigger(
             "tool.execute.after",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
             result,
           )
 
+          result = redact.output(result) // altimate_change — cover mutable hook changes
           const textParts: string[] = []
           const attachments: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[] = []
           for (const contentItem of result.content) {
@@ -217,7 +238,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
           }
 
-          const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
+          const truncated = yield* truncate.output(redact.text(textParts.join("\n\n")), {}, input.agent) // altimate_change — match across joined content
           // altimate_change start — authoritative source + readable title from the original client
           // name, shared with prompt.ts resolveTools so the two resolvers can't drift.
           const described = describeMcpTool(key, clientName)

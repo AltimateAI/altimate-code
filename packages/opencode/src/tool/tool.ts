@@ -4,6 +4,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
+// altimate_change — exact known credentials at the tool execution boundary
+import { loadToolCredentialRedactor, type CredentialRedactor } from "@/altimate/tool-output-credentials"
 import { Agent } from "@/agent/agent"
 // altimate_change start — telemetry instrumentation + legacy zod-tool adapter
 import z from "zod"
@@ -67,6 +69,8 @@ export type Context<M extends Metadata = Metadata> = {
   abort: AbortSignal
   callID?: string
   extra?: { [key: string]: unknown }
+  // altimate_change — shared with producers that format or clip output
+  redactCredentials?: CredentialRedactor
   messages: SessionV1.WithParts[]
   // altimate_change start — pass effective permission rules to search result filtering
   permissions?: PermissionV1.Ruleset
@@ -348,15 +352,20 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
           // Debug mode: trace each call as it starts and ends (no-op unless ALTIMATE_DEBUG).
           const endTrace = traceToolCall(id, ctx.callID)
-          const rawResult = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
+          const redact = ctx.redactCredentials ?? (yield* loadToolCredentialRedactor)
+          const metadata = ctx.metadata
+          ctx = { ...ctx, redactCredentials: redact, metadata: (value) => metadata(redact.output(value)) }
+          const executed = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
             Effect.onError((cause) =>
               Effect.sync(() => {
                 const error = Cause.squash(cause)
-                endTrace("error", error instanceof Error ? error.message : String(error))
+                endTrace("error", redact.text(error instanceof Error ? error.message : String(error)))
                 altimateTrackError(id, decoded, ctx, startTime, error)
               }),
             ),
           )
+          // Refresh for tools that read or install a credential during execution.
+          const rawResult = redact.output((yield* loadToolCredentialRedactor).output(executed))
           const failed = isErrorResult(rawResult)
           const unsuccessful = hasFailureSignals(id, rawResult)
           // Ended before anything else can throw, so a call that finished is never left "running".

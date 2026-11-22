@@ -400,6 +400,13 @@ export const ReadTool = Tool.define<
         )
       }
 
+      // altimate_change start — check the raw window before adding line-number prefixes
+      if (ctx.redactCredentials) {
+        const raw = file.raw.join("\n")
+        const redacted = ctx.redactCredentials.lines(raw)
+        if (redacted !== raw) file.raw.splice(0, file.raw.length, ...redacted.split("\n"))
+      }
+      // altimate_change end
       let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
       output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
 

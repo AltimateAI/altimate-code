@@ -1068,6 +1068,14 @@ export async function reload(): Promise<void> {
   // altimate_change end
 }
 
+// altimate_change start — use the active registry and its credential classifier for redaction
+export function knownCredentialConfigs(): Iterable<ConnectionConfig> {
+  const registry = state()
+  if (!registry.loaded) loadInto(registry)
+  return registry.configs.values()
+}
+// altimate_change end
+
 /** Get the raw config for a connection (for testing). */
 export function getConfig(name: string): ConnectionConfig | undefined {
   // altimate_change start — the current project's registry

@@ -18,6 +18,14 @@
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig } from "@altimateai/drivers"
 
+// altimate_change start — credentials this process has already read or written
+const knownCredentials = new Map<string, string>()
+
+export function knownStoredCredentials(): Iterable<string> {
+  return knownCredentials.values()
+}
+// altimate_change end
+
 const SERVICE_NAME = "altimate-code"
 
 const SENSITIVE_FIELDS = new Set([
@@ -104,6 +112,7 @@ async function getBackend(): Promise<SecretBackend | null> {
 /** Swap the credential backend in tests. `undefined` re-probes on next use. */
 export function setSecretBackendForTests(next: SecretBackend | null | undefined): void {
   backend = next
+  knownCredentials.clear() // altimate_change — reset observations when replacing the backend
 }
 
 /** Store a single credential in the OS credential store (or return false if unavailable). */
@@ -116,6 +125,8 @@ export async function storeCredential(
   if (!store) return false
   try {
     await store.set(`${connectionName}/${field}`, value)
+    // altimate_change — retain the current credential for exact tool-result redaction
+    knownCredentials.set(`${connectionName}/${field}`, value)
     return true
   } catch (e) {
     // e.g. no libsecret on Linux, or a locked keychain: report "not stored" so
@@ -135,7 +146,13 @@ export async function getCredential(
   const store = await getBackend()
   if (!store) return null
   try {
-    return await store.get(`${connectionName}/${field}`)
+    // altimate_change start — remember only the latest value for this account
+    const account = `${connectionName}/${field}`
+    const value = await store.get(account)
+    if (value === null) knownCredentials.delete(account)
+    else knownCredentials.set(account, value)
+    return value
+    // altimate_change end
   } catch (e) {
     // Treated as absent so a locked store cannot stop every connect, but logged, so a connection that then fails
     // for want of its password shows why.
@@ -152,7 +169,12 @@ export async function deleteCredential(
   const store = await getBackend()
   if (!store) return false
   try {
-    return await store.delete(`${connectionName}/${field}`)
+    // altimate_change start — forget removed credentials
+    const account = `${connectionName}/${field}`
+    const deleted = await store.delete(account)
+    if (deleted) knownCredentials.delete(account)
+    return deleted
+    // altimate_change end
   } catch {
     return false
   }
@@ -187,7 +209,12 @@ export async function forgetCredentials(name: string, keep?: ConnectionConfig): 
     } catch {
       present = "unknown"
     }
-    if (present === false) continue
+    // altimate_change start — discard stale observed values
+    if (present === false) {
+      knownCredentials.delete(account)
+      continue
+    }
+    // altimate_change end
     let deleted: boolean
     try {
       deleted = await store.delete(account)
@@ -196,6 +223,7 @@ export async function forgetCredentials(name: string, keep?: ConnectionConfig): 
     }
     // A delete that reports "nothing to delete" after an unreadable entry cannot be told from a refusal.
     if (!deleted) notRemoved.push(field)
+    else knownCredentials.delete(account) // altimate_change — remove the observation too
   }
   return notRemoved
 }
