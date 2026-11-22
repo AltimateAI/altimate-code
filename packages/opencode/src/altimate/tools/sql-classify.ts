@@ -186,6 +186,11 @@ function hardDenyLabel(match: string): string {
   return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
 }
 
+/** A name quoted the way the dialect quotes identifiers: backticks where double quotes make a string. */
+function quoteName(name: string, dialect?: string): string {
+  return /^(mysql|mariadb|bigquery|spark|databricks|hive)$/i.test(dialect ?? "") ? `\`${name}\`` : `"${name}"`
+}
+
 /** SQL Server and its aliases, whose batches run statements without separators and whose XML .query() takes XQuery. */
 export function isSqlServerDialect(dialect?: string): boolean {
   return /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
@@ -718,7 +723,7 @@ export function explainWrite(
       return unreadable(
         `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
         "The position is approximate: it counts within that statement, with each comment read as one space. " +
-        'Fix the syntax there: quote identifiers that contain spaces or are keywords ("order date"), ' +
+        `Fix the syntax there: quote identifiers that contain spaces or are keywords (${quoteName("order date", dialect)}), ` +
         "check the clause order, and replace any placeholder text (...)"
       )
     }
@@ -747,14 +752,14 @@ export function explainWrite(
     if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
       // Quoted names keep their case; engines that store unquoted names in uppercase need it written so.
       const quoted = /^(snowflake|oracle)$/i.test(dialect ?? "")
-        ? '"T"."UPDATE" (this engine stores unquoted names in uppercase)'
-        : '"t"."update"'
+        ? `${quoteName("T", dialect)}.${quoteName("UPDATE", dialect)} (this engine stores unquoted names in uppercase)`
+        : `${quoteName("t", dialect)}.${quoteName("update", dialect)}`
       return writes(
         dialect?.toLowerCase() === "clickhouse"
           ? `${where} contains a write clause (SELECT ... INTO or a modifying CTE), or a write keyword that on ClickHouse ` +
               'counts even after a dot: quote the column, t."update"'
           : `${where} contains a write clause (SELECT ... INTO, INSERT/UPDATE/DELETE/MERGE inside a CTE, ` +
-              `or a write keyword after a quoted name such as "t".update: quote the column too, ${quoted})`,
+              `or a write keyword after a quoted name such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted})`,
       )
     }
     const keyword = batchedStatement(masked, dialect)
