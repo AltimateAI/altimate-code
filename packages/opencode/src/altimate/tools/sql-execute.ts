@@ -323,19 +323,21 @@ export const SqlExecuteTool = Tool.define(
                 const rules: Array<{ permission?: string; pattern?: string; action?: string }> = Array.isArray(error.ruleset)
                   ? error.ruleset
                   : []
-                // Only this permission's own rules name statements; wildcard-permission rules (the builder's
-                // "*": "allow") are about every tool.
-                // Name specific patterns only: a catch-all "*" would read as "everything is allowed". Allow before ask.
-                const own = rules.filter((rule) => rule.permission === "sql_execute_write" && rule.pattern && rule.pattern !== "*")
-                permitted = [...own.filter((rule) => rule.action === "allow"), ...own.filter((rule) => rule.action === "ask")].map(
-                  (rule) => rule.pattern!,
-                )
                 // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
                 // nothing after it allows or asks (an agent's own deny can override a user's earlier "ask").
                 let lastCatchAllDeny = -1
                 rules.forEach((rule, index) => {
                   if (rule.pattern === "*" && rule.action === "deny") lastCatchAllDeny = index
                 })
+                // Name only patterns still in effect (after that deny), from this permission's own rules (wildcard-
+                // permission rules such as the builder's "*": "allow" are about every tool), and never a catch-all,
+                // which would read as "everything is allowed". Allow before ask.
+                const own = rules
+                  .slice(lastCatchAllDeny + 1)
+                  .filter((rule) => rule.permission === "sql_execute_write" && rule.pattern && rule.pattern !== "*")
+                permitted = [...own.filter((rule) => rule.action === "allow"), ...own.filter((rule) => rule.action === "ask")].map(
+                  (rule) => rule.pattern!,
+                )
                 // With no catch-all deny, writes the rules do not name fall to the default ("ask").
                 throw new Error(
                   explain(lastCatchAllDeny >= 0 && !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny")),

@@ -343,6 +343,21 @@ describe("denied write message branches", () => {
     expect(deniedWriteMessage({ ...base, sql: "DELETE FROM orders", readOnly: false })).not.toContain("allow or ask for")
   })
 
+  test("a pattern overridden by a later catch-all deny is not named", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ruleset = [
+      { permission: "sql_execute_write", pattern: "INSERT INTO audit*", action: "allow" },
+      { permission: "sql_execute_write", pattern: "*", action: "deny" },
+      { permission: "sql_execute_write", pattern: "CREATE TEMP*", action: "allow" },
+    ]
+    const ctx = { ...deniedCtx([]), ask: async () => Promise.reject(new PermissionV1.DeniedError({ ruleset })) }
+    const error = await tool
+      .execute({ query: "DELETE FROM orders", warehouse: "guard_db", limit: 10 }, ctx as any)
+      .then(() => "", (e: Error) => e.message)
+    expect(error).toContain("'CREATE TEMP*'")
+    expect(error).not.toContain("INSERT INTO audit")
+  })
+
   test("a CLI write refusal leads with --allow-write", () => {
     const message = deniedWriteMessage({ ...base, sql: "CREATE TABLE t (a int)", cli: true })
     expect(message.indexOf("--allow-write")).toBeGreaterThan(-1)
