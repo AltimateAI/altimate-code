@@ -358,6 +358,11 @@ export namespace LLM {
     // altimate_change start — clamp after every context-affecting request field is finalized.
     // Tool schemas and provider instructions share the window; encoded media is charged by the
     // estimator's media allowances, not as literal text. The estimate runs only when the clamp needs it.
+    const effortOptions = runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options
+    // Numeric reasoning clamps leave the reasoning mode unchanged.
+    const budgetedMessages = budgetMessages(input.messages, input.model, effortOptions)
+    const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    const requestMessages = declaresNoTools ? ProviderTransform.flattenToolParts(budgetedMessages) : budgetedMessages
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,
@@ -367,7 +372,7 @@ export namespace LLM {
         headerSources: [provider.options, requestHeaders],
       }),
       inputTokens: () => {
-        const messages = ProviderTransform.messagesForInputEstimate(input.messages, input.model)
+        const messages = ProviderTransform.messagesForInputEstimate(requestMessages, input.model)
         const overhead = { system, tools, instructions: params.options.instructions }
         const estimate = estimateInputTokens({ ...overhead, messages })
         const { measuredInputTokens, measuredEstimateTokens, measuredEstimateShape } = input
@@ -392,17 +397,7 @@ export namespace LLM {
         return calibratedInputTokens(estimate, calibrated)
       },
     })
-    // Deadline effort wins configured variants and plugin overrides.
-    const requestOptions = clampReasoningBudget(
-      runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
-      maxOutputTokens,
-      params.maxOutputTokens,
-    )
-    const requestMessages = budgetMessages(input.messages, input.model, requestOptions)
-    // altimate_change end
-
-    // altimate_change start — detect a toolless request once, for the message flattening below
-    const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    const requestOptions = clampReasoningBudget(effortOptions, maxOutputTokens, params.maxOutputTokens)
     // altimate_change end
 
     // altimate_change start — record final system text and resolved tools before provider middleware
@@ -510,7 +505,7 @@ export namespace LLM {
         // never declares. The Altimate gateway fails every provider in its fallback chain on
         // that shape and reports one generic error; see ProviderTransform.flattenToolParts.
         // altimate_change start — keep interrupted reasoning in storage without sending empty disabled-thinking turns
-        ...(declaresNoTools ? ProviderTransform.flattenToolParts(requestMessages) : requestMessages),
+        ...requestMessages,
         // altimate_change end
         // altimate_change end
       ],

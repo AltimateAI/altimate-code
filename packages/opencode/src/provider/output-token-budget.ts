@@ -28,8 +28,8 @@ export function requestEstimateShape(value: unknown): RequestEstimateShape | und
 }
 
 export function requestEstimateHash(value: unknown, mediaMessages?: readonly unknown[]): string {
-  const media = mediaMessages && messageMediaAllowances(mediaMessages)
-  return Bun.hash(serializeForEstimate(value, media, true).text).toString(16)
+  const media = mediaMessages && messageMediaAllowances(mediaMessages, false)
+  return Bun.hash(serializeForEstimate(value, media).text).toString(16)
 }
 
 const CLAMP_MARGIN_FRACTION = 0.02
@@ -314,7 +314,7 @@ function mediaTokenAllowance(part: JsonRecord): number {
 }
 
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
-function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
+function messageMediaAllowances(messages: readonly unknown[], charge = true): WeakMap<object, number> {
   const result = new WeakMap<object, number>()
   const visited = new WeakSet<object>()
 
@@ -323,7 +323,7 @@ function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, n
     visited.add(content)
     for (const part of content) {
       if (!isRecord(part)) continue
-      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, mediaTokenAllowance(part))
+      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, charge ? mediaTokenAllowance(part) : 0)
 
       // Tool-result media is nested in the AI SDK's typed content output.
       if (part.type !== "tool-result" || !isRecord(part.output)) continue
@@ -341,7 +341,6 @@ function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, n
 function serializeForEstimate(
   value: unknown,
   mediaContainers?: WeakMap<object, number>,
-  fingerprintMedia = false,
 ): { readonly text: string; readonly mediaTokens: number } {
   let mediaTokens = 0
   const ancestors: object[] = []
@@ -352,14 +351,6 @@ function serializeForEstimate(
       const mediaField =
         typeof this === "object" && this !== null && mediaContainers?.has(this) && MEDIA_PAYLOAD_KEYS.has(key)
       if (mediaField && child !== undefined && child !== null) {
-        if (fingerprintMedia) {
-          const original = (this as JsonRecord)[key]
-          if (ArrayBuffer.isView(original)) {
-            return Bun.hash(new Uint8Array(original.buffer, original.byteOffset, original.byteLength)).toString(16)
-          }
-          if (original instanceof ArrayBuffer) return Bun.hash(original).toString(16)
-          if (typeof child === "string") return Bun.hash(child).toString(16)
-        }
         return "[media omitted]"
       }
       if (typeof child === "object" && child !== null) {

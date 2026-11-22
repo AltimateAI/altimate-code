@@ -2253,7 +2253,7 @@ export namespace SessionPrompt {
       const measuredEstimateShape = requestEstimateShape(measured?.metadata?.[REQUEST_SHAPE_METADATA_KEY])
       // Compaction drops images and PDFs, so keep a refusal as a budget error if the
       // current request includes media the model has not seen yet, including an edited attachment.
-      const requestMedia = msgs.flatMap(({ info, parts }) =>
+      const media = msgs.flatMap(({ info, parts }) =>
         parts.flatMap((part) => {
           const files =
             info.role === "user" && part.type === "file"
@@ -2263,18 +2263,25 @@ export namespace SessionPrompt {
                 : []
           return files
             .filter((file) => MessageV2.isMedia(file.mime))
-            .map((file) => `${info.id}:${part.id}:${Bun.hash(`${file.mime}\n${file.url}`).toString(16)}`)
+            .map((file) => ({
+              fingerprint: `${info.id}:${part.id}:${file.mime}:${Bun.hash(file.url).toString(16)}`,
+              supported: model.capabilities.input[file.mime === "application/pdf" ? "pdf" : "image"],
+            }))
         }),
       )
       const recordedMedia = measured?.metadata?.[REQUEST_MEDIA_METADATA_KEY]
       const seenMedia = new Set(sameModel && Array.isArray(recordedMedia) ? recordedMedia : [])
-      const unseenMedia = requestMedia.some((fingerprint) => !seenMedia.has(fingerprint))
+      const unseenMedia = media.some(({ fingerprint }) => !seenMedia.has(fingerprint))
+      const requestMedia = media.filter(({ supported }) => supported).map(({ fingerprint }) => fingerprint)
+      const currentMedia = new Set(requestMedia)
+      const measuredMediaUnchanged = [...seenMedia].every((fingerprint) => currentMedia.has(fingerprint))
       const canAutoCompact = measured !== undefined && loopConfig.compaction?.auto !== false
       const measuredInputTokens =
         measured &&
         typeof recordedEstimate === "number" &&
         Number.isFinite(recordedEstimate) &&
         sameModel &&
+        measuredMediaUnchanged &&
         measured.agent === lastUser.agent &&
         (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
           ? measured.tokens.input + measured.tokens.cache.read + measured.tokens.cache.write

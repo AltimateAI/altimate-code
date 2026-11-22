@@ -135,6 +135,9 @@ const providerCfg =
             id: "test-model",
             name: "Test Model",
             attachment: opts.attachment === true,
+            ...(opts.attachment
+              ? { modalities: { input: ["text" as const, "image" as const], output: ["text" as const] } }
+              : {}),
             reasoning: false,
             temperature: false,
             tool_call: true,
@@ -142,6 +145,7 @@ const providerCfg =
             limit,
             cost: { input: 0, output: 0 },
             options: opts.modelOptions ?? {},
+            variants: { "no-thinking": { thinking: { type: "disabled" } } },
           },
         },
         options: { apiKey: "test-key", baseURL: url },
@@ -205,6 +209,7 @@ type Seeded = {
   next?: string
   nextSystem?: string
   measureBeforeNext?: boolean
+  previousReasoning?: string
   earlierToolOutput?: string
   last?: {
     modelID?: string
@@ -238,7 +243,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
       permission: [{ permission: "*", pattern: "*", action: "allow" }],
     })
     const sessionID = session.id
-    const user = Effect.fnUntraced(function* (text: string, system?: string) {
+    const user = Effect.fnUntraced(function* (text: string, system?: string, variant?: string) {
       const msg = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "user",
@@ -246,6 +251,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         agent: seeded.last?.tool === "answer_commit" ? "analyst" : "build",
         model,
         system,
+        variant,
         time: { created: Date.now() },
       } as any)
       yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, type: "text", text } as any)
@@ -333,19 +339,34 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
           },
         } as any)
       }
+      return msg
     })
     const turns = Array.isArray(seeded.user) ? seeded.user : [seeded.user]
     // Estimate the seeded history as it was before the measured assistant answered.
     const history: { role: "user" | "assistant"; content: { type: "text"; text: string }[] }[] = []
     const measuredFiles: { id: PartID; messageID: MessageID; mime: string; url: string }[] = []
     for (const [index, text] of turns.entries()) {
-      const msg = yield* user(text)
+      const msg = yield* user(
+        text,
+        undefined,
+        index === turns.length - 1 && seeded.previousReasoning !== undefined ? "no-thinking" : undefined,
+      )
       if (index === 0 && seeded.olderFile) measuredFiles.push(yield* attachImage(msg.id))
       history.push({ role: "user", content: [{ type: "text", text }] })
       const last = index === turns.length - 1
       if (last && seeded.userFile) measuredFiles.push(yield* attachImage(msg.id))
       if (!last) {
-        yield* answer(msg.id, 0, null, index === 0 ? { toolOutput: seeded.earlierToolOutput } : undefined)
+        const response = yield* answer(msg.id, 0, null, index === 0 ? { toolOutput: seeded.earlierToolOutput } : undefined)
+        if (index === 0 && seeded.previousReasoning !== undefined) {
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: response.id,
+            sessionID,
+            type: "reasoning",
+            text: seeded.previousReasoning,
+            time: { start: Date.now(), end: Date.now() },
+          } as any)
+        }
         history.push({ role: "assistant", content: [{ type: "text", text: answerText }] })
       } else if (seeded.assistantUsage !== undefined) {
         const override = seeded.last?.requestEstimateTokens
@@ -353,7 +374,7 @@ const runSession = (dir: string, llm: TestLLMServer["Service"], seeded: Seeded) 
         const measuredHistory = toolOutput === undefined ? history : [...history, { role: "tool", content: toolOutput }]
         const estimate = override === undefined ? estimateInputTokens({ system: [], messages: measuredHistory }) : override
         const media = measuredFiles.map(
-          (file) => `${file.messageID}:${file.id}:${Bun.hash(`${file.mime}\n${file.url}`).toString(16)}`,
+          (file) => `${file.messageID}:${file.id}:${file.mime}:${Bun.hash(file.url).toString(16)}`,
         )
         yield* answer(msg.id, seeded.assistantUsage, estimate, seeded.last, media)
       }
@@ -632,6 +653,30 @@ it.live(
           messageHash: expect.any(String),
           overheadHash: expect.any(String),
         })
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "restoring previously omitted reasoning uses the full request estimate",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("First answer.", { usage: { input: 85_000, output: 5 } })
+        yield* llm.text("Second answer.")
+        const result = yield* runSession(dir, llm, {
+          user: sqlJsonTurns(98_000),
+          previousReasoning: sqlJsonHistory(17_000),
+          measureBeforeNext: true,
+          next: "Can you explain further?",
+        })
+
+        expect(result.errors).toEqual([])
+        expect(result.hits).toHaveLength(2)
+        expect(result.hits[0]!.body.max_tokens).toBe(LARGE_WINDOW.output)
+        expect(result.hits[1]!.body.max_tokens).toBeLessThan(LARGE_WINDOW.output)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
@@ -960,6 +1005,7 @@ it.live(
         expect(result.errors).toEqual([])
         expect(result.compactions.length).toBe(0)
         expect(result.hits.length).toBe(1)
+        expect(JSON.stringify(result.hits[0]!.body)).toContain(PNG_BASE64)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
     ),
@@ -1055,6 +1101,25 @@ it.live(
         expect(result.hits).toHaveLength(2)
       }),
       { git: true, config: providerCfg(LARGE_WINDOW, { attachment: true }) },
+    ),
+  { timeout: 120_000 },
+)
+
+it.live(
+  "a text-only request does not record an unsupported image as seen",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        yield* llm.text("I can read text.")
+        const result = yield* runSession(dir, llm, { user: "Describe this image.", userFile: true })
+
+        expect(result.errors).toEqual([])
+        expect(result.hits).toHaveLength(1)
+        expect(JSON.stringify(result.hits[0]!.body)).not.toContain(PNG_BASE64)
+        const answer = result.messages.at(-1)?.info
+        expect(answer?.role === "assistant" && answer.metadata?.[REQUEST_MEDIA_METADATA_KEY]).toEqual([])
+      }),
+      { git: true, config: providerCfg(LARGE_WINDOW) },
     ),
   { timeout: 120_000 },
 )
