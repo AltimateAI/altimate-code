@@ -318,15 +318,19 @@ function written(raw: string): Written {
 
 /**
  * Whether a reference names a CTE. Two bare names match in any letter case; two quoted ones only exactly. A quoted
- * and a bare one match when the quoted text is the bare name folded to lower case (Postgres, DuckDB, Redshift) or
+ * and a bare one match when the quoted text is the bare name folded to lower case (Postgres) or
  * to upper case (Snowflake), the warehouse being unknown here: so `"ORDERS"` names `orders`, and `"Foo"` does not
- * name `foo`.
+ * name `foo`. Without a warehouse dialect this can miss case-insensitive quoted references, including DuckDB
+ * and default Redshift, or backtick/bracket names under case-insensitive collations.
  */
-function sameName(a: Written, b: Written): boolean {
-  if (!a.quoted && !b.quoted) return a.name.toLowerCase() === b.name.toLowerCase()
-  if (a.quoted && b.quoted) return a.name === b.name
-  const [quoted, bare] = a.quoted ? [a, b] : [b, a]
-  return quoted.name === bare.name.toLowerCase() || quoted.name === bare.name.toUpperCase()
+function declarationKeys(name: Written): string[] {
+  return name.quoted ? [`q:${name.name}`] : [`l:${name.name.toLowerCase()}`, `u:${name.name.toUpperCase()}`]
+}
+
+function referenceKeys(name: Written): string[] {
+  return name.quoted
+    ? [`q:${name.name}`, `l:${name.name}`, `u:${name.name}`]
+    : [...new Set([`l:${name.name.toLowerCase()}`, `q:${name.name.toLowerCase()}`, `q:${name.name.toUpperCase()}`])]
 }
 
 const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
@@ -506,10 +510,15 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
   const out: { written: Written; at: number; from: number; to: number }[] = []
   if (!/\bwith\b/i.test(sql.substring(start, end))) return out
   const push = (ctes: CteInfo[], offset: number, to: number) => {
+    const recursiveClauses = new Map<number, boolean>()
     for (const one of ctes) {
       // In a WITH RECURSIVE clause a CTE's name means that CTE across the whole clause, its own body included.
-      const afterWith = skipTrivia(sql, offset + one.withClauseStart + 4, true)
-      const recursive = /^recursive\b/i.test(sql.substring(afterWith, afterWith + 10))
+      let recursive = recursiveClauses.get(one.withClauseStart)
+      if (recursive === undefined) {
+        const afterWith = skipTrivia(sql, offset + one.withClauseStart + 4, true)
+        recursive = /^recursive\b/i.test(sql.substring(afterWith, afterWith + 10))
+        recursiveClauses.set(one.withClauseStart, recursive)
+      }
       const from = offset + (recursive ? one.withClauseStart : one.queryEnd)
       out.push({ written: written(stripColumnList(one.name)), at: offset + one.nameStart, from, to })
     }
@@ -523,7 +532,10 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
   let pos = start
   while (pos < end) {
     const char = sql[pos]
-    // Pair parentheses with the same literal rules as detectCtes and findMatchingClosingParen.
+    if (char === "'" || char === '"' || char === "`") {
+      pos = skipQuoted(sql, pos)
+      continue
+    }
     const skipped = skipLiteral(sql, pos)
     if (skipped !== pos) {
       pos = skipped
@@ -551,7 +563,7 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
  * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names
  * directly: a name outside strings, comments and Jinja (blanked first: `{{ }}`, `{% %}`, `{# #}`, and the SQL a
  * `{% set %}`, `{% call %}` or `{% macro %}` block captures, which is a string for dbt), not qualified by a dot
- * (`schema . orders`) or inside a longer word, that names the CTE (see `sameName`). Once a CTE the body's own
+ * (`schema . orders`) or inside a longer word, that names the CTE (see `referenceKeys`). Once a CTE the body's own
  * WITH or a subquery's WITH defines has ended, its name is that inner CTE there, not a read of the outer one.
  * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not; a CTE
  * named only through Jinja is not seen, nor one after a nested block comment. A client can estimate a CTE's own
@@ -560,24 +572,22 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
  */
 export function cteReads(text: string, ctes: CteInfo[]): number[][] {
   const sql = blankJinja(text)
-  // Per WITH clause, the CTEs met so far, by the first letters of their names folded: built up in source order,
-  // so each body is scanned once and a reference is compared with few names.
-  const seen = new Map<number, Map<string, { written: Written; position: number }[]>>()
+  // Exact quoted and folded bare keys keep distinct case-sensitive names out of each other's lookup paths.
+  const seen = new Map<number, Map<string, number[]>>()
   const bracketed = new Map<number, Set<string>>()
-  const bucket = (name: string) => name.toLowerCase()
   return ctes.map((cte, position) => {
     // The body's end found again in the Jinja-blanked text: a `)` inside Jinja (`'{{ ')' }}'`) does not end it.
     const close = sql[cte.queryStart - 1] === "(" ? findMatchingClosingParen(sql, cte.queryStart - 1) : -1
     const queryEnd = close > cte.queryStart ? close : cte.queryEnd
-    const earlier = seen.get(cte.withClauseStart) ?? new Map<string, { written: Written; position: number }[]>()
+    const earlier = seen.get(cte.withClauseStart) ?? new Map<string, number[]>()
     seen.set(cte.withClauseStart, earlier)
     const earlierBrackets = bracketed.get(cte.withClauseStart) ?? new Set<string>()
     bracketed.set(cte.withClauseStart, earlierBrackets)
     const reads = new Set<number>()
     // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
     // once its definition has ended, to the end of the query that holds it.
-    // Scopes nest or are disjoint and the scan only moves forward, so each name keeps a stack of the scopes open at
-    // the scan position: a reference is compared with the scopes that hold it, not every scope of its name.
+    // Scopes nest or are disjoint and the scan only moves forward. Each matching key keeps an open-scope stack;
+    // membership needs no scan of scopes whose quoted spelling differs.
     type Shadow = { written: Written; at: number; from: number; to: number }
     const inner = new Map<string, { scopes: Shadow[]; next: number; open: Shadow[] }>()
     const definedAt = new Set<number>()
@@ -585,13 +595,15 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
     for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, queryEnd) : []) {
       definedAt.add(one.at)
       if (one.written.bracketed) innerBrackets.add(one.written.name)
-      const named = inner.get(bucket(one.written.name))
-      if (named) named.scopes.push(one)
-      else inner.set(bucket(one.written.name), { scopes: [one], next: 0, open: [] })
+      for (const key of declarationKeys(one.written)) {
+        const named = inner.get(key)
+        if (named) named.scopes.push(one)
+        else inner.set(key, { scopes: [one], next: 0, open: [] })
+      }
     }
     for (const named of inner.values()) named.scopes.sort((a, b) => a.from - b.from)
-    const shadows = (ref: Written, at: number) => {
-      const named = inner.get(bucket(ref.name))
+    const shadows = (key: string, at: number) => {
+      const named = inner.get(key)
       if (!named) return false
       const { scopes, open } = named
       while (named.next < scopes.length && scopes[named.next].from < at) {
@@ -600,7 +612,7 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
         open.push(one)
       }
       while (open.length > 0 && open[open.length - 1].to <= at) open.pop()
-      return open.some((one) => one.from < at && at < one.to && sameName(one.written, ref))
+      return open.length > 0
     }
     let pos = cte.queryStart
     // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
@@ -644,19 +656,21 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
       }
       if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ")) {
         const ref = written(sql.substring(pos, end))
-        const named = (earlier.get(bucket(ref.name)) ?? []).filter((one) => sameName(one.written, ref))
+        const keys = referenceKeys(ref)
         // An inner CTE's own name where it is defined is no reference at all, and one in scope shadows the outer.
-        const shadowed = definedAt.has(pos) || shadows(ref, pos)
-        if (!shadowed) for (const one of named) reads.add(one.position)
+        const shadowed = definedAt.has(pos) || keys.some((key) => shadows(key, pos))
+        if (!shadowed) for (const key of keys) for (const index of earlier.get(key) ?? []) reads.add(index)
       }
       previous = sql[end - 1]
       pos = end
     }
     const own = written(stripColumnList(cte.name))
     if (own.bracketed) earlierBrackets.add(own.name)
-    const list = earlier.get(bucket(own.name))
-    if (list) list.push({ written: own, position })
-    else earlier.set(bucket(own.name), [{ written: own, position }])
+    for (const key of declarationKeys(own)) {
+      const list = earlier.get(key)
+      if (list) list.push(position)
+      else earlier.set(key, [position])
+    }
     return [...reads].sort((a, b) => a - b)
   })
 }

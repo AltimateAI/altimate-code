@@ -1793,9 +1793,41 @@ select * from c`
     expect(readsOf('with a as (select 1 as a), b as (select 2 as b), "a,b" as (select 3), c as (select [a,b] as xs from a cross join b) select * from c').c).toEqual(["a", "b"])
   })
 
-  it("pairs inner scopes using the detector's literal rules when a string ends in a backslash", () => {
-    const sql = String.raw`with orders as (select 1), b as (select * from (with orders as (select '\' as v) select * from orders) s) select * from b`
-    expect(readsOf(sql)).toEqual({ orders: [], b: [] })
+  it("keeps escaped SQL quotes and nested shadow scopes consistent", () => {
+    const sql = String.raw`with a as (select 1), b as (select 'x\'', (with a as (select 2) select * from a) s, 'y\'' from t) select 1`
+    expect(readsOf(sql)).toEqual({ a: [], b: [] })
+  })
+
+  it("indexes distinct quoted spellings without scanning their case-folded collisions", () => {
+    const n = 32000
+    const name = (i: number) => `"c${i.toString(2).padStart(16, "0").replaceAll("0", "a").replaceAll("1", "A")}"`
+    const sql = "with " + Array.from({ length: n }, (_, i) => `${name(i)} as (select ${i ? `* from ${name(0)}` : "1"})`).join(",") + ` select * from ${name(n - 1)}`
+    const start = performance.now()
+    const reads = cteReads(sql, detectCtesInText(sql))
+    expect(reads[0]).toEqual([])
+    expect(reads.slice(1).every((one) => one.length === 1 && one[0] === 0)).toBe(true)
+    expect(performance.now() - start).toBeLessThan(2000)
+  })
+
+  it("checks nested quoted shadow membership without scanning nonmatching case variants", () => {
+    const n = 32000
+    const sql = 'with "orders" as (select 1), b as (' +
+      'select * from (with "ORDERS" as (select 2) '.repeat(n) +
+      'select * from "orders"' + ') s cross join "orders"'.repeat(n) + ') select * from b'
+    const start = performance.now()
+    expect(cteReads(sql, detectCtesInText(sql))).toEqual([[], [0]])
+    expect(performance.now() - start).toBeLessThan(2000)
+  })
+
+  it("reads long WITH trivia once per clause, for body and subquery scopes", () => {
+    const n = 16000
+    const inner = "with " + " ".repeat(20 * n) + Array.from({ length: n }, (_, i) => `c${i} as (select 1)`).join(",") + " select * from c0"
+    for (const body of [inner, `select * from (${inner}) s`]) {
+      const sql = `with seed as (select 1), b as (${body}) select * from b`
+      const start = performance.now()
+      expect(readsOf(sql)).toEqual({ seed: [], b: [] })
+      expect(performance.now() - start).toBeLessThan(2000)
+    }
   })
 
   it("does not scan every inner declaration for each bracketed expression", () => {
