@@ -19,17 +19,13 @@ import type { Finding } from "./finding"
 import { type AiReviewFile, type AiTokens, type BatchUsage, addUsage, aiTimeoutMs, streamUsage } from "./ai-review"
 import { type ReviewRunner, scanDiffLines, walkDiffLines } from "./orchestrate"
 import { readStreamStep, type StepToolCall } from "../llm/stream-text"
+import { isCredentialPath } from "./credentials"
 
 const log = Log.create({ service: "ai-verify" })
 
-// Connection profiles, env files, key material and Terraform variables hold credentials: never sent to a model.
-const CREDENTIAL_FILE =
-  /(^|\/)(profiles\.ya?ml|\.env(\.[^/]*)?|\.netrc|\.pgpass|id_(rsa|dsa|ecdsa|ed25519)|[^/]+\.(pem|key|p12|pfx|tfvars))$/i
-
-/** A path whose content may hold credentials; the AI lane and the verifier never read or show it. */
-export function isCredentialPath(path: string): boolean {
-  return CREDENTIAL_FILE.test(path)
-}
+// Credential files are refused by name (the requested path, a renamed file's old path, a
+// working-tree symlink's target) and by content (private keys, service-account keys).
+export { holdsCredentials, isCredentialPath } from "./credentials"
 
 /** What the verifier may read: the PR's files, the engine, and the dbt project. */
 export interface AiVerifyEvidence {

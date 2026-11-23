@@ -3,6 +3,7 @@ import { promisify } from "node:util"
 import { promises as fs } from "node:fs"
 import path from "node:path"
 import type { ChangedFile } from "./diff-filter"
+import { isCredentialPath } from "./credentials"
 
 /**
  * Git helpers for the review pipeline. Produces the ChangedFile[] for a PR
@@ -95,7 +96,8 @@ export async function collectChangedFiles(opts: CollectOptions): Promise<Changed
  *  Blocks the "tracked symlink escapes the root" class of attack — e.g. a
  *  `models/evil.sql → /etc/passwd` symlink that would otherwise leak external
  *  files into the review pipeline (coderabbit + cubic security review).
- *  Returns undefined when the target escapes, is missing, or realpath fails.
+ *  Returns undefined when the target escapes, is a credential file (by its
+ *  resolved name), is missing, or realpath fails.
  *
  *  Exported for the compiled-SQL resolver in compiled.ts so both content
  *  paths go through the same containment check — cubic + kilo suggested
@@ -114,6 +116,9 @@ export async function safeReadInside(root: string, rel: string): Promise<string 
     // startsWith check so `/repo-backup` doesn't count as inside `/repo`.
     const sep = path.sep
     if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) return undefined
+    // Judge the file actually read: an in-repo symlink (`docs/link.md -> ../profiles.yml`)
+    // must not reach a credential file the requested name doesn't show.
+    if (isCredentialPath(path.relative(rootReal, targetReal).split(sep).join("/"))) return undefined
     return await fs.readFile(targetReal, "utf8")
   } catch {
     return undefined
@@ -220,7 +225,9 @@ export async function grepFixedAt(
   // No pathspec would search the whole repository.
   if (!pathspecs.length) return undefined
   const maxHits = opts.maxHits ?? 50
-  const args = ["grep", "-n", "-I", "-F", "--full-name", "-m", String(maxHits), "-e", pattern, ...(ref ? [ref] : []), "--"]
+  // -z: NUL after the path and line number, and paths unquoted (git otherwise
+  // C-quotes non-ASCII names, `"models/caf\303\251/x.yml"`), so callers see canonical paths.
+  const args = ["grep", "-z", "-n", "-I", "-F", "--full-name", "-m", String(maxHits), "-e", pattern, ...(ref ? [ref] : []), "--"]
   args.push(...pathspecs.map((p) => `:(top)${p}`))
   let out: string
   let failed = false
@@ -235,7 +242,7 @@ export async function grepFixedAt(
   const hits: Array<{ path: string; line: number; text: string }> = []
   for (const row of out.split("\n")) {
     const rest = ref && row.startsWith(ref + ":") ? row.slice(ref.length + 1) : row
-    const m = /^(.+?):(\d+):(.*)$/.exec(rest)
+    const m = /^([^\0]+)\0(\d+)\0(.*)$/.exec(rest)
     if (!m) continue
     hits.push({ path: m[1], line: Number(m[2]), text: m[3].slice(0, 300) })
     if (hits.length >= maxHits) break

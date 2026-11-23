@@ -159,3 +159,38 @@ describe("projectResourceNames", () => {
     expect(await projectAdapters(dir, "HEAD", "p")).toEqual([])
   })
 })
+
+describe("packageDocNames", () => {
+  const repo = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), "pkg-docs-"))
+    for (const [rel, body] of Object.entries(files)) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true })
+      writeFileSync(join(dir, rel), body)
+    }
+    const git = (...x: string[]) => execFileSync("git", x, { cwd: dir, stdio: "ignore" })
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    return dir
+  }
+
+  test("collects docs blocks from .md files anywhere under installed dbt_packages/", async () => {
+    const { packageDocNames } = await import("../../src/altimate/review/run")
+    const dir = repo({ "p/packages.yml": "packages: []\n", "p/models/a.sql": "select 1" })
+    // dbt_packages/ is installed (ignored in real repos), so it lives on disk only.
+    mkdirSync(join(dir, "p/dbt_packages/utils/docs/deep"), { recursive: true })
+    writeFileSync(join(dir, "p/dbt_packages/utils/docs/a.md"), "{% docs order_id %}x{% enddocs %}\n{%- docs amount -%}y{% enddocs %}")
+    writeFileSync(join(dir, "p/dbt_packages/utils/docs/deep/b.md"), "{% docs grain %}z{% enddocs %}")
+    writeFileSync(join(dir, "p/dbt_packages/utils/docs/not_md.sql"), "{% docs ignored %}{% enddocs %}")
+    expect([...(await packageDocNames(dir, "HEAD", "p", join(dir, "p")))!].sort()).toEqual(["amount", "grain", "order_id"])
+  })
+
+  test("no packages declared is an empty set; declared but not installed is undefined", async () => {
+    const { packageDocNames } = await import("../../src/altimate/review/run")
+    const none = repo({ "p/models/a.sql": "select 1" })
+    expect(await packageDocNames(none, "HEAD", "p", join(none, "p"))).toEqual(new Set())
+    const missing = repo({ "p/dependencies.yml": "projects: []\n" })
+    expect(await packageDocNames(missing, "HEAD", "p", join(missing, "p"))).toBeUndefined()
+    expect(await packageDocNames(missing, "HEAD", undefined, join(missing, "p"))).toBeUndefined()
+  })
+})

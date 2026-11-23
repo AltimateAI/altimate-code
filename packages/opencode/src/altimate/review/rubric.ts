@@ -78,7 +78,6 @@ const PROJECT_BREAKING_RULES = new Set(["dbt-project-rules:yaml-parse-error", "d
  * be dropped, or null to keep it. Centralizing this here (vs prompt text) is
  * what keeps the false-positive rate down deterministically.
  */
-
 export function exclusionReason(finding: Finding, rubric: Rubric): string | null {
   const ex = rubric.exclusions
   const isStaging = /(^|\/)stg_|(^|\/)staging\//.test(finding.file) || finding.model?.startsWith("stg_")
