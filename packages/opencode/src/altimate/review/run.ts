@@ -2,7 +2,7 @@ import path from "node:path"
 import { readFile, realpath, stat, access, readdir } from "node:fs/promises"
 import YAML from "yaml"
 import { Installation } from "../../installation"
-import { loadReviewPolicy, policyHash, resolveRubric } from "./config"
+import { headPolicyChanges, loadReviewPolicy, policyHash, resolveRubric } from "./config"
 import { SEVERITY_ORDER, type Severity } from "./finding"
 import {
   collectChangedFiles,
@@ -48,7 +48,7 @@ export interface ReviewPullRequestOptions {
   /** Override the manifest path from config. */
   manifestPath?: string
   /** Directories whose `.altimate/review` policy applies, in order, when `cwd` has none
-   *  (`--all-projects`: the invocation directory, then the repository root). */
+   *  (`--all-projects`: the ancestors of `cwd` up to the repository root, nearest first). */
   policyFallbackDirs?: string[]
   /** Override the review mode from config. */
   mode?: ReviewMode
@@ -270,15 +270,20 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
         resolved && dirRel !== undefined ? (rel) => showAtRef(opts.cwd, resolved.sha, path.posix.join(dirRel, rel)) : undefined,
     })
   }
-  let policy = await policyAt(opts.cwd)
-  const policyChangedHere = policy.changedInPr
+  const policyHere = await policyAt(opts.cwd)
+  let policy = policyHere
   for (const dir of opts.policyFallbackDirs ?? []) {
     if (policy.source !== "default") break
     policy = await policyAt(dir)
   }
-  // A policy file the PR adds next to the project would replace the fallback: list it too.
-  if (policyChangedHere.length && policy.changedInPr !== policyChangedHere)
-    policy.changedInPr = [...new Set([...policy.changedInPr, ...policyChangedHere])]
+  if (policy !== policyHere) {
+    // A policy file the PR adds in cwd replaces the inherited one once merged: list
+    // what it changes relative to the policy applied (relative to the defaults when
+    // no directory has one on the base branch).
+    const addedHere =
+      policy.source === "base" ? await headPolicyChanges(opts.cwd, policy.config) : policyHere.changedInPr
+    policy.changedInPr = [...new Set([...policy.changedInPr, ...addedHere])]
+  }
   const config = policy.config
   if (policy.changedInPr.length) {
     process.stderr.write(

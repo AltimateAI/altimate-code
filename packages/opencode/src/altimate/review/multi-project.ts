@@ -11,9 +11,10 @@ import type { ChangedFile } from "./diff-filter"
  * can change several dbt projects. Each touched project is reviewed on its own
  * (its manifest and layout, with the project directory as `cwd`) and the
  * results are merged into one signed verdict envelope, so the PR gets one
- * comment. Policy precedence: the project directory's `.altimate/review` file,
- * else the invocation directory's, else the repository root's (each read from
- * the base branch, as in a single-project review).
+ * comment. Policy precedence: the nearest `.altimate/review` file at or above
+ * the directory reviewed, up to the repository root (each read from the base
+ * branch, as in a single-project review). A sibling directory's policy never
+ * applies, whichever directory the command runs from.
  */
 
 const PROJECT_FILE = /(^|\/)dbt_project\.ya?ml$/
@@ -82,9 +83,23 @@ function repoRel(gitRootReal: string, abs: string): string | undefined {
   return rel
 }
 
+/** The ancestors of `dir` up to the repo root, nearest first ([] for the root or a path outside it). */
+function ancestorsUpToRoot(gitRootReal: string, dir: string): string[] {
+  let rel = repoRel(gitRootReal, dir)
+  const out: string[] = []
+  while (rel) {
+    rel = path.posix.dirname(rel) === "." ? "" : path.posix.dirname(rel)
+    out.push(path.join(gitRootReal, rel))
+  }
+  return out
+}
+
 export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise<VerdictEnvelope> {
   const gitRoot = (await gitRepoRoot(opts.cwd)) ?? opts.cwd
   const gitRootReal = await canonical(gitRoot)
+  const cwdReal = await canonical(opts.cwd)
+  // Reviewed from the invocation directory: its own policy, else the nearest one above it.
+  const inPlace: ReviewPullRequestOptions = { ...opts, policyFallbackDirs: ancestorsUpToRoot(gitRootReal, cwdReal) }
 
   // Collect the PR's changed files once, against the same merge-base reviewPullRequest resolves.
   const collected =
@@ -99,7 +114,7 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
   const touched = roots.filter((r) => byProject.has(r))
   // Every discovered project is covered: one the PR does not touch has nothing to flag.
   const covered = (env: VerdictEnvelope) => withCoveredProjects(env, roots)
-  if (touched.length === 0) return covered(await reviewPullRequest(opts))
+  if (touched.length === 0) return covered(await reviewPullRequest(inPlace))
 
   // An explicit --manifest belongs to the project that contains it; the others auto-discover.
   const manifestAbs = opts.manifestPath
@@ -115,13 +130,13 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
     ...opts,
     cwd: path.join(gitRootReal, root),
     manifestPath: manifestFor(root),
-    policyFallbackDirs: [...new Set([opts.cwd, gitRootReal])],
+    policyFallbackDirs: ancestorsUpToRoot(gitRootReal, path.join(gitRootReal, root)),
   })
 
   if (touched.length === 1) {
     // Invoked from inside the touched project: exactly the single-project review.
-    const cwdRel = repoRel(gitRootReal, await canonical(opts.cwd))
-    if (cwdRel !== undefined && owningProject(cwdRel + "/", roots) === touched[0]) return covered(await reviewPullRequest(opts))
+    const cwdRel = repoRel(gitRootReal, cwdReal)
+    if (cwdRel !== undefined && owningProject(cwdRel + "/", roots) === touched[0]) return covered(await reviewPullRequest(inPlace))
   }
   if (manifestAbs && !touched.some((r) => manifestFor(r))) {
     const where = manifestOwner === undefined ? "is outside every dbt project" : `belongs to ${manifestOwner || "."}, which this PR does not change`

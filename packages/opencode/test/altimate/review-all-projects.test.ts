@@ -131,6 +131,60 @@ describe("reviewAllProjects: one envelope for every dbt project a PR touches", (
     expect([single.mode, single.policy?.source]).toEqual(["gate", "base"])
   }, 60_000)
 
+  test("the root policy applies when invoked from inside the sole touched project", async () => {
+    const { root } = await fixture()
+    await write(root, ".altimate/review.yml", "mode: gate\n")
+    const base = await commitAll(root, "policy")
+    await write(root, "proj_a/models/orders.sql", STAR_MODEL)
+    await commitAll(root, "head")
+
+    const env = await reviewAllProjects({ cwd: path.join(root, "proj_a"), base, head: "HEAD", noAi: true })
+    expect([env.mode, env.policy?.source]).toEqual(["gate", "base"])
+    // Zero touched projects (only a file outside every project) from inside proj_a: same root policy.
+    await write(root, "proj_a/models/orders.sql", "select id, amount from {{ ref('stg') }}\n")
+    await write(root, ".github/workflows/x.yml", "on: [push]\n")
+    await commitAll(root, "outside only")
+    const none = await reviewAllProjects({ cwd: path.join(root, "proj_a"), base, head: "HEAD", noAi: true })
+    expect([none.mode, none.policy?.source]).toEqual(["gate", "base"])
+  }, 60_000)
+
+  test("a sibling project's policy never governs another project, whatever the invocation directory", async () => {
+    const { root } = await fixture()
+    await write(root, ".altimate/review.yml", "mode: gate\n")
+    await write(root, "proj_a/.altimate/review.yml", "mode: comment\n")
+    const base = await commitAll(root, "policies")
+    await write(root, "proj_a/models/orders.sql", STAR_MODEL)
+    await write(root, "proj_b/models/orders.sql", STAR_MODEL)
+    await commitAll(root, "head")
+
+    const modes = (env: VerdictEnvelope) => env.scope?.projects?.map((p) => [p.root, p.mode])
+    for (const cwd of [root, path.join(root, "proj_a"), path.join(root, "proj_b")]) {
+      const env = await reviewAllProjects({ cwd, base, head: "HEAD", noAi: true })
+      expect(modes(env)).toEqual([["proj_a", "comment"], ["proj_b", "gate"]])
+    }
+  }, 60_000)
+
+  test("a PR-added project policy is diffed against the inherited policy it would replace", async () => {
+    const { root } = await fixture()
+    await write(root, ".altimate/review.yml", "mode: gate\n")
+    const base = await commitAll(root, "policy")
+    await write(root, "proj_a/models/orders.sql", STAR_MODEL)
+    await write(root, "proj_b/models/orders.sql", STAR_MODEL)
+
+    // `mode: comment` equals the default, but over the root's `gate` it would turn gating off.
+    await write(root, "proj_a/.altimate/review.yml", "mode: comment\n")
+    await commitAll(root, "loosen proj_a")
+    const loosened = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true })
+    expect(loosened.scope?.projects?.map((p) => [p.root, p.mode])).toEqual([["proj_a", "gate"], ["proj_b", "gate"]])
+    expect(loosened.policy?.changedInPr).toEqual(["mode"])
+
+    // A file identical to the inherited policy changes nothing.
+    await write(root, "proj_a/.altimate/review.yml", "mode: gate\n")
+    await commitAll(root, "same as root")
+    const same = await reviewAllProjects({ cwd: root, base, head: "HEAD", noAi: true })
+    expect(same.policy?.changedInPr).toBeUndefined()
+  }, 60_000)
+
   test("discovery skips virtualenvs and finds dbt_project.yaml", async () => {
     const { root } = await fixture()
     await write(root, ".venv/lib/site-packages/dbt/include/starter_project/dbt_project.yml", "name: starter\n")
