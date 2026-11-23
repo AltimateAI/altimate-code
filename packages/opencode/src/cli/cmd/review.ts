@@ -4,6 +4,7 @@ import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import { Installation } from "../../installation"
 import { prContextFromEnv, reviewPullRequest } from "../../altimate/review/run"
+import { reviewAllProjects } from "../../altimate/review/multi-project"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
 // altimate_change — review feature telemetry
@@ -70,6 +71,13 @@ export const ReviewCommand = cmd({
         type: "string",
         describe: "provider/model for the advisory AI lane (default: the configured default model)",
       })
+      .option("all-projects", {
+        type: "boolean",
+        default: false,
+        describe:
+          "review every dbt project the PR changes (mono-repo) and emit one merged verdict / one comment; " +
+          "--manifest then applies only to the project that contains it",
+      })
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
@@ -100,7 +108,8 @@ export const ReviewCommand = cmd({
       const prContext = await prContextFromEnv()
       let env
       try {
-        env = await reviewPullRequest({
+        const review = args.allProjects === true ? reviewAllProjects : reviewPullRequest
+        env = await review({
           ...prContext,
           aiModel: args.aiModel as string | undefined,
           cwd,

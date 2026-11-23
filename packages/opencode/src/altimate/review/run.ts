@@ -2,7 +2,7 @@ import path from "node:path"
 import { readFile, realpath, stat, access, readdir } from "node:fs/promises"
 import YAML from "yaml"
 import { Installation } from "../../installation"
-import { loadReviewPolicy, policyHash, resolveRubric } from "./config"
+import { headPolicyChanges, loadReviewPolicy, policyHash, resolveRubric } from "./config"
 import { SEVERITY_ORDER, type Severity } from "./finding"
 import {
   collectChangedFiles,
@@ -47,6 +47,9 @@ export interface ReviewPullRequestOptions {
   head?: string
   /** Override the manifest path from config. */
   manifestPath?: string
+  /** Directories whose `.altimate/review` policy applies, in order, when `cwd` has none
+   *  (`--all-projects`: the ancestors of `cwd` up to the repository root, nearest first). */
+  policyFallbackDirs?: string[]
   /** Override the review mode from config. */
   mode?: ReviewMode
   /** Override the minimum severity to surface. */
@@ -72,6 +75,10 @@ export interface ReviewPullRequestOptions {
   /** G2 — [EXPERIMENTAL] bypass the tier classifier with the supplied tier.
    *  Envelope carries `tierForced: true` when used. Debug / bench only. */
   forceTier?: "trivial" | "lite" | "full"
+  /** Every file the PR changes, when `changedFiles` is a subset of it (multi-project review). */
+  prFiles?: string[]
+  /** Every rename the PR makes (new → old path), when `changedFiles` is a subset of it. */
+  prRenames?: Array<[string, string]>
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -256,14 +263,29 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
 
   // The policy (.altimate/review.yml) comes from the BASE commit, so the PR
   // under review cannot relax its own rules; what it would change is listed.
-  const cwdRel = await repoRelative(gitRoot, opts.cwd, true)
-  const policy = await loadReviewPolicy({
-    cwd: opts.cwd,
-    readBase:
-      resolved && cwdRel !== undefined
-        ? (rel) => showAtRef(opts.cwd, resolved.sha, path.posix.join(cwdRel, rel))
-        : undefined,
-  })
+  // The first of cwd and `policyFallbackDirs` that has a policy file wins.
+  const policyAt = async (dir: string) => {
+    const dirRel = await repoRelative(gitRoot, dir, true)
+    return loadReviewPolicy({
+      cwd: dir,
+      readBase:
+        resolved && dirRel !== undefined ? (rel) => showAtRef(opts.cwd, resolved.sha, path.posix.join(dirRel, rel)) : undefined,
+    })
+  }
+  const policyHere = await policyAt(opts.cwd)
+  let policy = policyHere
+  for (const dir of opts.policyFallbackDirs ?? []) {
+    if (policy.source !== "default") break
+    policy = await policyAt(dir)
+  }
+  if (policy !== policyHere) {
+    // A policy file the PR adds in cwd replaces the inherited one once merged: list
+    // what it changes relative to the policy applied (relative to the defaults when
+    // no directory has one on the base branch).
+    const addedHere =
+      policy.source === "base" ? await headPolicyChanges(opts.cwd, policy.config) : policyHere.changedInPr
+    policy.changedInPr = [...new Set([...policy.changedInPr, ...addedHere])]
+  }
   const config = policy.config
   if (policy.changedInPr.length) {
     process.stderr.write(
@@ -349,10 +371,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   }
   // Map renamed files → their old path so getContent resolves the "old" side
   // from where the file lived at `base`: in-scope files as scoped (a rename into
-  // the project is scoped as added), files outside the project as collected.
-  const prRenames = new Map(
-    collected.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
-  )
+  // the project is scoped as added), files outside the project as collected or,
+  // when `changedFiles` is a subset, as the whole PR renamed them.
+  const prRenames = new Map([
+    ...(opts.prRenames ?? []),
+    ...collected.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string] as const),
+  ])
   const inScopePaths = new Set(changedFiles.map((f) => f.path))
   const renames = new Map([...prRenames].filter(([p]) => !inScopePaths.has(p)))
   for (const f of changedFiles) if (f.status === "renamed" && f.oldPath) renames.set(f.path, f.oldPath)
@@ -470,7 +494,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       const specs = projectGrepSpecs(projectRootRel, dirs, glob)
       return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
-    prFiles: collected.map((f) => f.path),
+    prFiles: opts.prFiles ?? collected.map((f) => f.path),
     prRenames,
     prTitle: opts.prTitle,
     prBody: opts.prBody,

@@ -247,17 +247,26 @@ export async function loadReviewPolicy(opts: {
         "(a PR that repairs it is reviewed under the broken base file, so merge it with an admin bypass).",
     )
   }
-  const headText = await readFirst((rel) => fs.readFile(path.join(opts.cwd, rel), "utf8").catch(() => undefined))
-  let changedInPr: string[] = []
-  if (headText !== baseText) {
-    try {
-      const head = headText === undefined ? structuredClone(DEFAULT_REVIEW_CONFIG) : parseReviewConfig(headText)
-      changedInPr = policyChanges(config, head)
-    } catch {
-      changedInPr = ["(the PR's .altimate/review file does not parse)"]
-    }
-  }
+  const changedInPr = await headPolicyChanges(opts.cwd, config, baseText)
   return { config, source: baseText === undefined ? "default" : "base", hash: policyHash(config), changedInPr }
+}
+
+/**
+ * Settings the PR's `.altimate/review` file in `dir` (the working tree) changes
+ * relative to `applied`. `appliedText` is the applied file's text when it lives
+ * in `dir` too: an identical file is then no change, and a missing one reverts
+ * to the defaults. Without it, a missing file changes nothing (the applied
+ * policy is inherited from another directory).
+ */
+export async function headPolicyChanges(dir: string, applied: ReviewConfig, appliedText?: string): Promise<string[]> {
+  const headText = await readFirst((rel) => fs.readFile(path.join(dir, rel), "utf8").catch(() => undefined))
+  if (headText === appliedText) return []
+  try {
+    const head = headText === undefined ? structuredClone(DEFAULT_REVIEW_CONFIG) : parseReviewConfig(headText)
+    return policyChanges(applied, head)
+  } catch {
+    return ["(the PR's .altimate/review file does not parse)"]
+  }
 }
 
 /**
