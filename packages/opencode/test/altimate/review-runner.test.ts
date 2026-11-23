@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { writeFileSync } from "node:fs"
 import path from "node:path"
-import { createDispatcherRunner } from "../../src/altimate/review/runner"
+import { createDispatcherRunner, isParseFailure } from "../../src/altimate/review/runner"
 import { Dispatcher } from "../../src/altimate/native"
 import { tmpdir } from "../fixture/fixture"
 
@@ -160,5 +160,56 @@ describe("runner honors engine `decidable` flag (core 0.5.1)", () => {
     const result = await runner.equivalence("select id from orders", "select 1 as id from orders", "duckdb")
     expect(result).toEqual({ decided: false })
     await tmp[Symbol.asyncDispose]?.()
+  })
+})
+
+describe("engine handlers that report failure instead of throwing", () => {
+  test("a {success:false} result is an engine failure, not a clean or PII-free check", async () => {
+    await using tmp = await tmpdir()
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => ({
+      success: false,
+      data: {},
+      error: "Error: native core not loaded",
+    })) as any)
+    const runner = createDispatcherRunner({ manifestPath: path.join(tmp.path, "missing.json") })
+    expect((await runner.check("select 1 as id", "duckdb")).ran).toBe(false)
+    expect((await runner.detectPii("select 1 as id", "duckdb")).abstained).toBe(true)
+    expect(await runner.grain!("select 1 as id")).toEqual({ group_by: [], dedup_partition: [] })
+    expect(await runner.dataDiff!("select 1 as id", "select 2 as id", ["id"])).toBeNull()
+    const failed = runner.failures!().map((f) => f.method)
+    expect(failed).toContain("dataDiff")
+    expect(failed).toContain("check")
+    expect(failed).toContain("grain")
+    expect(runner.failures!()[0].reason).toBe("Error: native core not loaded")
+  })
+
+  test("a SQL parse failure abstains (unknown result) instead of counting as an engine failure", async () => {
+    await using tmp = await tmpdir()
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => ({
+      success: false,
+      data: {},
+      error: "sql parser error: Expected: end of statement, found: QUALIFY",
+    })) as any)
+    const runner = createDispatcherRunner({ manifestPath: path.join(tmp.path, "missing.json") })
+    expect((await runner.check("select 1 qualify x", "snowflake")).ran).toBe(false)
+    expect((await runner.detectPii("select 1 qualify x", "snowflake")).abstained).toBe(true)
+    expect(await runner.equivalence("select 1", "select 1 qualify x", "snowflake")).toEqual({ decided: false })
+    expect(await runner.grain!("select 1 qualify x")).toEqual({ group_by: [], dedup_partition: [] })
+    expect(runner.failures!()).toEqual([])
+  })
+})
+
+describe("isParseFailure", () => {
+  test("separates parse/dialect errors from engine faults", () => {
+    for (const m of [
+      "sql parser error: Expected: ), found: ::",
+      "ParseError: unexpected token",
+      "Failed to parse query 1: syntax error at or near",
+      "Error: cannot parse this dialect's SQL",
+      "unsupported dialect feature: LATERAL FLATTEN",
+    ])
+      expect(isParseFailure(m)).toBe(true)
+    for (const m of ["Error: native core not loaded", "Failed to parse schema: missing tables", "TypeError: x is undefined", "timeout after 30000ms"])
+      expect(isParseFailure(m)).toBe(false)
   })
 })

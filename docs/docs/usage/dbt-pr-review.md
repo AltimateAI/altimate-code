@@ -108,7 +108,7 @@ Options:
 
 | Flag | Description |
 |------|-------------|
-| `--base <ref>` | Base git ref. Defaults to the pull request's target branch in CI (GitHub `pull_request.base.ref` or `GITHUB_BASE_REF`, GitLab `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`), else the remote default branch. Always reduced to the merge-base with the head, so commits the base gained after the PR branched are never reviewed. In CI, a target branch that is not fetched is an error (use `fetch-depth: 0`). |
+| `--base <ref>` | Base git ref. Defaults to the pull request's target branch in CI (GitHub `pull_request.base.ref` or `GITHUB_BASE_REF`, GitLab `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`), else the remote default branch. Always reduced to the merge-base with the head, so commits the base gained after the PR branched are never reviewed. In CI, a shallow checkout is handled: the target branch is fetched and the history deepened until the merge-base is found. If that fails (no `origin`, no access), the review stops with an error rather than diffing against another branch. |
 | `--head <ref>` | Head git ref. Omit to review the working tree. |
 | `--manifest <path>` | Path to the compiled `manifest.json`. When omitted, the reviewer walks up from the current directory to find the nearest `dbt_project.yml` and uses its adjacent `target/manifest.json`; the discovered path is logged to stderr. |
 | `--mode comment\|gate` | `comment` never blocks; `gate` exits non-zero on `REQUEST_CHANGES`. |
@@ -203,7 +203,7 @@ jobs:
 
 | Input | How to produce it | Unlocks |
 |---|---|---|
-| Full git history of the PR's target branch | `actions/checkout` with `fetch-depth: 0` | Correct base: the diff starts at the merge-base with the PR's target branch. A target branch that is not fetched is an error, never a silent fallback to `main`. |
+| The PR's target branch and the merge-base | Fetched automatically from `origin` when the checkout is shallow; `fetch-depth: 0` avoids the extra fetches | Correct base: the diff starts at the merge-base with the PR's target branch. When it can't be fetched, the review stops with an error, never a silent fallback to `main`. |
 | `target/manifest.json` | `dbt compile` (or `dbt parse` for lint + lineage only) | Blast radius, lineage breakage, tiering. Without it the run is lint-only. |
 | `target/compiled/…` | `dbt compile` | Engine checks on the head (lint, grade, PII, grain). |
 | `target-base/compiled/…` | Compile the base ref into `target-base/` (below) | Equivalence proofs and column-breakage for modified models. |
@@ -304,6 +304,13 @@ rubric:
   rules) or `ai`. Only `engine` findings count toward REQUEST_CHANGES. A pattern
   rule you trust can be allowed to block by naming its id in
   `rubric.blockingRules`. The advisory AI lane never blocks.
+- **Upgrading a `gate` setup.** Before this policy, any critical finding in a
+  `blockOn` category could block, including pattern rules such as the regex
+  PII check. Now pattern-rule findings comment but don't block. To keep a
+  pattern rule blocking, add its id to `rubric.blockingRules`. A blocking
+  review is dismissed only by a later run that completed: when an engine call
+  or a file failed, a check (such as PII) could not analyse a model, or a
+  changed model had no compiled SQL, the earlier block stays.
 
 ### What the PR comment shows
 
@@ -323,7 +330,26 @@ rubric:
 - **PII:** flagged only for PII columns the change newly exposes, not for
   columns the base already surfaced. That comparison needs the base version's
   SQL; when it can't be compiled, PII columns are reported as non-blocking
-  warnings that may predate the PR.
+  warnings that may predate the PR. A model the PII check could not analyse is
+  listed as not fully verified.
+- **Failures are never a clean pass:** if an engine check fails, a file's
+  review fails, a check could not analyse a model, or a changed model has no
+  compiled head SQL (its engine and PII checks were skipped), the comment names
+  it and an otherwise clean verdict becomes COMMENT, never APPROVE (envelope
+  `engineErrors` and `scope.unverified`); a real blocking finding still
+  blocks. A project reviewed without `dbt compile` (parse-only) therefore never
+  gets APPROVE for a changed Jinja model. A failure on one file marks that file
+  unverified and the rest of the PR is still reviewed. SQL the engine cannot
+  parse in your dialect is not an engine failure: the affected checks abstain
+  on that model (a PII abstention still marks it not fully verified).
+- **The gate clears itself:** when a completed rerun on the PR's current head
+  no longer blocks, the earlier blocking altimate review for the same dbt
+  project is dismissed after the new review is posted (needs
+  `pull-requests: write`). "Current head" means the reviewed commit is the PR
+  head, or the merge commit a `pull_request` checkout builds from it
+  (`refs/pull/N/merge`). When either the reviewed commit or the PR head cannot
+  be determined, the block stays. Only reviews authored by a bot (or by the
+  token's own user) are dismissed.
 
 ### Risk-tier path tokens
 

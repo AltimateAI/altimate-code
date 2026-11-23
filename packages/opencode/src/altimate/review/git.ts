@@ -202,6 +202,44 @@ async function mergeBase(a: string, b: string, cwd: string): Promise<string | un
   }
 }
 
+/**
+ * A default CI checkout is shallow (`actions/checkout` fetches one commit) and
+ * lacks the target branch. Fetch the branch, then deepen the history until a
+ * merge-base exists, so the review works without `fetch-depth: 0`. Returns
+ * true once `found` resolves; false when it never does (no remote, no access).
+ */
+async function fetchTargetHistory(
+  branch: string,
+  head: string,
+  cwd: string,
+  found: () => Promise<unknown>,
+): Promise<boolean> {
+  if (branch.startsWith("-")) return false
+  const shallow = async () => (await git(["rev-parse", "--is-shallow-repository"], cwd)).trim() === "true"
+  try {
+    // In a shallow checkout, fetch only recent target history; the loop below
+    // deepens it. A full fetch would pull the target branch's whole history.
+    const depth = (await shallow()) ? ["--depth=50"] : []
+    await git(["fetch", "--no-tags", ...depth, "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], cwd)
+  } catch {
+    return false
+  }
+  if (await found()) return true
+  for (const depth of [50, 200, 1000]) {
+    try {
+      if (!(await shallow())) return false
+      // Deepen the history of the head being reviewed, which may differ from
+      // the checkout (`--head <ref>`).
+      const headSha = (await git(["rev-parse", "--verify", `${head}^{commit}`], cwd)).trim()
+      await git(["fetch", "--no-tags", `--deepen=${depth}`, "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`, headSha], cwd)
+    } catch {
+      return false
+    }
+    if (await found()) return true
+  }
+  return false
+}
+
 /** The PR's target branch from the CI provider, when the run is for a PR/MR. */
 async function ciTargetBranch(env: NodeJS.ProcessEnv): Promise<{ branch: string; source: BaseSource } | undefined> {
   if (env.GITHUB_EVENT_PATH) {
@@ -241,10 +279,15 @@ export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<Resol
 
   const target = await ciTargetBranch(env)
   if (target) {
-    for (const ref of [`origin/${target.branch}`, target.branch]) {
-      const sha = await mergeBase(ref, head, opts.cwd)
-      if (sha) return { ref, sha, source: target.source }
+    const find = async () => {
+      for (const ref of [`origin/${target.branch}`, target.branch]) {
+        const sha = await mergeBase(ref, head, opts.cwd)
+        if (sha) return { ref, sha, source: target.source }
+      }
+      return undefined
     }
+    const found = (await find()) ?? ((await fetchTargetHistory(target.branch, head, opts.cwd, find)) ? await find() : undefined)
+    if (found) return found
     throw new Error(
       `PR target branch '${target.branch}' (${target.source}) is not available locally. ` +
         `Fetch it (actions/checkout with fetch-depth: 0, or git fetch origin ${target.branch}) or pass --base.`,
@@ -290,6 +333,30 @@ export async function showAtRef(cwd: string, ref: string, rel: string): Promise<
     const msg = err instanceof Error ? err.message : String(err)
     if (/does not exist in|exists on disk, but not in/i.test(msg)) return undefined
     throw err
+  }
+}
+
+/** The commit SHA a ref names, or undefined when it does not resolve. */
+export async function resolveCommit(ref: string, cwd: string): Promise<string | undefined> {
+  try {
+    return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)).trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Parents of a commit, read from the commit object itself so a shallow
+ *  checkout (whose grafts hide them from rev-parse) still reports them. */
+export async function commitParents(sha: string, cwd: string): Promise<string[]> {
+  try {
+    const raw = await git(["cat-file", "-p", sha], cwd)
+    const header = raw.split("\n\n")[0] ?? ""
+    return header
+      .split("\n")
+      .filter((l) => l.startsWith("parent "))
+      .map((l) => l.slice("parent ".length).trim())
+  } catch {
+    return []
   }
 }
 
