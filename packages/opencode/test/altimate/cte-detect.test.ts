@@ -1670,7 +1670,7 @@ select * from ranked`
 
   it("does not count a name in a string, a comment, after a dot, or inside a longer word", () => {
     const sql = `with orders as (select 1 as id),
-a as (select 'orders' as s, x.orders, my_orders, orders2 from t as x -- orders
+a as (select 'orders' as s, x.orders, my_orders, orders2, 1orders from t as x -- orders
   /* orders */ {# orders #}),
 b as (select * from ORDERS)
 select * from b`
@@ -1790,6 +1790,24 @@ select * from c`
     expect(readsOf("with [a,b] as (select 1 as x), b as (select * from [a,b]) select * from b").b).toEqual(["[a,b]"])
     expect(readsOf("with a as (select 1), [x(y)] as (select 2), c as (select * from [x(y)]) select * from c").c).toEqual(["[x(y)]"])
     expect(readsOf("with a as (select 1), c as (select [a, 2] as xs) select * from c").c).toEqual(["a"])
+    expect(readsOf('with a as (select 1 as a), b as (select 2 as b), "a,b" as (select 3), c as (select [a,b] as xs from a cross join b) select * from c').c).toEqual(["a", "b"])
+  })
+
+  it("pairs inner scopes using the detector's literal rules when a string ends in a backslash", () => {
+    const sql = String.raw`with orders as (select 1), b as (select * from (with orders as (select '\' as v) select * from orders) s) select * from b`
+    expect(readsOf(sql)).toEqual({ orders: [], b: [] })
+  })
+
+  it("does not scan every inner declaration for each bracketed expression", () => {
+    for (const name of ['"a,b"', "[a,b]"]) {
+      const n = 32000
+      const sql = "with seed as (select 1), b as (" +
+        Array(n).fill(`(with ${name} as (select 1) select [1] as xs)`).join(" union all ") +
+        " union all select coalesce(" + Array(n).fill("[A,b]").join(",") + ") from (select 1 as A, 2 as b)) select * from b"
+      const start = performance.now()
+      expect(readsOf(sql)).toEqual({ seed: [], b: [] })
+      expect(performance.now() - start).toBeLessThan(2000)
+    }
   })
 
   it("a Jinja tag or expression between two names keeps both: either branch may render", () => {

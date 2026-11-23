@@ -307,12 +307,12 @@ export function detectCtes(text: string): CteInfo[] {
 }
 
 /** A CTE name or a reference as written: its text without quotes, and whether it was quoted. */
-type Written = { name: string; quoted: boolean }
+type Written = { name: string; quoted: boolean; bracketed?: boolean }
 
 function written(raw: string): Written {
   const quote = raw[0]
   if ((quote === '"' || quote === "`") && raw.length > 1 && raw.endsWith(quote)) return { name: raw.slice(1, -1).replaceAll(quote + quote, quote), quoted: true }
-  if (quote === "[" && raw.endsWith("]")) return { name: raw.slice(1, -1).replaceAll("]]", "]"), quoted: true }
+  if (quote === "[" && raw.endsWith("]")) return { name: raw.slice(1, -1).replaceAll("]]", "]"), quoted: true, bracketed: true }
   return { name: raw, quoted: false }
 }
 
@@ -333,7 +333,7 @@ const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
 /** A `[name]` (SQL Server), as a CTE's name is read. */
 const BRACKET_NAME = /\[(?:[^\]\n]|\]\]){1,256}\]/y
 /** A `[name]` in a body: one holding a parenthesis, comma, quote or bracket is an expression, as DuckDB's
- * `[(select …)]` list, unless it is the name of a CTE in the clause (`[a,b]`). */
+ * `[(select …)]` list, unless a CTE declares that name with brackets (`[a,b]`). */
 const BRACKETED = /\[(?:[^\]\n(),'\[]|\]\]){1,256}\]/y
 
 /**
@@ -523,10 +523,7 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
   let pos = start
   while (pos < end) {
     const char = sql[pos]
-    if (char === "'" || char === '"' || char === "`") {
-      pos = skipQuoted(sql, pos)
-      continue
-    }
+    // Pair parentheses with the same literal rules as detectCtes and findMatchingClosingParen.
     const skipped = skipLiteral(sql, pos)
     if (skipped !== pos) {
       pos = skipped
@@ -566,6 +563,7 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
   // Per WITH clause, the CTEs met so far, by the first letters of their names folded: built up in source order,
   // so each body is scanned once and a reference is compared with few names.
   const seen = new Map<number, Map<string, { written: Written; position: number }[]>>()
+  const bracketed = new Map<number, Set<string>>()
   const bucket = (name: string) => name.toLowerCase()
   return ctes.map((cte, position) => {
     // The body's end found again in the Jinja-blanked text: a `)` inside Jinja (`'{{ ')' }}'`) does not end it.
@@ -573,6 +571,8 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
     const queryEnd = close > cte.queryStart ? close : cte.queryEnd
     const earlier = seen.get(cte.withClauseStart) ?? new Map<string, { written: Written; position: number }[]>()
     seen.set(cte.withClauseStart, earlier)
+    const earlierBrackets = bracketed.get(cte.withClauseStart) ?? new Set<string>()
+    bracketed.set(cte.withClauseStart, earlierBrackets)
     const reads = new Set<number>()
     // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
     // once its definition has ended, to the end of the query that holds it.
@@ -581,8 +581,10 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
     type Shadow = { written: Written; at: number; from: number; to: number }
     const inner = new Map<string, { scopes: Shadow[]; next: number; open: Shadow[] }>()
     const definedAt = new Set<number>()
+    const innerBrackets = new Set<string>()
     for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, queryEnd) : []) {
       definedAt.add(one.at)
+      if (one.written.bracketed) innerBrackets.add(one.written.name)
       const named = inner.get(bucket(one.written.name))
       if (named) named.scopes.push(one)
       else inner.set(bucket(one.written.name), { scopes: [one], next: 0, open: [] })
@@ -620,10 +622,9 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
         BRACKETED.lastIndex = pos
         BRACKET_NAME.lastIndex = pos
         if (BRACKETED.test(sql)) end = BRACKETED.lastIndex
-        else if (BRACKET_NAME.test(sql)) {
+        else if ((earlierBrackets.size > 0 || innerBrackets.size > 0) && BRACKET_NAME.test(sql)) {
           const ref = written(sql.substring(pos, BRACKET_NAME.lastIndex))
-          const declared = (list?: { written: Written }[]) => (list ?? []).some((one) => sameName(one.written, ref))
-          if (declared(earlier.get(bucket(ref.name))) || declared(inner.get(bucket(ref.name))?.scopes)) end = BRACKET_NAME.lastIndex
+          if (earlierBrackets.has(ref.name) || innerBrackets.has(ref.name)) end = BRACKET_NAME.lastIndex
         }
       } else {
         // A comment or a dollar-quoted string is skipped whole.
@@ -652,6 +653,7 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
       pos = end
     }
     const own = written(stripColumnList(cte.name))
+    if (own.bracketed) earlierBrackets.add(own.name)
     const list = earlier.get(bucket(own.name))
     if (list) list.push({ written: own, position })
     else earlier.set(bucket(own.name), [{ written: own, position }])
