@@ -93,17 +93,20 @@ jobs:
         # the release (see the Solid plugin warm-up in build.ts for the flake we know of). The
         # retry is a new `bun run`: Bun keeps a misread resolver entry for the life of the
         # process. The warning keeps the first failure visible on the run summary. Each attempt
-        # gets 5 minutes (a build takes under 30s), so a hung first attempt still leaves time
-        # for the second inside the job's 15 minutes.
+        # gets attempt_timeout (a build takes under 30s), so a hung first attempt still leaves
+        # time for the second inside the job's 15 minutes.
         run: |
+          attempt_timeout=300 # seconds
           for attempt in 1 2; do
             status=0
-            timeout --kill-after=30s 5m bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }} || status=$?
+            started=$SECONDS
+            timeout --kill-after=30s "${attempt_timeout}s" bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }} || status=$?
             if [ "$status" = 0 ]; then
               exit 0
             fi
-            if [ "$status" = 124 ]; then
-              reason="timed out after 5 minutes"
+            # timeout exits 124 when it stopped the attempt; a build that exits 124 itself does so early.
+            if [ "$status" = 124 ] && [ $((SECONDS - started)) -ge "$attempt_timeout" ]; then
+              reason="timed out after ${attempt_timeout}s"
             else
               reason="exited with code $status"
             fi
