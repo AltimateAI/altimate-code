@@ -296,6 +296,16 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     // Some calls answered and some failed: the files in the failed calls were not reviewed by the AI.
     notes.push(`Advisory AI review partly failed: ${env.ai.reason}.`)
   }
+  // Files over the AI coverage quotas still went through the deterministic checks,
+  // so they are a note on the AI lane, not entries in the "Not reviewed" ledger.
+  const aiUnsent = env.ai?.unsent ?? []
+  if (aiUnsent.length) {
+    const head = aiUnsent.slice(0, 5).map(codeSpan).join(", ")
+    const more = aiUnsent.length > 5 ? ` and ${aiUnsent.length - 5} more` : ""
+    notes.push(
+      `${aiUnsent.length} file(s) were not sent to the advisory AI review (file quota); the deterministic checks still ran on them: ${head}${more}.`,
+    )
+  }
   const out = notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
   return [...out, ...ledgerBlock(ledger)]
 }
