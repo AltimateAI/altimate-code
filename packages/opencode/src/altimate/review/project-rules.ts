@@ -402,7 +402,19 @@ export function yamlParseFindings(file: ChangedFile, oldContent: string | undefi
   if (!/\.ya?ml$/i.test(file.path) || file.status === "deleted" || !newContent) return []
   const err = yamlError(newContent)
   if (!err || (oldContent !== undefined && yamlError(oldContent))) return []
-  const text = err.line ? newContent.split("\n")[err.line - 1] : undefined
+  // Some errors land one past the edit (an unterminated quote fails where the scan ends): anchor
+  // on the added line at or before the error line, else on the error line when a hunk shows it
+  // (a deletion-only edit), else on the file. An error with no line goes on the first added line.
+  const rows = [...walkDiffRows(file.diff)]
+  const added = rows.filter((r) => r.kind === "+")
+  const errLine = err.line
+  const at =
+    errLine === undefined
+      ? added[0]
+      : (added.find((r) => r.line === errLine) ??
+        [...added].reverse().find((r) => r.line < errLine) ??
+        rows.find((r) => r.kind === " " && r.line === errLine))
+  const text = at?.text ?? (errLine ? newContent.split("\n")[errLine - 1] : undefined)
   const f = finding(
     file,
     "yaml-parse-error",
@@ -414,7 +426,7 @@ export function yamlParseFindings(file: ChangedFile, oldContent: string | undefi
       : `${err.message}${err.line ? ` (line ${err.line})` : ""}. The file parsed before this change; tools that read it now fail.`,
     text,
   )
-  return [err.line ? { ...f, startLine: err.line, endLine: err.line } : f]
+  return [at ? { ...f, startLine: at.line, endLine: at.line } : f]
 }
 
 /** New models named like the public models a `.quickstart/quickstart.yml` lists, but missing from
@@ -489,14 +501,17 @@ export function packageLockFindings(file: ChangedFile, isPackage: boolean): Find
 
 const DOC_REF = /\bdoc\s*\(\s*['"](\w+)['"]\s*\)/g
 
-/** `doc('x')` names this change adds to a yml file that no docs block in the project defines:
- *  dbt fails to parse the project. Only when another `doc()` in the file resolves in the project,
- *  so docs kept in an installed package aren't mistaken for missing ones. */
+/** `doc('x')` names this change adds to a yml file that no docs block in the project or its
+ *  installed packages defines: dbt fails to parse the project. Only when another `doc()` in the
+ *  file resolves, or, when the file has no other `doc()`, the project keeps its own docs blocks
+ *  (`projectHasDocs` also requires the packages' blocks to be known); so docs kept in an
+ *  uninstalled package aren't mistaken for missing ones. */
 export async function docRefFindings(
   file: ChangedFile,
   oldContent: string | undefined,
   newContent: string | undefined,
   docExists: (name: string) => Promise<boolean>,
+  projectHasDocs?: () => Promise<boolean>,
 ): Promise<Finding[]> {
   if (!newContent || file.status === "deleted") return []
   const before = new Set([...(oldContent ?? "").matchAll(DOC_REF)].map((m) => m[1]))
@@ -509,6 +524,7 @@ export async function docRefFindings(
   const others = [...new Set([...newContent.matchAll(DOC_REF)].map((m) => m[1]))].filter((n) => !missing.includes(n)).slice(0, 5)
   let resolves = false
   for (const n of others) if ((resolves = await docExists(n))) break
+  if (!others.length && projectHasDocs) resolves = await projectHasDocs()
   if (!resolves) return []
   return missing.map((name) =>
     finding(
@@ -517,7 +533,7 @@ export async function docRefFindings(
       "warning",
       "sql_correctness",
       `\`doc('${name}')\` has no docs block`,
-      `No \`{% docs ${name} %}\` block exists in the project's \`.md\` files, while the other \`doc()\` references in this file resolve there. dbt fails to parse the project on a \`doc()\` it can't resolve. Add the docs block, or fix the name.`,
+      `No \`{% docs ${name} %}\` block exists in the project's \`.md\` files or its installed packages, while ${others.length ? "the other \`doc()\` references in this file resolve" : "the project defines its own docs blocks"}. dbt fails to parse the project on a \`doc()\` it can't resolve. Add the docs block, or fix the name.`,
       lines.get(name),
     ),
   )

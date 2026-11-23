@@ -13,6 +13,8 @@ import {
   runAiVerify,
   toolsChars,
   verifierTools,
+  isCredentialPath,
+  holdsCredentials,
   type AiVerifyEvidence,
   type VerifierLlm,
   type VerifierStep,
@@ -38,15 +40,19 @@ import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
 import { LLM } from "../../src/session/llm"
-import { mkdirSync, writeFileSync } from "fs"
+import { mkdirSync, symlinkSync, writeFileSync } from "fs"
 import { execFileSync } from "child_process"
-import { grepFixedAt, projectGrepSpecs } from "../../src/altimate/review/git"
+import { grepFixedAt, makeContentResolver, projectGrepSpecs } from "../../src/altimate/review/git"
 import path from "path"
 import { tmpdir } from "../fixture/fixture"
 import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { Provider } from "../../src/provider/provider"
+
+// Fake credential markers are assembled at runtime so secret scanners do not flag the fixtures.
+const pkHeader = (kind?: string) => ["-----BEGIN", kind, "PRIVATE", "KEY-----"].filter(Boolean).join(" ")
+const FAKE_PW = ["SECRET", "123"].join("")
 
 /**
  * The dbt-grounded verifier: an opt-in second model call that tries to refute
@@ -868,7 +874,7 @@ describe("runAiVerify: the bounded tool loop", () => {
     await verify([aiFinding()], llm)
     const [secret, traversal, parent, bySuffix, downstreamOld] = toolResults(calls[1])
     expect(secret).toBe(
-      "not available: outside review scope (changed files, their dbt parents and direct downstream models only)",
+      "not available: outside review scope (files the PR changes, their dbt parents and direct downstream models only)",
     )
     expect(traversal).toStartWith("not available: outside review scope")
     expect(parent).toBe("1: select id as order_id, amount_cents from raw.orders")
@@ -1051,6 +1057,52 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(toolsChars(tools as any)).toBeLessThan(3_000)
   })
 
+  test("read_file opens any file the PR changes, outside the dbt project too", async () => {
+    const read: string[] = []
+    const defs = verifierTools(
+      evidence({
+        prFiles: ["models/fct.sql", "packages/transform/tests/unit/test_override.py"],
+        readFile: async (p) => (read.push(p), "1: def test_x(): ..."),
+      }),
+    )
+    expect(await defs.read_file.run({ path: "packages/transform/tests/unit/test_override.py" })).toBe("1: def test_x(): ...")
+    expect(await defs.read_file.run({ path: "other/secret.py" })).toStartWith("not available: outside review scope")
+    expect(read).toEqual(["packages/transform/tests/unit/test_override.py"])
+  })
+
+  test("credential files the PR changes stay unreadable, whatever lists them, and never show in grep hits", async () => {
+    const read: string[] = []
+    const secrets = ["config/profiles.yml", "dbt/.env", "infra/prod.tfvars", "certs/client.pem", "profiles.yaml"]
+    const defs = verifierTools(
+      evidence({
+        prFiles: ["models/fct.sql", ...secrets],
+        addedLines: new Map([["config/profiles.yml", new Set([1])]]),
+        readFile: async (p) => (read.push(p), "1: password: hunter2"),
+        grepProject: async () => [
+          { path: "config/profiles.yml", line: 3, text: "password: hunter2" },
+          { path: "models/fct.sql", line: 1, text: "select password_hash" },
+        ],
+      }),
+      { parents: [{ name: "profiles", kind: "model", path: "profiles.yaml" }], downstream: [] } as any,
+    )
+    for (const p of [...secrets, "profiles.yml"]) expect(await defs.read_file.run({ path: p })).toStartWith("not available: outside review scope")
+    expect(read).toEqual([])
+    expect(await defs.grep_project.run({ pattern: "password" })).toBe("models/fct.sql:1: select password_hash")
+    expect(isCredentialPath("models/profiles_summary.sql")).toBe(false)
+    expect(isCredentialPath("models/env.yml")).toBe(false)
+  })
+
+  test("a test-coverage candidate lists the PR's files; other candidates don't", () => {
+    const files = ["models/fct.sql", "tests/unit/test_override.py"]
+    const gap = buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding({ category: "test_coverage" }), diff: DIFF }], files)
+    expect(gap).toContain("Files this PR changes (read_file can open any of them):\n- models/fct.sql\n- tests/unit/test_override.py")
+    const other = buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding(), diff: DIFF }], files)
+    expect(other).not.toContain("Files this PR changes")
+    expect(buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding(), diff: DIFF }])).toBe(
+      buildVerifyMessage("Fix", [{ id: "c1", finding: aiFinding(), diff: DIFF }], []),
+    )
+  })
+
   test("verifierTools: equivalence needs a base side; grain needs the engine; grep needs 2 chars", async () => {
     const defs = verifierTools(evidence())
     expect(await defs.grep_project.run({ pattern: "a" })).toBe("not available: pattern needs at least 2 characters")
@@ -1088,6 +1140,330 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(await grepFixedAt(tmp.path, "HEAD", "nothing_here", ["models"])).toEqual([])
     expect(await grepFixedAt(tmp.path, "no-such-ref", "amount", ["models"])).toBeUndefined()
     expect(await grepFixedAt(tmp.path, "HEAD", "amount", [])).toBeUndefined()
+  })
+})
+
+describe("credential files: refused by name, by the path actually read, and by content", () => {
+  test.each([
+    "profiles.yml",
+    "config/Profiles.YAML",
+    ".env",
+    "dbt/.env.local",
+    ".envrc",
+    ".env-prod",
+    "deploy/prod.env",
+    ".netrc",
+    ".pgpass",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
+    "home/.ssh/id_ed25519", // ggignore: a path name, not a secret
+    "keyfile.json",
+    "secrets/keyfile-bq.json",
+    "gcp/my-service-account.json",
+    "gcp/service_account_key.json",
+    "credentials.json",
+    "aws/credentials-prod.json",
+    "certs/client.pem",
+    "tls/server.key",
+    "apple/AuthKey.p8",
+    "store.p12",
+    "infra/prod.tfvars",
+    "infra/terraform.tfvars.json",
+    "home/.aws/credentials",
+    ".docker/config.json",
+    "kubeconfig",
+    "deploy/secrets.yml",
+    "config/secret.json",
+    "gcp/client_secret_1234.apps.json",
+    "ci/dbt_profiles.yml",
+    "profiles-ci.yml",
+    "profiles.yml.example",
+    "config/profiles.prod.yaml",
+  ])("%s is a credential path", (p) => expect(isCredentialPath(p)).toBe(true))
+
+  test.each([
+    "models/profiles_summary.sql",
+    "models/env.yml",
+    "models/environment.sql",
+    "models/accounts.json",
+    "macros/keys.sql",
+    "docs/credentials.md",
+    "seeds/service_accounts.csv",
+    "models/schema.yml",
+    "dbt_project.yml",
+    "models/secrets_summary.sql",
+    "models/marts/customer_profiles.yml",
+    "models/secrets/stg_vault.yml",
+    "docs/aws/credentials.md",
+    "k8s/config.json",
+  ])("%s is not a credential path", (p) => expect(isCredentialPath(p)).toBe(false))
+
+  test("content holding a private key or a service-account key is credentials, whatever the name", () => {
+    expect(holdsCredentials("x\n" + pkHeader("RSA") + "\nMII...")).toBe(true)
+    expect(holdsCredentials(pkHeader())).toBe(true)
+    expect(holdsCredentials("x\n" + pkHeader("PGP").replace("KEY-----", "KEY BLOCK-----") + "\nfake-key-body")).toBe(true)
+    expect(holdsCredentials('{ "type": "service_account", "project_id": "p" }')).toBe(true)
+    expect(holdsCredentials("select private_key_id from keys -- BEGIN")).toBe(false)
+    expect(holdsCredentials("-----BEGIN PUBLIC KEY-----")).toBe(false)
+  })
+
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, stdio: "ignore" })
+  const runner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true }
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  } as ReviewRunner
+  type Changed = Parameters<typeof runReview>[0]["changedFiles"]
+  /** What runReview hands the AI lane over the real git content resolver. */
+  const aiInputFor = async (
+    root: string,
+    changedFiles: Changed,
+    head?: string,
+    more: { prFiles?: string[]; prRenames?: Map<string, string>; grep?: boolean } = {},
+  ) => {
+    const renames = new Map([
+      ...(more.prRenames ?? []),
+      ...changedFiles.flatMap((f) => (f.oldPath ? [[f.path, f.oldPath] as [string, string]] : [])),
+    ])
+    let got: Parameters<NonNullable<Parameters<typeof runReview>[0]["aiReview"]>>[0] | undefined
+    await runReview({
+      changedFiles,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      aiVerify: true,
+      getContent: makeContentResolver({ base: "HEAD~1", head, cwd: root, renames, gitRoot: root }),
+      prFiles: more.prFiles ?? changedFiles.map((f) => f.path),
+      prRenames: more.prRenames,
+      grepProject: more.grep ? (pattern, glob) => grepFixedAt(root, head, pattern, [glob ?? "models"]) : undefined,
+      generatedAt: "2026-11-23T00:00:00Z",
+      aiReview: async (input) => ((got = input), { findings: [], status: { state: "ok" } }),
+    })
+    return got!
+  }
+  /** The verifier evidence runReview builds over the real git content resolver. */
+  const evidenceFor = async (root: string, changedFiles: Changed, head?: string) =>
+    (await aiInputFor(root, changedFiles, head)).evidence!
+
+  test("the old side of a renamed credential file is refused (read_file, compiled_sql, equivalence)", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    writeFileSync(path.join(root, "profiles.yml"), `prod:\n  password: ${FAKE_PW}\n`)
+    writeFileSync(path.join(root, ".env"), "select 'SECRET456' as id\n")
+    mkdirSync(path.join(root, "models"))
+    writeFileSync(path.join(root, "models", "a.sql"), "select 1 as id\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    git(root, "mv", "profiles.yml", "profiles.yml.example")
+    writeFileSync(path.join(root, "profiles.yml.example"), "prod:\n  password: \"{{ env_var('PW') }}\"\n")
+    git(root, "mv", ".env", "models/env_model.sql")
+    git(root, "commit", "-qam", "head")
+    const ev = await evidenceFor(
+      root,
+      [
+        { path: "profiles.yml.example", oldPath: "profiles.yml", status: "renamed", diff: `@@ -2 +2 @@\n-  password: ${FAKE_PW}\n+  password: x\n` },
+        { path: "models/env_model.sql", oldPath: ".env", status: "renamed", diff: "" },
+      ],
+      "HEAD",
+    )
+    const tools = verifierTools(ev)
+    // Both sides are refused: the verifier lists it nowhere, and evidence.readFile refuses it.
+    for (const side of ["old", "new"] as const) {
+      expect(await tools.read_file.run({ path: "profiles.yml.example", side })).toStartWith("not available")
+      expect(await ev.readFile("profiles.yml.example", side)).toBe("not available: may hold credentials")
+    }
+    // A model renamed from a credential file: neither the engine's old SQL nor compiled output is shown.
+    expect(await ev.compiledSql("models/env_model.sql", "old")).toBeUndefined()
+    expect(await tools.compiled_sql.run({ path: "models/env_model.sql", side: "old" })).not.toContain("SECRET456")
+    expect(await tools.equivalence.run({ path: "models/env_model.sql" })).toStartWith("not available")
+    expect(await tools.read_file.run({ path: "models/env_model.sql", side: "old" })).toStartWith("not available")
+    expect(await ev.readFile("models/env_model.sql", "old")).toBe("not available: may hold credentials")
+    expect(ev.files.map((f) => f.path)).not.toContain("models/env_model.sql")
+  })
+
+  test("working-tree mode never follows a symlink to a credential file; other symlinks still read", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    writeFileSync(path.join(root, "profiles.yml"), `prod:\n  password: ${FAKE_PW}\n`)
+    mkdirSync(path.join(root, "docs"))
+    writeFileSync(path.join(root, "docs", "readme.md"), "hello\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    symlinkSync("../profiles.yml", path.join(root, "docs", "link.md"))
+    symlinkSync("readme.md", path.join(root, "docs", "alias.md"))
+    const resolver = makeContentResolver({ base: "HEAD", cwd: root, gitRoot: root })
+    expect(await resolver("docs/link.md", "new")).toBeUndefined()
+    expect(await resolver("docs/alias.md", "new")).toBe("hello\n")
+    const ev = await evidenceFor(root, [
+      { path: "docs/link.md", status: "added", diff: "@@ -0,0 +1 @@\n+../profiles.yml\n" },
+      { path: "docs/alias.md", status: "added", diff: "@@ -0,0 +1 @@\n+readme.md\n" },
+    ])
+    const tools = verifierTools(ev)
+    expect(await tools.read_file.run({ path: "docs/link.md" })).not.toContain(FAKE_PW)
+    expect(await tools.read_file.run({ path: "docs/alias.md" })).toStartWith("1: hello")
+  })
+
+  test("read_file refuses a file whose content is a private key, whatever it is called", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    writeFileSync(path.join(root, "notes.md"), "x\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    writeFileSync(path.join(root, "notes.md"), pkHeader("OPENSSH") + "\nfake-key-body\n")
+    const ev = await evidenceFor(root, [{ path: "notes.md", status: "modified", diff: "@@ -1 +1,2 @@\n-x\n+k\n" }])
+    expect(await verifierTools(ev).read_file.run({ path: "notes.md" })).toBe("not available: may hold credentials")
+  })
+
+  test("an unedited rename of a credential file is refused on the new side (git ref and working tree)", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    writeFileSync(path.join(root, "warehouse.yml"), `prod:\n  password: ${FAKE_PW}\n`)
+    mkdirSync(path.join(root, "models"))
+    writeFileSync(path.join(root, "models", "a.sql"), "select 1 as id\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    git(root, "mv", "warehouse.yml", ".env")
+    git(root, "commit", "-qm", "head")
+    git(root, "mv", ".env", "conn.txt") // working tree: the same file renamed again, uncommitted
+    const changed: Changed = [{ path: "conn.txt", oldPath: ".env", status: "renamed", diff: "" }]
+    for (const head of ["HEAD", undefined]) {
+      const files: Changed = head ? [{ path: ".env", oldPath: "warehouse.yml", status: "renamed", diff: "" }] : changed
+      const p = files[0].path
+      const tools = verifierTools((await aiInputFor(root, files, head)).evidence!)
+      for (const side of ["new", "old"] as const) {
+        const got = await tools.read_file.run({ path: p, side })
+        expect(got).not.toContain(FAKE_PW)
+      }
+    }
+    // Renamed from a credential name to an innocuous one, unedited: still refused on the new side.
+    const ev = (await aiInputFor(root, changed)).evidence!
+    expect(await ev.readFile("conn.txt", "new")).toBe("not available: may hold credentials")
+    expect(ev.prFiles).toEqual([])
+  })
+
+  test("a model renamed from a credential file, moved into the project, sends no diff to the AI lane", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    writeFileSync(path.join(root, ".env"), `DB_PASSWORD=${FAKE_PW}\nselect 1 as id\n`)
+    mkdirSync(path.join(root, "models"))
+    writeFileSync(path.join(root, "models", "a.sql"), "select 1 as id\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    git(root, "mv", ".env", "models/x.sql")
+    writeFileSync(path.join(root, "models", "x.sql"), "select 1 as id\n")
+    git(root, "commit", "-qam", "head")
+    const diff = `@@ -1,2 +1 @@\n-DB_PASSWORD=${FAKE_PW}\n select 1 as id\n`
+    // Scoped into the project, the rename arrives as "added"; only the PR's rename map knows its old path.
+    const input = await aiInputFor(root, [{ path: "models/x.sql", status: "added", diff }], "HEAD", {
+      prRenames: new Map([["models/x.sql", ".env"]]),
+    })
+    expect(JSON.stringify(input.files)).not.toContain(FAKE_PW)
+    expect(input.files.map((f) => f.path)).not.toContain("models/x.sql")
+    expect(await input.evidence!.readFile("models/x.sql", "old")).toBe("not available: may hold credentials")
+    expect(await input.evidence!.compiledSql("models/x.sql", "new")).toBeUndefined()
+  })
+
+  test("a rename outside the dbt project: its old side reads the old path; a credential one is refused", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    mkdirSync(path.join(root, "ci"))
+    writeFileSync(path.join(root, "ci", "old.sh"), "echo old\n")
+    writeFileSync(path.join(root, "ci", "profiles.yml"), `password: ${FAKE_PW}\n`)
+    mkdirSync(path.join(root, "models"))
+    writeFileSync(path.join(root, "models", "a.sql"), "select 1 as id\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    git(root, "mv", "ci/old.sh", "ci/run.sh")
+    git(root, "mv", "ci/profiles.yml", "ci/settings.txt")
+    writeFileSync(path.join(root, "models", "a.sql"), "select 2 as id\n")
+    git(root, "commit", "-qam", "head")
+    const ev = (
+      await aiInputFor(root, [{ path: "models/a.sql", status: "modified", diff: "@@ -1 +1 @@\n-select 1 as id\n+select 2 as id\n" }], "HEAD", {
+        prFiles: ["models/a.sql", "ci/run.sh", "ci/settings.txt"],
+        prRenames: new Map([
+          ["ci/run.sh", "ci/old.sh"],
+          ["ci/settings.txt", "ci/profiles.yml"],
+        ]),
+      })
+    ).evidence!
+    const tools = verifierTools(ev)
+    expect(await tools.read_file.run({ path: "ci/run.sh", side: "old" })).toStartWith("1: echo old")
+    expect(ev.prFiles).toEqual(["models/a.sql", "ci/run.sh"])
+    expect(await ev.readFile("ci/settings.txt", "new")).toBe("not available: may hold credentials")
+  })
+
+  test("key material is screened by content: grep hits, diffs and PGP armor", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    mkdirSync(path.join(root, "models"))
+    mkdirSync(path.join(root, "macros"))
+    writeFileSync(path.join(root, "models", "a.sql"), "select 1 as id\n")
+    writeFileSync(path.join(root, "macros", "m.sql"), "{% macro m() %}1{% endmacro %}\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "base")
+    const pgp = pkHeader("PGP").replace("KEY-----", "KEY BLOCK-----")
+    writeFileSync(path.join(root, "models", "k.md"), `${pgp}\nfake-key-body\n`)
+    writeFileSync(path.join(root, "models", "a.sql"), "select 1 as id -- fake-key-body mentioned\n")
+    writeFileSync(path.join(root, "macros", "m.sql"), `{% macro m() %}1{% endmacro %}\n-- ${pkHeader("RSA")}\n`)
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "head")
+    const input = await aiInputFor(
+      root,
+      [
+        { path: "models/k.md", status: "added", diff: `@@ -0,0 +1,2 @@\n+${pgp}\n+fake-key-body\n` },
+        { path: "models/a.sql", status: "modified", diff: "@@ -1 +1 @@\n-select 1 as id\n+select 1 as id -- fake-key-body mentioned\n" },
+        { path: "macros/m.sql", status: "modified", diff: `@@ -1 +1,2 @@\n {% macro m() %}1{% endmacro %}\n+-- ${pkHeader("RSA")}\n` },
+      ],
+      "HEAD",
+      { grep: true },
+    )
+    const tools = verifierTools(input.evidence!)
+    expect(await tools.read_file.run({ path: "models/k.md" })).toBe("not available: may hold credentials")
+    // The whole file holds a key, so none of its lines are shown; other files' hits still are.
+    expect(await tools.grep_project.run({ pattern: "fake-key-body" })).toBe("models/a.sql:1: select 1 as id -- fake-key-body mentioned")
+    // A file whose diff carries a key header is not sent to the AI lane.
+    expect(input.files.map((f) => f.path)).not.toContain("macros/m.sql")
+    expect(JSON.stringify(input.files)).not.toContain("PRIVATE")
+  })
+
+  test("grepFixedAt returns canonical non-ASCII paths, so the credential filter still matches", async () => {
+    await using tmp = await tmpdir()
+    const root = tmp.path
+    git(root, "init", "-q")
+    mkdirSync(path.join(root, "models", "café"), { recursive: true })
+    writeFileSync(path.join(root, "models", "café", "profiles.yml"), `password: ${FAKE_PW}\n`)
+    writeFileSync(path.join(root, "models", "café", "a.sql"), "select password_hash\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "init")
+    for (const ref of ["HEAD", undefined]) {
+      const hits = await grepFixedAt(root, ref, "password", ["models"])
+      expect(hits?.map((h) => h.path).sort()).toEqual(["models/café/a.sql", "models/café/profiles.yml"])
+      const tools = verifierTools({ ...evidence(), grepProject: async () => hits })
+      expect(await tools.grep_project.run({ pattern: "password" })).toBe("models/café/a.sql:1: select password_hash")
+    }
   })
 })
 

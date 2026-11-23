@@ -70,6 +70,9 @@ export function blockingCategories(rubric: Rubric): Set<string> {
   return new Set(rubric.blockOn)
 }
 
+/** Findings that break `dbt parse` for the whole project, so a dev/sandbox/scratch folder doesn't excuse them. */
+const PROJECT_BREAKING_RULES = new Set(["dbt-project-rules:yaml-parse-error", "dbt-project-rules:doc-block-missing"])
+
 /**
  * Apply the rubric's exclusion predicates. Returns the reason a finding should
  * be dropped, or null to keep it. Centralizing this here (vs prompt text) is
@@ -80,7 +83,7 @@ export function exclusionReason(finding: Finding, rubric: Rubric): string | null
   const isStaging = /(^|\/)stg_|(^|\/)staging\//.test(finding.file) || finding.model?.startsWith("stg_")
   const isDev = /(^|\/)(dev|sandbox|scratch)\//.test(finding.file)
 
-  if (ex.skipNonProdModels && isDev) return "non-prod model (dev/sandbox/scratch)"
+  if (ex.skipNonProdModels && isDev && !PROJECT_BREAKING_RULES.has(finding.rule ?? "")) return "non-prod model (dev/sandbox/scratch)"
 
   if (
     ex.allowSelectStarInStaging &&

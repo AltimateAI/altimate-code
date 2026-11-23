@@ -18,6 +18,7 @@ import {
   type NotReviewed,
   partitionChangedFiles,
   hasOldSide,
+  isExcludedPath,
   walkDiffLines,
   walkDiffRows,
 } from "./diff-filter"
@@ -63,11 +64,10 @@ import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReview
 import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
+import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
-// Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
-const AI_CREDENTIAL_FILE = /(^|\/)profiles\.ya?ml$/i
 
 /**
  * The deterministic review recipe.
@@ -290,6 +290,10 @@ export interface OrchestrateInput {
   aiVerify?: boolean
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
+  /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
+  prFiles?: string[]
+  /** Every rename the PR makes, new path → old path, including files outside the dbt project. */
+  prRenames?: Map<string, string>
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -303,6 +307,8 @@ export interface OrchestrateInput {
   layout?: DbtProjectLayout
   /** Names `ref()` can resolve to at head (repo resources + installed packages); undefined = unknown. */
   resourceNames?: () => Promise<Set<string> | undefined>
+  /** `{% docs %}` names installed packages define; undefined when that can't be known. */
+  packageDocNames?: () => Promise<Set<string> | undefined>
   /** What the review covered: base resolution and files left out of scope. */
   scope?: Omit<ReviewScope, "unverified" | "notReviewed"> & { notReviewed?: NotReviewed[] }
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
@@ -2379,6 +2385,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // dozens of yml files; serial `git show` per file adds up).
   // A `{% docs name %}` block in any of the project's .md files at head (cached per name).
   const docLookups = new Map<string, Promise<boolean>>()
+  // Docs blocks of installed packages (cached); undefined when they can't be known.
+  let pkgDocs: Promise<Set<string> | undefined> | undefined
+  const packageDocs = () => (pkgDocs ??= input.packageDocNames?.().catch(() => undefined) ?? Promise.resolve(undefined))
   const docExists = (name: string) => {
     if (!docLookups.has(name)) {
       const block = new RegExp(`\\{%-?\\s*docs\\s+${name}\\s*-?%\\}`)
@@ -2386,13 +2395,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         name,
         (input.grepProject?.(`docs ${name}`, "*.md") ?? Promise.resolve([]))
           // An unavailable search (undefined) is no evidence the block is missing.
-          .then((hits) => hits === undefined || hits.some((h) => block.test(h.text)))
+          .then(async (hits) => hits === undefined || hits.some((h) => block.test(h.text)) || !!(await packageDocs())?.has(name))
           // A failed search is no evidence the block is missing.
           .catch(() => true),
       )
     }
     return docLookups.get(name)!
   }
+  // The project defines docs blocks of its own (any `{% docs x %}` in its .md files), and its
+  // installed packages' blocks are known: a package may define the name otherwise.
+  let docsAny: Promise<boolean> | undefined
+  const projectHasDocs = () =>
+    (docsAny ??= (input.grepProject?.("docs", "*.md") ?? Promise.resolve([]))
+      .then(async (hits) => !!hits?.some((h) => /\{%-?\s*docs\s+\w+\s*-?%\}/.test(h.text)) && (await packageDocs()) !== undefined)
+      // A failed or unavailable search is no evidence: stay silent.
+      .catch(() => false))
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
   touch(schemaFiles)
   const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
@@ -2411,7 +2428,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ...detectUnitTestFixtures(file, oldContent, newContent),
             ...snapshotYmlFindings(file, oldContent, newContent),
             ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
-            ...(lanes.has("dbt_patterns") && input.grepProject ? await docRefFindings(file, oldContent, newContent, docExists) : []),
+            ...(lanes.has("dbt_patterns") && input.grepProject ? await docRefFindings(file, oldContent, newContent, docExists, projectHasDocs) : []),
           ]
         } catch (err) {
           // One malformed schema file degrades that file only.
@@ -2617,24 +2634,49 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   } else if (!input.aiReview) {
     aiStatus = { state: "skipped", reason: input.aiDisabledReason ?? "disabled" }
   } else {
-    const aiFiles: AiReviewFile[] = [...ctxByPath.values()].map((ctx) => ({
-      path: ctx.file.path,
-      status: ctx.file.status,
-      model: modelNameFromPath(ctx.file.path),
-      kind: ctx.file.kind,
-      diff: ctx.file.diff,
-      sql: ctx.engineNewSql ?? ctx.newSql,
-    }))
+    // Changed files that may hold credentials: named like a credential file now or before a
+    // rename, over every file the PR changes. Neither side of them reaches the AI lane or the verifier.
+    const prRenames = input.prRenames ?? new Map<string, string>()
+    const credentialLike = new Set(
+      [
+        ...input.changedFiles.map((f) => [f.path, f.oldPath ?? prRenames.get(f.path)] as const),
+        ...(input.prFiles ?? []).map((p) => [p, prRenames.get(p)] as const),
+      ]
+        .filter(([p, old]) => isCredentialPath(p) || (!!old && isCredentialPath(old)))
+        .map(([p]) => p),
+    )
+    const mayHoldCredentials = (p: string) => credentialLike.has(p) || isCredentialPath(p)
+    // A file whose diff carries key material is not sent; one whose full text does is sent as its diff only.
+    const screened = (f: AiReviewFile): AiReviewFile[] =>
+      mayHoldCredentials(f.path) || (f.diff && holdsCredentials(f.diff))
+        ? []
+        : [f.sql && holdsCredentials(f.sql) ? { ...f, sql: undefined } : f]
+    const aiFiles: AiReviewFile[] = [...ctxByPath.values()].flatMap((ctx) =>
+      screened({
+        path: ctx.file.path,
+        status: ctx.file.status,
+        model: modelNameFromPath(ctx.file.path),
+        kind: ctx.file.kind,
+        diff: ctx.file.diff,
+        sql: ctx.engineNewSql ?? ctx.newSql,
+      }),
+    )
     // Macros, data tests, snapshots, yml and seeds carry defects no model diff shows.
     // Seeds go as a diff only: the full CSV is data, not logic.
     const supporting = reviewable.filter(
-      (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !AI_CREDENTIAL_FILE.test(f.path),
+      (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !mayHoldCredentials(f.path),
     )
     const contents = await Promise.all(
-      supporting.map((f) => (f.kind === "seed" ? undefined : getContent?.(f.path, "new")?.catch(() => undefined))),
+      supporting.map((f) =>
+        f.kind === "seed"
+          ? undefined
+          : getContent?.(f.path, "new")?.catch(() => undefined),
+      ),
     )
     supporting.forEach((f, i) =>
-      aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
+      aiFiles.push(
+        ...screened({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
+      ),
     )
     // Only the files the AI lane will send are reached (its file cap, or the
     // per-kind quotas in coverage mode); the rest stay in the ledger.
@@ -2642,6 +2684,31 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
+    // Files the PR changes that the AI may list and the verifier may read; never the user's exclusions or credentials.
+    const prFiles = (input.prFiles ?? input.changedFiles.map((f) => f.path)).filter(
+      (p) => !isExcludedPath(p, input.rubric.exclusions.excludeGlobs) && !mayHoldCredentials(p),
+    )
+    // A renamed file's old side is read from its old path, as the content resolver does: the
+    // in-scope rename as scoped, otherwise the PR's rename. Symlink targets are refused by safeReadInside.
+    const inScopePaths = new Set(input.changedFiles.map((f) => f.path))
+    const oldPathOf = new Map([...prRenames].filter(([p]) => !inScopePaths.has(p)))
+    for (const f of input.changedFiles) if (f.oldPath) oldPathOf.set(f.path, f.oldPath)
+    const pathActuallyRead = (p: string, side: "old" | "new") => (side === "old" ? (oldPathOf.get(p) ?? p) : p)
+    const refused = (p: string, side: "old" | "new") => mayHoldCredentials(p) || isCredentialPath(pathActuallyRead(p, side))
+    const REFUSED = "not available: may hold credentials"
+    // Grep hits are dropped for any file that may hold credentials, by name or by its whole content.
+    const grepProject: AiVerifyEvidence["grepProject"] =
+      input.grepProject &&
+      (async (pattern, glob) => {
+        const found = await input.grepProject!(pattern, glob)
+        if (!found) return undefined
+        const paths = [...new Set(found.map((h) => h.path))]
+        const texts = await Promise.all(
+          paths.map((p) => (mayHoldCredentials(p) ? undefined : getContent?.(p, "new").catch(() => undefined))),
+        )
+        const clean = new Set(paths.filter((_, i) => texts[i] !== undefined && !holdsCredentials(texts[i]!)))
+        return found.filter((h) => clean.has(h.path))
+      })
     // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
     const evidence: AiVerifyEvidence | undefined = input.aiVerify
       ? {
@@ -2649,15 +2716,22 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           files: aiFiles,
           projectRoot: input.layout?.root,
           runner: input.runner,
-          addedLines: addedLinesByFile(input.changedFiles),
+          addedLines: addedLinesByFile(input.changedFiles.filter((f) => !mayHoldCredentials(f.path))),
           prTitle: input.prTitle,
           prBody: input.prBody,
-          grepProject: input.grepProject,
-          readFile: async (p, side, start, end) => numberedSlice(await getContent?.(p, side), start, end),
+          grepProject,
+          prFiles,
+          readFile: async (p, side, start, end) => {
+            if (refused(p, side)) return REFUSED
+            const text = await getContent?.(p, side)
+            return text && holdsCredentials(text) ? REFUSED : numberedSlice(text, start, end)
+          },
           compiledSql: async (p, side) => {
+            if (refused(p, side)) return undefined
             const ctx = ctxByPath.get(p)
             const engine = side === "new" ? ctx?.engineNewSql : ctx?.engineOldSql
-            return engine ?? (await getCompiled?.(ctx?.file.oldPath && side === "old" ? ctx.file.oldPath : p, side))
+            const sql = engine ?? (await getCompiled?.(pathActuallyRead(p, side), side))
+            return sql && holdsCredentials(sql) ? undefined : sql
           },
         }
       : undefined
@@ -2669,6 +2743,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         prTitle: input.prTitle,
         prBody: input.prBody,
         model: input.aiModel,
+        prFiles,
         ...(evidence ? { evidence } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings

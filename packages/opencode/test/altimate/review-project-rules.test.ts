@@ -16,6 +16,7 @@ import {
   testWindowFindings,
   testsOnNullColumns,
   yamlParseFindings,
+  yamlError,
 } from "../../src/altimate/review/project-rules"
 import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
 import { inlineConfigSplats, isSuppressiblePortability, runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
@@ -578,6 +579,33 @@ describe("YAML that stops parsing", () => {
   test("a file that already failed at base is not this change", () => {
     expect(yamlParseFindings(f(bad), bad, bad)).toHaveLength(0)
   })
+  test("an unterminated quote fails past the edit: anchors on the added line", () => {
+    const b = "models:\n  - name: orders\n    columns:\n      - name: total\n        description: Total in USD.\n      - name: ordered_at\n"
+    const h = b.replace("description: Total in USD.", 'description: "Total in USD.')
+    const file: ChangedFile = { path: "models/orders.yml", status: "modified", diff: '@@ -5 +5 @@\n-        description: Total in USD.\n+        description: "Total in USD.\n' }
+    const fs = yamlParseFindings(file, b, h)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine).toBe(5)
+    expect((fs[0].evidence!.result as { line?: string }).line).toBe('        description: "Total in USD.')
+  })
+  test("a deletion-only break anchors on the error line the hunk shows", () => {
+    const b = "models:\n  - name: a\n    columns:\n      - name: id\n"
+    const h = "models:\n  - name: a\n      - name: id\n"
+    const file: ChangedFile = { path: "models/a.yml", status: "modified", diff: "@@ -1,4 +1,3 @@\n models:\n   - name: a\n-    columns:\n       - name: id\n" }
+    const fs = yamlParseFindings(file, b, h)
+    expect(fs).toHaveLength(1)
+    // The parser's error line is a context line of the hunk (no line is added).
+    expect(yamlError(h)!.line).toBeGreaterThan(0)
+    expect(fs[0].startLine).toBe(yamlError(h)!.line!)
+  })
+  test("an error before every added line and outside the hunks stays on the file, not an unrelated added line", () => {
+    const b = "models:\n  - name: a\n    columns:\n      - name: id\n"
+    const h = "models:\n  - name: a\n      - name: id\n"
+    const file: ChangedFile = { path: "models/a.yml", status: "modified", diff: "@@ -9,0 +9,1 @@\n+# trailing\n" }
+    const fs = yamlParseFindings(file, b, h)
+    expect(fs).toHaveLength(1)
+    expect(fs[0].startLine ?? null).toBeNull()
+  })
   test("runs on a quickstart file the review otherwise doesn't classify, and lists it as reviewed", async () => {
     const env = await prReview([{ path: ".quickstart/quickstart.yml", head: bad, base }])
     expect(ruleIds(env.findings)).toContain("dbt-project-rules:yaml-parse-error")
@@ -642,6 +670,23 @@ describe("doc() reference with no docs block", () => {
   test("no other doc() in the file resolves locally (docs may come from a package): silent", async () => {
     expect(await docRefFindings(yml("audience_id"), base, head("audience_id"), async () => false)).toHaveLength(0)
   })
+  describe("a file whose only doc() is the new one", () => {
+    const solo = 'models:\n  - name: orders\n    description: "{{ doc(\'orders_grain\') }}"\n'
+    const added: ChangedFile = { path: "models/orders.yml", status: "added", diff: `@@ -0,0 +1,3 @@\n+${solo.trimEnd().split("\n").join("\n+")}\n` }
+    test("fires when the project keeps its own docs blocks", async () => {
+      const fs = await docRefFindings(added, undefined, solo, async () => false, async () => true)
+      expect(fs.map((x) => x.rule)).toEqual(["dbt-project-rules:doc-block-missing"])
+    })
+    test("silent when the project has no docs blocks (they may come from a package)", async () => {
+      expect(await docRefFindings(added, undefined, solo, async () => false, async () => false)).toHaveLength(0)
+      expect(await docRefFindings(added, undefined, solo, async () => false)).toHaveLength(0)
+    })
+    test("other doc() names that don't resolve still keep it silent", async () => {
+      const two = solo + '  - name: items\n    description: "{{ doc(\'items_grain\') }}"\n'
+      const both: ChangedFile = { path: "models/orders.yml", status: "modified", diff: `@@ -3,0 +4,2 @@\n+  - name: items\n+    description: "{{ doc('items_grain') }}"\n` }
+      expect(await docRefFindings(both, solo, two, async () => false, async () => true)).toHaveLength(0)
+    })
+  })
   test("end to end: the project's .md files are searched for the block", async () => {
     const searched: string[] = []
     const env = await prReview([{ path: "models/staging/stg_ads.yml", head: head("audience_id"), base, diff: yml("audience_id").diff }], {
@@ -652,6 +697,26 @@ describe("doc() reference with no docs block", () => {
     })
     expect(ruleIds(env.findings)).toContain("dbt-project-rules:doc-block-missing")
     expect(searched).toContain("docs audience_id *.md")
+  })
+  describe("end to end: docs blocks of installed packages", () => {
+    const solo = 'models:\n  - name: orders\n    description: "{{ doc(\'orders_grain\') }}"\n'
+    const files = [{ path: "models/orders.yml", status: "added" as const, head: solo }]
+    // The project keeps docs blocks of its own, but not `orders_grain`.
+    const grepProject = async (pattern: string) => (pattern === "docs" ? [{ path: "models/docs.md", line: 1, text: "{% docs other %}" }] : [])
+    test("a name an installed package defines is silent", async () => {
+      const env = await prReview(files, { grepProject, packageDocNames: async () => new Set(["orders_grain"]) })
+      expect(ruleIds(env.findings)).not.toContain("dbt-project-rules:doc-block-missing")
+    })
+    test("packages that can't be known (declared, not installed) keep the no-other-doc() path silent", async () => {
+      expect(ruleIds((await prReview(files, { grepProject, packageDocNames: async () => undefined })).findings)).not.toContain("dbt-project-rules:doc-block-missing")
+      expect(ruleIds((await prReview(files, { grepProject })).findings)).not.toContain("dbt-project-rules:doc-block-missing")
+    })
+    test("no package defines it: fires, and the body says why it is trusted", async () => {
+      const env = await prReview(files, { grepProject, packageDocNames: async () => new Set() })
+      const f = env.findings.find((x) => x.rule === "dbt-project-rules:doc-block-missing")
+      expect(f?.body).toContain("the project defines its own docs blocks")
+      expect(f?.body).not.toContain("other `doc()` references")
+    })
   })
 })
 
@@ -733,6 +798,12 @@ describe("SQL text concatenated in Jinja without a space", () => {
   test("a SQL literal ending in a word right at `~`", () => {
     expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(true)
     expect(seam("{{ 'select id from' ~ relation }}")).toBe(true)
+  })
+  test("double-quoted strings", () => {
+    expect(seam('{% set q = "select " ~ cols ~ "from " ~ rel %}')).toBe(true)
+    expect(seam('{% set q = "select " ~ cols ~ " from " ~ rel %}')).toBe(false)
+    expect(seam('{{ elementary.debug_log("column_snapshot_query - \\n" ~ column_snapshot_query) }}')).toBe(false)
+    expect(seam("{{ log('query: \\n' ~ q) }}")).toBe(false)
   })
   test("twin: the space is inside the string", () => {
     expect(seam("{{ dbt.datediff('changed_at', 'coalesce(lead(changed_at) over (partition by ticket_id ' ~ pkg.cols() ~ ' order by changed_at), now()', 'second') }}")).toBe(false)

@@ -348,10 +348,14 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     )
   }
   // Map renamed files → their old path so getContent resolves the "old" side
-  // from where the file lived at `base`.
-  const renames = new Map(
-    changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
+  // from where the file lived at `base`: in-scope files as scoped (a rename into
+  // the project is scoped as added), files outside the project as collected.
+  const prRenames = new Map(
+    collected.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
   )
+  const inScopePaths = new Set(changedFiles.map((f) => f.path))
+  const renames = new Map([...prRenames].filter(([p]) => !inScopePaths.has(p)))
+  for (const f of changedFiles) if (f.status === "renamed" && f.oldPath) renames.set(f.path, f.oldPath)
   const getContent =
     opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
 
@@ -434,6 +438,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
 
   return runReview({
     resourceNames: () => projectResourceNames(opts.cwd, opts.head, projectRootRel, dbtRoot),
+    packageDocNames: () => packageDocNames(opts.cwd, opts.head, projectRootRel, dbtRoot),
     changedFiles,
     config,
     rubric,
@@ -465,6 +470,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       const specs = projectGrepSpecs(projectRootRel, dirs, glob)
       return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
+    prFiles: collected.map((f) => f.path),
+    prRenames,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
@@ -610,6 +617,41 @@ export async function projectAdapters(
     if (m) seen.add(m[1] === "presto" ? "trino" : m[1])
   }
   return [...seen].sort()
+}
+
+/**
+ * `{% docs name %}` blocks defined in the `.md` files of installed packages (`dbt_packages/`). Empty when the
+ * project declares no packages; undefined when that can't be known (no project root, git can't
+ * list the tree, or packages are declared but not installed).
+ */
+export async function packageDocNames(
+  cwd: string,
+  head: string | undefined,
+  projectRootRel: string | undefined,
+  dbtRoot: string,
+): Promise<Set<string> | undefined> {
+  if (projectRootRel === undefined) return undefined
+  const files = await listFilesAt(cwd, head)
+  if (!files) return undefined
+  const prefix = projectRootRel ? projectRootRel + "/" : ""
+  const names = new Set<string>()
+  if (!files.includes(prefix + "packages.yml") && !files.includes(prefix + "dependencies.yml")) return names
+  const walk = async (dir: string, depth: number): Promise<boolean> => {
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return false
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory() && depth < 12 && e.name !== ".git") await walk(p, depth + 1)
+      else if (e.isFile() && e.name.endsWith(".md"))
+        for (const m of (await readFile(p, "utf8").catch(() => "")).matchAll(/\{%-?\s*docs\s+(\w+)\s*-?%\}/g)) names.add(m[1])
+    }
+    return true
+  }
+  return (await walk(path.join(dbtRoot, "dbt_packages"), 0)) ? names : undefined
 }
 
 /**
