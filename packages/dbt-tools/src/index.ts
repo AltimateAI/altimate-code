@@ -8,7 +8,7 @@ import { failureLines } from "./failure-text"
 const USAGE = {
   commands: {
     init: "Auto-detect dbt project and write config",
-    doctor: "Check prerequisites (Python, dbt, project)",
+    doctor: "Check prerequisites: Python, dbt-core and the project, or in Fusion mode the dbt Fusion binary and the project",
     info: "Get project info (paths, targets, version)",
     compile: "Compile a model (Jinja to SQL) --model <name>",
     "compile-query": "Compile a raw query --query <sql> [--model <name>]",

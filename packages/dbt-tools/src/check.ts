@@ -74,10 +74,9 @@ async function fusion(cfg: Config): Promise<Status> {
     timeoutMs: 15_000,
   })
   if (binary) return { ok: true }
-  const nextTo = cfg.pythonPath ? `next to ${cfg.pythonPath}, ` : ""
   return {
     ok: false,
-    error: `dbt Fusion was not found: no dbt 2.x binary ${nextTo}in ~/.local/bin or on PATH`,
+    error: `dbt Fusion was not found: no dbt 2.x binary ${fusionPlaces(cfg.pythonPath)}`,
     fix: "Install dbt Fusion so that `dbt --version` reports 2.x, or set dbtIntegration to core in the altimate-dbt config",
   }
 }
