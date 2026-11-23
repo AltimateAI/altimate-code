@@ -3,7 +3,7 @@ import type {
   OAuthClientMetadata,
   OAuthTokens,
   OAuthClientInformation,
-  OAuthClientInformationFull,
+  OAuthClientInformationMixed,
 } from "@modelcontextprotocol/sdk/shared/auth.js"
 import { Effect } from "effect"
 import { McpAuth } from "./auth"
@@ -71,17 +71,22 @@ export class McpOAuthProvider implements OAuthClientProvider {
       if (entry.clientInfo.clientSecretExpiresAt && entry.clientInfo.clientSecretExpiresAt < Date.now() / 1000) {
         return undefined
       }
+      // altimate_change start — return the full registration: the SDK saves this object back after a token exchange
       return {
         client_id: entry.clientInfo.clientId,
         client_secret: entry.clientInfo.clientSecret,
+        client_id_issued_at: entry.clientInfo.clientIdIssuedAt,
+        client_secret_expires_at: entry.clientInfo.clientSecretExpiresAt,
+        issuer: entry.clientInfo.issuer,
       }
+      // altimate_change end
     }
 
     // No client info or URL changed - will trigger dynamic registration
     return undefined
   }
 
-  async saveClientInformation(info: OAuthClientInformationFull): Promise<void> {
+  async saveClientInformation(info: OAuthClientInformationMixed): Promise<void> {
     await Effect.runPromise(
       this.auth.updateClientInfo(
         this.mcpName,
@@ -90,6 +95,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
           clientSecret: info.client_secret,
           clientIdIssuedAt: info.client_id_issued_at,
           clientSecretExpiresAt: info.client_secret_expires_at,
+          // altimate_change start — keep the authorization server binding
+          issuer: info.issuer,
+          // altimate_change end
         },
         this.serverUrl,
       ),
@@ -109,6 +117,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
         ? Math.max(0, Math.floor(entry.tokens.expiresAt - Date.now() / 1000))
         : undefined,
       scope: entry.tokens.scope,
+      // altimate_change start — keep the authorization server binding
+      issuer: entry.tokens.issuer,
+      // altimate_change end
     }
   }
 
@@ -121,6 +132,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
           refreshToken: tokens.refresh_token,
           expiresAt: tokens.expires_in ? Date.now() / 1000 + tokens.expires_in : undefined,
           scope: tokens.scope,
+          // altimate_change start — keep the authorization server binding
+          issuer: tokens.issuer,
+          // altimate_change end
         },
         this.serverUrl,
       ),
