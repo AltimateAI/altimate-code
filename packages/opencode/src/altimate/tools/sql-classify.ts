@@ -160,17 +160,20 @@ const optionList = (option: string) => `\\(\\s*${option}(?:\\s*,\\s*${option})*\
 const POSTGRES_OPTION_LIST = optionList(POSTGRES_OPTION)
 const DUCKDB_OPTION_LIST = optionList(DUCKDB_OPTION)
 // DuckDB runs a COPY written as a CTE body; a column or table named copy is not one.
-const COPY_CTE_BODY = /\bAS\s+(?:(?:NOT\s+)?MATERIALIZED\s+)?\(\s*COPY\b/i
+const COPY_CTE_BODY = /\bAS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(\s*COPY\b/i
 
-function explainPrefix(dialect?: string): RegExp {
+/** The EXPLAIN keyword and its options. `legacy` adds the generic words the parser reads itself;
+ * only the dialect's own options are ever blanked, so the parser still rejects foreign words. */
+function explainPrefix(dialect?: string, legacy = true): RegExp {
   const d = dialect?.toLowerCase() ?? ""
-  const words = ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+"]
+  const words = legacy ? ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+"] : []
   if (d === "snowflake") words.push("USING\\s+(?:JSON|TEXT|TABULAR)")
   if (/^(databricks|spark|hive)$/.test(d)) words.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
   // Only PostgreSQL and DuckDB have such a list. It is taken either alone or as the legacy words, never both.
   const options = /^(postgres|postgresql)$/.test(d) ? POSTGRES_OPTION_LIST : d === "duckdb" ? DUCKDB_OPTION_LIST : ""
   const list = options ? `\\s*${options}\\s*|` : ""
-  return new RegExp(`^\\s*EXPLAIN\\b(?:${list}(?:\\s+(?:${words.join("|")}))*\\s+)`, "i")
+  const each = words.length ? `(?:\\s+(?:${words.join("|")}))*` : ""
+  return new RegExp(`^\\s*EXPLAIN\\b(?:${list}${each}\\s+)`, "i")
 }
 
 /** Length of the EXPLAIN keyword and its options, beyond a bare `EXPLAIN `. */
@@ -194,7 +197,7 @@ function blankExplainOptions(sql: string, dialect?: string): string {
   // the parser rejects the options and the statement is a write. Only code can open a dollar quote,
   // since the lexer and the parser read the same text up to the first one.
   if (!lexesDollarQuotes(dialect) && DOLLAR_TAG_ANYWHERE.test(scan)) return sql
-  const prefix = explainPrefix(dialect)
+  const prefix = explainPrefix(dialect, false)
   const parts: string[] = []
   let copied = 0
   let start = 0

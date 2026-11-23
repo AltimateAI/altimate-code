@@ -151,7 +151,10 @@ describe("EXPLAIN with options", () => {
       expect(type(sql, "postgres")).toBe("write")
     }
     expect(type("EXPLAIN (ANALYZE) SELECT 'copy' AS \"copy\"", "duckdb")).toBe("read")
-    expect(type("EXPLAIN WITH c AS MATERIALIZED (COPY (SELECT 1) TO '/tmp/out.csv') SELECT * FROM c", "duckdb")).toBe("write")
+    for (const body of ["AS MATERIALIZED (COPY", "AS(COPY", "AS MATERIALIZED(COPY", "AS NOT MATERIALIZED(COPY", "AS/* c */(COPY"]) {
+      const sql = `WITH c ${body} (SELECT 1) TO '/tmp/out.csv') SELECT * FROM c`
+      for (const explain of ["EXPLAIN", "EXPLAIN (ANALYZE)", "EXPLAIN ANALYZE"]) expect(type(`${explain} ${sql}`, "duckdb")).toBe("write")
+    }
   })
 
   test("EXPLAIN of a read over a column or table named copy is a read", () => {
@@ -248,6 +251,15 @@ describe("EXPLAIN with options", () => {
     ]) {
       expect(best(statement, dialect, 64_000) / best(statement, dialect, 16_000)).toBeLessThan(9)
     }
+  })
+
+  test("generic EXPLAIN words are left for the parser to judge", () => {
+    for (const sql of ["EXPLAIN FORMAT BOGUS SELECT 1", "EXPLAIN VERBOSE SELECT 1", "EXPLAIN VERBOSE USING JSON SELECT 1"]) {
+      expect(type(sql, "snowflake")).toBe("write")
+    }
+    expect(type("EXPLAIN VERBOSE COST SELECT 1", "databricks")).toBe("write")
+    expect(type("EXPLAIN ANALYZE SELECT 1", "postgres")).toBe("read")
+    expect(type("EXPLAIN ANALYZE DELETE FROM t", "postgres")).toBe("write")
   })
 
   test("plain EXPLAIN is unchanged", () => {
