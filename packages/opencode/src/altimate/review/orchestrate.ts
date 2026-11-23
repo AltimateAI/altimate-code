@@ -42,7 +42,23 @@ import { detectUnitTestFixtures } from "./unit-tests"
 import { finalSelectNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
-import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
+import {
+  dbtProjectFindings,
+  dispatchKwargFindings,
+  dispatchVariants,
+  docRefFindings,
+  jinjaFindings,
+  joinTargets,
+  missingRefFindings,
+  modelConfigFindings,
+  isPackageProject,
+  packageLockFindings,
+  packagesFindings,
+  quickstartModelFindings,
+  testWindowFindings,
+  testsOnNullColumns,
+  yamlParseFindings,
+} from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
 import { ruleTier } from "./rule-tiers"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
@@ -2210,6 +2226,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     for (const findings of sets) all.push(findings)
   }
 
+  // An `adapter.dispatch` call that now passes a keyword some `<adapter>__` variant in the repo doesn't take.
+  const dispatchVariantFindings = async (file: ChangedFile, newSql: string): Promise<Finding[]> => {
+    if (!/\badapter\.dispatch\b/.test(newSql)) return []
+    const texts = new Map<string, string>([[file.path, newSql]])
+    for (const name of new Set([...newSql.matchAll(/\badapter\.dispatch\s*\(\s*['"](?:\w+\.)?(\w+)['"]/g)].map((m) => m[1]))) {
+      const hits = (await input.grepProject?.(`__${name}(`).catch(() => [])) ?? []
+      for (const path of new Set(hits.map((h) => h.path)))
+        if (!texts.has(path)) texts.set(path, (await getContent?.(path, "new").catch(() => undefined)) ?? "")
+    }
+    return dispatchKwargFindings(file, newSql, (name) => [...texts.values()].flatMap((t) => dispatchVariants(t, name)))
+  }
+
   // Macros: the catalog rules that hold in a SQL template, and vars with no default.
   if (lanes.has("dbt_patterns")) {
     const macros = reviewable.filter((f) => f.kind === "macro" && f.status !== "deleted")
@@ -2225,6 +2253,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           return [
             ...detectMacroPatterns(file, newSql, input.rubric, projectVars, { dialect, dialectKnown: !!input.dialectKnown }),
             ...jinjaFindings(file, oldSql, newSql),
+            ...(await dispatchVariantFindings(file, newSql)),
           ]
         } catch (err) {
           failedFile(file, err)
@@ -2256,7 +2285,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             file.status === "added" ? Promise.resolve(undefined) : getContent?.(file.oldPath ?? file.path, "old")?.catch(() => undefined),
           ])
           if (file.kind === "project_config") return [...packagesFindings(file, newContent), ...dbtProjectFindings(file, oldContent, newContent)]
-          return jinjaFindings(file, oldContent, newContent)
+          return [...jinjaFindings(file, oldContent, newContent), ...(file.kind === "test" ? testWindowFindings(file) : [])]
         } catch (err) {
           failedFile(file, err)
           return []
@@ -2264,6 +2293,56 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }),
     )
     for (const findings of sets) all.push(findings)
+  }
+
+  // Files checked whatever their dbt role (a `.quickstart/quickstart.yml` is "other"): YAML that
+  // no longer parses, and new models missing from the quickstart `public_models`.
+  const otherChecked = new Set<string>()
+  const checkedOther = (file: ChangedFile) => {
+    otherChecked.add(file.path)
+    touch([file])
+  }
+  if (lanes.has("dbt_patterns")) {
+    const read = (p: string, side: "old" | "new") => getContent?.(p, side)?.catch(() => undefined) ?? Promise.resolve(undefined)
+    const ymls = reviewable.filter((f) => f.status !== "deleted" && /\.ya?ml$/i.test(f.path))
+    const sets = await Promise.all(
+      ymls.map(async (file) => {
+        const [newContent, oldContent] = await Promise.all([
+          read(file.path, "new"),
+          file.status === "added" ? Promise.resolve(undefined) : read(file.oldPath ?? file.path, "old"),
+        ])
+        if (file.kind === "other") checkedOther(file)
+        return yamlParseFindings(file, oldContent, newContent)
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+
+    for (const file of reviewable.filter((f) => f.status === "added" && /(^|\/)package-lock\.yml$/.test(f.path))) {
+      const dir = file.path.slice(0, file.path.length - "package-lock.yml".length)
+      const [projectYml, testsYml, nested] = await Promise.all([
+        read(`${dir}dbt_project.yml`, "new"),
+        read(`${dir}integration_tests/dbt_project.yml`, "new"),
+        // `integration_tests/<name>/dbt_project.yml` (grepProject globs from the project root;
+        // a git pathspec `*` crosses directories).
+        (dir === (input.layout?.root ? input.layout.root + "/" : "") && input.grepProject?.("name", "integration_tests/*dbt_project.yml").then((h) => h ?? []).catch(() => [])) ||
+          Promise.resolve([]),
+      ])
+      if (projectYml === undefined && testsYml === undefined) continue
+      checkedOther(file)
+      all.push(packageLockFindings(file, isPackageProject(projectYml, !!testsYml || nested.length > 0)))
+    }
+
+    const newModels = reviewable.filter((f) => f.kind === "model_sql" && f.status === "added")
+    if (newModels.length) {
+      const QUICKSTART = /(^|\/)\.quickstart\/quickstart\.ya?ml$/
+      const changed = reviewable.find((f) => QUICKSTART.test(f.path) && f.status !== "deleted")
+      const qsPath = changed?.path ?? `${input.layout?.root ? input.layout.root + "/" : ""}.quickstart/quickstart.yml`
+      const content = await read(qsPath, "new")
+      if (content) {
+        if (changed) checkedOther(changed)
+        all.push(quickstartModelFindings(changed ?? newModels[0], qsPath, content, newModels.map((f) => modelNameFromPath(f.path))))
+      }
+    }
   }
 
   // schema.yml-level detectors (test removal) — run on changed YAML files
@@ -2287,6 +2366,22 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   //
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
+  // A `{% docs name %}` block in any of the project's .md files at head (cached per name).
+  const docLookups = new Map<string, Promise<boolean>>()
+  const docExists = (name: string) => {
+    if (!docLookups.has(name)) {
+      const block = new RegExp(`\\{%-?\\s*docs\\s+${name}\\s*-?%\\}`)
+      docLookups.set(
+        name,
+        (input.grepProject?.(`docs ${name}`, "*.md") ?? Promise.resolve([]))
+          // An unavailable search (undefined) is no evidence the block is missing.
+          .then((hits) => hits === undefined || hits.some((h) => block.test(h.text)))
+          // A failed search is no evidence the block is missing.
+          .catch(() => true),
+      )
+    }
+    return docLookups.get(name)!
+  }
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
   touch(schemaFiles)
   const sqlByModel = new Map([...ctxByPath.values()].filter((c) => c.newSql).map((c) => [modelNameFromPath(c.file.path).toLowerCase(), c.newSql!]))
@@ -2305,6 +2400,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ...detectUnitTestFixtures(file, oldContent, newContent),
             ...snapshotYmlFindings(file, oldContent, newContent),
             ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
+            ...(lanes.has("dbt_patterns") && input.grepProject ? await docRefFindings(file, oldContent, newContent, docExists) : []),
           ]
         } catch (err) {
           // One malformed schema file degrades that file only.
@@ -2591,7 +2687,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ...(input.scope?.notReviewed ?? []),
     ...dropped,
     ...reviewable
-      .filter((f) => f.kind === "other" || f.kind === "analysis")
+      .filter((f) => (f.kind === "other" && !otherChecked.has(f.path)) || f.kind === "analysis")
       .map((f) => ({ path: f.path, reason: "not a dbt model/macro/test/yml/seed file" })),
     ...reviewable
       .filter((f) => !touched.has(f.path))

@@ -21,7 +21,7 @@ import { capabilityFor, type AdapterCapability } from "./adapter-capabilities"
  * Redshift/Databricks anti-pattern docs, r/dataengineering, dbt-core issues.
  */
 
-export type RuleKind = "model_sql" | "schema_yml" | "snapshot" | "any"
+export type RuleKind = "model_sql" | "schema_yml" | "snapshot" | "macro" | "any"
 
 export interface RuleExample {
   add?: string // text treated as added (+) lines
@@ -498,7 +498,13 @@ export function evaluateCatalog(
 /** Build a RuleInput from an example (for the catalog self-test). */
 export function inputFromExample(ex: RuleExample, kind: RuleKind = "model_sql"): RuleInput {
   const defaultPath =
-    kind === "schema_yml" ? "models/marts/_models.yml" : kind === "snapshot" ? "snapshots/s.sql" : "models/marts/m.sql"
+    kind === "schema_yml"
+      ? "models/marts/_models.yml"
+      : kind === "snapshot"
+        ? "snapshots/s.sql"
+        : kind === "macro"
+          ? "macros/m.sql"
+          : "models/marts/m.sql"
   const file: ChangedFile = { path: ex.path ?? defaultPath, status: "modified" }
   const added = ex.add ? ex.add.split("\n") : []
   const removed = ex.remove ? ex.remove.split("\n") : []
@@ -860,6 +866,36 @@ const CORRECTNESS: Rule[] = [
     { added: /\bgroup\s+by\s+\d+(\s*,\s*\d+)+/i, macros: true },
     { add: "group by 1, 2" },
     { add: "group by customer_id" },
+  ),
+  r(
+    "jinja-concat-missing-space",
+    "sql_correctness",
+    "suggestion",
+    "SQL text concatenated in Jinja without a space",
+    "A string of SQL is joined with `~` to a macro call or variable with no space at the seam, so the rendered SQL runs the two together (`ticket_id` + `, source_relation` works, `ticket_id` + `source_relation` does not). Put a space inside the string next to `~`.",
+    {
+      // A literal holding SQL (it has whitespace) that ends, or starts, with a word character right at the `~`,
+      // inside an open `{{`/`{%` on the line (a bare `col ~ 'a b'` is a Postgres regex match, not Jinja).
+      added:
+        // The whitespace check is a lookahead so the literal is scanned once (no split backtracking on long lines).
+        /\{[{%](?:(?![}%]\}).)*?(?:'(?=[^'\n]*\s)[^'\n]*[A-Za-z0-9]'\s*~\s*[A-Za-z_][\w.]*|[\w)]\s*~\s*'[A-Za-z0-9](?=[^'\n]*\s)[^'\n]*')/,
+      // Messages are not SQL.
+      unless: /\b(?:log|print|raise_compiler_error|warn)\s*\(/,
+      macros: true,
+    },
+    { add: "{{ dbt.datediff('a', 'lead(a) over (partition by ticket_id' ~ pkg.partition_cols() ~ ' order by a)', 'second') }}" },
+    { add: "{{ dbt.datediff('a', 'lead(a) over (partition by ticket_id ' ~ pkg.partition_cols() ~ ' order by a)', 'second') }}" },
+  ),
+  r(
+    "macro-group-by-ordinal",
+    "sql_quality",
+    "suggestion",
+    "GROUP BY a column position in macro SQL",
+    "A macro's SELECT list is usually built from arguments or loops, so the column at that position depends on the caller. `GROUP BY <n>` then groups by whichever column lands there. Group by the column name or expression.",
+    // A single position; two or more are `group-by-positional`.
+    { added: /\bgroup\s+by\s+\d+\b(?!\s*,)/i, kind: "macro" },
+    { add: "    SELECT max(t.loaded_at) AS loaded_at, 'src' AS src_label\n    FROM t\n    GROUP BY 2" },
+    { add: "    SELECT max(t.loaded_at) AS loaded_at, 'src' AS src_label\n    FROM t\n    GROUP BY src_label" },
   ),
   r(
     "order-by-positional",

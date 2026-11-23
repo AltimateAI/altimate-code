@@ -1605,3 +1605,73 @@ describe("dbt-patterns extended battery", () => {
   test("safe_divide is NOT flagged", () =>
     expect(has(fire("x", ["select safe_divide(a, b) as r"]), "sql_correctness")).toBe(false))
 })
+
+describe("join predicate repeated from an earlier join", () => {
+  const sql = (extra: string) =>
+    [
+      "select e.member_id, s.score",
+      "from {{ ref('accounts') }} as e",
+      "inner join",
+      "    {{ ref('expected') }} as a",
+      "    on e.region = a.target_region",
+      "    and e.level = a.target_level",
+      "inner join",
+      "    scores as s",
+      "    on a.target_metric = s.metric",
+      `    ${extra}`,
+    ].join("\n")
+  const redundant = (body: string, added: string[]) =>
+    detectModelPatterns(modelFile("models/m.sql", body, added), body, DEFAULT_RUBRIC).filter((f) => f.rule === "dbt-patterns:redundant-join-predicate")
+  test("a later join restating an earlier join's predicate: fires on that added line", () => {
+    const body = sql("and a.target_region = e.region")
+    const fs = redundant(body, ["    and a.target_region = e.region"])
+    expect(fs).toHaveLength(1)
+    expect((fs[0].evidence?.result as { line?: string }).line?.trim()).toBe("and a.target_region = e.region")
+  })
+  test("twin: a predicate on the newly joined relation is silent", () => {
+    const body = sql("and s.region = e.region")
+    expect(redundant(body, ["    and s.region = e.region"])).toHaveLength(0)
+  })
+  test("after a LEFT JOIN the repeated predicate still filters: silent", () => {
+    const body = sql("and a.target_region = e.region").replace("inner join\n    {{ ref('expected') }}", "left join\n    {{ ref('expected') }}")
+    expect(redundant(body, ["    and a.target_region = e.region"])).toHaveLength(0)
+  })
+  test("predicates comparing to different literals are different predicates", () => {
+    const body = [
+      "select * from p",
+      "inner join a on a.id = p.id and p.platform = 'web'",
+      "inner join b on b.id = p.id and p.platform = 'app'",
+    ].join("\n")
+    expect(redundant(body, ["inner join b on b.id = p.id and p.platform = 'app'"])).toHaveLength(0)
+    const same = body.replace("'app'", "'web'")
+    expect(redundant(same, ["inner join b on b.id = p.id and p.platform = 'web'"])).toHaveLength(1)
+  })
+  test("the same predicate in a separate query (another CTE) is not the same join chain", () => {
+    const body = [
+      "with x as (select * from e join a on e.region = a.target_region),",
+      "y as (select * from e join s on e.id = s.id where 1 = 1)",
+      "select * from y join a on e.region = a.target_region",
+    ].join("\n")
+    expect(redundant(body, ["select * from y join a on e.region = a.target_region"])).toHaveLength(0)
+  })
+  test("an unaliased table-function join does not crash the detector and abstains", () => {
+    for (const rel of ["unnest(a.arr)", "table(flatten(a.arr))"]) {
+      const body = `select * from a inner join b on a.id = b.id inner join ${rel} on a.id = b.id`
+      expect(() => redundant(body, [body])).not.toThrow()
+      expect(redundant(body, [body])).toHaveLength(0)
+    }
+  })
+  test("literal case is significant: 'X' and 'x' are different predicates", () => {
+    const body = "select * from a inner join b on a.flag = 'X' inner join c on b.id = c.id and a.flag = 'x'"
+    expect(redundant(body, [body])).toHaveLength(0)
+    expect(redundant(body.replace("'x'", "'X'"), [body.replace("'x'", "'X'")])).toHaveLength(1)
+  })
+  test("a RIGHT or FULL join re-introduces rows: an earlier predicate repeated after it is silent", () => {
+    for (const kind of ["right", "full outer"]) {
+      const body = `select * from a inner join b on a.id = b.id ${kind} join c on b.id = c.id inner join d on c.id = d.id and a.id = b.id`
+      expect(redundant(body, [body])).toHaveLength(0)
+    }
+    const inner = "select * from a inner join b on a.id = b.id inner join c on b.id = c.id inner join d on c.id = d.id and a.id = b.id"
+    expect(redundant(inner, [inner])).toHaveLength(1)
+  })
+})

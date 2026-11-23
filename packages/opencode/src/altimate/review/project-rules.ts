@@ -3,10 +3,11 @@
 import path from "path"
 import YAML from "yaml"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
-import { type ChangedFile, walkDiffLines } from "./diff-filter"
+import { type ChangedFile, walkDiffLines, walkDiffRows } from "./diff-filter"
 import { incrementalFilter, inlineConfig } from "./incremental-semantics"
 import { parenBody, topLevel } from "./rule-catalog"
 import { capabilityFor } from "./adapter-capabilities"
+import { ADAPTERS } from "./dbt-patterns"
 
 const nameOf = (p: string) => path.basename(p).replace(/\.(sql|py|ya?ml|csv)$/i, "")
 
@@ -224,6 +225,34 @@ const macroSignatures = (sql: string | undefined) => {
   return out
 }
 
+/** Each `{% macro name(…) %}` / `{% test name(…) %}` with its parameters (name and whether it has a default)
+ *  and the head line range of its signature. Defaults may hold calls and lists. */
+function signatures(sql: string | undefined) {
+  const out = new Map<string, { params: { name: string; hasDefault: boolean }[]; first: number; last: number; test: boolean }>()
+  const text = sql ?? ""
+  for (const m of text.matchAll(/\{%-?\s*(macro|test)\s+([\w.]+)\s*\(/g)) {
+    const open = m.index! + m[0].length - 1
+    const body = parenBody(text, open)
+    const params: { name: string; hasDefault: boolean }[] = []
+    let depth = 0
+    let cur = ""
+    for (const ch of body + ",") {
+      if ("([{".includes(ch)) depth++
+      else if (")]}".includes(ch)) depth--
+      if (ch === "," && depth === 0) {
+        const name = /^\s*(\w+)/.exec(cur)?.[1]
+        if (name) params.push({ name, hasDefault: /=/.test(cur) })
+        cur = ""
+      } else cur += ch
+    }
+    const first = text.slice(0, m.index).split("\n").length
+    out.set(m[2], { params, first, last: first + (m[0] + body).split("\n").length - 1, test: m[1] === "test" })
+  }
+  return out
+}
+
+const DISPATCH_VARIANT = new RegExp(`^(default|${ADAPTERS.join("|")})__\\w`, "i")
+
 /** The comment text on a line (`-- …`, `/* … *\/`, `{# … #}`), or "". */
 const commentOf = (l: string) => /--(.*)$|\/\*(.*?)(\*\/|$)|\{#(.*?)(#\}|$)/.exec(l)?.slice(1).filter(Boolean).join(" ") ?? ""
 const TEMP_MARKER =
@@ -269,6 +298,34 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
         name,
       )
       out.push(at ? { ...f, startLine: at.line, endLine: at.line } : f)
+    }
+
+    // A parameter added to an existing macro with no default: every existing caller omits it, and Jinja
+    // binds an omitted parameter to Undefined, which is not `none` (an `is none` fallback never runs).
+    const oldSigs = signatures(oldContent)
+    for (const [name, sig] of signatures(newContent)) {
+      const old = oldSigs.get(name)
+      // An `<adapter>__x` variant is called only by its dispatcher, which passes every argument.
+      if (!old || DISPATCH_VARIANT.test(name)) continue
+      const known = new Set(old.params.map((p) => p.name))
+      for (const p of sig.params) {
+        // dbt itself passes `model` / `column_name` to a generic test.
+        if (p.hasDefault || known.has(p.name) || (sig.test && ["model", "column_name"].includes(p.name))) continue
+        const at = [...walkDiffLines(file.diff)].find(
+          (r) => r.kind === "+" && r.line >= sig.first && r.line <= sig.last && new RegExp(`\\b${p.name}\\b`).test(r.text),
+        )
+        if (!at) continue
+        const f = finding(
+          file,
+          "macro-param-no-default",
+          "warning",
+          "sql_correctness",
+          `new parameter \`${p.name}\` of \`${name}\` has no default`,
+          `\`${p.name}\` was added to the existing ${sig.test ? "test" : "macro"} \`${name}\` without a default. Every call written before this change omits it, and Jinja passes an omitted parameter as Undefined, not \`none\`: an \`is none\` fallback is skipped and the value renders as an empty string. Give it a default (\`${p.name}=none\`) unless every caller is updated in this change.`,
+          at.text,
+        )
+        out.push({ ...f, startLine: at.line, endLine: at.line })
+      }
     }
 
     // A var() key renamed with no fallback: projects that set the old key lose their override silently.
@@ -328,6 +385,295 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
   return out
 }
 
+// ── YAML structure ──────────────────────────────────────────────────────────
+
+/** The first YAML error in `text` (all documents), with its 1-based line; undefined when it parses. */
+export function yamlError(text: string): { message: string; line?: number; duplicate: boolean } | undefined {
+  for (const doc of YAML.parseAllDocuments(text)) {
+    const e = doc.errors?.[0]
+    if (e) return { message: e.message.split("\n")[0].replace(/ at line \d+, column \d+:?$/, ""), line: e.linePos?.[0]?.line, duplicate: e.code === "DUPLICATE_KEY" }
+  }
+  return undefined
+}
+
+/** A YAML file that parsed at base and no longer parses at head (a mis-indented key often
+ *  becomes a duplicate key of the entry above it). */
+export function yamlParseFindings(file: ChangedFile, oldContent: string | undefined, newContent: string | undefined): Finding[] {
+  if (!/\.ya?ml$/i.test(file.path) || file.status === "deleted" || !newContent) return []
+  const err = yamlError(newContent)
+  if (!err || (oldContent !== undefined && yamlError(oldContent))) return []
+  const text = err.line ? newContent.split("\n")[err.line - 1] : undefined
+  const f = finding(
+    file,
+    "yaml-parse-error",
+    "warning",
+    "sql_correctness",
+    err.duplicate ? "YAML key defined twice" : "file no longer parses as YAML",
+    err.duplicate
+      ? `${err.message}${err.line ? ` (line ${err.line})` : ""}. A key indented one level too deep becomes a second entry of the mapping above it; parsers either reject the file or keep only one value. Check the indentation of the keys added here.`
+      : `${err.message}${err.line ? ` (line ${err.line})` : ""}. The file parsed before this change; tools that read it now fail.`,
+    text,
+  )
+  return [err.line ? { ...f, startLine: err.line, endLine: err.line } : f]
+}
+
+/** New models named like the public models a `.quickstart/quickstart.yml` lists, but missing from
+ *  its `public_models`: the quickstart setup won't expose them. */
+export function quickstartModelFindings(
+  /** Where the finding goes: the quickstart file when the PR changes it, else the new model. */
+  target: ChangedFile,
+  quickstartPath: string,
+  content: string | undefined,
+  newModels: string[],
+): Finding[] {
+  // Lenient like PyYAML: a duplicate key elsewhere in the file must not hide the list.
+  let doc: any
+  try {
+    doc = YAML.parse(content ?? "", { uniqueKeys: false })
+  } catch {
+    return []
+  }
+  const listed: string[] = Array.isArray(doc?.public_models) ? doc.public_models.filter((x: unknown) => typeof x === "string") : []
+  if (listed.length < 3) return []
+  // The package prefix (`hubspot__…`) most public models share.
+  const counts = new Map<string, number>()
+  for (const m of listed) {
+    const p = /^([a-z0-9_]+?)__/i.exec(m)?.[1]
+    if (p) counts.set(p, (counts.get(p) ?? 0) + 1)
+  }
+  const [prefix, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? ["", 0]
+  if (!prefix || n < listed.length * 0.8) return []
+  const have = new Set(listed.map((m) => m.toLowerCase()))
+  const missing = newModels.filter((m) => m.toLowerCase().startsWith(`${prefix.toLowerCase()}__`) && !have.has(m.toLowerCase()))
+  if (!missing.length) return []
+  return [
+    finding(
+      target,
+      "quickstart-public-model-missing",
+      "suggestion",
+      "materialization",
+      `new model${missing.length === 1 ? "" : "s"} missing from \`public_models\``,
+      `${missing.map((m) => `\`${m}\``).join(", ")} ${missing.length === 1 ? "is" : "are"} new and named like the ${listed.length} models \`${quickstartPath}\` lists in \`public_models\`, but ${missing.length === 1 ? "isn't" : "aren't"} listed. Add ${missing.length === 1 ? "it" : "them"}, or confirm ${missing.length === 1 ? "it is" : "they are"} meant to stay internal.`,
+    ),
+  ]
+}
+
+// ── package-lock.yml ────────────────────────────────────────────────────────
+
+/** True when the dbt project at `dir` is a package others install: it carries a dbt project
+ *  under `integration_tests/` (at any depth), or its `dbt_project.yml` names no profile. */
+export function isPackageProject(projectYml: string | undefined, hasIntegrationTests: boolean): boolean {
+  if (hasIntegrationTests) return true
+  const doc = parseYaml(projectYml)
+  return !!doc && typeof doc === "object" && !doc.profile
+}
+
+/** `package-lock.yml` added to a package: it pins the package's own dev dependencies, which
+ *  projects installing the package never read, and drifts from `packages.yml` ranges. */
+export function packageLockFindings(file: ChangedFile, isPackage: boolean): Finding[] {
+  if (!/(^|\/)package-lock\.yml$/.test(file.path) || file.status !== "added" || !isPackage) return []
+  return [
+    finding(
+      file,
+      "package-lock-in-package",
+      "suggestion",
+      "materialization",
+      "`package-lock.yml` committed in a dbt package",
+      "This repository is a dbt package (it has an `integration_tests/` project or no `profile:`). Projects that install it resolve their own dependencies and never read this lock file, while it pins the package's development installs to versions that drift from the `packages.yml` ranges. Leave it out (add it to `.gitignore`) unless the package deliberately locks its CI.",
+      addedLines(file.diff)[0],
+    ),
+  ]
+}
+
+// ── doc() references ────────────────────────────────────────────────────────
+
+const DOC_REF = /\bdoc\s*\(\s*['"](\w+)['"]\s*\)/g
+
+/** `doc('x')` names this change adds to a yml file that no docs block in the project defines:
+ *  dbt fails to parse the project. Only when another `doc()` in the file resolves in the project,
+ *  so docs kept in an installed package aren't mistaken for missing ones. */
+export async function docRefFindings(
+  file: ChangedFile,
+  oldContent: string | undefined,
+  newContent: string | undefined,
+  docExists: (name: string) => Promise<boolean>,
+): Promise<Finding[]> {
+  if (!newContent || file.status === "deleted") return []
+  const before = new Set([...(oldContent ?? "").matchAll(DOC_REF)].map((m) => m[1]))
+  const lines = new Map<string, string>()
+  for (const l of addedLines(file.diff)) for (const m of l.matchAll(DOC_REF)) if (!before.has(m[1]) && !lines.has(m[1])) lines.set(m[1], l)
+  if (!lines.size) return []
+  const missing: string[] = []
+  for (const name of [...lines.keys()].slice(0, 10)) if (!(await docExists(name))) missing.push(name)
+  if (!missing.length) return []
+  const others = [...new Set([...newContent.matchAll(DOC_REF)].map((m) => m[1]))].filter((n) => !missing.includes(n)).slice(0, 5)
+  let resolves = false
+  for (const n of others) if ((resolves = await docExists(n))) break
+  if (!resolves) return []
+  return missing.map((name) =>
+    finding(
+      file,
+      "doc-block-missing",
+      "warning",
+      "sql_correctness",
+      `\`doc('${name}')\` has no docs block`,
+      `No \`{% docs ${name} %}\` block exists in the project's \`.md\` files, while the other \`doc()\` references in this file resolve there. dbt fails to parse the project on a \`doc()\` it can't resolve. Add the docs block, or fix the name.`,
+      lines.get(name),
+    ),
+  )
+}
+
+// ── singular test windows ───────────────────────────────────────────────────
+
+const UNIT_SECONDS: Record<string, number> = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000, quarter: 7776000, year: 31536000 }
+const UNIT = "(second|minute|hour|day|week|month|quarter|year)s?"
+// `interval 1 day`, `interval '1' day`, `interval '30 minutes'`, `dateadd('day', -3, …)` / `dbt.dateadd(datepart='day', interval=-3, …)`.
+const WINDOW_RES = [
+  new RegExp(`\\binterval\\s+'?\\s*(\\d+)\\s*'?\\s*'?${UNIT}\\b'?`, "gi"),
+  new RegExp(`\\bdate_?add\\s*\\(\\s*(?:datepart\\s*=\\s*)?['"]?${UNIT}['"]?\\s*,\\s*(?:interval\\s*=\\s*)?-\\s*(\\d+)`, "gi"),
+]
+
+const COMPARISON = /(>=|<=|<>|!=|>|<|\bbetween\b)/gi
+
+/**
+ * Whether the window at `at..end` of `line` is a lookback a column must fall inside: the clock minus
+ * the window (`- interval`, `*_sub(…, interval …)`, or a negative `dateadd` count) on the right of
+ * `>`/`>=`/`between`, or on the left of `<`/`<=`. Shrinking any other window (`ts < now - 30 days`,
+ * `ts > now + interval '2 day'`) makes the test check more rows or a stricter bound, not fewer.
+ */
+function isLookback(line: string, at: number, end: number, kind: number): boolean {
+  const before = line.slice(0, at)
+  if (kind === 0 && !/-\s*$/.test(before) && !/\w*sub\s*\([^()]*(?:\([^()]*\)[^()]*)*$/i.test(before)) return false
+  const ops = [...line.matchAll(COMPARISON)]
+  const left = ops.filter((o) => o.index! < at).pop()
+  if (left) return /^(>=?|between)$/i.test(left[0])
+  const right = ops.find((o) => o.index! >= end)
+  return !!right && /^<=?$/.test(right[0])
+}
+
+/** Lookback window lengths on a line in seconds, and the line with every window masked (for pairing edits). */
+function windows(line: string): { secs: number[]; shape: string } {
+  const secs: number[] = []
+  let shape = line.replace(/--.*$/, "")
+  WINDOW_RES.forEach((re, i) => {
+    const src = shape
+    shape = shape.replace(re, (m, a: string, b: string, at: number) => {
+      const [n, unit] = i === 0 ? [a, b] : [b, a]
+      if (!isLookback(src, at, at + m.length, i)) return m
+      secs.push(Number(n) * UNIT_SECONDS[unit.toLowerCase()])
+      return "<window>"
+    })
+  })
+  return { secs, shape: shape.replace(/\s+/g, " ").trim().toLowerCase() }
+}
+
+/** A singular test whose lookback window literal got shorter: it now checks less data. */
+export function testWindowFindings(file: ChangedFile): Finding[] {
+  if (file.status !== "modified" || !/\.sql$/i.test(file.path)) return []
+  const rows = [...walkDiffRows(file.diff)]
+  const removed = rows.filter((r) => r.kind === "-").map((r) => windows(r.text)).filter((w) => w.secs.length)
+  if (!removed.length) return []
+  for (const r of rows) {
+    if (r.kind !== "+") continue
+    const now = windows(r.text)
+    if (!now.secs.length) continue
+    const was = removed.find((w) => w.shape === now.shape && w.secs.length === now.secs.length)
+    const shrunk = was && now.secs.some((s, i) => s < was.secs[i])
+    if (!was || !shrunk) continue
+    const fmt = (s: number) => {
+      const [u, n] = Object.entries(UNIT_SECONDS).reverse().find(([, n]) => s % n === 0 && s >= n) ?? ["second", 1]
+      return `${s / n} ${u}${s / n === 1 ? "" : "s"}`
+    }
+    const i = now.secs.findIndex((s, k) => s < was.secs[k])
+    const f = finding(
+      file,
+      "test-window-shrunk",
+      "suggestion",
+      "test_coverage",
+      "test lookback window got shorter",
+      `The window this test checks shrank from ${fmt(was.secs[i])} to ${fmt(now.secs[i])}, so rows outside the new window are no longer tested. If the test now runs on that schedule, say so; otherwise keep the longer window.`,
+      r.text,
+    )
+    return [{ ...f, startLine: r.line, endLine: r.line }]
+  }
+  return []
+}
+
+// ── adapter.dispatch variants ───────────────────────────────────────────────
+
+/** `adapter.dispatch('name', …)(…)` calls whose argument list carries `kw=` keywords on added
+ *  lines: the dispatched macro name, and each such keyword with the raw added line. */
+export function addedDispatchKwargs(file: ChangedFile, sql: string): { name: string; kwargs: { kw: string; line: number; text: string }[] }[] {
+  const added = [...walkDiffLines(file.diff)].filter((r) => r.kind === "+")
+  const lineAt = (i: number) => sql.slice(0, i).split("\n").length
+  const out: { name: string; kwargs: { kw: string; line: number; text: string }[] }[] = []
+  for (const m of sql.matchAll(/\badapter\.dispatch\s*\(\s*['"]([\w.]+)['"]/g)) {
+    const open = m.index! + m[0].indexOf("(")
+    const head = parenBody(sql, open)
+    const after = open + head.length + 2
+    const call = /^\s*\(/.exec(sql.slice(after))
+    if (!call) continue
+    const argsOpen = after + call[0].length - 1
+    const args = parenBody(sql, argsOpen)
+    const first = lineAt(argsOpen)
+    const last = first + args.split("\n").length - 1
+    const kws = [...topLevel(args).matchAll(/(?:^|,)\s*(\w+)\s*=(?!=)/g)].map((k) => k[1])
+    const kwargs = kws.flatMap((kw) => {
+      const hit = added.find((r) => r.line >= first && r.line <= last && new RegExp(`\\b${kw}\\s*=(?!=)`).test(r.text))
+      return hit ? [{ kw, line: hit.line, text: hit.text }] : []
+    })
+    if (kwargs.length) out.push({ name: m[1].split(".").pop()!, kwargs })
+  }
+  return out
+}
+
+/** Every `{% macro <prefix>__<name>(…) %}` in `text`: its parameters, and whether its body reads
+ *  `kwargs` outside comments and strings (Jinja then accepts any extra keyword). */
+export function dispatchVariants(text: string, name: string): { macro: string; params: string[]; acceptsKwargs: boolean }[] {
+  const out: { macro: string; params: string[]; acceptsKwargs: boolean }[] = []
+  for (const [macro, sig] of signatures(text)) {
+    // `{% test %}` blocks are never dispatch targets.
+    if (sig.test || !macro.endsWith(`__${name}`) || macro === name) continue
+    const at = new RegExp(`\\{%-?\\s*macro\\s+${escapeRe(macro)}\\s*\\(`).exec(text)?.index
+    if (at === undefined) continue
+    const end = text.slice(at).search(/\{%-?\s*endmacro\b/)
+    const body = text.slice(at, end < 0 ? undefined : at + end)
+    // Only a real `kwargs` read takes extra keywords (`varargs` takes extra positionals only); a
+    // mention in a comment or string literal does not.
+    const code = body.replace(/\{#[\s\S]*?#\}/g, " ").replace(/'[^'\n]*'|"[^"\n]*"/g, "''")
+    out.push({ macro, params: sig.params.map((p) => p.name), acceptsKwargs: /\bkwargs\b/.test(code) })
+  }
+  return out
+}
+
+/** Keywords a changed `adapter.dispatch` call now passes that an in-repo variant does not take:
+ *  on that adapter dbt fails with "takes no keyword argument". */
+export function dispatchKwargFindings(
+  file: ChangedFile,
+  sql: string,
+  variantsOf: (name: string) => { macro: string; params: string[]; acceptsKwargs: boolean }[],
+): Finding[] {
+  const out: Finding[] = []
+  for (const call of addedDispatchKwargs(file, sql)) {
+    const variants = variantsOf(call.name)
+    for (const { kw, line, text } of call.kwargs) {
+      const missing = variants.filter((v) => !v.acceptsKwargs && !v.params.includes(kw)).map((v) => v.macro)
+      if (!missing.length) continue
+      const f = finding(
+        file,
+        "dispatch-kwarg-not-in-variant",
+        "warning",
+        "sql_correctness",
+        `\`${call.name}\` now passes \`${kw}\`, which ${missing.length === 1 ? "a variant doesn't" : "some variants don't"} accept`,
+        `The \`adapter.dispatch('${call.name}')\` call passes \`${kw}=\`, but ${missing.map((v) => `\`${v}\``).join(", ")} ${missing.length === 1 ? "has" : "have"} no \`${kw}\` parameter. On ${missing.length === 1 ? "that adapter" : "those adapters"} dbt fails with "takes no keyword argument '${kw}'". Add the parameter (with a default) to every variant.`,
+        text,
+      )
+      out.push({ ...f, startLine: line, endLine: line })
+    }
+  }
+  return out
+}
+
 // ── model config combinations ───────────────────────────────────────────────
 
 const unquote = (v: string | undefined) => (v ?? "").trim().replace(/^['"]|['"]$/g, "")
@@ -365,7 +711,7 @@ export function modelConfigFindings(
   if (!/config\s*\(|unique_key|partition_by|batch_size|materialized|incremental|is_incremental/i.test(touched)) return []
   const out: Finding[] = []
   const materialized = (unquote(cfg.materialized) || String(manifestConfig?.materialized ?? "")).toLowerCase()
-  const strategy = unquote(cfg.incremental_strategy).toLowerCase()
+  const strategy = (unquote(cfg.incremental_strategy) || String(manifestConfig?.incremental_strategy ?? "")).toLowerCase()
 
   if (cfg.unique_key && (materialized === "table" || materialized === "view"))
     out.push(
@@ -423,6 +769,23 @@ export function modelConfigFindings(
           ),
         )
     }
+    // BigQuery merges scan the whole target unless `incremental_predicates` bound it: the merge
+    // condition alone never prunes target partitions. (`merge` is BigQuery's default strategy.)
+    const bigquery = dialectKnown ? /bigquery/i.test(dialect) : /['"]field['"]\s*:/.test(cfg.partition_by ?? "")
+    const predicates = cfg.incremental_predicates ?? manifestConfig?.incremental_predicates
+    const hasPredicates = Array.isArray(predicates) ? predicates.length > 0 : !!predicates && !/^\s*(none|\[\s*\])\s*$/i.test(String(predicates))
+    if (bigquery && parts.length && uk.length && (strategy === "merge" || !strategy) && !hasPredicates)
+      out.push(
+        finding(
+          file,
+          "merge-no-incremental-predicates",
+          "suggestion",
+          "warehouse_cost",
+          "incremental merge has no `incremental_predicates`",
+          `This model merges on \`unique_key\` into a table partitioned by ${parts.map((p) => `\`${p}\``).join(", ")}, with no \`incremental_predicates\`. BigQuery can't prune the target from the merge condition, so every run scans the whole table. Add a predicate on the partition column, e.g. \`incremental_predicates=["DBT_INTERNAL_DEST.${parts[0]} >= <lookback>"]\`.`,
+          addedLine(file, /\b(unique_key|partition_by|incremental_strategy)\b/) ?? addedLine(file, /\bis_incremental\s*\(/),
+        ),
+      )
     // The incremental filter should constrain the partition column, or each run scans every partition.
     const filter = incrementalFilter(newSql)
     if (parts.length && filter && !parts.some((p) => new RegExp(`\\b${p}\\b`, "i").test(filter)))
