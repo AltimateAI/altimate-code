@@ -2,7 +2,9 @@ import { describe, test, expect } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
+import { DBTFusionCommandProjectIntegration } from "@altimateai/dbt-integration"
 import { create } from "../src/adapter"
+import type { Config } from "../src/config"
 
 /** A stand-in `python` that records the DBT_TARGET_PATH each run sees and fails the bridge run. */
 function recordingPython(root: string) {
@@ -63,5 +65,30 @@ describe.skipIf(process.platform === "win32")("create's target folder", () => {
     const runs = await start()
     expect(runs.length).toBeGreaterThan(0)
     expect(new Set(runs)).toEqual(new Set(["unset"]))
+  })
+})
+
+// A Fusion config may name no Python at all. dbt-integration types the interpreter as a string and some
+// of its code calls string methods on it, so create hands it an empty one rather than undefined.
+describe("create's Python for a Fusion config without one", () => {
+  test("is the empty string", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dbt-tools-fusion-python-"))
+    const proto = DBTFusionCommandProjectIntegration.prototype as unknown as { initializeProject: () => Promise<void> }
+    const initializeProject = proto.initializeProject
+    const seen: unknown[] = []
+    // Record the interpreter the Fusion integration was given, and stop before it looks for a binary.
+    proto.initializeProject = async function (this: { pythonEnvironment: { pythonPath: unknown } }) {
+      seen.push(this.pythonEnvironment.pythonPath)
+      throw new Error("stop")
+    }
+    try {
+      writeFileSync(join(root, "dbt_project.yml"), "name: p\nversion: '1.0'\nprofile: p\n")
+      const cfg = { projectRoot: root, dbtIntegration: "fusion", queryLimit: 500 } as unknown as Config
+      await expect(create(cfg)).rejects.toThrow("stop")
+      expect(seen).toEqual([""])
+    } finally {
+      proto.initializeProject = initializeProject
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
