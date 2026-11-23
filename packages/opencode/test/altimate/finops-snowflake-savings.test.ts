@@ -1244,6 +1244,22 @@ describe("snowflake savings handler over a stubbed connection", () => {
       expect(result.price).toMatchObject({ per_credit: 2.5, source: "rate_sheet" })
     })
 
+    test("restart events alone also show the view had events for those days", async () => {
+      const RESTART = { warehouse_id: 7, warehouse_name: "BI_WH", day: "2026-11-11", gap_seconds: 30, bounces: 4 }
+      connect((sql) =>
+        sql === SNOWFLAKE_PERIOD_FACTS_SQL
+          ? table([])
+          : sql === SNOWFLAKE_RESTART_FACTS_SQL
+            ? table([RESTART])
+            : answer(() => table([{ ...HISTORY, recent_events: 0 }, ...lifecycle]))(sql),
+      )
+      const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+      expect(sent.warehouses[0]).toMatchObject({ warehouse_id: "7" })
+      expect(result.skipped?.[0]).toEqual(
+        BY_NAME_AND_TIME("WAREHOUSE_EVENTS_HISTORY returned no events for the days the other queries read events from"),
+      )
+    })
+
     test("a view with no events at all, where no other query found any, is read as it is", async () => {
       connect((sql) => (sql === SNOWFLAKE_PERIOD_FACTS_SQL ? table([]) : answer(() => table([{ ...HISTORY, recent_events: 0 }, ...lifecycle]))(sql)))
       const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
