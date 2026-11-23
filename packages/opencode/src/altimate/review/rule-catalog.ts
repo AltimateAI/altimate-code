@@ -2,6 +2,7 @@ import { type Finding, type Severity, type ReviewCategory, makeFinding } from ".
 import { type ChangedFile, fileKind } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
 import path from "node:path"
+import { capabilityFor, type AdapterCapability } from "./adapter-capabilities"
 
 /**
  * Declarative rule catalog for dbt/SQL PR review.
@@ -55,12 +56,27 @@ export interface Rule {
    *  `evidence.result.columns` / `items` so the orchestrator can reconcile each
    *  column (and its `AS` alias) with the base. */
   capturesColumns?: RegExp
+  /**
+   * Engine-dependent rule: fires as written where this capability is true for
+   * the project's adapter; where it is false, fires with `portabilityBody`
+   * instead, tagged as portability (dropped for single-engine projects, kept
+   * for packages).
+   */
+  dialectGate?: keyof Omit<AdapterCapability, "sources">
+  portabilityBody?: string
+  /** Match `added` outside quoted strings only (e.g. `'2024/01/15'` is not a division). */
+  ignoreStrings?: boolean
   example: RuleExample
   counter?: RuleExample
 }
 
 function modelName(p: string): string {
   return path.basename(p).replace(/\.(sql|py)$/i, "")
+}
+
+/** Replace quoted string contents so text inside literals can't match. */
+function stripStrings(s: string): string {
+  return s.replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"\\]|\\.)*"/g, '""')
 }
 
 function stripComments(s: string): string {
@@ -92,7 +108,7 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   let relevant = false
   if (rule.added) {
     const hit = input.added.some((l) => {
-      const s = stripComments(l)
+      const s = rule.ignoreStrings ? stripStrings(stripComments(l)) : stripComments(l)
       return rule.added!.test(s) && !(rule.unless && rule.unless.test(s))
     })
     if (!hit) return false
@@ -183,6 +199,22 @@ function capturedColumns(rule: Rule, added: string[]): SelectItemColumn[] {
   return out
 }
 
+/** The project's engine, for engine-dependent rules. Omitted = unknown. */
+export interface CatalogContext {
+  dialect: string
+  /** False when the dialect is a default guess, not read from config or the manifest. */
+  dialectKnown: boolean
+}
+
+/** The body an engine-dependent rule reports for this project, or null to stay silent. */
+function gatedBody(rule: Rule, ctx: CatalogContext | undefined): string | null {
+  if (!rule.dialectGate || !ctx?.dialectKnown) return rule.body
+  const cap = capabilityFor(ctx.dialect)
+  if (!cap) return rule.body
+  if (cap[rule.dialectGate]) return rule.body
+  return rule.portabilityBody?.replace("{dialect}", ctx.dialect) ?? null
+}
+
 /** Evaluate the catalog against a changed file. */
 export function evaluateCatalog(
   file: ChangedFile,
@@ -190,30 +222,34 @@ export function evaluateCatalog(
   added: string[],
   removed: string[],
   rubric: Rubric,
+  ctx?: CatalogContext,
 ): Finding[] {
   const input: RuleInput = { file, newSql, added, removed }
   const model = modelName(file.path)
   const matched: { rule: Rule; finding: Finding }[] = []
   for (const rule of CATALOG) {
     if (!ruleMatches(rule, input)) continue
+    const body = gatedBody(rule, ctx)
+    if (body === null) continue
     const f = makeFinding({
       severity: clampSeverity(rule.category, rule.severity, "high"),
       category: rule.category,
       title: `${model}: ${rule.title}`,
-      body: rule.body,
+      body,
       file: file.path,
       model,
       confidence: "high",
       evidence: {
         tool: "rule-catalog",
-        result: rule.portability
-          ? { rule: rule.id, portability: true, worksOn: rule.portability.worksOn }
-          : rule.capturesColumns
-            ? (() => {
-                const items = capturedColumns(rule, added)
-                return { rule: rule.id, columns: [...new Set(items.map((i) => i.column))], items }
-              })()
-            : { rule: rule.id },
+        result:
+          rule.portability || body !== rule.body
+            ? { rule: rule.id, portability: true, worksOn: rule.portability?.worksOn }
+            : rule.capturesColumns
+              ? (() => {
+                  const items = capturedColumns(rule, added)
+                  return { rule: rule.id, columns: [...new Set(items.map((i) => i.column))], items }
+                })()
+              : { rule: rule.id },
       },
       ruleKey: `${rule.category}:${rule.id}`,
     })
@@ -259,7 +295,21 @@ const r = (
   severity: Severity,
   title: string,
   body: string,
-  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "portability" | "capturesColumns">,
+  match: Pick<
+    Rule,
+      | "added"
+      | "removed"
+      | "newSql"
+      | "absentNewSql"
+      | "unless"
+      | "kind"
+      | "pathGlob"
+      | "portability"
+      | "capturesColumns"
+      | "dialectGate"
+      | "portabilityBody"
+      | "ignoreStrings"
+  >,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
@@ -1922,10 +1972,21 @@ const MISC: Rule[] = [
     "sql_correctness",
     "suggestion",
     "integer division truncates",
-    "`5 / 2` does integer division (=2) on many warehouses; cast a side to numeric for a real ratio.",
-    { added: /(?<![\d.])\d+\s*\/\s*\d+(?![\d.])/ },
-    { add: "select 7 / 2 as r" },
-    { add: "select 7.0 / 2 as r" },
+    "`7 / 2` returns 3, not 3.5, on Postgres, Redshift, Trino/Athena and SQL Server (`count(…) / count(…)` too): " +
+      "integer division drops the fraction. Cast one side to numeric for a real ratio.",
+    {
+      // A count ratio already made numeric (`100.0 * count(…) / …`, a trailing
+      // `::float` cast on the divisor) does not truncate.
+      added:
+        /(?<![\w.])\d[\d_]*\s*\/\s*\d[\d_]*(?![\d.])|(?<!\d*\.\d*\s*\*\s*)\bcount\s*\([^()]*\)\s*\/\s*(?:nullif\s*\(\s*count\s*\([^()]*\)\s*,[^()]*\)|count\s*\([^()]*\))(?!\s*::)/i,
+      dialectGate: "integerDivisionTruncates",
+      ignoreStrings: true,
+      portabilityBody:
+        "Not portable: `int / int` (including `count(…) / count(…)`) returns a decimal on {dialect} but truncates on " +
+        "Postgres, Redshift, Trino/Athena and SQL Server. In a package that supports several adapters, cast one side to numeric.",
+    },
+    { add: "select count(*) / count(distinct user_id) as r" },
+    { add: "select count(*) * 1.0 / count(distinct user_id) as r" },
   ),
   r(
     "mod-by-zero",
