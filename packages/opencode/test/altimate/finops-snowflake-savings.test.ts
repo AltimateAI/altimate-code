@@ -947,7 +947,7 @@ describe("building the facts", () => {
       })
 
       test("a rename after the view's latest event: the creation names the warehouse once its usage shows the new name", () => {
-        // ETL_WH (id 5) was renamed NEW_WH an hour ago; its usage and events carry only the old name.
+        // ETL_WH (id 5) was renamed NEW_WH an hour ago; its creation carries the old name, and it has metered an hour under the new one.
         const rows = { warehouses: [show({ name: "NEW_WH", created_on: new Date("2026-06-01T00:00:00Z") })], metering: [metered(5, "ETL_WH", "2026-11-12T08:00:00Z", 7), metered(5, "NEW_WH", "2026-11-12T09:00:00Z", 1)], ...none }
         expect(buildFacts(rows).facts[0]).toMatchObject({ warehouse_id: "5" })
         const { facts, unlisted } = buildFacts({ ...rows, lifecycle: [event("create", 5, "ETL_WH", "2026-06-01T00:00:00.500Z")] })
@@ -955,6 +955,15 @@ describe("building the facts", () => {
         expect(credits(facts[0]!)).toEqual([8])
         expect(unlisted).toEqual([])
       })
+    })
+
+    test("a rename since the warehouse's last run leaves its usage unattributed rather than guessed from time", () => {
+      // ETL_WH (id 5) was renamed NEW_WH after its last run: no usage or event carries the new name, so a creation in
+      // the same second as `created_on` is indistinguishable from another warehouse's.
+      const rows = { warehouses: [show({ name: "NEW_WH", created_on: new Date("2026-06-01T00:00:00Z") })], metering: [metered(5, "ETL_WH", "2026-11-12T08:00:00Z", 7)], ...none }
+      const { facts, unlisted } = buildFacts({ ...rows, lifecycle: [event("create", 5, "ETL_WH", "2026-06-01T00:00:00.500Z")] })
+      expect(facts[0]).toMatchObject({ warehouse_id: "unused:NEW_WH", usage_days: [] })
+      expect(unlisted).toEqual(["ETL_WH"])
     })
 
     describe("a creation names a warehouse's id only when it is the one match", () => {
