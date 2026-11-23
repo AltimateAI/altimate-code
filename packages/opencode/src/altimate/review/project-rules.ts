@@ -3,9 +3,10 @@
 import path from "path"
 import YAML from "yaml"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
-import type { ChangedFile } from "./diff-filter"
+import { type ChangedFile, walkDiffLines } from "./diff-filter"
 import { incrementalFilter, inlineConfig } from "./incremental-semantics"
 import { parenBody, topLevel } from "./rule-catalog"
+import { capabilityFor } from "./adapter-capabilities"
 
 const nameOf = (p: string) => path.basename(p).replace(/\.(sql|py|ya?ml|csv)$/i, "")
 
@@ -16,6 +17,8 @@ function finding(
   category: ReviewCategory,
   title: string,
   body: string,
+  /** The raw added line the rule matched, when it matches one. */
+  line?: string,
   /** What the finding is about (a ref target, a column, a macro), so two findings of one rule in one file keep distinct ids. */
   subject?: string,
 ): Finding {
@@ -28,13 +31,17 @@ function finding(
     file: file.path,
     model,
     confidence: "high",
-    evidence: { tool: "dbt-project-rules", result: { rule } },
+    evidence: { tool: "dbt-project-rules", result: line === undefined ? { rule } : { rule, line } },
     ruleKey: subject ? `${category}:${rule}:${subject}` : `${category}:${rule}`,
   })
 }
 
 const addedLines = (diff: string | undefined) =>
   (diff ?? "").split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1))
+
+/** The first added line matching `re`, for anchoring a finding to the diff. */
+const addedLine = (file: ChangedFile, re: RegExp) => addedLines(file.diff).find((l) => re.test(l))
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 function parseYaml(text: string | undefined): any {
   if (!text) return undefined
@@ -71,6 +78,7 @@ export function packagesFindings(file: ChangedFile, newContent: string | undefin
       "materialization",
       "package installed from a git branch",
       `${list} tracks a branch, so \`dbt deps\` installs whatever the branch holds on the day it runs. Pin a release (\`package:\` + \`version:\` range) or a tag/commit sha before merging.`,
+      addedLines(file.diff).find((l) => l.includes(touched[0].git)),
     ),
   ]
 }
@@ -133,6 +141,7 @@ export function dbtProjectFindings(file: ChangedFile, oldContent: string | undef
             "sql_quality",
             `duplicate grantee under \`${at}.${priv}\``,
             `${[...new Set(dups)].map((d) => `\`${d}\``).join(", ")} is listed more than once. Usually a copy-paste where another role was meant; check the list is complete.`,
+            undefined,
             `${at}.${priv}`,
           ),
         )
@@ -150,6 +159,7 @@ export function dbtProjectFindings(file: ChangedFile, oldContent: string | undef
         "lineage_breakage",
         "resources disabled in dbt_project.yml",
         "This change adds `enabled: false`. Disabled models drop out of the DAG: anything that refs them fails to compile and their tables stop refreshing. Say in the PR why, and whether downstream models are disabled too.",
+        addedLine(file, /^\s*\+?enabled\s*:\s*false\b/i),
       ),
     )
   return out
@@ -195,6 +205,18 @@ export function jinjaBalance(sql: string): string | undefined {
   return undefined
 }
 
+/** The first added head line inside macro `name`'s parameter list in `sql`
+ *  (a multi-line signature changes on a parameter line, not the `{% macro`
+ *  line), with its text; undefined when the PR added none of those lines. */
+function signatureAnchor(file: ChangedFile, sql: string, name: string): { line: number; text: string } | undefined {
+  const m = new RegExp(`\\{%-?\\s*macro\\s+${escapeRe(name)}\\s*\\([^)]*\\)`).exec(sql)
+  if (!m) return undefined
+  const first = sql.slice(0, m.index).split("\n").length
+  const last = first + m[0].split("\n").length - 1
+  const hit = [...walkDiffLines(file.diff)].find((r) => r.kind === "+" && r.line >= first && r.line <= last)
+  return hit && { line: hit.line, text: hit.text }
+}
+
 const macroSignatures = (sql: string | undefined) => {
   const out = new Map<string, string[]>()
   for (const m of (sql ?? "").matchAll(/\{%-?\s*macro\s+([\w.]+)\s*\(([^)]*)\)/g))
@@ -205,7 +227,7 @@ const macroSignatures = (sql: string | undefined) => {
 /** The comment text on a line (`-- …`, `/* … *\/`, `{# … #}`), or "". */
 const commentOf = (l: string) => /--(.*)$|\/\*(.*?)(\*\/|$)|\{#(.*?)(#\}|$)/.exec(l)?.slice(1).filter(Boolean).join(" ") ?? ""
 const TEMP_MARKER =
-  /\b(temp(orary)?\b.{0,40}\b(ci|test|validation|sample|debug|hack)|revert\b.{0,30}\b(to|before|after)\b|do\s+not\s+merge|remove\s+before\s+(merge|release)|ci\s+test\b|for\s+testing\s+only)/i
+  /\b(temp(orary)?\b.{0,40}\b(ci|test|validation|sample|debug|hack)|revert\b.{0,30}\b(to|before|after)\b|do\s+not\s+merge|remove\s+before\s+(merge|release)|ci\s+test\b|for\s+testing\s+only|take\s+(this|it)\s+out\s+(before|once|after|when)\b|\b(added|enabled|only)\s+while\s+debugging\b|(remove|delete|drop)\s+(this|it)\s+before\s+(merg|releas|deploy|prod))/i
 
 const varNames = (sql: string | undefined) => new Set([...(sql ?? "").matchAll(/\bvar\s*\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]))
 
@@ -234,18 +256,19 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
       if (!old || old.length === 0) continue
       const kept = old.filter((p) => params.includes(p))
       const shifted = kept.filter((p) => params.indexOf(p) !== old.indexOf(p))
-      if (shifted.length)
-        out.push(
-          finding(
-            file,
-            "macro-param-shifted",
-            "warning",
-            "sql_correctness",
-            `\`${name}\` parameters moved position`,
-            `${shifted.map((p) => `\`${p}\``).join(", ")} ${shifted.length === 1 ? "is" : "are"} no longer at the same position in \`${name}(${params.join(", ")})\`. Callers that pass arguments positionally now bind them to different parameters. Add new parameters at the end, or check every caller uses keywords.`,
-            name,
-          ),
-        )
+      if (!shifted.length) continue
+      const at = signatureAnchor(file, newContent, name)
+      const f = finding(
+        file,
+        "macro-param-shifted",
+        "warning",
+        "sql_correctness",
+        `\`${name}\` parameters moved position`,
+        `${shifted.map((p) => `\`${p}\``).join(", ")} ${shifted.length === 1 ? "is" : "are"} no longer at the same position in \`${name}(${params.join(", ")})\`. Callers that pass arguments positionally now bind them to different parameters. Add new parameters at the end, or check every caller uses keywords.`,
+        at?.text ?? addedLine(file, new RegExp(`\\bmacro\\s+${escapeRe(name)}\\s*\\(`)),
+        name,
+      )
+      out.push(at ? { ...f, startLine: at.line, endLine: at.line } : f)
     }
 
     // A var() key renamed with no fallback: projects that set the old key lose their override silently.
@@ -285,10 +308,12 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
         "sql_correctness",
         "code marked temporary is part of the change",
         `\`${marker.trim().slice(0, 160)}\` says it is temporary. If this merges, the temporary filter, date or sample ships to production. Revert it, or drop the comment if it is meant to stay.`,
+        marker,
       ),
     )
 
-  if (addedLines(file.diff).some((l) => /modules\.datetime\.datetime\.utcnow\s*\(/.test(l)))
+  const utcnow = addedLine(file, /modules\.datetime\.datetime\.utcnow\s*\(/)
+  if (utcnow !== undefined)
     out.push(
       finding(
         file,
@@ -297,6 +322,7 @@ export function jinjaFindings(file: ChangedFile, oldContent: string | undefined,
         "idempotency",
         "`datetime.utcnow()` returns a naive timestamp",
         "`utcnow()` is deprecated since Python 3.12 and returns a timestamp with no timezone, which compares wrongly against aware ones. Use `modules.datetime.datetime.now(modules.datetime.timezone.utc)`.",
+        utcnow,
       ),
     )
   return out
@@ -329,6 +355,8 @@ export function modelConfigFindings(
   dialect: string,
   /** The manifest's config for the model: fills what the file leaves to project defaults. */
   manifestConfig?: Record<string, unknown>,
+  /** False when `dialect` is a default guess, not read from config or the manifest. */
+  dialectKnown = true,
 ): Finding[] {
   if (!newSql || file.status === "deleted") return []
   const cfg = inlineConfig(newSql)
@@ -348,12 +376,18 @@ export function modelConfigFindings(
         "materialization",
         `\`unique_key\` has no effect on a ${materialized}`,
         `\`unique_key\` only drives incremental merges; on a \`${materialized}\` it neither deduplicates nor checks anything. Add a \`unique\` / \`unique_combination_of_columns\` test to enforce it.`,
+        addedLine(file, /\bunique_key\b/),
       ),
     )
 
   // dbt-bigquery requires microbatch `batch_size` to equal the partition granularity.
-  // A `partition_by` dict with `granularity` is BigQuery's syntax, so it identifies the adapter too.
-  if (strategy === "microbatch" && (/bigquery/i.test(dialect) || /['"]granularity['"]\s*:/.test(cfg.partition_by ?? ""))) {
+  // On a known adapter its capability decides; otherwise a `partition_by` dict with
+  // `granularity` (BigQuery's syntax) identifies the adapter.
+  const cap = dialectKnown ? capabilityFor(dialect) : undefined
+  const batchMustMatchPartition = cap
+    ? !!cap.microbatchBatchSizeMatchesPartition
+    : /bigquery/i.test(dialect) || /['"]granularity['"]\s*:/.test(cfg.partition_by ?? "")
+  if (strategy === "microbatch" && batchMustMatchPartition) {
     const sizes = valueLiterals(cfg.batch_size, newSql).filter((s) => ["hour", "day", "month", "year"].includes(s))
     const gran = /['"]granularity['"]\s*:\s*['"](\w+)['"]/i.exec(cfg.partition_by ?? "")?.[1]?.toLowerCase() ?? (cfg.partition_by ? "day" : undefined)
     const off = gran ? sizes.filter((s) => s !== gran) : []
@@ -366,6 +400,7 @@ export function modelConfigFindings(
           "materialization",
           "microbatch `batch_size` differs from the partition granularity",
           `\`batch_size\` can be ${off.map((s) => `\`${s}\``).join(", ")} but \`partition_by\` granularity is \`${gran}\`. dbt-bigquery rejects a microbatch model whose batch size and partition granularity differ, so those runs fail before executing.`,
+          addedLine(file, /\bbatch_size\b/) ?? addedLine(file, /\bgranularity\b|\bpartition_by\b/),
         ),
       )
   }
@@ -384,6 +419,7 @@ export function modelConfigFindings(
             "warehouse_cost",
             "partition column is not in the merge `unique_key`",
             `The table is partitioned by ${missing.map((p) => `\`${p}\``).join(", ")}, which \`unique_key\` [${uk.join(", ")}] doesn't include, so the merge can't prune target partitions and scans the whole table. Add the partition column to \`unique_key\` (or \`incremental_predicates\`).`,
+            addedLine(file, /\bunique_key\b/) ?? addedLine(file, /\bpartition_by\b/),
           ),
         )
     }
@@ -403,7 +439,8 @@ export function modelConfigFindings(
     // Filtering on a creation timestamp misses updates to rows created earlier.
     // Rows are expected to change when the model carries an update timestamp or merges on a key.
     const rowsChange = /\b\w*(updated|modified|changed)(_at|_on|_date|_ts|_time)\b/i.test(newSql) || (uk.length > 0 && strategy !== "append")
-    if (filter && /\b\w*(created|inserted)(_at|_on|_date|_ts|_time)\b/i.test(filter) && !/\b\w*(updated|modified|changed)\w*\b/i.test(filter) && rowsChange)
+    const created = filter && /\b\w*(created|inserted)(_at|_on|_date|_ts|_time)\b/i.exec(filter)?.[0]
+    if (filter && created && !/\b\w*(updated|modified|changed)\w*\b/i.test(filter) && rowsChange)
       out.push(
         finding(
           file,
@@ -412,6 +449,9 @@ export function modelConfigFindings(
           "materialization",
           "incremental filter reads new rows only, not updated ones",
           `The \`is_incremental()\` filter keys on a creation timestamp while ${/\b\w*(updated|modified|changed)(_at|_on|_date|_ts|_time)\b/i.test(newSql) ? "the model also carries an update timestamp" : "the model merges on \`unique_key\`, so existing rows are expected to change"}. Rows created before the last run and changed since are never picked up again. Filter on the update timestamp, or explain why rows never change.`,
+          // The first added line that compares the creation timestamp. `filter` is
+          // tokenised, so the raw line is matched on the column and a comparison.
+          addedLines(file.diff).find((l) => new RegExp(`\\b${created}\\b`, "i").test(l) && /[<>]=?|\bbetween\b/i.test(l)),
         ),
       )
   }
@@ -436,13 +476,14 @@ function editDistance(a: string, b: string): number {
 
 /** Single-argument `ref('x')` on added lines whose target no resource carries. */
 export function missingRefFindings(file: ChangedFile, names: Set<string>): Finding[] {
-  const refs = new Set<string>()
+  const refs = new Map<string, string>()
   for (const l of addedLines(file.diff))
-    for (const m of l.matchAll(/\bref\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*v(?:ersion)?\s*=\s*[^)]*)?\)/g)) refs.add(m[1])
+    for (const m of l.matchAll(/\bref\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*v(?:ersion)?\s*=\s*[^)]*)?\)/g))
+      if (!refs.has(m[1])) refs.set(m[1], l)
   // Versioned models live in `<name>_v1.sql`, `<name>_v2.sql`; `ref('<name>')` resolves to one of them.
   const known = new Set(names)
   for (const n of names) known.add(n.replace(/_v\d+$/, ""))
-  const missing = [...refs].filter((r) => !known.has(r.toLowerCase()) && !known.has(r.toLowerCase().replace(/_v\d+$/, "")))
+  const missing = [...refs.keys()].filter((r) => !known.has(r.toLowerCase()) && !known.has(r.toLowerCase().replace(/_v\d+$/, "")))
   return missing.map((r) => {
     const near = [...names].filter((n) => Math.abs(n.length - r.length) <= 2 && editDistance(n, r.toLowerCase()) <= 2)
     return finding(
@@ -452,6 +493,7 @@ export function missingRefFindings(file: ChangedFile, names: Set<string>): Findi
       "sql_correctness",
       `\`ref('${r}')\` points at no model`,
       `No model, seed or snapshot named \`${r}\` exists in this project or its installed packages, so dbt fails to parse the project.${near.length ? ` Did you mean ${near.slice(0, 3).map((n) => `\`${n}\``).join(", ")}?` : " Add the model in this PR or fix the name."}`,
+      refs.get(r),
       r.toLowerCase(),
     )
   })
@@ -623,6 +665,7 @@ export function testsOnNullColumns(file: ChangedFile, ymlContent: string | undef
           "test_coverage",
           `\`${m.name}.${c.name}\` is tested but the model sets it to NULL`,
           `\`${m.name}\` selects \`${c.name}\` as a literal NULL, so its ${failing.map((t) => `\`${t}\``).join(" / ")} test fails on every row. Drop the test until the column is populated, or populate it.`,
+          addedLine(file, new RegExp(`\\b${escapeRe(col)}\\b`, "i")) ?? addedLine(file, /not_null/),
           `${m.name}.${c.name}`,
         ),
       )

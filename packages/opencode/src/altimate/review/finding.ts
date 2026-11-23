@@ -89,6 +89,27 @@ export const Finding = z.object({
    *  verdict unless the rubric opts a named catalog rule in. Stamped by
    *  buildEnvelope from `evidence.tool`. */
   origin: z.enum(["engine", "catalog", "ai"]).optional(),
+  /** Stable rule id, `tool:rule`, normalised by `ruleId`. Keys the per-rule
+   *  posting policy; not part of the fingerprint. */
+  rule: z.string().optional(),
+  /** True when the finding sits on a line the PR did not add. */
+  preExisting: z.boolean().optional(),
+  /** True when the line stands in for code the PR removed (the head-side site
+   *  of a deletion): the finding concerns the PR's own change, so a context
+   *  line does not make it pre-existing. */
+  deletionSite: z.boolean().optional(),
+  /** Where the finding is posted: inline on the diff, or in the summary only. */
+  tier: z.enum(["inline", "summary"]).optional(),
+  /** The source line the finding points at, quoted as evidence. */
+  evidenceLine: z.string().max(200).optional(),
+  /** A replacement for a line range, rendered as a suggestion block. */
+  suggestion: z
+    .object({
+      startLine: z.number().int().positive(),
+      endLine: z.number().int().positive(),
+      replacement: z.string().max(2000),
+    })
+    .optional(),
 })
 export type Finding = z.infer<typeof Finding>
 
@@ -145,8 +166,32 @@ export function fingerprint(input: FingerprintInput): string {
   return "f_" + createHash("sha256").update(canonical).digest("hex").slice(0, 16)
 }
 
-/** Build a finding, auto-assigning the fingerprint id when not supplied. */
+/** Normalise one half of a rule id: lowercase, `_` to `-`, any other run of
+ *  characters outside `[a-z0-9.-]` to a single `-`, no leading/trailing `-`. */
+export function normRuleToken(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+/** The stable `tool:rule` id used to key per-rule posting policy. */
+export function ruleId(tool: string, rule: string): string {
+  return `${normRuleToken(tool)}:${normRuleToken(rule)}`
+}
+
+/** Build a finding, auto-assigning the fingerprint id when not supplied. The
+ *  `rule` id is derived from the evidence when not supplied; it never feeds the
+ *  fingerprint, so ids stay stable across the change. */
 export function makeFinding(input: Omit<z.input<typeof Finding>, "id"> & { id?: string; ruleKey?: string }): Finding {
+  const result = input.evidence?.result as { rule?: unknown; code?: unknown } | undefined
+  const rule =
+    input.rule ??
+    (input.evidence?.tool
+      ? ruleId(input.evidence.tool, String(result?.rule ?? result?.code ?? groupKeyTitle(input)))
+      : undefined)
   const id =
     input.id ??
     fingerprint({
@@ -156,7 +201,7 @@ export function makeFinding(input: Omit<z.input<typeof Finding>, "id"> & { id?: 
       column: input.column,
       ruleKey: input.ruleKey ?? input.title,
     })
-  return Finding.parse({ ...input, id })
+  return Finding.parse({ ...input, id, rule })
 }
 
 /** Serialize findings as JSONL (one finding per line). */
@@ -244,7 +289,7 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
       out.push(f)
       continue
     }
-    const key = [f.file, f.category, f.severity, !!f.degraded, groupKeyTitle(f)].join("|")
+    const key = [f.file, f.category, f.severity, !!f.degraded, !!f.preExisting, groupKeyTitle(f)].join("|")
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])

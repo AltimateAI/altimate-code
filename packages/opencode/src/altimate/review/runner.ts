@@ -437,6 +437,49 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       return Array.isArray(pk) && pk.length ? pk.map((c: string) => String(c)) : undefined
     },
 
+    async graphParents(paths: string[]) {
+      const raw = loadRawManifest(opts.manifestPath)
+      if (!raw) return []
+      const project = raw.metadata?.project_name
+      const nodes = Object.values<any>(raw.nodes ?? {})
+      // A changed path may carry a prefix the manifest's project-relative paths don't.
+      const owner = (ofp: string) => paths.find((p) => p === ofp || p.endsWith("/" + ofp))
+      const parents = new Map<string, { path: string; kind: string; name: string; forPaths: string[]; columns?: string[] }>()
+      const add = (key: string, entry: { path: string; kind: string; name: string; columns?: string[] }, forPath: string) => {
+        const hit = parents.get(key) ?? { ...entry, forPaths: [] }
+        if (!hit.forPaths.includes(forPath)) hit.forPaths.push(forPath)
+        parents.set(key, hit)
+      }
+      // Paths are only resolvable for the root project's files; installed packages live elsewhere.
+      const local = (n: any) => !project || !n?.package_name || n.package_name === project
+      for (const node of nodes) {
+        const ofp: string | undefined = node?.original_file_path
+        if (!ofp || !local(node)) continue
+        const changed = owner(ofp)
+        if (!changed) continue
+        const base = changed.slice(0, changed.length - ofp.length)
+        for (const uid of asArray<string>(node.depends_on?.nodes)) {
+          const parent = raw.nodes?.[uid]
+          if (parent?.original_file_path && ["model", "seed", "snapshot"].includes(parent.resource_type)) {
+            if (!local(parent)) continue
+            add(uid, { path: base + parent.original_file_path, kind: parent.resource_type, name: parent.name }, changed)
+            continue
+          }
+          const source = raw.sources?.[uid]
+          if (source && local(source)) {
+            const columns = Object.keys(source.columns ?? {})
+            add(uid, { path: base + source.original_file_path, kind: "source", name: `${source.source_name}.${source.name}`, columns }, changed)
+          }
+        }
+        for (const uid of asArray<string>(node.depends_on?.macros)) {
+          const macro = raw.macros?.[uid]
+          if (macro?.original_file_path && project && macro.package_name === project)
+            add(uid, { path: base + macro.original_file_path, kind: "macro", name: macro.name }, changed)
+        }
+      }
+      return [...parents.values()].filter((p) => !paths.includes(p.path))
+    },
+
     async downstreamModels(model: string): Promise<Array<{ name: string; path: string }>> {
       const m = await loadManifest()
       const node = m.byName.get(model)

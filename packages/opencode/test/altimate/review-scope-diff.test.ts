@@ -7,7 +7,9 @@ import { promisify } from "node:util"
 import { collectChangedFiles, resolveReviewBase } from "../../src/altimate/review/git"
 import { classifyDbtFile, scopeToProject, type ChangedFile } from "../../src/altimate/review/diff-filter"
 import { dbtProjectLayout } from "../../src/altimate/review/compiled"
-import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { runReview, markPreExisting, addedLinesByFile, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { makeFinding, mergeRepeats, type Finding } from "../../src/altimate/review/finding"
+import { computeIdealVerdict } from "../../src/altimate/review/verdict"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { reviewPullRequest } from "../../src/altimate/review/run"
@@ -246,6 +248,18 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
     expect(r.movedUnchanged).toBe(0)
   })
 
+  test("the dropped files are listed by path for the coverage ledger", () => {
+    const macroMove: ChangedFile = {
+      path: "projects/a/macros/utils/sub/m.sql",
+      oldPath: "projects/a/macros/utils/m.sql",
+      status: "renamed",
+      similarity: 100,
+    }
+    const r = scopeToProject([...files, macroMove], "projects/a")
+    expect(r.outOfScopePaths).toEqual(["projects/b/models/y.sql", ".github/workflows/ci.yml"])
+    expect(r.movedUnchangedPaths).toEqual(["projects/a/macros/utils/sub/m.sql"])
+  })
+
   test("project at the repo root keeps every file", () => {
     expect(scopeToProject(files, "").outOfScope).toBe(0)
   })
@@ -323,6 +337,75 @@ describe("classifyDbtFile: the project's own directories decide", () => {
     expect(classifyDbtFile("models/tests/helper.sql")).toBe("model_sql")
     expect(classifyDbtFile("tests/models/assert_x.sql")).toBe("test")
     expect(classifyDbtFile("models/marts/_marts.yml")).toBe("schema_yml")
+  })
+})
+
+describe("layout dirs outside the project root (shared macros in a monorepo)", () => {
+  async function solanaLayout(macroPaths: string) {
+    const root = await newRepo()
+    await write(root, "dbt_subprojects/solana/dbt_project.yml", `name: solana\nmacro-paths: ${macroPaths}\n`)
+    return dbtProjectLayout(path.join(root, "dbt_subprojects/solana"), "dbt_subprojects/solana")
+  }
+
+  test("a macro dir above the root classifies as macro, stays in scope and reaches the AI lane", async () => {
+    const layout = await solanaLayout(`["macros", "../../dbt_macros"]`)
+    expect(classifyDbtFile("dbt_macros/shared/x.sql", layout)).toBe("macro")
+    expect(classifyDbtFile("dbt_subprojects/solana/macros/y.sql", layout)).toBe("macro")
+    const files: ChangedFile[] = [
+      { path: "dbt_macros/shared/x.sql", status: "modified", diff: "+{% macro x() %}1{% endmacro %}\n" },
+      { path: "dbt_subprojects/solana/models/m.sql", status: "modified", diff: "+select 1 as id\n" },
+      { path: "dbt_subprojects/ethereum/models/e.sql", status: "modified", diff: "+select 1 as id\n" },
+    ]
+    const r = scopeToProject(files, layout!.root, layout)
+    expect(r.inScope.map((f) => f.path)).toEqual(["dbt_macros/shared/x.sql", "dbt_subprojects/solana/models/m.sql"])
+    expect(r.outOfScope).toBe(1)
+    // Without the layout the shared macro dir is out of scope, as before.
+    expect(scopeToProject(files, layout!.root).outOfScope).toBe(2)
+
+    let aiPaths: Array<{ path: string; kind?: string }> = []
+    await runReview({
+      changedFiles: r.inScope,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      layout,
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return { grade: "B" }
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: false }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+      } as unknown as ReviewRunner,
+      getContent: async (f, side) => (side === "old" ? undefined : f.endsWith("x.sql") ? "{% macro x() %}1{% endmacro %}\n" : "select 1 as id\n"),
+      getCompiled: async () => undefined,
+      aiReview: async (input) => {
+        aiPaths = input.files.map((f) => ({ path: f.path, kind: f.kind }))
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    expect(aiPaths).toContainEqual({ path: "dbt_macros/shared/x.sql", kind: "macro" })
+  })
+
+  test("a layout dir that escapes the repository is ignored", async () => {
+    const layout = await solanaLayout(`["macros", "../../../outside"]`)
+    const files: ChangedFile[] = [
+      { path: "outside/x.sql", status: "modified" },
+      { path: "../outside/x.sql", status: "modified" },
+    ]
+    const r = scopeToProject(files, layout!.root, layout)
+    expect(r.inScope).toEqual([])
+    expect(r.outOfScope).toBe(2)
+    expect(classifyDbtFile("outside/x.sql", layout)).toBe("other")
   })
 })
 
@@ -513,4 +596,68 @@ describe("a shallow CI checkout without the target branch", () => {
     const resolved = await resolveReviewBase({ cwd: clone, head: "origin/pr", env: { GITHUB_BASE_REF: "main" } })
     expect(resolved.sha).toBe(branchPoint)
   }, 60_000)
+})
+
+describe("changed-line awareness: findings on lines the PR did not add", () => {
+  // Head lines: 10 and 11 are context, 12 is added, 13 is context.
+  const diff = [
+    "diff --git a/models/m.sql b/models/m.sql",
+    "--- a/models/m.sql",
+    "+++ b/models/m.sql",
+    "@@ -10,3 +10,4 @@",
+    " select a,",
+    "   b,",
+    "+  c,",
+    "   d",
+    "",
+  ].join("\n")
+  const file: ChangedFile = { path: "models/m.sql", status: "modified", diff }
+  const at = (line: number, title = `m: risky join on line ${line}`): Finding =>
+    makeFinding({
+      category: "sql_quality",
+      severity: "warning",
+      confidence: "high",
+      file: "models/m.sql",
+      startLine: line,
+      title,
+      body: "body",
+      evidence: { tool: "dbt.manifest", result: { rule: "risky-join" } },
+    })
+
+  test("a finding on a context line is marked pre-existing and keeps its line", () => {
+    const [ctx, added] = markPreExisting([at(11), at(12)], [file])
+    expect(ctx.preExisting).toBe(true)
+    expect(ctx.startLine).toBe(11)
+    expect(added.preExisting).toBeUndefined()
+    expect(added.startLine).toBe(12)
+  })
+
+  test("a line outside the hunks keeps its line and is not marked", () => {
+    const [far] = markPreExisting([at(40)], [file])
+    expect(far.startLine).toBe(40)
+    expect(far.preExisting).toBeUndefined()
+  })
+
+  test("every line of a newly added file counts as added", () => {
+    const fresh: ChangedFile = { path: "models/m.sql", status: "added", diff: "@@ -0,0 +1,2 @@\n+select 1\n+from x\n" }
+    expect([...addedLinesByFile([fresh]).get("models/m.sql")!]).toEqual([1, 2])
+    expect([...addedLinesByFile([file]).get("models/m.sql")!]).toEqual([12])
+    const [f] = markPreExisting([at(1)], [fresh])
+    expect(f.preExisting).toBeUndefined()
+  })
+
+  test("pre-existing warnings do not count toward the verdict", () => {
+    const pre = markPreExisting([at(10, "m: a"), at(11, "m: b"), at(13, "m: c")], [file])
+    expect(pre.every((f) => f.preExisting)).toBe(true)
+    // Three engine warnings meet the default risk-pattern threshold; pre-existing ones must not.
+    expect(computeIdealVerdict(pre, DEFAULT_RUBRIC)).toBe("COMMENT")
+    const fresh = pre.map(({ preExisting: _p, ...f }) => f as Finding)
+    expect(computeIdealVerdict(fresh, DEFAULT_RUBRIC)).toBe("REQUEST_CHANGES")
+  })
+
+  test("mergeRepeats keeps pre-existing and new instances of one rule apart", () => {
+    const merged = mergeRepeats(markPreExisting([at(11, "m: risky join on `a`"), at(12, "m: risky join on `c`")], [file]))
+    expect(merged).toHaveLength(2)
+    expect(merged.filter((f) => f.preExisting)).toHaveLength(1)
+  })
 })

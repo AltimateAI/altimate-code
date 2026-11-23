@@ -62,17 +62,27 @@ const unquote = (s: string) => s.replace(/^["`\[]|["`\]]$/g, "")
 /** A top-level set operator (parenthesized groups are already blanked). */
 const SET_OP = /\b(union|intersect|except|minus)\b(\s+(all|distinct))?\s*(\bselect\b|\()/i
 
+/**
+ * Offset just past the `select` keyword of the final top-level query. For a
+ * set operation (`… union all select …`) that is the chain's first branch,
+ * which names the output columns.
+ */
+function finalSelectStart(flat: string): number | undefined {
+  const selects = [...flat.matchAll(/\bselect\b/gi)]
+  if (!selects.length) return undefined
+  const head = SET_OP.test(flat) ? selects[0] : selects[selects.length - 1]
+  return head.index! + "select".length
+}
+
 /** Output names of the final top-level SELECT, or null when unknown (`*`, unparseable).
  *  A set operation (`UNION` …) takes its names from its first branch. Items it
  *  cannot name contribute nothing, unless `complete` is set: then any unnamed
  *  item makes the whole list unknown (null). */
 export function selectListNames(sql: string, opts: { complete?: boolean } = {}): string[] | null {
   const flat = flatten(sql)
-  const selects = [...flat.matchAll(/\bselect\b/gi)]
-  if (!selects.length) return null
-  const head = SET_OP.test(flat) ? selects[0] : selects[selects.length - 1]
-  const start = head.index! + "select".length
-  const fromRel = flat.slice(start).search(/\bfrom\b/i)
+  const start = finalSelectStart(flat)
+  if (start === undefined) return null
+  const fromRel = flat.slice(start).search(/\b(from|union|intersect|except|minus)\b/i)
   const listFlat = flat.slice(start, fromRel < 0 ? undefined : start + fromRel)
   const listRaw = blankComments(sql).slice(start, fromRel < 0 ? undefined : start + fromRel)
   // Split on top-level commas (the flattened text has no nested commas).
@@ -98,4 +108,38 @@ export function selectListNames(sql: string, opts: { complete?: boolean } = {}):
     else if (opts.complete) return null
   }
   return names
+}
+
+/**
+ * Output names of the final SELECT, following `select * from <cte>` to that
+ * CTE's own select list (dbt's `select * from final`). Null when unknown;
+ * `complete` is passed to `selectListNames`.
+ */
+export function finalSelectNames(sql: string, opts: { complete?: boolean } = {}): string[] | null {
+  // String contents blanked too, so a `')'` literal can't close a CTE body early.
+  const text = blankComments(sql).replace(/'(?:[^']|'')*'/g, (m) => "'" + "_".repeat(m.length - 2) + "'")
+  let query = sql
+  for (let hop = 0; hop < 5; hop++) {
+    const names = selectListNames(query, opts)
+    if (names) return names
+    const flat = flatten(query)
+    const start = finalSelectStart(flat)
+    if (start === undefined) return null
+    const tail = flat.slice(start)
+    const from = /^\s*\*\s+from\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:(?:where|order|limit|qualify)\b[\s\S]*)?;?\s*$/i.exec(tail)
+    if (!from) return null
+    // The CTE's body: the parenthesis after `<name> as`.
+    const def = new RegExp(`(?:\\bwith\\s+(?:recursive\\s+)?|,\\s*)${from[1]}\\s+as\\s*\\(`, "i").exec(text)
+    if (!def) return null
+    const open = def.index + def[0].length - 1
+    let level = 0
+    let close = -1
+    for (let i = open; i < text.length && close < 0; i++) {
+      if (text[i] === "(") level++
+      else if (text[i] === ")" && --level === 0) close = i
+    }
+    if (close < 0) return null
+    query = text.slice(open + 1, close)
+  }
+  return null
 }

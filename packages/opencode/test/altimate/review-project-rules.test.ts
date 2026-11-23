@@ -10,7 +10,8 @@ import {
   packagesFindings,
   testsOnNullColumns,
 } from "../../src/altimate/review/project-rules"
-import { CATALOG, ruleMatches, leftJoinNullifiedByWhere } from "../../src/altimate/review/rule-catalog"
+import { CATALOG, ruleMatches, leftJoinNullifiedByWhere, evaluateCatalog } from "../../src/altimate/review/rule-catalog"
+import { isSuppressiblePortability } from "../../src/altimate/review/orchestrate"
 import { detectMacroPatterns } from "../../src/altimate/review/dbt-patterns"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import type { ChangedFile } from "../../src/altimate/review/diff-filter"
@@ -82,6 +83,43 @@ describe("Jinja structure", () => {
     expect(titles(jinjaFindings(file("macros/ghost.sql", inserted), old, inserted))).toContain("ghost: `ghost` parameters moved position")
     expect(jinjaFindings(file("macros/ghost.sql", appended), old, appended).some((f) => /moved/.test(f.title))).toBe(false)
   })
+  describe("macro-param-shifted anchors on the changed signature", () => {
+    const shifted = (diff: string, old: string, head: string) =>
+      jinjaFindings({ path: "macros/m.sql", status: "modified", diff }, old, head).find((f) => /moved/.test(f.title))
+
+    test("multi-line signature: the inserted parameter line, not the unchanged `{% macro` line", () => {
+      const old = "{% macro stab(\n    model,\n    max_change_percent,\n    days_back\n) %}\nx\n{% endmacro %}"
+      const head = "{% macro stab(\n    model,\n    max_change_percent,\n    max_change_absolute,\n    days_back\n) %}\nx\n{% endmacro %}"
+      const diff = "@@ -2,3 +2,4 @@\n     model,\n     max_change_percent,\n+    max_change_absolute,\n     days_back\n"
+      const f = shifted(diff, old, head)!
+      expect(f.startLine).toBe(4)
+      expect((f.evidence!.result as { line?: string }).line).toBe("    max_change_absolute,")
+    })
+
+    test("single-line signature: the changed `{% macro` line", () => {
+      const old = "{% macro ghost(a, b) %}{% endmacro %}"
+      const head = "-- header\n{% macro ghost(a, x, b) %}{% endmacro %}"
+      const diff = "@@ -1 +1,2 @@\n+-- header\n-{% macro ghost(a, b) %}{% endmacro %}\n+{% macro ghost(a, x, b) %}{% endmacro %}\n"
+      expect(shifted(diff, old, head)!.startLine).toBe(2)
+    })
+
+    test("two macros in one file: each finding anchors inside its own signature", () => {
+      const old = "{% macro one(a, b) %}{% endmacro %}\n{% macro two(\n  c,\n  d\n) %}{% endmacro %}"
+      const head = "{% macro one(a, b) %}{% endmacro %}\n{% macro two(\n  e,\n  c,\n  d\n) %}{% endmacro %}"
+      const diff = "@@ -2,2 +2,3 @@\n {% macro two(\n+  e,\n   c,\n"
+      const f = shifted(diff, old, head)!
+      expect(f.title).toContain("`two`")
+      expect(f.startLine).toBe(3)
+    })
+
+    test("no added line inside the signature: no line set here (left to the evidence text)", () => {
+      const old = "{% macro ghost(a, b) %}{% endmacro %}"
+      const head = "{% macro ghost(b, a) %}{% endmacro %}"
+      const f = shifted("@@ -5 +5 @@\n-x\n+y\n", old, head)!
+      expect(f.startLine).toBeUndefined()
+    })
+  })
+
   test("a var() key renamed without the old key as a fallback", () => {
     const old = "{%- set concat = var('concat_string', '||') -%}"
     const renamed = "{%- set concat = var('datavault4dbt.concat_string', '||') -%}"
@@ -104,6 +142,21 @@ describe("Jinja structure", () => {
     const ok = "where mod(abs(xxhash64(address)), 1000) = 0 -- one in a thousand, as a template example"
     expect(jinjaFindings(file("models/m.sql", ok), "select 1", ok).some((f) => /temporary/.test(f.title))).toBe(false)
   })
+  test("temporary-code phrasing: take this out, while debugging, remove it before release", () => {
+    const temp = (sql: string) => jinjaFindings(file("models/m.sql", sql), "select 1", sql).some((f) => /temporary/.test(f.title))
+    expect(temp("    where order_id < 50  -- sample while debugging locally, take this out before release")).toBe(true)
+    expect(temp("    limit 100  -- take it out once the backfill finishes")).toBe(true)
+    expect(temp("    and region = 'eu'  {# remove this before deploying #}")).toBe(true)
+    expect(temp("    where amount > 0  -- zero-amount rows are voided payments from the card processor")).toBe(false)
+    expect(temp("    where released_at < current_date  -- orders placed before release are pre-orders")).toBe(false)
+    expect(temp("    -- take this out before release")).toBe(true)
+    // Only comments count: the phrase in code or a string literal is not a marker.
+    expect(temp("    select 'take this out' as label")).toBe(false)
+    // Without removal intent the phrases describe code meant to stay.
+    expect(temp("    limit 10  -- handy while debugging: take this out of the CTE to see raw rows")).toBe(false)
+    expect(temp("    and is_test = false  -- surfaced while debugging the refund mismatch")).toBe(false)
+    expect(temp("    limit 10  -- added while debugging")).toBe(true)
+  })
 })
 
 describe("model config combinations", () => {
@@ -117,6 +170,16 @@ describe("model config combinations", () => {
     expect(run(sql, "unknown")).toContain("m: microbatch `batch_size` differs from the partition granularity")
     expect(run(sql.replace("'year' if flags.FULL_REFRESH else 'day'", "'day'"))).not.toContain("m: microbatch `batch_size` differs from the partition granularity")
   })
+  test("microbatch granularity mismatch is a BigQuery rule: silent on other known adapters", () => {
+    const sql = `{{ config(materialized='incremental', incremental_strategy='microbatch', event_time='paid_at',\n  batch_size='hour',\n  partition_by={'field': 'paid_at', 'data_type': 'timestamp', 'granularity': 'day'}) }}\nselect 1`
+    const title = "m: microbatch `batch_size` differs from the partition granularity"
+    const at = (dialect: string, known = true) => titles(modelConfigFindings(file("models/m.sql", sql), sql, dialect, undefined, known))
+    expect(at("bigquery")).toContain(title)
+    for (const d of ["duckdb", "postgres", "snowflake", "databricks"]) expect(at(d)).not.toContain(title)
+    // A guessed dialect: the BigQuery `granularity` dict still identifies the adapter.
+    expect(at("snowflake", false)).toContain(title)
+    expect(titles(modelConfigFindings(file("models/m.sql", sql), sql.replace("'hour'", "'day'"), "bigquery"))).not.toContain(title)
+  })
   test("partition column missing from the merge key, and an incremental filter that doesn't prune", () => {
     const sql = `{{ config(materialized='incremental', incremental_strategy='merge', partition_by=['block_month'], unique_key=['tx_hash', 'evt_index']) }}\nselect * from t\n{% if is_incremental() %}\nwhere block_time >= now() - interval '1' day\n{% endif %}`
     const t = run(sql, "trino")
@@ -129,6 +192,11 @@ describe("model config combinations", () => {
     const sql = `{{ config(materialized='incremental', unique_key='enrollment_key') }}\nselect * from e\n{% if is_incremental() %}\nwhere enrollment_created_on > (select max(enrollment_created_on) from {{ this }})\n{% endif %}`
     expect(run(sql, "trino")).toContain("m: incremental filter reads new rows only, not updated ones")
     expect(run(sql.replace(/enrollment_created_on/g, "enrollment_updated_on"), "trino")).not.toContain("m: incremental filter reads new rows only, not updated ones")
+  })
+  test("the creation-time filter finding quotes the added filter line", () => {
+    const sql = `{{ config(materialized='incremental', unique_key='enrollment_key') }}\nselect * from e\n{% if is_incremental() %}\n  WHERE   Enrollment_Created_On > (select max(enrollment_created_on) from {{ this }})\n{% endif %}`
+    const f = modelConfigFindings(file("models/m.sql", sql), sql, "trino").find((x) => x.rule === "dbt-project-rules:incremental-filter-created-only")
+    expect((f?.evidence?.result as { line?: string } | undefined)?.line).toBe("  WHERE   Enrollment_Created_On > (select max(enrollment_created_on) from {{ this }})")
   })
 })
 
@@ -238,6 +306,14 @@ describe("SQL shapes from the catalog", () => {
     expect(fires("case-duplicate-when", "case\n when grade = 'A' then 1\n when grade = 'a' then 2\nend")).toBe(false)
     expect(fires("case-duplicate-when", "case\n when Grade = 'A' then 1\n WHEN grade  =  'A' then 2\nend")).toBe(true)
   })
+  test("duplicate WHEN ignores spacing and keyword case, but not literal case", () => {
+    const tier = (third: string) =>
+      `CASE\n    WHEN s.lifetime_spend >= 1000 THEN 'platinum'\n    WHEN s.lifetime_spend >= 500 THEN 'gold'\n    ${third}\n    ELSE 'standard'\nEND`
+    expect(fires("case-duplicate-when", tier("WHEN s.lifetime_spend>=1000 THEN 'vip'"))).toBe(true)
+    expect(fires("case-duplicate-when", tier("when S.Lifetime_Spend  >=  1000 then 'vip'"))).toBe(true)
+    expect(fires("case-duplicate-when", tier("WHEN s.lifetime_spend>=100 THEN 'silver'"))).toBe(false)
+    expect(fires("case-duplicate-when", "case\n when status = 'A' then 1\n when status = 'a' then 2\nend")).toBe(false)
+  })
   test("window ORDER BY repeating the partition key", () => {
     expect(fires("window-order-repeats-partition", "row_number() over (partition by tx_hash, evt_index order by tx_hash) as rn")).toBe(true)
     expect(fires("window-order-repeats-partition", "row_number() over (partition by tx_hash order by block_time desc) as rn")).toBe(false)
@@ -252,8 +328,29 @@ describe("SQL shapes from the catalog", () => {
     const sql = "select\n  last_value(\n    content_title\n    ignore nulls\n  ) over (partition by k order by d) as t\nfrom x"
     expect(fires("ignore-nulls-inside-call", sql, ["    ignore nulls"])).toBe(true)
     expect(fires("ignore-nulls-inside-call", "select last_value(t) ignore nulls over (partition by k order by d) from x")).toBe(false)
-    // DuckDB accepts IGNORE NULLS inside the call too, so it is not flagged as non-portable there.
-    expect(rule("ignore-nulls-inside-call").portability?.worksOn).toContain("duckdb")
+    // DuckDB accepts IGNORE NULLS inside a navigation window call, so that form is portable there.
+    const duck = rule("ignore-nulls-inside-call").portability?.alsoWorksOn
+    expect(duck?.engines).toContain("duckdb")
+    expect(duck?.check(sql)).toBe(true)
+  })
+  test("IGNORE NULLS inside an aggregate call followed by ORDER BY", () => {
+    expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status IGNORE NULLS ORDER BY order_date) as s from o")).toBe(true)
+    expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status IGNORE NULLS LIMIT 10) as s from o")).toBe(true)
+    expect(fires("ignore-nulls-inside-call", "select ARRAY_AGG(status ORDER BY order_date) FILTER (WHERE status IS NOT NULL) as s from o")).toBe(false)
+  })
+  test("IGNORE NULLS inside the call: kept on Postgres/Snowflake; dropped on DuckDB for window functions only", () => {
+    const ignoreNulls = (sql: string) =>
+      evaluateCatalog({ path: "models/m.sql", status: "modified" }, sql, sql.split("\n"), [], DEFAULT_RUBRIC).find(
+        (f) => (f.evidence?.result as { rule?: string }).rule === "ignore-nulls-inside-call",
+      )!
+    const win = ignoreNulls("select last_value(location_id ignore nulls) over (partition by c order by d) as l from o")
+    const agg = ignoreNulls("select ARRAY_AGG(status IGNORE NULLS ORDER BY order_date) as s from o")
+    expect(isSuppressiblePortability(win, "duckdb")).toBe(true)
+    expect(isSuppressiblePortability(win, "bigquery")).toBe(true)
+    expect(isSuppressiblePortability(win, "postgres")).toBe(false)
+    expect(isSuppressiblePortability(win, "snowflake")).toBe(false)
+    expect(isSuppressiblePortability(agg, "duckdb")).toBe(false)
+    expect(isSuppressiblePortability(agg, "bigquery")).toBe(true)
   })
 })
 

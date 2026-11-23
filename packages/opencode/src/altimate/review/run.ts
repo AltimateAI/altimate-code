@@ -451,6 +451,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
     aiDisabledReason,
     aiModel: opts.aiModel,
+    aiGraphContext: process.env.ALTIMATE_REVIEW_AI_GRAPH === "1",
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
@@ -461,7 +462,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     portabilityTargets: await projectAdapters(opts.cwd, opts.head, projectRootRel),
     dialectKnown,
     consumerLists,
-    policy: { source: policy.source, hash: policy.hash, changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined },
+    policy: {
+      source: policy.source,
+      hash: policy.hash,
+      changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined,
+      posting: config.posting,
+    },
     scope: {
       baseRef: resolved?.ref ?? opts.base,
       baseSha: resolved?.sha,
@@ -471,6 +477,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       projectRoot: projectRootRel,
       outOfScopeFiles: scoped.outOfScope || undefined,
       movedUnchangedFiles: scoped.movedUnchanged || undefined,
+      notReviewed: [
+        ...scoped.outOfScopePaths.map((path) => ({ path, reason: `outside the dbt project (${projectRootRel || "."})` })),
+        ...scoped.movedUnchangedPaths.map((path) => ({ path, reason: "moved without edits; not re-reviewed" })),
+      ],
     },
   })
 }

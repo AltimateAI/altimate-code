@@ -50,7 +50,11 @@ export interface Rule {
    * engine, unless that engine is missing from `worksOn` (then it is a real
    * error there and is kept). Omit `worksOn` when support isn't established.
    */
-  portability?: { worksOn?: string[] }
+  portability?: {
+    worksOn?: string[]
+    /** More engines that accept the construct when `check` holds on the new file (comments and strings blanked). */
+    alsoWorksOn?: { engines: string[]; check: (sql: string) => boolean }
+  }
   /** Column-token pattern (first capture group is the column name) collected on
    *  every line `added` matches — every token, not just the first — and kept on
    *  `evidence.result.columns` / `items` so the orchestrator can reconcile each
@@ -111,10 +115,20 @@ export interface RuleInput {
 
 /** True when the rule matches the change. */
 export function ruleMatches(rule: Rule, input: RuleInput): boolean {
+  return matchRule(rule, input) !== null
+}
+
+/**
+ * Match a rule against the change. Returns null when it doesn't match, else the
+ * raw added line that carried the signal (the first one that satisfied `added`,
+ * else the added line inside the matching ON clause, else the first added line
+ * where the `newSql` pattern shows), when one exists.
+ */
+export function matchRule(rule: Rule, input: RuleInput): { line?: string } | null {
   const kind = fileKind(input.file)
   const wantKind = rule.kind ?? "model_sql"
-  if (wantKind !== "any" && kind !== wantKind && !(kind === "macro" && rule.macros)) return false
-  if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return false
+  if (wantKind !== "any" && kind !== wantKind && !(kind === "macro" && rule.macros)) return null
+  if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return null
 
   // Relevance gate: a rule only fires when its signal is in THE DIFF, never on
   // an unrelated edit to a matching file. added/removed are diff-anchored by
@@ -122,24 +136,26 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   // changed lines to count as relevant. `absentNewSql` is a whole-file guard.
   const diffText = stripComments([...input.added, ...input.removed].join("\n"))
   let relevant = false
+  let line: string | undefined
   if (rule.added) {
-    const hit = input.added.some((l) => {
+    // Tested on the stripped line; the raw line is what gets recorded.
+    line = input.added.find((l) => {
       const s = rule.ignoreStrings ? stripStrings(stripComments(l)) : stripComments(l)
       return rule.added!.test(s) && !(rule.unless && rule.unless.test(s))
     })
-    if (!hit) return false
+    if (line === undefined) return null
     relevant = true
   }
   if (rule.removed) {
-    if (!input.removed.some((l) => rule.removed!.test(stripComments(l)))) return false
+    if (!input.removed.some((l) => rule.removed!.test(stripComments(l)))) return null
     relevant = true
   }
   if (rule.newSql) {
-    if (!rule.newSql.test(stripComments(input.newSql))) return false
+    if (!rule.newSql.test(stripComments(input.newSql))) return null
     if (rule.newSql.test(diffText)) relevant = true
   }
   if (rule.absentNewSql) {
-    if (rule.absentNewSql.test(stripComments(input.newSql))) return false
+    if (rule.absentNewSql.test(stripComments(input.newSql))) return null
   }
   if (
     rule.check &&
@@ -148,14 +164,24 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
       input.added.map(stripComments),
     )
   )
-    return false
+    return null
   if (rule.onClause) {
-    const changed = input.added.map((l) => stripStrings(stripComments(l)).trim()).filter((l) => /\w{2}/.test(l))
-    const hit = onClauses(input.newSql).some((c) => rule.onClause!.test(c) && changed.some((l) => c.includes(l)))
-    if (!hit) return false
+    const changed = input.added
+      .map((raw) => ({ raw, s: stripStrings(stripComments(raw)).trim() }))
+      .filter(({ s }) => /\w{2}/.test(s))
+    let onLine: string | undefined
+    for (const c of onClauses(input.newSql)) {
+      if (!rule.onClause.test(c)) continue
+      onLine = changed.find(({ s }) => c.includes(s))?.raw
+      if (onLine !== undefined) break
+    }
+    if (onLine === undefined) return null
+    line ??= onLine
     relevant = true
   }
-  return relevant
+  if (!relevant) return null
+  if (line === undefined && rule.newSql) line = input.added.find((l) => rule.newSql!.test(stripComments(l)))
+  return line === undefined ? {} : { line }
 }
 
 /** A column token found in a select item, with the item's `AS` alias (the
@@ -227,6 +253,11 @@ function capturedColumns(rule: Rule, added: string[]): SelectItemColumn[] {
     out.push(...selectItemColumns(l, rule.capturesColumns))
   }
   return out
+}
+
+/** Evidence for a column-capturing rule: distinct columns plus each (column, alias, line) item. */
+function capturedEvidence(items: SelectItemColumn[]) {
+  return { columns: [...new Set(items.map((i) => i.column))], items }
 }
 
 const ON_END = /^(?:join|where|group\s+by|order\s+by|qualify|having|union|limit|window|left|right|inner|full|cross|natural|lateral|select|from)\b|^;|^\{%/i
@@ -396,6 +427,13 @@ export function ruleEngine(rule: Rule): string | undefined {
   return m ? PACK_ENGINE[m[1]] : undefined
 }
 
+/** Engines a portability rule's construct runs on, for this file. */
+function worksOn(rule: Rule, newSql: string): string[] | undefined {
+  const p = rule.portability
+  if (!p?.worksOn || !p.alsoWorksOn?.check(stripStrings(stripComments(newSql)))) return p?.worksOn
+  return [...p.worksOn, ...p.alsoWorksOn.engines]
+}
+
 /** Evaluate the catalog against a changed file. */
 export function evaluateCatalog(
   file: ChangedFile,
@@ -413,7 +451,8 @@ export function evaluateCatalog(
     // applies to its own engine once the project's engine is known.
     const engine = ruleEngine(rule)
     if (engine && ctx?.dialectKnown && ctx.dialect.toLowerCase().replace(/^spark$/, "databricks") !== engine) continue
-    if (!ruleMatches(rule, input)) continue
+    const match = matchRule(rule, input)
+    if (!match) continue
     const body = gatedBody(rule, ctx)
     if (body === null) continue
     const f = makeFinding({
@@ -426,15 +465,12 @@ export function evaluateCatalog(
       confidence: "high",
       evidence: {
         tool: "rule-catalog",
-        result:
-          rule.portability || body !== rule.body
-            ? { rule: rule.id, portability: true, worksOn: rule.portability?.worksOn }
-            : rule.capturesColumns
-              ? (() => {
-                  const items = capturedColumns(rule, added)
-                  return { rule: rule.id, columns: [...new Set(items.map((i) => i.column))], items }
-                })()
-              : { rule: rule.id },
+        result: {
+          rule: rule.id,
+          ...(rule.portability || body !== rule.body ? { portability: true, worksOn: worksOn(rule, newSql) } : {}),
+          ...(rule.capturesColumns ? capturedEvidence(capturedColumns(rule, added)) : {}),
+          ...(match.line !== undefined ? { line: match.line } : {}),
+        },
       },
       ruleKey: `${rule.category}:${rule.id}`,
     })
@@ -521,12 +557,6 @@ function windowOrderRepeatsPartition(sql: string): boolean {
   return false
 }
 
-/** A condition with whitespace collapsed and keywords lowercased outside quotes; quoted text stays exact ('A' is not 'a'). */
-const normalizeCondition = (c: string) =>
-  c
-    .replace(/('[^']*'|"[^"]*")|[^'"]+/g, (seg, quoted) => (quoted ? seg : seg.replace(/\s+/g, " ").toLowerCase()))
-    .trim()
-
 /** A CASE with two WHEN branches whose conditions are identical: the second is unreachable. */
 function duplicateCaseWhen(sql: string): boolean {
   for (const m of sql.matchAll(/\bcase\b/gi)) {
@@ -545,6 +575,31 @@ function duplicateCaseWhen(sql: string): boolean {
     if (new Set(conds).size < conds.length) return true
   }
   return false
+}
+
+/** Condition text for comparison: case and spacing folded outside string literals and quoted
+ *  identifiers, which are kept verbatim ('A' is not 'a'; "Col" is case-sensitive). */
+function normalizeCondition(cond: string): string {
+  return cond
+    .split(/('(?:[^']|'')*'|"(?:[^"]|"")*")/)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .replace(/\s*([^\w\s])\s*/g, "$1"),
+    )
+    .join("")
+    .trim()
+}
+
+const NAVIGATION_WINDOW_FN = /^(first_value|last_value|nth_value|lead|lag)$/i
+
+/** Calls written `f(x IGNORE NULLS [ORDER BY …] [LIMIT n])`, with whether an OVER follows. */
+function ignoreNullsInCall(sql: string): { fn: string; over: boolean }[] {
+  const re = /\b(\w+)\s*\(\s*[^()]*?\bignore\s+nulls(?:\s+(?:order\s+by|limit)\b[^()]*)?\s*\)(\s*over\b)?/gi
+  return [...sql.matchAll(re)].map((m) => ({ fn: m[1], over: !!m[2] }))
 }
 
 /** A LEFT JOIN whose right side is filtered in the WHERE of the same SELECT: the join behaves as INNER.
@@ -644,12 +699,19 @@ const FEASIBLE: Rule[] = [
     "sql_correctness",
     "warning",
     "IGNORE NULLS inside the function call is BigQuery syntax",
-    "`f(x IGNORE NULLS)` parses on BigQuery only. Trino, Snowflake and others take it after the call: `last_value(x) IGNORE NULLS OVER (…)`.",
+    "`f(x IGNORE NULLS)` parses on BigQuery, and on DuckDB for window functions only. Trino, Snowflake and others take it after the call: `last_value(x) IGNORE NULLS OVER (…)`.",
     {
       added: /\bignore\s+nulls\b/i,
-      check: (sql) => /\(\s*[^()]*?\bignore\s+nulls\s*\)/i.test(sql),
+      check: (sql) => ignoreNullsInCall(sql).length > 0,
       macros: true,
-      portability: { worksOn: ["bigquery", "duckdb"] },
+      // DuckDB takes the in-call form on navigation window functions only; on an aggregate it is a parse error.
+      portability: {
+        worksOn: ["bigquery"],
+        alsoWorksOn: {
+          engines: ["duckdb"],
+          check: (sql) => ignoreNullsInCall(sql).every((m) => m.over && NAVIGATION_WINDOW_FN.test(m.fn)),
+        },
+      },
     },
     { add: "last_value(x ignore nulls) over (partition by k order by d)" },
     { add: "last_value(x) ignore nulls over (partition by k order by d)" },

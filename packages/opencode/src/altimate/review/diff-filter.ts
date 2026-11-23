@@ -7,6 +7,8 @@
  * snapshots, macros, schema.yml contract blocks, seeds.
  */
 
+import { posix } from "node:path"
+
 /** Paths that are build output / vendored and carry no review signal. */
 const SKIP_DIR_PATTERNS = [
   /(^|\/)target\//,
@@ -86,20 +88,41 @@ export function relativeToRoot(p: string, root: string): string | undefined {
   return f.startsWith(r + "/") ? f.slice(r.length + 1) : undefined
 }
 
-/** The role of a project-relative path from the configured directories; the
+/**
+ * The layout's directories as repo-relative paths. Each `*-paths` entry is
+ * relative to the project root and may climb out of it (`../../dbt_macros`
+ * in a monorepo of sub-projects sharing one macro dir); entries that resolve
+ * outside the repository are dropped.
+ */
+export function resolvedLayoutDirs(layout: DbtProjectLayout): Array<{ role: DbtRole; dir: string }> {
+  const root = norm(layout.root).replace(/^\.\/?/, "").replace(/\/+$/, "")
+  const out: Array<{ role: DbtRole; dir: string }> = []
+  for (const [role, list] of Object.entries(layout.dirs) as Array<[DbtRole, string[]]>) {
+    for (const d of list) {
+      const dir = posix.normalize(posix.join(root || ".", norm(d))).replace(/\/+$/, "")
+      // The project root itself (`model-paths: ["."]` with the project at the repo root).
+      if (dir === ".") {
+        out.push({ role, dir: "" })
+        continue
+      }
+      if (!dir || dir === ".." || dir.startsWith("../") || dir.startsWith("/")) continue
+      out.push({ role, dir })
+    }
+  }
+  return out
+}
+
+/** The role of a repo-relative path from the configured directories; the
  *  longest matching directory wins so `models/tests/x.sql` is a model when
  *  `models` is a model path. */
-function roleFromLayout(rel: string, dirs: Record<DbtRole, string[]>): DbtRole | undefined {
-  const p = rel.toLowerCase()
+function roleFromLayout(path: string, layout: DbtProjectLayout): DbtRole | undefined {
+  const p = norm(path).toLowerCase()
   let best: { role: DbtRole; len: number } | undefined
-  for (const [role, list] of Object.entries(dirs) as Array<[DbtRole, string[]]>) {
-    for (const d of list) {
-      const dir = norm(d).toLowerCase().replace(/^\.\/?/, "").replace(/\/+$/, "")
-      // `model-paths: ["."]` normalises to "": it matches every path at length 0,
-      // so a more specific directory still wins.
-      const matches = dir === "" || p.startsWith(dir + "/")
-      if (matches && (!best || dir.length > best.len)) best = { role, len: dir.length }
-    }
+  for (const { role, dir } of resolvedLayoutDirs(layout)) {
+    const d = dir.toLowerCase()
+    // "" (`model-paths: ["."]` at the repo root) matches every path at length 0,
+    // so a more specific directory still wins.
+    if ((d === "" || p.startsWith(d + "/")) && (!best || d.length > best.len)) best = { role, len: d.length }
   }
   return best?.role
 }
@@ -123,8 +146,12 @@ export function classifyDbtFile(path: string, layout?: DbtProjectLayout): DbtFil
   const p = norm(path).toLowerCase()
   const isYaml = p.endsWith(".yml") || p.endsWith(".yaml")
   if (/(^|\/)(dbt_project|profiles|packages|dependencies)\.ya?ml$/.test(p)) return "project_config"
-  const rel = layout ? relativeToRoot(norm(path), layout.root) : undefined
-  const role = rel !== undefined && layout ? roleFromLayout(rel, layout.dirs) : roleFromConvention(p)
+  // A layout dir decides wherever it points, including outside the project
+  // root; other files outside the root fall back to conventional names.
+  const role = layout
+    ? (roleFromLayout(path, layout) ??
+      (relativeToRoot(norm(path), layout.root) === undefined ? roleFromConvention(p) : undefined))
+    : roleFromConvention(p)
   if (role === "macro") return "macro"
   // Snapshots split by extension: `.sql` files are snapshot definitions
   // (tier-forcing, catalog-scoped), YAML property files under `snapshots/`
@@ -195,18 +222,45 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`)
 }
 
+/** A changed file the review did not look at, and why. */
+export interface NotReviewed {
+  path: string
+  reason: string
+}
+
+/** Split changed files into the reviewable set (with their dbt kind) and the
+ *  files dropped before review, each with the reason it was dropped. */
+export function partitionChangedFiles(
+  files: ChangedFile[],
+  extraExcludeGlobs: string[] = [],
+  layout?: DbtProjectLayout,
+): { reviewable: Array<ChangedFile & { kind: DbtFileKind }>; dropped: NotReviewed[] } {
+  // Normalize to forward slashes so `/`-based glob semantics hold on Windows paths.
+  const excluders = extraExcludeGlobs.map((g) => ({ glob: g, re: globToRegExp(g) }))
+  const reviewable: Array<ChangedFile & { kind: DbtFileKind }> = []
+  const dropped: NotReviewed[] = []
+  for (const f of files) {
+    if (!shouldReview(f.path)) {
+      dropped.push({ path: f.path, reason: "not a dbt file (extension or generated path)" })
+      continue
+    }
+    const hit = excluders.find(({ re }) => re.test(norm(f.path)))
+    if (hit) {
+      dropped.push({ path: f.path, reason: `excluded by glob ${hit.glob}` })
+      continue
+    }
+    reviewable.push({ ...f, kind: classifyDbtFile(f.path, layout) })
+  }
+  return { reviewable, dropped }
+}
+
 /** Filter changed files down to the reviewable set, with their dbt kind. */
 export function filterChangedFiles(
   files: ChangedFile[],
   extraExcludeGlobs: string[] = [],
   layout?: DbtProjectLayout,
 ): Array<ChangedFile & { kind: DbtFileKind }> {
-  const excluders = extraExcludeGlobs.map(globToRegExp)
-  // Normalize to forward slashes so `/`-based glob semantics hold on Windows paths.
-  return files
-    .filter((f) => shouldReview(f.path))
-    .filter((f) => !excluders.some((re) => re.test(norm(f.path))))
-    .map((f) => ({ ...f, kind: classifyDbtFile(f.path, layout) }))
+  return partitionChangedFiles(files, extraExcludeGlobs, layout).reviewable
 }
 
 /** The first folder under the file's role directory (`staging` for
@@ -231,6 +285,10 @@ export interface ScopeResult {
   outOfScope: number
   /** Non-model renames with identical content that keep the name, role and layer (a pure move). */
   movedUnchanged: number
+  /** Paths behind `outOfScope`. */
+  outOfScopePaths: string[]
+  /** Paths behind `movedUnchanged`. */
+  movedUnchangedPaths: string[]
 }
 
 const isModel = (p: string, layout?: DbtProjectLayout) => {
@@ -243,7 +301,9 @@ const isModel = (p: string, layout?: DbtProjectLayout) => {
  *
  * - Files outside `root` belong to another project or to non-dbt code: they
  *   are counted, never reviewed (a monorepo with several dbt projects must not
- *   review its siblings).
+ *   review its siblings). The exception is a layout dir that points outside
+ *   the root (`macro-paths: ["../../dbt_macros"]`): files there are part of
+ *   the project and stay in scope.
  * - Every model move stays in scope, even a same-name 100% rename: a model's
  *   folder can carry config in `dbt_project.yml` (materialization, schema,
  *   tags) and match risk paths, so moving it can change how it builds.
@@ -260,17 +320,19 @@ export function scopeToProject(
   root: string | undefined,
   layout?: DbtProjectLayout,
 ): ScopeResult {
-  let outOfScope = 0
-  let movedUnchanged = 0
+  const outOfScopePaths: string[] = []
+  const movedUnchangedPaths: string[] = []
   const inScope: ChangedFile[] = []
   const basename = (p: string) => norm(p).split("/").pop()
-  const isInside = (p: string) => root === undefined || relativeToRoot(p, root) !== undefined
+  const layoutDirs = layout ? resolvedLayoutDirs(layout).map((d) => d.dir) : []
+  const isInside = (p: string) =>
+    root === undefined || relativeToRoot(p, root) !== undefined || layoutDirs.some((d) => relativeToRoot(p, d) !== undefined)
   for (const f of files) {
     const inside = isInside(f.path)
     // A rename moving a file into or out of the project still concerns it.
     const oldInside = !!f.oldPath && isInside(f.oldPath)
     if (!inside && !oldInside) {
-      outOfScope++
+      outOfScopePaths.push(f.path)
       continue
     }
     if (f.oldPath && inside !== oldInside) {
@@ -287,12 +349,18 @@ export function scopeToProject(
       classifyDbtFile(f.oldPath, layout) === classifyDbtFile(f.path, layout) &&
       layerOf(f.oldPath, root, layout) === layerOf(f.path, root, layout)
     ) {
-      movedUnchanged++
+      movedUnchangedPaths.push(f.path)
       continue
     }
     inScope.push(f)
   }
-  return { inScope, outOfScope, movedUnchanged }
+  return {
+    inScope,
+    outOfScope: outOfScopePaths.length,
+    movedUnchanged: movedUnchangedPaths.length,
+    outOfScopePaths,
+    movedUnchangedPaths,
+  }
 }
 
 /** Heuristic: does a yml diff declare dbt `sources:`? Tolerates unified-diff
@@ -314,4 +382,52 @@ export function countChangedLines(diff: string | undefined): number {
     if ((line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---"))) n++
   }
   return n
+}
+
+/** A row inside a unified diff hunk. `line` is the head-side line number for
+ *  `+` and context rows; for a `-` row it is the head line that follows the
+ *  deletion. `hunk` numbers the hunks from 0. */
+export interface DiffRow {
+  line: number
+  text: string
+  kind: "+" | "-" | " "
+  hunk: number
+}
+
+/** Walk every row of a unified diff's hunks: added, removed and context lines. */
+export function* walkDiffRows(diff: string | undefined): Generator<DiffRow> {
+  if (!diff) return
+  let right = 0
+  let hunk = -1
+  let inHunk = false
+  const rows = diff.split("\n")
+  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
+  for (const row of rows) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
+    if (h) {
+      right = Number(h[1])
+      hunk++
+      inHunk = true
+      continue
+    }
+    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
+    if (!inHunk || row.startsWith("\\")) continue
+    // A blank context line may have lost its leading space in transit.
+    if (row.startsWith("+")) yield { line: right++, text: row.slice(1), kind: "+", hunk }
+    else if (row.startsWith(" ") || row === "") yield { line: right++, text: row.slice(1), kind: " ", hunk }
+    else if (row.startsWith("-")) yield { line: right, text: row.slice(1), kind: "-", hunk }
+    else inHunk = false
+  }
+}
+
+/** A head-side line inside a diff hunk: an added (`+`) or a context (` `) line. */
+export interface DiffLine {
+  line: number
+  text: string
+  kind: "+" | " "
+}
+
+/** Walk a unified diff's hunks, yielding each added and context line with its head-side line number. */
+export function* walkDiffLines(diff: string | undefined): Generator<DiffLine> {
+  for (const { line, text, kind } of walkDiffRows(diff)) if (kind !== "-") yield { line, text, kind }
 }
