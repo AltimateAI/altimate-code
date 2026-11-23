@@ -1006,6 +1006,14 @@ describe("lineageGraph", () => {
     const hashed = lineageGraph({ metadata: { project_id: createHash("md5").update("shop").digest("hex") }, nodes }, "model.shop.orders")
     expect(hashed.nodes["model.shop.orders"].yml).toBe("models/schema.yml")
     expect(hashed.nodes["model.dep.base"].yml).toBeUndefined()
+    // A path without the package prefix is the node's own package's.
+    const unprefixed = {
+      "model.shop.orders": { ...model("orders", ["model.dep.base"], "select 1", []), package_name: "shop", patch_path: "models/schema.yml" },
+      "model.dep.base": { ...model("base", [], "select 1", []), package_name: "dep", patch_path: "models/schema.yml" },
+    }
+    const old = lineageGraph({ metadata: { project_name: "shop" }, nodes: unprefixed }, "model.shop.orders")
+    expect(old.nodes["model.shop.orders"].yml).toBe("models/schema.yml")
+    expect(old.nodes["model.dep.base"].yml).toBeUndefined()
     for (const metadata of [undefined, {}, { project_name: null }]) {
       const graph = lineageGraph({ ...(metadata ? { metadata } : {}), nodes }, "model.shop.orders")
       expect(graph.nodes["model.shop.orders"].yml).toBeUndefined()

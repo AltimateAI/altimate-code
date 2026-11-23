@@ -380,17 +380,24 @@ function blankJinja(text: string): string {
   // one name, not `orders`, and so does a run of such comments. A tag or expression may render either side of it
   // apart (`{% else %}`), so it stays a boundary.
   const word = /[\p{L}\p{N}_$]/u
+  const run = { end: -1, joined: false }
   const blank = (from: number, to: number) => {
     const comment = text.startsWith("{#", from)
     if (text[from + 2] === "-") while (from > kept && /\s/.test(text[from - 1])) from--
     if (text[to - 3] === "-") while (to < text.length && /\s/.test(text[to])) to++
     let joined = false
-    if (comment) {
+    if (comment && from < run.end) joined = run.joined
+    else if (comment) {
       const before = from > kept ? text[from - 1] : (out.at(-1)?.at(-1) ?? "")
-      // The text after this comment and any comments right after it.
+      // The text after this comment and the comments right after it, less the whitespace they trim; read once per run.
       let after = to
-      while (text.startsWith("{#", after)) after = jinjaEnd(text, after)
+      while (text.startsWith("{#", after)) {
+        after = jinjaEnd(text, after)
+        if (text[after - 3] === "-") while (after < text.length && /\s/.test(text[after])) after++
+      }
       joined = word.test(before) && word.test(text[after] ?? "")
+      run.end = after
+      run.joined = joined
     }
     out.push(text.substring(kept, from), (joined ? "_" : " ").repeat(to - from))
     kept = to

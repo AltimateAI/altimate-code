@@ -1762,6 +1762,8 @@ select * from c`
     expect(readsOf(wrap("select * from orders{# a #}{# b #}_archive")).b).toEqual([])
     expect(readsOf(wrap("select * from orders{#- a -#} {# b #}_archive")).b).toEqual([])
     expect(readsOf(wrap("select * from orders{# a #} _archive")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select * from orders{# a #}{# b -#} _archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #}{# b #} _archive")).b).toEqual(["orders"])
     expect(readsOf(wrap("select * from orders {# note #} join t on 1 = 1")).b).toEqual(["orders"])
     expect(readsOf(wrap("select 2 -- {% raw %}\n{%- endraw %} from orders\n")).b).toEqual([])
     expect(readsOf(wrap("select 2 -- {% raw %}\n{% endraw %} from orders\n")).b).toEqual(["orders"])
@@ -1794,6 +1796,20 @@ select * from c`
     expect(readsOf(sql("{% if var('use_orders') %}orders{% else %}payments{% endif %}")).b).toEqual(["orders", "payments"])
     expect(readsOf(sql("orders{% if x %}_a{% endif %}")).b).toEqual(["orders"])
     expect(readsOf(sql("orders{{ suffix }}")).b).toEqual(["orders"])
+  })
+
+  it("a long run of Jinja comments inside a word is blanked in linear time", () => {
+    const time = (count: number) => {
+      const sql = `with orders as (select 1), b as (select * from orders${"{# x #}".repeat(count)}_archive) select * from b`
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const started = performance.now()
+          expect(readsOf(sql).b).toEqual([])
+          return performance.now() - started
+        }),
+      )
+    }
+    expect(time(32000) / time(8000)).toBeLessThan(9)
   })
 
   it("sibling subqueries defining one name scale linearly", () => {

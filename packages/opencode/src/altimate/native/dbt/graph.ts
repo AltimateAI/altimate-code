@@ -69,7 +69,9 @@ function isRootPackage(name: string, metadata: any): boolean {
 function ymlOf(node: any, metadata: any): string | undefined {
   if (typeof node?.patch_path !== "string") return undefined
   const scheme = /^([^:/]+):\/\//.exec(node.patch_path)
-  if (scheme && !isRootPackage(scheme[1], metadata)) return undefined
+  // A path without the package prefix (older manifests) belongs to the node's own package.
+  const owner = scheme ? scheme[1] : node?.package_name
+  if (typeof owner !== "string" || !isRootPackage(owner, metadata)) return undefined
   return node.patch_path.slice(scheme?.[0].length ?? 0)
 }
 
