@@ -1,6 +1,6 @@
 import { existsSync } from "fs"
 import { execFileSync } from "child_process"
-import { join } from "path"
+import { isAbsolute, join } from "path"
 import type { Config } from "./config"
 
 type Status = { ok: true } | { ok: false; error: string; fix: string }
@@ -51,6 +51,16 @@ type FusionLookup = {
  * A field so tests can replace it. */
 export const fusionBinary = {
   find: async (options: FusionLookup) => (await import("@altimateai/dbt-integration")).findDbtV2Binary(options),
+}
+
+/**
+ * Where dbt-integration's lookup looks for a dbt 2.x binary, as a phrase. Next to the interpreter only
+ * when `pythonPath` is a path: the lookup's interpreter-adjacent candidate skips a bare command name
+ * such as `python3`, which carries no directory.
+ */
+export function fusionPlaces(pythonPath?: string): string {
+  const adjacent = !!pythonPath && (isAbsolute(pythonPath) || /[\\/]/.test(pythonPath))
+  return `${adjacent ? `next to ${pythonPath}, ` : ""}in ~/.local/bin or on PATH`
 }
 
 async function fusion(cfg: Config): Promise<Status> {

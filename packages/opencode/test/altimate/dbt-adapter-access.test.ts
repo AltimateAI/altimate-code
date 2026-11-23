@@ -240,6 +240,57 @@ describe("dbtAdapterFor", () => {
     }
   })
 
+  /** The refusal for an adapter started from `config` that didn't load (`loaded: false`) or didn't start, with no saved dbt.json. */
+  async function refusal(config: Record<string, unknown>, loaded: boolean): Promise<string | undefined> {
+    const home = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-access-home-"))
+    const saved = process.env.HOME
+    try {
+      process.env.HOME = home
+      resetDbtAdapter()
+      dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, queryLimit: 500, ...config })
+      dbtAdapterInternals.create = async () => {
+        if (!loaded) throw new Error("dbt-integration missing")
+        return { isInitialized: () => false, dispose: async () => {} }
+      }
+      return (await dbtAdapterFor(ctx)).reason
+    } finally {
+      if (saved === undefined) delete process.env.HOME
+      else process.env.HOME = saved
+      await rm(home, { recursive: true, force: true })
+    }
+  }
+
+  const FUSION_FIX =
+    "Run `altimate-dbt doctor` to check for one, install dbt Fusion, or set dbtIntegration to core in ~/.altimate-code/dbt.json, then start a new session, or run `altimate-code tool daemon stop` for the `tool run` daemon"
+
+  test("in Fusion mode, a refusal says what Fusion needs, and nothing about a Python", async () => {
+    const config = { dbtIntegration: "fusion", pythonPath: "/venv/bin/python" }
+    expect(await refusal(config, true)).toBe(
+      `the dbt adapter didn't load the project: dbt runs as dbt Fusion, which needs no Python but a dbt whose \`--version\` reports 2.x next to /venv/bin/python, in ~/.local/bin or on PATH. ${FUSION_FIX}`,
+    )
+    expect(await refusal(config, false)).toBe(
+      `the dbt adapter didn't start: dbt runs as dbt Fusion, which needs no Python but a dbt whose \`--version\` reports 2.x next to /venv/bin/python, in ~/.local/bin or on PATH. ${FUSION_FIX}`,
+    )
+  })
+
+  test("in Fusion mode, a refusal names the interpreter's folder only when the lookup searched it", async () => {
+    // No Python at all, or a bare command name, which carries no folder.
+    for (const config of [{ dbtIntegration: "fusion" }, { dbtIntegration: "fusion", pythonPath: "python3" }])
+      expect(await refusal(config, true)).toBe(
+        `the dbt adapter didn't load the project: dbt runs as dbt Fusion, which needs no Python but a dbt whose \`--version\` reports 2.x in ~/.local/bin or on PATH. ${FUSION_FIX}`,
+      )
+  })
+
+  test("outside Fusion mode, a refusal's Python advice is unchanged", async () => {
+    const advice =
+      ": dbt runs with the Python found when the tools started (python3), which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json), then start a new session, or run `altimate-code tool daemon stop` for the `tool run` daemon"
+    for (const dbtIntegration of ["core", "corecommand", "cloud", undefined]) {
+      const config = { dbtIntegration, pythonPath: "python3" }
+      expect(await refusal(config, true)).toBe(`the dbt adapter didn't load the project${advice}`)
+      expect(await refusal(config, false)).toBe(`the dbt adapter didn't start${advice}`)
+    }
+  })
+
   test("the tools' adapter is created with a dbt target folder of its own, inside the project's target", async () => {
     let options: { targetPath?: string } | undefined
     dbtAdapterInternals.create = async (_config, given) => {
