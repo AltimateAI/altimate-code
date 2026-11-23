@@ -142,18 +142,19 @@ function formatFixHint(mismatches: SchemaVerifyOutput[]): string {
 }
 
 /**
- * `hint`, led by the stale-manifest note when an answer came from a stale manifest: the verdicts and
- * errors rest on that manifest. The note's text is the validator's own; only the parse time comes
- * from the answer, quoted. The models share one project, so the first note stands for all of them.
+ * `reason`, led by the stale-manifest note when an answer came from a stale manifest: the verdicts and
+ * errors rest on that manifest, so the agent reads that before the verdict (the session prints the reason,
+ * then the fix hint). The note's text is the validator's own; only the parse time comes from the answer,
+ * quoted. The models share one project, so the first note stands for all of them.
  */
-function leadWithStaleManifestNote(results: SchemaVerifyOutput[], hint: string): string {
+function leadWithStaleManifestNote(results: SchemaVerifyOutput[], reason: string): string {
   const stale = results.find((r) => r.stale_manifest)?.stale_manifest
-  if (!stale) return hint
+  if (!stale) return reason
   const written =
     typeof stale.written_at === "string" && stale.written_at.trim()
       ? ` (written ${sanitizeForPrompt(stale.written_at, 40)})`
       : ""
-  return `The dbt project check failed, so schema-verify read the manifest of the last successful parse${written}. Its spec may not match schema.yml as it is now.\n\n${hint}`
+  return `The dbt project check failed, so schema-verify read the manifest of the last successful parse${written}. Its spec may not match schema.yml as it is now.\n\n${reason}`
 }
 
 export const DbtSchemaVerifyValidator: Validator = {
@@ -255,14 +256,12 @@ export const DbtSchemaVerifyValidator: Validator = {
 
     return {
       ok: false,
-      reason,
-      fixHint: leadWithStaleManifestNote(
-        results,
+      reason: leadWithStaleManifestNote(results, reason),
+      fixHint:
         mismatches.length > 0
           ? formatFixHint(mismatches) +
-              `\n\nFix the model SQL to match the schema.yml spec (do not edit the spec), rebuild, and the harness will re-check before declaring done.`
+            `\n\nFix the model SQL to match the schema.yml spec (do not edit the spec), rebuild, and the harness will re-check before declaring done.`
           : `Run \`altimate-dbt schema-verify <model>\` manually to diagnose the error. Check that altimate-dbt is on PATH and that the dbt project compiles cleanly.`,
-      ),
       details: {
         ...baseDetails,
         mismatch: mismatches.length,
