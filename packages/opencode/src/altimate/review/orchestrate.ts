@@ -27,6 +27,7 @@ import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
 import { selectListNames } from "./select-list"
+import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
@@ -621,19 +622,47 @@ async function columnDelta(
   dialect: string,
 ): Promise<{ added: string[]; removed: string[]; current: Set<string> }> {
   const none = { added: [], removed: [], current: new Set<string>() }
-  const { file, engineNewSql, engineOldSql } = ctx
-  if (!engineNewSql || file.status === "deleted") return none
-  const current = await outputColumns(runner, engineNewSql, dialect)
-  if (!current.size) return none
-  if (!hasOldSide(file)) return { added: [...current], removed: [], current }
-  if (!engineOldSql) return none
-  const before = await outputColumns(runner, engineOldSql, dialect)
-  if (!before.size) return none
-  return {
-    added: [...current].filter((c) => !before.has(c)),
-    removed: [...before].filter((c) => !current.has(c)),
-    current,
+  const { file, engineNewSql, engineOldSql, newSql, oldSql } = ctx
+  if (file.status === "deleted") return none
+  const withOld = hasOldSide(file)
+  const delta = (current: Set<string>, before?: Set<string>) =>
+    !current.size || (withOld && !before?.size)
+      ? none
+      : {
+          added: [...current].filter((c) => !before?.has(c)),
+          removed: before ? [...before].filter((c) => !current.has(c)) : [],
+          current,
+        }
+  // Compiled SQL on both sides: column lineage plus the final SELECT's names.
+  if (engineNewSql && (!withOld || engineOldSql)) {
+    const current = await outputColumns(runner, engineNewSql, dialect)
+    const before = withOld ? await outputColumns(runner, engineOldSql!, dialect) : undefined
+    return delta(current, before)
   }
+  // Compiled SQL missing on either side (`dbt parse`-only CI, or a base that did
+  // not compile): the raw model's own SELECT list, when it names every column.
+  // Columns produced inside a macro stay unknown.
+  if (!newSql) return none
+  const current = rawSelectList(newSql)
+  const before = withOld && oldSql ? rawSelectList(oldSql) : undefined
+  return delta(current, before)
+}
+
+/** Output names of a raw (Jinja) model's final SELECT; empty when a Jinja
+ *  expression or tag is in the list, or when any item has no name of its own
+ *  (e.g. `amount::numeric(18,2)`): this list is the whole answer, not a supplement. */
+function rawSelectList(sql: string): Set<string> {
+  const plain = sql
+    .replace(/\{#[\s\S]*?#\}/g, " ")
+    // A tag in the list (`{% if %}` / `{% for %}`) makes its columns conditional:
+    // it becomes its own `__jinja__` item, which marks the list unknown.
+    .replace(/\{%[\s\S]*?%\}/g, " , __jinja__ , ")
+    .replace(/\{\{[\s\S]*?\}\}/g, " __jinja__ ")
+  const names = selectListNames(plain, { complete: true })
+  // A Jinja expression inside an item (e.g. `{{ col }} as x`) leaves its alias
+  // intact; only a Jinja item standing alone is unknown.
+  if (!names || names.includes("__jinja__")) return new Set()
+  return new Set(names)
 }
 
 const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
@@ -1700,6 +1729,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  // The head's dbt_project.yml (test thresholds inherited by new tests), read once.
+  const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
+  const projectYml = schemaFiles.length ? await getContent?.(projectYmlPath, "new").catch(() => undefined) : undefined
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
@@ -1713,6 +1745,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
             ...detectUnitTestFixtures(file, oldContent, newContent),
             ...snapshotYmlFindings(file, oldContent, newContent),
+            ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
           ]
         } catch (err) {
           // One malformed schema file degrades that file only.
@@ -1722,6 +1755,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }),
     )
     for (const findings of schemaFindingSets) all.push(findings)
+  }
+  // A dbt_project.yml change that loosens test thresholds for a whole path.
+  for (const file of reviewable.filter((f) => f.kind === "project_config" && /(^|\/)dbt_project\.ya?ml$/.test(f.path))) {
+    if (file.status !== "modified") continue
+    const [oldContent, newContent] = await Promise.all([getContent?.(file.path, "old"), getContent?.(file.path, "new")])
+    all.push(detectThresholdLoosening(file, oldContent, newContent))
   }
 
   // Architectural dedup: the regex `dbt-patterns`/`rule-catalog` layer is a

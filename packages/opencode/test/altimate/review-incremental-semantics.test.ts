@@ -299,3 +299,122 @@ describe("end to end through the orchestrator", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 })
+
+describe("dedup windows split across lines", () => {
+  const sql = "select *,\n  row_number() over (\n    partition by job_id\n    order by ingestion_timestamp desc\n  ) as rn\nfrom t"
+  const rulesFor = (diffAdded: string) =>
+    detectModelPatterns({ path: "models/m.sql", status: "modified", diff: diffAdded }, sql, DEFAULT_RUBRIC).map(
+      (f) => (f.evidence?.result as { rule?: string })?.rule,
+    )
+  test("an ORDER BY on its own line is seen: no false 'no ORDER BY', and the load-timestamp rule fires", () => {
+    const r = rulesFor("+  row_number() over (\n")
+    expect(r).not.toContain("dedup_no_tiebreaker")
+    expect(r).toContain("dedup_load_timestamp_only")
+  })
+  test("a window the PR doesn't touch is not reported", () => {
+    expect(rulesFor("+select 1 as unrelated\n")).not.toContain("dedup_load_timestamp_only")
+  })
+  test("with hunk headers, an added line matching window text elsewhere doesn't touch the window", () => {
+    const noOrder =
+      "select\n  tenant\n  , row_number() over (partition by tenant, id) as rn\nfrom t\nunion all\nselect\n  tenant\n  , id\nfrom u"
+    const rules = (diff: string) =>
+      detectModelPatterns({ path: "models/m.sql", status: "modified", diff }, noOrder, DEFAULT_RUBRIC).map(
+        (f) => (f.evidence?.result as { rule?: string })?.rule,
+      )
+    // Line 8 (`  , id`) in the second branch was added; the window on line 3 is old code.
+    expect(rules("@@ -7,1 +7,2 @@\n   tenant\n+  , id\n")).not.toContain("dedup_no_tiebreaker")
+    expect(rules("@@ -3,1 +3,1 @@\n-  , row_number() over () as rn\n+  , row_number() over (partition by tenant, id) as rn\n")).toContain(
+      "dedup_no_tiebreaker",
+    )
+  })
+  test("without hunk headers, a bare identifier that also appears in the window doesn't touch it", () => {
+    const window = "select customer_id, row_number() over (partition by customer_id) as rn\nfrom t\ngroup by\n  customer_id"
+    const rules = (diff: string) =>
+      detectModelPatterns({ path: "models/m.sql", status: "modified", diff }, window, DEFAULT_RUBRIC).map(
+        (f) => (f.evidence?.result as { rule?: string })?.rule,
+      )
+    expect(rules("+  customer_id\n")).not.toContain("dedup_no_tiebreaker")
+    // An added line that is the window itself (whitespace differing) still counts.
+    expect(rules("+select customer_id, row_number()  over (partition by   customer_id) as rn\n")).toContain("dedup_no_tiebreaker")
+  })
+})
+
+describe("column changes without compiled SQL (dbt parse-only CI)", () => {
+  test("on_schema_change='fail' sees columns added to the raw model's SELECT", async () => {
+    const cfg = "{{ config(materialized='incremental', unique_key='id', on_schema_change='fail') }}\n"
+    const oldSql = `${cfg}select id, amount from {{ ref('src') }}`
+    const newSql = `${cfg}select id, amount, region from {{ ref('src') }}`
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/fct.sql", status: "modified", diff: `-${oldSql}\n+${newSql}\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return {}
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: false }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+        async columnLineage() {
+          return []
+        },
+      } as ReviewRunner,
+      getContent: async (_f, side) => (side === "old" ? oldSql : newSql),
+    })
+    expect(env.findings.find((f) => f.title.includes("on_schema_change"))?.body).toContain("adds `region`")
+  })
+
+  test("columns inside a `{% if %}` block are unknown, not added", async () => {
+    const cfg = "{{ config(materialized='incremental', unique_key='id', on_schema_change='fail') }}\n"
+    const review = (oldSql: string, newSql: string) =>
+      runReview({
+        changedFiles: [{ path: "models/marts/fct.sql", status: "modified", diff: `-${oldSql}\n+${newSql}\n` }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          async impact() {
+            return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+          },
+          async grade() {
+            return {}
+          },
+          async check() {
+            return { issues: [], ran: true }
+          },
+          async equivalence() {
+            return { decided: false }
+          },
+          async detectPii() {
+            return { columns: [] }
+          },
+          async columnLineage() {
+            return []
+          },
+        } as ReviewRunner,
+        getContent: async (_f, side) => (side === "old" ? oldSql : newSql),
+      })
+    const conditional = await review(
+      `${cfg}select id, amount from {{ ref('src') }}`,
+      `${cfg}select id, amount {% if var('with_region', false) %}, region {% endif %} from {{ ref('src') }}`,
+    )
+    expect(conditional.findings.some((f) => f.title.includes("on_schema_change"))).toBe(false)
+    // An item with no name of its own (a cast) makes the list unknown, so a
+    // column turned into a cast is neither removed nor are others added.
+    const cast = await review(
+      `${cfg}select id, amount from {{ ref('src') }}`,
+      `${cfg}select id, amount::numeric(18,2), region from {{ ref('src') }}`,
+    )
+    expect(cast.findings.some((f) => f.title.includes("on_schema_change"))).toBe(false)
+  })
+})

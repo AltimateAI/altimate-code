@@ -238,7 +238,7 @@ describe("v0.8.5 adversarial - composite action", () => {
     const changelog = await fs.readFile(path.join(repoRoot, "CHANGELOG.md"), "utf8")
     expect(changelog).toContain(`## [${version}]`)
 
-    for (const relative of ["docs/docs/usage/dbt-pr-review.md", "github/review/examples/altimate-ingestion.yml"]) {
+    for (const relative of ["docs/docs/usage/dbt-pr-review.md", "github/review/examples/dbt-pr-review.yml"]) {
       const content = await fs.readFile(path.join(repoRoot, relative), "utf8")
       expect(content).toContain(`AltimateAI/altimate-code/github/review@v${version}`)
       expect(content).not.toContain("AltimateAI/altimate-code/github/review@v0.8.4")
