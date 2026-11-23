@@ -77,6 +77,8 @@ export interface ReviewPullRequestOptions {
   forceTier?: "trivial" | "lite" | "full"
   /** Every file the PR changes, when `changedFiles` is a subset of it (multi-project review). */
   prFiles?: string[]
+  /** Every rename the PR makes (new → old path), when `changedFiles` is a subset of it. */
+  prRenames?: Array<[string, string]>
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -369,10 +371,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   }
   // Map renamed files → their old path so getContent resolves the "old" side
   // from where the file lived at `base`: in-scope files as scoped (a rename into
-  // the project is scoped as added), files outside the project as collected.
-  const prRenames = new Map(
-    collected.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
-  )
+  // the project is scoped as added), files outside the project as collected or,
+  // when `changedFiles` is a subset, as the whole PR renamed them.
+  const prRenames = new Map([
+    ...(opts.prRenames ?? []),
+    ...collected.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string] as const),
+  ])
   const inScopePaths = new Set(changedFiles.map((f) => f.path))
   const renames = new Map([...prRenames].filter(([p]) => !inScopePaths.has(p)))
   for (const f of changedFiles) if (f.status === "renamed" && f.oldPath) renames.set(f.path, f.oldPath)

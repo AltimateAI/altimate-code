@@ -149,11 +149,12 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
   // Each project sees its own files plus the files outside every project (so
   // those are listed as not reviewed); other projects' files are left out.
   const prFiles = collected.map((f) => f.path)
+  const prRenames = collected.flatMap((f) => (f.status === "renamed" && f.oldPath ? [[f.path, f.oldPath] as [string, string]] : []))
   const runs: ProjectRun[] = []
   for (const root of touched) {
     const own = byProject.get(root)!
     process.stderr.write(`ℹ️  reviewing dbt project ${root || "."} (${own.length} changed file(s))\n`)
-    const env = await reviewPullRequest({ ...optsFor(root), changedFiles: [...own, ...unassigned], prFiles })
+    const env = await reviewPullRequest({ ...optsFor(root), changedFiles: [...own, ...unassigned], prFiles, prRenames })
     runs.push({ root, paths: own.map((f) => f.path), env })
   }
   return mergeProjectEnvelopes(runs, roots)

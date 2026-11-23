@@ -1,10 +1,11 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import { promises as fs } from "node:fs"
 import path from "node:path"
 import { tmpdir } from "node:os"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { reviewPullRequest } from "../../src/altimate/review/run"
+import * as Orchestrate from "../../src/altimate/review/orchestrate"
 import {
   assignToProjects,
   discoverDbtProjects,
@@ -274,6 +275,44 @@ describe("reviewAllProjects: one envelope for every dbt project a PR touches", (
     await commitAll(root, "head")
     expect(await discoverDbtProjects(root, "HEAD")).toEqual(["proj_a", "proj_b", "projé"])
     expect(await discoverDbtProjects(root)).toEqual(["proj_a", "proj_b", "projé"])
+  }, 60_000)
+
+  test("a credential file another project renames unedited is refused to this project's verifier", async () => {
+    const { root } = await fixture()
+    // Built at runtime: an obviously fake marker, never a realistic secret.
+    const marker = ["FAKE", "PW", "123"].join("_")
+    await write(root, "proj_b/profiles.yml", `password: ${marker}\n`)
+    const base = await commitAll(root, "profiles")
+    await write(root, "proj_a/models/orders.sql", STAR_MODEL)
+    await write(root, "proj_b/models/orders.sql", STAR_MODEL)
+    await g(root, "mv", "proj_b/profiles.yml", "proj_b/settings.txt")
+    await commitAll(root, "head")
+
+    // Each project's AI lane runs with the verifier; capture what it would be handed.
+    type Input = Parameters<typeof Orchestrate.runReview>[0]
+    const real = Orchestrate.runReview
+    const seen = new Map<string, Parameters<NonNullable<Input["aiReview"]>>[0]>()
+    const spy = spyOn(Orchestrate, "runReview").mockImplementation((input: Input) =>
+      real({
+        ...input,
+        forceTier: "full",
+        aiVerify: true,
+        aiReview: async (ai) => {
+          seen.set(input.layout?.root ?? "", ai)
+          return { findings: [], status: { state: "ok" } }
+        },
+      }),
+    )
+    try {
+      await reviewAllProjects({ cwd: root, base, head: "HEAD" })
+    } finally {
+      spy.mockRestore()
+    }
+    const a = seen.get("proj_a")?.evidence
+    expect(a).toBeDefined()
+    expect(a!.prFiles).not.toContain("proj_b/settings.txt")
+    expect(await a!.readFile("proj_b/settings.txt", "new")).toBe("not available: may hold credentials")
+    expect(await a!.readFile("proj_b/settings.txt", "old")).toBe("not available: may hold credentials")
   }, 60_000)
 })
 
