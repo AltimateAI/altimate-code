@@ -87,15 +87,17 @@ The Altimate Code plugins let Claude Code and Codex hand dbt and warehouse work 
 altimate. Install the CLI above first — the plugins run it, they do not install it.
 
 ```bash
-# Claude Code
-claude plugin install altimate-code
+# Claude Code — from Altimate's marketplace, which has the current plugin
+# (the copy in Anthropic's plugin directory is pinned at 1.0.0)
+claude plugin marketplace add AltimateAI/altimate-claude-plugin
+claude plugin install altimate-code@altimate-claude-plugin
 
 # Codex — add the marketplace, then open Codex, type /plugins and install "Altimate Code"
 codex plugin marketplace add AltimateAI/altimate-codex-plugin
 ```
 
 See [Using with Claude Code](docs/docs/data-engineering/guides/using-with-claude-code.md) for
-the marketplace install, sign-in and the `/altimate-code:altimate` command, and the
+the dbt helpers and panes, sign-in and the `/altimate-code:altimate` command, and the
 [Codex plugin README](https://github.com/AltimateAI/altimate-codex-plugin#install) for Codex.
 
 ## Why a specialized harness?
