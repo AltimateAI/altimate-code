@@ -313,6 +313,7 @@ export async function postGitHubReview(
           comments: verified,
         })
         result.reviewId = r.data.id
+        await dismissStale()
         return result
       } catch {
         /* fall through to the event-only review */
