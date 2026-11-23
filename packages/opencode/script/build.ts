@@ -2,6 +2,9 @@
 
 import { $ } from "bun"
 import fs from "fs"
+// altimate_change start — tmpdir for the Solid plugin warm-up build below
+import os from "os"
+// altimate_change end
 import path from "path"
 import { fileURLToPath } from "url"
 import { createRequire } from "node:module"
@@ -500,6 +503,28 @@ function locatePlatformPackageDir(pkgName: string): string {
   const pkgJsonPath = altimateCoreLoaderRequire.resolve(`${pkgName}/package.json`)
   return fs.realpathSync(path.dirname(pkgJsonPath))
 }
+
+// altimate_change start — warm the Solid plugin before the real bundles.
+// The plugin's .tsx loader runs Babel on the JS thread, and Babel requires most of its
+// dependencies lazily on its first transform. Inside `Bun.build` those lookups race the
+// bundle thread, which resolves the same symlinked `node_modules/.bun` entries for the
+// copy of @babel/core this binary embeds (via @opentui/solid/runtime-plugin-support).
+// Bun 1.3.14's resolver fills each entry's kind without a lock, so either side can read a
+// package directory as a file: `EISDIR reading ".../node_modules/@babel/traverse"`, on a
+// random target. One throwaway transform here, in a build that resolves nothing, does
+// those lookups first. Bun 1.4 locks that lookup; this block can go once we build on it.
+{
+  const warmDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-solid-warm-"))
+  try {
+    const warmEntry = path.join(warmDir, "warm.tsx")
+    fs.writeFileSync(warmEntry, "export const Warm = (props: { n: number }) => <box>{props.n}</box>\n")
+    await Bun.build({ entrypoints: [warmEntry], plugins: [solidPlugin], target: "bun", external: ["*"] })
+  } finally {
+    fs.rmSync(warmDir, { recursive: true, force: true })
+  }
+}
+// altimate_change end
+
 for (const item of targets) {
   const name = [
     pkg.name,
