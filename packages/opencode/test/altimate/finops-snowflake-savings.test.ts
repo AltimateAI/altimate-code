@@ -348,7 +348,7 @@ describe("the fact queries", () => {
     expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(`WHERE TIMESTAMP >= DATEADD(day, -365, ${end}) AND WAREHOUSE_ID IS NOT NULL`)
     // Of the year, only creations and drops; every event of the days the count covers.
     expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(
-      `AND (EVENT_NAME IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE') OR TIMESTAMP >= DATEADD(day, -9, ${end}))`,
+      `AND (EVENT_NAME IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE')\n         OR (TIMESTAMP >= DATEADD(day, -9, ${end}) AND TIMESTAMP < DATEADD(day, 1, ${end})))`,
     )
     // A drop matters only for an id with usage, which began no earlier than ten days before the window's end.
     expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain(`START_TIME >= DATEADD(day, -10, ${end})`)
