@@ -342,15 +342,19 @@ describe("the fact queries", () => {
     expect(SNOWFLAKE_QUERY_FACTS_SQL).toContain("DATE_PART(epoch_second, MIN(q.st)) AS first_start")
   })
 
-  test("the identity query reads every creation and drop the view keeps, as instants, and counts the period query's days", () => {
-    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY")
-    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("TIMESTAMP >= DATEADD(day, -365,")
-    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("event_name IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE')")
-    // Epoch milliseconds are the same instant whatever the session's time zone.
-    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("DATE_PART(epoch_millisecond, ts)")
-    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("+0000")
-    // The count covers the days the period query reads events from, so events there mean events here.
+  test("the identity query reads the year of creations the view keeps, the drops since the earliest usage read, and counts the period query's days", () => {
     const end = "TO_TIMESTAMP_TZ(? || ' 00:00:00 +0000', 'YYYY-MM-DD HH24:MI:SS TZHTZM')"
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY")
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(`WHERE TIMESTAMP >= DATEADD(day, -365, ${end}) AND WAREHOUSE_ID IS NOT NULL`)
+    // A drop matters only for an id with usage, which began no earlier than ten days before the window's end.
+    expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain(`START_TIME >= DATEADD(day, -10, ${end})`)
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(`(event_name = 'DROP_WAREHOUSE' AND ts >= DATEADD(day, -10, ${end}))`)
+    // A creation names a listed warehouse only for an id that still exists.
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("gone AS (SELECT DISTINCT warehouse_id FROM e WHERE event_name = 'DROP_WAREHOUSE')")
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("(event_name = 'CREATE_WAREHOUSE' AND warehouse_id NOT IN (SELECT warehouse_id FROM gone))")
+    // In UTC, as every other query's `first_start`, whatever the session's time zone.
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("DATE_PART(epoch_millisecond, TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ts)))")
+    // The count covers the days the period query reads events from, so events there mean events here.
     expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain(`TIMESTAMP >= DATEADD(day, -9, ${end}) AND TIMESTAMP < DATEADD(day, 1, ${end})`)
     expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(`COUNT_IF(ts >= DATEADD(day, -9, ${end}) AND ts < DATEADD(day, 1, ${end}))`)
     // The history row sorts first, so a result cut at the row limit still has it.
@@ -792,7 +796,8 @@ describe("building the facts", () => {
   })
 
   describe("with the warehouse create and drop events", () => {
-    // Rows as SNOWFLAKE_IDENTITY_EVENTS_SQL returns them, from CREATE_WAREHOUSE and DROP_WAREHOUSE events.
+    // Rows as SNOWFLAKE_IDENTITY_EVENTS_SQL returns them, from CREATE_WAREHOUSE and DROP_WAREHOUSE events: the
+    // query leaves out the creation of an id dropped since, so no id here has both.
     const event = (kind: "create" | "drop", id: number, name: string, iso: string) => ({
       kind,
       warehouse_id: id,
@@ -813,7 +818,7 @@ describe("building the facts", () => {
     describe("an older warehouse renamed into a dropped one's name, with no usage under it", () => {
       // X_WH (id 9) billed on 10 Nov and was dropped that evening; OLD_WH (id 5) was then renamed X_WH and has not run since.
       const usage = { metering: [metered(9, "X_WH", "2026-11-10T08:00:00Z", 50), metered(5, "OLD_WH", "2026-11-09T08:00:00Z", 3)], ...none }
-      const dropped = [event("create", 9, "X_WH", "2026-03-02T10:00:00Z"), event("drop", 9, "X_WH", "2026-11-10T20:00:00Z")]
+      const dropped = [event("drop", 9, "X_WH", "2026-11-10T20:00:00Z")]
 
       test("does not take the dropped one's usage", () => {
         // Created in 2025, before the year the view keeps: no creation event names its id.
@@ -862,11 +867,7 @@ describe("building the facts", () => {
         ...none,
       }
       expect(buildFacts(rows).facts[0]).toMatchObject({ warehouse_id: "1" })
-      const lifecycle = [
-        event("create", 1, "A", "2026-02-01T00:00:00Z"),
-        event("create", 3, "C", "2026-04-01T12:00:00.300Z"),
-        event("drop", 1, "B", "2026-11-11T08:00:00Z"),
-      ]
+      const lifecycle = [event("create", 3, "C", "2026-04-01T12:00:00.300Z"), event("drop", 1, "B", "2026-11-11T08:00:00Z")]
       const { facts, replaced, unlisted } = buildFacts({ ...rows, lifecycle })
       expect(facts[0]).toMatchObject({ warehouse_id: "3" })
       expect(credits(facts[0]!)).toEqual([6])
@@ -917,6 +918,20 @@ describe("building the facts", () => {
         expect(withEvents).toMatchObject({ replaced: ["BI_WH"], facts: [{ warehouse_id: "unused:BI_WH" }] })
       })
 
+      test("a drop after the view's latest event: a warehouse the events cannot name, renamed into its name, gets its usage", () => {
+        // X_WH (id 9) billed on 10 Nov and was dropped an hour ago; OLD_WH (id 5), created in 2025, was then renamed X_WH.
+        const rows = {
+          warehouses: [show({ name: "X_WH", created_on: new Date("2025-06-01T00:00:00Z") })],
+          metering: [metered(9, "X_WH", "2026-11-10T08:00:00Z", 50), metered(5, "OLD_WH", "2026-11-09T08:00:00Z", 3)],
+          ...none,
+        }
+        // The view was read: it has another warehouse's creation, and not yet this drop.
+        const { facts, unlisted } = buildFacts({ ...rows, lifecycle: [event("create", 2, "ETL_WH", "2026-08-01T00:00:00Z")] })
+        expect(facts[0]).toMatchObject({ warehouse_id: "9" })
+        expect(credits(facts[0]!)).toEqual([50])
+        expect(unlisted).toEqual(["OLD_WH"])
+      })
+
       test("a rename after the view's latest event: the creation still names the warehouse", () => {
         // ETL_WH (id 5) was renamed NEW_WH an hour ago; its usage and events carry only the old name.
         const rows = { warehouses: [show({ name: "NEW_WH", created_on: new Date("2026-06-01T00:00:00Z") })], metering: [metered(5, "ETL_WH", "2026-11-12T08:00:00Z", 7)], ...none }
@@ -941,10 +956,10 @@ describe("building the facts", () => {
         }
       })
 
-      test("two warehouses created in the same second give neither an id, unless one was dropped since", () => {
+      test("two ids created in the same second give neither an id", () => {
         const both = [event("create", 7, "OTHER_WH", "2026-06-01T00:00:00.100Z"), event("create", 8, "SIBLING_WH", "2026-06-01T00:00:00.200Z")]
         expect(buildFacts({ ...rows, lifecycle: both }).facts[0]!.warehouse_id).toBe("unused:BI_WH")
-        expect(buildFacts({ ...rows, lifecycle: [...both, event("drop", 8, "SIBLING_WH", "2026-07-01T00:00:00Z")] }).facts[0]!.warehouse_id).toBe("7")
+        expect(buildFacts({ ...rows, lifecycle: both.slice(0, 1) }).facts[0]!.warehouse_id).toBe("7")
       })
 
       test("a creation that fits two listed warehouses gives neither its id", () => {
@@ -1154,7 +1169,8 @@ describe("snowflake savings handler over a stubbed connection", () => {
   })
 
   describe("the warehouse create and drop events", () => {
-    // Earlier BI_WH (id 3) and the current one (id 7) both billed under the name; the current one was created on 1 Jun.
+    // Ids 3 and 7 both billed under BI_WH, and 7 was seen last, so by name and time 7 is the listed BI_WH. The events
+    // say otherwise: 7 was dropped on 12 Nov, and 3 was created with the listed BI_WH on 1 Jun.
     const created = new Date("2026-06-01T08:00:00.000Z")
     const shared = [{ warehouse_id: 3, warehouse_name: "BI_WH", usage_day: "2026-11-11", idle_day: null, credits_used: 100 }, ...METERING]
     const PERIOD = { warehouse_id: 7, warehouse_name: "BI_WH", cluster_number: 1, usage_day: "2026-11-11", idle_day: "2026-11-11", periods: 1, short_periods: 0, active_seconds: 60, idle_seconds: 10 }
@@ -1199,10 +1215,17 @@ describe("snowflake savings handler over a stubbed connection", () => {
         () => table([{ ...HISTORY, recent_events: 0 }, ...lifecycle]),
         "WAREHOUSE_EVENTS_HISTORY returned no events for the days the other queries read events from",
       ],
+      [
+        "the list was cut at the row limit",
+        () => table([HISTORY, ...lifecycle], true),
+        "WAREHOUSE_EVENTS_HISTORY has more creations and drops than the 100,000-row limit",
+      ],
     ])("when %s, usage is matched by name and time as before, and the answer says so", async (_, identity, reason) => {
       connect(answer(identity))
       const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
       expect(result.success).toBe(true)
+      // None of the events is used, so none is reported as partly checked.
+      expect(result.limited).toEqual([])
       // The newest id under the name, as the name-and-time rule picks it.
       expect(sent.warehouses[0]).toMatchObject({ warehouse_id: "7" })
       expect(result.skipped).toEqual([

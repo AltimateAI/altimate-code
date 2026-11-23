@@ -228,26 +228,32 @@ GROUP BY 1, 2 ORDER BY 2
 `
 
 /**
- * Every warehouse creation and drop in the year the view keeps, one row per event (`kind` is `create` or
- * `drop`, `event_ms` its epoch milliseconds), after one `history` row counting the events in the span the
- * period query reads.
- * `SHOW WAREHOUSES` gives no ids: a creation logged within a second of a listed warehouse's `created_on`
- * names its id, and a dropped id is no listed warehouse's, since a warehouse cannot be undropped. The count
- * tells a view with nothing for those days from one that was read.
+ * The warehouse lifecycle the view keeps for a year, as rows (`kind`, `warehouse_id`, `warehouse_name`,
+ * `event_ms` in epoch milliseconds, UTC):
+ * - one `history` row counting the events in the span the period query reads, which tells a view with
+ *   nothing for those days from one that was read;
+ * - a `drop` row per id dropped since ten days before the window's end, the earliest any usage read here
+ *   begins: a dropped id is no listed warehouse's, since a dropped warehouse cannot be recovered;
+ * - a `create` row per creation of an id not dropped in the year: a creation within a second of a listed
+ *   warehouse's `created_on` names its id.
+ * The view records no rename, so a rename changes nothing here: an id keeps the creation that names it.
  */
 export const SNOWFLAKE_IDENTITY_EVENTS_SQL = `
 WITH e AS (
   SELECT WAREHOUSE_ID AS warehouse_id, WAREHOUSE_NAME AS warehouse_name, EVENT_NAME AS event_name, TIMESTAMP AS ts
   FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
   WHERE TIMESTAMP >= DATEADD(day, -365, ${WINDOW_END}) AND WAREHOUSE_ID IS NOT NULL
-)
+),
+gone AS (SELECT DISTINCT warehouse_id FROM e WHERE event_name = 'DROP_WAREHOUSE')
 SELECT 'history' AS kind, NULL AS warehouse_id, NULL AS warehouse_name, NULL AS event_ms,
        COUNT_IF(ts >= DATEADD(day, -9, ${WINDOW_END}) AND ts < DATEADD(day, 1, ${WINDOW_END})) AS recent_events
 FROM e
 UNION ALL
 SELECT DISTINCT IFF(event_name = 'DROP_WAREHOUSE', 'drop', 'create'), warehouse_id, warehouse_name,
-       DATE_PART(epoch_millisecond, ts), NULL
-FROM e WHERE event_name IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE')
+       DATE_PART(epoch_millisecond, TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ts))), NULL
+FROM e
+WHERE (event_name = 'DROP_WAREHOUSE' AND ts >= DATEADD(day, -10, ${WINDOW_END}))
+   OR (event_name = 'CREATE_WAREHOUSE' AND warehouse_id NOT IN (SELECT warehouse_id FROM gone))
 ORDER BY 1 DESC, 2, 4
 `
 
@@ -306,7 +312,7 @@ export interface FactRows {
   periods: Row[]
   restarts: Row[]
   queries: Row[]
-  /** Creation and drop rows of `SNOWFLAKE_IDENTITY_EVENTS_SQL`; none when the view could not be read. */
+  /** The rows of `SNOWFLAKE_IDENTITY_EVENTS_SQL`; none when the view could not be read in full. */
   lifecycle?: Row[]
 }
 
@@ -327,13 +333,14 @@ const CREATE_TOLERANCE_MS = 1_000
 
 /**
  * The id each listed warehouse's creation event names, and the ids that were dropped. A listed warehouse
- * gets an id only when exactly one id not since dropped was created within a second of its `created_on`,
- * and that id fits no other listed warehouse; otherwise it has none here.
+ * gets an id only when exactly one id was created within a second of its `created_on` (the query leaves
+ * out the creations of ids dropped since), and that id fits no other listed warehouse; otherwise it has
+ * none here.
  */
 function identityOf(warehouses: Row[], lifecycle: Row[]) {
   const dropped = new Set(lifecycle.filter((row) => row.kind === "drop").map((row) => num(row.warehouse_id)))
   const creations = lifecycle
-    .filter((row) => row.kind === "create" && !dropped.has(num(row.warehouse_id)))
+    .filter((row) => row.kind === "create")
     .map((row) => ({ id: num(row.warehouse_id), at: num(row.event_ms) }))
   const namesByCreatedId = new Map<number, string[]>()
   for (const row of warehouses) {
@@ -368,8 +375,8 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  * Usage belongs to a warehouse id, and each id belongs to at most one listed warehouse. The warehouse
  * events give that from ids: an id dropped belongs to none, and an id whose creation matches a listed
  * warehouse's `created_on` belongs to that one, whatever names its usage was logged under. Ids and listed
- * warehouses the events leave open (created before the year the view keeps, or after its latest event, or
- * the view unread) are matched by name and time:
+ * warehouses the events leave open (created more than a year ago or in the same second as another, dropped
+ * or created after the view's latest event, or no events read) are matched by name and time:
  * - the name an id was seen under last, by each row's start (a query row starts at that name's first query),
  *   unless some of its usage began before the warehouse now holding that name was created (a dropped
  *   warehouse whose name was reused);
@@ -377,7 +384,9 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  *   away from a name that was then reused).
  * A metered hour counts from its start, which can be up to an hour before the creation inside it, and other
  * times may read up to a minute early. A name that several ids belong to keeps the one seen last, then the
- * larger (newer) id.
+ * larger (newer) id. Without an id from the events, a listed warehouse can still get the usage of another
+ * that used its name before: one renamed away with no usage under its new name, or one dropped after the
+ * view's latest event.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
  * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits,
  * periods, restarts or queries): that earlier usage is left out.
@@ -586,9 +595,10 @@ export async function snowflakeSavings(
     const connector = await run.beforeStop(() => Registry.get(resolved.warehouse), "Connecting to the warehouse")
     const config = Registry.getConfig(resolved.warehouse) as Record<string, unknown> | undefined
     const limited: string[] = []
+    // Every parameter is the window's end date.
+    const binds = (sql: string) => Array.from({ length: sql.split("?").length - 1 }, () => window.end)
     const read = async (what: string, sql: string, rowLimit = ROW_LIMIT) => {
-      const binds = Array.from({ length: sql.split("?").length - 1 }, () => window.end)
-      const result = await run.query(connector, what, sql, rowLimit, binds)
+      const result = await run.query(connector, what, sql, rowLimit, binds(sql))
       if (result.truncated) limited.push(what)
       return records(result)
     }
@@ -633,11 +643,16 @@ export async function snowflakeSavings(
         reason: `${reason.replace(/\.$/, "")}; usage was matched to warehouses by name and creation time instead`,
       })
     try {
-      const events = await read("warehouse identity", SNOWFLAKE_IDENTITY_EVENTS_SQL)
+      const sql = SNOWFLAKE_IDENTITY_EVENTS_SQL
+      const result = await run.query(connector, "warehouse identity", sql, ROW_LIMIT, binds(sql))
+      const events = records(result)
       const history = events.find((row) => row.kind === "history")
       // The period and restart queries read the same view: events there and none here is a view not read.
       if (history === undefined || (whole(history.recent_events) === 0 && periods.length + restarts.length > 0)) {
         byNameAndTime("WAREHOUSE_EVENTS_HISTORY returned no events for the days the other queries read events from")
+      } else if (result.truncated) {
+        // A cut list can lack the creation that would rule a match out, so none of it is used.
+        byNameAndTime(`WAREHOUSE_EVENTS_HISTORY has more creations and drops than the ${ROW_LIMIT.toLocaleString("en-US")}-row limit`)
       } else lifecycle = events
     } catch (e) {
       if (signal?.aborted) throw e
