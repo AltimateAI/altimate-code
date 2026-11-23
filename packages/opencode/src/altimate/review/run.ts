@@ -348,10 +348,14 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     )
   }
   // Map renamed files → their old path so getContent resolves the "old" side
-  // from where the file lived at `base`.
-  const renames = new Map(
-    changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
+  // from where the file lived at `base`: in-scope files as scoped (a rename into
+  // the project is scoped as added), files outside the project as collected.
+  const prRenames = new Map(
+    collected.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
   )
+  const inScopePaths = new Set(changedFiles.map((f) => f.path))
+  const renames = new Map([...prRenames].filter(([p]) => !inScopePaths.has(p)))
+  for (const f of changedFiles) if (f.status === "renamed" && f.oldPath) renames.set(f.path, f.oldPath)
   const getContent =
     opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
 
@@ -467,6 +471,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
     prFiles: collected.map((f) => f.path),
+    prRenames,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,

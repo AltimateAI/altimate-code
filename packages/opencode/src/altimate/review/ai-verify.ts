@@ -23,8 +23,10 @@ import { isCredentialPath } from "./credentials"
 
 const log = Log.create({ service: "ai-verify" })
 
-// Credential files are refused by name (the requested path, a renamed file's old path, a
-// working-tree symlink's target) and by content (private keys, service-account keys).
+// The verifier refuses a file that may hold credentials: by name (its path or, for a rename, its
+// old path; a working-tree symlink's target) on both sides of `read_file` and `compiled_sql` and in
+// `grep_project` hits; by content (private keys, service-account keys) in `read_file`, `compiled_sql`
+// and every file `grep_project` would show. The AI lane never gets such a file, nor one whose diff holds a key.
 export { holdsCredentials, isCredentialPath } from "./credentials"
 
 /** What the verifier may read: the PR's files, the engine, and the dbt project. */
