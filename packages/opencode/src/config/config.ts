@@ -30,7 +30,9 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
+// altimate_change start — typed remote-config failures
+import { RemoteAuthError, RemoteUnavailableError } from "@opencode-ai/core/v1/config/error"
+// altimate_change end
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
@@ -332,24 +334,48 @@ export const layer = Layer.effect(
       headers: Record<string, string> | undefined,
       schema: S,
       loginOrigin: string,
+      // altimate_change start — how errors name the remote: never a URL with a substituted token in it
+      shown: string = url,
+      // altimate_change end
     ) {
       const response = yield* HttpClient.filterStatusOk(withTransientReadRetry(http))
         .execute(
           HttpClientRequest.get(url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers ?? {})),
         )
         .pipe(
-          Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
+          // altimate_change start — an unreachable or failing remote is reported by name and status (HTTP 502), not as
+          // an untyped defect whose stack the server used to send back in a 500.
+          Effect.catch((error) =>
+            Effect.die(
+              new RemoteUnavailableError({
+                remote: shown,
+                status: error.reason._tag === "StatusCodeError" ? error.reason.response.status : undefined,
+                reason:
+                  error.reason._tag === "StatusCodeError" ? `HTTP ${error.reason.response.status}` : error.reason._tag,
+              }),
+            ),
+          ),
+          // altimate_change end
         )
       const body = yield* response.text.pipe(
-        Effect.catch((error) => Effect.die(new Error(`failed to read remote config from ${url}: ${String(error)}`))),
+        // altimate_change start — see above
+        Effect.catch((error) =>
+          // The status passed filterStatusOk, so it says nothing about this failure.
+          Effect.die(new RemoteUnavailableError({ remote: shown, reason: error.reason._tag })),
+        ),
+        // altimate_change end
       )
       // An auth proxy can answer with an HTML login page at HTTP 200 (passes filterStatusOk); treat it as a re-auth error, not a decode failure.
       const contentType = (response.headers["content-type"] ?? "").toLowerCase()
       if (contentType.includes("html") || /^\s*<!doctype|^\s*<html/i.test(body)) {
-        return yield* Effect.die(new RemoteAuthError({ url: loginOrigin, remote: url }))
+        // altimate_change start — see `shown` above
+        return yield* Effect.die(new RemoteAuthError({ url: loginOrigin, remote: shown }))
+        // altimate_change end
       }
       return yield* Schema.decodeEffect(Schema.fromJsonString(schema))(body).pipe(
-        Effect.catch((error) => Effect.die(new Error(`failed to decode remote config from ${url}: ${String(error)}`))),
+        // altimate_change start — see `shown` above
+        Effect.catch((error) => Effect.die(new Error(`failed to decode remote config from ${shown}: ${String(error)}`))),
+        // altimate_change end
       )
     })
 
@@ -551,12 +577,19 @@ export const layer = Layer.effect(
             )
             const fetchedConfig = remote
               ? yield* Effect.gen(function* () {
-                  yield* Effect.logDebug("fetching remote config", { url: remote.url })
-                  const data = yield* fetchRemoteJson(remote.url, remote.headers, Schema.Json, url)
+                  // altimate_change start — errors and logs name the remote by its template (`{env:…}` and all), not
+                  // the substituted URL, which can carry the auth token
+                  const template = isRecord(wellknown.remote_config) ? wellknown.remote_config.url : undefined
+                  const shown = typeof template === "string" ? template : url
+                  yield* Effect.logDebug("fetching remote config", { url: shown })
+                  const data = yield* fetchRemoteJson(remote.url, remote.headers, Schema.Json, url, shown)
+                  // altimate_change end
                   if (isRecord(data) && isRecord(data.config)) return data.config
                   if (isRecord(data)) return data
                   return yield* Effect.die(
-                    new Error(`failed to decode remote config from ${remote.url}: expected object`),
+                    // altimate_change start — see `shown` above
+                    new Error(`failed to decode remote config from ${shown}: expected object`),
+                    // altimate_change end
                   )
                 })
               : {}

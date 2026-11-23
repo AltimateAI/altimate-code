@@ -5,31 +5,7 @@
  * concurrent access, and error recovery paths.
  */
 
-import { describe, expect, test, beforeEach, beforeAll, afterAll, mock } from "bun:test"
-
-// Mock DuckDB driver so tests don't require the native duckdb package.
-// Bun's mock.module leaks across test files: snapshot the genuine exports before
-// mocking and restore them in afterAll so later DuckDB-backed tests see the real driver.
-import * as realDuckdb from "@altimateai/drivers/duckdb"
-const genuineDuckdb = { ...realDuckdb }
-afterAll(() => {
-  mock.module("@altimateai/drivers/duckdb", () => genuineDuckdb)
-})
-mock.module("@altimateai/drivers/duckdb", () => ({
-  connect: async (config: any) => ({
-    execute: async (sql: string) => ({
-      columns: [],
-      rows: [],
-      row_count: 0,
-      truncated: false,
-    }),
-    connect: async () => {},
-    close: async () => {},
-    schemas: async () => [],
-    tables: async () => [],
-    columns: async () => [],
-  }),
-}))
+import { describe, expect, test, beforeEach, beforeAll, afterAll } from "bun:test"
 
 // Disable telemetry via env var instead of mock.module
 beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
@@ -224,6 +200,12 @@ describe("Adversarial: Connection Registry", () => {
   beforeEach(() => {
     Registry.reset()
     registerConnections()
+  })
+
+  // These tests open real in-memory DuckDB connections; close them for later files.
+  afterAll(async () => {
+    await Registry.closeAll()
+    Registry.reset()
   })
 
   test("get() with empty string name", async () => {

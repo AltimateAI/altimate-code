@@ -105,6 +105,15 @@ export function FormatError(input: unknown): string | undefined {
     return stringField(configFrontmatter, "message") ?? ""
   }
 
+  // altimate_change start — ConfigRemoteUnavailableError: { remote: string, status?: number, reason: string }
+  const remoteUnavailable = configData(input, "ConfigRemoteUnavailableError")
+  if (remoteUnavailable) {
+    const remote = stringField(remoteUnavailable, "remote")
+    const reason = stringField(remoteUnavailable, "reason")
+    return `Failed to load remote config${remote ? ` from ${remote}` : ""}: the remote is unavailable${reason ? ` (${reason})` : ""}.`
+  }
+  // altimate_change end
+
   // ConfigRemoteAuthError: { url: string, remote: string }
   const remoteAuth = configData(input, "ConfigRemoteAuthError")
   if (remoteAuth) {

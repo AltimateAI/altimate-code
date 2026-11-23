@@ -27,7 +27,7 @@ export const DbtPrReviewTool = Tool.define("dbt_pr_review", {
     '- dbt_pr_review({ manifest_path: "target/manifest.json", mode: "gate" })',
   ].join("\n"),
   parameters: z.object({
-    base: z.string().optional().describe("Base git ref. Defaults to merge-base with origin/main."),
+    base: z.string().optional().describe("Base git ref. Defaults to the PR target branch from CI, else the remote default branch, reduced to the merge-base."),
     head: z.string().optional().describe("Head git ref. Omit to review the working tree."),
     manifest_path: z
       .string()
