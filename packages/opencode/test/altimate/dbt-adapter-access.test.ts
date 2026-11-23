@@ -417,11 +417,19 @@ describe("dbtAdapterFor", () => {
     const cancelled = tracked()
     const signal = settled.signal
     const timers = new Set<unknown>()
+    let started = 0
     const set = globalThis.setTimeout
     const clear = globalThis.clearTimeout
+    // Only the timers dbtAdapterFor sets itself: other code scheduling one in this window (a fiber an
+    // earlier test file left running, say) sets timers that fire on their own and are never cleared.
+    const own = path.join("src", "altimate", "tools", "dbt-adapter-access.ts")
     globalThis.setTimeout = ((fn: () => void, ms?: number) => {
       const t = set(fn, ms)
-      timers.add(t)
+      // The frame below this wrapper is the caller's.
+      if (new Error().stack?.split("\n")[2]?.includes(own)) {
+        started += 1
+        timers.add(t)
+      }
       return t
     }) as typeof setTimeout
     globalThis.clearTimeout = ((t: ReturnType<typeof setTimeout>) => {
@@ -466,6 +474,8 @@ describe("dbtAdapterFor", () => {
     }
     expect(settled.listening).toBe(0)
     expect(cancelled.listening).toBe(0)
+    // One timer for each of the four calls, so the filter above saw them, and every one was cleared.
+    expect(started).toBe(4)
     expect(timers.size).toBe(0)
   })
 
