@@ -346,6 +346,10 @@ describe("the fact queries", () => {
     const end = "TO_TIMESTAMP_TZ(? || ' 00:00:00 +0000', 'YYYY-MM-DD HH24:MI:SS TZHTZM')"
     expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain("FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY")
     expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(`WHERE TIMESTAMP >= DATEADD(day, -365, ${end}) AND WAREHOUSE_ID IS NOT NULL`)
+    // Of the year, only creations and drops; every event of the days the count covers.
+    expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(
+      `AND (EVENT_NAME IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE') OR TIMESTAMP >= DATEADD(day, -9, ${end}))`,
+    )
     // A drop matters only for an id with usage, which began no earlier than ten days before the window's end.
     expect(SNOWFLAKE_PERIOD_FACTS_SQL).toContain(`START_TIME >= DATEADD(day, -10, ${end})`)
     expect(SNOWFLAKE_IDENTITY_EVENTS_SQL).toContain(`(event_name = 'DROP_WAREHOUSE' AND ts >= DATEADD(day, -10, ${end}))`)
@@ -850,11 +854,12 @@ describe("building the facts", () => {
       })
 
       test.each([
-        ["its drop", [event("drop", 100, "BI_WH", "2026-11-12T17:20:00Z")], "unused:BI_WH"],
-        ["the replacement's creation", [event("create", 200, "BI_WH", "2026-11-12T17:30:00.400Z")], "200"],
-      ])("is left out, from %s alone", (_, lifecycle, id) => {
+        ["its drop", [event("drop", 100, "BI_WH", "2026-11-12T17:20:00Z")]],
+        ["the replacement's creation", [event("create", 200, "BI_WH", "2026-11-12T17:30:00.400Z")]],
+      ])("is left out, from %s alone", (_, lifecycle) => {
         const { facts, replaced } = buildFacts({ ...recreated, lifecycle })
-        expect(facts[0]).toMatchObject({ warehouse_id: id, usage_days: [] })
+        // A warehouse with no usage is reported the same way whether or not the events were read.
+        expect(facts[0]).toMatchObject({ warehouse_id: "unused:BI_WH", usage_days: [] })
         expect(replaced).toEqual(["BI_WH"])
       })
     })
@@ -905,7 +910,7 @@ describe("building the facts", () => {
       // By name and time, the hour metered under the old name fits the new warehouse.
       expect(buildFacts(rows).facts[0]).toMatchObject({ warehouse_id: "5" })
       const { facts, replaced, unlisted } = buildFacts({ ...rows, lifecycle: [event("create", 9, "BI_WH", "2026-11-12T10:30:00.200Z")] })
-      expect(facts[0]).toMatchObject({ warehouse_id: "9", usage_days: [] })
+      expect(facts[0]).toMatchObject({ warehouse_id: "unused:BI_WH", usage_days: [] })
       expect({ replaced, unlisted }).toEqual({ replaced: [], unlisted: ["HIDDEN_WH"] })
     })
 
@@ -1045,15 +1050,15 @@ describe("snowflake savings handler over a stubbed connection", () => {
     const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
     expect(result.success).toBe(true)
     expect(result.window).toEqual({ start: "2026-11-11", end: "2026-11-18" })
-    // The warehouse events come after the usage queries, and the rate sheet last: only the price needs it.
+    // The rate sheet comes after the usage queries, and the year of warehouse events last.
     expect(calls.map((one) => one.sql)).toEqual([
       SNOWFLAKE_WAREHOUSES_SQL,
       SNOWFLAKE_METERING_FACTS_SQL,
       SNOWFLAKE_PERIOD_FACTS_SQL,
       SNOWFLAKE_RESTART_FACTS_SQL,
       SNOWFLAKE_QUERY_FACTS_SQL,
-      SNOWFLAKE_IDENTITY_EVENTS_SQL,
       SNOWFLAKE_RATE_SQL,
+      SNOWFLAKE_IDENTITY_EVENTS_SQL,
     ])
     for (const one of calls) {
       expect(one.binds).toEqual(Array(one.sql.split("?").length - 1).fill("2026-11-18"))
@@ -1235,7 +1240,8 @@ describe("snowflake savings handler over a stubbed connection", () => {
           reason: "BI_WH also had usage from an earlier warehouse, since dropped or renamed: only the current warehouse's usage was checked",
         },
       ])
-      expect(calls.at(-1)!.sql).toBe(SNOWFLAKE_RATE_SQL)
+      // The rest of the check is unaffected: the rate sheet's price stands.
+      expect(result.price).toMatchObject({ per_credit: 2.5, source: "rate_sheet" })
     })
 
     test("a view with no events at all, where no other query found any, is read as it is", async () => {
@@ -1308,8 +1314,8 @@ describe("snowflake savings handler over a stubbed connection", () => {
     expect(result.skipped).toEqual([
       { check: "Frequent Restart Overcharge", reason: "The restart events query was not started: it would run past the check's 9-minute limit." },
       { check: "The short-query signal of Downsize Warehouse", reason: "The query history query was not started: it would run past the check's 9-minute limit." },
-      BY_NAME_AND_TIME("The warehouse identity query was not started: it would run past the check's 9-minute limit"),
       { check: "The account's credit rate", reason: "The credit rate query was not started: it would run past the check's 9-minute limit." },
+      BY_NAME_AND_TIME("The warehouse identity query was not started: it would run past the check's 9-minute limit"),
     ])
   })
 
@@ -1332,9 +1338,23 @@ describe("snowflake savings handler over a stubbed connection", () => {
     expect(result.success).toBe(true)
     expect(result.price).toEqual({ per_credit: LIST_PRICE_PER_CREDIT, source: "list_price" })
     expect(result.skipped).toEqual([
-      BY_NAME_AND_TIME("The warehouse identity query was not started: it would run past the check's 9-minute limit"),
       { check: "The account's credit rate", reason: "The credit rate query was not started: it would run past the check's 9-minute limit." },
+      BY_NAME_AND_TIME("The warehouse identity query was not started: it would run past the check's 9-minute limit"),
     ])
+  })
+
+  test("the year of warehouse events cannot take the rate lookup's time: the price is read first", async () => {
+    let now = 1_000_000
+    tracked(spyOn(Date, "now")).mockImplementation(() => now)
+    connect((sql) => {
+      // The rate lookup leaves no time for the events.
+      if (sql === SNOWFLAKE_RATE_SQL) now += SAVINGS_RUN_LIMIT_MS
+      return answers(sql)
+    })
+    const result = await snowflakeSavings({ warehouse: "sf", now_ms: NOW }, rules)
+    expect(calls.at(-1)!.sql).toBe(SNOWFLAKE_RATE_SQL)
+    expect(result.price).toMatchObject({ per_credit: 2.5, source: "rate_sheet" })
+    expect(result.skipped).toEqual([BY_NAME_AND_TIME("The warehouse identity query was not started: it would run past the check's 9-minute limit")])
   })
 
   test("stopping the session cancels the running query and starts no other", async () => {

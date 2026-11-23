@@ -243,6 +243,7 @@ WITH e AS (
   SELECT WAREHOUSE_ID AS warehouse_id, WAREHOUSE_NAME AS warehouse_name, EVENT_NAME AS event_name, TIMESTAMP AS ts
   FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
   WHERE TIMESTAMP >= DATEADD(day, -365, ${WINDOW_END}) AND WAREHOUSE_ID IS NOT NULL
+    AND (EVENT_NAME IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE') OR TIMESTAMP >= DATEADD(day, -9, ${WINDOW_END}))
 ),
 gone AS (SELECT DISTINCT warehouse_id FROM e WHERE event_name = 'DROP_WAREHOUSE')
 SELECT 'history' AS kind, NULL AS warehouse_id, NULL AS warehouse_name, NULL AS event_ms,
@@ -460,8 +461,7 @@ export function buildFacts(rows: FactRows) {
     if (listed.has(last) && list.some(({ row }) => active(row))) replaced.add(last)
     if (!listed.has(last) && list.some(({ hourly }) => hourly)) unlisted.add(last)
   }
-  // A warehouse the events identified keeps its id with no usage in the window.
-  const idOf = new Map<string, number>([...listedAs].map(([id, name]) => [name, id]))
+  const idOf = new Map<string, number>()
   for (const [owner, ids] of idsByOwner) {
     const [id, ...others] = ids.sort((a, b) => later(lastSeen(a), lastSeen(b)) || b - a)
     idOf.set(owner, id!)
@@ -634,8 +634,21 @@ export async function snowflakeSavings(
       return failed(`No check could run. ${reason.reason}`)
     }
 
-    // Read after the usage queries, so it cannot cost one of them its time. Without it, usage is matched
-    // to warehouses by name and time, and the answer says so.
+    // Read after the usage queries: only the price needs it, and a slow or unreadable rate sheet must not
+    // cost a usage query its time. Most accounts cannot read it (it needs organization access); list price
+    // stands in.
+    const rate = await read("credit rate", SNOWFLAKE_RATE_SQL).catch((e) => {
+      if (signal?.aborted) throw e
+      // An unreadable rate sheet is ordinary; a lookup the time limit stopped, or that may still be
+      // running, is named, so the list price is not passed off as an unreadable rate sheet.
+      if (e instanceof SavingsLimitError) skipped.push({ check: "The account's credit rate", reason: reasonOf(e) })
+      return [] as Row[]
+    })
+    const price = creditPrice(rate[0])
+
+    // Read last: it scans a year of events, and the price matters to every warehouse while this matters only
+    // to warehouses that shared a name. Without it, usage is matched to warehouses by name and time, and the
+    // answer says so.
     let lifecycle: Row[] = []
     const byNameAndTime = (reason: string) =>
       skipped.push({
@@ -658,17 +671,6 @@ export async function snowflakeSavings(
       if (signal?.aborted) throw e
       byNameAndTime(reasonOf(e))
     }
-
-    // Read last: only the price needs it, and a slow or unreadable rate sheet must not cost a usage
-    // query its time. Most accounts cannot read it (it needs organization access); list price stands in.
-    const rate = await read("credit rate", SNOWFLAKE_RATE_SQL).catch((e) => {
-      if (signal?.aborted) throw e
-      // An unreadable rate sheet is ordinary; a lookup the time limit stopped, or that may still be
-      // running, is named, so the list price is not passed off as an unreadable rate sheet.
-      if (e instanceof SavingsLimitError) skipped.push({ check: "The account's credit rate", reason: reasonOf(e) })
-      return [] as Row[]
-    })
-    const price = creditPrice(rate[0])
     const { facts, unlisted, replaced } = buildFacts({ warehouses, metering, periods, restarts, queries, lifecycle })
     if (unlisted.length > 0) {
       skipped.push({
