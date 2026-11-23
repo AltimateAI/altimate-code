@@ -114,12 +114,26 @@ describe("EXPLAIN with options", () => {
     expect(type("EXPLAIN (FORMAT JSON) SELECT 1", undefined as unknown as string)).toBe("write")
   })
 
-  test("DuckDB and the postgresql alias share the Postgres option list", () => {
+  test("DuckDB and the postgresql alias accept their own option lists", () => {
     for (const dialect of ["duckdb", "postgresql", "postgres"]) {
       expect(type("EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1", dialect)).toBe("read")
-      expect(type("EXPLAIN (FORMAT HTML) SELECT 1", dialect)).toBe("read")
+      expect(type("EXPLAIN (FORMAT YAML) SELECT 1", dialect)).toBe("read")
       expect(type("EXPLAIN (ANALYZE, FORMAT JSON) DELETE FROM t", dialect)).toBe("write")
       expect(type("EXPLAIN (BOGUS TRUE) SELECT 1", dialect)).toBe("write")
+    }
+  })
+
+  test("EXPLAIN formats and options follow the dialect", () => {
+    for (const format of ["HTML", "GRAPHVIZ"]) {
+      expect(type(`EXPLAIN (FORMAT ${format}) SELECT 1`, "duckdb")).toBe("read")
+      expect(type(`EXPLAIN (FORMAT ${format}) DELETE FROM t`, "duckdb")).toBe("write")
+      expect(type(`EXPLAIN (FORMAT ${format}) SELECT 1`, "postgres")).toBe("write")
+      expect(type(`EXPLAIN (FORMAT ${format}) SELECT 1`, "postgresql")).toBe("write")
+    }
+    expect(type("EXPLAIN (FORMAT XML) SELECT 1", "postgres")).toBe("read")
+    expect(type("EXPLAIN (VERBOSE, BUFFERS) SELECT 1", "postgres")).toBe("read")
+    for (const options of ["(FORMAT XML)", "(VERBOSE)", "(BUFFERS)", "(PROFILING)"]) {
+      expect(type(`EXPLAIN ${options} SELECT 1`, "duckdb")).toBe("write")
     }
   })
 
@@ -137,6 +151,20 @@ describe("EXPLAIN with options", () => {
       expect(type(sql, "postgres")).toBe("write")
     }
     expect(type("EXPLAIN (ANALYZE) SELECT 'copy' AS \"copy\"", "duckdb")).toBe("read")
+    expect(type("EXPLAIN WITH c AS MATERIALIZED (COPY (SELECT 1) TO '/tmp/out.csv') SELECT * FROM c", "duckdb")).toBe("write")
+  })
+
+  test("EXPLAIN of a read over a column or table named copy is a read", () => {
+    for (const dialect of ["postgres", "duckdb"]) {
+      for (const sql of [
+        "EXPLAIN SELECT copy FROM docs",
+        "EXPLAIN (FORMAT JSON) SELECT t.copy FROM t",
+        "EXPLAIN SELECT * FROM copy",
+        "EXPLAIN (ANALYZE) WITH c AS (SELECT copy FROM t) SELECT * FROM c",
+      ]) {
+        expect(type(sql, dialect)).toBe("read")
+      }
+    }
   })
 
   test("an optioned EXPLAIN batch of reads is still a write", () => {
@@ -174,11 +202,18 @@ describe("EXPLAIN with options", () => {
       for (const quote of ["$$", "$t$"]) {
         const literal = `${quote}--${quote}`
         expect(type(`EXPLAIN COST SELECT ${literal} AS a; DELETE FROM t`, dialect)).toBe("write")
-        expect(type(`EXPLAIN COST SELECT $t1$--$t1$ AS a; CHECKPOINT`, dialect)).toBe("write")
         expect(type(`EXPLAIN SELECT ${literal} AS a; DELETE FROM t`, dialect)).toBe("write")
       }
+      expect(type(`EXPLAIN COST SELECT $t1$--$t1$ AS a; CHECKPOINT`, dialect)).toBe("write")
     }
     expect(type("EXPLAIN COST SELECT 1 -- note; not a statement", "databricks")).toBe("read")
+  })
+
+  test("dollar text inside a literal or comment does not stop option blanking", () => {
+    for (const sql of ["EXPLAIN EXTENDED SELECT '$$' AS marker", "EXPLAIN COST SELECT 1 /* $t$ */", "EXPLAIN COST SELECT 1 -- $$"]) {
+      expect(type(sql, "databricks")).toBe("read")
+    }
+    expect(type("EXPLAIN EXTENDED SELECT '$$' AS marker; DELETE FROM t", "databricks")).toBe("write")
   })
 
   test("a long option list is classified in linear time", () => {
