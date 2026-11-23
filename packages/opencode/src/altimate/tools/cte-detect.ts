@@ -220,7 +220,7 @@ function readIdentifier(text: string, pos: number): number {
       if (close === end || text[close - 1] !== char || close - end < 2) return -1
       end = close
     } else if (char === "[") {
-      const bracketed = /\[(?:[^\]\n]|\]\]){1,256}\]/y
+      const bracketed = BRACKET_NAME
       bracketed.lastIndex = end
       if (!bracketed.test(text)) return -1
       end = bracketed.lastIndex
@@ -325,7 +325,10 @@ function sameName(a: Written, b: Written): boolean {
 }
 
 const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
-/** A `[name]` (SQL Server): one holding a parenthesis, comma, quote or bracket is an expression, as DuckDB's `[(select …)]` list. */
+/** A `[name]` (SQL Server), as a CTE's name is read. */
+const BRACKET_NAME = /\[(?:[^\]\n]|\]\]){1,256}\]/y
+/** A `[name]` in a body: one holding a parenthesis, comma, quote or bracket is an expression, as DuckDB's
+ * `[(select …)]` list, unless it is the name of a CTE in the clause (`[a,b]`). */
 const BRACKETED = /\[(?:[^\]\n(),'\[]|\]\]){1,256}\]/y
 
 /**
@@ -587,7 +590,13 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
       if (char === '"' || char === "`") end = skipQuoted(sql, pos)
       else if (char === "[") {
         BRACKETED.lastIndex = pos
+        BRACKET_NAME.lastIndex = pos
         if (BRACKETED.test(sql)) end = BRACKETED.lastIndex
+        else if (BRACKET_NAME.test(sql)) {
+          const ref = written(sql.substring(pos, BRACKET_NAME.lastIndex))
+          const declared = (list?: { written: Written }[]) => (list ?? []).some((one) => sameName(one.written, ref))
+          if (declared(earlier.get(bucket(ref.name))) || declared(inner.get(bucket(ref.name))?.scopes)) end = BRACKET_NAME.lastIndex
+        }
       } else {
         // A comment or a dollar-quoted string is skipped whole.
         const skipped = skipLiteral(sql, pos)

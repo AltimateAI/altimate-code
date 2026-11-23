@@ -1782,6 +1782,12 @@ select * from c`
     expect(performance.now() - started).toBeLessThan(3000)
   })
 
+  it("a bracketed CTE name holding a comma or parenthesis is read whole; an undeclared one is a list", () => {
+    expect(readsOf("with [a,b] as (select 1 as x), b as (select * from [a,b]) select * from b").b).toEqual(["[a,b]"])
+    expect(readsOf("with a as (select 1), [x(y)] as (select 2), c as (select * from [x(y)]) select * from c").c).toEqual(["[x(y)]"])
+    expect(readsOf("with a as (select 1), c as (select [a, 2] as xs) select * from c").c).toEqual(["a"])
+  })
+
   it("a Jinja tag or expression between two names keeps both: either branch may render", () => {
     const sql = (body: string) =>
       `with orders as (select 1), payments as (select 2), b as (select * from ${body}) select * from b`
