@@ -237,7 +237,17 @@ async function runCredentials(args: any, update: boolean) {
     if (r.status === "connected") {
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${update ? "updated" : "connected"}${r.account ? ` as ${S.TEXT_NORMAL_BOLD}${clean(r.account)}${S.TEXT_NORMAL}` : ""}`)
       out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${clean(os.hostname())}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
-    } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
+    } else {
+      out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
+      if (r.status === "missing_fields") {
+        // The re-run keeps the flags of the call that failed: without --local-only it would sync the credential.
+        // A variant named by its label ("Jira Server / Data Center") is quoted so the copied command parses.
+        const shellWord = (v: string) => (/^[\w.:/-]+$/.test(v) ? v : `'${v.replace(/'/g, "'\\''")}'`)
+        const variant = typeof args.variant === "string" && args.variant ? ` --variant ${shellWord(clean(args.variant))}` : ""
+        const rerun = `${update ? "update" : "connect"} ${id}${variant}${args.share ? " --share" : ""}${!update && args["local-only"] ? " --local-only" : ""}`
+        out(`  ${S.TEXT_DIM}See the fields with \`altimate integrations fields ${id}${variant}\`, fill them with \`altimate integrations set ${id} <field> <value>\` or \`altimate integrations set-secret ${id} <field> --stdin\` (or \`--from-env VAR\`, \`--from-clipboard\`), then run \`altimate integrations ${rerun}\` again.${S.TEXT_NORMAL}`)
+      }
+    }
   } catch (e) {
     fail(e, args.json)
   }

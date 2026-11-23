@@ -68,12 +68,14 @@ altimate-code tool daemon status
 altimate-code tool daemon stop
 ```
 
-`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS` and `ALTIMATE_DISABLE_WORKSPACE` environment variables. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
+`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS`, `ALTIMATE_DISABLE_WORKSPACE`, `VIRTUAL_ENV` and `CONDA_PREFIX` environment variables. The last two are part of the daemon's identity because, when `~/.altimate-code/dbt.json` sets no `pythonPath` and the project has no `.venv`, `venv` or `env` folder of its own, they pick the Python the daemon's dbt adapter runs dbt with: activating the project's virtualenv then gets a daemon that uses it rather than one started without it. A `pythonPath` in `dbt.json` always wins; change it there. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
 
 | Setting | Description |
 |---|---|
 | `ALTIMATE_TOOL_DAEMON=0` | Always run in-process. |
 | `ALTIMATE_TOOL_DAEMON_IDLE_MS` | Idle time before the daemon exits (default `600000`). |
+
+The tools that start the dbt adapter (`dbt_lineage`, `dbt_cte_profile`, `dbt_sql_graph`, `dbt_health`, `dbt_cost_estimate`, and `sql_execute` routed through dbt) have dbt write its artifacts to `<target-path>/.altimate-code/` rather than the project's own `target/` in the `core` and `corecommand` integration modes: a dbt command rewrites `manifest.json` with compiled SQL for only what it compiled, so the project's `target/manifest.json` is left as your own `dbt compile` wrote it. The `fusion` and `cloud` modes read `<project>/target` whatever dbt is told, so there dbt still writes to it.
 
 The daemon listens on a local socket (a named pipe on Windows) under the Altimate Code state directory and removes it on exit.
 
@@ -84,3 +86,5 @@ For clients that cannot use the `altimate-code` MCP server, the Claude Code plug
 ## Plugin events
 
 `altimate-code tool report-event <action> --session claude:<id>` is called by the Claude Code plugin to record what a person did with its lineage report. `<action>` is one of `summary_shown`, `open_pressed`, `command_run`, `built`, `build_failed` or `no_browser`. It sends one `lineage_report` usage event (see [Telemetry](../reference/telemetry.md)) and nothing when telemetry is off. It is not meant to be run by hand.
+
+The plugin also calls `altimate-code tool report-event plugin_session_start --plugin-version <v> --install-id <uuid> --os <os>` at each session start, and `altimate-code tool report-event plugin_feature_used --plugin-version <v> --install-id <uuid> --feature <name> --outcome <outcome>` when a panel or command opens (or its panel fails to open) or a gate holds or allows a command. They take no `--session`. Each value is checked against a fixed list or pattern, and any other flag is refused, so the events carry only those fields (see [Telemetry](../reference/telemetry.md)).

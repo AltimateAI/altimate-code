@@ -2,14 +2,14 @@
 // one gate the new dbt-adapter-backed tools go through, and the API helper for new endpoint files. The
 // dbt adapter is replaced through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { existsSync, readFileSync, realpathSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
-import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
+import { DBT_TOOL_TARGET_DIR, dbtAdapterInternals, dbtToolTargetPath, resetDbtAdapter } from "@/altimate/native/connections/register"
 import { dbtAdapterAccessInternals, dbtAdapterFor } from "@/altimate/tools/dbt-adapter-access"
 import { resultFailed } from "@/altimate/mcp-server/adapter"
 import { EXPOSED, MCP_OPEN_WRITE_TOOLS, WRITE_TOOLS } from "@/altimate/tool-cli/allow-list"
@@ -135,13 +135,21 @@ describe("feature tools in the allow-list", () => {
 
 describe("dbtAdapterFor", () => {
   let created: number
+  // The default target folder is the project's own `target`: an inherited DBT_TARGET_PATH would move it.
+  let inheritedTargetPath: string | undefined
   beforeEach(() => {
+    inheritedTargetPath = process.env.DBT_TARGET_PATH
+    delete process.env.DBT_TARGET_PATH
     created = 0
     useConfig()
     dbtAdapterInternals.create = async () => {
       created += 1
       return { isInitialized: () => true, dispose: async () => {} }
     }
+  })
+  afterEach(() => {
+    if (inheritedTargetPath === undefined) delete process.env.DBT_TARGET_PATH
+    else process.env.DBT_TARGET_PATH = inheritedTargetPath
   })
 
   test("refuses a read-only call and never creates the adapter", async () => {
@@ -180,7 +188,98 @@ describe("dbtAdapterFor", () => {
   test("says when the adapter didn't load the project", async () => {
     dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
     const access = await dbtAdapterFor(ctx)
-    expect(access).toEqual({ refusal: "not_loaded", reason: "the dbt adapter didn't load the project" })
+    expect(access.refusal).toBe("not_loaded")
+    expect(access.reason).toStartWith("the dbt adapter didn't load the project: ")
+  })
+
+  test("a refusal for an adapter that didn't load names the Python dbt ran with and how to fix it", async () => {
+    // A HOME without ~/.altimate-code/dbt.json, so a developer's saved pythonPath can't change the hint.
+    const home = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-access-home-"))
+    const saved = process.env.HOME
+    try {
+      process.env.HOME = home
+      dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
+      const access = await dbtAdapterFor(ctx)
+      // The Python the config chose: dbt missing from it is the usual cause.
+      expect(access.reason).toContain("(python3)")
+      expect(access.reason).toContain("Activate the project's virtualenv")
+      expect(access.reason).toContain("altimate-code tool daemon stop")
+    } finally {
+      if (saved === undefined) delete process.env.HOME
+      else process.env.HOME = saved
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test("with a saved dbt config, the refusal says to change its pythonPath, which wins over any virtualenv", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-access-home-"))
+    const saved = process.env.HOME
+    try {
+      await mkdir(path.join(home, ".altimate-code"), { recursive: true })
+      const config = path.join(home, ".altimate-code", "dbt.json")
+      process.env.HOME = home
+      dbtAdapterInternals.create = async () => ({ isInitialized: () => false, dispose: async () => {} })
+      await writeFile(config, JSON.stringify({ projectRoot: project, pythonPath: "python3" }))
+      const access = await dbtAdapterFor(ctx)
+      expect(access.reason).toContain("Python that ~/.altimate-code/dbt.json names (python3)")
+      expect(access.reason).toContain("Set pythonPath there")
+      expect(access.reason).not.toContain("Activate the project's virtualenv")
+      // A config without a pythonPath, or one that doesn't parse, leaves the choice to discovery.
+      for (const text of ["{}", "{not json"]) {
+        await writeFile(config, text)
+        resetDbtAdapter()
+        useConfig()
+        const other = await dbtAdapterFor(ctx)
+        expect(other.reason).toContain("Activate the project's virtualenv")
+        expect(other.reason).not.toContain("Set pythonPath there")
+      }
+    } finally {
+      if (saved === undefined) delete process.env.HOME
+      else process.env.HOME = saved
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test("the tools' adapter is created with a dbt target folder of its own, inside the project's target", async () => {
+    let options: { targetPath?: string } | undefined
+    dbtAdapterInternals.create = async (_config, given) => {
+      options = given
+      return { isInitialized: () => true, dispose: async () => {} }
+    }
+    await dbtAdapterFor(ctx)
+    expect(options).toEqual({ targetPath: path.join(project, "target", DBT_TOOL_TARGET_DIR) })
+  })
+
+  test("Fusion and dbt Cloud, which read <project>/target whatever dbt is told, keep dbt writing there", async () => {
+    const seen: ({ targetPath?: string } | undefined)[] = []
+    dbtAdapterInternals.create = async (_config, given) => {
+      seen.push(given)
+      return { isInitialized: () => true, dispose: async () => {} }
+    }
+    for (const dbtIntegration of ["fusion", "cloud", "core", ""]) {
+      resetDbtAdapter()
+      dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "python3", dbtIntegration, queryLimit: 500 })
+      await dbtAdapterFor(ctx)
+    }
+    const own = { targetPath: path.join(project, "target", DBT_TOOL_TARGET_DIR) }
+    // An unset mode is dbt-integration's default, core.
+    expect(seen).toEqual([{}, {}, own, own])
+  })
+
+  test("the tools' target folder follows the project's own target-path and DBT_TARGET_PATH", async () => {
+    const yml = path.join(project, "dbt_project.yml")
+    const saved = readFileSync(yml, "utf8")
+    const env = process.env.DBT_TARGET_PATH
+    try {
+      await writeFile(yml, `${saved}target-path: "build"\n`)
+      expect(await dbtToolTargetPath(project)).toBe(path.join(project, "build", DBT_TOOL_TARGET_DIR))
+      process.env.DBT_TARGET_PATH = path.join(project, "elsewhere")
+      expect(await dbtToolTargetPath(project)).toBe(path.join(project, "elsewhere", DBT_TOOL_TARGET_DIR))
+    } finally {
+      await writeFile(yml, saved)
+      if (env === undefined) delete process.env.DBT_TARGET_PATH
+      else process.env.DBT_TARGET_PATH = env
+    }
   })
 
   test("says there is no dbt project when the config finds none", async () => {
@@ -207,7 +306,9 @@ describe("dbtAdapterFor", () => {
       throw new Error("dbt-integration missing")
     }
     const access = await dbtAdapterFor(ctx)
-    expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter didn't start" })
+    expect(access.refusal).toBe("not_started")
+    expect(access.reason).toStartWith("the dbt adapter didn't start: ")
+    expect(access.reason).toContain("(python3)")
     expect(created).toBe(1)
   })
 

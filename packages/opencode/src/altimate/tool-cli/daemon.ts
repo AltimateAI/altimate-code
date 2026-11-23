@@ -44,8 +44,10 @@ export function resolveDirectory(directory: string): string {
 const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
 
 // Variables a daemon reads once at spawn that change what it returns or exposes (value sampling, integration
-// routing, workspace tools), so a caller with a different value must not be served by a daemon started without it.
-const BEHAVIOUR_ENV = ["ALTIMATE_DISABLE_SCHEMA_VALUES", "ALTIMATE_INTEGRATIONS", "ALTIMATE_DISABLE_WORKSPACE"]
+// routing, workspace tools, and the Python environment its dbt adapter runs dbt with), so a caller with a
+// different value must not be served by a daemon started without it: a daemon started outside the project's
+// virtualenv would otherwise go on answering that dbt didn't load after the caller activated it.
+const BEHAVIOUR_ENV = ["ALTIMATE_DISABLE_SCHEMA_VALUES", "ALTIMATE_INTEGRATIONS", "ALTIMATE_DISABLE_WORKSPACE", "VIRTUAL_ENV", "CONDA_PREFIX"]
 
 /** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables and the behaviour variables above, empty when
  * none are set. A daemon reads them once at spawn, so callers with different values must not share one. */

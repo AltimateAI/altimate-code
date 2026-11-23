@@ -5,6 +5,8 @@ import { Log } from "@/altimate/util/log"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
+// altimate_change — the Claude Code plugin's actions, whose events are sent anonymous (see ANONYMOUS_EVENTS)
+import { PLUGIN_ACTIONS } from "@/altimate/tool-cli/report-event"
 import { TelemetryIdentity } from "./identity"
 import { OptOutMarker } from "./opt-out"
 import { TelemetryConfig } from "./config-state"
@@ -926,6 +928,39 @@ export namespace Telemetry {
         /** The host agent's session: `claude:<id>`. */
         session_id: string
         action: "summary_shown" | "open_pressed" | "command_run" | "built" | "build_failed" | "no_browser"
+      }
+    // altimate_change end
+    // altimate_change start — the Claude Code plugin's own usage, sent through `tool report-event`
+    | {
+        /** A Claude Code session started with the plugin. Versions, OS and the plugin's random install id only: no session id. */
+        type: "plugin_session_start"
+        timestamp: number
+        plugin_version: string
+        altimate_code_version: string
+        /** Claude Code's name for the OS; not `os`, which other events carry as `process.platform`. */
+        host_os: "macos" | "linux" | "windows" | "wsl" | "unknown"
+        /** A random UUID the plugin made on first run and keeps in its Claude Code plugin store. */
+        install_id: string
+      }
+    | {
+        /** A plugin panel or command was opened, or one of its gates held or allowed a command. */
+        type: "plugin_feature_used"
+        timestamp: number
+        plugin_version: string
+        install_id: string
+        feature:
+          | "lineage"
+          | "dbt_show"
+          | "profile_ctes"
+          | "scan_cost"
+          | "comments"
+          | "sql_graph"
+          | "health"
+          | "runs"
+          | "to_model"
+          | "cost_gate"
+          | "health_push_gate"
+        outcome: "opened" | "failed" | "held" | "allowed"
       }
     // altimate_change end
     | {
@@ -2383,6 +2418,12 @@ export namespace Telemetry {
   // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
   // the module's current state (the opt-out marker runs while telemetry is disabled and must not
   // touch the state an enabled init may be using concurrently).
+  // altimate_change start — the Claude Code plugin's usage events are anonymous and unlinkable: they carry
+  // none of the identifiers the CLI's other events share (account, machine id, project, session, launch id),
+  // so they cannot be joined to a signed-in row. They are keyed to the plugin's own random install id only.
+  const ANONYMOUS_EVENTS: ReadonlySet<string> = new Set(PLUGIN_ACTIONS)
+  // altimate_change end
+
   function toAppInsightsEnvelopes(
     events: Event[],
     cfg: AppInsightsConfig,
@@ -2400,7 +2441,11 @@ export namespace Telemetry {
     const clientSource = Flag.ALTIMATE_CLI_CLIENT
     return events.map((event) => {
       const { type, timestamp, ...fields } = event as any
-      const sid: string = fields.session_id ?? sessionId
+      // altimate_change start — the plugin's anonymous events: no account, machine id, project, session or launch id.
+      const anonymous = ANONYMOUS_EVENTS.has(type)
+      const account = anonymous ? undefined : who
+      const sid: string = anonymous ? "" : (fields.session_id ?? sessionId)
+      // altimate_change end
 
       const properties: Record<string, string> = {
         cli_version: InstallationVersion,
@@ -2408,17 +2453,19 @@ export namespace Telemetry {
         // still says how this CLI was launched (cli, tui, serve, datamates).
         client: "altimate-code",
         source: clientSource,
-        project_id: fields.project_id ?? projectId,
-        ...(mid && { machine_id: mid }),
+        ...(!anonymous && { project_id: fields.project_id ?? projectId }),
+        ...(mid && !anonymous && { machine_id: mid }),
         // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
         // row joins the PostHog person and the backend record for the same account.
-        ...(who && { user_id: who.user_id, tenant: who.tenant }),
+        ...(account && { user_id: account.user_id, tenant: account.tenant }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
         // spans the TUI main thread and the server worker, and most of it runs before any chat
         // session exists, so `session_id` is empty for the first half and real for the second —
         // leaving no key to join a single run on. This is not persisted, not derived from the
         // machine or the user, and not reused across launches; it only says "same run".
-        launch_id: launchId(),
+        // altimate_change — not on the plugin's anonymous events: shared with the same process's other rows
+        // (a first_launch carries the machine id), it would join them.
+        ...(!anonymous && { launch_id: launchId() }),
       }
       const measurements: Record<string, number> = {}
 
@@ -2438,15 +2485,15 @@ export namespace Telemetry {
         time: new Date(timestamp).toISOString(),
         iKey: cfg.iKey,
         tags: {
-          "ai.session.id": sid || "startup",
+          "ai.session.id": sid || (anonymous ? "" : "startup"),
           // altimate_change start — the backend user uuid when signed in, else the machine id.
           // Anonymous machines each keep a distinct identity (the random machine UUID, already a
           // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
-          "ai.user.id": who?.user_id || mid || "",
+          "ai.user.id": anonymous ? String(fields.install_id ?? "") : account?.user_id || mid || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
-          ...(fields._operation_id && { "ai.operation.id": fields._operation_id }),
+          ...(fields._operation_id && !anonymous && { "ai.operation.id": fields._operation_id }),
         },
         data: {
           baseType: "EventData",
@@ -3009,15 +3056,27 @@ export namespace Telemetry {
     const controller = new AbortController()
     activeFlushAbort = controller
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    // altimate_change start — the plugin's anonymous events go in a request of their own, never in one
+    // body beside rows that carry the machine id or the account. Only an unsent batch is retried.
+    const batches = [events.filter((e) => !ANONYMOUS_EVENTS.has(e.type)), events.filter((e) => ANONYMOUS_EVENTS.has(e.type))].filter(
+      (batch) => batch.length > 0,
+    )
+    const sent = new Set<Event>()
+    const attempted = new Set<Event>()
+    // altimate_change end
     try {
-      const response = await fetch(appInsights.endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights, { machineId: mid, identity: who })),
-        signal: controller.signal,
-      })
-      if (!response.ok) {
-        log.debug("telemetry flush failed", { status: response.status })
+      for (const batch of batches) {
+        for (const e of batch) attempted.add(e)
+        const response = await fetch(appInsights.endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(toAppInsightsEnvelopes(batch, appInsights, { machineId: mid, identity: who })),
+          signal: controller.signal,
+        })
+        for (const e of batch) sent.add(e)
+        if (!response.ok) {
+          log.debug("telemetry flush failed", { status: response.status })
+        }
       }
     } catch {
       // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
@@ -3025,9 +3084,10 @@ export namespace Telemetry {
       // shipped by whatever lifecycle comes next, under a different launch id.
       if (shuttingDown) return
       // Re-add events that haven't been retried yet to avoid data loss
-      const retriable = events.filter((e) => !(e as any)._retried)
+      const retriable = events.filter((e) => !sent.has(e) && !(e as any)._retried)
+      // altimate_change — a batch never attempted (an earlier one failed) keeps its retry.
       for (const e of retriable) {
-        ;(e as any)._retried = true
+        if (attempted.has(e)) (e as any)._retried = true
       }
       const space = Math.max(0, MAX_BUFFER_SIZE - buffer.length)
       buffer.unshift(...retriable.slice(0, space))

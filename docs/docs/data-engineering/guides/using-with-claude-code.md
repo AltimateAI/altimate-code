@@ -24,6 +24,10 @@ This gives Claude Code access to:
 - dbt manifest parsing and model scaffolding
 - Cross-dialect SQL translation
 
+### What `altimate-dbt` is
+
+When altimate works on a dbt project, it often runs `altimate-dbt`. It is a small command-line tool for dbt tasks: it finds your dbt project, Python environment and adapter, then compiles models, runs and tests them, and inspects columns and schemas. It is installed together with altimate-code, so there is nothing separate to set up, and altimate runs it for you as part of a task. altimate adds it to the `PATH` of the commands it runs, which is not necessarily your terminal's `PATH`. See [dbt Tools](../tools/dbt-tools.md#altimate-dbt-cli) for its commands.
+
 ## Example workflows
 
 ### Code review with cost analysis
@@ -82,19 +86,15 @@ altimate:
 
 ### The Altimate Code plugin (recommended)
 
-1. Install Altimate Code (Node.js 20 or later): `npm install -g altimate-code`
-2. Install the plugin from Anthropic's plugin directory:
-
-    ```bash
-    claude plugin install altimate-code
-    ```
-
-    Or add Altimate's own marketplace and install from it:
+1. Install Altimate Code (Node.js 20 or later): `npm install -g altimate-code`. The plugin needs version 0.12.11 or later, and the commands under [Lineage, cost, health and more](#lineage-cost-health-and-more) need 0.12.12; `altimate-code --version` shows what you have.
+2. Add Altimate's marketplace and install the plugin from it:
 
     ```bash
     claude plugin marketplace add AltimateAI/altimate-claude-plugin
     claude plugin install altimate-code@altimate-claude-plugin
     ```
+
+    Anthropic's plugin directory also lists the plugin (`claude plugin install altimate-code` with no marketplace), but it serves a reviewed, pinned copy that is several versions behind: it hands tasks to Altimate Code and has none of the panes and helpers below. If you installed that copy, remove it first (see [dbt helpers beside the chat](#dbt-helpers-beside-the-chat)).
 
 3. Start a new Claude Code session in your project. Ask for dbt or warehouse work as usual, or start a request with `/altimate-code:altimate` to hand it over yourself. (Claude Code names plugin commands `<plugin>:<command>`; the bare `/altimate` below comes from `/configure-claude`.)
 
@@ -102,7 +102,7 @@ The plugin runs `altimate-code run` in your project for each task, with the mode
 
 #### dbt helpers beside the chat
 
-Plugin 1.8.0 or later brings five dbt Power User helpers into the Claude Code session when you work in a dbt project. They are on by default; to turn them off, set the plugin's `dbt_mods` option to false in `/config`. Anthropic's plugin directory serves a reviewed, pinned version of the plugin that does not yet include these helpers, so `claude plugin update altimate-code` will not bring them. Install from Altimate's marketplace instead, remove the other copy, then start a new session. Run `claude plugin list` to see which copy you have: the directory's copy is `altimate-code@anthropic-plugin-directory` (or `altimate-code@claude-plugins-official` when you added Anthropic's catalog from GitHub), and the uninstall below names it.
+Plugin 1.8.0 or later brings five dbt Power User helpers into the Claude Code session when you work in a dbt project; they run the project's own dbt. The plugin also has a lineage pane and more dbt Power User commands that call Altimate Code's dbt tools instead (see [Lineage, cost, health and more](#lineage-cost-health-and-more)). The five helpers are on by default; to turn them off, set the plugin's `dbt_mods` option to false in `/config`. Anthropic's plugin directory serves a reviewed, pinned version of the plugin that does not yet include these helpers, so `claude plugin update altimate-code` will not bring them. Install from Altimate's marketplace instead, remove the other copy, then start a new session. Run `claude plugin list` to see which copy you have: the directory's copy is `altimate-code@anthropic-plugin-directory` (or `altimate-code@claude-plugins-official` when you added Anthropic's catalog from GitHub), and the uninstall below names it.
 
 ```bash
 claude plugin uninstall altimate-code@anthropic-plugin-directory   # or the ID `claude plugin list` shows
@@ -139,6 +139,23 @@ The helpers run the project's own dbt (from a `.venv` or `venv` in the project f
 Compile and validate runs one query on your warehouse after each model edit (a `dbt ls`, which runs no query, comes first when the manifest does not name the model; a second `dbt show` runs only when the first showed nothing and the manifest names the model differently). Rechecks run it again. That costs money on a warehouse that bills by bytes scanned or wakes a suspended one.
 
 The helpers read `manifest.json` and `run_results.json` from the `target-path` that `dbt_project.yml` names (`target/` by default). A path set by `DBT_TARGET_PATH`, a command's `--target-path` or a Jinja `target-path` is not followed.
+
+#### Lineage, cost, health and more
+
+The rest of the plugin's panes and commands call Altimate Code's tools through `altimate tool run`, and make no model-provider call of their own. The dbt Power User ones need altimate-code 0.12.12 or later, the release with the [dbt Power User tools](../tools/dbt-tools.md#dbt-power-user-tools); with an older one most say so where their answer would be, while `/runs` records nothing and `/defer` adds no flags. Cost, health, the SQL graph and CTE timing start the project's dbt adapter, so the plugin runs them with `altimate tool run --allow-write` itself, without asking. The commands are listed by the bare names the plugin registers.
+
+- **Lineage pane** (`/lineage <model>[.column]`). The dbt model Claude reads or edits, with every model upstream and downstream, its exposures (dashboards and other consumers), each output column's sources and, for a picked column, the downstream models and dashboards that read it, from `dbt_lineage` and `impact_analysis` on `target/manifest.json`. When a task changed a model, a band above the prompt sums up each changed column's downstream reach, and **Open report** or `/lineage-report` builds an offline HTML report of it. Claude Code opens the pane on its own only in a terminal at least 144 columns wide; `/lineage` opens it at any width.
+- **Scan cost check** (`/scan-cost <model>`, `/allow-scan`). Before a `dbt run`, `build` or `show` that Claude runs names one model or an inline query, `dbt_cost_estimate` says what it would scan: a BigQuery dry run, or the planner's `EXPLAIN` on Snowflake and Databricks. Over the plugin's `maxScanBytes` setting (10 GiB by default; 0 never holds) the command is refused with the estimate until you run `/allow-scan`, which lets that same command through once. A query with no estimate runs, with a line saying why, and other warehouses are never held. On Databricks the `EXPLAIN` can start a stopped SQL warehouse, which is billed while it runs.
+- **Project health** (`/health`). At session start `dbt_health` (DataPilot) records the project's existing insights; after a turn in which Claude changed model files, the check runs again and the new issues on those models show in a band. With `healthBlocksPush` on, `git push` is refused while the check of your latest changes is not in or finds new issues. `healthConfigPath` names a DataPilot config file by a path inside the dbt project. A check can take minutes, and it needs the `altimate-datapilot-cli` package in the project's Python.
+- **Team comments** (`/comments`). The open comment threads on dbt docs your team shared through Altimate, fetched at session start and, in an interactive session, every `commentsPollSeconds` (15 minutes by default). When Claude reads or edits a model that has open threads, they are added to its context as quoted data (`commentsInContext`), so it sees the review before it changes the model. Reply and resolve are buttons you press in the pane; Claude has no way to post. Needs an Altimate sign-in.
+- **dbt runs** (`/runs`). The dbt commands Claude ran that wrote `run_results.json`, with their per-node results from `dbt_run_results`, up to 50 runs per project, kept on this machine across sessions. From the pane a run can be opened, run again, or its failures run again through the prompt.
+- **Profile CTEs** (`/profile-ctes [model]`). Times each CTE of a model with one `COUNT(*)` warehouse query per CTE (`dbt_cte_profile`), slowest first, in a pane that fills as the queries finish. It runs only when asked, never on an edit, since every CTE is a warehouse query. Without a model it profiles the model last read or edited.
+- **SQL graph** (`/sql-graph [model]`). A model's CTEs, joins and filters as a graph beside the chat (`dbt_sql_graph`). It compiles the model and reads the parents' column metadata from the warehouse.
+- **Raw SQL to a dbt model** (`/to-model <name> [path/to/query.sql]`). `dbt_map_relations` maps each table in the SQL (a file, or the text you selected) to a `ref()` or `source()` call; the pane lists the tables that need a decision first, and then asks Claude to write the model with exactly those replacements.
+- **Defer and target** (`/defer [status|on|off|reset]`, `/target [<name>|reset]`). Adds `--defer --state <dir>` (and `--favor-state`) and `--target <name>` to the dbt commands Claude runs that do not set them, from the dbt Power User defer setting (`dbt_defer_state`) or your choice for the session. The target shows in the status line, and Claude's result says what the command ran as.
+- **Docs coverage and propagation** (`/propagate`). After Claude edits a model's SQL, the model's documentation coverage (`dbt_docs_coverage`) is shown. After Claude writes a column description in a model's YAML, the downstream columns that carry the same value, as is or renamed, are offered as copies: tick the columns you want and press **Apply**.
+
+The settings named above are the plugin's options in `/config`. The plugin's [README](https://github.com/AltimateAI/altimate-claude-plugin/blob/main/plugins/altimate-code/README.md) describes each pane in full.
 
 ### The `/altimate` command, without the plugin
 

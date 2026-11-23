@@ -110,7 +110,9 @@ export const SqlExplainTool = Tool.define("sql_explain", {
       let error: string | undefined
       if (blocked) error = "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
       else if (!lexical.complete)
-        error = "The SQL's quotes or comments could not be read with certainty (for example an unterminated quote), so it is not explained."
+        error = lexical.backslash
+          ? "The SQL has a backslash in a quoted string, which this dialect can read as an escape, so it is not explained. Build that character with the dialect's character function instead (CHR(92) or CHAR(92), depending on the dialect) to get a plan."
+          : "The SQL's quotes or comments could not be read with certainty (for example an unterminated quote), so it is not explained."
       else if (statements.length !== 1 || option)
         error = "Only a single statement can be explained, without EXPLAIN or its options. Run each statement separately."
       else if (args.analyze && (queryType !== "read" || !isSingleQuery(args.sql, dialect)))

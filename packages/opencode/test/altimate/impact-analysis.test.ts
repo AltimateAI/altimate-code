@@ -350,3 +350,29 @@ describe("impact_analysis: column reach carries how each column comes from the t
     }
   })
 })
+
+describe("impact_analysis: invalid arguments", () => {
+  // The CLI and MCP print this message as the answer: it has to say which field is wrong.
+  const message = async (args: unknown) => {
+    const tool = await initTool(ImpactAnalysisTool)
+    return Promise.resolve()
+      .then(() => tool.execute(args, ctx))
+      .then(
+        () => "",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      )
+  }
+
+  test("a missing change_type is named, with the values it takes", async () => {
+    const text = await message({ model: "stg_orders" })
+    expect(text).toContain("invalid arguments: change_type is required (expected one of \"remove\"|\"rename\"|\"retype\"|\"add\"|\"modify\")")
+    expect(text).not.toContain("Declaration")
+  })
+
+  test("an unknown change_type and a wrong type are named field by field", async () => {
+    const text = await message({ model: 7, change_type: "drop" })
+    expect(text).toContain("model: Invalid input: expected string, received number")
+    expect(text).toContain("change_type: Invalid option: expected one of")
+    expect(text).not.toContain("Declaration")
+  })
+})

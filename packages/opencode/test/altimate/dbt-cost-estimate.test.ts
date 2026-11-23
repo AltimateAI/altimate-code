@@ -11,7 +11,9 @@ import { SessionID, MessageID } from "@/session/schema"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import {
   DbtCostEstimateTool,
+  dbtCostEstimateInternals,
   explainJinja,
+  firstStatement,
   mayBeScript,
   parseBytesProcessed,
   readsFiles,
@@ -481,7 +483,7 @@ describe("parseDatabricksExplainCost", () => {
   })
 
   test("a leaf with no statistics at all is no estimate", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nProject [a#0], Statistics(sizeInBytes=1.0 KiB)\n+- Relation main.t[a#0] parquet")).toEqual({ noStats: true, relation: "main.t", unread: true })
   })
 
   test.each([
@@ -617,6 +619,162 @@ describe("dbt_cost_estimate on a warehouse with a planner", () => {
   })
 })
 
+describe("follow-ups to the planner estimate", () => {
+  const rendered = (row: unknown) => async () => JSON.stringify([row])
+  const originalTimeout = dbtCostEstimateInternals.explainTimeoutMs
+  afterEach(() => {
+    dbtCostEstimateInternals.explainTimeoutMs = originalTimeout
+  })
+
+  test("an EXPLAIN that outlasts its deadline is no estimate, and the call stops waiting", async () => {
+    dbtCostEstimateInternals.explainTimeoutMs = 50
+    useAdapter(calls, { type: "databricks", explain: () => new Promise<string>(() => {}) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.title).toBe("dbt_cost_estimate: explain failed")
+    expect(result.output).toContain("did not answer within 0.05 s")
+    expect(result.metadata.bytes).toBeUndefined()
+  })
+
+  test("an EXPLAIN that answers within its deadline is read as before", async () => {
+    dbtCostEstimateInternals.explainTimeoutMs = 5_000
+    useAdapter(calls, { type: "snowflake", explain: rendered(SNOWFLAKE_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.bytes).toBe(2_147_483_648)
+  })
+
+  test.each([
+    ["a multi-line block comment", "select 1; /* a\nb */", "select 1"],
+    ["a second semicolon and a comment", "select 1;; -- c", "select 1"],
+    ["a comment on the next line", "select 1;\n-- done\n", "select 1"],
+  ])("Snowflake sends %s after the final semicolon to nobody", async (_, compiled, sent) => {
+    expect(mayBeScript(compiled, "snowflake")).toBe(false)
+    useAdapter(calls, { type: "snowflake", compile: async () => compiled, explain: rendered(SNOWFLAKE_PLAN) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries).toEqual([[explainJinja("EXPLAIN USING JSON", sent), undefined]])
+    expect(result.metadata.success).toBe(true)
+  })
+
+  test.each([
+    ["select 'a;b' from t; -- c", "snowflake", "select 'a;b' from t"],
+    ["select \"a;b\" /* ; */ from t", "snowflake", 'select "a;b" /* ; */ from t'],
+    ["select `a;b` from t; /* x */", "databricks", "select `a;b` from t"],
+    ["select 1 -- not; a split", "snowflake", "select 1 -- not; a split"],
+    ["select 1", "snowflake", "select 1"],
+  ])("firstStatement(%p, %s) keeps what the driver sends as the statement", (sql, type, expected) => {
+    expect(firstStatement(sql, type)).toBe(expected)
+  })
+
+  test("a section heading inside a multi-line literal does not end the plan", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Project [concat(w#1, ",
+      "== Physical Plan ==",
+      ") AS z#2], Statistics(sizeInBytes=1.0 KiB)",
+      "+- Relation spark_catalog.default.b[w#1] parquet, Statistics(sizeInBytes=2.0 GiB)",
+      "",
+      "== Physical Plan ==",
+      "*(1) Project",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 2 * 1024 ** 3 })
+  })
+
+  test("a section heading after a finished node still ends the plan", () => {
+    const plan = "== Optimized Logical Plan ==\nRelation main.t[a#0] parquet, Statistics(sizeInBytes=4.0 KiB)\n\n== Physical Plan ==\nRelation main.u[a#0] parquet, Statistics(sizeInBytes=9.0 GiB)"
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 4096 })
+  })
+
+  test("brackets inside a printed name do not stretch a node over the plan's real end", () => {
+    const plan = "== Optimized Logical Plan ==\nRelation main.t[a(b#0] parquet, Statistics(sizeInBytes=2.0 GiB)\n\n== Physical Plan ==\nFileScan parquet main.t[a(b#0]"
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 2 * 1024 ** 3 })
+  })
+
+  test("Snowflake: a scan of an external table or stage, or a scan with no size, keeps the total from being a cap", () => {
+    const mixed = (extra: object) =>
+      JSON.stringify({
+        GlobalStats: { bytesAssigned: 1024 },
+        Operations: [[{ id: 1, operation: "TableScan", objects: ["T"], bytesAssigned: 1024 }, { id: 2, ...extra }]],
+      })
+    expect(parseSnowflakeExplain(mixed({ operation: "ExternalScan", bytesAssigned: 0 }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "StageScan" }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "TableScan", objects: ["U"], bytesAssigned: 0 }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "SecureView", objects: ["V"] }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "DynamicSecureView" }))).toEqual({ bytes: 1024, unsized: true })
+    // A secure view hides what it scans, so a total of 0 beside one is not a cap either.
+    expect(parseSnowflakeExplain('{"GlobalStats":{"bytesAssigned":0},"Operations":[[{"id":1,"operation":"SecureView"}]]}')).toEqual({ bytes: 0, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "TableScan", objects: ["U"] }))).toEqual({ bytes: 1024, unsized: true })
+    expect(parseSnowflakeExplain(mixed({ operation: "Filter" }))).toEqual({ bytes: 1024 })
+    expect(parseSnowflakeExplain(SNOWFLAKE_PLAN)).toEqual({ bytes: 2_147_483_648, partitionsAssigned: 37, partitionsTotal: 1240 })
+  })
+
+  test("Snowflake: a positive total beside an external scan is not called an upper bound", async () => {
+    const plan = JSON.stringify({
+      GlobalStats: { partitionsTotal: 2, partitionsAssigned: 2, bytesAssigned: 1024 },
+      Operations: [[{ id: 1, operation: "TableScan", objects: ["T"], bytesAssigned: 1024 }, { id: 2, operation: "ExternalScan", objects: ["E"] }]],
+    })
+    useAdapter(calls, { type: "snowflake", explain: rendered(plan) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select * from t join e" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, bound: "unknown", bytes: 1024 })
+    expect(result.output).not.toContain("an upper bound")
+  })
+
+  test("a leaf that holds an inner plan keeps its own size", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Relation main.s.t[a#0] parquet, Statistics(sizeInBytes=2.0 GiB)",
+      ":  +- Relation main.s.u[a#1] parquet, Statistics(sizeInBytes=3.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 5 * 1024 ** 3 })
+  })
+
+  test("a leaf with an inner plan but no size of its own is no estimate, not the inner plan's size", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Relation main.s.t[a#0] parquet",
+      ":  +- Relation main.s.u[a#1] parquet, Statistics(sizeInBytes=3.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ noStats: true, relation: "main.s.t", unread: true })
+  })
+
+  test("an EXPLAIN that rejects after its deadline changes nothing", async () => {
+    dbtCostEstimateInternals.explainTimeoutMs = 30
+    let reject!: (e: Error) => void
+    useAdapter(calls, { type: "snowflake", explain: () => new Promise<string>((_, r) => (reject = r)) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.title).toBe("dbt_cost_estimate: explain failed")
+    reject(new Error("late"))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("did not answer within 0.03 s")
+    expect(result.output).not.toContain("late")
+  })
+
+  test("a node with a child and an inner plan is still not a leaf", () => {
+    const plan = [
+      "== Optimized Logical Plan ==",
+      "Filter (a#0 IN (list#5 [])), Statistics(sizeInBytes=1.0 GiB)",
+      ":  +- Relation main.s.u[a#1] parquet, Statistics(sizeInBytes=3.0 GiB)",
+      "+- Relation main.s.t[a#0] parquet, Statistics(sizeInBytes=2.0 GiB)",
+    ].join("\n")
+    expect(parseDatabricksExplainCost(plan)).toEqual({ bytes: 5 * 1024 ** 3 })
+  })
+
+  test("Snowflake's 0 bytes is not called an upper bound: it also reports 0 for a source it cannot size", async () => {
+    useAdapter(calls, { type: "snowflake", explain: rendered('{"GlobalStats":{"partitionsTotal":0,"partitionsAssigned":0,"bytesAssigned":0}}') })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select $1 from @stage" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, bound: "unknown", bytes: 0 })
+    expect(result.output).toContain("not a cap")
+    expect(result.output).not.toContain("an upper bound")
+  })
+
+  test("a leaf with no readable size gets no ANALYZE advice: it is not known to lack statistics", async () => {
+    useAdapter(calls, { type: "databricks", explain: rendered("== Optimized Logical Plan ==\nRelation main.t[a#0] parquet") })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("printed no size this tool can read for main.t")
+    expect(result.output).not.toContain("ANALYZE")
+  })
+})
+
 describe("mayBeScript", () => {
   test.each([
     ["snowflake", "select 1; delete from orders"],
@@ -680,7 +838,7 @@ describe("parseDatabricksExplainCost reads only the statistics Spark appends", (
   })
 
   test("nor stands in for missing statistics, or for Spark's default size", () => {
-    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true, relation: "main.t" })
+    expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation main.t[Statistics(sizeInBytes=0.0 B)#0] parquet")).toEqual({ noStats: true, relation: "main.t", unread: true })
     expect(parseDatabricksExplainCost("== Optimized Logical Plan ==\nRelation [Statistics(sizeInBytes=0 B)#0] parquet, Statistics(sizeInBytes=8.0 EiB)")).toEqual({ noStats: true })
   })
 })
@@ -885,7 +1043,7 @@ describe("review follow-ups, round eight", () => {
   })
 
   test("both checks read the SQL the same way: one scan", () => {
-    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  " })
+    expect(scanSql("select `json`.`x` from t -- c\n", "databricks")).toEqual({ script: false, code: "select `json`.`x` from t  ", literals: [], calls: 0 })
     expect(scanSql("select 'a' from t", "databricks").code).toBe("select   from t")
   })
 })
@@ -993,5 +1151,110 @@ describe("review follow-ups, round twelve", () => {
       expect(local.queries).toEqual([])
       expect(result.metadata).toMatchObject({ success: false, adapter: "databricks", source: "explain" })
     }
+  })
+})
+
+describe("IDENTIFIER() on Databricks", () => {
+  test.each([
+    "SELECT * FROM IDENTIFIER('read_files')('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('system.builtin.read_files')('s3://b/x')",
+    "SELECT * FROM IDENTIFIER('json.`/Volumes/c/s/v/raw`')",
+    "select * from identifier ( 'READ_FILES' ) ('/x')",
+    "select * from IDENTIFIER(\"Cloud_Files\")('/x')",
+    "select * from IDENTIFIER('system . builtin . `read_files`')('/x')",
+    "select * from IDENTIFIER /* c */ ( /* d */ 'CSV.`/x`')",
+    "select * from IDENTIFIER('`parquet`.`s3://b/x`')",
+    "select * from IDENTIFIER('read' || '_files')('/x')",
+    "select * from IDENTIFIER('read_' '' 'files')('/x')",
+    "select * from IDENTIFIER(:tbl)",
+    "select * from IDENTIFIER(concat('json.`', :p, '`'))",
+    "select * from IDENTIFIER(tbl_var)",
+    "select * from IDENTIFIER('cat.sch.tbl') a join IDENTIFIER(:other) b on a.id = b.id",
+    "select * from IDENTIFIER('read\\_files')('/x')",
+    "SELECT * FROM IDENTIFIER(IDENTIFIER('lower')('READ_FILES'))('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER( IDENTIFIER('concat')('read_', 'files'))('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('read_files /* c */')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('read_files/**/')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('json/**/.`/Volumes/c/s/v/raw`')",
+    "SELECT * FROM IDENTIFIER('read_files -- c\n')('/x')",
+    "SELECT * FROM system.builtin.IDENTIFIER('read_files')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM json.IDENTIFIER('`/Volumes/c/s/v/raw`')",
+    "SELECT * FROM IDENTIFIER('json').`data.json`",
+    "SELECT * FROM IDENTIFIER('json') . `data`",
+    "SELECT * FROM IDENTIFIER('\"read_files\"')('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER(\"fn\")('/Volumes/c/s/v/raw')",
+    "SELECT * FROM \u0131DENTIFIER('read_files')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER(\"IDENTIFIER('read_files')\")('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('identifier(''x'')')('/x')",
+    "SELECT * FROM IDENTIFIER('read_' /*a*/ || 'files' /*b*/)('/Volumes/c/s/v/raw', format => 'json')",
+    "SELECT * FROM IDENTIFIER('`j\u017fon`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('${hiveconf:source}')('/Volumes/c/s/v/raw')",
+    "SELECT * FROM IDENTIFIER('json.raw')",
+    "SELECT * FROM IDENTIFIER(' CSV . raw')",
+    "SELECT \u017fIDENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+    "SELECT \u0131DENTIFIER('safe') FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+    "SELECT * FROM IDENTIFIER('`org.apache.spark.sql.json.DefaultSource`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('`org.apache.spark.sql.json.DefaultSource`.`data.json`')",
+    "SELECT * FROM IDENTIFIER('a.b.c.d')",
+    "SELECT * FROM IDENTIFIER('js' /*a*/ || 'on.`/Volumes/c/s/v/raw`' /*b*/)",
+    "SELECT 1 AS `\u00df\u00df\u00df`, XIDENTIFIER('safe') AS n FROM IDENTIFIER(concat('read_', 'files'))('/x')",
+  ])("%p may read files", (sql) => {
+    expect(readsFiles(sql)).toBe(true)
+  })
+
+  test.each([
+    "select * from IDENTIFIER('cat.sch.tbl')",
+    "select * from identifier ( 'cat.sch.tbl' ) t where t.x = 'read_files'",
+    "select IDENTIFIER('col') from main.sales.orders",
+    "select * from IDENTIFIER('main.json.t')",
+    "select * from `identifier`('x')",
+    "SELECT `note identifier(x)` FROM main.sales.orders",
+    `select * from IDENTIFIER${" ".repeat(120)}( 'cat.sch.tbl' )`,
+    "select * from IDENTIFIER('main.analytics.identifier_map')",
+    "SELECT 1 AS `\u00df\u00df`, XIDENTIFIER('safe') AS n FROM main.sales.orders",
+  ])("%p reads tables", (sql) => {
+    expect(readsFiles(sql)).toBe(false)
+  })
+
+  test.each([
+    ["SELECT * FROM IDENTIFIER('system.builtin.read_files')('s3://b/x')", false],
+    ["SELECT * FROM IDENTIFIER(:tbl)", false],
+    ["SELECT * FROM IDENTIFIER('cat.sch.tbl')", true],
+  ])("%p: EXPLAIN sent is %p", async (compiled, explained) => {
+    useAdapter(calls, { type: "databricks", compile: async () => compiled, explain: async () => JSON.stringify([DATABRICKS_PLAN]) })
+    await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(calls.queries.length > 0).toBe(explained)
+  })
+
+  test("repeated comments before a concatenation scan in linear time", () => {
+    const sql = "SELECT * FROM IDENTIFIER('read_' " + "/**/".repeat(30) + " || 'files')('/Volumes/c/s/v/raw')"
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(true)
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+
+  test("adjacent ordinary literals scan in linear time", () => {
+    const sql = "SELECT " + "'a' ".repeat(64000) + "FROM main.s.t"
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("an unbalanced backtick over many slashes scans in linear time", () => {
+    const started = performance.now()
+    expect(readsFiles("SELECT * FROM IDENTIFIER('`" + "/".repeat(128000) + "')")).toBe(true)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("many ordinary literals scan in linear time", () => {
+    const sql = `select ${Array.from({ length: 20000 }, (_, n) => `'v${n}'`).join(", ")} from main.s.t`
+    const started = performance.now()
+    expect(readsFiles(sql)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test("leaves Snowflake and BigQuery alone", async () => {
+    expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").literals).toEqual([])
+    expect(scanSql("select * from IDENTIFIER('cat.sch.tbl')", "snowflake").calls).toBe(0)
   })
 })

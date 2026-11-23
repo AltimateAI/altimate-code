@@ -31,7 +31,10 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
-      reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
+      reason:
+        ctx.agent === "plan"
+          ? "this needs the dbt adapter, which plan mode doesn't start: run it outside plan mode"
+          : "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
     }
   // One deadline and the call's abort bound every wait below, the dbt config reads included: a stalled
   // read gives up with the start's timeout, and a cancelled call stops waiting at once.
@@ -55,7 +58,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
     return value
   }
   try {
-    const { getDbtAdapter, getDbtProjectRoot } = await bounded(import("../native/connections/register"))
+    const { getDbtAdapter, getDbtProjectRoot, getDbtPythonPath } = await bounded(import("../native/connections/register"))
     const project = await bounded(sessionProject())
     if (project?.other) {
       return {
@@ -71,7 +74,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
       const root = await bounded(getDbtProjectRoot())
       const found = !!root && fs.existsSync(path.join(root, "dbt_project.yml"))
       return found
-        ? { refusal: "not_started", reason: "the dbt adapter didn't start" }
+        ? { refusal: "not_started", reason: `the dbt adapter didn't start${pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))}` }
         : { refusal: "no_project", reason: "no dbt project here" }
     }
     if (project?.root) {
@@ -84,7 +87,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
         }
     }
     if (adapter.isInitialized?.() === false)
-      return { refusal: "not_loaded", reason: "the dbt adapter didn't load the project" }
+      return { refusal: "not_loaded", reason: `the dbt adapter didn't load the project${pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))}` }
     return { adapter }
   } catch (e) {
     if (signal.aborted) throw e
@@ -92,6 +95,33 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   } finally {
     signal.removeEventListener("abort", stop)
     clearTimeout(timer)
+  }
+}
+
+/**
+ * How to fix an adapter that didn't start or load, which is most often dbt missing from the Python it was
+ * started with. A pythonPath saved in ~/.altimate-code/dbt.json wins over any virtualenv, so that is what
+ * to change then. The adapter is kept for the life of the process, so the fix takes effect in a new one.
+ */
+function pythonHint(python: string | undefined, saved: boolean): string {
+  const which = python ? ` (${python})` : ""
+  const restart = "then start a new session, or run `altimate-code tool daemon stop` for the `tool run` daemon"
+  return saved
+    ? `: dbt runs with the Python that ~/.altimate-code/dbt.json names${which}, which may not be the project's. Set pythonPath there to a Python that has dbt installed, ${restart}`
+    : `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json), ${restart}`
+}
+
+/**
+ * Whether ~/.altimate-code/dbt.json picks the Python: it parses and names a pythonPath. A file without one,
+ * or one that doesn't parse, leaves the choice to discovery (project venv, VIRTUAL_ENV, CONDA_PREFIX, PATH).
+ */
+async function savedDbtConfig(): Promise<boolean> {
+  try {
+    const { path: configPath } = await import("../../../../dbt-tools/src/config")
+    const saved = JSON.parse(await fs.promises.readFile(configPath(), "utf8")) as { pythonPath?: unknown } | null
+    return typeof saved?.pythonPath === "string" && saved.pythonPath.trim() !== ""
+  } catch {
+    return false
   }
 }
 

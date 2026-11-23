@@ -65,6 +65,15 @@ describe("tool list", () => {
       "finops_query_history",
       "project_scan",
       "answer_commit",
+      "dbt_cost_estimate",
+      "dbt_cte_profile",
+      "dbt_defer_state",
+      "dbt_docs_coverage",
+      "dbt_health",
+      "dbt_map_relations",
+      "dbt_run_results",
+      "dbt_sql_graph",
+      "docs_share_comments",
     ])
       expect(ids).toContain(id)
     for (const tool of tools) {
@@ -409,7 +418,9 @@ describe("sql_explain", () => {
     Registry.setConfigs({ pg: { type: "postgres" } as any })
     try {
       const result = await runner.run("sql_explain", { sql: "SELECT 'a\\'", warehouse: "pg" })
-      expect(JSON.stringify(result)).toContain("could not be read with certainty")
+      const text = JSON.stringify(result)
+      expect(text).toContain("backslash in a quoted string")
+      expect(text).toContain("is not explained")
     } finally {
       Registry.reset()
     }

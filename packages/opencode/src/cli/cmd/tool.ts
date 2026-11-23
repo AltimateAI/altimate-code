@@ -332,14 +332,34 @@ function writeAll(text: string) {
 
 const ToolReportEventCommand = cmd({
   command: "report-event <action>",
-  describe: "record what a person did with the Claude Code plugin's lineage report (usage telemetry; nothing is sent when telemetry is off)",
+  describe: "record the Claude Code plugin's usage: its lineage report, a session start, a feature used (usage telemetry; nothing is sent when telemetry is off)",
   builder: (yargs: Argv) =>
     yargs
-      .positional("action", { type: "string", describe: "what happened to the report", demandOption: true })
-      .option("session", { type: "string", describe: "the Claude Code session: claude:<id>", demandOption: true }),
+      .positional("action", {
+        type: "string",
+        describe:
+          "a lineage report step (summary_shown, open_pressed, command_run, built, build_failed, no_browser), plugin_session_start or plugin_feature_used",
+        demandOption: true,
+      })
+      .option("session", { type: "string", describe: "the Claude Code session: claude:<id> (lineage report steps only)" })
+      .option("plugin-version", { type: "string", describe: "the plugin's version (plugin_* actions)" })
+      .option("install-id", { type: "string", describe: "the plugin's random install id, a UUID (plugin_* actions)" })
+      .option("os", { type: "string", describe: "macos, linux, windows, wsl or unknown (plugin_session_start)" })
+      .option("feature", {
+        type: "string",
+        describe:
+          "lineage, dbt_show, profile_ctes, scan_cost, comments, sql_graph, health, runs, to_model, cost_gate or health_push_gate (plugin_feature_used)",
+      })
+      .option("outcome", { type: "string", describe: "opened, failed, held or allowed (plugin_feature_used)" }),
   handler: async (args) => {
     const { reportEvent } = await import("../../altimate/tool-cli/report-event")
-    const event = reportEvent(args.action, args.session)
+    const event = reportEvent(args.action, args.session, Date.now(), {
+      pluginVersion: args.pluginVersion,
+      installId: args.installId,
+      os: args.os,
+      feature: args.feature,
+      outcome: args.outcome,
+    })
     if ("error" in event) {
       console.error(event.error)
       process.exitCode = 1
