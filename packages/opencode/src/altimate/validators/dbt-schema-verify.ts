@@ -149,7 +149,10 @@ function formatFixHint(mismatches: SchemaVerifyOutput[]): string {
 function leadWithStaleManifestNote(results: SchemaVerifyOutput[], hint: string): string {
   const stale = results.find((r) => r.stale_manifest)?.stale_manifest
   if (!stale) return hint
-  const written = typeof stale.written_at === "string" ? ` (written ${sanitizeForPrompt(stale.written_at, 40)})` : ""
+  const written =
+    typeof stale.written_at === "string" && stale.written_at.trim()
+      ? ` (written ${sanitizeForPrompt(stale.written_at, 40)})`
+      : ""
   return `The dbt project check failed, so schema-verify read the manifest of the last successful parse${written}. Its spec may not match schema.yml as it is now.\n\n${hint}`
 }
 

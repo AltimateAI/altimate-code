@@ -49,6 +49,8 @@ altimate-dbt children --model <name>                        # downstream models
 altimate-dbt parents --model <name>                         # upstream models
 ```
 
+When the project check fails (a broken profile, a missing env var) and an earlier parse left a manifest, `children` and `parents` answer `{ stale_manifest, models }` instead of a list: `models` comes from that last successful parse and may predate the current files, so check for it before relying on the answer for impact analysis. With no earlier manifest they answer an error.
+
 ## Packages
 
 ```bash

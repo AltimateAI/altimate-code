@@ -98,7 +98,8 @@ function env(cfg: Config, options: CreateOptions): RuntimePythonEnvironment {
   const vars = { ...process.env }
   if (options.targetPath) vars.DBT_TARGET_PATH = options.targetPath
   return {
-    pythonPath: cfg.pythonPath,
+    // A Fusion config may have none: dbt-integration runs Fusion with an empty one.
+    pythonPath: cfg.pythonPath ?? "",
     getEnvironmentVariables: () => vars,
   }
 }
