@@ -5,7 +5,7 @@
 // Parser failures are never reads; lexical checks retain hard-deny protection.
 
 import { hasMongoWriteStage, normalizeMqlCommand } from "@altimateai/drivers"
-import { isModeledDialect, maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
+import { DOLLAR_TAG_ANYWHERE, isModeledDialect, lexesDollarQuotes, maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls, sqlLiteral } from "./sql-functions"
 import { hasSideEffectFunction, isReadOnlyNestedFunction } from "./sql-function-policy"
 
@@ -32,6 +32,7 @@ const READ_CATEGORIES = new Set(["query"])
  * Only code tokens change; quoted content and the original statement boundaries
  * remain authoritative when checking the parser's result. */
 function parserSql(sql: string, dialect?: string): string {
+  if (/\bEXPLAIN\b/i.test(sql)) sql = blankExplainOptions(sql, dialect)
   const duckdb = dialect?.toLowerCase() === "duckdb"
   if (!duckdb && dialect?.toLowerCase() !== "sqlite") return sql
   const compatible = tokenizeSql(sql, dialect).tokens
@@ -85,7 +86,11 @@ function maskUnpivotLabels(sql: string): string {
 // The parser labels SELECT INTO and queries with modifying CTEs as "query".
 // Quoted identifiers/literals and comments cannot introduce these write clauses.
 function hasQueryWriteClause(sql: string, dialect?: string): boolean {
-  let masked = maskSql(tokenizeSql(sql, dialect).tokens)
+  return maskedHasWriteClause(maskSql(tokenizeSql(sql, dialect).tokens), dialect)
+}
+
+/** hasQueryWriteClause over text already masked by maskSql. */
+function maskedHasWriteClause(masked: string, dialect?: string): boolean {
   // UNPIVOT's INTO NAME labels output columns; it does not create a table.
   if (dialect?.toLowerCase() === "duckdb") masked = maskUnpivotLabels(masked)
   return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked)
@@ -141,14 +146,92 @@ function isReadOnlyMetadata(statement: string): boolean {
 }
 // EXPLAIN is a read only when the explained statement is one: `EXPLAIN ANALYZE`
 // executes the statement, so `EXPLAIN ANALYZE DELETE …` must stay a write.
-const EXPLAIN_PREFIX = /^\s*EXPLAIN\b(\s+(ANALYZE|VERBOSE|QUERY\s+PLAN|FORMAT\s+\w+|\([^)]*\)))*\s+/i
+// Options are accepted only where the dialect defines them: Snowflake USING JSON|TEXT|TABULAR,
+// Databricks/Spark/Hive EXTENDED|CODEGEN|COST|FORMATTED, and the parenthesized list of each of
+// PostgreSQL and DuckDB. Any other option, or a list in another dialect, leaves a write.
+const OPTION_BOOLEAN = "(?:\\s+(?:TRUE|FALSE|ON|OFF|YES|NO|T|F|Y|N|0|1))?"
+const POSTGRES_OPTION =
+  "(?:FORMAT\\s+(?:TEXT|XML|JSON|YAML)|SERIALIZE(?:\\s+(?:NONE|TEXT|BINARY))?|" +
+  `(?:ANALYZE|ANALYSE|VERBOSE|COSTS|IO|SETTINGS|GENERIC_PLAN|BUFFERS|WAL|TIMING|SUMMARY|MEMORY)${OPTION_BOOLEAN})`
+// DuckDB implements only ANALYZE and FORMAT, with its own formats.
+const DUCKDB_OPTION = `(?:FORMAT\\s+(?:TEXT|JSON|HTML|GRAPHVIZ|YAML)|ANALYZE${OPTION_BOOLEAN})`
+// Linear: the items are separated by a comma, so no whitespace run can be split two ways.
+const optionList = (option: string) => `\\(\\s*${option}(?:\\s*,\\s*${option})*\\s*\\)`
+const POSTGRES_OPTION_LIST = optionList(POSTGRES_OPTION)
+const DUCKDB_OPTION_LIST = optionList(DUCKDB_OPTION)
+// DuckDB runs a COPY written as a CTE body; a column or table named copy is not one.
+const COPY_CTE_BODY = /\bAS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(\s*COPY\b/i
+
+/** The EXPLAIN keyword and its options. `legacy` adds the generic words the parser reads itself;
+ * only the dialect's own options are ever blanked, so the parser still rejects foreign words. */
+function explainPrefix(dialect?: string, legacy = true): RegExp {
+  const d = dialect?.toLowerCase() ?? ""
+  const words = legacy ? ["ANALYZE", "VERBOSE", "QUERY\\s+PLAN", "FORMAT\\s+\\w+"] : []
+  if (d === "snowflake") words.push("USING\\s+(?:JSON|TEXT|TABULAR)")
+  if (/^(databricks|spark|hive)$/.test(d)) words.push("EXTENDED", "CODEGEN", "COST", "FORMATTED")
+  // Only PostgreSQL and DuckDB have such a list. It is taken either alone or as the legacy words, never both.
+  const options = /^(postgres|postgresql)$/.test(d) ? POSTGRES_OPTION_LIST : d === "duckdb" ? DUCKDB_OPTION_LIST : ""
+  const list = options ? `\\s*${options}\\s*|` : ""
+  const each = words.length ? `(?:\\s+(?:${words.join("|")}))*` : ""
+  return new RegExp(`^\\s*EXPLAIN\\b(?:${list}${each}\\s+)`, "i")
+}
+
+/** Length of the EXPLAIN keyword and its options, beyond a bare `EXPLAIN `. */
+function optionsLength(statement: string, prefix: RegExpExecArray): number {
+  return prefix[0].length - (/^\s*EXPLAIN\s+/i.exec(statement)?.[0].length ?? 0)
+}
+
+/** The parser lacks the dialect's EXPLAIN options. Blank them in place, so the parser reads plain
+ * EXPLAIN <statement> over the original text, comments and statement boundaries unchanged. Never used for execution. */
+function blankExplainOptions(sql: string, dialect?: string): string {
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) return sql
+  // Same length as the text: comments are blanks, quoted text a filler no option can match.
+  const scan = lexical.tokens
+    .map(({ kind, text }) =>
+      kind === "code" ? text : kind === "comment" ? " ".repeat(text.length) : "\u0001".repeat(text.length),
+    )
+    .join("")
+  // A lexer without dollar quotes can read `$$--$$` as a comment that hides statements the parser
+  // skips too, so the two statement counts would agree on a wrong answer. Leave such text unadapted:
+  // the parser rejects the options and the statement is a write. Only code can open a dollar quote,
+  // since the lexer and the parser read the same text up to the first one.
+  if (!lexesDollarQuotes(dialect) && DOLLAR_TAG_ANYWHERE.test(scan)) return sql
+  const prefix = explainPrefix(dialect, false)
+  const parts: string[] = []
+  let copied = 0
+  let start = 0
+  for (const statement of scan.split(";")) {
+    const match = prefix.exec(statement)
+    if (match && optionsLength(statement, match) > 0 && statement.slice(match[0].length).trim()) {
+      const from = start + /^\s*/.exec(match[0])![0].length + "EXPLAIN".length
+      const to = start + match[0].length
+      parts.push(sql.slice(copied, from), " ".repeat(to - from))
+      copied = to
+    }
+    start += statement.length + 1
+  }
+  return parts.length ? parts.join("") + sql.slice(copied) : sql
+}
+
+/** EXPLAIN with options is read-only only as the sole statement of its text. */
+function hasExplainOptions(statement: string, dialect?: string): boolean {
+  const prefix = explainPrefix(dialect).exec(statement)
+  return !!prefix && optionsLength(statement, prefix) > 0
+}
+
+/** An adapted EXPLAIN reaches the parser without its options, so the explained query is checked here. */
+function isReadOnlyExplainedQuery(explained: string, dialect?: string): boolean {
+  const masked = maskSql(tokenizeSql(explained, dialect).tokens)
+  return !maskedHasWriteClause(masked, dialect) && !COPY_CTE_BODY.test(masked)
+}
 
 function isReadOnlyOther(statement: string, dialect?: string): boolean {
   if (isReadOnlyMetadata(statement)) return true
-  const explained = statement.replace(EXPLAIN_PREFIX, "")
+  const explained = statement.replace(explainPrefix(dialect), "")
   if (explained === statement) return false
   return (
-    (/^\s*(SELECT|WITH)\b/i.test(explained) && !hasQueryWriteClause(explained, dialect)) ||
+    (/^\s*(SELECT|WITH)\b/i.test(explained) && isReadOnlyExplainedQuery(explained, dialect)) ||
     isReadOnlyMetadata(explained)
   )
 }
@@ -161,6 +244,7 @@ function otherIsReadOnly(sql: string, parsed: Array<{ category: string }>, diale
   if (!tokenizeSql(sql, dialect).complete) return false
   const statements = statementsOf(sql, dialect)
   if (statements.length !== parsed.length) return false
+  if (statements.length > 1 && statements.some((statement) => hasExplainOptions(statement, dialect))) return false
   return parsed.every(
     (statement, i) =>
       (READ_CATEGORIES.has(statement.category) && !hasQueryWriteClause(statements[i], dialect)) ||
