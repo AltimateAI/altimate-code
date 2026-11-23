@@ -235,7 +235,7 @@ GROUP BY 1, 2 ORDER BY 2
  * - a `drop` row per id dropped since ten days before the window's end, the earliest any usage read here
  *   begins: a dropped id is no listed warehouse's, since a dropped warehouse cannot be recovered;
  * - a `create` row per creation of an id not dropped in the year: a creation within a second of a listed
- *   warehouse's `created_on` names its id.
+ *   warehouse's `created_on` names its id when it carries that warehouse's name or the id's usage does.
  * The view records no rename, so a rename changes nothing here: an id keeps the creation that names it.
  */
 export const SNOWFLAKE_IDENTITY_EVENTS_SQL = `
@@ -334,21 +334,30 @@ const CLOCK_SKEW_MS = 60_000
 const CREATE_TOLERANCE_MS = 1_000
 
 /**
- * The id each listed warehouse's creation event names, and the ids that were dropped. A listed warehouse
- * gets an id only when exactly one id was created within a second of its `created_on` (the query leaves
- * out the creations of ids dropped since), and that id fits no other listed warehouse; otherwise it has
- * none here.
+ * The id each listed warehouse's creation event names, and the ids that were dropped. A creation within a
+ * second of a listed warehouse's `created_on` is not enough: another warehouse, one this role cannot list
+ * among them, can be created in the same second. The creation must also carry the listed name, or the id's
+ * usage must have been logged under it (`namesById`). A listed warehouse gets an id only when exactly one
+ * such id was created within a second of its `created_on` (the query leaves out the creations of ids
+ * dropped since), and that id fits no other listed warehouse; otherwise it has none here, and an id with
+ * no listed owner stays unattributed.
  */
-function identityOf(warehouses: Row[], lifecycle: Row[]) {
+function identityOf(warehouses: Row[], lifecycle: Row[], namesById: Map<number, Map<string, number>>) {
   const dropped = new Set(lifecycle.filter((row) => row.kind === "drop").map((row) => num(row.warehouse_id)))
   const creations = lifecycle
     .filter((row) => row.kind === "create")
-    .map((row) => ({ id: num(row.warehouse_id), at: num(row.event_ms) }))
+    .map((row) => ({ id: num(row.warehouse_id), at: num(row.event_ms), name: String(row.warehouse_name ?? "") }))
   const namesByCreatedId = new Map<number, string[]>()
   for (const row of warehouses) {
+    const name = String(row.name ?? "")
     const created = timeOf(row.created_on)
-    const ids = new Set(creations.filter(({ at }) => Math.abs(at - created) <= CREATE_TOLERANCE_MS).map(({ id }) => id))
-    if (ids.size === 1) entry(namesByCreatedId, [...ids][0]!, () => []).push(String(row.name ?? ""))
+    const ids = new Set(
+      creations
+        .filter((one) => Math.abs(one.at - created) <= CREATE_TOLERANCE_MS)
+        .filter((one) => one.name === name || namesById.get(one.id)?.has(name))
+        .map(({ id }) => id),
+    )
+    if (ids.size === 1) entry(namesByCreatedId, [...ids][0]!, () => []).push(name)
   }
   const listedAs = new Map<number, string>()
   for (const [id, names] of namesByCreatedId) if (names.length === 1) listedAs.set(id, names[0]!)
@@ -376,7 +385,8 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  * The input core reads, one entry per warehouse `SHOW WAREHOUSES` lists, which gives names and no ids.
  * Usage belongs to a warehouse id, and each id belongs to at most one listed warehouse. The warehouse
  * events give that from ids: an id dropped belongs to none, and an id whose creation matches a listed
- * warehouse's `created_on` belongs to that one, whatever names its usage was logged under. Ids and listed
+ * warehouse's `created_on` and name (or whose usage was logged under that name) belongs to that one,
+ * whatever other names its usage was logged under. A creation matching only the time names nothing. Ids and listed
  * warehouses the events leave open (created more than a year ago or in the same second as another, dropped
  * or created after the view's latest event, or no events read) are matched by name and time:
  * - the name an id was seen under last, by each row's start (a query row starts at that name's first query),
@@ -396,10 +406,6 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
 export function buildFacts(rows: FactRows) {
   const listed = new Set(rows.warehouses.map((row) => String(row.name ?? "")))
   const createdAt = new Map(rows.warehouses.map((row) => [String(row.name ?? ""), timeOf(row.created_on)]))
-  const { dropped, listedAs } = identityOf(rows.warehouses, rows.lifecycle ?? [])
-  const identified = new Set(listedAs.values())
-  /** A listed warehouse whose id the events did not give. */
-  const open = (name: string) => listed.has(name) && !identified.has(name)
   // Each id's rows from every source, with whether a row's time is a metered hour, and when each of its names was last seen.
   const sources = [
     { list: rows.metering, hourly: true },
@@ -420,6 +426,10 @@ export function buildFacts(rows: FactRows) {
       names.set(name, Math.max(names.get(name) ?? -Infinity, at))
     }
   }
+  const { dropped, listedAs } = identityOf(rows.warehouses, rows.lifecycle ?? [], namesById)
+  const identified = new Set(listedAs.values())
+  /** A listed warehouse whose id the events did not give. */
+  const open = (name: string) => listed.has(name) && !identified.has(name)
   /** An id's names, latest first; on a tie a listed name comes first. */
   const namesOf = (id: number) =>
     [...(namesById.get(id) ?? [])]

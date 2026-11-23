@@ -835,13 +835,22 @@ describe("building the facts", () => {
         expect({ replaced, unlisted }).toEqual({ replaced: ["X_WH"], unlisted: ["OLD_WH"] })
       })
 
-      test("created within the year the view keeps, it gets its own usage under its old name", () => {
+      test("created within the year the view keeps, with usage under its new name too, it gets its own usage under its old name", () => {
+        const warehouses = [show({ name: "X_WH", created_on: new Date("2026-06-01T09:30:00.250Z") })]
+        const lifecycle = [...dropped, event("create", 5, "OLD_WH", "2026-06-01T09:30:00.600Z")]
+        const renamedUsage = { ...usage, metering: [...usage.metering, metered(5, "X_WH", "2026-11-11T08:00:00Z", 2)] }
+        const { facts, replaced, unlisted } = buildFacts({ warehouses, ...renamedUsage, lifecycle })
+        expect(facts[0]).toMatchObject({ warehouse_id: "5" })
+        expect(credits(facts[0]!)).toEqual([3, 2])
+        expect({ replaced, unlisted }).toEqual({ replaced: ["X_WH"], unlisted: [] })
+      })
+
+      test("created within the year, with no usage under its new name, a creation under another name does not name it", () => {
         const warehouses = [show({ name: "X_WH", created_on: new Date("2026-06-01T09:30:00.250Z") })]
         const lifecycle = [...dropped, event("create", 5, "OLD_WH", "2026-06-01T09:30:00.600Z")]
         const { facts, replaced, unlisted } = buildFacts({ warehouses, ...usage, lifecycle })
-        expect(facts[0]).toMatchObject({ warehouse_id: "5" })
-        expect(credits(facts[0]!)).toEqual([3])
-        expect({ replaced, unlisted }).toEqual({ replaced: ["X_WH"], unlisted: [] })
+        expect(facts[0]).toMatchObject({ warehouse_id: "unused:X_WH", usage_days: [] })
+        expect({ replaced, unlisted }).toEqual({ replaced: ["X_WH"], unlisted: ["OLD_WH"] })
       })
     })
 
@@ -868,14 +877,14 @@ describe("building the facts", () => {
       // Id 1 was created as A, renamed B on 9 Nov and dropped on 11 Nov; id 3, created as C, was renamed B on 12 Nov.
       const rows = {
         warehouses: [show({ name: "B", created_on: new Date("2026-04-01T12:00:00Z") })],
-        metering: [metered(1, "A", "2026-11-08T08:00:00Z", 4), metered(1, "B", "2026-11-10T08:00:00Z", 5), metered(3, "C", "2026-11-10T09:00:00Z", 6)],
+        metering: [metered(1, "A", "2026-11-08T08:00:00Z", 4), metered(1, "B", "2026-11-10T08:00:00Z", 5), metered(3, "C", "2026-11-10T09:00:00Z", 6), metered(3, "B", "2026-11-12T09:00:00Z", 2)],
         ...none,
       }
-      expect(buildFacts(rows).facts[0]).toMatchObject({ warehouse_id: "1" })
+      expect(buildFacts(rows).facts[0]).toMatchObject({ warehouse_id: "3" })
       const lifecycle = [event("create", 3, "C", "2026-04-01T12:00:00.300Z"), event("drop", 1, "B", "2026-11-11T08:00:00Z")]
       const { facts, replaced, unlisted } = buildFacts({ ...rows, lifecycle })
       expect(facts[0]).toMatchObject({ warehouse_id: "3" })
-      expect(credits(facts[0]!)).toEqual([6])
+      expect(credits(facts[0]!)).toEqual([6, 2])
       expect({ replaced, unlisted }).toEqual({ replaced: ["B"], unlisted: [] })
     })
 
@@ -937,45 +946,89 @@ describe("building the facts", () => {
         expect(unlisted).toEqual(["OLD_WH"])
       })
 
-      test("a rename after the view's latest event: the creation still names the warehouse", () => {
+      test("a rename after the view's latest event: the creation names the warehouse once its usage shows the new name", () => {
         // ETL_WH (id 5) was renamed NEW_WH an hour ago; its usage and events carry only the old name.
-        const rows = { warehouses: [show({ name: "NEW_WH", created_on: new Date("2026-06-01T00:00:00Z") })], metering: [metered(5, "ETL_WH", "2026-11-12T08:00:00Z", 7)], ...none }
-        expect(buildFacts(rows)).toMatchObject({ unlisted: ["ETL_WH"], facts: [{ warehouse_id: "unused:NEW_WH" }] })
+        const rows = { warehouses: [show({ name: "NEW_WH", created_on: new Date("2026-06-01T00:00:00Z") })], metering: [metered(5, "ETL_WH", "2026-11-12T08:00:00Z", 7), metered(5, "NEW_WH", "2026-11-12T09:00:00Z", 1)], ...none }
+        expect(buildFacts(rows).facts[0]).toMatchObject({ warehouse_id: "5" })
         const { facts, unlisted } = buildFacts({ ...rows, lifecycle: [event("create", 5, "ETL_WH", "2026-06-01T00:00:00.500Z")] })
         expect(facts[0]).toMatchObject({ warehouse_id: "5" })
-        expect(credits(facts[0]!)).toEqual([7])
+        expect(credits(facts[0]!)).toEqual([8])
         expect(unlisted).toEqual([])
       })
     })
 
     describe("a creation names a warehouse's id only when it is the one match", () => {
       const created = "2026-06-01T00:00:00.000Z"
-      const rows = { warehouses: [show({ created_on: new Date(created) })], metering: [metered(7, "OTHER_WH", "2026-11-12T08:00:00Z", 1)], ...none }
+      // Id 7's usage under the listed name began before `created_on`, so name and time alone would not give it the id.
+      const rows = { warehouses: [show({ created_on: new Date(created) })], metering: [metered(7, "BI_WH", "2026-05-30T08:00:00Z", 1)], ...none }
 
       test("within a second of `created_on`, either side", () => {
         for (const at of ["2026-05-31T23:59:59.000Z", "2026-06-01T00:00:01.000Z"]) {
-          expect(buildFacts({ ...rows, lifecycle: [event("create", 7, "OTHER_WH", at)] }).facts[0]!.warehouse_id).toBe("7")
+          expect(buildFacts({ ...rows, lifecycle: [event("create", 7, "BI_WH", at)] }).facts[0]!.warehouse_id).toBe("7")
         }
         for (const at of ["2026-05-31T23:59:58.999Z", "2026-06-01T00:00:01.001Z"]) {
-          expect(buildFacts({ ...rows, lifecycle: [event("create", 7, "OTHER_WH", at)] }).facts[0]!.warehouse_id).toBe("unused:BI_WH")
+          expect(buildFacts({ ...rows, lifecycle: [event("create", 7, "BI_WH", at)] }).facts[0]!.warehouse_id).toBe("unused:BI_WH")
         }
       })
 
-      test("two ids created in the same second give neither an id", () => {
-        const both = [event("create", 7, "OTHER_WH", "2026-06-01T00:00:00.100Z"), event("create", 8, "SIBLING_WH", "2026-06-01T00:00:00.200Z")]
+      test("two ids created in the same second under its name give neither an id", () => {
+        const both = [event("create", 7, "BI_WH", "2026-06-01T00:00:00.100Z"), event("create", 8, "BI_WH", "2026-06-01T00:00:00.200Z")]
         expect(buildFacts({ ...rows, lifecycle: both }).facts[0]!.warehouse_id).toBe("unused:BI_WH")
         expect(buildFacts({ ...rows, lifecycle: both.slice(0, 1) }).facts[0]!.warehouse_id).toBe("7")
       })
 
       test("a creation that fits two listed warehouses gives neither its id", () => {
         const warehouses = [show({ created_on: new Date(created) }), show({ name: "ETL_WH", created_on: new Date("2026-06-01T00:00:00.900Z") })]
-        const { facts } = buildFacts({ ...rows, warehouses, lifecycle: [event("create", 7, "OTHER_WH", "2026-06-01T00:00:00.400Z")] })
+        const metering = [metered(7, "BI_WH", "2026-05-30T08:00:00Z", 1), metered(7, "ETL_WH", "2026-05-30T09:00:00Z", 1)]
+        const { facts } = buildFacts({ ...rows, warehouses, metering, lifecycle: [event("create", 7, "BI_WH", "2026-06-01T00:00:00.400Z")] })
         expect(facts.map((one) => one.warehouse_id)).toEqual(["unused:BI_WH", "unused:ETL_WH"])
       })
 
       test("an unreadable creation time matches no event", () => {
-        const { facts } = buildFacts({ ...rows, warehouses: [show({ created_on: "not a time" })], lifecycle: [event("create", 7, "OTHER_WH", created)] })
+        const metering = [metered(7, "OTHER_WH", "2026-11-12T08:00:00Z", 1)]
+        const { facts } = buildFacts({ ...rows, metering, warehouses: [show({ created_on: "not a time" })], lifecycle: [event("create", 7, "BI_WH", created)] })
         expect(facts[0]!.warehouse_id).toBe("unused:BI_WH")
+      })
+    })
+
+    describe("a creation in the same second under another name is not the listed warehouse's", () => {
+      // BI_WH is listed, created at 00:00:00.000, and its own creation event is missing from the view. OTHER_WH
+      // (id 7, not listed: the role cannot see it) was created 200 ms later and billed 42 credits.
+      const rows = {
+        warehouses: [show({ created_on: new Date("2026-06-01T00:00:00.000Z") })],
+        metering: [metered(7, "OTHER_WH", "2026-11-12T08:00:00Z", 42)],
+        ...none,
+      }
+      const other = event("create", 7, "OTHER_WH", "2026-06-01T00:00:00.200Z")
+
+      test("its id and credits are not given to the listed warehouse", () => {
+        const { facts, replaced, unlisted } = buildFacts({ ...rows, lifecycle: [other] })
+        expect(facts[0]).toMatchObject({ warehouse_id: "unused:BI_WH", usage_days: [] })
+        expect({ replaced, unlisted }).toEqual({ replaced: [], unlisted: ["OTHER_WH"] })
+      })
+
+      test("a creation under the listed name in that second still names its id", () => {
+        const own = event("create", 3, "BI_WH", "2026-06-01T00:00:00.100Z")
+        const withOwnUsage = { ...rows, metering: [...rows.metering, metered(3, "BI_WH", "2026-11-12T08:00:00Z", 5)] }
+        const { facts, unlisted } = buildFacts({ ...withOwnUsage, lifecycle: [other, own] })
+        expect(facts[0]).toMatchObject({ warehouse_id: "3" })
+        expect(credits(facts[0]!)).toEqual([5])
+        expect(unlisted).toEqual(["OTHER_WH"])
+      })
+
+      test("an id whose usage was also logged under the listed name is the listed warehouse's: a rename", () => {
+        const renamed = { ...rows, metering: [...rows.metering, metered(7, "BI_WH", "2026-11-13T08:00:00Z", 4)] }
+        const { facts } = buildFacts({ ...renamed, lifecycle: [other] })
+        expect(facts[0]).toMatchObject({ warehouse_id: "7" })
+        expect(credits(facts[0]!)).toEqual([42, 4])
+      })
+
+      test("another warehouse's usage under that name does not corroborate it", () => {
+        // A different id (4) used the name BI_WH; id 7 never did.
+        const rival = { ...rows, metering: [...rows.metering, metered(4, "BI_WH", "2026-11-13T08:00:00Z", 4)] }
+        const { facts } = buildFacts({ ...rival, lifecycle: [other] })
+        expect(facts[0]).toMatchObject({ warehouse_id: "4" })
+        expect(credits(facts[0]!)).toEqual([4])
       })
     })
   })
