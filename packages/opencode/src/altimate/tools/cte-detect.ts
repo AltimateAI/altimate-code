@@ -253,7 +253,12 @@ function skipHeader(text: string, pos: number): number {
 }
 
 /** The CTEs of the WITH clause that opens at `withPos`: each `name [(columns)] AS (body)`, separated by commas, up to the first thing that is not one. */
-function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
+function parseWithClause(
+  text: string,
+  withPos: number,
+  ctes: CteInfo[],
+  closeOf: (open: number) => number = (open) => findMatchingClosingParen(text, open),
+): void {
   let pos = skipTrivia(text, withPos + 4, true)
   const keyword = /recursive\b/iy
   keyword.lastIndex = pos
@@ -267,7 +272,7 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
     let name = text.substring(nameStart, identifierEnd)
     pos = skipTrivia(text, identifierEnd, false)
     if (text[pos] === "(") {
-      const close = findMatchingClosingParen(text, pos)
+      const close = closeOf(pos)
       if (close === -1) return
       // The name as written plus its column list; a comment between them is left out.
       name += ` ${text.substring(pos, close + 1)}`
@@ -277,7 +282,7 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
     // `AS [NOT] [MATERIALIZED] (`, with comments or Jinja tags allowed between the words.
     const open = skipHeader(text, pos)
     if (open === -1) return
-    const close = findMatchingClosingParen(text, open)
+    const close = closeOf(open)
     if (close === -1) return
     ctes.push({
       name,
@@ -391,7 +396,12 @@ function blankJinja(text: string): string {
       const before = from > kept ? text[from - 1] : (out.at(-1)?.at(-1) ?? "")
       // The text after this comment and the comments right after it, less the whitespace they trim; read once per run.
       let after = to
-      while (text.startsWith("{#", after)) {
+      for (;;) {
+        let next = after
+        while (next < text.length && /\s/.test(text[next])) next++
+        // Whitespace before a `{#-` is trimmed by it.
+        if (text.startsWith("{#-", next)) after = next
+        if (!text.startsWith("{#", after)) break
         after = jinjaEnd(text, after)
         if (text[after - 3] === "-") while (after < text.length && /\s/.test(text[after])) after++
       }
@@ -494,17 +504,22 @@ function skipQuoted(text: string, pos: number): number {
  */
 function shadowsIn(sql: string, start: number, end: number): { written: Written; at: number; from: number; to: number }[] {
   const out: { written: Written; at: number; from: number; to: number }[] = []
-  const add = (from: number, to: number) => {
-    const text = sql.substring(from, to)
-    for (const one of detectCtes(text)) {
+  if (!/\bwith\b/i.test(sql.substring(start, end))) return out
+  const push = (ctes: CteInfo[], offset: number, to: number) => {
+    for (const one of ctes) {
       // In a WITH RECURSIVE clause a CTE's name means that CTE across the whole clause, its own body included.
-      const afterWith = skipTrivia(text, one.withClauseStart + 4, true)
-      const recursive = /^recursive\b/i.test(text.substring(afterWith, afterWith + 10))
-      out.push({ written: written(stripColumnList(one.name)), at: from + one.nameStart, from: from + (recursive ? one.withClauseStart : one.queryEnd), to })
+      const afterWith = skipTrivia(sql, offset + one.withClauseStart + 4, true)
+      const recursive = /^recursive\b/i.test(sql.substring(afterWith, afterWith + 10))
+      const from = offset + (recursive ? one.withClauseStart : one.queryEnd)
+      out.push({ written: written(stripColumnList(one.name)), at: offset + one.nameStart, from, to })
     }
   }
-  if (!/\bwith\b/i.test(sql.substring(start, end))) return out
-  add(start, end)
+  push(detectCtes(sql.substring(start, end)), start, end)
+  // One pass pairs every parenthesis and notes each `(` that opens a query with WITH; each such clause is then read
+  // with the pairs found, so a deep nest of subqueries is not scanned again for every level.
+  const closes = new Map<number, number>()
+  const opens: number[] = []
+  const withOpens: number[] = []
   let pos = start
   while (pos < end) {
     const char = sql[pos]
@@ -518,13 +533,19 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
       continue
     }
     if (char === "(") {
+      opens.push(pos)
       const first = skipTrivia(sql, pos + 1, false)
-      if (/^with\b/i.test(sql.substring(first, first + 5))) {
-        const close = findMatchingClosingParen(sql, pos)
-        if (close > pos) add(pos + 1, close)
-      }
-    }
+      if (/^with\b/i.test(sql.substring(first, first + 5))) withOpens.push(pos)
+    } else if (char === ")" && opens.length > 0) closes.set(opens.pop()!, pos)
     pos++
+  }
+  const closeOf = (open: number) => closes.get(open) ?? -1
+  for (const open of withOpens) {
+    const close = closeOf(open)
+    if (close === -1) continue
+    const ctes: CteInfo[] = []
+    parseWithClause(sql, skipTrivia(sql, open + 1, false), ctes, closeOf)
+    push(ctes, 0, close)
   }
   return out
 }

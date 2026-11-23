@@ -1764,6 +1764,8 @@ select * from c`
     expect(readsOf(wrap("select * from orders{# a #} _archive")).b).toEqual(["orders"])
     expect(readsOf(wrap("select * from orders{# a #}{# b -#} _archive")).b).toEqual([])
     expect(readsOf(wrap("select * from orders{# a #}{# b #} _archive")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select * from orders{# a #} {#- b #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #} {# b #}_archive")).b).toEqual(["orders"])
     expect(readsOf(wrap("select * from orders {# note #} join t on 1 = 1")).b).toEqual(["orders"])
     expect(readsOf(wrap("select 2 -- {% raw %}\n{%- endraw %} from orders\n")).b).toEqual([])
     expect(readsOf(wrap("select 2 -- {% raw %}\n{% endraw %} from orders\n")).b).toEqual(["orders"])
@@ -1810,6 +1812,22 @@ select * from c`
       )
     }
     expect(time(32000) / time(8000)).toBeLessThan(9)
+  })
+
+  it("deeply nested subqueries that each open with WITH scale linearly", () => {
+    const time = (depth: number) => {
+      let body = "select * from orders"
+      for (let i = 0; i < depth; i++) body = `with x as (${body}) select * from x`
+      const sql = `with orders as (select 1), b as (${body}) select * from b`
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const started = performance.now()
+          expect(readsOf(sql).b).toEqual(["orders"])
+          return performance.now() - started
+        }),
+      )
+    }
+    expect(time(8000) / time(2000)).toBeLessThan(9)
   })
 
   it("sibling subqueries defining one name scale linearly", () => {
