@@ -2,7 +2,7 @@ import path from "node:path"
 import { readFile, realpath, stat, access, readdir } from "node:fs/promises"
 import YAML from "yaml"
 import { Installation } from "../../installation"
-import { loadReviewPolicy, policyHash, resolveRubric } from "./config"
+import { loadRepoInstructions, loadReviewPolicy, resolveRubric, policyHash } from "./config"
 import { SEVERITY_ORDER, type Severity } from "./finding"
 import {
   collectChangedFiles,
@@ -432,6 +432,17 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       })
     : []
 
+  // Repo review instructions come from the base commit, like the policy, and
+  // only matter when the AI lane runs.
+  const aiOn = !opts.noAi && config.ai !== false
+  const repoInstructions =
+    aiOn && resolved
+      ? await loadRepoInstructions({
+          readBase: (rel) => showAtRef(gitRoot, resolved.sha, rel),
+          changedPaths: changedFiles.map((f) => f.path),
+        })
+      : undefined
+
   return runReview({
     resourceNames: () => projectResourceNames(opts.cwd, opts.head, projectRootRel, dbtRoot),
     changedFiles,
@@ -451,7 +462,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     // so a missing default silently regresses envelope provenance for tool-
     // path verdicts (cubic-review PR #1041).
     cliVersion: opts.cliVersion ?? Installation.VERSION,
-    aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
+    aiReview: aiOn ? runAiReview : undefined,
     aiDisabledReason,
     aiModel: opts.aiModel,
     aiGraphContext: process.env.ALTIMATE_REVIEW_AI_GRAPH === "1",
@@ -464,6 +475,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       const specs = projectGrepSpecs(projectRootRel, dirs, glob)
       return specs ? grepFixedAt(gitRoot, opts.head, pattern, specs) : Promise.resolve(undefined)
     },
+    repoInstructions,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,

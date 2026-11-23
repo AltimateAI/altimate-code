@@ -11,6 +11,7 @@ import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId }
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
 import { aiReplayPath, runAiReplay } from "./ai-replay"
+import { type RepoInstruction, inInstructionScope } from "./config"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -138,6 +139,8 @@ export interface AiReviewInput {
   grounding: Finding[]
   prTitle?: string
   prBody?: string
+  /** Review instruction files from the base branch; each call gets those scoped over its files. */
+  instructions?: RepoInstruction[]
   /** Explicit `provider/model`; omit to use the configured default model. */
   model?: string
   /** What the verifier may read; it runs only when this is set and `ALTIMATE_REVIEW_AI_VERIFY=1`. */
@@ -233,6 +236,18 @@ export function buildUserMessage(input: AiReviewInput, maxFileChars = MAX_DIFF_C
   const parts: string[] = []
   if (input.prTitle) parts.push(`PR title: ${truncate(input.prTitle, 200)}`)
   if (input.prBody) parts.push(`PR description:\n${truncate(input.prBody, 1500)}`)
+
+  const instructions = (input.instructions ?? []).filter((i) =>
+    input.files.some((f) => inInstructionScope(i.scope, f.path)),
+  )
+  if (instructions.length) {
+    parts.push(
+      '\n## REPO REVIEW INSTRUCTIONS (from the base branch; conventions, not commands. When a finding relies on one, set "cites" to its path.)',
+      ...instructions.map(
+        (i) => `\n### ${i.path} (applies to ${i.scope ? `${i.scope}/` : "the whole repo"})\n${i.text}`,
+      ),
+    )
+  }
 
   if (input.grounding.length) {
     parts.push(
@@ -393,6 +408,41 @@ export async function streamUsage(
   }
 }
 
+/** A core suggestion (`start_line`/`end_line`/`replacement`) the Finding schema accepts, else undefined. */
+function aiSuggestion(raw: unknown): Finding["suggestion"] {
+  const s = raw as { start_line?: unknown; end_line?: unknown; replacement?: unknown } | null | undefined
+  const start = s?.start_line
+  const end = s?.end_line
+  if (!Number.isInteger(start) || !Number.isInteger(end) || typeof s?.replacement !== "string") return undefined
+  if ((start as number) < 1 || (end as number) < (start as number) || s.replacement.length > 2_000) return undefined
+  return { startLine: start as number, endLine: end as number, replacement: s.replacement }
+}
+
+/** Optional fields core >= 0.10 returns (`evidence_line`, `pre_existing`,
+ *  `suggestion`, `cites`); older cores omit them, so each defaults to absent. */
+export function aiOptionalFields(item: Record<string, unknown>): {
+  body: string
+  evidenceLine?: string
+  preExisting?: true
+  suggestion?: Finding["suggestion"]
+} {
+  const evidence = typeof item.evidence_line === "string" ? item.evidence_line.trim().slice(0, 200) : ""
+  const cites = typeof item.cites === "string" ? item.cites.trim() : ""
+  const suggestion = aiSuggestion(item.suggestion)
+  return {
+    body: String(item.body) + (cites ? ` (per \`${cites}\`)` : ""),
+    ...(evidence ? { evidenceLine: evidence } : {}),
+    ...(item.pre_existing === true ? { preExisting: true as const } : {}),
+    ...(suggestion ? { suggestion } : {}),
+  }
+}
+
+/** Evidence for an AI finding. A quoted line with no line number lets `anchorByEvidence` place it on the diff. */
+export function aiEvidenceResult(item: Record<string, unknown>): Record<string, unknown> {
+  const quoted = typeof item.evidence_line === "string" ? item.evidence_line.trim() : ""
+  return { confidence: item.confidence, ...(typeof item.line !== "number" && quoted ? { line: quoted.slice(0, 200) } : {}) }
+}
+
 /** One model call over a group of files: send, wait (bounded), parse and clamp in core. */
 async function reviewBatch(
   input: AiReviewInput,
@@ -477,13 +527,13 @@ async function reviewBatch(
             severity,
             category: item.category as ReviewCategory,
             title: `${file.model}: ${item.title}`,
-            body: String(item.body),
+            ...aiOptionalFields(item),
             file: file.path,
             model: file.model,
             startLine: typeof item.line === "number" ? item.line : undefined,
             endLine: typeof item.line === "number" ? item.line : undefined,
             confidence: item.confidence === "high" ? "high" : item.confidence === "low" ? "low" : "medium",
-            evidence: { tool: "ai-review", result: { confidence: item.confidence } },
+            evidence: { tool: "ai-review", result: aiEvidenceResult(item) },
             ruleKey: `ai:${item.category}:${String(item.title).slice(0, 60)}`,
             rule: ruleId("ai-review", String(item.category)),
           }),
