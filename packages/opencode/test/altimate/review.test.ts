@@ -2162,6 +2162,87 @@ describe("orchestrate", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
+  test("PII warnings without a compiled base never add up to a block", async () => {
+    // Three head PII columns, base not compilable: each is a warning of undecided
+    // exposure and must not count toward the warning-pattern threshold.
+    const files: ChangedFile[] = [
+      { path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email,\n+    ssn,\n+    phone_number\n" },
+    ]
+    const PII = ["email", "ssn", "phone_number"]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii(sql: string) {
+        return { columns: PII.filter((c) => sql.includes(c)) }
+      },
+      async columnLineage(sql) {
+        return ["customer_id", ...PII].filter((c) => sql.includes(c)).map((c) => ({ source: `customers.${c}`, target: c }))
+      },
+      async classifyPii(columns) {
+        return columns
+          .filter((c) => PII.includes(c))
+          .map((column) => ({ column, classification: column === "email" ? "Email" : column === "ssn" ? "SSN" : "Phone", confidence: 0.95 }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content(
+        "select customer_id, email, ssn, phone_number from customers",
+        "select customer_id from {{ ref('customers') }}",
+      ),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii.length).toBeGreaterThanOrEqual(3)
+    expect(pii.every((f) => f.severity === "warning" && f.confidence === "unknown")).toBe(true)
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
+  })
+
+  test("a reindented PII line the base already exposed raises no regex twin", async () => {
+    // Whitespace-only edit of the `ssn` line in a mart: base and head expose the
+    // same columns, so neither the broad fallback nor `pii_into_mart` applies.
+    const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+    ssn\n" }]
+    const runner = (): ReviewRunner => ({
+      ...fakeRunner({}),
+      async detectPii(sql: string) {
+        return { columns: sql.includes("ssn") ? ["ssn"] : [] }
+      },
+      async columnLineage(sql) {
+        return ["customer_id", "ssn"].filter((c) => sql.includes(c)).map((c) => ({ source: `customers.${c}`, target: c }))
+      },
+      async classifyPii() {
+        return []
+      },
+    })
+    const twin = (env: { findings: Array<{ evidence?: { tool?: string; result?: unknown } }> }) =>
+      env.findings.some((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: runner(),
+        getContent: content("select customer_id,\n    ssn\nfrom customers", "select customer_id,\n  ssn\nfrom customers"),
+      })
+      expect(twin(env)).toBe(false)
+      expect(env.findings.filter((f) => f.category === "pii_exposure" && f.severity === "critical")).toEqual([])
+      expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    }
+    // Control: the same head with a base that lacked `ssn` still gets the twin.
+    const added = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+    ssn\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: runner(),
+      getContent: content("select customer_id,\n    ssn\nfrom customers", "select customer_id\nfrom customers"),
+    })
+    expect(twin(added)).toBe(true)
+  })
+
   test("case-variant PII detector output does not duplicate core diff-scoped finding", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    Email as EMAIL\n" }]
     const runner: ReviewRunner = {
@@ -2276,8 +2357,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["ssn"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("ssn") ? ["ssn"] : [] }
       },
       async columnLineage(sql) {
         return sql.includes("ssn")
@@ -2315,8 +2396,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["ssn"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("ssn") ? ["ssn"] : [] }
       },
       async columnLineage() {
         // Lineage resolves but derives zero output columns for every input.

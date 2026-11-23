@@ -264,8 +264,9 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
-portability: false            # cross-engine advice; default off once the engine is known
-                              # (set true for packages that support several adapters)
+# portability: true           # cross-engine advice. Unset: off once the engine is known
+                              # (configured or detected). An explicit value applies even when
+                              # the engine is unknown. Set true for multi-adapter packages.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
@@ -291,13 +292,15 @@ rubric:
   5,000 characters. Critical findings come first; anything that does not fit is
   counted, and the full list is always in the verdict envelope
   (`altimate review --json`). Local CLI output is never truncated.
-- **Repeated rules are grouped:** the same rule on three or more models is one
-  bullet listing the models.
+- **Repeated findings are grouped:** the same rule with the same message on
+  three or more models is one bullet listing the models. Local CLI output lists
+  every finding with its location.
 - **Inline comments only on lines of the PR's diff.** Findings computed on
   compiled SQL, or on unchanged lines, stay in the summary.
 - **No re-posting on reruns:** each inline comment carries the finding's
   fingerprint, so a push does not repeat findings already on the PR, and a
-  non-blocking rerun with nothing new only updates the summary.
+  non-blocking rerun with nothing new and the same headline as the bot's last
+  review only updates the summary.
 - **PII:** flagged only for PII columns the change newly exposes, not for
   columns the base already surfaced. That comparison needs the base version's
   SQL; when it can't be compiled, PII columns are reported as non-blocking

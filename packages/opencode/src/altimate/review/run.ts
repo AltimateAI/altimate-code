@@ -395,7 +395,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     forceTier: opts.forceTier,
     staleManifest,
     layout,
-    suppressPortability: config.portability === undefined ? dialectKnown : !config.portability,
+    suppressPortability: shouldSuppressPortability(config.portability, dialectKnown),
     scope: {
       baseRef: resolved?.ref ?? opts.base,
       baseSha: resolved?.sha,
@@ -405,6 +405,13 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       movedUnchangedFiles: scoped.movedUnchanged || undefined,
     },
   })
+}
+
+/** Drop cross-engine portability advice? An explicit `portability` setting
+ *  wins (even when the engine is unknown); unset, drop it once the engine is
+ *  known (configured or detected from the manifest). */
+export function shouldSuppressPortability(portability: boolean | undefined, dialectKnown: boolean): boolean {
+  return portability === undefined ? dialectKnown : !portability
 }
 
 /**

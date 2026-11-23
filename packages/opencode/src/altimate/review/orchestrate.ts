@@ -226,47 +226,6 @@ export function isSuppressiblePortability(f: Finding, dialect: string): boolean 
   return !worksOn || worksOn.includes(dialect.toLowerCase())
 }
 
-/** Line numbers on the head side of a unified diff that GitHub accepts for an
- *  inline comment: added lines and context lines inside a hunk. */
-export function commentableLines(diff: string | undefined): Set<number> {
-  const out = new Set<number>()
-  if (!diff) return out
-  let right = 0
-  let inHunk = false
-  const rows = diff.split("\n")
-  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
-  for (const line of rows) {
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (h) {
-      right = Number(h[1])
-      inHunk = true
-      continue
-    }
-    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
-    if (!inHunk || line.startsWith("\\")) continue
-    // A blank context line may have lost its leading space in transit.
-    if (line.startsWith("+") || line.startsWith(" ") || line === "") out.add(right++)
-    else if (!line.startsWith("-")) inHunk = false
-  }
-  return out
-}
-
-/**
- * Keep a finding's line only when it can be commented on: inside the file's
- * diff hunks on the head side. Anything else (a line from compiled SQL, an
- * unchanged region) moves to the summary instead of making GitHub reject the
- * whole batch of inline comments.
- */
-export function anchorToDiff(findings: Finding[], files: ChangedFile[]): Finding[] {
-  const lines = new Map(files.map((f) => [f.path, commentableLines(f.diff)]))
-  return findings.map((f) => {
-    if (typeof f.startLine !== "number") return f
-    if (lines.get(f.file)?.has(f.startLine)) return f
-    const { startLine: _s, endLine: _e, ...rest } = f
-    return rest as Finding
-  })
-}
-
 /** True when SQL text contains Jinja (`{{ }}`, `{% %}` or `{# #}`). */
 export function hasJinja(sql: string | undefined): boolean {
   return !!sql && /\{\{|\{%|\{#/.test(sql)
@@ -1086,7 +1045,9 @@ async function piiClassifyLane(
           (p.masking ? `; suggested masking: \`${p.masking}\`.` : "."),
         file: file.path,
         model,
-        confidence: highConfidence ? "high" : "medium",
+        // Without a base, exposure is undecided: `unknown` keeps these warnings
+        // out of the warning-pattern count, so they never block.
+        confidence: baseUnknown ? "unknown" : highConfidence ? "high" : "medium",
         evidence: { tool: "altimate_core.classify_pii", result: p },
         ruleKey: `pii_exposure:${col}`,
       }),
@@ -1114,7 +1075,8 @@ function piiLane(file: ChangedFile & { kind: string }, columns: string[], baseUn
           : ""),
       file: file.path,
       model,
-      confidence: baseUnknown ? "medium" : "high",
+      // `unknown`: undecided exposure never counts toward the warning pattern.
+      confidence: baseUnknown ? "unknown" : "high",
       evidence: { tool: "schema.detect_pii", result: { columns } },
       ruleKey: "pii:exposure",
     }),
@@ -1253,6 +1215,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const diffScopedPiiCompletedFiles = new Set<string>()
   const diffScopedPiiFindingFiles = new Set<string>()
   const classifiedPiiColumnsByFile = new Map<string, Set<string>>()
+  // Per file: PII columns the compiled base already exposed. Neither the broad
+  // fallback nor the regex twins report these (this PR did not expose them).
+  const basePiiColumnsByFile = new Map<string, Set<string>>()
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1296,6 +1261,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         }
         if (diffScopedPii.findings.length) diffScopedPiiFindingFiles.add(currentCtx.file.path)
         const findings = [...diffScopedPii.findings]
+        let basePii = new Set<string>()
+        if (hasOldSide(currentCtx.file) && currentCtx.engineOldSql) {
+          try {
+            basePii = new Set(
+              (await input.runner.detectPii(currentCtx.engineOldSql, dialect)).columns.map((c) => c.toLowerCase()),
+            )
+          } catch {
+            /* unknown base exposure: report as if new */
+          }
+          basePiiColumnsByFile.set(currentCtx.file.path, basePii)
+        }
         if (lanes.has("pii_exposure")) {
           // The broad fallback covers output PII columns the precise lane did NOT
           // classify (pre-existing columns, or ones core's classifier missed) —
@@ -1304,14 +1280,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           let fallbackPii = diffScopedPii.completed
             ? currentCtx.pii.filter((col) => !diffScopedPii.classifiedColumns.has(col.toLowerCase()))
             : currentCtx.pii
-          // Only columns this PR newly exposes: a PII column the base already
-          // surfaced is not this change's concern (the docs promise "newly expose").
-          if (fallbackPii.length && hasOldSide(currentCtx.file) && currentCtx.engineOldSql) {
-            const basePii = new Set(
-              (await input.runner.detectPii(currentCtx.engineOldSql, dialect)).columns.map((c) => c.toLowerCase()),
-            )
-            fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
-          }
+          // The fallback reports only columns the base did not already expose.
+          fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
           const baseUnknown = hasOldSide(currentCtx.file) && !currentCtx.engineOldSql
           findings.push(...piiLane(currentCtx.file, fallbackPii, baseUnknown))
         }
@@ -1456,6 +1426,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         // deliberately muted). A column core never classified falls through.
         const token = PII_TOKEN_RE.exec(String((f.evidence?.result as any)?.line ?? ""))?.[1]?.toLowerCase()
         if (token && classifiedPiiColumnsByFile.get(f.file)?.has(token)) return false
+        // A column the base already exposed (e.g. a reindented `ssn` line) is
+        // not newly exposed by this PR.
+        if (token && basePiiColumnsByFile.get(f.file)?.has(token)) return false
         // No recoverable column: defer to the prior file-level behavior so the
         // twin isn't double-reported when core ran for the file.
         if (!token && diffScopedPiiCompletedFiles.has(f.file)) return false
@@ -1534,7 +1507,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // project that runs on one known engine. Core's dialect-aware check (a
   // function missing on THIS engine) is a real error and is kept.
   if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect))
-  findings = anchorToDiff(findings, input.changedFiles)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.

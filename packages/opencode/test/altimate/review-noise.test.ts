@@ -1,7 +1,5 @@
 import { describe, test, expect } from "bun:test"
 import {
-  anchorToDiff,
-  commentableLines,
   isCatalogPortability,
   isSuppressiblePortability,
   runReview,
@@ -11,6 +9,7 @@ import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { makeFinding, type Finding } from "../../src/altimate/review/finding"
 import {
+  commentableLines,
   findingMarker,
   inlineComments,
   postedFindingIds,
@@ -18,8 +17,11 @@ import {
   SUMMARY_BUDGET_CHARS,
 } from "../../src/altimate/review/format"
 import { buildEnvelope } from "../../src/altimate/review/verdict"
+import { verdictHeadline } from "../../src/altimate/review/format"
 import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
 import { classifyPostOutcome } from "../../src/altimate/review/telemetry"
+import { postGitHubReview } from "../../src/altimate/review/post-github"
+import { shouldSuppressPortability } from "../../src/altimate/review/run"
 
 /**
  * The PR comment must stay readable: inline comments land on real lines of the
@@ -68,13 +70,16 @@ describe("inline anchors", () => {
     expect([...commentableLines(d)].sort()).toEqual([1, 2])
   })
 
-  test("a line outside the diff moves to the summary instead of failing the batch", () => {
+  test("a line outside the diff is not posted inline but keeps its location in the envelope", () => {
     const inDiff = finding({ startLine: 3, endLine: 3, title: "m: a" })
     const outside = finding({ startLine: 40, endLine: 40, title: "m: b" })
-    const [a, b] = anchorToDiff([inDiff, outside], [{ path: "models/m.sql", status: "modified", diff: DIFF }])
-    expect(a.startLine).toBe(3)
-    expect(b.startLine).toBeUndefined()
-    expect(b.endLine).toBeUndefined()
+    const env = buildEnvelope({ findings: [inDiff, outside], tier: "lite", mode: "comment" })
+    const commentable = new Map([["models/m.sql", commentableLines(DIFF)]])
+    expect(inlineComments(env, new Set(), commentable).map((c) => c.line)).toEqual([3])
+    // Without diff information every line is attempted (the 422 fallback covers it).
+    expect(inlineComments(env).map((c) => c.line)).toEqual([3, 40])
+    expect(env.findings.find((f) => f.title === "m: b")!.startLine).toBe(40)
+    expect(renderSummary(env, { maxChars: Infinity })).toContain("`models/m.sql:40`")
   })
 
   test("engine lint on compiled SQL never anchors to the raw file", async () => {
@@ -165,6 +170,67 @@ describe("summary grouping and budget", () => {
     )
     const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
     expect(md).toContain("3 findings across 3 model(s)")
+  })
+
+  test("one rule with different messages per model is not merged into the first message", () => {
+    const fs = [
+      ["a", "ILIKE"],
+      ["b", "QUALIFY"],
+      ["c", "IFF"],
+    ].map(([m, fn], i) =>
+      finding({
+        severity: "warning",
+        category: "sql_quality",
+        model: m,
+        file: `models/${m}.sql`,
+        startLine: i + 1,
+        title: `${m}: dialect-unsupported-function`,
+        body: `${fn} is not supported on the target dialect.`,
+        degraded: m === "c",
+      }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).not.toContain("findings across")
+    for (const fn of ["ILIKE", "QUALIFY", "IFF"]) expect(md).toContain(`${fn} is not supported`)
+    for (const loc of ["models/a.sql:1", "models/b.sql:2", "models/c.sql:3"]) expect(md).toContain(loc)
+    expect(md).toContain("_unverified_")
+  })
+
+  test("a grouped bullet keeps _unverified_ when any member is degraded", () => {
+    const fs = ["a", "b", "c"].map((m) =>
+      finding({ model: m, file: `models/${m}.sql`, title: `${m}: new model has no uniqueness/grain test`, degraded: m === "b" }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).toContain("3 findings across 3 model(s)")
+    expect(md).toMatch(/findings across[^\n]*\n[^\n]*\n\s*<sub>test_coverage · _unverified_<\/sub>/)
+  })
+
+  test("a grouped body that names one model's column shows the names blanked", () => {
+    const fs = ["a", "b", "c"].map((m) =>
+      finding({
+        model: m,
+        file: `models/${m}.sql`,
+        title: `${m}: grain column lacks not_null`,
+        body: `Column \`${m}_id\` has no not_null test.`,
+      }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).toContain("3 findings across 3 model(s)")
+    expect(md).toContain("Column `…` has no not_null test.")
+    expect(md).not.toContain("`a_id`")
+  })
+
+  test("more than eight models: the posted comment lists eight, local output lists every finding", () => {
+    const ms = Array.from({ length: 11 }, (_, i) => `m${i}`)
+    const fs = ms.map((m) => finding({ model: m, file: `models/${m}.sql`, title: `${m}: new model has no uniqueness/grain test` }))
+    const env = buildEnvelope({ findings: fs, tier: "lite", mode: "comment" })
+    const md = renderSummary(env)
+    expect(md).toContain("11 findings across 11 model(s)")
+    expect(md).toContain("(+3 more)")
+    expect(md).not.toContain("`m8`")
+    const local = renderSummary(env, { maxChars: Infinity })
+    expect(local).not.toContain("findings across")
+    for (const m of ms) expect(local).toContain(`\`models/${m}.sql\``)
   })
 
   test("the posted comment stays within budget, most severe first, and counts what it hides", () => {
@@ -276,5 +342,149 @@ describe("moved files", () => {
     })
     expect(renderSummary(env)).toContain("3 file(s) moved without edits")
     expect(renderSummary(env)).toContain("`+schema`")
+  })
+})
+
+describe("postGitHubReview", () => {
+  const BOT = "github-actions[bot]"
+  const target = { token: "t", owner: "o", repo: "r", prNumber: 7 }
+  const PATCH = DIFF.split("\n").slice(3).join("\n")
+
+  function fakeOcto(
+    opts: {
+      reviews?: Array<{ body: string; user?: { login: string } }>
+      listFails?: boolean
+      createReview?: (call: number) => unknown
+    } = {},
+  ) {
+    const reviewCalls: any[] = []
+    const fail = async () => {
+      throw new Error("listing failed")
+    }
+    const octo = {
+      paginate: async (fn: (p: unknown) => unknown, p: unknown) => fn(p),
+      rest: {
+        issues: {
+          listComments: async () => [],
+          createComment: async () => ({ data: { id: 1, user: { login: BOT } } }),
+          updateComment: async () => ({ data: { id: 1, user: { login: BOT } } }),
+        },
+        pulls: {
+          listReviewComments: opts.listFails ? fail : async () => [],
+          listReviews: opts.listFails ? fail : async () => opts.reviews ?? [],
+          listFiles: opts.listFails ? fail : async () => [{ filename: "models/m.sql", patch: PATCH }],
+          get: async () => ({ data: { head: { sha: "abc" } } }),
+          createReview: async (p: any) => {
+            reviewCalls.push(p)
+            const r = opts.createReview?.(reviewCalls.length)
+            return r ?? { data: { id: 9 } }
+          },
+        },
+      },
+    }
+    return { octo: octo as any, reviewCalls }
+  }
+
+  const noLine = buildEnvelope({ findings: [finding()], tier: "lite", mode: "comment" })
+
+  test("skips a new review when this bot's latest review has the same headline", async () => {
+    const { octo, reviewCalls } = fakeOcto({
+      reviews: [
+        { body: "🛑 Changes requested — 1 critical (lite tier)", user: { login: BOT } },
+        { body: verdictHeadline(noLine), user: { login: BOT } },
+      ],
+    })
+    const r = await postGitHubReview(noLine, target, octo)
+    expect(r.reviewSkipped).toBe(true)
+    expect(reviewCalls.length).toBe(0)
+  })
+
+  test("posts a new review when this bot's latest review requested changes", async () => {
+    const { octo, reviewCalls } = fakeOcto({
+      reviews: [
+        { body: verdictHeadline(noLine), user: { login: BOT } },
+        { body: "🛑 Changes requested — 1 critical (lite tier)", user: { login: BOT } },
+      ],
+    })
+    const r = await postGitHubReview(noLine, target, octo)
+    expect(r.reviewSkipped).toBeUndefined()
+    expect(reviewCalls.length).toBe(1)
+    expect(reviewCalls[0].event).toBe("COMMENT")
+  })
+
+  test("another account's review with the same headline does not count", async () => {
+    const { octo, reviewCalls } = fakeOcto({ reviews: [{ body: verdictHeadline(noLine), user: { login: "someone" } }] })
+    const r = await postGitHubReview(noLine, target, octo)
+    expect(r.reviewSkipped).toBeUndefined()
+    expect(reviewCalls.length).toBe(1)
+  })
+
+  test("inline comments go only to lines inside the PR diff", async () => {
+    const env = buildEnvelope({
+      findings: [finding({ startLine: 3, title: "m: a" }), finding({ startLine: 40, title: "m: b" })],
+      tier: "lite",
+      mode: "comment",
+    })
+    const { octo, reviewCalls } = fakeOcto()
+    const r = await postGitHubReview(env, target, octo)
+    expect(reviewCalls[0].comments.map((c: { line: number }) => c.line)).toEqual([3])
+    expect(r.inlineSkippedAsPosted).toBe(0)
+  })
+
+  test("when listing fails, everything is posted and nothing is skipped", async () => {
+    const env = buildEnvelope({
+      findings: [finding({ startLine: 3, title: "m: a" }), finding({ startLine: 40, title: "m: b" })],
+      tier: "lite",
+      mode: "comment",
+    })
+    const { octo, reviewCalls } = fakeOcto({ listFails: true, reviews: [{ body: verdictHeadline(env), user: { login: BOT } }] })
+    const r = await postGitHubReview(env, target, octo)
+    expect(r.reviewSkipped).toBeUndefined()
+    expect(reviewCalls[0].comments.map((c: { line: number }) => c.line)).toEqual([3, 40])
+  })
+
+  test("a positioning 422 retries the review without inline comments", async () => {
+    const env = buildEnvelope({ findings: [finding({ startLine: 3 })], tier: "lite", mode: "comment" })
+    const { octo, reviewCalls } = fakeOcto({
+      createReview: (call) => {
+        if (call === 1)
+          throw Object.assign(new Error("Unprocessable Entity"), {
+            status: 422,
+            response: { data: { errors: ["Line could not be resolved"] } },
+          })
+        return undefined
+      },
+    })
+    const r = await postGitHubReview(env, target, octo)
+    expect(reviewCalls.length).toBe(2)
+    expect(reviewCalls[0].comments.length).toBe(1)
+    expect(reviewCalls[1].comments).toBeUndefined()
+    expect(r.inlineFellBack).toBe(true)
+    expect(r.postError).toBeUndefined()
+    expect(r.reviewId).toBe(9)
+  })
+})
+
+describe("portability settings", () => {
+  test("unset follows whether the engine is known; an explicit value always wins", () => {
+    expect(shouldSuppressPortability(undefined, true)).toBe(true)
+    expect(shouldSuppressPortability(undefined, false)).toBe(false)
+    expect(shouldSuppressPortability(false, false)).toBe(true)
+    expect(shouldSuppressPortability(true, true)).toBe(false)
+  })
+
+  test("integer arithmetic on a timestamp is kept on Postgres; on a date it is not", () => {
+    const rule = (sql: string, id: string) =>
+      evaluateCatalog({ path: "models/m.sql", status: "added" }, sql, [sql], [], DEFAULT_RUBRIC).find(
+        (f) => (f.evidence?.result as { rule: string }).rule === id,
+      )
+    const ts = rule("select updated_at + 1 from t", "timestamp-plus-int")
+    expect(ts).toBeDefined()
+    expect(rule("select updated_at + 1 from t", "date-plus-int")).toBeUndefined()
+    expect(isSuppressiblePortability(ts!, "postgres")).toBe(false)
+    expect(isSuppressiblePortability(ts!, "snowflake")).toBe(false)
+    const date = rule("select order_date + 7 from t", "date-plus-int")
+    expect(date).toBeDefined()
+    expect(isSuppressiblePortability(date!, "postgres")).toBe(true)
   })
 })

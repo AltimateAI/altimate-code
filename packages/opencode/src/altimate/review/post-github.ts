@@ -1,7 +1,14 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
 import { type VerdictEnvelope, VCS_EVENT } from "./verdict"
-import { renderSummary, inlineComments, postedFindingIds, REVIEW_MARKER, verdictHeadline } from "./format"
+import {
+  commentableLines,
+  inlineComments,
+  postedFindingIds,
+  renderSummary,
+  REVIEW_MARKER,
+  verdictHeadline,
+} from "./format"
 
 /**
  * Post a verdict envelope to a GitHub pull request: an upserted summary comment
@@ -56,16 +63,20 @@ export interface PostResult {
   postError?: string
   /** Inline comments not re-posted because the same finding is already on the PR. */
   inlineSkippedAsPosted?: number
-  /** True when no review was submitted: nothing new to say and a previous
-   *  non-blocking altimate review already exists (the summary comment was updated). */
+  /** True when no review was submitted: nothing new inline, the verdict is not
+   *  blocking, and this bot's latest review already carries the same headline
+   *  (the summary comment was updated). */
   reviewSkipped?: boolean
 }
 
 /** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
-export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarget): Promise<PostResult> {
-  const octo = new Octokit({ auth: target.token })
+export async function postGitHubReview(
+  env: VerdictEnvelope,
+  target: GitHubTarget,
+  octo: Octokit = new Octokit({ auth: target.token }),
+): Promise<PostResult> {
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
 
@@ -80,13 +91,12 @@ export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarge
     per_page: 100,
   })
   const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
-  if (prior) {
-    const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
-    result.summaryCommentId = r.data.id
-  } else {
-    const r = await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
-    result.summaryCommentId = r.data.id
-  }
+  const upserted = prior
+    ? await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
+    : await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
+  result.summaryCommentId = upserted.data.id
+  // The account this token posts as: the summary comment's author.
+  const botLogin = upserted.data.user?.login
 
   // 2. Post a review. `env.verdict` arrives already mode-gated from
   //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
@@ -98,25 +108,39 @@ export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarge
   // Rerun dedup: a finding already commented inline (same fingerprint, which
   // ignores line numbers) is not posted again on the next push.
   let posted = new Set<string>()
-  let priorBotReview = false
+  let lastBotHeadline: string | undefined
   try {
     const [reviewComments, reviews] = await Promise.all([
       octo.paginate(octo.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 }),
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    priorBotReview = reviews.some((r) => BOT_REVIEW_RE.test(r.body ?? ""))
+    // Reviews are listed oldest first; only this bot's own latest review counts.
+    const mine = botLogin
+      ? reviews.filter((r) => r.user?.login === botLogin && BOT_REVIEW_RE.test(r.body ?? ""))
+      : []
+    lastBotHeadline = mine.at(-1)?.body?.trim()
   } catch {
     /* listing failed: post everything rather than nothing */
   }
-  const comments = inlineComments(env, posted)
-  const withLine = env.findings.filter((f) => typeof f.startLine === "number").length
-  result.inlineSkippedAsPosted = withLine - comments.length
 
-  // Nothing new inline, not blocking, and the PR already has an altimate
-  // review: the updated summary comment says it all; another "Reviewed with
-  // comments" entry per push is noise. A blocking verdict always posts.
-  if (!comments.length && event === "COMMENT" && priorBotReview) {
+  // Inline comments only on lines GitHub accepts (inside the PR's diff hunks).
+  // If the file list can't be read, post everything and rely on the 422 fallback.
+  let commentable: Map<string, Set<number>> | undefined
+  try {
+    const files = await octo.paginate(octo.rest.pulls.listFiles, { owner, repo, pull_number: prNumber, per_page: 100 })
+    commentable = new Map(files.map((f) => [f.filename, commentableLines(f.patch)]))
+  } catch {
+    /* fall back to the positioning retry below */
+  }
+  const comments = inlineComments(env, posted, commentable)
+  result.inlineSkippedAsPosted = inlineComments(env, new Set(), commentable).length - comments.length
+
+  // Nothing new inline, not blocking, and this bot's latest review already says
+  // the same thing: the updated summary comment covers it; another identical
+  // timeline entry per push is noise. A blocking verdict always posts, and a
+  // changed headline (e.g. after "Changes requested") posts a new review.
+  if (!comments.length && event === "COMMENT" && lastBotHeadline === reviewBody) {
     result.reviewSkipped = true
     return result
   }

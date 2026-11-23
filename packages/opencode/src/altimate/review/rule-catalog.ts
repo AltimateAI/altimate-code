@@ -1752,9 +1752,21 @@ const STYLE: Rule[] = [
     "suggestion",
     "integer arithmetic on a date",
     "`date + 7` (bare int) isn't portable and is ambiguous (days? seconds?); use dateadd/interval.",
-    { added: /\b\w*(date|_at|_dt)\b\s*[+\-]\s*\d+\b/i, portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "oracle"] } },
+    { added: /\b\w*(date|_dt)\b\s*[+\-]\s*\d+\b/i, portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "oracle"] } },
     { add: "select order_date + 7" },
     { add: "select dateadd(day, 7, order_date)" },
+  ),
+  // Split from date-plus-int: `timestamp + integer` has no operator on most
+  // engines that accept `date + integer` (Postgres, Snowflake, DuckDB).
+  r(
+    "timestamp-plus-int",
+    "sql_correctness",
+    "suggestion",
+    "integer arithmetic on a timestamp",
+    "`updated_at + 1` (bare int on a timestamp) fails on most warehouses and is ambiguous (days? seconds?); use dateadd/interval.",
+    { added: /\b\w*_at\b\s*[+\-]\s*\d+\b/i, portability: { worksOn: ["oracle"] } },
+    { add: "select updated_at + 1" },
+    { add: "select dateadd(day, 1, updated_at)" },
   ),
 ]
 

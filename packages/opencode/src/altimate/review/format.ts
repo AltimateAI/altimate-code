@@ -39,7 +39,7 @@ export function verdictHeadline(env: VerdictEnvelope): string {
 /** Default size budget for the posted PR comment (characters). */
 export const SUMMARY_BUDGET_CHARS = 5_000
 /** The same rule on this many models or more collapses into one bullet. */
-export const GROUP_MIN = 3
+export const GROUP_MIN_MODELS = 3
 
 export interface RenderOptions {
   /** Character budget for the comment; findings beyond it are counted, not listed.
@@ -117,7 +117,7 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
 
   // Findings fill the budget left after the fixed parts, most severe first.
   // What does not fit is counted, never silently dropped: the envelope keeps
-  // every finding.
+  // every finding. The reserve keeps room for the "… N more finding(s)" line.
   const overflowReserve = 220
   let used = [...lines, ...tail].join("\n").length + overflowReserve
   let hidden = 0
@@ -126,7 +126,8 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     const items = grouped[sev]
     if (!items.length) continue
     const heading = [`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""]
-    const bullets = bulletsFor(items)
+    // Uncapped (local) output lists every finding with its own location.
+    const bullets = bulletsFor(items, maxChars !== Infinity)
     let headed = false
     for (const b of bullets) {
       const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + 2)
@@ -153,19 +154,27 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   return [...lines, ...tail].join("\n")
 }
 
-/** A finding's title without its leading `model: `, with backticked names
- *  blanked, so the same rule on different models/columns shares a key. */
-function ruleTitle(f: Finding): string {
-  const t = f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title
-  return t.replace(/`[^`]*`/g, "`…`")
+/** Backticked names blanked, so the same rule on different models/columns
+ *  normalizes to the same text. */
+function blankNames(s: string): string {
+  return s.replace(/`[^`]*`/g, "`…`")
 }
 
-/** Render findings of one severity as bullets; a rule repeated on GROUP_MIN or
- *  more distinct models collapses into a single bullet listing the models. */
-function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
+/** A finding's title without its leading `model: `, with backticked names
+ *  blanked: the title half of the grouping key. */
+function groupKeyTitle(f: Finding): string {
+  return blankNames(f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title)
+}
+
+/** Render findings of one severity as bullets. With `group`, findings that say
+ *  the same thing (same category, title and body once names are blanked) on
+ *  GROUP_MIN_MODELS or more distinct models collapse into one bullet. */
+function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; count: number }> {
   const groups = new Map<string, Finding[]>()
   for (const f of items) {
-    const key = `${f.category}|${ruleTitle(f)}`
+    // The body is part of the key: one rule with different messages (e.g. a
+    // dialect check naming different functions) is different findings.
+    const key = group ? `${f.category}|${groupKeyTitle(f)}|${blankNames(oneLine(f.body))}` : f.id
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])
@@ -175,13 +184,17 @@ function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
     // Group by distinct models: several findings of one rule on the SAME model
     // (e.g. two different columns) are distinct issues and stay separate bullets.
     const names = [...new Set(g.map((f) => f.model ?? f.file))]
-    if (names.length >= GROUP_MIN) {
+    if (group && names.length >= GROUP_MIN_MODELS) {
       const shown = names.slice(0, 8).map((n) => `\`${n}\``).join(", ")
       const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
+      // Show a body verbatim only when every member says exactly that;
+      // otherwise its names belong to one model, so show the blanked form.
+      const body = g.every((f) => f.body === g[0].body) ? oneLine(g[0].body) : blankNames(oneLine(g[0].body))
+      const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
-          `- **${ruleTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
-          `  ${oneLine(g[0].body)}  \n  <sub>${g[0].category}</sub>`,
+          `- **${groupKeyTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
+          `  ${body}  \n  <sub>${g[0].category}${unverified}</sub>`,
         count: g.length,
       })
       continue
@@ -255,9 +268,49 @@ export function postedFindingIds(bodies: Array<string | null | undefined>): Set<
   return out
 }
 
-export function inlineComments(env: VerdictEnvelope, alreadyPosted: Set<string> = new Set()): InlineComment[] {
+/** Line numbers on the head side of a unified diff that GitHub accepts for an
+ *  inline comment: added lines and context lines inside a hunk. */
+export function commentableLines(diff: string | undefined): Set<number> {
+  const out = new Set<number>()
+  if (!diff) return out
+  let right = 0
+  let inHunk = false
+  const rows = diff.split("\n")
+  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
+  for (const line of rows) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (h) {
+      right = Number(h[1])
+      inHunk = true
+      continue
+    }
+    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
+    if (!inHunk || line.startsWith("\\")) continue
+    // A blank context line may have lost its leading space in transit.
+    if (line.startsWith("+") || line.startsWith(" ") || line === "") out.add(right++)
+    else if (!line.startsWith("-")) inHunk = false
+  }
+  return out
+}
+
+/**
+ * Inline comments for findings with a line. With `commentable` (head-side
+ * commentable lines per file, see `commentableLines`), only lines inside the
+ * PR's diff hunks are kept: GitHub rejects the whole batch over one line
+ * outside the diff. The finding keeps its line in the envelope and summary.
+ */
+export function inlineComments(
+  env: VerdictEnvelope,
+  alreadyPosted: Set<string> = new Set(),
+  commentable?: Map<string, Set<number>>,
+): InlineComment[] {
   return env.findings
-    .filter((f) => typeof f.startLine === "number" && !alreadyPosted.has(f.id))
+    .filter(
+      (f) =>
+        typeof f.startLine === "number" &&
+        !alreadyPosted.has(f.id) &&
+        (!commentable || !!commentable.get(f.file)?.has(f.startLine)),
+    )
     .map((f) => ({
       path: f.file,
       line: f.startLine!,
