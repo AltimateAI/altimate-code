@@ -89,7 +89,21 @@ jobs:
         run: bun install
 
       - name: Build ${{ matrix.name }}
-        run: bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }}
+        # altimate_change start — retry a failed build once, so one flaky target can't hold up
+        # the release (see the Solid plugin warm-up in build.ts for the flake we know of). The
+        # retry is a new `bun run`: Bun keeps a misread resolver entry for the life of the
+        # process. The warning keeps the first failure visible on the run summary.
+        run: |
+          for attempt in 1 2; do
+            if bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }}; then
+              exit 0
+            fi
+            if [ "$attempt" = 1 ]; then
+              echo "::warning::Build (${{ matrix.name }}) failed on attempt 1; retrying once in a fresh process"
+            fi
+          done
+          exit 1
+        # altimate_change end
         env:
           OPENCODE_VERSION: ${{ github.ref_name }}
           # altimate_change — derive channel from the tag: a prerelease tag (e.g. v0.9.0-beta.1)
