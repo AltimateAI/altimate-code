@@ -1756,6 +1756,29 @@ select * from c`
     expect(readsOf(sql)).toEqual({ orders: [], b: [], c: ["orders"] })
   })
 
+  it("reads the SQL Jinja renders: a comment inside a word joins it, {%- endraw %} trims, a ) in Jinja ends no body", () => {
+    const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
+    expect(readsOf(wrap("select * from orders{# note #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders {# note #} join t on 1 = 1")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select 2 -- {% raw %}\n{%- endraw %} from orders\n")).b).toEqual([])
+    expect(readsOf(wrap("select 2 -- {% raw %}\n{% endraw %} from orders\n")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select '{{ ')' }}' as label from orders")).b).toEqual(["orders"])
+  })
+
+  it("reads inside a bracketed expression, as DuckDB's list of a scalar subquery", () => {
+    const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
+    expect(readsOf(wrap("select [(select x from orders)] as xs")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select [a, orders] as xs from t")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select [my orders] from t")).b).toEqual([])
+  })
+
+  it("thousands of sibling subqueries defining one name are read in near-linear time", () => {
+    const siblings = Array.from({ length: 5000 }, (_, i) => `select * from (with orders as (select ${i}) select * from orders) s${i}`).join(" union all ")
+    const started = performance.now()
+    expect(readsOf(`with orders as (select 1), b as (${siblings} union all select * from orders) select * from b`).b).toEqual(["orders"])
+    expect(performance.now() - started).toBeLessThan(3000)
+  })
+
   it("a body with thousands of inner CTEs is read in near-linear time", () => {
     const inner = Array.from({ length: 10000 }, (_, i) => `i${i} as (select ${i} as x)`).join(",\n")
     const sql = `with orders as (select 1), b as (with ${inner} select * from i9999 join orders on 1 = 1) select * from b`

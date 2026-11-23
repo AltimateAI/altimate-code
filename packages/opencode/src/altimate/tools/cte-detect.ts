@@ -325,7 +325,8 @@ function sameName(a: Written, b: Written): boolean {
 }
 
 const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
-const BRACKETED = /\[(?:[^\]\n]|\]\]){1,256}\]/y
+/** A `[name]` (SQL Server): one holding a parenthesis, comma, quote or bracket is an expression, as DuckDB's `[(select …)]` list. */
+const BRACKETED = /\[(?:[^\]\n(),'\[]|\]\]){1,256}\]/y
 
 /**
  * Position just past the Jinja delimiter `{{`, `{%` or `{#` at `pos` closes: a comment at its first `#}`; an
@@ -371,11 +372,14 @@ function blankJinja(text: string): string {
   const out: string[] = []
   let kept = 0
   // Blanked to spaces, newlines too: a Jinja comment ends no SQL line comment. Whitespace control (`{{-`, `-}}`)
-  // takes the whitespace beside the tag with it, newlines included, as rendering does.
+  // takes the whitespace beside the tag with it, newlines included, as rendering does. Between two word characters
+  // the tag is blanked to word characters instead: `orders{# x #}_archive` renders as one name, not `orders`.
   const blank = (from: number, to: number) => {
     if (text[from + 2] === "-") while (from > kept && /\s/.test(text[from - 1])) from--
     if (text[to - 3] === "-") while (to < text.length && /\s/.test(text[to])) to++
-    out.push(text.substring(kept, from), " ".repeat(to - from))
+    const before = from > kept ? text[from - 1] : (out.at(-1)?.at(-1) ?? "")
+    const joined = /[\p{L}\p{N}_$]/u.test(before) && /[\p{L}\p{N}_$]/u.test(text[to] ?? "")
+    out.push(text.substring(kept, from), (joined ? "_" : " ").repeat(to - from))
     kept = to
     return to
   }
@@ -398,8 +402,7 @@ function blankJinja(text: string): string {
       const found = close.exec(text)
       blank(at, end)
       if (found) {
-        out.push(text.substring(kept, found.index))
-        kept = found.index
+        // Kept as written up to the closing tag, less the whitespace a `{%- endraw %}` trims.
         blank(found.index, close.lastIndex)
         pos = close.lastIndex
       } else pos = text.length
@@ -523,17 +526,24 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
   const seen = new Map<number, Map<string, { written: Written; position: number }[]>>()
   const bucket = (name: string) => name.toLowerCase()
   return ctes.map((cte, position) => {
+    // The body's end found again in the Jinja-blanked text: a `)` inside Jinja (`'{{ ')' }}'`) does not end it.
+    const close = sql[cte.queryStart - 1] === "(" ? findMatchingClosingParen(sql, cte.queryStart - 1) : -1
+    const queryEnd = close > cte.queryStart ? close : cte.queryEnd
     const earlier = seen.get(cte.withClauseStart) ?? new Map<string, { written: Written; position: number }[]>()
     seen.set(cte.withClauseStart, earlier)
     const reads = new Set<number>()
     // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
     // once its definition has ended, to the end of the query that holds it.
     const inner = new Map<string, { written: Written; at: number; from: number; to: number }[]>()
-    for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, cte.queryEnd) : []) inner.set(bucket(one.written.name), [...(inner.get(bucket(one.written.name)) ?? []), one])
+    for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, queryEnd) : []) {
+      const list = inner.get(bucket(one.written.name))
+      if (list) list.push(one)
+      else inner.set(bucket(one.written.name), [one])
+    }
     let pos = cte.queryStart
     // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
     let previous = ""
-    while (earlier.size > 0 && pos < cte.queryEnd) {
+    while (earlier.size > 0 && pos < queryEnd) {
       const char = sql[pos]
       if (/\s/.test(char)) {
         pos++
@@ -576,7 +586,9 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
       pos = end
     }
     const own = written(stripColumnList(cte.name))
-    earlier.set(bucket(own.name), [...(earlier.get(bucket(own.name)) ?? []), { written: own, position }])
+    const list = earlier.get(bucket(own.name))
+    if (list) list.push({ written: own, position })
+    else earlier.set(bucket(own.name), [{ written: own, position }])
     return [...reads].sort((a, b) => a - b)
   })
 }

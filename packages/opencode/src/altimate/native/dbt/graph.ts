@@ -12,7 +12,10 @@ export interface GraphNode {
   label: string | null
   type: string
   path: string | null
-  /** The project-relative schema.yml that describes the node (dbt's patch_path without its `package://`), when there is one. */
+  /**
+   * The project-relative schema.yml that describes the node (dbt's patch_path without its `package://`), when there
+   * is one in the project itself: a node of an installed package has none, its file being relative to that package.
+   */
   yml?: string
   materialized: string | null
   /** database.schema.table, lower-cased. */
@@ -51,7 +54,16 @@ function relationOf(node: any): string | null {
   return parts.length === 3 ? parts.join(".").toLowerCase() : null
 }
 
-function nodeOf(id: string, node: any): GraphNode {
+/** The schema.yml path of a node's patch_path, when it is the root project's (or the manifest does not name it). */
+function ymlOf(node: any, rootProject: unknown): string | undefined {
+  if (typeof node?.patch_path !== "string") return undefined
+  const scheme = /^([^:/]+):\/\//.exec(node.patch_path)
+  if (scheme && typeof rootProject === "string" && rootProject && scheme[1] !== rootProject) return undefined
+  return node.patch_path.slice(scheme?.[0].length ?? 0)
+}
+
+function nodeOf(id: string, node: any, rootProject?: unknown): GraphNode {
+  const yml = ymlOf(node, rootProject)
   const type: string = node?.resource_type ?? id.split(".")[0] ?? "unknown"
   return {
     id,
@@ -59,7 +71,7 @@ function nodeOf(id: string, node: any): GraphNode {
     label: type === "exposure" ? node?.label || node?.name || id : null,
     type,
     path: node?.original_file_path ?? null,
-    ...(typeof node?.patch_path === "string" ? { yml: node.patch_path.replace(/^[^:/]+:\/\//, "") } : {}),
+    ...(yml !== undefined ? { yml } : {}),
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns: Object.entries<any>(node?.columns ?? {}).map(([key, col]) => String(col?.name ?? key)),
@@ -106,13 +118,13 @@ export function lineageGraph(manifest: any, id: string): LineageGraph {
   const truncated = walk(children, MAX_DOWNSTREAM, counted)
   const graph: LineageGraph = { nodes: {}, parents: {}, children: {}, truncated, upTruncated }
   for (const one of keep) {
-    graph.nodes[one] = nodeOf(one, lookup(manifest, one))
+    graph.nodes[one] = nodeOf(one, lookup(manifest, one), manifest.metadata?.project_name)
     graph.parents[one] = (parents[one] ?? []).filter((other) => keep.has(other))
     graph.children[one] = (children[one] ?? []).filter((other) => {
       if (keep.has(other)) return true
       if (!isTest(other) || !counted.has(one)) return false
       if (!graph.nodes[other]) {
-        graph.nodes[other] = { ...nodeOf(other, lookup(manifest, other)), type: "test" }
+        graph.nodes[other] = { ...nodeOf(other, lookup(manifest, other), manifest.metadata?.project_name), type: "test" }
         graph.parents[other] = (parents[other] ?? []).filter((p) => keep.has(p))
         graph.children[other] = []
       }

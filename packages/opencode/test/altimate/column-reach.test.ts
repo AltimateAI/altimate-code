@@ -980,6 +980,21 @@ describe("lineageGraph", () => {
     expect(graph.nodes["model.shop.bare"].yml).toBeUndefined()
   })
 
+  test("a node of an installed package carries no schema.yml: its path is relative to that package", () => {
+    const graph = lineageGraph(
+      {
+        metadata: { project_name: "shop" },
+        nodes: {
+          "model.shop.orders": { ...model("orders", ["model.dep.base"], "select 1", []), patch_path: "shop://models/schema.yml" },
+          "model.dep.base": { ...model("base", [], "select 1", []), patch_path: "dep://models/schema.yml" },
+        },
+      },
+      "model.shop.orders",
+    )
+    expect(graph.nodes["model.shop.orders"].yml).toBe("models/schema.yml")
+    expect(graph.nodes["model.dep.base"].yml).toBeUndefined()
+  })
+
   test("a twelve-hop chain comes back whole to its source; upstream past 500 nodes is cut and marked", () => {
     const chain: Record<string, any> = {}
     for (let i = 1; i <= 12; i++)
