@@ -14,6 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
+import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -865,11 +866,6 @@ const STRUCTURAL_CATEGORY: Record<string, ReviewCategory> = {
 const PII_LOW_RISK_CLASS = /^(name|address)$/i
 const PII_LOW_RISK_MIN_CONFIDENCE = 0.9
 const PII_DEFAULT_MIN_CONFIDENCE = 0.7
-// Column-name tokens the regex PII twins (`pii_into_mart`) key off — used to
-// recover which column a coarse regex finding flagged so suppression can be
-// column-aware (suppress only when core actually classified THAT column).
-const PII_TOKEN_RE =
-  /\b(email|ssn|social_security|phone_number|first_name|last_name|full_name|street_address|date_of_birth|dob|passport|credit_card)\b/i
 
 async function structuralChangeLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.structuralDiff) return []
@@ -1405,6 +1401,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }
     }
   }
+  // Per file, the normalised removed lines: an added line found here is a pure
+  // reindent (or comment/comma-only edit) of a base line and exposes nothing new.
+  const removedLinesByFile = new Map<string, Set<string>>()
+  const isReindented = (file: string, line: string) => {
+    let removed = removedLinesByFile.get(file)
+    if (!removed) {
+      removed = new Set(splitDiff(ctxByPath.get(file)?.file.diff).removed.map(normalizeSelectLine).filter(Boolean))
+      removedLinesByFile.set(file, removed)
+    }
+    const normalized = normalizeSelectLine(line)
+    return !!normalized && removed.has(normalized)
+  }
+  // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a column is
+  // already exposed when the base output holds its alias, or the source column
+  // itself (a rename of an exposed column re-exposes nothing new).
+  const isBaseExposed = (file: string, item: { column: string; alias?: string }) => {
+    const basePii = basePiiColumnsByFile.get(file)
+    return !!basePii && (basePii.has(item.column) || (!!item.alias && basePii.has(item.alias)))
+  }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
     const fallbackRule = String((f.evidence?.result as any)?.rule ?? "").replace(/_/g, "-")
@@ -1420,25 +1435,29 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ) {
       // The broad `schema.detect_pii` lane already flagged this file → redundant.
       if (schemaPiiFiles.has(f.file)) return false
-      if (fallbackRule === "pii-into-mart") {
-        // `pii_into_mart` carries the matched column in `result.line`: suppress
-        // only when core's classifier actually CONSIDERED that column (flagged or
-        // deliberately muted). A column core never classified falls through.
-        const token = PII_TOKEN_RE.exec(String((f.evidence?.result as any)?.line ?? ""))?.[1]?.toLowerCase()
-        if (token && classifiedPiiColumnsByFile.get(f.file)?.has(token)) return false
-        // A column the base already exposed (e.g. a reindented `ssn` line) is
-        // not newly exposed by this PR.
-        if (token && basePiiColumnsByFile.get(f.file)?.has(token)) return false
-        // No recoverable column: defer to the prior file-level behavior so the
-        // twin isn't double-reported when core ran for the file.
-        if (!token && diffScopedPiiCompletedFiles.has(f.file)) return false
-        return true
+      const result = (f.evidence?.result ?? {}) as {
+        line?: string
+        column?: string
+        alias?: string
+        items?: SelectItemColumn[]
       }
-      // `select-pii-columns` keeps its matched columns: drop it when the base
-      // already exposed every one of them.
-      const columns: string[] = (f.evidence?.result as any)?.columns ?? []
-      const basePii = basePiiColumnsByFile.get(f.file)
-      if (columns.length && basePii && columns.every((c) => basePii.has(c))) return false
+      if (fallbackRule === "pii-into-mart") {
+        // `pii_into_mart` is one finding per column token, carrying the column,
+        // its alias and the line. A reindented base line exposes nothing new.
+        if (result.line && isReindented(f.file, result.line)) return false
+        if (!result.column) return !diffScopedPiiCompletedFiles.has(f.file)
+        const item = { column: result.column, alias: result.alias }
+        // Suppress when core's classifier actually CONSIDERED that column (flagged
+        // or deliberately muted). A column core never classified falls through.
+        const classified = classifiedPiiColumnsByFile.get(f.file)
+        if (classified?.has(item.column) || (item.alias && classified?.has(item.alias))) return false
+        // A column the base already exposed is not newly exposed by this PR.
+        return !isBaseExposed(f.file, item)
+      }
+      // `select-pii-columns` keeps every matched column with its alias and line:
+      // drop it when each one is a reindented base line or already base-exposed.
+      const items = result.items ?? []
+      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i))) return false
       // Otherwise suppress only when a precise detector actually EMITTED a PII
       // finding for the file (so the exposure is reported by the better source,
       // not silently dropped).

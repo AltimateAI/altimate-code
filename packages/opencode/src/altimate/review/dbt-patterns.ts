@@ -4,7 +4,7 @@ import { Log } from "@/altimate/util/log"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
 import { type ChangedFile, fileKind } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
-import { evaluateCatalog } from "./rule-catalog"
+import { evaluateCatalog, selectItemColumns } from "./rule-catalog"
 
 /** Local copy to avoid a cycle with orchestrate.ts. */
 function modelNameFromPath(p: string): string {
@@ -313,14 +313,14 @@ const detectPiiIntoMart: Detector = (c) => {
       )
     )
   })
-  // One finding per added PII line: each carries its own column in `result.line`
-  // so the orchestrator can suppress a base-exposed column without hiding a new
-  // one on another line. They share a fingerprint, so dedupe keeps the most
-  // severe survivor.
-  return hits.map((hit) => {
+  // One finding per PII column token on each added line (`ssn, passport` is two):
+  // each carries its column, `AS` alias and line in `result` so the orchestrator
+  // can suppress a base-exposed column without hiding a new one beside it. They
+  // share a fingerprint, so dedupe keeps the most severe survivor.
+  return hits.flatMap((hit) => selectItemColumns(hit, PII_RE)).map(({ column, alias, line }) => {
     // Highly-sensitive identifiers (SSN/financial/passport/DOB) into a broadly-read
     // marts layer are critical; softer PII (email/phone/name) is a warning.
-    const sev: Severity = /\b(ssn|social_security|credit_card|passport|date_of_birth|dob)\b/i.test(hit)
+    const sev: Severity = /^(ssn|social_security|credit_card|passport|date_of_birth|dob)$/i.test(column)
       ? "critical"
       : "warning"
     return makeFinding({
@@ -333,7 +333,7 @@ const detectPiiIntoMart: Detector = (c) => {
       file: c.file.path,
       model: c.model,
       confidence: "high",
-      evidence: { tool: "dbt-patterns", result: { rule: "pii_into_mart", line: hit.trim() } },
+      evidence: { tool: "dbt-patterns", result: { rule: "pii_into_mart", line, column, alias } },
       ruleKey: "pii_exposure:into-mart",
     })
   })

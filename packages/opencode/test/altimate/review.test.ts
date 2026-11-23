@@ -2200,14 +2200,24 @@ describe("orchestrate", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
-  // Runner whose base/head PII is exactly the listed columns present in the SQL.
+  // Output names of `col` in `sql`, like the real engine: `c.ssn as tax_ref`
+  // exposes `tax_ref` (runner.ts prefers query_targets), plain `ssn` exposes `ssn`.
+  const outputNames = (sql: string, col: string): string[] => {
+    const aliases = [...sql.matchAll(new RegExp(`\\b${col}\\s+as\\s+(\\w+)`, "gi"))].map((m) => m[1])
+    if (aliases.length) return aliases
+    return new RegExp(`\\b${col}\\b`, "i").test(sql) ? [col] : []
+  }
+  // Runner whose base/head PII is exactly the listed columns present in the SQL,
+  // reported by output name (alias) as `runner.detectPii` does.
   const piiRunner = (cols: string[], classify: ReviewRunner["classifyPii"] = async () => []): ReviewRunner => ({
     ...fakeRunner({}),
     async detectPii(sql: string) {
-      return { columns: cols.filter((c) => sql.includes(c)) }
+      return { columns: cols.flatMap((c) => outputNames(sql, c)) }
     },
     async columnLineage(sql) {
-      return ["customer_id", ...cols].filter((c) => sql.includes(c)).map((c) => ({ source: `customers.${c}`, target: c }))
+      return ["customer_id", ...cols].flatMap((c) =>
+        outputNames(sql, c).map((target) => ({ source: `customers.${c}`, target })),
+      )
     },
     classifyPii: classify,
   })
@@ -2265,10 +2275,108 @@ describe("orchestrate", () => {
     expect((catalog?.evidence?.result as any)?.columns).toEqual(["ssn", "passport"])
   })
 
+  const ALIASED_BASE = "select c.customer_id,\n  c.email as contact,\n  c.ssn as tax_ref\nfrom customers c"
+
+  test("a reindented aliased PII column in three marts raises no twin and does not block", async () => {
+    // detectPii reports output aliases (`contact`, `tax_ref`), not the source
+    // tokens the regex twins match (`email`, `ssn`): both must be reconciled.
+    const cases = [
+      { line: "c.ssn as tax_ref", head: ALIASED_BASE.replace("  c.ssn", "    c.ssn") },
+      { line: "c.email as contact,", head: ALIASED_BASE.replace("  c.email", "    c.email") },
+    ]
+    for (const { line, head } of cases) {
+      const files: ChangedFile[] = MARTS.map((path) => ({ path, status: "modified", diff: `-  ${line}\n+    ${line}\n` }))
+      for (const reviewers of [[], ["dbt_patterns"]]) {
+        const env = await runReview({
+          changedFiles: files,
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner: piiRunner(["email", "ssn"]),
+          getContent: content(head, ALIASED_BASE),
+        })
+        expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+        expect(env.verdict).not.toBe("REQUEST_CHANGES")
+      }
+    }
+  })
+
+  test("an aliased PII line whose alias the base exposes raises no twin even when not a pure reindent", async () => {
+    // Table alias renamed `c` → `cust`: the line text changes, but the output
+    // `tax_ref` (built from `ssn`) was already exposed by the base.
+    const head = ALIASED_BASE.replace(/\bc\./g, "cust.").replace("customers c", "customers cust")
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  c.ssn as tax_ref\n+  cust.ssn as tax_ref\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["email", "ssn"]),
+      getContent: content(head, ALIASED_BASE),
+    })
+    expect(env.findings.filter(isTwin)).toEqual([])
+    // Control: the same aliased line added to a base without it keeps both twins.
+    const added = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+  c.ssn as tax_ref\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["email", "ssn"]),
+      getContent: content(ALIASED_BASE, "select c.customer_id,\n  c.email as contact\nfrom customers c"),
+    })
+    const twins = added.findings.filter(isTwin)
+    expect(twins.map((f) => (f.evidence?.result as any)?.rule).sort()).toEqual(["pii_into_mart", "select-pii-columns"])
+    expect(twins.find((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")?.severity).toBe("critical")
+  })
+
+  test("a pure reindent drops the regex twins even when base PII detection misses the column", async () => {
+    // detectPii finds nothing on either side: only the reindent check applies.
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+    ssn\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner([]),
+      getContent: content("select customer_id,\n    ssn\nfrom customers", "select customer_id,\n  ssn\nfrom customers"),
+    })
+    expect(env.findings.filter(isTwin)).toEqual([])
+  })
+
+  test("a new PII column on the same line as a base-exposed one keeps its twins", async () => {
+    // `-  ssn` / `+  ssn, passport`: `ssn` is base-exposed, `passport` is new and
+    // must not hide behind the first token on the line.
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+  ssn, passport\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["ssn", "passport"]),
+      getContent: content("select customer_id,\n  ssn, passport\nfrom customers", "select customer_id,\n  ssn\nfrom customers"),
+    })
+    const intoMart = env.findings.filter((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+    expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["passport"])
+    expect(intoMart[0].severity).toBe("critical")
+    const catalog = env.findings.find((f) => (f.evidence?.result as any)?.rule === "select-pii-columns")
+    expect((catalog?.evidence?.result as any)?.columns).toEqual(["ssn", "passport"])
+    // Both tokens already in the base: nothing is reported.
+    const both = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn,\n-  passport\n+  ssn, passport\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["ssn", "passport"]),
+      getContent: content(
+        "select customer_id,\n  ssn, passport\nfrom customers",
+        "select customer_id,\n  ssn,\n  passport\nfrom customers",
+      ),
+    })
+    expect(both.findings.filter(isTwin)).toEqual([])
+  })
+
   test("without a compiled base the regex PII twins are unknown-confidence warnings that never block", async () => {
-    // Raw Jinja on both sides and no compiled artifacts: whether `ssn` is new
-    // cannot be decided, so neither twin is critical or counts toward a block.
-    const files: ChangedFile[] = MARTS.map((path) => ({ path, status: "modified", diff: "-  ssn\n+    ssn\n" }))
+    // Raw Jinja on both sides and no compiled artifacts: whether an added `ssn`
+    // line is new cannot be decided (it is not a reindent of a removed line), so
+    // neither twin is critical or counts toward a block.
+    const files: ChangedFile[] = MARTS.map((path) => ({ path, status: "modified", diff: "+    ssn\n" }))
     for (const reviewers of [[], ["dbt_patterns"]]) {
       const env = await runReview({
         changedFiles: files,

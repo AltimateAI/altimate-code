@@ -486,6 +486,50 @@ describe("postGitHubReview", () => {
     expect(r.postError).toBeUndefined()
     expect(r.reviewId).toBe(9)
   })
+
+  test("a positioning 422 with a patchless file retries with the verified comments first", async () => {
+    const env = buildEnvelope({
+      findings: [
+        finding({ file: "models/known.sql", startLine: 3, title: "known: a" }),
+        finding({ file: "models/big.sql", startLine: 900, title: "big: b" }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    const positioning422 = Object.assign(new Error("Unprocessable Entity"), {
+      status: 422,
+      response: { data: { errors: ["Line could not be resolved"] } },
+    })
+    const where = (call: any) => (call.comments ?? []).map((c: { path: string; line: number }) => `${c.path}:${c.line}`)
+    const files = [{ filename: "models/known.sql", patch: PATCH }, { filename: "models/big.sql" }]
+
+    const kept = fakeOcto({
+      files,
+      createReview: (call) => {
+        if (call === 1) throw positioning422
+        return undefined
+      },
+    })
+    const r = await postGitHubReview(env, target, kept.octo)
+    expect(kept.reviewCalls.map(where)).toEqual([["models/known.sql:3", "models/big.sql:900"], ["models/known.sql:3"]])
+    expect(r.inlineFellBack).toBe(true)
+    expect(r.postError).toBeUndefined()
+    expect(r.reviewId).toBe(9)
+
+    // The verified-only retry also failing falls back to an event-only review.
+    const none = fakeOcto({
+      files,
+      createReview: (call) => {
+        if (call <= 2) throw positioning422
+        return undefined
+      },
+    })
+    const r2 = await postGitHubReview(env, target, none.octo)
+    expect(none.reviewCalls.length).toBe(3)
+    expect(none.reviewCalls[2].comments).toBeUndefined()
+    expect(r2.inlineFellBack).toBe(true)
+    expect(r2.reviewId).toBe(9)
+  })
 })
 
 describe("portability settings", () => {

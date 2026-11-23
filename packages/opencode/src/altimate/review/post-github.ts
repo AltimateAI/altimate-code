@@ -57,7 +57,7 @@ export async function resolveGitHubTarget(): Promise<GitHubTarget | undefined> {
 export interface PostResult {
   summaryCommentId?: number
   reviewId?: number
-  /** True when inline comments were dropped due to a 422 positioning error. */
+  /** True when some or all inline comments were dropped due to a 422 positioning error. */
   inlineFellBack: boolean
   /** Set when the review event could not be posted for a non-positioning reason. */
   postError?: string
@@ -180,6 +180,27 @@ export async function postGitHubReview(
     const isPositioning = status === 422 && /(position|\bline\b|diff|commit)/.test(detail)
     result.inlineFellBack = isPositioning
     result.postError = isPositioning ? undefined : `${status ?? ""} ${e?.message ?? e}`.trim()
+    // Lines on files without a known hunk (no `patch`) are the likely cause of a
+    // positioning 422: retry once with only the comments on verified files
+    // before dropping every inline comment.
+    const verified = isPositioning && commentable ? comments.filter((c) => commentable!.has(c.path)) : []
+    if (verified.length && verified.length < comments.length) {
+      try {
+        const r = await octo.rest.pulls.createReview({
+          owner,
+          repo,
+          pull_number: prNumber,
+          commit_id: commitId,
+          event,
+          body: reviewBody,
+          comments: verified,
+        })
+        result.reviewId = r.data.id
+        return result
+      } catch {
+        /* fall through to the event-only review */
+      }
+    }
     try {
       const r = await octo.rest.pulls.createReview({
         owner,

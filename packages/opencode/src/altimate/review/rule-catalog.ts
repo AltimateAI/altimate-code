@@ -50,9 +50,11 @@ export interface Rule {
    * error there and is kept). Omit `worksOn` when support isn't established.
    */
   portability?: { worksOn?: string[] }
-  /** `added`'s first capture group is a column name: matched columns are kept on
-   *  `evidence.result.columns` so the orchestrator can reconcile them per column. */
-  capturesColumns?: boolean
+  /** Column-token pattern (first capture group is the column name) collected on
+   *  every line `added` matches — every token, not just the first — and kept on
+   *  `evidence.result.columns` / `items` so the orchestrator can reconcile each
+   *  column (and its `AS` alias) with the base. */
+  capturesColumns?: RegExp
   example: RuleExample
   counter?: RuleExample
 }
@@ -110,16 +112,75 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   return relevant
 }
 
-/** Distinct lowercased first-group captures of `rule.added` over the added lines. */
-function capturedColumns(rule: Rule, added: string[]): string[] {
-  const cols = new Set<string>()
+/** A column token found in a select item, with the item's `AS` alias (the
+ *  output name) when it has one, and the trimmed line it came from. */
+export interface SelectItemColumn {
+  column: string
+  alias?: string
+  line: string
+}
+
+/** Split on commas outside parentheses (one entry per select item). */
+function topLevelItems(s: string): string[] {
+  const items: string[] = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "(") depth++
+    else if (s[i] === ")") depth = Math.max(0, depth - 1)
+    else if (s[i] === "," && depth === 0) {
+      items.push(s.slice(start, i))
+      start = i + 1
+    }
+  }
+  items.push(s.slice(start))
+  return items
+}
+
+/**
+ * Every column token `tokenRe` finds on a select line (all of them, not just
+ * the first), each paired with its item's `AS` alias. The pair matters because
+ * PII detection reports OUTPUT names: `c.ssn as tax_ref` exposes `tax_ref`.
+ */
+export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColumn[] {
+  const global = new RegExp(tokenRe.source, tokenRe.flags.includes("g") ? tokenRe.flags : `${tokenRe.flags}g`)
+  const out: SelectItemColumn[] = []
+  const seen = new Set<string>()
+  for (const item of topLevelItems(stripComments(line))) {
+    // The item's alias is its first `AS` outside parentheses (`cast(x as int) as y`
+    // → `y`), which also holds when the line runs on into `from …`.
+    let flat = item
+    while (/\([^()]*\)/.test(flat)) flat = flat.replace(/\([^()]*\)/g, " ")
+    const alias = /\bas\s+["`]?([A-Za-z_][\w$]*)/i.exec(flat)?.[1]?.toLowerCase()
+    for (const m of item.matchAll(global)) {
+      const column = m[1]?.toLowerCase()
+      if (!column || seen.has(`${column} ${alias ?? ""}`)) continue
+      seen.add(`${column} ${alias ?? ""}`)
+      out.push({ column, alias, line: line.trim() })
+    }
+  }
+  return out
+}
+
+/** A diff line with comments and whitespace normalised (and a leading/trailing
+ *  select-list comma dropped), so a reindented line compares equal to its base. */
+export function normalizeSelectLine(line: string): string {
+  return stripComments(line)
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),])\s*/g, "$1")
+    .trim()
+    .replace(/^,|,$/g, "")
+}
+
+/** Column tokens (with aliases) of `rule.capturesColumns` over the added lines `rule.added` matches. */
+function capturedColumns(rule: Rule, added: string[]): SelectItemColumn[] {
+  const out: SelectItemColumn[] = []
   for (const l of added) {
     const s = stripComments(l)
-    if (rule.unless?.test(s)) continue
-    const col = rule.added?.exec(s)?.[1]
-    if (col) cols.add(col.toLowerCase())
+    if (!rule.capturesColumns || !rule.added?.test(s) || rule.unless?.test(s)) continue
+    out.push(...selectItemColumns(l, rule.capturesColumns))
   }
-  return [...cols]
+  return out
 }
 
 /** Evaluate the catalog against a changed file. */
@@ -148,7 +209,10 @@ export function evaluateCatalog(
         result: rule.portability
           ? { rule: rule.id, portability: true, worksOn: rule.portability.worksOn }
           : rule.capturesColumns
-            ? { rule: rule.id, columns: capturedColumns(rule, added) }
+            ? (() => {
+                const items = capturedColumns(rule, added)
+                return { rule: rule.id, columns: [...new Set(items.map((i) => i.column))], items }
+              })()
             : { rule: rule.id },
       },
       ruleKey: `${rule.category}:${rule.id}`,
@@ -1221,7 +1285,10 @@ const SECURITY_PII: Rule[] = [
     "warning",
     "PII columns selected",
     "Email/SSN/phone/DOB pulled into a model widens PII exposure; confirm it's needed and masked.",
-    { added: /^\s*[\w.]*\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i, capturesColumns: true },
+    {
+      added: /^\s*[\w.]*\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i,
+      capturesColumns: /\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i,
+    },
     { add: "        c.ssn," },
     { add: "        c.country," },
   ),
