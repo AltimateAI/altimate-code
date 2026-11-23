@@ -45,6 +45,8 @@ import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./in
 import { dbtProjectFindings, jinjaFindings, joinTargets, missingRefFindings, modelConfigFindings, packagesFindings, testsOnNullColumns } from "./project-rules"
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles } from "./ai-review"
 import { ruleTier } from "./rule-tiers"
+import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
+import type { ColumnReach } from "../native/dbt/column-reach"
 
 const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
 // Connection profiles hold warehouse credentials: never send their diff or content to the AI lane.
@@ -166,6 +168,8 @@ export interface ReviewRunner {
   lexicalScan?(addedLines: string[]): Promise<Array<{ rule: string; severity?: string; message: string; line?: string }>>
   /** Direct downstream models (name + file path) of a model, from the manifest DAG. */
   downstreamModels?(model: string): Promise<Array<{ name: string; path: string }>>
+  /** Downstream models and exposures that read one column of a model (manifest + compiled SQL). */
+  columnReach?(model: string, column: string, dialect?: string): Promise<ColumnReach | undefined>
   /**
    * Direct dbt parents of the nodes defined in these files (project-relative
    * paths): models, seeds and snapshots by file, sources with their declared
@@ -255,6 +259,10 @@ export interface OrchestrateInput {
   aiModel?: string
   /** Send the changed files' unchanged dbt parents to the AI lane as context. */
   aiGraphContext?: boolean
+  /** Give the AI lane what the dbt-grounded verifier reads (`ALTIMATE_REVIEW_AI_VERIFY=1`). */
+  aiVerify?: boolean
+  /** Fixed-string search over the dbt project at head, for the verifier. */
+  grepProject?: AiVerifyEvidence["grepProject"]
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -2524,6 +2532,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // Only the files within the AI lane's file cap are reached; the rest stay in the ledger.
     touch(selectAiFiles(aiFiles, aiInputBudget().maxFiles))
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
+    // The verifier reads engine SQL first (the same SQL the engine lanes saw), then compiled output.
+    const evidence: AiVerifyEvidence | undefined = input.aiVerify
+      ? {
+          dialect,
+          files: aiFiles,
+          projectRoot: input.layout?.root,
+          runner: input.runner,
+          addedLines: addedLinesByFile(input.changedFiles),
+          prTitle: input.prTitle,
+          prBody: input.prBody,
+          grepProject: input.grepProject,
+          readFile: async (p, side, start, end) => numberedSlice(await getContent?.(p, side), start, end),
+          compiledSql: async (p, side) => {
+            const ctx = ctxByPath.get(p)
+            const engine = side === "new" ? ctx?.engineNewSql : ctx?.engineOldSql
+            return engine ?? (await getCompiled?.(ctx?.file.oldPath && side === "old" ? ctx.file.oldPath : p, side))
+          },
+        }
+      : undefined
     try {
       const res = await input.aiReview({
         files: aiFiles,
@@ -2532,6 +2559,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         prTitle: input.prTitle,
         prBody: input.prBody,
         model: input.aiModel,
+        ...(evidence ? { evidence } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       aiStatus = Array.isArray(res) ? { state: "ok" } : res.status
