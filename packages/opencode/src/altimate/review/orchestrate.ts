@@ -1434,9 +1434,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         if (!token && diffScopedPiiCompletedFiles.has(f.file)) return false
         return true
       }
-      // `select-pii-columns` doesn't preserve its column. Suppress only when a
-      // precise detector actually EMITTED a PII finding for the file (so the
-      // exposure is reported by the better source, not silently dropped).
+      // `select-pii-columns` keeps its matched columns: drop it when the base
+      // already exposed every one of them.
+      const columns: string[] = (f.evidence?.result as any)?.columns ?? []
+      const basePii = basePiiColumnsByFile.get(f.file)
+      if (columns.length && basePii && columns.every((c) => basePii.has(c))) return false
+      // Otherwise suppress only when a precise detector actually EMITTED a PII
+      // finding for the file (so the exposure is reported by the better source,
+      // not silently dropped).
       if (diffScopedPiiFindingFiles.has(f.file)) return false
       return true
     }
@@ -1463,6 +1468,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       return false
     return true
   })
+  // Without a compiled base (raw Jinja on the old side) the regex PII twins can't
+  // tell a new column from one the base already exposed: report them like the
+  // other PII lanes, as a warning of unknown confidence that never blocks.
+  for (const [i, f] of merged.entries()) {
+    const rule = (f.evidence?.result as any)?.rule
+    if (f.category !== "pii_exposure" || (rule !== "pii_into_mart" && rule !== "select-pii-columns")) continue
+    const ctx = ctxByPath.get(f.file)
+    if (ctx && hasOldSide(ctx.file) && !ctx.engineOldSql)
+      merged[i] = { ...f, severity: f.severity === "critical" ? "warning" : f.severity, confidence: "unknown" }
+  }
 
   // AI reviewer lane — runs AFTER the deterministic lanes so it can be GROUNDED
   // in (and told not to duplicate) the engine findings. Advisory only: its

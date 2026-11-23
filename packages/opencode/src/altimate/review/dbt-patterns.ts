@@ -109,7 +109,7 @@ interface Ctx {
   inMartOrReporting: boolean
 }
 
-type Detector = (c: Ctx) => Finding | null
+type Detector = (c: Ctx) => Finding | Finding[] | null
 
 // A line that is dbt Jinja / config rather than SQL — e.g. the microbatch
 // `begin=(modules.datetime.datetime.now() - ...)` config kwarg, which is NOT a
@@ -304,7 +304,7 @@ const PII_RE =
   /\b(email|ssn|social_security|phone_number|first_name|last_name|full_name|street_address|date_of_birth|dob|passport|credit_card)\b/i
 const detectPiiIntoMart: Detector = (c) => {
   if (!c.inMartOrReporting) return null
-  const hit = c.added.find((l) => {
+  const hits = c.added.filter((l) => {
     const s = stripComments(l)
     return (
       PII_RE.test(s) &&
@@ -313,24 +313,29 @@ const detectPiiIntoMart: Detector = (c) => {
       )
     )
   })
-  if (!hit) return null
-  // Highly-sensitive identifiers (SSN/financial/passport/DOB) into a broadly-read
-  // marts layer are critical; softer PII (email/phone/name) is a warning.
-  const sev: Severity = /\b(ssn|social_security|credit_card|passport|date_of_birth|dob)\b/i.test(hit)
-    ? "critical"
-    : "warning"
-  return makeFinding({
-    severity: sev,
-    category: "pii_exposure",
-    title: `${c.model}: PII column added to a marts/reporting model`,
-    body:
-      "A PII-named column was added to a model in `marts/`/`reporting/`, widening PII exposure into a broadly-read " +
-      "layer. Confirm the column is needed here, that masking/access policy applies, and that the downstream grant is appropriate.",
-    file: c.file.path,
-    model: c.model,
-    confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "pii_into_mart", line: hit.trim() } },
-    ruleKey: "pii_exposure:into-mart",
+  // One finding per added PII line: each carries its own column in `result.line`
+  // so the orchestrator can suppress a base-exposed column without hiding a new
+  // one on another line. They share a fingerprint, so dedupe keeps the most
+  // severe survivor.
+  return hits.map((hit) => {
+    // Highly-sensitive identifiers (SSN/financial/passport/DOB) into a broadly-read
+    // marts layer are critical; softer PII (email/phone/name) is a warning.
+    const sev: Severity = /\b(ssn|social_security|credit_card|passport|date_of_birth|dob)\b/i.test(hit)
+      ? "critical"
+      : "warning"
+    return makeFinding({
+      severity: sev,
+      category: "pii_exposure",
+      title: `${c.model}: PII column added to a marts/reporting model`,
+      body:
+        "A PII-named column was added to a model in `marts/`/`reporting/`, widening PII exposure into a broadly-read " +
+        "layer. Confirm the column is needed here, that masking/access policy applies, and that the downstream grant is appropriate.",
+      file: c.file.path,
+      model: c.model,
+      confidence: "high",
+      evidence: { tool: "dbt-patterns", result: { rule: "pii_into_mart", line: hit.trim() } },
+      ruleKey: "pii_exposure:into-mart",
+    })
   })
 }
 
@@ -780,8 +785,8 @@ export function detectModelPatterns(file: ChangedFile, newSql: string | undefine
   }
   const out: Finding[] = []
   for (const d of MODEL_DETECTORS) {
-    const f = d(ctx)
-    if (f) out.push({ ...f, severity: clampSeverity(f.category, f.severity, f.confidence) })
+    for (const f of [d(ctx) ?? []].flat())
+      out.push({ ...f, severity: clampSeverity(f.category, f.severity, f.confidence) })
   }
   // Declarative rule catalog (data-driven checks) complements the programmatic detectors.
   out.push(...evaluateCatalog(file, newSql, added, removed, rubric))

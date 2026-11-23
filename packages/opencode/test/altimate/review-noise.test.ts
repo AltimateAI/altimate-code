@@ -354,6 +354,7 @@ describe("postGitHubReview", () => {
     opts: {
       reviews?: Array<{ body: string; user?: { login: string } }>
       listFails?: boolean
+      files?: Array<{ filename: string; patch?: string }>
       createReview?: (call: number) => unknown
     } = {},
   ) {
@@ -372,7 +373,7 @@ describe("postGitHubReview", () => {
         pulls: {
           listReviewComments: opts.listFails ? fail : async () => [],
           listReviews: opts.listFails ? fail : async () => opts.reviews ?? [],
-          listFiles: opts.listFails ? fail : async () => [{ filename: "models/m.sql", patch: PATCH }],
+          listFiles: opts.listFails ? fail : async () => opts.files ?? [{ filename: "models/m.sql", patch: PATCH }],
           get: async () => ({ data: { head: { sha: "abc" } } }),
           createReview: async (p: any) => {
             reviewCalls.push(p)
@@ -429,6 +430,28 @@ describe("postGitHubReview", () => {
     const r = await postGitHubReview(env, target, octo)
     expect(reviewCalls[0].comments.map((c: { line: number }) => c.line)).toEqual([3])
     expect(r.inlineSkippedAsPosted).toBe(0)
+  })
+
+  test("a file GitHub lists without a patch keeps its inline comments", async () => {
+    // GitHub omits `patch` for large diffs: the hunks are unknown, so the lines
+    // are attempted (the 422 fallback covers a miss) instead of all dropped.
+    const env = buildEnvelope({
+      findings: [
+        finding({ startLine: 3, title: "m: a" }),
+        finding({ startLine: 40, title: "m: b" }),
+        finding({ file: "models/big.sql", startLine: 900, title: "big: c" }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    const { octo, reviewCalls } = fakeOcto({
+      files: [{ filename: "models/m.sql", patch: PATCH }, { filename: "models/big.sql" }],
+    })
+    await postGitHubReview(env, target, octo)
+    expect(reviewCalls[0].comments.map((c: { path: string; line: number }) => `${c.path}:${c.line}`)).toEqual([
+      "models/m.sql:3",
+      "models/big.sql:900",
+    ])
   })
 
   test("when listing fails, everything is posted and nothing is skipped", async () => {

@@ -125,11 +125,12 @@ export async function postGitHubReview(
   }
 
   // Inline comments only on lines GitHub accepts (inside the PR's diff hunks).
-  // If the file list can't be read, post everything and rely on the 422 fallback.
+  // If the file list can't be read, or a file has no `patch` (GitHub omits it
+  // for large diffs), post those lines and rely on the 422 fallback.
   let commentable: Map<string, Set<number>> | undefined
   try {
     const files = await octo.paginate(octo.rest.pulls.listFiles, { owner, repo, pull_number: prNumber, per_page: 100 })
-    commentable = new Map(files.map((f) => [f.filename, commentableLines(f.patch)]))
+    commentable = new Map(files.filter((f) => f.patch).map((f) => [f.filename, commentableLines(f.patch)]))
   } catch {
     /* fall back to the positioning retry below */
   }

@@ -50,6 +50,9 @@ export interface Rule {
    * error there and is kept). Omit `worksOn` when support isn't established.
    */
   portability?: { worksOn?: string[] }
+  /** `added`'s first capture group is a column name: matched columns are kept on
+   *  `evidence.result.columns` so the orchestrator can reconcile them per column. */
+  capturesColumns?: boolean
   example: RuleExample
   counter?: RuleExample
 }
@@ -107,6 +110,18 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   return relevant
 }
 
+/** Distinct lowercased first-group captures of `rule.added` over the added lines. */
+function capturedColumns(rule: Rule, added: string[]): string[] {
+  const cols = new Set<string>()
+  for (const l of added) {
+    const s = stripComments(l)
+    if (rule.unless?.test(s)) continue
+    const col = rule.added?.exec(s)?.[1]
+    if (col) cols.add(col.toLowerCase())
+  }
+  return [...cols]
+}
+
 /** Evaluate the catalog against a changed file. */
 export function evaluateCatalog(
   file: ChangedFile,
@@ -130,7 +145,11 @@ export function evaluateCatalog(
       confidence: "high",
       evidence: {
         tool: "rule-catalog",
-        result: rule.portability ? { rule: rule.id, portability: true, worksOn: rule.portability.worksOn } : { rule: rule.id },
+        result: rule.portability
+          ? { rule: rule.id, portability: true, worksOn: rule.portability.worksOn }
+          : rule.capturesColumns
+            ? { rule: rule.id, columns: capturedColumns(rule, added) }
+            : { rule: rule.id },
       },
       ruleKey: `${rule.category}:${rule.id}`,
     })
@@ -176,7 +195,7 @@ const r = (
   severity: Severity,
   title: string,
   body: string,
-  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "portability">,
+  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "portability" | "capturesColumns">,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
@@ -1202,7 +1221,7 @@ const SECURITY_PII: Rule[] = [
     "warning",
     "PII columns selected",
     "Email/SSN/phone/DOB pulled into a model widens PII exposure; confirm it's needed and masked.",
-    { added: /^\s*[\w.]*\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i },
+    { added: /^\s*[\w.]*\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i, capturesColumns: true },
     { add: "        c.ssn," },
     { add: "        c.country," },
   ),

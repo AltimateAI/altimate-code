@@ -2200,47 +2200,110 @@ describe("orchestrate", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
+  // Runner whose base/head PII is exactly the listed columns present in the SQL.
+  const piiRunner = (cols: string[], classify: ReviewRunner["classifyPii"] = async () => []): ReviewRunner => ({
+    ...fakeRunner({}),
+    async detectPii(sql: string) {
+      return { columns: cols.filter((c) => sql.includes(c)) }
+    },
+    async columnLineage(sql) {
+      return ["customer_id", ...cols].filter((c) => sql.includes(c)).map((c) => ({ source: `customers.${c}`, target: c }))
+    },
+    classifyPii: classify,
+  })
+  const isTwin = (f: { evidence?: { tool?: string; result?: unknown } }) =>
+    ["pii_into_mart", "select-pii-columns"].includes((f.evidence?.result as any)?.rule)
+  const MARTS = ["models/marts/m1.sql", "models/marts/m2.sql", "models/marts/m3.sql"]
+
   test("a reindented PII line the base already exposed raises no regex twin", async () => {
-    // Whitespace-only edit of the `ssn` line in a mart: base and head expose the
-    // same columns, so neither the broad fallback nor `pii_into_mart` applies.
-    const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+    ssn\n" }]
-    const runner = (): ReviewRunner => ({
-      ...fakeRunner({}),
-      async detectPii(sql: string) {
-        return { columns: sql.includes("ssn") ? ["ssn"] : [] }
-      },
-      async columnLineage(sql) {
-        return ["customer_id", "ssn"].filter((c) => sql.includes(c)).map((c) => ({ source: `customers.${c}`, target: c }))
-      },
-      async classifyPii() {
-        return []
-      },
-    })
-    const twin = (env: { findings: Array<{ evidence?: { tool?: string; result?: unknown } }> }) =>
-      env.findings.some((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+    // Whitespace-only edit of the `ssn` line in three marts: base and head expose
+    // the same columns, so neither the broad fallback nor either regex twin
+    // applies, and three of them do not add up to a block.
+    const files: ChangedFile[] = MARTS.map((path) => ({ path, status: "modified", diff: "-  ssn\n+    ssn\n" }))
     for (const reviewers of [[], ["dbt_patterns"]]) {
       const env = await runReview({
         changedFiles: files,
         config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
         rubric: DEFAULT_RUBRIC,
         mode: "gate",
-        runner: runner(),
+        runner: piiRunner(["ssn"]),
         getContent: content("select customer_id,\n    ssn\nfrom customers", "select customer_id,\n  ssn\nfrom customers"),
       })
-      expect(twin(env)).toBe(false)
-      expect(env.findings.filter((f) => f.category === "pii_exposure" && f.severity === "critical")).toEqual([])
+      expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
       expect(env.verdict).not.toBe("REQUEST_CHANGES")
     }
-    // Control: the same head with a base that lacked `ssn` still gets the twin.
+    // Control: the same head with a base that lacked `ssn` still gets both twins.
     const added = await runReview({
       changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+    ssn\n" }],
       config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
-      runner: runner(),
+      runner: piiRunner(["ssn"]),
       getContent: content("select customer_id,\n    ssn\nfrom customers", "select customer_id\nfrom customers"),
     })
-    expect(twin(added)).toBe(true)
+    const rules = added.findings.filter(isTwin).map((f) => (f.evidence?.result as any)?.rule)
+    expect(rules.sort()).toEqual(["pii_into_mart", "select-pii-columns"])
+  })
+
+  test("a new PII column next to a reindented base one keeps its own critical twin", async () => {
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+    ssn,\n+    passport\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["ssn", "passport"]),
+      getContent: content(
+        "select customer_id,\n    ssn,\n    passport\nfrom customers",
+        "select customer_id,\n  ssn\nfrom customers",
+      ),
+    })
+    const twin = env.findings.find((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+    expect(twin?.severity).toBe("critical")
+    expect((twin?.evidence?.result as any)?.line).toContain("passport")
+    // `select-pii-columns` names a column the base lacked, so it is kept too.
+    const catalog = env.findings.find((f) => (f.evidence?.result as any)?.rule === "select-pii-columns")
+    expect((catalog?.evidence?.result as any)?.columns).toEqual(["ssn", "passport"])
+  })
+
+  test("without a compiled base the regex PII twins are unknown-confidence warnings that never block", async () => {
+    // Raw Jinja on both sides and no compiled artifacts: whether `ssn` is new
+    // cannot be decided, so neither twin is critical or counts toward a block.
+    const files: ChangedFile[] = MARTS.map((path) => ({ path, status: "modified", diff: "-  ssn\n+    ssn\n" }))
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["ssn"]),
+        getContent: content(
+          "select customer_id,\n    ssn\nfrom {{ ref('customers') }}",
+          "select customer_id,\n  ssn\nfrom {{ ref('customers') }}",
+        ),
+      })
+      const twins = env.findings.filter(isTwin)
+      if (reviewers.length) expect(twins.length).toBeGreaterThan(0)
+      expect(twins.every((f) => f.severity === "warning" && f.confidence === "unknown")).toBe(true)
+      expect(env.findings.filter((f) => f.severity === "critical")).toEqual([])
+      expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    }
+  })
+
+  test("the broad PII fallback without a compiled base is an unknown-confidence warning", async () => {
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["ssn"], async () => {
+        throw new Error("classifier unavailable")
+      }),
+      getContent: content("select customer_id, ssn from customers", "select customer_id from {{ ref('customers') }}"),
+    })
+    const fallback = env.findings.filter((f) => f.evidence?.tool === "schema.detect_pii")
+    expect(fallback.length).toBe(1)
+    expect(fallback[0].severity).toBe("warning")
+    expect(fallback[0].confidence).toBe("unknown")
   })
 
   test("case-variant PII detector output does not duplicate core diff-scoped finding", async () => {

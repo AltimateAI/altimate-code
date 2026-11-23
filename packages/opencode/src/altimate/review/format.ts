@@ -297,7 +297,9 @@ export function commentableLines(diff: string | undefined): Set<number> {
  * Inline comments for findings with a line. With `commentable` (head-side
  * commentable lines per file, see `commentableLines`), only lines inside the
  * PR's diff hunks are kept: GitHub rejects the whole batch over one line
- * outside the diff. The finding keeps its line in the envelope and summary.
+ * outside the diff. A file with no entry has unknown hunks (GitHub omits the
+ * patch for large diffs): its lines are attempted, and the 422 fallback covers a
+ * miss. The finding keeps its line in the envelope and summary.
  */
 export function inlineComments(
   env: VerdictEnvelope,
@@ -309,7 +311,7 @@ export function inlineComments(
       (f) =>
         typeof f.startLine === "number" &&
         !alreadyPosted.has(f.id) &&
-        (!commentable || !!commentable.get(f.file)?.has(f.startLine)),
+        (!commentable?.has(f.file) || commentable.get(f.file)!.has(f.startLine)),
     )
     .map((f) => ({
       path: f.file,
