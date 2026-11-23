@@ -227,6 +227,30 @@ WHERE q.et >= DATEADD(day, -7, ${WINDOW_END_UTC}) AND q.et < ${WINDOW_END_UTC}
 GROUP BY 1, 2 ORDER BY 2
 `
 
+/**
+ * Every warehouse creation and drop in the year the view keeps, one row per event (`kind` is `create` or
+ * `drop`, `event_ms` its epoch milliseconds), after one `history` row counting the events in the span the
+ * period query reads.
+ * `SHOW WAREHOUSES` gives no ids: a creation logged within a second of a listed warehouse's `created_on`
+ * names its id, and a dropped id is no listed warehouse's, since a warehouse cannot be undropped. The count
+ * tells a view with nothing for those days from one that was read.
+ */
+export const SNOWFLAKE_IDENTITY_EVENTS_SQL = `
+WITH e AS (
+  SELECT WAREHOUSE_ID AS warehouse_id, WAREHOUSE_NAME AS warehouse_name, EVENT_NAME AS event_name, TIMESTAMP AS ts
+  FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
+  WHERE TIMESTAMP >= DATEADD(day, -365, ${WINDOW_END}) AND WAREHOUSE_ID IS NOT NULL
+)
+SELECT 'history' AS kind, NULL AS warehouse_id, NULL AS warehouse_name, NULL AS event_ms,
+       COUNT_IF(ts >= DATEADD(day, -9, ${WINDOW_END}) AND ts < DATEADD(day, 1, ${WINDOW_END})) AS recent_events
+FROM e
+UNION ALL
+SELECT DISTINCT IFF(event_name = 'DROP_WAREHOUSE', 'drop', 'create'), warehouse_id, warehouse_name,
+       DATE_PART(epoch_millisecond, ts), NULL
+FROM e WHERE event_name IN ('CREATE_WAREHOUSE', 'DROP_WAREHOUSE')
+ORDER BY 1 DESC, 2, 4
+`
+
 /** The account's contracted price of a warehouse credit: the latest above zero before the window's end, the lowest if that date has several. */
 export const SNOWFLAKE_RATE_SQL = `
 SELECT EFFECTIVE_RATE AS effective_rate, CURRENCY AS currency, TO_VARCHAR(DATE, 'YYYY-MM-DD') AS rate_date
@@ -282,6 +306,8 @@ export interface FactRows {
   periods: Row[]
   restarts: Row[]
   queries: Row[]
+  /** Creation and drop rows of `SNOWFLAKE_IDENTITY_EVENTS_SQL`; none when the view could not be read. */
+  lifecycle?: Row[]
 }
 
 /** Milliseconds of a `created_on` value, or NaN when it cannot be read. */
@@ -295,6 +321,30 @@ const HOUR_MS = 3_600_000
 
 /** How far an event or query time may read before `created_on`, which Snowflake stamps on its own clock. */
 const CLOCK_SKEW_MS = 60_000
+
+/** How far a warehouse's CREATE_WAREHOUSE event may be from the `created_on` SHOW WAREHOUSES reports. */
+const CREATE_TOLERANCE_MS = 1_000
+
+/**
+ * The id each listed warehouse's creation event names, and the ids that were dropped. A listed warehouse
+ * gets an id only when exactly one id not since dropped was created within a second of its `created_on`,
+ * and that id fits no other listed warehouse; otherwise it has none here.
+ */
+function identityOf(warehouses: Row[], lifecycle: Row[]) {
+  const dropped = new Set(lifecycle.filter((row) => row.kind === "drop").map((row) => num(row.warehouse_id)))
+  const creations = lifecycle
+    .filter((row) => row.kind === "create" && !dropped.has(num(row.warehouse_id)))
+    .map((row) => ({ id: num(row.warehouse_id), at: num(row.event_ms) }))
+  const namesByCreatedId = new Map<number, string[]>()
+  for (const row of warehouses) {
+    const created = timeOf(row.created_on)
+    const ids = new Set(creations.filter(({ at }) => Math.abs(at - created) <= CREATE_TOLERANCE_MS).map(({ id }) => id))
+    if (ids.size === 1) entry(namesByCreatedId, [...ids][0]!, () => []).push(String(row.name ?? ""))
+  }
+  const listedAs = new Map<number, string>()
+  for (const [id, names] of namesByCreatedId) if (names.length === 1) listedAs.set(id, names[0]!)
+  return { dropped, listedAs }
+}
 
 /**
  * When a fact row's usage began, in milliseconds: its `first_start` (epoch seconds). A row without one (only
@@ -315,8 +365,12 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
 
 /**
  * The input core reads, one entry per warehouse `SHOW WAREHOUSES` lists, which gives names and no ids.
- * Usage belongs to a warehouse id, and each id belongs to at most one listed warehouse:
- * - the name it was seen under last, by each row's start (a query row starts at that name's first query),
+ * Usage belongs to a warehouse id, and each id belongs to at most one listed warehouse. The warehouse
+ * events give that from ids: an id dropped belongs to none, and an id whose creation matches a listed
+ * warehouse's `created_on` belongs to that one, whatever names its usage was logged under. Ids and listed
+ * warehouses the events leave open (created before the year the view keeps, or after its latest event, or
+ * the view unread) are matched by name and time:
+ * - the name an id was seen under last, by each row's start (a query row starts at that name's first query),
  *   unless some of its usage began before the warehouse now holding that name was created (a dropped
  *   warehouse whose name was reused);
  * - otherwise another listed name it was seen under, created before all of its usage (a warehouse renamed
@@ -324,9 +378,6 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
  * A metered hour counts from its start, which can be up to an hour before the creation inside it, and other
  * times may read up to a minute early. A name that several ids belong to keeps the one seen last, then the
  * larger (newer) id.
- * Without ids in `SHOW WAREHOUSES`, two cases stay ambiguous: an older warehouse renamed into a dropped one's
- * name, with no usage under it in the window, takes the dropped one's usage; and a predecessor metered only in
- * the hour of the new warehouse's creation, with no other row, has that hour counted for the new warehouse.
  * `unlisted` names the warehouses that billed credits but are not listed: dropped, or hidden from the role.
  * `replaced` names the listed ones whose name an earlier warehouse also used with any usage (credits,
  * periods, restarts or queries): that earlier usage is left out.
@@ -334,6 +385,10 @@ const later = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1)
 export function buildFacts(rows: FactRows) {
   const listed = new Set(rows.warehouses.map((row) => String(row.name ?? "")))
   const createdAt = new Map(rows.warehouses.map((row) => [String(row.name ?? ""), timeOf(row.created_on)]))
+  const { dropped, listedAs } = identityOf(rows.warehouses, rows.lifecycle ?? [])
+  const identified = new Set(listedAs.values())
+  /** A listed warehouse whose id the events did not give. */
+  const open = (name: string) => listed.has(name) && !identified.has(name)
   // Each id's rows from every source, with whether a row's time is a metered hour, and when each of its names was last seen.
   const sources = [
     { list: rows.metering, hourly: true },
@@ -371,14 +426,17 @@ export function buildFacts(rows: FactRows) {
    * there; it never moves an id to another name.
    */
   const ownerOf = (id: number): string | undefined => {
+    if (dropped.has(id)) return undefined
+    const known = listedAs.get(id)
+    if (known !== undefined) return known
     const [last, ...earlier] = namesOf(id)
-    if (last !== undefined && listed.has(last)) {
+    if (last !== undefined && open(last)) {
       const created = createdAt.get(last) ?? Number.NaN
       if (!Number.isFinite(created) || startedAfter(id, created)) return last
     }
     // Moving an id to another of its names needs that warehouse's creation time to show the id fits it: an
     // unreadable one compares false.
-    return earlier.find((name) => listed.has(name) && startedAfter(id, createdAt.get(name) ?? Number.NaN))
+    return earlier.find((name) => open(name) && startedAfter(id, createdAt.get(name) ?? Number.NaN))
   }
   const replaced = new Set<string>()
   const unlisted = new Set<string>()
@@ -393,7 +451,8 @@ export function buildFacts(rows: FactRows) {
     if (listed.has(last) && list.some(({ row }) => active(row))) replaced.add(last)
     if (!listed.has(last) && list.some(({ hourly }) => hourly)) unlisted.add(last)
   }
-  const idOf = new Map<string, number>()
+  // A warehouse the events identified keeps its id with no usage in the window.
+  const idOf = new Map<string, number>([...listedAs].map(([id, name]) => [name, id]))
   for (const [owner, ids] of idsByOwner) {
     const [id, ...others] = ids.sort((a, b) => later(lastSeen(a), lastSeen(b)) || b - a)
     idOf.set(owner, id!)
@@ -565,6 +624,26 @@ export async function snowflakeSavings(
       return failed(`No check could run. ${reason.reason}`)
     }
 
+    // Read after the usage queries, so it cannot cost one of them its time. Without it, usage is matched
+    // to warehouses by name and time, and the answer says so.
+    let lifecycle: Row[] = []
+    const byNameAndTime = (reason: string) =>
+      skipped.push({
+        check: "Telling dropped, recreated and renamed warehouses apart by id",
+        reason: `${reason.replace(/\.$/, "")}; usage was matched to warehouses by name and creation time instead`,
+      })
+    try {
+      const events = await read("warehouse identity", SNOWFLAKE_IDENTITY_EVENTS_SQL)
+      const history = events.find((row) => row.kind === "history")
+      // The period and restart queries read the same view: events there and none here is a view not read.
+      if (history === undefined || (whole(history.recent_events) === 0 && periods.length + restarts.length > 0)) {
+        byNameAndTime("WAREHOUSE_EVENTS_HISTORY returned no events for the days the other queries read events from")
+      } else lifecycle = events
+    } catch (e) {
+      if (signal?.aborted) throw e
+      byNameAndTime(reasonOf(e))
+    }
+
     // Read last: only the price needs it, and a slow or unreadable rate sheet must not cost a usage
     // query its time. Most accounts cannot read it (it needs organization access); list price stands in.
     const rate = await read("credit rate", SNOWFLAKE_RATE_SQL).catch((e) => {
@@ -575,7 +654,7 @@ export async function snowflakeSavings(
       return [] as Row[]
     })
     const price = creditPrice(rate[0])
-    const { facts, unlisted, replaced } = buildFacts({ warehouses, metering, periods, restarts, queries })
+    const { facts, unlisted, replaced } = buildFacts({ warehouses, metering, periods, restarts, queries, lifecycle })
     if (unlisted.length > 0) {
       skipped.push({
         check: `${unlisted.length} warehouse${unlisted.length === 1 ? "" : "s"} that billed credits`,
