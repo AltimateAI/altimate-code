@@ -1,4 +1,4 @@
-import { type Finding, type Severity } from "./finding"
+import { type Finding, type Severity, blankNames, groupKeyTitle } from "./finding"
 import { type VerdictEnvelope } from "./verdict"
 
 /**
@@ -38,8 +38,8 @@ export function verdictHeadline(env: VerdictEnvelope): string {
 
 /** Default size budget for the posted PR comment (characters). */
 export const SUMMARY_BUDGET_CHARS = 5_000
-/** The same rule on this many models or more collapses into one bullet. */
-export const GROUP_MIN_MODELS = 3
+/** The same finding on this many models or more collapses into one bullet. */
+export const GROUP_MIN_MODELS = 2
 
 export interface RenderOptions {
   /** Character budget for the comment; findings beyond it are counted, not listed.
@@ -152,18 +152,6 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     )
   }
   return [...lines, ...tail].join("\n")
-}
-
-/** Backticked names blanked, so the same rule on different models/columns
- *  normalizes to the same text. */
-function blankNames(s: string): string {
-  return s.replace(/`[^`]*`/g, "`…`")
-}
-
-/** A finding's title without its leading `model: `, with backticked names
- *  blanked: the title half of the grouping key. */
-function groupKeyTitle(f: Finding): string {
-  return blankNames(f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title)
 }
 
 /** Render findings of one severity as bullets. With `group`, findings that say

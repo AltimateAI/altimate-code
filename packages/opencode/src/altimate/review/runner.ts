@@ -2,6 +2,7 @@ import { Dispatcher } from "../native"
 import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import { loadRawManifest } from "../native/dbt/helpers"
+import { isExistenceError } from "../native/existence-error"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
 import { errorReason } from "./verdict"
@@ -30,6 +31,8 @@ interface CachedManifest {
   schemaContext?: SchemaContext // model/source columns for equivalence resolution
   ok: boolean
 }
+
+const NOT_FOUND_MESSAGE = /^(table|column) .+ not found/i
 
 function asArray<T = any>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : []
@@ -248,12 +251,12 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // Only surface validation errors when a REAL schema was supplied —
           // in lint-only mode the throwaway `_altimate_lint_` schema makes
           // every real table "unknown" and would flood the review.
-          // A manifest-derived schema lists only models documented in yml, so
-          // "table not found" there means "undocumented", not "missing": drop
-          // it unless the schema came from a complete catalog.json.
+          // A manifest-derived schema lists only the models and columns documented
+          // in yml, so "table/column not found" there means "undocumented", not
+          // "missing": drop both unless the schema came from a complete catalog.json.
           hasTables
             ? asArray(data.validation?.errors)
-                .filter((e: any) => opts.schemaContext || e?.kind?.type !== "TableNotFound")
+                .filter((e: any) => opts.schemaContext || !(isExistenceError(e) || NOT_FOUND_MESSAGE.test(String(e?.message ?? ""))))
                 .map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
             : [],
         )
@@ -465,6 +468,29 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       } catch (err) {
         fail("modelConsumers", err)
         return undefined
+      }
+    },
+
+    async declaredUniqueKeys(model: string): Promise<string[][]> {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw) return []
+        const nodes = Object.entries<any>(raw.nodes ?? {})
+        const uid = nodes.find(([id, n]) => id.startsWith("model.") && n?.name === model)?.[0]
+        if (!uid) return []
+        const keys: string[][] = []
+        for (const [, n] of nodes) {
+          if (n?.resource_type !== "test" || n.attached_node !== uid) continue
+          const name = String(n.test_metadata?.name ?? "")
+          const kw = n.test_metadata?.kwargs ?? {}
+          if (name === "unique" && n.column_name) keys.push([String(n.column_name)])
+          const combo = kw.combination_of_columns ?? kw.arguments?.combination_of_columns
+          if (name === "unique_combination_of_columns" && Array.isArray(combo)) keys.push(combo.map(String))
+        }
+        return keys
+      } catch (err) {
+        fail("declaredUniqueKeys", err)
+        return []
       }
     },
 

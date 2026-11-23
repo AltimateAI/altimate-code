@@ -210,3 +210,59 @@ export function dedupe(findings: Finding[]): Finding[] {
   }
   return [...byId.values()]
 }
+
+/** Backticked names blanked, so the same rule on different models/columns
+ *  normalizes to the same text. */
+export function blankNames(s: string): string {
+  return s.replace(/`[^`]*`/g, "`…`")
+}
+
+/** A finding's title without its leading `<model or file>: ` or a merged
+ *  `(+N more)` suffix, with backticked names blanked: the title half of a
+ *  grouping key, so the same rule on different models/columns shares it. */
+export function groupKeyTitle(f: Pick<Finding, "title">): string {
+  return blankNames(f.title.replace(/^[\w.\-/]+: /, "").replace(/ \(\+\d+ more\)$/, ""))
+}
+
+/** One merged instance: its title, or its message when the title is the same as
+ *  the first's (lint titles carry only the rule name), plus its line. */
+function repeatLabel(f: Finding, first: Finding): string {
+  const label = f.title === first.title ? (f.body.split("\n")[0] ?? "") : f.title.replace(/^[\w.\-/]+: /, "")
+  return f.startLine ? `${label} (line ${f.startLine})` : label
+}
+
+/**
+ * Merge repeats of one rule within one file (one finding per column of a grain
+ * test, one per join onto the same kind of key) into a single finding that
+ * lists every instance. Critical findings stay separate: each one can block.
+ */
+export function mergeRepeats(findings: Finding[]): Finding[] {
+  const groups = new Map<string, Finding[]>()
+  const out: Finding[] = []
+  for (const f of findings) {
+    if (f.severity === "critical") {
+      out.push(f)
+      continue
+    }
+    const key = [f.file, f.category, f.severity, !!f.degraded, groupKeyTitle(f)].join("|")
+    const g = groups.get(key)
+    if (g) g.push(f)
+    else groups.set(key, [f])
+  }
+  for (const [key, g] of groups) {
+    if (g.length === 1) {
+      out.push(g[0])
+      continue
+    }
+    g.sort((a, b) => tieKey(a).localeCompare(tieKey(b)))
+    const [first, ...rest] = g
+    out.push({
+      ...first,
+      // Keyed by the group, not by its first instance: fixing that instance must not re-post the comment.
+      id: "f_" + createHash("sha256").update(`merged ${key}`).digest("hex").slice(0, 16),
+      title: `${first.title} (+${rest.length} more)`,
+      body: `${first.body}\n\nSame rule, also here:\n${rest.map((f) => `- ${repeatLabel(f, first)}`).join("\n")}`,
+    })
+  }
+  return out
+}
