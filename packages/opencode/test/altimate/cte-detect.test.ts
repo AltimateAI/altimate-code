@@ -1759,6 +1759,9 @@ select * from c`
   it("reads the SQL Jinja renders: a comment inside a word joins it, {%- endraw %} trims, a ) in Jinja ends no body", () => {
     const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
     expect(readsOf(wrap("select * from orders{# note #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #}{# b #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{#- a -#} {# b #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #} _archive")).b).toEqual(["orders"])
     expect(readsOf(wrap("select * from orders {# note #} join t on 1 = 1")).b).toEqual(["orders"])
     expect(readsOf(wrap("select 2 -- {% raw %}\n{%- endraw %} from orders\n")).b).toEqual([])
     expect(readsOf(wrap("select 2 -- {% raw %}\n{% endraw %} from orders\n")).b).toEqual(["orders"])
@@ -1777,6 +1780,30 @@ select * from c`
     const started = performance.now()
     expect(readsOf(`with orders as (select 1), b as (${siblings} union all select * from orders) select * from b`).b).toEqual(["orders"])
     expect(performance.now() - started).toBeLessThan(3000)
+  })
+
+  it("a Jinja tag or expression between two names keeps both: either branch may render", () => {
+    const sql = (body: string) =>
+      `with orders as (select 1), payments as (select 2), b as (select * from ${body}) select * from b`
+    expect(readsOf(sql("{% if var('use_orders') %}orders{% else %}payments{% endif %}")).b).toEqual(["orders", "payments"])
+    expect(readsOf(sql("orders{% if x %}_a{% endif %}")).b).toEqual(["orders"])
+    expect(readsOf(sql("orders{{ suffix }}")).b).toEqual(["orders"])
+  })
+
+  it("sibling subqueries defining one name scale linearly", () => {
+    const time = (count: number) => {
+      const siblings = Array.from({ length: count }, (_, i) => `select * from (with orders as (select ${i}) select * from orders) s${i}`).join(" union all ")
+      const sql = `with orders as (select 1), b as (${siblings} union all select * from orders) select * from b`
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const started = performance.now()
+          expect(readsOf(sql).b).toEqual(["orders"])
+          return performance.now() - started
+        }),
+      )
+    }
+    // Four times the siblings costs about four times as much; comparing with every earlier scope costs sixteen.
+    expect(time(16000) / time(4000)).toBeLessThan(9)
   })
 
   it("a body with thousands of inner CTEs is read in near-linear time", () => {

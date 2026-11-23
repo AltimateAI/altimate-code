@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import * as core from "@altimateai/altimate-core"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import {
   columnReach,
@@ -969,6 +970,7 @@ describe("lineageGraph", () => {
   test("a node carries the schema.yml that describes it, without dbt's package prefix", () => {
     const graph = lineageGraph(
       {
+        metadata: { project_name: "shop" },
         nodes: {
           "model.shop.orders": { ...model("orders", [], "select 1", []), patch_path: "shop://models/marts/schema.yml" },
           "model.shop.bare": model("bare", ["model.shop.orders"], "select 1", []),
@@ -993,6 +995,22 @@ describe("lineageGraph", () => {
     )
     expect(graph.nodes["model.shop.orders"].yml).toBe("models/schema.yml")
     expect(graph.nodes["model.dep.base"].yml).toBeUndefined()
+  })
+
+  test("without project_name the root project is told by project_id, and otherwise no package path is given", () => {
+    const nodes = {
+      "model.shop.orders": { ...model("orders", ["model.dep.base"], "select 1", []), patch_path: "shop://models/schema.yml" },
+      "model.dep.base": { ...model("base", [], "select 1", []), patch_path: "dep://models/schema.yml" },
+    }
+    // dbt's project_id is the MD5 of the project name.
+    const hashed = lineageGraph({ metadata: { project_id: createHash("md5").update("shop").digest("hex") }, nodes }, "model.shop.orders")
+    expect(hashed.nodes["model.shop.orders"].yml).toBe("models/schema.yml")
+    expect(hashed.nodes["model.dep.base"].yml).toBeUndefined()
+    for (const metadata of [undefined, {}, { project_name: null }]) {
+      const graph = lineageGraph({ ...(metadata ? { metadata } : {}), nodes }, "model.shop.orders")
+      expect(graph.nodes["model.shop.orders"].yml).toBeUndefined()
+      expect(graph.nodes["model.dep.base"].yml).toBeUndefined()
+    }
   })
 
   test("a twelve-hop chain comes back whole to its source; upstream past 500 nodes is cut and marked", () => {

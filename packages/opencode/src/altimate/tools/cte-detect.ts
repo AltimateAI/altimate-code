@@ -372,13 +372,23 @@ function blankJinja(text: string): string {
   const out: string[] = []
   let kept = 0
   // Blanked to spaces, newlines too: a Jinja comment ends no SQL line comment. Whitespace control (`{{-`, `-}}`)
-  // takes the whitespace beside the tag with it, newlines included, as rendering does. Between two word characters
-  // the tag is blanked to word characters instead: `orders{# x #}_archive` renders as one name, not `orders`.
+  // takes the whitespace beside the tag with it, newlines included, as rendering does. A comment, which renders to
+  // nothing, between two word characters is blanked to word characters instead: `orders{# x #}_archive` renders as
+  // one name, not `orders`, and so does a run of such comments. A tag or expression may render either side of it
+  // apart (`{% else %}`), so it stays a boundary.
+  const word = /[\p{L}\p{N}_$]/u
   const blank = (from: number, to: number) => {
+    const comment = text.startsWith("{#", from)
     if (text[from + 2] === "-") while (from > kept && /\s/.test(text[from - 1])) from--
     if (text[to - 3] === "-") while (to < text.length && /\s/.test(text[to])) to++
-    const before = from > kept ? text[from - 1] : (out.at(-1)?.at(-1) ?? "")
-    const joined = /[\p{L}\p{N}_$]/u.test(before) && /[\p{L}\p{N}_$]/u.test(text[to] ?? "")
+    let joined = false
+    if (comment) {
+      const before = from > kept ? text[from - 1] : (out.at(-1)?.at(-1) ?? "")
+      // The text after this comment and any comments right after it.
+      let after = to
+      while (text.startsWith("{#", after)) after = jinjaEnd(text, after)
+      joined = word.test(before) && word.test(text[after] ?? "")
+    }
     out.push(text.substring(kept, from), (joined ? "_" : " ").repeat(to - from))
     kept = to
     return to
@@ -516,8 +526,9 @@ function shadowsIn(sql: string, start: number, end: number): { written: Written;
  * (`schema . orders`) or inside a longer word, that names the CTE (see `sameName`). Once a CTE the body's own
  * WITH or a subquery's WITH defines has ended, its name is that inner CTE there, not a read of the outer one.
  * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not; a CTE
- * named only through Jinja is not seen, nor one after a nested block comment. A client wanting a CTE's own time subtracts the CTEs it reads directly or through another (the
- * closure of `reads`), each once.
+ * named only through Jinja is not seen, nor one after a nested block comment. A client can estimate a CTE's own
+ * time by subtracting the CTEs it reads directly or through another (the closure of `reads`), each once: `reads`
+ * records names in the SQL, not the work the warehouse does, so separately timed counts need not add up.
  */
 export function cteReads(text: string, ctes: CteInfo[]): number[][] {
   const sql = blankJinja(text)
@@ -534,11 +545,29 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
     const reads = new Set<number>()
     // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
     // once its definition has ended, to the end of the query that holds it.
-    const inner = new Map<string, { written: Written; at: number; from: number; to: number }[]>()
+    // Scopes nest or are disjoint and the scan only moves forward, so each name keeps a stack of the scopes open at
+    // the scan position: a reference is compared with the scopes that hold it, not every scope of its name.
+    type Shadow = { written: Written; at: number; from: number; to: number }
+    const inner = new Map<string, { scopes: Shadow[]; next: number; open: Shadow[] }>()
+    const definedAt = new Set<number>()
     for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, queryEnd) : []) {
-      const list = inner.get(bucket(one.written.name))
-      if (list) list.push(one)
-      else inner.set(bucket(one.written.name), [one])
+      definedAt.add(one.at)
+      const named = inner.get(bucket(one.written.name))
+      if (named) named.scopes.push(one)
+      else inner.set(bucket(one.written.name), { scopes: [one], next: 0, open: [] })
+    }
+    for (const named of inner.values()) named.scopes.sort((a, b) => a.from - b.from)
+    const shadows = (ref: Written, at: number) => {
+      const named = inner.get(bucket(ref.name))
+      if (!named) return false
+      const { scopes, open } = named
+      while (named.next < scopes.length && scopes[named.next].from < at) {
+        const one = scopes[named.next++]
+        while (open.length > 0 && open[open.length - 1].to <= one.from) open.pop()
+        open.push(one)
+      }
+      while (open.length > 0 && open[open.length - 1].to <= at) open.pop()
+      return open.some((one) => one.from < at && at < one.to && sameName(one.written, ref))
     }
     let pos = cte.queryStart
     // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
@@ -579,7 +608,7 @@ export function cteReads(text: string, ctes: CteInfo[]): number[][] {
         const ref = written(sql.substring(pos, end))
         const named = (earlier.get(bucket(ref.name)) ?? []).filter((one) => sameName(one.written, ref))
         // An inner CTE's own name where it is defined is no reference at all, and one in scope shadows the outer.
-        const shadowed = (inner.get(bucket(ref.name)) ?? []).some((one) => one.at === pos || (one.from < pos && pos < one.to && sameName(one.written, ref)))
+        const shadowed = definedAt.has(pos) || shadows(ref, pos)
         if (!shadowed) for (const one of named) reads.add(one.position)
       }
       previous = sql[end - 1]
