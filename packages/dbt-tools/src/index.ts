@@ -138,9 +138,9 @@ async function main() {
   const issue = await validate(cfg)
   if (issue) return { error: issue }
 
-  // Configure CLI fallbacks with the project's Python environment
+  // Configure CLI fallbacks with the project's Python environment, or its dbt Fusion
   const { configure } = await import("./dbt-cli")
-  configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
+  configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot, dbtIntegration: cfg.dbtIntegration })
 
   // Lazy import: the adapter loads dbt-integration, which commands above don't need
   let adapter

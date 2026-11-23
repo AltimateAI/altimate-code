@@ -1,5 +1,8 @@
-import { describe, test, expect, mock, beforeEach } from "bun:test"
+import { describe, test, expect, mock, beforeEach, afterEach, beforeAll, afterAll } from "bun:test"
 import * as realChildProcess from "child_process"
+import { mkdtempSync, rmSync, writeFileSync } from "fs"
+import { tmpdir } from "os"
+import { dirname, join } from "path"
 
 // We test the parsing logic by mocking execFile.
 // Spread the real module so other exports (execFileSync, etc.)
@@ -14,7 +17,8 @@ mock.module("child_process", () => ({
 }))
 
 // Import after mocking
-const { execDbtShow, execDbtCompile, execDbtCompileInline, execDbtLs } = await import("../src/dbt-cli")
+const { configure, execDbtShow, execDbtCompile, execDbtCompileInline, execDbtLs } = await import("../src/dbt-cli")
+const { all, fusionBinary } = await import("../src/check")
 
 // ---------------------------------------------------------------------------
 // execDbtShow
@@ -718,5 +722,77 @@ describe("execDbtLs", () => {
 
     const result = await execDbtLs("isolated_model", "children")
     expect(result).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Which dbt the fallbacks run
+// ---------------------------------------------------------------------------
+describe("the fallbacks' dbt", () => {
+  const realFind = fusionBinary.find
+  const override = process.env.ALTIMATE_DBT_PATH
+  const FUSION = { path: "/fusion/bin/dbt", version: [2, 0, 9], location: "installer" as const }
+  const cfg = { projectRoot: "/p", pythonPath: "/venv/bin/python", dbtIntegration: "fusion", queryLimit: 500 }
+  // The first dbt resolveDbt would take: in Fusion mode, a dbt Core or a dbt Cloud CLI. It takes only one that exists.
+  let core: string
+
+  beforeAll(() => {
+    core = join(mkdtempSync(join(tmpdir(), "dbt-cli-core-")), "dbt")
+    writeFileSync(core, "#!/bin/sh\n", { mode: 0o755 })
+  })
+
+  afterAll(() => rmSync(dirname(core), { recursive: true, force: true }))
+
+  beforeEach(() => {
+    mockExecFile.mockReset()
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      cb(null, "model.p.orders\n", "")
+    })
+    process.env.ALTIMATE_DBT_PATH = core
+  })
+
+  afterEach(() => {
+    fusionBinary.find = realFind
+    if (override === undefined) delete process.env.ALTIMATE_DBT_PATH
+    else process.env.ALTIMATE_DBT_PATH = override
+    configure({})
+  })
+
+  test("in Fusion mode, are the dbt Fusion binary the prerequisite check finds, looked up as it looks", async () => {
+    const asked: unknown[] = []
+    fusionBinary.find = async (options) => {
+      asked.push(options)
+      return FUSION
+    }
+    configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot, dbtIntegration: "fusion" })
+
+    await execDbtLs("customers", "children")
+    await all(cfg)
+
+    expect(new Set(mockExecFile.mock.calls.map((c) => c[0]))).toEqual(new Set([FUSION.path]))
+    expect(asked).toHaveLength(2)
+    expect(asked[0]).toEqual(asked[1])
+  })
+
+  test("in Fusion mode with no Fusion binary, fail rather than run another dbt", async () => {
+    fusionBinary.find = async () => undefined
+    configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot, dbtIntegration: "fusion" })
+
+    await expect(execDbtLs("customers", "children")).rejects.toThrow(
+      "dbt Fusion was not found: no dbt 2.x binary next to /venv/bin/python, in ~/.local/bin or on PATH",
+    )
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  test("in other modes, are resolved as before, with no Fusion lookup", async () => {
+    fusionBinary.find = async () => {
+      throw new Error("the Fusion lookup must not run outside Fusion mode")
+    }
+    for (const dbtIntegration of ["core", "corecommand", "cloud", undefined]) {
+      mockExecFile.mockClear()
+      configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot, dbtIntegration })
+      await execDbtLs("customers", "children")
+      expect(new Set(mockExecFile.mock.calls.map((c) => c[0]))).toEqual(new Set([core]))
+    }
   })
 })

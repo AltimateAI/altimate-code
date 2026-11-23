@@ -29,6 +29,8 @@ export interface DbtCliOptions {
   pythonPath?: string
   /** dbt project root directory (used as cwd). */
   projectRoot?: string
+  /** The config's dbt-integration mode. In `fusion` the fallbacks run the dbt Fusion binary the adapter runs. */
+  dbtIntegration?: string
 }
 
 /** Module-level options, set once via `configure()`. */
@@ -44,11 +46,23 @@ export function configure(opts: DbtCliOptions): void {
 }
 
 /** Get or resolve the dbt binary path. */
-function getDbt(): ResolvedDbt {
-  if (!resolvedDbt) {
-    resolvedDbt = resolveDbt(globalOptions.pythonPath, globalOptions.projectRoot)
-  }
-  return resolvedDbt
+async function getDbt(): Promise<ResolvedDbt> {
+  if (resolvedDbt) return resolvedDbt
+  const options = globalOptions
+  // In dbt Fusion mode, the Fusion binary the prerequisite check and the adapter pick: resolveDbt takes
+  // the first `dbt` it finds, which can be dbt Core or the dbt Cloud CLI.
+  const resolved =
+    options.dbtIntegration === "fusion" ? await fusionDbt(options) : resolveDbt(options.pythonPath, options.projectRoot)
+  // A configure() while the lookup ran owns the cache now.
+  if (globalOptions === options) resolvedDbt = resolved
+  return resolved
+}
+
+async function fusionDbt(options: DbtCliOptions): Promise<ResolvedDbt> {
+  const { findFusion, fusionPlaces } = await import("./check")
+  const binary = await findFusion(options)
+  if (!binary) throw new Error(`dbt Fusion was not found: no dbt 2.x binary ${fusionPlaces(options.pythonPath)}`)
+  return { path: binary.path, source: `dbt Fusion (${binary.location})` }
 }
 
 /** Shape of an execFile rejection — carries stdout/stderr alongside message. */
@@ -65,8 +79,8 @@ function toExecFileError(e: unknown): ExecFileError {
   return new Error(String(e)) as ExecFileError
 }
 
-function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
-  const dbt = getDbt()
+async function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const dbt = await getDbt()
   const env = buildDbtEnv(dbt)
   const cwd = globalOptions.projectRoot ?? process.cwd()
 

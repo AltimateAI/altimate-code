@@ -63,17 +63,21 @@ export function fusionPlaces(pythonPath?: string): string {
   return `${adjacent ? `next to ${pythonPath}, ` : ""}in ~/.local/bin or on PATH`
 }
 
-async function fusion(cfg: Config): Promise<Status> {
+/** The dbt Fusion binary for a config, found as the adapter finds the one it runs; undefined when there is none. */
+export function findFusion(cfg: { pythonPath?: string; projectRoot?: string }) {
   // Judge candidates as the adapter does: it runs any `dbt` whose `--version` reports 2.x,
   // script launchers (asdf, nix and company wrappers) included, and allows 15 s for it.
-  const binary = await fusionBinary.find({
+  return fusionBinary.find({
     pythonPath: cfg.pythonPath || undefined,
     cwd: cfg.projectRoot || undefined,
     env: process.env,
     skipScripts: false,
     timeoutMs: 15_000,
   })
-  if (binary) return { ok: true }
+}
+
+async function fusion(cfg: Config): Promise<Status> {
+  if (await findFusion(cfg)) return { ok: true }
   return {
     ok: false,
     error: `dbt Fusion was not found: no dbt 2.x binary ${fusionPlaces(cfg.pythonPath)}`,
