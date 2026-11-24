@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test"
 import {
   isDuplicateEntry,
   MAX_HISTORY_ENTRIES,
+  // altimate_change start — direct mergeStartupHistory coverage
+  mergeStartupHistory,
+  // altimate_change end
   // altimate_change start — prompt history draft navigation tests
   movePromptHistory,
   // altimate_change end
@@ -72,6 +75,52 @@ describe("prompt history", () => {
 
     expect(movePromptHistory(state, history, -1, entry("edited newer"))).toBeUndefined()
     expect(movePromptHistory(state, history, 1, entry("edited newer"))).toBeUndefined()
+  })
+  // altimate_change end
+
+  // altimate_change start — direct mergeStartupHistory coverage
+  test("merges startup history with entries appended during the disk read, disk first", () => {
+    expect(mergeStartupHistory([entry("one"), entry("two")], [entry("three")])).toEqual([
+      entry("one"),
+      entry("two"),
+      entry("three"),
+    ])
+  })
+
+  test("drops a duplicate that straddles the disk and in-memory halves", () => {
+    expect(mergeStartupHistory([entry("one"), entry("ls")], [entry("ls"), entry("two")])).toEqual([
+      entry("one"),
+      entry("ls"),
+      entry("two"),
+    ])
+  })
+
+  test("drops consecutive duplicates within each half but keeps non-consecutive repeats", () => {
+    expect(mergeStartupHistory([entry("a"), entry("a"), entry("b")], [entry("a"), entry("c"), entry("c")])).toEqual([
+      entry("a"),
+      entry("b"),
+      entry("a"),
+      entry("c"),
+    ])
+  })
+
+  test("caps the merged history at the newest MAX_HISTORY_ENTRIES", () => {
+    const lines = Array.from({ length: MAX_HISTORY_ENTRIES }, (_, index) => entry(`disk-${index}`))
+    const prev = [entry("mem-0"), entry("mem-1")]
+    const result = mergeStartupHistory(lines, prev)
+    expect(result).toHaveLength(MAX_HISTORY_ENTRIES)
+    expect(result[0]?.input).toBe("disk-2")
+    expect(result.at(-1)?.input).toBe("mem-1")
+  })
+
+  test("returns a new array and leaves its inputs untouched", () => {
+    const lines = [entry("one")]
+    const prev = [entry("one")]
+    const result = mergeStartupHistory(lines, prev)
+    expect(result).toEqual([entry("one")])
+    expect(lines).toEqual([entry("one")])
+    expect(prev).toEqual([entry("one")])
+    expect(result).not.toBe(lines)
   })
   // altimate_change end
 })
