@@ -2437,28 +2437,65 @@ describe("orchestrate", () => {
   })
 
   test("a comma inside a literal does not split an aliased PII item from its alias", async () => {
-    // `email || ',' || phone_number as contact` is ONE item aliased `contact`; the
-    // base built `contact` from both columns, so a table-alias rename exposes nothing.
-    const base = "select c.customer_id,\n  c.email || ',' || c.phone_number as contact\nfrom customers c"
-    const head = base.replace(/\bc\./g, "cust.").replace("customers c", "customers cust")
+    // `email || ',' || phone_number as contact` is ONE item aliased `contact`, so
+    // both PII tokens carry that alias (not just the one after the literal comma).
     const env = await runReview({
       changedFiles: [
-        {
-          path: "models/marts/m.sql",
-          status: "modified",
-          diff: "-  c.email || ',' || c.phone_number as contact\n+  cust.email || ',' || cust.phone_number as contact\n",
-        },
+        { path: "models/marts/m.sql", status: "modified", diff: "+  c.email || ',' || c.phone_number as contact\n" },
       ],
       config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
-      runner: {
-        ...piiRunner([]),
-        detectPii: async (sql: string) => ({ columns: /as contact/.test(sql) ? ["contact"] : [] }),
-      },
-      getContent: content(head, base),
+      runner: piiRunner([]),
+      getContent: content(
+        "select c.customer_id,\n  c.email || ',' || c.phone_number as contact\nfrom customers c",
+        "select c.customer_id\nfrom customers c",
+      ),
     })
-    expect(env.findings.filter(isTwin)).toEqual([])
+    // The two twins share a fingerprint (dedupe keeps one); the catalog twin lists every item.
+    const catalog = env.findings.find((f) => (f.evidence?.result as any)?.rule === "select-pii-columns")
+    expect((catalog?.evidence?.result as any)?.items.map((i: any) => [i.column, i.alias])).toEqual([
+      ["email", "contact"],
+      ["phone_number", "contact"],
+    ])
+  })
+
+  test("a base output that masks a PII column does not hide the raw column newly added", async () => {
+    // Base `sha2(c.ssn) as ssn_hash` (flagged by name) exposes no raw SSN, so a
+    // newly added `c.ssn as tax_ref` keeps its critical twin.
+    const base = "select c.customer_id,\n  sha2(c.ssn) as ssn_hash\nfrom customers c"
+    const head = "select c.customer_id,\n  sha2(c.ssn) as ssn_hash,\n  c.ssn as tax_ref\nfrom customers c"
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: [
+          {
+            path: "models/marts/m.sql",
+            status: "modified",
+            diff: "-  sha2(c.ssn) as ssn_hash\n+  sha2(c.ssn) as ssn_hash,\n+  c.ssn as tax_ref\n",
+          },
+        ],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: {
+          ...piiRunner([]),
+          detectPii: async (sql: string) => ({
+            columns: ["ssn_hash", "tax_ref"].filter((name) => new RegExp(`as ${name}\\b`).test(sql)),
+          }),
+        },
+        getContent: content(head, base),
+      })
+      // Reported by the broad lane (reviewers `[]`) or, without it, by the regex twin.
+      const ssn = env.findings.filter(
+        (f) =>
+          f.category === "pii_exposure" &&
+          f.severity === "critical" &&
+          ((f.evidence?.result as any)?.alias === "tax_ref" || f.title.includes("tax_ref")),
+      )
+      expect(ssn.length).toBeGreaterThan(0)
+      if (reviewers.length) expect((ssn[0].evidence?.result as any)?.rule).toBe("pii_into_mart")
+      expect(env.verdict).toBe("REQUEST_CHANGES")
+    }
   })
 
   test("without a compiled base the regex PII twins are unknown-confidence warnings that never block", async () => {

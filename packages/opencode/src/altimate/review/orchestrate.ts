@@ -14,7 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type SelectItemColumn, aliasSourceTokens, normalizeSelectLine } from "./rule-catalog"
+import { type SelectItemColumn, normalizeSelectLine, rawColumnExposures } from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -1413,28 +1413,28 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const normalized = normalizeSelectLine(line)
     return !!normalized && removed.has(normalized)
   }
-  // Per file, the base SQL's output aliases mapped to the identifiers each is built from.
-  const baseAliasSourcesByFile = new Map<string, Map<string, Set<string>>>()
-  const baseAliasSources = (file: string) => {
-    let sources = baseAliasSourcesByFile.get(file)
-    if (!sources) {
+  // Per file, the base SQL's output names mapped to the columns each exposes RAW.
+  const baseRawExposuresByFile = new Map<string, Map<string, Set<string>>>()
+  const baseRawExposures = (file: string) => {
+    let exposures = baseRawExposuresByFile.get(file)
+    if (!exposures) {
       const ctx = ctxByPath.get(file)
-      sources = aliasSourceTokens([ctx?.oldSql, ctx?.engineOldSql].filter(Boolean).join("\n"))
-      baseAliasSourcesByFile.set(file, sources)
+      exposures = rawColumnExposures([ctx?.oldSql, ctx?.engineOldSql].filter(Boolean).join("\n"))
+      baseRawExposuresByFile.set(file, exposures)
     }
-    return sources
+    return exposures
   }
   // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a SOURCE
-  // column is already exposed when the base output holds it under its own name, or
-  // under an alias the base built from it (so `c.ssn as tax_ref` → `c.ssn as tax_id`
-  // re-exposes nothing new). The line's alias alone is not proof: `c.email as
-  // contact` → `c.ssn as contact` newly exposes `ssn`.
+  // column is already exposed only when a base PII output exposes that same column
+  // RAW, under its own name or an alias (`c.ssn as tax_ref` → `c.ssn as tax_id`
+  // re-exposes nothing new). The line's alias alone is not proof (`c.email as
+  // contact` → `c.ssn as contact` newly exposes `ssn`), and neither is a base
+  // output that only masks the column (`sha2(c.ssn) as ssn_hash`).
   const isBaseExposed = (file: string, item: { column: string; alias?: string }) => {
     const basePii = basePiiColumnsByFile.get(file)
     if (!basePii) return false
-    if (basePii.has(item.column)) return true
-    const sources = baseAliasSources(file)
-    return [...basePii].some((name) => !!sources.get(name)?.has(item.column))
+    const exposures = baseRawExposures(file)
+    return [...basePii].some((name) => !!exposures.get(name)?.has(item.column))
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool

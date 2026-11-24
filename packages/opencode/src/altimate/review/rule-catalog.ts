@@ -178,19 +178,38 @@ export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColu
   return out
 }
 
+// A column reference, optionally table-qualified (`c.ssn`); group 1 is the column.
+const COLUMN_REF = String.raw`(?:[A-Za-z_][\w$]*\.)*([A-Za-z_][\w$]*)`
+// Select-item expressions that expose a column RAW: a bare reference, or one only
+// cast to a type (`cast(c.ssn as varchar)`, `c.ssn::varchar(20)`).
+const RAW_COLUMN_EXPRS = [
+  new RegExp(String.raw`^${COLUMN_REF}$`, "i"),
+  new RegExp(String.raw`^cast\s*\(\s*${COLUMN_REF}\s+as\s+[\w\s(),]+\)$`, "i"),
+  new RegExp(String.raw`^${COLUMN_REF}\s*::\s*\w+(?:\s*\([\d\s,]*\))?$`, "i"),
+]
+
 /**
- * Per output alias in `sql`, every identifier the select items carrying that
- * alias are built from (`c.email as contact` → `contact: {c, email, …}`). An
- * alias only proves exposure of a column that is among its sources.
+ * Per output name in `sql`, the columns a select item exposes RAW under that
+ * name (`c.ssn as tax_ref` → `tax_ref: {ssn}`, bare `ssn` → `ssn: {ssn}`). An
+ * item that wraps the column in any other function or expression (`sha2(c.ssn)`,
+ * `left(c.ssn, 4)`, `case …`, `a || b`) exposes nothing raw and is left out.
  */
-export function aliasSourceTokens(sql: string): Map<string, Set<string>> {
+export function rawColumnExposures(sql: string): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>()
   for (const line of sql.split("\n")) {
-    for (const { column, alias } of selectItemColumns(line, /\b([A-Za-z_][\w$]*)\b/)) {
-      if (!alias) continue
-      const sources = out.get(alias) ?? new Set<string>()
-      sources.add(column)
-      out.set(alias, sources)
+    for (const item of topLevelItems(stripLiterals(stripComments(line)))) {
+      const s = item
+        .trim()
+        .replace(/^select\s+(?:distinct\s+)?/i, "")
+        .replace(/\s+from\s[\s\S]*$/i, "")
+      const aliased = /^([\s\S]*\S)\s+as\s+["`]?([A-Za-z_][\w$]*)["`]?$/i.exec(s)
+      const expr = aliased ? aliased[1] : s
+      const column = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)?.[1]).find(Boolean)?.toLowerCase()
+      if (!column) continue
+      const name = aliased?.[2]?.toLowerCase() ?? column
+      const columns = out.get(name) ?? new Set<string>()
+      columns.add(column)
+      out.set(name, columns)
     }
   }
   return out
