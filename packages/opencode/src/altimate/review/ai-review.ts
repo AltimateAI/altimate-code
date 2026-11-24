@@ -14,6 +14,7 @@ import { aiReplayPath, runAiReplay } from "./ai-replay"
 import { walkDiffLines } from "./diff-filter"
 import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
 import { type AiSwitches, switchOn } from "./ai-switches"
+import { AI_OTHER_FILES_QUOTA, AI_OTHER_KINDS } from "./ai-other-files"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -52,8 +53,10 @@ export interface AiInputBudget {
   /** Characters of file sections per call; Infinity keeps a single call (the default without coverage). */
   batchChars: number
   /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
-   *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
-  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number> }
+   *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input.
+   *  `otherQuota` (`otherFiles` switch): quota for other/analysis files, kept outside
+   *  `quotas` so the existing buckets and their spare are unchanged. */
+  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number>; otherQuota?: number }
   /** `ALTIMATE_REVIEW_AI_FOCUSED=1`: on PRs with at least `minFiles` selected files, review
    *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls
    *  unless `batchChars` needs more. */
@@ -96,6 +99,9 @@ export function aiInputBudget(
               test: quota(env.ALTIMATE_REVIEW_AI_QUOTA_TEST, COVERAGE_QUOTAS.test),
               yml: quota(env.ALTIMATE_REVIEW_AI_QUOTA_YML, COVERAGE_QUOTAS.yml),
             },
+            ...(switchOn("otherFiles", switches, env)
+              ? { otherQuota: quota(env.ALTIMATE_REVIEW_AI_QUOTA_OTHER, AI_OTHER_FILES_QUOTA) }
+              : {}),
           }
         : undefined,
     focused:
@@ -175,8 +181,20 @@ const KIND_LABEL: Record<string, string> = {
   seed: "seed CSV",
   project_config: "project config",
   python_model: "Python model",
+  // Sent only with the `otherFiles` switch.
+  analysis: "dbt analysis (compiled, not materialized)",
+  other: "other project file",
 }
 const FENCE: Record<string, string> = { schema_yml: "yaml", source_yml: "yaml", project_config: "yaml", seed: "csv", python_model: "python" }
+
+/** Code fence for a file's current content; `other`/`analysis` files by extension. */
+function fenceOf(f: AiReviewFile): string {
+  const known = FENCE[f.kind ?? ""]
+  if (known) return known
+  if (!AI_OTHER_KINDS.has(f.kind ?? "")) return "sql"
+  const p = f.path.toLowerCase()
+  return p.endsWith(".py") ? "python" : p.endsWith(".yml") || p.endsWith(".yaml") ? "yaml" : "sql"
+}
 
 function kindRank(kind: string | undefined): number {
   const i = KIND_ORDER.indexOf(kind ?? "model_sql")
@@ -231,10 +249,14 @@ export function changedLineCount(diff: string | undefined): number {
 export function selectAiFilesByQuota(
   files: AiReviewFile[],
   quotas: Record<AiFileBucket, number> = COVERAGE_QUOTAS,
+  extra: { otherQuota?: number } = {},
 ): { sent: AiReviewFile[]; unsent: AiReviewFile[] } {
   const eligible = files.filter(sendable)
+  // With an `otherQuota`, other/analysis files are selected apart and appended after the rest.
+  const isOther = (f: AiReviewFile) => extra.otherQuota !== undefined && AI_OTHER_KINDS.has(f.kind ?? "")
   const byBucket = new Map<AiFileBucket, AiReviewFile[]>(BUCKET_ORDER.map((b) => [b, []]))
   eligible
+    .filter((f) => !isOther(f))
     .map((f, i) => ({ f, i, n: changedLineCount(f.diff) }))
     .sort((a, b) => b.n - a.n || a.i - b.i)
     .forEach(({ f }) => byBucket.get(BUCKET_OF[f.kind ?? "model_sql"] ?? "model")!.push(f))
@@ -248,8 +270,18 @@ export function selectAiFilesByQuota(
     spare -= extra
   }
   const sent = BUCKET_ORDER.flatMap((b) => byBucket.get(b)!.slice(0, take.get(b)!))
+  sent.push(...mostChanged(eligible.filter(isOther), extra.otherQuota ?? 0))
   const chosen = new Set(sent)
   return { sent, unsent: eligible.filter((f) => !chosen.has(f)) }
+}
+
+/** Up to `n` of `files`, most changed first (ties by input order). */
+function mostChanged(files: AiReviewFile[], n: number): AiReviewFile[] {
+  return files
+    .map((f, i) => ({ f, i, n: changedLineCount(f.diff) }))
+    .sort((a, b) => b.n - a.n || a.i - b.i)
+    .slice(0, n)
+    .map(({ f }) => f)
 }
 
 interface DiffHunk {
@@ -486,7 +518,7 @@ function renderFile(f: AiReviewFile, maxChars: number, coverageArg: CoverageArg,
         ? truncate(f.sql, fileChars)
         : excerptFile(f.sql, f.diff, maxChars).text
     if (f.sql.length > fileChars) stats = { ...stats, truncated: true }
-    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + body + "\n```")
+    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${fenceOf(f)}\n` + body + "\n```")
   }
   return { text: parts.join("\n"), ...stats }
 }
@@ -884,7 +916,7 @@ export function planAiInput(input: AiReviewInput, env: Record<string, string | u
   const budget = aiInputBudget(env, input.switches)
   let files: AiReviewFile[]
   let unsent: AiReviewFile[]
-  if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas))
+  if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas, budget.coverage))
   else {
     files = selectAiFiles(input.files, budget.maxFiles)
     const chosen = new Set(files)

@@ -17,6 +17,7 @@ import {
   type DiffRow,
   type NotReviewed,
   partitionChangedFiles,
+  relativeToRoot,
   hasOldSide,
   isExcludedPath,
   walkDiffLines,
@@ -63,7 +64,8 @@ import {
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles, selectAiFilesByQuota } from "./ai-review"
 import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
-import type { AiSwitches } from "./ai-switches"
+import { type AiSwitches, switchOn } from "./ai-switches"
+import { isAiOtherFile } from "./ai-other-files"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -2669,6 +2671,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const supporting = reviewable.filter(
       (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !mayHoldCredentials(f.path),
     )
+    // `otherFiles`: other/analysis files inside the project root (.sql/.yml/.yaml/.py), after the supporting files.
+    if (switchOn("otherFiles", input.aiSwitches)) {
+      const root = input.layout?.root
+      supporting.push(
+        ...reviewable.filter(
+          (f) =>
+            isAiOtherFile(f) &&
+            !mayHoldCredentials(f.path) &&
+            (root === undefined || relativeToRoot(f.path, root) !== undefined),
+        ),
+      )
+    }
     const contents = await Promise.all(
       supporting.map((f) =>
         f.kind === "seed"
@@ -2684,7 +2698,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // Only the files the AI lane will send are reached (its file cap, or the
     // per-kind quotas in coverage mode); the rest stay in the ledger.
     const aiBudget = aiInputBudget(process.env, input.aiSwitches)
-    touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
+    touch(
+      aiBudget.coverage
+        ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas, aiBudget.coverage).sent
+        : selectAiFiles(aiFiles, aiBudget.maxFiles),
+    )
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     // Files the PR changes that the AI may list and the verifier may read; never the user's exclusions or credentials.
@@ -2781,7 +2799,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ...(input.scope?.notReviewed ?? []),
     ...dropped,
     ...reviewable
-      .filter((f) => (f.kind === "other" && !otherChecked.has(f.path)) || f.kind === "analysis")
+      // Other/analysis files the AI lane sent (`otherFiles`) were reviewed.
+      .filter((f) => ((f.kind === "other" && !otherChecked.has(f.path)) || f.kind === "analysis") && !touched.has(f.path))
       .map((f) => ({ path: f.path, reason: "not a dbt model/macro/test/yml/seed file" })),
     ...reviewable
       .filter((f) => !touched.has(f.path))
