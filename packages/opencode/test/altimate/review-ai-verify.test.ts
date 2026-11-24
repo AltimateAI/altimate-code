@@ -1632,3 +1632,41 @@ describe("decisions[]: offline re-triage from one run's envelope", () => {
     })
   })
 })
+
+describe("runAiVerify: findings left unreviewed when a batch stops", () => {
+  const two = () => [aiFinding({ title: "fct: first claim" }), aiFinding({ title: "fct: second claim", startLine: 11, endLine: 11 })]
+  const big = { tokens: { input: 30_000, inputTotal: 30_000, output: 10, reasoning: 0, cacheRead: 0 }, cost: 0 }
+
+  test("budget: the finding without a verdict goes to the summary, not inline", async () => {
+    const { llm } = scripted((req) =>
+      req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["pr_description", {}]], big),
+    )
+    const { findings, status } = await verify(two(), llm)
+    expect(status.state).toBe("budget")
+    expect(status.reviewed).toBe(1)
+    expect(status.unreviewed).toBe(1)
+    expect(status.summary).toBe(1)
+    const second = findings.find((f) => f.title === "fct: second claim")!
+    expect(second.tier).toBe("summary")
+    expect(inlineEligible({ ...second, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(false)
+    expect(status.decisions?.find((d) => d.id === second.id)?.rule).toBe("unreviewed_stopped")
+  })
+
+  test("a batch that finished normally keeps an omitted finding as before (open fail mode)", async () => {
+    const { llm } = scripted(() => ({ text: JSON.stringify([verdict("c1")]) }))
+    const { findings, status } = await verify(two(), llm)
+    expect(status.state).toBe("ok")
+    expect(status.unreviewed).toBe(1)
+    expect(status.summary).toBe(0)
+    const second = findings.find((f) => f.title === "fct: second claim")!
+    expect(inlineEligible({ ...second, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(true)
+  })
+
+  test("the closed fail mode still discards it", async () => {
+    const { llm } = scripted((req) =>
+      req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["pr_description", {}]], big),
+    )
+    const { findings } = await verify(two(), llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" } })
+    expect(findings.map((f) => f.title)).toEqual(["fct: first claim"])
+  })
+})

@@ -465,10 +465,15 @@ export function triage(
   ts: TsFeatures,
   m: ModelFeatures | undefined,
   knobs: TriageKnobs,
+  stopped = false,
 ): { decision: Decision; rule: string } {
+  // A finding left without a verdict because its batch stopped on the token or tool-output
+  // budget was never checked: under the open fail mode it goes to the summary, not inline.
   if (!m)
     return knobs.failMode === "open"
-      ? { decision: "keep", rule: "unreviewed" }
+      ? stopped
+        ? { decision: "summary", rule: "unreviewed_stopped" }
+        : { decision: "keep", rule: "unreviewed" }
       : { decision: "discard", rule: "unreviewed" }
   if (ts.restatesGrounding) return { decision: "discard", rule: "duplicate_of_engine" }
   if (m.verdict === "refuted") {
@@ -564,7 +569,7 @@ export function retriage(
       m = { ...rest, evidence: hasEvidence ? "(recorded)" : "" }
       if (knobs.claimsOtherFileAsCrossFile && d.ts.claimsOtherFile) m.claimType = "cross_file"
     } else counts.unreviewed++
-    const { decision, rule } = triage(d, d.ts, m, knobs)
+    const { decision, rule } = triage(d, d.ts, m, knobs, d.rule === "unreviewed_stopped")
     if (decision === "discard") counts.discarded++
     else if (decision === "summary") counts.summary++
     else counts.kept++
@@ -601,6 +606,8 @@ export function applyTriage(
   ts: TsFeatures[],
   model: Array<ModelFeatures | undefined>,
   knobs: TriageKnobs,
+  /** Per finding: its batch answered early on the budget (`budget` state). */
+  stopped: boolean[] = [],
 ): {
   findings: Finding[]
   dropped: DroppedFinding[]
@@ -615,7 +622,7 @@ export function applyTriage(
     const m = model[i]
     if (m) counts.reviewed++
     else counts.unreviewed++
-    const { decision, rule } = triage(f, ts[i], m, knobs)
+    const { decision, rule } = triage(f, ts[i], m, knobs, stopped[i] === true)
     decisions.push(compactDecision(f, ts[i], m, decision, rule))
     if (decision === "discard") {
       counts.discarded++
@@ -637,7 +644,17 @@ export function applyTriage(
     if (decision === "summary") counts.summary++
     else counts.kept++
     if (!m) {
-      out.push(f)
+      // An unreviewed finding demoted to the summary carries only the decision and its rule.
+      if (decision !== "summary") out.push(f)
+      else {
+        const prior =
+          f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
+        out.push({
+          ...f,
+          evidence: { tool: f.evidence?.tool ?? "ai-review", result: { ...prior, verification: { decision, rule } } },
+          tier: "summary" as const,
+        })
+      }
       return
     }
     const verification: Verification = {
@@ -1240,7 +1257,11 @@ export async function runAiVerify(
 
     const model: Array<ModelFeatures | undefined> = input.findings.map(() => undefined)
     batches.forEach((b, k) => b.idx.forEach((i, j) => (model[i] = outcomes[k].verdicts.get(b.ids[j]))))
-    const triaged = applyTriage(input.findings, ts, model, triageKnobs(env))
+    const stopped: boolean[] = input.findings.map(() => false)
+    batches.forEach((b, k) => {
+      if (outcomes[k].state === "budget") for (const i of b.idx) stopped[i] = true
+    })
+    const triaged = applyTriage(input.findings, ts, model, triageKnobs(env), stopped)
     for (const d of triaged.dropped)
       log.info("ai verify dropped", { id: d.id, file: d.file, rule: d.rule, verdict: d.verdict })
 
