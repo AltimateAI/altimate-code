@@ -1,6 +1,6 @@
 import { describe, test, expect, mock, beforeEach, afterEach, beforeAll, afterAll } from "bun:test"
 import * as realChildProcess from "child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 
@@ -782,6 +782,22 @@ describe("the fallbacks' dbt", () => {
       "dbt Fusion was not found: no dbt 2.x binary next to /venv/bin/python, in ~/.local/bin or on PATH",
     )
     expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  test("in Fusion mode with no Fusion binary, compile fails rather than answer from an earlier manifest", async () => {
+    const project = mkdtempSync(join(tmpdir(), "dbt-cli-stale-"))
+    try {
+      mkdirSync(join(project, "target"))
+      const manifest = { nodes: { "model.p.orders": { name: "orders", compiled_code: "select 1 as stale" } } }
+      writeFileSync(join(project, "target", "manifest.json"), JSON.stringify(manifest))
+      fusionBinary.find = async () => undefined
+      configure({ pythonPath: cfg.pythonPath, projectRoot: project, dbtIntegration: "fusion" })
+
+      await expect(execDbtCompile("orders")).rejects.toThrow("dbt Fusion was not found: no dbt 2.x binary")
+      expect(mockExecFile).not.toHaveBeenCalled()
+    } finally {
+      rmSync(project, { recursive: true, force: true })
+    }
   })
 
   test("in other modes, are resolved as before, with no Fusion lookup", async () => {

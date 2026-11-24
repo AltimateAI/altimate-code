@@ -510,6 +510,9 @@ function bubbleDbtError(label: string, primary?: ExecFileError, plain?: ExecFile
  * Compile a model via `dbt compile --select <model>` and return compiled SQL.
  */
 export async function execDbtCompile(model: string): Promise<{ sql: string }> {
+  // Find dbt before the tiers below: the manifest fallback tolerates a failed run, so with no
+  // dbt Fusion it would answer from an earlier compile's manifest.
+  await getDbt()
   const args = ["compile", "--select", model, "--output", "json", "--log-format", "json"]
 
   let lines: Record<string, unknown>[] = []
