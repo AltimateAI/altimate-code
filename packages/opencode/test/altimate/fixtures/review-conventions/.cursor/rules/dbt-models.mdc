@@ -1,0 +1,6 @@
+---
+description: dbt model conventions
+globs: models/**/*.sql
+alwaysApply: false
+---
+Use `{{ ref() }}` for models and `{{ source() }}` for raw tables; never hardcode schemas.

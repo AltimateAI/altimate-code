@@ -282,6 +282,8 @@ export const VerdictEnvelope = z.object({
             card: z.boolean(),
             /** Index of the call that carried the file (focused batching only). */
             batch: z.number().int().nonnegative().optional(),
+            /** Convention paths the call carried (first file of each call that carried any). */
+            conventions: z.array(z.string()).optional(),
           }),
         )
         .optional(),
@@ -289,6 +291,18 @@ export const VerdictEnvelope = z.object({
       unsent: z.array(z.string()).optional(),
       /** Files sent only in calls that failed while other calls answered: not reviewed by the AI lane. */
       failedFiles: z.array(z.string()).optional(),
+      /** Team conventions loaded from the base branch (no text). */
+      conventions: z
+        .array(
+          z.object({
+            path: z.string(),
+            source: z.string(),
+            scope: z.string(),
+            globs: z.array(z.string()).optional(),
+            chars: z.number().int().nonnegative(),
+          }),
+        )
+        .optional(),
       /** The dbt-grounded verifier (the `verify` switch): what it kept and dropped. */
       verifier: z
         .object({

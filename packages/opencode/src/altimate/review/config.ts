@@ -51,6 +51,8 @@ export const ReviewConfig = z.object({
         pythonFiles: z.boolean().optional(),
         /** The dbt-grounded verifier over the AI findings. */
         verify: z.boolean().optional(),
+        /** Repo review instructions (AGENTS.md, CLAUDE.md, REVIEW.md, Cursor/CodeRabbit/Copilot rules, CONTRIBUTING.md) from the base branch. */
+        conventions: z.boolean().optional(),
       }),
     ])
     .default(true),

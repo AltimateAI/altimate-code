@@ -19,6 +19,7 @@ import {
   resolveCommit,
   commitParents,
   showAtRef,
+  lsTreeAtRef,
 } from "./git"
 import { makeCompiledResolver, dbtProjectName, dbtProjectLayout } from "./compiled"
 import { scopeToProject } from "./diff-filter"
@@ -29,6 +30,7 @@ import { ADAPTERS } from "./dbt-patterns"
 import { runAiReview } from "./ai-review"
 import { resolveAiSwitches } from "./ai-switches"
 import { isAiPythonFile } from "./ai-python-files"
+import { loadConventions } from "./conventions"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -477,6 +479,17 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     ? undefined
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
+  // Repo review instructions come from the base commit, like the policy, so a PR cannot
+  // change the conventions it is reviewed under; only when the AI lane runs.
+  const conventions =
+    aiOn && aiSwitches.conventions && resolved
+      ? await loadConventions({
+          readBase: (rel) => showAtRef(gitRoot, resolved.sha, rel),
+          listBase: (dir) => lsTreeAtRef(gitRoot, resolved.sha, dir),
+          changedPaths: opts.prFiles ?? collected.map((f) => f.path),
+        })
+      : []
+
   const consumerLists = config.consumerColumnLists.length
     ? await loadConsumerLists({
         configs: config.consumerColumnLists,
@@ -515,6 +528,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiSwitches,
     ...(aiOutsideFiles.length ? { aiOutsideFiles } : {}),
     reviewDir: gitRoot,
+    ...(conventions.length ? { conventions } : {}),
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
       const dirs = layout

@@ -68,6 +68,7 @@ import { ruleTier } from "./rule-tiers"
 import { type AiSwitches, switchOn } from "./ai-switches"
 import { isAiOtherFile } from "./ai-other-files"
 import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
+import type { Convention } from "./conventions"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -299,6 +300,8 @@ export interface OrchestrateInput {
   aiOutsideFiles?: ChangedFile[]
   /** The review's repository root (`--cwd`'s git root); env-named files must be outside it. */
   reviewDir?: string
+  /** Team conventions from the base branch (`conventions` switch), for the AI finder. */
+  conventions?: Convention[]
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2802,6 +2805,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(input.aiSwitches ? { switches: input.aiSwitches } : {}),
         ...(otherChecked.size ? { checkedPaths: [...otherChecked] } : {}),
         ...(input.reviewDir ? { reviewDir: input.reviewDir } : {}),
+        ...(input.conventions?.length ? { conventions: input.conventions } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }
