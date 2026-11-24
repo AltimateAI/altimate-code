@@ -7,6 +7,7 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
+import { readFile } from "node:fs/promises"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, runAiVerify } from "./ai-verify"
@@ -911,6 +912,22 @@ function buildBatchMessage(
   return { message: parts.join("\n"), records }
 }
 
+/**
+ * The finder's system prompt: the compiled core's, or the text of the file named by
+ * `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE`, which replaces it. An unreadable or empty file is
+ * an error, never a silent fallback to the core prompt.
+ */
+export async function finderSystemPrompt(env: Record<string, string | undefined> = process.env): Promise<string | undefined> {
+  const file = env.ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE
+  if (file) {
+    const text = await readFile(file, "utf8")
+    if (!text.trim()) throw new Error(`ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is empty: ${file}`)
+    return text
+  }
+  const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
+  return ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+}
+
 /** What the lane would send: files, the unsent rest, one message per call, and a record per file. */
 export interface AiInputPlan {
   budget: AiInputBudget
@@ -977,9 +994,8 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
 
   let modelLabel: string | undefined
   try {
-    // Prompt comes from the compiled core, not this file.
-    const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
-    const corePrompt = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+    // Prompt comes from the compiled core, not this file (or ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE).
+    const corePrompt = await finderSystemPrompt()
     if (!corePrompt) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
     const testGap = aiTestGapEnabled()
     const system = testGap ? corePrompt + TEST_GAP_INSTRUCTION : corePrompt
