@@ -66,6 +66,7 @@ import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context
 import { ruleTier } from "./rule-tiers"
 import { type AiSwitches, switchOn } from "./ai-switches"
 import { isAiOtherFile } from "./ai-other-files"
+import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -293,6 +294,8 @@ export interface OrchestrateInput {
   aiVerify?: boolean
   /** The review's resolved AI switches (ai-switches.ts); without them each switch reads its env variable. */
   aiSwitches?: Partial<AiSwitches>
+  /** Changed files outside the dbt project, for the AI lane only (`pythonFiles` switch). */
+  aiOutsideFiles?: ChangedFile[]
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2634,6 +2637,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
   let aiStatus: AiLaneStatus | undefined
+  // Outside-project files the AI lane sent, and those it reviewed (sent and the lane answered).
+  let aiOutsideSent: string[] = []
+  let aiReviewedOutside: string[] = []
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2695,14 +2701,34 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...screened({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
       ),
     )
+    // `pythonFiles`: changed .py files the lane does not send yet, inside the project root or
+    // outside it (AI lane only), after every other file, with their head content.
+    if (switchOn("pythonFiles", input.aiSwitches)) {
+      const queued = new Set(aiFiles.map((f) => f.path))
+      const python = [...reviewable, ...(input.aiOutsideFiles ?? [])].filter(
+        (f) =>
+          isAiPythonFile(f) &&
+          !mayHoldCredentials(f.path) &&
+          !isExcludedPath(f.path, input.rubric.exclusions.excludeGlobs) &&
+          !queued.has(f.path) &&
+          !!queued.add(f.path),
+      )
+      const pyContents = await Promise.all(python.map((f) => getContent?.(f.path, "new")?.catch(() => undefined)))
+      python.forEach((f, i) =>
+        aiFiles.push(
+          ...screened({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: AI_PYTHON_KIND, diff: f.diff, sql: pyContents[i] }),
+        ),
+      )
+    }
     // Only the files the AI lane will send are reached (its file cap, or the
     // per-kind quotas in coverage mode); the rest stay in the ledger.
     const aiBudget = aiInputBudget(process.env, input.aiSwitches)
-    touch(
-      aiBudget.coverage
-        ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas, aiBudget.coverage).sent
-        : selectAiFiles(aiFiles, aiBudget.maxFiles),
-    )
+    const aiSent = aiBudget.coverage
+      ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas, aiBudget.coverage).sent
+      : selectAiFiles(aiFiles, aiBudget.maxFiles)
+    touch(aiSent)
+    const outsidePaths = new Set((input.aiOutsideFiles ?? []).map((f) => f.path))
+    aiOutsideSent = aiSent.filter((f) => outsidePaths.has(f.path)).map((f) => f.path)
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
     // Files the PR changes that the AI may list and the verifier may read; never the user's exclusions or credentials.
@@ -2771,6 +2797,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }
       else aiStatus = res.status
+      // Files outside the project count as reviewed only when the lane answered.
+      if (aiStatus.state === "ok") aiReviewedOutside = aiOutsideSent
       // Defense in depth: the AI never blocks, regardless of what it returns.
       for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
     } catch (err) {
@@ -2795,8 +2823,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Coverage ledger: every changed file the review did not look at, and why.
   // First reason per path wins; `unverified` entries are always kept.
   const sortedUnverified = unverified.sort((a, b) => a.path.localeCompare(b.path))
+  // An outside-project file the AI lane reviewed is not "outside the dbt project, not reviewed".
+  const aiReviewedSet = new Set(aiReviewedOutside)
+  const inputNotReviewed = (input.scope?.notReviewed ?? []).filter((n) => !aiReviewedSet.has(n.path))
   const ledger: NotReviewed[] = [
-    ...(input.scope?.notReviewed ?? []),
+    ...inputNotReviewed,
     ...dropped,
     ...reviewable
       // Other/analysis files the AI lane sent (`otherFiles`) were reviewed.
@@ -2828,7 +2859,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     degraded,
     scope:
       input.scope || notReviewed.length
-        ? { ...input.scope, unverified: sortedUnverified.length ? sortedUnverified : undefined, notReviewed }
+        ? {
+            ...input.scope,
+            ...(aiReviewedOutside.length && input.scope?.outOfScopeFiles !== undefined
+              ? { outOfScopeFiles: Math.max(0, input.scope.outOfScopeFiles - aiReviewedOutside.length) || undefined }
+              : {}),
+            ...(aiReviewedOutside.length ? { aiReviewedOutside } : {}),
+            unverified: sortedUnverified.length ? sortedUnverified : undefined,
+            notReviewed,
+          }
         : undefined,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
     // when a riskTierPathTokens config error was caught above, OR when the

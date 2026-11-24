@@ -15,6 +15,7 @@ import { walkDiffLines } from "./diff-filter"
 import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
 import { type AiSwitches, switchOn } from "./ai-switches"
 import { AI_OTHER_FILES_QUOTA, AI_OTHER_KINDS } from "./ai-other-files"
+import { AI_PYTHON_FILES_QUOTA, AI_PYTHON_KIND } from "./ai-python-files"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -55,8 +56,9 @@ export interface AiInputBudget {
   /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
    *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input.
    *  `otherQuota` (`otherFiles` switch): quota for other/analysis files, kept outside
-   *  `quotas` so the existing buckets and their spare are unchanged. */
-  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number>; otherQuota?: number }
+   *  `quotas` so the existing buckets and their spare are unchanged. `pythonQuota`
+   *  (`pythonFiles` switch): the same for the added Python files. */
+  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number>; otherQuota?: number; pythonQuota?: number }
   /** `ALTIMATE_REVIEW_AI_FOCUSED=1`: on PRs with at least `minFiles` selected files, review
    *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls
    *  unless `batchChars` needs more. */
@@ -101,6 +103,9 @@ export function aiInputBudget(
             },
             ...(switchOn("otherFiles", switches, env)
               ? { otherQuota: quota(env.ALTIMATE_REVIEW_AI_QUOTA_OTHER, AI_OTHER_FILES_QUOTA) }
+              : {}),
+            ...(switchOn("pythonFiles", switches, env)
+              ? { pythonQuota: quota(env.ALTIMATE_REVIEW_AI_QUOTA_PYTHON, AI_PYTHON_FILES_QUOTA) }
               : {}),
           }
         : undefined,
@@ -184,8 +189,17 @@ const KIND_LABEL: Record<string, string> = {
   // Sent only with the `otherFiles` switch.
   analysis: "dbt analysis (compiled, not materialized)",
   other: "other project file",
+  // Sent only with the `pythonFiles` switch.
+  [AI_PYTHON_KIND]: "Python file",
 }
-const FENCE: Record<string, string> = { schema_yml: "yaml", source_yml: "yaml", project_config: "yaml", seed: "csv", python_model: "python" }
+const FENCE: Record<string, string> = {
+  schema_yml: "yaml",
+  source_yml: "yaml",
+  project_config: "yaml",
+  seed: "csv",
+  python_model: "python",
+  [AI_PYTHON_KIND]: "python",
+}
 
 /** Code fence for a file's current content; `other`/`analysis` files by extension. */
 function fenceOf(f: AiReviewFile): string {
@@ -249,14 +263,16 @@ export function changedLineCount(diff: string | undefined): number {
 export function selectAiFilesByQuota(
   files: AiReviewFile[],
   quotas: Record<AiFileBucket, number> = COVERAGE_QUOTAS,
-  extra: { otherQuota?: number } = {},
+  extra: { otherQuota?: number; pythonQuota?: number } = {},
 ): { sent: AiReviewFile[]; unsent: AiReviewFile[] } {
   const eligible = files.filter(sendable)
   // With an `otherQuota`, other/analysis files are selected apart and appended after the rest.
   const isOther = (f: AiReviewFile) => extra.otherQuota !== undefined && AI_OTHER_KINDS.has(f.kind ?? "")
+  // With a `pythonQuota`, the added Python files likewise, after the other files.
+  const isPython = (f: AiReviewFile) => extra.pythonQuota !== undefined && f.kind === AI_PYTHON_KIND
   const byBucket = new Map<AiFileBucket, AiReviewFile[]>(BUCKET_ORDER.map((b) => [b, []]))
   eligible
-    .filter((f) => !isOther(f))
+    .filter((f) => !isOther(f) && !isPython(f))
     .map((f, i) => ({ f, i, n: changedLineCount(f.diff) }))
     .sort((a, b) => b.n - a.n || a.i - b.i)
     .forEach(({ f }) => byBucket.get(BUCKET_OF[f.kind ?? "model_sql"] ?? "model")!.push(f))
@@ -271,6 +287,7 @@ export function selectAiFilesByQuota(
   }
   const sent = BUCKET_ORDER.flatMap((b) => byBucket.get(b)!.slice(0, take.get(b)!))
   sent.push(...mostChanged(eligible.filter(isOther), extra.otherQuota ?? 0))
+  sent.push(...mostChanged(eligible.filter(isPython), extra.pythonQuota ?? 0))
   const chosen = new Set(sent)
   return { sent, unsent: eligible.filter((f) => !chosen.has(f)) }
 }

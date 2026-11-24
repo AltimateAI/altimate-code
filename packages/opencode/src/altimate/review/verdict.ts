@@ -134,6 +134,8 @@ export const ReviewScope = z.object({
   projectRoot: z.string().optional(),
   /** Changed files outside the dbt project: counted, not reviewed. */
   outOfScopeFiles: z.number().int().nonnegative().optional(),
+  /** Changed files outside the dbt project that only the AI lane reviewed (Python files). */
+  aiReviewedOutside: z.array(z.string()).optional(),
   /** Non-model renames with unchanged content, name, role and layer (pure moves): not re-reviewed. */
   movedUnchangedFiles: z.number().int().nonnegative().optional(),
   /** Head commit the review ran on; a run on an older push never clears a block. */

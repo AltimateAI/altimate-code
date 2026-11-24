@@ -28,6 +28,7 @@ import { runReview } from "./orchestrate"
 import { ADAPTERS } from "./dbt-patterns"
 import { runAiReview } from "./ai-review"
 import { resolveAiSwitches } from "./ai-switches"
+import { isAiPythonFile } from "./ai-python-files"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -79,6 +80,9 @@ export interface ReviewPullRequestOptions {
   prFiles?: string[]
   /** Every rename the PR makes (new → old path), when `changedFiles` is a subset of it. */
   prRenames?: Array<[string, string]>
+  /** Send changed Python files outside the dbt project to this review's AI lane (`pythonFiles`
+   *  switch). Default true; `--all-projects` sets it for one project only. */
+  aiOutsidePython?: boolean
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -364,9 +368,26 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const collected = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
   const scoped = scopeToProject(collected, projectRootRel, layout)
   const changedFiles = scoped.inScope
-  if (scoped.outOfScope > 0) {
+  let aiDisabledReason: string | undefined
+  if (opts.noAi) aiDisabledReason = "disabled by --no-ai"
+  else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled by `ai: false` in .altimate/review.yml"
+  const aiOn = !aiDisabledReason
+  const aiSwitches = resolveAiSwitches(config)
+  // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane.
+  const outside = new Set(scoped.outOfScopePaths)
+  const aiOutsideFiles =
+    aiOn && aiSwitches.pythonFiles && opts.aiOutsidePython !== false
+      ? collected.filter((f) => outside.has(f.path) && isAiPythonFile(f))
+      : []
+  const notReviewedOutside = scoped.outOfScope - aiOutsideFiles.length
+  if (notReviewedOutside > 0) {
     process.stderr.write(
-      `ℹ️  ${scoped.outOfScope} changed file(s) outside the dbt project (${projectRootRel || "."}) were not reviewed.\n`,
+      `ℹ️  ${notReviewedOutside} changed file(s) outside the dbt project (${projectRootRel || "."}) were not reviewed.\n`,
+    )
+  }
+  if (aiOutsideFiles.length > 0) {
+    process.stderr.write(
+      `ℹ️  ${aiOutsideFiles.length} changed Python file(s) outside the dbt project (${projectRootRel || "."}) go to the AI review only.\n`,
     )
   }
   // Map renamed files → their old path so getContent resolves the "old" side
@@ -447,12 +468,6 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     ? undefined
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
-  let aiDisabledReason: string | undefined
-  if (opts.noAi) aiDisabledReason = "disabled by --no-ai"
-  else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled by `ai: false` in .altimate/review.yml"
-  const aiOn = !aiDisabledReason
-  const aiSwitches = resolveAiSwitches(config)
-
   const consumerLists = config.consumerColumnLists.length
     ? await loadConsumerLists({
         configs: config.consumerColumnLists,
@@ -489,6 +504,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiContextCard: aiSwitches.contextCard,
     aiVerify: aiSwitches.verify,
     aiSwitches,
+    ...(aiOutsideFiles.length ? { aiOutsideFiles } : {}),
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
       const dirs = layout

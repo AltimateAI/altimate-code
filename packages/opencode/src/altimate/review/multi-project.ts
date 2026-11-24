@@ -154,7 +154,14 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
   for (const root of touched) {
     const own = byProject.get(root)!
     process.stderr.write(`ℹ️  reviewing dbt project ${root || "."} (${own.length} changed file(s))\n`)
-    const env = await reviewPullRequest({ ...optsFor(root), changedFiles: [...own, ...unassigned], prFiles, prRenames })
+    // Python files outside every project go to one project's AI lane only (`pythonFiles`).
+    const env = await reviewPullRequest({
+      ...optsFor(root),
+      changedFiles: [...own, ...unassigned],
+      prFiles,
+      prRenames,
+      aiOutsidePython: root === touched[0],
+    })
     runs.push({ root, paths: own.map((f) => f.path), env })
   }
   return mergeProjectEnvelopes(runs, roots)
@@ -194,7 +201,9 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
   const tierReasons = [...new Set(envs.flatMap((e) => e.tierReasons ?? []))]
 
   // A path some project reviewed is not "outside the dbt project" for the PR.
-  const reviewed = new Set(runs.flatMap((r) => r.paths))
+  // So is a path outside every project that one project's AI lane reviewed.
+  const aiReviewedOutside = [...new Set(envs.flatMap((e) => e.scope?.aiReviewedOutside ?? []))]
+  const reviewed = new Set([...runs.flatMap((r) => r.paths), ...aiReviewedOutside])
   const notReviewed: Array<{ path: string; reason: string }> = []
   const seenEntry = new Set<string>()
   for (const e of envs) {
@@ -251,6 +260,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       headParents: first.scope?.headParents,
       coveredProjects: coveredProjects ?? runs.map((r) => r.root),
       outOfScopeFiles: outsideCount || undefined,
+      aiReviewedOutside: aiReviewedOutside.length ? aiReviewedOutside : undefined,
       movedUnchangedFiles: movedCount || undefined,
       unverified: unverified.length ? unverified : undefined,
       notReviewed,
