@@ -2,7 +2,7 @@ import path from "node:path"
 import { readFile, realpath, stat, access, readdir } from "node:fs/promises"
 import YAML from "yaml"
 import { Installation } from "../../installation"
-import { headPolicyChanges, loadReviewPolicy, policyHash, resolveRubric } from "./config"
+import { aiLaneEnabled, headPolicyChanges, loadReviewPolicy, policyHash, resolveRubric } from "./config"
 import { SEVERITY_ORDER, type Severity } from "./finding"
 import {
   collectChangedFiles,
@@ -27,7 +27,7 @@ import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { ADAPTERS } from "./dbt-patterns"
 import { runAiReview } from "./ai-review"
-import { aiVerifyEnabled } from "./ai-verify"
+import { resolveAiSwitches } from "./ai-switches"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -449,7 +449,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
 
   let aiDisabledReason: string | undefined
   if (opts.noAi) aiDisabledReason = "disabled by --no-ai"
-  else if (config.ai === false) aiDisabledReason = "disabled by `ai: false` in .altimate/review.yml"
+  else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled by `ai: false` in .altimate/review.yml"
+  const aiOn = !aiDisabledReason
+  const aiSwitches = resolveAiSwitches(config)
 
   const consumerLists = config.consumerColumnLists.length
     ? await loadConsumerLists({
@@ -480,12 +482,13 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     // so a missing default silently regresses envelope provenance for tool-
     // path verdicts (cubic-review PR #1041).
     cliVersion: opts.cliVersion ?? Installation.VERSION,
-    aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
+    aiReview: aiOn ? runAiReview : undefined,
     aiDisabledReason,
     aiModel: opts.aiModel,
     aiGraphContext: process.env.ALTIMATE_REVIEW_AI_GRAPH === "1",
-    aiContextCard: process.env.ALTIMATE_REVIEW_AI_CONTEXT_CARD === "1",
-    aiVerify: aiVerifyEnabled(),
+    aiContextCard: aiSwitches.contextCard,
+    aiVerify: aiSwitches.verify,
+    aiSwitches,
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
       const dirs = layout

@@ -63,6 +63,7 @@ import {
 import { type AiContextFile, type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult, aiInputBudget, safeReason, selectAiFiles, selectAiFilesByQuota } from "./ai-review"
 import { type MacroCard, type ModelCard, attachContextCards } from "./ai-context-card"
 import { ruleTier } from "./rule-tiers"
+import type { AiSwitches } from "./ai-switches"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -288,6 +289,8 @@ export interface OrchestrateInput {
   aiContextCard?: boolean
   /** Give the AI lane what the dbt-grounded verifier reads (`ALTIMATE_REVIEW_AI_VERIFY=1`). */
   aiVerify?: boolean
+  /** The review's resolved AI switches (ai-switches.ts); without them each switch reads its env variable. */
+  aiSwitches?: Partial<AiSwitches>
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2680,7 +2683,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     )
     // Only the files the AI lane will send are reached (its file cap, or the
     // per-kind quotas in coverage mode); the rest stay in the ledger.
-    const aiBudget = aiInputBudget()
+    const aiBudget = aiInputBudget(process.env, input.aiSwitches)
     touch(aiBudget.coverage ? selectAiFilesByQuota(aiFiles, aiBudget.coverage.quotas).sent : selectAiFiles(aiFiles, aiBudget.maxFiles))
     if (input.aiContextCard && anyManifest) await attachContextCards(aiFiles, input.runner)
     const context = input.aiGraphContext ? await aiGraphContext(aiFiles.map((f) => f.path), input.runner, getContent) : undefined
@@ -2745,6 +2748,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         model: input.aiModel,
         prFiles,
         ...(evidence ? { evidence } : {}),
+        ...(input.aiSwitches ? { switches: input.aiSwitches } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }

@@ -25,8 +25,33 @@ export const ReviewConfig = z.object({
   /** SQL dialect for static analysis. Empty = auto-detect from the dbt
    *  manifest's `adapter_type` (set explicitly here to override). */
   dialect: z.string().default(""),
-  /** Enable the advisory LLM reviewer lane (needs a configured model). */
-  ai: z.boolean().default(true),
+  /**
+   * The advisory LLM reviewer lane (needs a configured model): `true`/`false`,
+   * or an object with `enabled` and per-switch settings for what the lane does
+   * (see ai-switches.ts). An env variable set to `1` or `0` overrides a switch.
+   * Read from the base branch, so a PR cannot change them for itself. Every key
+   * is optional so the default policy hash does not change.
+   */
+  ai: z
+    .union([
+      z.boolean(),
+      z.object({
+        enabled: z.boolean().optional(),
+        /** Per-kind file quotas and hunk-centred excerpts instead of a 20-file cap. */
+        coverage: z.boolean().optional(),
+        /** dbt manifest context card with each changed model. */
+        contextCard: z.boolean().optional(),
+        /** Related changed files reviewed together in a few calls on larger PRs. */
+        focused: z.boolean().optional(),
+        /** Changed `other`/`analysis` files inside the project (.sql/.yml/.yaml/.py). */
+        otherFiles: z.boolean().optional(),
+        /** Changed Python files, inside or outside the dbt project. */
+        pythonFiles: z.boolean().optional(),
+        /** The dbt-grounded verifier over the AI findings. */
+        verify: z.boolean().optional(),
+      }),
+    ])
+    .default(true),
   /**
    * Report cross-engine portability advice ("isn't portable across
    * warehouses"). Off by default once the engine is known (from the manifest's
@@ -132,6 +157,11 @@ export const ReviewConfig = z.object({
 export type ReviewConfig = z.infer<typeof ReviewConfig>
 
 export const DEFAULT_REVIEW_CONFIG: ReviewConfig = ReviewConfig.parse({})
+
+/** Whether the AI lane is enabled (`ai: false` or `ai: { enabled: false }` turns it off). */
+export function aiLaneEnabled(cfg: Pick<ReviewConfig, "ai">): boolean {
+  return typeof cfg.ai === "boolean" ? cfg.ai : cfg.ai.enabled !== false
+}
 
 /** Deep-merge a partial rubric override onto the default rubric. */
 export function resolveRubric(cfg: ReviewConfig): Rubric {

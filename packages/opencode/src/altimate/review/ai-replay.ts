@@ -14,7 +14,8 @@ import { Provider } from "@/provider/provider"
 import { Log } from "@/altimate/util/log"
 import { Finding, ReviewCategory, makeFinding, ruleId } from "./finding"
 import type { AiLaneStatus, AiReviewInput, AiReviewResult } from "./ai-review"
-import { aiVerifyEnabled, runAiVerify, type VerifierStatus } from "./ai-verify"
+import { runAiVerify, type VerifierStatus } from "./ai-verify"
+import { switchOn } from "./ai-switches"
 import { modelNameFromPath } from "./orchestrate"
 
 const log = Log.create({ service: "ai-replay" })
@@ -189,7 +190,7 @@ export async function runAiReplay(input: AiReviewInput, path: string): Promise<A
 
   let findings = lane.findings
   let verifier: VerifierStatus | undefined
-  if (input.evidence && aiVerifyEnabled()) {
+  if (input.evidence && switchOn("verify", input.switches)) {
     let model: Awaited<ReturnType<typeof Provider.getModel>>
     try {
       const chosen = input.model ? Provider.parseModel(input.model) : await Provider.defaultModel()

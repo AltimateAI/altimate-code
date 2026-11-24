@@ -9,10 +9,11 @@ import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
-import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
+import { type AiVerifyEvidence, type VerifierStatus, runAiVerify } from "./ai-verify"
 import { aiReplayPath, runAiReplay } from "./ai-replay"
 import { walkDiffLines } from "./diff-filter"
 import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
+import { type AiSwitches, switchOn } from "./ai-switches"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -63,7 +64,10 @@ export interface AiFocusBudget {
   batchFiles: number
   maxBatches: number
 }
-export function aiInputBudget(env: Record<string, string | undefined> = process.env): AiInputBudget {
+export function aiInputBudget(
+  env: Record<string, string | undefined> = process.env,
+  switches?: Partial<AiSwitches>,
+): AiInputBudget {
   const num = (v: string | undefined, d: number) => {
     const n = Number(v)
     return v && Number.isFinite(n) && n > 0 ? n : d
@@ -77,7 +81,7 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
     const n = Number(v)
     return v && Number.isInteger(n) && n >= 0 ? n : d
   }
-  const coverageOn = env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
+  const coverageOn = switchOn("coverage", switches, env)
   return {
     maxFiles: num(env.ALTIMATE_REVIEW_AI_MAX_FILES, MAX_FILES),
     maxFileChars: num(env.ALTIMATE_REVIEW_AI_MAX_FILE_CHARS, MAX_DIFF_CHARS),
@@ -95,7 +99,7 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
           }
         : undefined,
     focused:
-      env.ALTIMATE_REVIEW_AI_FOCUSED === "1"
+      switchOn("focused", switches, env)
         ? {
             minFiles: int(env.ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES, FOCUS_DEFAULTS.minFiles),
             batchFiles: int(env.ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES, FOCUS_DEFAULTS.batchFiles),
@@ -685,6 +689,8 @@ export interface AiReviewInput {
   evidence?: AiVerifyEvidence
   /** Every file the PR changes (repo-relative), including files outside the dbt project. */
   prFiles?: string[]
+  /** The review's resolved AI switches; without them each switch reads only its env variable. */
+  switches?: Partial<AiSwitches>
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -875,7 +881,7 @@ export interface AiInputPlan {
  * `env` argument; `runAiReview` sends exactly these messages.
  */
 export function planAiInput(input: AiReviewInput, env: Record<string, string | undefined> = process.env): AiInputPlan {
-  const budget = aiInputBudget(env)
+  const budget = aiInputBudget(env, input.switches)
   let files: AiReviewFile[]
   let unsent: AiReviewFile[]
   if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas))
@@ -962,7 +968,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     const reason = failed.length ? `${failed.length} of ${results.length} calls failed: ${failed[0].reason}` : undefined
     // Opt-in: try to refute each finding with dbt evidence. Never throws.
     let verifier: VerifierStatus | undefined
-    if (input.evidence && aiVerifyEnabled()) {
+    if (input.evidence && switchOn("verify", input.switches)) {
       const v = await runAiVerify({ findings, grounding: input.grounding, evidence: input.evidence, model })
       findings = v.findings
       verifier = v.status
