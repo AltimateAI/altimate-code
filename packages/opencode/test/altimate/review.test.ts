@@ -2414,6 +2414,53 @@ describe("orchestrate", () => {
     expect(both.findings.filter(isTwin)).toEqual([])
   })
 
+  test("a PII name inside a string literal is not a PII column", async () => {
+    // `-  email` / `+  email, 'passport' as kind`: `email` is base-exposed and
+    // `'passport'` is a literal, so nothing new is exposed.
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: [
+          { path: "models/marts/m.sql", status: "modified", diff: "-  email\n+  email, 'passport' as kind\n" },
+        ],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["email"]),
+        getContent: content(
+          "select customer_id,\n  email, 'passport' as kind\nfrom customers",
+          "select customer_id,\n  email\nfrom customers",
+        ),
+      })
+      expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+      expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    }
+  })
+
+  test("a comma inside a literal does not split an aliased PII item from its alias", async () => {
+    // `email || ',' || phone_number as contact` is ONE item aliased `contact`; the
+    // base built `contact` from both columns, so a table-alias rename exposes nothing.
+    const base = "select c.customer_id,\n  c.email || ',' || c.phone_number as contact\nfrom customers c"
+    const head = base.replace(/\bc\./g, "cust.").replace("customers c", "customers cust")
+    const env = await runReview({
+      changedFiles: [
+        {
+          path: "models/marts/m.sql",
+          status: "modified",
+          diff: "-  c.email || ',' || c.phone_number as contact\n+  cust.email || ',' || cust.phone_number as contact\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: {
+        ...piiRunner([]),
+        detectPii: async (sql: string) => ({ columns: /as contact/.test(sql) ? ["contact"] : [] }),
+      },
+      getContent: content(head, base),
+    })
+    expect(env.findings.filter(isTwin)).toEqual([])
+  })
+
   test("without a compiled base the regex PII twins are unknown-confidence warnings that never block", async () => {
     // Raw Jinja on both sides and no compiled artifacts: whether an added `ssn`
     // line is new cannot be decided (it is not a reindent of a removed line), so

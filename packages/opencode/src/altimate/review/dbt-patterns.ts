@@ -4,7 +4,7 @@ import { Log } from "@/altimate/util/log"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
 import { type ChangedFile, fileKind } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
-import { evaluateCatalog, selectItemColumns } from "./rule-catalog"
+import { evaluateCatalog, selectItemColumns, stripLiterals } from "./rule-catalog"
 
 /** Local copy to avoid a cycle with orchestrate.ts. */
 function modelNameFromPath(p: string): string {
@@ -51,17 +51,6 @@ function stripComments(s: string): string {
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--[^\n]*/g, " ")
     .replace(/\{#[\s\S]*?#\}/g, " ")
-}
-
-/**
- * Blank out single-quoted SQL string-literal CONTENTS (keeping the quotes) so a
- * regex detector can't be tripped by punctuation inside a literal — e.g. the
- * `/` in `'n/a'` must not read as division, a `,` in `'a,b'` must not read as a
- * comma join. Detectors that legitimately inspect literal content (leading
- * wildcard, hardcoded date) must NOT use this. Handles doubled-quote escapes.
- */
-function stripLiterals(s: string): string {
-  return s.replace(/'(?:[^']|'')*'/g, "''")
 }
 
 /**

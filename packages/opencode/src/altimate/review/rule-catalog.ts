@@ -70,6 +70,18 @@ function stripComments(s: string): string {
     .replace(/\{#[\s\S]*?#\}/g, " ")
 }
 
+/**
+ * Blank out single-quoted SQL string-literal CONTENTS (keeping the quotes) so a
+ * regex detector can't be tripped by punctuation inside a literal — e.g. the
+ * `/` in `'n/a'` must not read as division, a `,` in `'a,b'` must not read as a
+ * comma join, and `'passport'` must not read as a column. Detectors that
+ * legitimately inspect literal content (leading wildcard, hardcoded date) must
+ * NOT use this. Handles doubled-quote escapes.
+ */
+export function stripLiterals(s: string): string {
+  return s.replace(/'(?:[^']|'')*'/g, "''")
+}
+
 export interface RuleInput {
   file: ChangedFile
   newSql: string
@@ -120,7 +132,8 @@ export interface SelectItemColumn {
   line: string
 }
 
-/** Split on commas outside parentheses (one entry per select item). */
+/** Split on commas outside parentheses (one entry per select item). Callers
+ *  blank string literals first (`stripLiterals`), so a comma inside one never splits. */
 function topLevelItems(s: string): string[] {
   const items: string[] = []
   let depth = 0
@@ -141,12 +154,15 @@ function topLevelItems(s: string): string[] {
  * Every column token `tokenRe` finds on a select line (all of them, not just
  * the first), each paired with its item's `AS` alias. The pair matters because
  * PII detection reports OUTPUT names: `c.ssn as tax_ref` exposes `tax_ref`.
+ * Tokens inside single-quoted literals are ignored.
  */
 export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColumn[] {
   const global = new RegExp(tokenRe.source, tokenRe.flags.includes("g") ? tokenRe.flags : `${tokenRe.flags}g`)
   const out: SelectItemColumn[] = []
   const seen = new Set<string>()
-  for (const item of topLevelItems(stripComments(line))) {
+  // Literals are blanked first: their contents are neither column tokens nor
+  // item separators (`email || ',' || phone_number as contact` is one item).
+  for (const item of topLevelItems(stripLiterals(stripComments(line)))) {
     // The item's alias is its first `AS` outside parentheses (`cast(x as int) as y`
     // → `y`), which also holds when the line runs on into `from …`.
     let flat = item

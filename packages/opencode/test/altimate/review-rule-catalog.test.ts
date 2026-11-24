@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { CATALOG, ruleMatches, inputFromExample } from "../../src/altimate/review/rule-catalog"
+import { CATALOG, ruleMatches, inputFromExample, selectItemColumns } from "../../src/altimate/review/rule-catalog"
 
 describe("rule catalog (self-verifying scenario corpus)", () => {
   test("every rule fires on its example and stays clean on its counter", () => {
@@ -24,5 +24,21 @@ describe("rule catalog (self-verifying scenario corpus)", () => {
   // this TS catalog now holds only the hand-written structural / dbt rules.
   test("catalog covers the hand-written structural/dbt rules", () => {
     expect(CATALOG.length).toBeGreaterThanOrEqual(150)
+  })
+})
+
+describe("selectItemColumns", () => {
+  const PII = /\b(email|ssn|phone_number|passport)\b/i
+  test("ignores tokens inside string literals", () => {
+    expect(selectItemColumns("email, 'passport' as kind", PII)).toEqual([
+      { column: "email", alias: undefined, line: "email, 'passport' as kind" },
+    ])
+  })
+  test("does not split a select item on a comma inside a literal", () => {
+    const line = "email || ',' || phone_number as contact"
+    expect(selectItemColumns(line, PII)).toEqual([
+      { column: "email", alias: "contact", line },
+      { column: "phone_number", alias: "contact", line },
+    ])
   })
 })
