@@ -162,6 +162,24 @@ export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColu
   return out
 }
 
+/**
+ * Per output alias in `sql`, every identifier the select items carrying that
+ * alias are built from (`c.email as contact` → `contact: {c, email, …}`). An
+ * alias only proves exposure of a column that is among its sources.
+ */
+export function aliasSourceTokens(sql: string): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  for (const line of sql.split("\n")) {
+    for (const { column, alias } of selectItemColumns(line, /\b([A-Za-z_][\w$]*)\b/)) {
+      if (!alias) continue
+      const sources = out.get(alias) ?? new Set<string>()
+      sources.add(column)
+      out.set(alias, sources)
+    }
+  }
+  return out
+}
+
 /** A diff line with comments and whitespace normalised (and a leading/trailing
  *  select-list comma dropped), so a reindented line compares equal to its base. */
 export function normalizeSelectLine(line: string): string {

@@ -2328,6 +2328,48 @@ describe("orchestrate", () => {
     expect(twins.find((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")?.severity).toBe("critical")
   })
 
+  test("an alias the base exposes from a different source does not hide a newly exposed PII column", async () => {
+    // Same output alias, different source: base `c.email as contact`, head
+    // `c.ssn as contact`. detectPii and the classifier see `contact` on both
+    // sides, so the regex twins are the only detectors left and must stay.
+    for (const [from, to] of [
+      ["c.email as contact", "c.ssn as contact"],
+      ["c.email as customer_key", "c.ssn as customer_key"],
+    ]) {
+      const base = `select c.customer_id,\n  ${from}\nfrom customers c`
+      for (const reviewers of [[], ["dbt_patterns"]]) {
+        const env = await runReview({
+          changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: `-  ${from}\n+  ${to}\n` }],
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner: piiRunner(["email", "ssn"]),
+          getContent: content(base.replace(from, to), base),
+        })
+        const intoMart = env.findings.filter((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+        expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["ssn"])
+        expect(intoMart[0].severity).toBe("critical")
+        expect(env.verdict).toBe("REQUEST_CHANGES")
+      }
+    }
+    // Control: only the alias changes, the source stays (`c.ssn as tax_ref` →
+    // `c.ssn as tax_id`): nothing new is exposed, so no PII finding.
+    const base = "select c.customer_id,\n  c.ssn as tax_ref\nfrom customers c"
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: [
+          { path: "models/marts/m.sql", status: "modified", diff: "-  c.ssn as tax_ref\n+  c.ssn as tax_id\n" },
+        ],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["ssn"]),
+        getContent: content(base.replace("tax_ref", "tax_id"), base),
+      })
+      expect(env.findings.filter(isTwin)).toEqual([])
+    }
+  })
+
   test("a pure reindent drops the regex twins even when base PII detection misses the column", async () => {
     // detectPii finds nothing on either side: only the reindent check applies.
     const env = await runReview({

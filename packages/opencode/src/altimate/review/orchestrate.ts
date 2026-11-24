@@ -14,7 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
+import { type SelectItemColumn, aliasSourceTokens, normalizeSelectLine } from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -1413,12 +1413,28 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const normalized = normalizeSelectLine(line)
     return !!normalized && removed.has(normalized)
   }
-  // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a column is
-  // already exposed when the base output holds its alias, or the source column
-  // itself (a rename of an exposed column re-exposes nothing new).
+  // Per file, the base SQL's output aliases mapped to the identifiers each is built from.
+  const baseAliasSourcesByFile = new Map<string, Map<string, Set<string>>>()
+  const baseAliasSources = (file: string) => {
+    let sources = baseAliasSourcesByFile.get(file)
+    if (!sources) {
+      const ctx = ctxByPath.get(file)
+      sources = aliasSourceTokens([ctx?.oldSql, ctx?.engineOldSql].filter(Boolean).join("\n"))
+      baseAliasSourcesByFile.set(file, sources)
+    }
+    return sources
+  }
+  // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a SOURCE
+  // column is already exposed when the base output holds it under its own name, or
+  // under an alias the base built from it (so `c.ssn as tax_ref` → `c.ssn as tax_id`
+  // re-exposes nothing new). The line's alias alone is not proof: `c.email as
+  // contact` → `c.ssn as contact` newly exposes `ssn`.
   const isBaseExposed = (file: string, item: { column: string; alias?: string }) => {
     const basePii = basePiiColumnsByFile.get(file)
-    return !!basePii && (basePii.has(item.column) || (!!item.alias && basePii.has(item.alias)))
+    if (!basePii) return false
+    if (basePii.has(item.column)) return true
+    const sources = baseAliasSources(file)
+    return [...basePii].some((name) => !!sources.get(name)?.has(item.column))
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
