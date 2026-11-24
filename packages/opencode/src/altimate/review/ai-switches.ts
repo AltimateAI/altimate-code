@@ -21,14 +21,18 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
   verify: "ALTIMATE_REVIEW_AI_VERIFY",
 }
 
-/** Product defaults when neither env nor config sets a switch. */
+/**
+ * Product defaults when neither env nor config sets a switch: the configuration measured
+ * together (wider input, related files batched, context cards, the verifier). Each one is
+ * opt-out with `ai: { <switch>: false }` or its env variable set to `0`.
+ */
 export const AI_SWITCH_DEFAULTS: AiSwitches = {
-  coverage: false,
-  contextCard: false,
-  focused: false,
-  otherFiles: false,
-  pythonFiles: false,
-  verify: false,
+  coverage: true,
+  contextCard: true,
+  focused: true,
+  otherFiles: true,
+  pythonFiles: true,
+  verify: true,
 }
 
 type Env = Record<string, string | undefined>

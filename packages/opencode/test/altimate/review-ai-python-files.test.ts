@@ -230,6 +230,7 @@ describe("reviewPullRequest end to end: .py files outside the dbt project reach 
         return write0(chunk, ...rest)
       }
       const outsideLines = () => lines.filter((l) => l.includes("outside the dbt project"))
+      process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "0"
       const off = await reviewPullRequest({ cwd: path.join(root, "dbt"), base: "main", head: "HEAD" })
       expect(outsideLines()).toEqual(["ℹ️  3 changed file(s) outside the dbt project (dbt) were not reviewed.\n"])
       lines.length = 0

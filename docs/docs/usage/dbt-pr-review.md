@@ -290,6 +290,16 @@ dialect: snowflake
                               # several adapters (`postgres__x`, `snowflake__x`) still gets advice
                               # on constructs one of those adapters lacks. Set true to see all of it.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
+ai: true                      # the advisory AI lane; false turns it off. Or an object, all keys
+                              # optional and on by default (see "AI reviewer lane" below):
+# ai:
+#   enabled: true
+#   coverage: true            # per-kind file quotas and hunk excerpts instead of a 20-file cap
+#   contextCard: true         # dbt manifest context with each changed model
+#   focused: true             # related files reviewed together in a few calls on larger PRs
+#   otherFiles: true          # other/analysis files inside the project (.sql/.yml/.yaml/.py)
+#   pythonFiles: true         # changed Python files, inside or outside the project
+#   verify: true              # the dbt-grounded verifier over the AI comments
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
   warehouse: ""               # connection name; empty = default connection
@@ -611,10 +621,18 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    runs **after** the deterministic lanes, grounded in their findings, and adds
    advisory contextual comments (intent, naming, business logic, test coverage).
    It sees every changed dbt file, not only models: macros, singular data tests,
-   snapshots, schema/source yml, seeds (diff only) and project config, each
-   labeled with its role, with models first under the 20-file cap.
-   Findings are clamped to ≤ warning and never block. Skipped (clean degrade) if
-   no model is available.
+   snapshots, schema/source yml, seeds (diff only) and project config, plus other
+   changed project files (analyses, CI and config yml, scripts) and changed Python
+   files anywhere in the repository, each labeled with its role, under per-kind
+   quotas (models 12, macros 8, tests 4, yml 6, other 8, Python 6). Related files
+   are reviewed together, each model with its manifest context, and a dbt-grounded
+   verifier then checks every AI comment against the code: refuted ones are dropped
+   and ones it cannot check go to the summary. Findings are clamped to ≤ warning
+   and never block. Skipped (clean degrade) if no model is available. Each part can
+   be turned off under `ai:` in `.altimate/review.yml` or with its env variable set
+   to `0` (`ALTIMATE_REVIEW_AI_COVERAGE`, `_CONTEXT_CARD`, `_FOCUSED`,
+   `_OTHER_FILES`, `_PYTHON_FILES`, `_VERIFY`); `1` turns one on.
+   `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE=<file>` replaces the finder's system prompt.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →
