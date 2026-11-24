@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process"
 import {
   CONVENTIONS_HEADING,
   appliesTo,
+  citedConvention,
+  groupConventionFindings,
   conventionSpecificity,
   conventionsFor,
   loadConventions,
@@ -23,6 +25,7 @@ import { Dispatcher } from "../../src/altimate/native"
 import { LLM } from "../../src/session/llm"
 import { Provider } from "../../src/provider/provider"
 import { resolveAiSwitches } from "../../src/altimate/review/ai-switches"
+import { makeFinding } from "../../src/altimate/review/finding"
 
 // Team conventions (repo review instructions) from the base branch for the AI finder.
 
@@ -432,4 +435,87 @@ describe("reviewPullRequest end to end (AI dry run, no model call)", () => {
       await fs.rm(dir, { recursive: true, force: true })
     }
   }, 60_000)
+})
+
+describe("repeated convention findings become one comment", () => {
+  const conv: Convention[] = [
+    { path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "Every model has a description." },
+    { path: "CLAUDE.md", source: "claude_md", scope: "", text: "Snake case." },
+  ]
+  const f = (file: string, model: string, title: string, body: string, severity: "warning" | "suggestion" = "suggestion") =>
+    makeFinding({
+      severity,
+      category: "sql_quality",
+      title: `${model}: ${title}`,
+      body,
+      file,
+      model,
+      startLine: 1,
+      endLine: 1,
+      confidence: "medium",
+      evidence: { tool: "ai-review", result: {} },
+      ruleKey: `ai:sql_quality:${title}`,
+      rule: "ai-review:sql-quality",
+    })
+
+  test("same convention, same issue on three files: one finding listing the other files", () => {
+    const out = groupConventionFindings(
+      [
+        f("models/a.sql", "fct_a", "Missing model description", "Per models/CLAUDE.md every model needs a description."),
+        f("models/b.sql", "fct_b", "Missing model description for fct_b", "models/CLAUDE.md: add a description.", "warning"),
+        f("models/c.sql", "fct_c", "missing model description", "See models/CLAUDE.md."),
+        f("models/a.sql", "fct_a", "Wrong join", "Unrelated defect."),
+      ],
+      conv,
+    )
+    expect(out.map((x) => x.file)).toEqual(["models/b.sql", "models/a.sql"])
+    expect(out[0].severity).toBe("warning")
+    expect(out[0].body).toEndWith("The same applies to: `models/a.sql`, `models/c.sql`.")
+    expect(out[1].title).toBe("fct_a: Wrong join")
+  })
+
+  test("different conventions, different issues, one file or no convention named: unchanged", () => {
+    const list = [
+      f("models/a.sql", "a", "Missing model description", "Per models/CLAUDE.md."),
+      f("models/b.sql", "b", "Missing model description", "Per CLAUDE.md at the root."),
+      f("models/c.sql", "c", "Column not snake case", "Per models/CLAUDE.md."),
+      f("models/d.sql", "d", "Missing model description", "No convention named."),
+      f("models/e.sql", "e", "Missing model description", "No convention named either."),
+    ]
+    expect(groupConventionFindings(list, conv)).toEqual(list)
+    const sameFile = [f("models/a.sql", "a", "X", "models/CLAUDE.md"), f("models/a.sql", "a", "X", "models/CLAUDE.md line 2")]
+    expect(groupConventionFindings(sameFile, conv)).toEqual(sameFile)
+    expect(groupConventionFindings(list, [])).toEqual(list)
+  })
+
+  test("citedConvention prefers the longest path named", () => {
+    expect(citedConvention({ title: "t", body: "see models/CLAUDE.md" }, ["CLAUDE.md", "models/CLAUDE.md"])).toBe("models/CLAUDE.md")
+    expect(citedConvention({ title: "t", body: "see CLAUDE.md" }, ["CLAUDE.md", "models/CLAUDE.md"])).toBe("CLAUDE.md")
+  })
+
+  test("runAiReview groups the lane's findings when conventions were given", async () => {
+    spyOn(Provider, "defaultModel").mockResolvedValue({ providerID: "fake", modelID: "m" } as any)
+    spyOn(Provider, "getModel").mockResolvedValue({ providerID: "fake", id: "m", api: { npm: "x" }, cost: {} } as any)
+    const parsed = [
+      { file: "models/a.sql", line: 1, category: "sql_quality", severity: "suggestion", title: "Missing description", body: "Per models/CLAUDE.md.", confidence: "medium" },
+      { file: "models/b.sql", line: 1, category: "sql_quality", severity: "suggestion", title: "Missing description", body: "Per models/CLAUDE.md.", confidence: "medium" },
+    ]
+    spyOn(Dispatcher, "call").mockImplementation((async (method: string) =>
+      method === "altimate_core.review_ai_prompt" ? { success: true, data: { prompt: "SYSTEM" } } : { success: true, data: { findings: parsed } }) as any)
+    spyOn(LLM, "stream").mockImplementation(async () => ({
+      fullStream: (async function* () {})(),
+      text: Promise.resolve("[x]"),
+      finishReason: Promise.resolve("stop"),
+      response: Promise.resolve({ messages: [] }),
+      totalUsage: Promise.resolve(undefined),
+      providerMetadata: Promise.resolve(undefined),
+    }) as any)
+    const files = [aiFile("models/a.sql"), aiFile("models/b.sql")]
+    const grouped = await runAiReview({ files, grounding: [], conventions: conv })
+    expect(grouped.findings).toHaveLength(1)
+    expect(grouped.findings[0].body).toContain("The same applies to: `models/b.sql`.")
+    const plain = await runAiReview({ files, grounding: [] })
+    expect(plain.findings).toHaveLength(2)
+    mock.restore()
+  })
 })

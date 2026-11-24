@@ -1,6 +1,7 @@
 // altimate_change - new file: team conventions (repo review instructions) for the AI finder
 import YAML from "yaml"
 import { globToRegExp } from "./diff-filter"
+import { type Finding, SEVERITY_ORDER } from "./finding"
 
 /**
  * Team conventions from the repository's guideline files, read from the BASE
@@ -387,4 +388,57 @@ export interface ConventionRecord {
 
 export function conventionRecords(all: Convention[]): ConventionRecord[] {
   return all.map((c) => ({ path: c.path, source: c.source, scope: c.scope, ...(c.globs ? { globs: c.globs } : {}), chars: c.text.length }))
+}
+
+/** The convention a finding relies on: the longest loaded convention path its body or title names. */
+export function citedConvention(f: Pick<Finding, "title" | "body">, paths: string[]): string | undefined {
+  const text = `${f.title}\n${f.body}`
+  return paths.filter((p) => text.includes(p)).sort((a, b) => b.length - a.length)[0]
+}
+
+/** A finding's title without the names of its own file, so one issue on several files reads the same. */
+function issueKey(f: Pick<Finding, "title" | "file" | "model">): string {
+  const base = f.file.split("/").pop() ?? f.file
+  const names = [f.model, base, base.replace(/\.[^.]+$/, "")].filter((n): n is string => !!n && n.length > 1)
+  let t = f.title.toLowerCase()
+  if (f.model && t.startsWith(f.model.toLowerCase() + ":")) t = t.slice(f.model.length + 1)
+  for (const n of names) t = t.split(n.toLowerCase()).join(" ")
+  // "… for <model>" leaves a dangling preposition once the name is gone.
+  return t
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/(?:\s+(?:for|in|on|of|to|at))+$/, "")
+}
+
+/**
+ * One comment per repeated convention finding (pure): AI findings in one review that name the
+ * same convention for the same issue (title without the file's own names) on different files
+ * become the first, most severe one, whose body lists the other files. Other findings are
+ * returned unchanged, in order.
+ */
+export function groupConventionFindings(findings: Finding[], conventions: Convention[]): Finding[] {
+  const paths = [...new Set(conventions.map((c) => c.path))]
+  if (!paths.length || findings.length < 2) return findings
+  const groups = new Map<string, number[]>()
+  findings.forEach((f, i) => {
+    const cited = citedConvention(f, paths)
+    if (!cited) return
+    const key = `${cited}\u0000${issueKey(f)}`
+    groups.set(key, [...(groups.get(key) ?? []), i])
+  })
+  const replace = new Map<number, Finding>()
+  const drop = new Set<number>()
+  for (const idx of groups.values()) {
+    const files = new Set(idx.map((i) => findings[i].file))
+    if (files.size < 2) continue
+    const lead = idx.reduce((a, b) => (SEVERITY_ORDER[findings[b].severity] > SEVERITY_ORDER[findings[a].severity] ? b : a))
+    const others = [...new Set(idx.filter((i) => i !== lead).map((i) => findings[i].file))].filter((p) => p !== findings[lead].file)
+    replace.set(lead, {
+      ...findings[lead],
+      body: `${findings[lead].body}\n\nThe same applies to: ${others.map((p) => `\`${p}\``).join(", ")}.`,
+    })
+    for (const i of idx) if (i !== lead) drop.add(i)
+  }
+  if (!drop.size) return findings
+  return findings.flatMap((f, i) => (drop.has(i) ? [] : [replace.get(i) ?? f]))
 }

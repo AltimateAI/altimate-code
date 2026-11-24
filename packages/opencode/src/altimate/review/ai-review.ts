@@ -18,7 +18,7 @@ import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
 import { type AiSwitches, switchOn } from "./ai-switches"
 import { AI_OTHER_FILES_QUOTA, AI_OTHER_KINDS } from "./ai-other-files"
 import { AI_PYTHON_FILES_QUOTA, AI_PYTHON_KIND } from "./ai-python-files"
-import { type Convention, type ConventionRecord, conventionRecords, renderConventions } from "./conventions"
+import { type Convention, type ConventionRecord, conventionRecords, groupConventionFindings, renderConventions } from "./conventions"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -1078,6 +1078,8 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       findings = v.findings
       verifier = v.status
     }
+    // One comment for one convention broken the same way on several files.
+    if (input.conventions?.length) findings = groupConventionFindings(findings, input.conventions)
     return done(findings, {
       state: "ok",
       model: modelLabel,
