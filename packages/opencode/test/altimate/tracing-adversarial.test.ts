@@ -904,6 +904,44 @@ describe("Adversarial — FileExporter", () => {
     expect(files.length).toBe(5)
   })
 
+  test("maxFiles of 0 still sweeps stale .tmp.* files left by a crash (#874)", async () => {
+    const exporter = new FileExporter(tmpDir, 0)
+    const stale = path.join(tmpDir, "crashed.json.tmp.1234.abcdef")
+    const fresh = path.join(tmpDir, "inflight.json.tmp.5678.fedcba")
+    await fs.writeFile(stale, "leftover")
+    await fs.writeFile(fresh, "in-flight")
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(stale, twoHoursAgo, twoHoursAgo)
+
+    await exporter.export({
+      version: 2,
+      traceId: "t-sweep",
+      sessionId: "s-sweep",
+      startedAt: new Date().toISOString(),
+      metadata: {},
+      spans: [],
+      summary: {
+        totalTokens: 0,
+        totalCost: 0,
+        totalToolCalls: 0,
+        totalGenerations: 0,
+        duration: 0,
+        status: "completed",
+        tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    })
+
+    // The sweep runs fire-and-forget after export(): poll for its effect instead of sleeping.
+    const deadline = Date.now() + 5_000
+    while ((await fs.readdir(tmpDir)).includes("crashed.json.tmp.1234.abcdef") && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    const entries = await fs.readdir(tmpDir)
+    expect(entries).not.toContain("crashed.json.tmp.1234.abcdef")
+    expect(entries).toContain("inflight.json.tmp.5678.fedcba")
+    expect(entries).toContain("s-sweep.json")
+  })
+
   test("maxFiles of 1 keeps only the latest", async () => {
     const exporter = new FileExporter(tmpDir, 1)
     for (let i = 0; i < 3; i++) {
