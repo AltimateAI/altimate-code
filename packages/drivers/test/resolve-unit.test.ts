@@ -1121,6 +1121,43 @@ describe("findOnWindowsPath", () => {
     )
   })
 
+  test("a relative cwd (a relative ALTIMATE_DRIVER_DIR) is searched once, not resolved against itself", () => {
+    const probes: string[] = []
+    const npm = path.win32.resolve("rel-drivers", "npm.cmd")
+    const isFile = (file: string) => {
+      probes.push(file)
+      return file.toLowerCase() === npm.toLowerCase()
+    }
+    expect(findOnWindowsPath("npm", "rel-drivers", { PATH: "" }, isFile)).toBe(
+      path.win32.resolve("rel-drivers", "npm.CMD"),
+    )
+    expect(probes).toEqual(
+      [".COM", ".EXE", ".BAT", ".CMD"].map((ext) => path.win32.resolve("rel-drivers", "npm" + ext)),
+    )
+    // A relative PATH entry is still read from that one folder.
+    const tools = path.win32.resolve("rel-drivers", "tools", "npm.exe")
+    expect(findOnWindowsPath("npm", "rel-drivers", { PATH: "tools" }, files(tools))).toBe(
+      path.win32.resolve("rel-drivers", "tools", "npm.EXE"),
+    )
+  })
+
+  test("with the default probe, PATH entries that are files or missing folders are stepped past", () => {
+    // findOnWindowsPath builds Windows paths, so the real filesystem can only answer on Windows.
+    if (process.platform !== "win32") return
+    const notAFolder = path.join(tmpRoot, "not-a-folder")
+    fs.writeFileSync(notAFolder, "")
+    const bin = path.join(tmpRoot, "bin")
+    fs.mkdirSync(bin)
+    fs.writeFileSync(path.join(bin, "npm.cmd"), "")
+    const env = {
+      PATH: [notAFolder, path.join(tmpRoot, "absent"), bin].join(";"),
+      NoDefaultCurrentDirectoryInExePath: "1",
+    }
+    expect(findOnWindowsPath("npm", tmpRoot, env)?.toLowerCase()).toBe(path.join(bin, "npm.CMD").toLowerCase())
+    const noNpm = { ...env, PATH: [notAFolder, path.join(tmpRoot, "absent")].join(";") }
+    expect(findOnWindowsPath("npm", tmpRoot, noNpm)).toBeUndefined()
+  })
+
   test("NoDefaultCurrentDirectoryInExePath, in any case and with any value, skips the current directory", () => {
     const isFile = files(`${cwd}\\npm.cmd`)
     expect(findOnWindowsPath("npm", cwd, { PATH: "", NODEFAULTCURRENTDIRECTORYINEXEPATH: "" }, isFile)).toBeUndefined()
@@ -1133,6 +1170,93 @@ describe("findOnWindowsPath", () => {
         files(`${cwd}\\npm.cmd`, "C:\\Program Files\\nodejs\\npm.cmd"),
       ),
     ).toBe("C:\\Program Files\\nodejs\\npm.CMD")
+  })
+})
+
+describe("isRegularFile, the default probe", () => {
+  test("true only for a file: a folder, a missing path or a path under a file is false", () => {
+    const file = path.join(tmpRoot, "npm.cmd")
+    fs.writeFileSync(file, "")
+    expect(_testing.isRegularFile(file)).toBe(true)
+    expect(_testing.isRegularFile(tmpRoot)).toBe(false)
+    expect(_testing.isRegularFile(path.join(tmpRoot, "absent.cmd"))).toBe(false)
+    // A PATH entry that names a file: stat throws (ENOTDIR on POSIX) instead of answering.
+    const underFile = path.join(file, "npm.cmd")
+    expect(() => fs.statSync(underFile)).toThrow()
+    expect(_testing.isRegularFile(underFile)).toBe(false)
+  })
+
+  test("a path inside a folder we may not read is false, not a throw", () => {
+    // Windows has no mode bits to lock a folder with, and root reads any folder.
+    if (process.platform === "win32" || process.getuid?.() === 0) return
+    const locked = path.join(tmpRoot, "locked")
+    fs.mkdirSync(locked)
+    fs.writeFileSync(path.join(locked, "npm.cmd"), "")
+    fs.chmodSync(locked, 0o000)
+    try {
+      expect(() => fs.statSync(path.join(locked, "npm.cmd"))).toThrow()
+      expect(_testing.isRegularFile(path.join(locked, "npm.cmd"))).toBe(false)
+    } finally {
+      fs.chmodSync(locked, 0o700)
+    }
+  })
+})
+
+describe("runNpm on Windows: paths that never look npm up", () => {
+  function recordLookups() {
+    const lookups: string[] = []
+    const npmOnPath = (dir: string) => {
+      lookups.push(dir)
+      return false
+    }
+    return { lookups, npmOnPath }
+  }
+
+  test("a spawn error is a missing npm (127), and a close after it changes nothing", async () => {
+    const child = fakeChild()
+    const { lookups, npmOnPath } = recordLookups()
+    const result = _testing.runNpm([], tmpRoot, 60_000, {
+      spawnProcess: (() => child as any) as typeof spawn,
+      platform: "win32",
+      npmOnPath,
+    })
+    child.emit("error", new Error("spawn C:\\Windows\\system32\\cmd.exe ENOENT"))
+    child.emit("close", 1)
+    const settled = await result
+    expect(settled.code).toBe(127)
+    expect(settled.output).toContain("ENOENT")
+    expect(lookups).toEqual([])
+  })
+
+  test("a spawn that throws is a missing npm (127)", async () => {
+    const { lookups, npmOnPath } = recordLookups()
+    const result = await _testing.runNpm([], tmpRoot, 60_000, {
+      spawnProcess: (() => {
+        throw new Error("spawn EPERM")
+      }) as typeof spawn,
+      platform: "win32",
+      npmOnPath,
+    })
+    expect(result.code).toBe(127)
+    expect(result.output).toBe("spawn EPERM")
+    expect(lookups).toEqual([])
+  })
+
+  test("a timeout is 124 even when the shell exits 1 during teardown", async () => {
+    const child = fakeChild()
+    const { lookups, npmOnPath } = recordLookups()
+    const result = await _testing.runNpm([], tmpRoot, 1, {
+      spawnProcess: (() => child as any) as typeof spawn,
+      platform: "win32",
+      npmOnPath,
+      killTree: async () => {
+        child.emit("close", 1)
+        return { verified: true }
+      },
+    })
+    expect(result.code).toBe(124)
+    expect(result.output).toContain("Timed out")
+    expect(lookups).toEqual([])
   })
 })
 
