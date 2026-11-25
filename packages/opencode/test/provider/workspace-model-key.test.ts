@@ -85,3 +85,18 @@ test("a disabled provider is not enabled by a workspace key", async () => {
     },
   )
 })
+
+test("a provider configured only with non-secret environment settings still takes the workspace key", async () => {
+  withWorkspaceKeys({ azure: "ws-azure-key" })
+  await using tmp = await tmpdir({})
+  await inInstance(
+    tmp.path,
+    async () => {
+      delete process.env.AZURE_API_KEY
+      Env.set("AZURE_RESOURCE_NAME", "my-resource")
+    },
+    async () => {
+      expect((await Provider.list())["azure"]?.options["apiKey"]).toBe("ws-azure-key")
+    },
+  )
+})

@@ -2002,11 +2002,14 @@ export namespace Provider {
     }
 
     // altimate_change start — the linked workspace's model keys fill in providers that have no credential of
-    // their own; env, stored logins and config all keep precedence, and the Altimate gateway login is untouched
+    // their own (no key from env or a stored login); config keeps precedence, and the Altimate gateway login is
+    // untouched. A provider's loader still runs on top, then the workspace key is put back in case it reset it.
+    const workspaceKeys: Record<string, string> = {}
     if (await AltimateApi.isConfigured()) {
       for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
         const providerID = ProviderID.make(id)
-        if (!database[providerID] || !isProviderAllowed(providerID) || providers[providerID]) continue
+        if (!database[providerID] || !isProviderAllowed(providerID) || providers[providerID]?.key) continue
+        workspaceKeys[providerID] = apiKey
         mergeProvider(providerID, { source: "custom", options: { apiKey } })
       }
     }
@@ -2031,6 +2034,13 @@ export namespace Provider {
         mergeProvider(providerID, patch)
       }
     }
+
+    // altimate_change start — see the workspace model keys above
+    for (const [id, apiKey] of Object.entries(workspaceKeys)) {
+      const providerID = ProviderID.make(id)
+      if (providers[providerID]) mergeProvider(providerID, { options: { apiKey } })
+    }
+    // altimate_change end
 
     // load config
     for (const [id, provider] of configProviders) {
