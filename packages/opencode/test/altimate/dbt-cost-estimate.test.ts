@@ -109,19 +109,20 @@ beforeAll(async () => {
   project = await mkdtemp(path.join(os.tmpdir(), "dbt-cost-estimate-"))
   await writeFile(path.join(project, "dbt_project.yml"), "name: shop\n")
   await mkdir(path.join(project, "target"))
-  const model = (pkg: string, name: string, materialized: string) => [
+  const model = (pkg: string, name: string, materialized: string, deps: string[] = []) => [
     `model.${pkg}.${name}`,
-    { resource_type: "model", name, config: { materialized } },
+    { resource_type: "model", name, config: { materialized }, depends_on: { nodes: deps } },
   ]
   await writeFile(
     path.join(project, "target", "manifest.json"),
     JSON.stringify({
       nodes: Object.fromEntries([
-        model("shop", "orders", "incremental"),
-        model("shop", "stg_orders", "table"),
+        model("shop", "orders", "incremental", ["model.shop.stg_orders", "source.shop.raw.items"]),
+        model("shop", "stg_orders", "table", ["source.shop.raw.orders"]),
         model("shop", "dup", "table"),
         model("other", "dup", "table"),
       ]),
+      sources: { "source.shop.raw.orders": {}, "source.shop.raw.items": {} },
     }),
   )
 })
@@ -202,7 +203,7 @@ describe("dbt_cost_estimate", () => {
       display: "4.2 TiB",
       model: "orders",
       truncated: false,
-      cost: expect.objectContaining({ basis: "dry_run" }),
+      cost: expect.objectContaining({ basis: "none" }),
     })
     expect(result.output).toContain("orders would process 4.2 TiB")
   })
@@ -219,7 +220,7 @@ describe("dbt_cost_estimate", () => {
       maxBytes: Math.ceil(1.05 * 1024 ** 3),
       display: "1.0 GiB",
       truncated: false,
-      cost: expect.objectContaining({ basis: "dry_run" }),
+      cost: expect.objectContaining({ basis: "none" }),
     })
   })
 
@@ -241,7 +242,7 @@ describe("dbt_cost_estimate", () => {
       lowerBound: true,
       display: "0 Bytes",
       truncated: false,
-      cost: expect.objectContaining({ basis: "dry_run" }),
+      cost: expect.objectContaining({ basis: "none" }),
     })
     expect(result.output).toContain("lower bound")
     expect(result.output).not.toContain("at most")
@@ -1304,33 +1305,44 @@ describe("IDENTIFIER() on Databricks", () => {
 
 
 const JOB_COLUMNS = ["job_id", "creation_time", "end_time", "statement_type", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
+const CHILD_COLUMNS = ["job_id", "parent_job_id", "statement_type", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const TIB = 1024 ** 4
-const job = (id: string, start: string, end: string, billed: number, reservation: string | null = null, slotMs = 0) => [
+const job = (id: string, start: string, end: string, billed: number | null, reservation: string | null = null, slotMs = 0, type = "MERGE") => [
   id,
   start,
   end,
-  "MERGE",
-  String(billed),
+  type,
+  billed === null ? null : String(billed),
   String(slotMs),
   reservation,
   "False",
 ]
 
-/** A history answer for the history query and `reserved` for the capacity check. */
-const bigqueryHistory = (jobs: (string | null)[][], reserved = "0") => async (jinja: string) =>
-  jinja.includes("countif(reservation_id") ? table(["reserved"], [[reserved]]) : table(JOB_COLUMNS, jobs)
+/**
+ * A history answer: `jobs` for the history query, `children` for the script-children query, and the capacity check
+ * counts `reserved` of `total` query jobs. `denyJobs` refuses the project-wide view, as a role without listAll is.
+ */
+const bigqueryHistory =
+  (jobs: (string | null)[][], opts: { reserved?: string; total?: string; children?: (string | null)[][]; denyJobs?: boolean } = {}) =>
+  async (jinja: string) => {
+    if (opts.denyJobs && /INFORMATION_SCHEMA\.JOBS\n|INFORMATION_SCHEMA\.JOBS\s/.test(jinja.replace(/\\n/g, "\n")) && !jinja.includes("JOBS_BY_USER"))
+      throw new Error("Access Denied: Table region-eu.INFORMATION_SCHEMA.JOBS: User does not have permission")
+    if (jinja.includes("countif(reservation_id")) return table(["jobs", "reserved"], [[opts.total ?? "10", opts.reserved ?? "0"]])
+    if (jinja.includes("parent_job_id in (")) return table(CHILD_COLUMNS, opts.children ?? [])
+    return table(JOB_COLUMNS, jobs)
+  }
 
 describe("dbt_cost_estimate cost", () => {
   afterEach(() => {
     costHistoryInternals.historyTimeoutMs = 60_000
   })
 
-  test("BigQuery on demand: the cost of earlier runs is read from the jobs view, grouped into runs, and leads the answer", async () => {
+  test("BigQuery on demand: earlier runs are read from the jobs view, a delete joins the build that follows it, and the cost leads the answer", async () => {
     useAdapter(calls, {
       history: bigqueryHistory([
-        // The newest run: two statements two minutes apart. The older run is a day before.
-        job("a2", "2026-05-02 10:03:00+00:00", "2026-05-02 10:04:00+00:00", 2 * TIB),
-        job("a1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 1 * TIB),
+        // The newest run: a delete and the merge that follows it. The older run is a day before.
+        job("a2", "2026-05-02 10:00:30+00:00", "2026-05-02 10:01:30+00:00", 2 * TIB),
+        job("a1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 1 * TIB, null, 0, "DELETE"),
         job("b1", "2026-05-01 10:00:00+00:00", "2026-05-01 10:01:00+00:00", 4 * TIB),
       ]),
     })
@@ -1347,11 +1359,41 @@ describe("dbt_cost_estimate cost", () => {
       native: { unit: "bytes_billed", lastRun: 3 * TIB, highest: 4 * TIB },
       rate: { value: 6.25, unit: "USD/TiB", source: "default" },
     })
-    expect(cost.selectOnly).toBeCloseTo((Math.round(4.2 * TIB) / TIB) * 6.25, 6)
+    // The model reads two tables, so the SELECT bills between the larger of the total and 2 x 10 MiB, and the total plus them.
+    const bytes = Math.round(4.2 * TIB)
+    expect(cost.selectOnly.low).toBeCloseTo((bytes / TIB) * 6.25, 6)
+    expect(cost.selectOnly.high).toBeCloseTo(((bytes + 2 * 10 * 1024 ** 2) / TIB) * 6.25, 6)
     expect(result.output.startsWith("Cost from 2 runs in the last 30 days: last run $18.75")).toBe(true)
     expect(result.output).toContain("would process 4.2 TiB")
-    // The pre-run figure keeps its fields.
-    expect(result.metadata).toMatchObject({ supported: true, bytes: Math.round(4.2 * TIB), display: "4.2 TiB", model: "orders" })
+    expect(result.metadata).toMatchObject({ supported: true, bytes, display: "4.2 TiB", model: "orders" })
+  })
+
+  test("the scan figure is computed first and the history is read after it, never beside it", async () => {
+    const order: string[] = []
+    const base = fakeAdapter(calls, {
+      history: async (jinja) => {
+        order.push("history")
+        return bigqueryHistory([])(jinja)
+      },
+    })
+    useAdapter(calls)
+    dbtAdapterInternals.create = async () => ({
+      ...base,
+      validateSQLDryRun: async (q: string) => {
+        order.push("dry run")
+        return base.validateSQLDryRun(q)
+      },
+    })
+    await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(order[0]).toBe("dry run")
+    expect(order.slice(1).every((o) => o === "history")).toBe(true)
+    expect(order).toContain("history")
+  })
+
+  test("a history that fails never changes the scan figure", async () => {
+    useAdapter(calls, {})
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB), display: "4.2 TiB" })
   })
 
   test("BigQuery asks the project and region of the dbt target, for exactly this model's unique_id", async () => {
@@ -1360,7 +1402,7 @@ describe("dbt_cost_estimate cost", () => {
       target: '{"project": "data", "execution_project": "billing-proj", "location": "EU"}',
     })
     await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const sql = historyLog.find((q) => q.includes("total_bytes_billed"))!
+    const sql = historyLog.find((q) => q.includes("total_bytes_billed") && q.includes("strpos"))!
     expect(sql).toContain("`billing-proj`.`region-eu`.INFORMATION_SCHEMA.JOBS")
     // Inside the Jinja string the SQL's own quotes are escaped once more.
     expect(sql).toContain("strpos(query, \\'\"node_id\": \"model.shop.orders\"\\') > 0")
@@ -1369,7 +1411,7 @@ describe("dbt_cost_estimate cost", () => {
 
   test("BigQuery capacity jobs are priced by slot time, with the caveat", async () => {
     useAdapter(calls, {
-      history: bigqueryHistory([job("c1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 5 * TIB, "res-1", 7_200_000)], "3"),
+      history: bigqueryHistory([job("c1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 5 * TIB, "res-1", 7_200_000)], { reserved: "3" }),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     const cost = result.metadata.cost
@@ -1382,8 +1424,25 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.notes.join(" ")).toContain("not each job")
   })
 
+  test("a script is priced from its child jobs, which carry the reservation the script row lacks", async () => {
+    useAdapter(calls, {
+      history: bigqueryHistory([job("p1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:05:00+00:00", 9 * TIB, null, 0, "SCRIPT")], {
+        reserved: "2",
+        children: [
+          ["k1", "p1", "CREATE_TABLE_AS_SELECT", "0", "3600000", "res", "False"],
+          ["k2", "p1", "MERGE", "0", "3600000", "res", "False"],
+        ],
+      }),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    const cost = result.metadata.cost
+    expect(cost).toMatchObject({ runs: 1, native: { unit: "slot_hours", lastRun: 2 } })
+    expect(cost.lastRun).toBeCloseTo(0.12, 10)
+    expect(historyLog.some((q) => q.includes("parent_job_id in (\\'p1\\')"))).toBe(true)
+  })
+
   test("a project on capacity pricing does not get the dry run priced", async () => {
-    useAdapter(calls, { history: bigqueryHistory([], "5") })
+    useAdapter(calls, { history: bigqueryHistory([], { reserved: "5" }) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     const cost = result.metadata.cost
     expect(cost.selectOnly).toBeUndefined()
@@ -1392,18 +1451,20 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.output).toContain("would process 4.2 TiB")
   })
 
-  test("a dry run is priced on demand with BigQuery's 10 MiB minimum, and says it covers the SELECT only", async () => {
+  test("an on-demand dry run is priced as a range, with each table's 10 MiB minimum, and says it covers the SELECT only", async () => {
     useAdapter(calls, { bytes: "1.0 KiB", history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders" }, ctx)
     const cost = result.metadata.cost
     expect(cost.basis).toBe("dry_run")
-    expect(cost.selectOnly).toBeCloseTo(((10 * 1024 ** 2) / TIB) * 6.25, 10)
+    const tenMiB = 10 * 1024 ** 2
+    expect(cost.selectOnly.low).toBeCloseTo((tenMiB / TIB) * 6.25, 10)
+    expect(cost.selectOnly.high).toBeCloseTo(((1024 + tenMiB) / TIB) * 6.25, 10)
     expect(cost.notes.join(" ")).toContain("SELECT only")
     expect(cost.notes.join(" ")).toContain("No runs of model.shop.stg_orders in the last 30 days")
-    expect(cost.notes.join(" ")).not.toContain("assuming on-demand")
+    expect(result.output).toContain("The SELECT would bill between $")
   })
 
-  test("when the capacity check cannot run, the dry run is priced assuming on-demand", async () => {
+  test("when neither the project's jobs nor the caller's own say the pricing mode, the dry run is not priced and the scan stays", async () => {
     useAdapter(calls, {
       history: async (jinja) => {
         if (jinja.includes("countif(reservation_id")) throw new Error("boom")
@@ -1411,11 +1472,32 @@ describe("dbt_cost_estimate cost", () => {
       },
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders" }, ctx)
-    expect(result.metadata.cost.notes.join(" ")).toContain("assuming on-demand")
-    expect(result.metadata.cost.selectOnly).toBeGreaterThan(0)
+    const cost = result.metadata.cost
+    expect(cost.selectOnly).toBeUndefined()
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("BigQuery pricing mode could not be read (on-demand vs reservations)")
+    expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB) })
   })
 
-  test("a history the role cannot read leaves the pre-run figure and says what is missing", async () => {
+  test("no query job in the last week is no pricing mode either", async () => {
+    useAdapter(calls, { history: bigqueryHistory([], { total: "0" }) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders" }, ctx)
+    expect(result.metadata.cost.selectOnly).toBeUndefined()
+    expect(result.metadata.cost.unknownReason).toContain("pricing mode could not be read")
+  })
+
+  test("a role without listAll falls back to its own jobs and says only its own runs were read", async () => {
+    useAdapter(calls, {
+      history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)], { denyJobs: true }),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    const cost = result.metadata.cost
+    expect(historyLog.some((q) => q.includes("JOBS_BY_USER") && q.includes("strpos"))).toBe(true)
+    expect(cost).toMatchObject({ basis: "history", lastRun: 6.25 })
+    expect(cost.notes.join(" ")).toContain("Only your own runs were read")
+  })
+
+  test("a history the role cannot read at all leaves the scan figure and says what is missing", async () => {
     useAdapter(calls, {
       history: async () => {
         throw new Error("Access Denied: Table region-eu.INFORMATION_SCHEMA.JOBS: User does not have permission")
@@ -1424,32 +1506,35 @@ describe("dbt_cost_estimate cost", () => {
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, supported: true, bytes: Math.round(4.2 * TIB), display: "4.2 TiB" })
     const cost = result.metadata.cost
-    expect(cost.notes.join(" ")).toContain("bigquery.jobs.listAll")
+    expect(cost.unknownReason).toContain("bigquery.jobs.listAll")
     expect(cost.runs).toBeUndefined()
     expect(result.output).toContain("would process 4.2 TiB")
   })
 
-  test("a history that never answers is bounded, and the pre-run figure still comes back", async () => {
+  test("a history that never answers is bounded, and the scan figure still comes back", async () => {
     costHistoryInternals.historyTimeoutMs = 30
     useAdapter(calls, { history: () => new Promise(() => {}) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB) })
-    expect(result.metadata.cost.notes.join(" ")).toContain("did not answer within 0.03 s")
+    expect(result.metadata.cost.unknownReason).toContain("did not answer within 0.03 s")
   })
 
   test("SQL input has no history to read", async () => {
     useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1" }, ctx)
-    expect(historyLog.some((q) => q.includes("total_bytes_billed"))).toBe(false)
-    expect(result.metadata.cost.basis).toBe("dry_run")
-    expect(result.metadata.cost.runs).toBeUndefined()
-    expect(result.metadata.cost.notes.join(" ")).toContain("A SQL input has no run history")
+    expect(historyLog.some((q) => q.includes("total_bytes_billed") && q.includes("strpos"))).toBe(false)
+    const cost = result.metadata.cost
+    expect(cost.basis).toBe("dry_run")
+    expect(cost.runs).toBeUndefined()
+    expect(cost.notes.join(" ")).toContain("A SQL input has no run history")
+    // The number of tables is unknown for SQL, so one is assumed and the range is called a floor.
+    expect(cost.notes.join(" ")).toContain("at least")
   })
 
   test("a model name that matches two nodes is reported ambiguous and no history is read", async () => {
     useAdapter(calls, { history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "dup" }, ctx)
-    expect(historyLog.some((q) => q.includes("total_bytes_billed"))).toBe(false)
+    expect(historyLog.some((q) => q.includes("total_bytes_billed") && q.includes("strpos"))).toBe(false)
     const notes = result.metadata.cost.notes.join(" ")
     expect(notes).toContain("model.other.dup")
     expect(notes).toContain("model.shop.dup")
@@ -1477,18 +1562,20 @@ describe("dbt_cost_estimate cost", () => {
     }
   })
 
-  test("Snowflake: credits of the run, priced at the rate sheet, and its currency", async () => {
-    const columns = ["query_id", "start_time", "end_time", "query_type", "warehouse_name", "warehouse_size", "credits_attributed_compute", "credits_used_query_acceleration", "credits_used_cloud_services"]
+  const SF_COLUMNS = ["query_id", "session_id", "start_time", "end_time", "execution_time", "query_type", "warehouse_name", "warehouse_size", "credits_attributed_compute", "credits_used_query_acceleration", "credits_used_cloud_services"]
+  const snowflakeFlow = (rate: (jinja: string) => string | Promise<string>) => async (jinja: string) =>
+    jinja.includes("rate_sheet_daily")
+      ? rate(jinja)
+      : table(SF_COLUMNS, [
+          ["q2", "s1", "2026-05-02 10:03:00.000", "2026-05-02 10:04:00.000", "9000", "MERGE", "W", "XS", "0.2", "0.05", "0.001"],
+          ["q1", "s1", "2026-05-02 10:00:00.000", "2026-05-02 10:01:00.000", "9000", "CREATE_TABLE_AS_SELECT", "W", "XS", "0.1", null, "0.001"],
+        ])
+
+  test("Snowflake: credits of the run, priced at the rate sheet's rate for the day, and its currency", async () => {
     useAdapter(calls, {
       type: "snowflake",
       explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
-      history: async (jinja) =>
-        jinja.includes("rate_sheet_daily")
-          ? table(["effective_rate", "currency"], [["2.5", "EUR"]])
-          : table(columns, [
-              ["q2", "2026-05-02 10:03:00.000", "2026-05-02 10:04:00.000", "MERGE", "W", "XS", "0.2", "0.05", "0.001"],
-              ["q1", "2026-05-02 10:00:00.000", "2026-05-02 10:01:00.000", "CREATE_TABLE_AS_SELECT", "W", "XS", "0.1", null, "0.001"],
-            ]),
+      history: snowflakeFlow(() => table(["date", "effective_rate", "currency"], [["2026-05-01", "2.0", "EUR"], ["2026-05-02", "2.5", "EUR"]])),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     const cost = result.metadata.cost
@@ -1500,8 +1587,37 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.rate).toEqual({ value: 2.5, unit: "EUR/credit", source: "account" })
     expect(cost.notes.join(" ")).toContain("Cloud-services credits")
     expect(cost.notes.join(" ")).toContain("idle time")
-    // The planner's figure is still there.
     expect(result.metadata).toMatchObject({ source: "explain", bytes: 1024 })
+  })
+
+  test("Snowflake: a configured credit rate overrides the account's rate sheet", async () => {
+    costHistoryInternals.readCostConfig = async () => ({ snowflakeUsdPerCredit: 4 })
+    try {
+      useAdapter(calls, {
+        type: "snowflake",
+        explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+        history: snowflakeFlow(() => table(["date", "effective_rate", "currency"], [["2026-05-02", "2.5", "EUR"]])),
+      })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      const cost = result.metadata.cost
+      expect(cost.rate).toEqual({ value: 4, unit: "USD/credit", source: "config" })
+      expect(cost.currency).toBe("USD")
+      expect(cost.lastRun).toBeCloseTo(0.35 * 4, 10)
+    } finally {
+      costHistoryInternals.readCostConfig = defaultReadCostConfig
+    }
+  })
+
+  test("Snowflake without a readable rate sheet uses the default rate, named as such", async () => {
+    useAdapter(calls, {
+      type: "snowflake",
+      explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+      history: snowflakeFlow(() => {
+        throw new Error("not an organization account")
+      }),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.cost.rate).toEqual({ value: 3, unit: "USD/credit", source: "default" })
   })
 
   test("Snowflake without access to the SNOWFLAKE database says so and still gives the scan", async () => {
@@ -1518,17 +1634,18 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.metadata.cost.unknownReason).toContain("IMPORTED PRIVILEGES")
   })
 
+  const DBX_COLUMNS = ["statement_id", "session_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd", "missing_hours"]
+
   test("Databricks: the cost is the warehouse's billed share, at list price, and a run without billing is left out", async () => {
-    const columns = ["statement_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd"]
     useAdapter(calls, {
       type: "databricks",
       explain: async () => "not a plan",
       history: async () =>
-        table(columns, [
+        table(DBX_COLUMNS, [
           // Newest run has no billing row yet; the two others do.
-          ["s3", "2026-05-03 09:00:00", "2026-05-03 09:01:00", "MERGE", "w1", "1000", null, null],
-          ["s2", "2026-05-02 09:00:00", "2026-05-02 09:01:00", "MERGE", "w1", "1000", "2", "1.1"],
-          ["s1", "2026-05-01 09:00:00", "2026-05-01 09:01:00", "MERGE", "w1", "1000", "4", "2.2"],
+          ["s3", "a", "2026-05-03 09:00:00", "2026-05-03 09:01:00", "MERGE", "w1", "1000", null, null, "1"],
+          ["s2", "a", "2026-05-02 09:00:00", "2026-05-02 09:01:00", "MERGE", "w1", "1000", "2", "1.1", "0"],
+          ["s1", "a", "2026-05-01 09:00:00", "2026-05-01 09:01:00", "MERGE", "w1", "1000", "4", "2.2", "0"],
         ]),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
@@ -1538,20 +1655,17 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.rate).toMatchObject({ unit: "USD/DBU", source: "list_price" })
     expect(cost.rate.value).toBeCloseTo(0.55, 10)
     const notes = cost.notes.join(" ")
-    expect(notes).toContain("list prices; your discount is not applied")
+    expect(notes).toContain("negotiated discounts are not applied")
     expect(notes).toContain("1 run left out")
   })
 
-  test("Databricks: a configured DBU rate replaces the list price", async () => {
+  test("Databricks: a configured DBU rate overrides the list price", async () => {
     costHistoryInternals.readCostConfig = async () => ({ databricksUsdPerDbu: 0.4 })
     try {
       useAdapter(calls, {
         type: "databricks",
         explain: async () => "not a plan",
-        history: async () =>
-          table(["statement_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd"], [
-            ["s1", "2026-05-01 09:00:00", "2026-05-01 09:01:00", "MERGE", "w1", "1000", "5", "9"],
-          ]),
+        history: async () => table(DBX_COLUMNS, [["s1", "a", "2026-05-01 09:00:00", "2026-05-01 09:01:00", "MERGE", "w1", "1000", "5", "9", "0"]]),
       })
       const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
       expect(result.metadata.cost).toMatchObject({ lastRun: 2, rate: { value: 0.4, source: "config" } })

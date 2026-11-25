@@ -637,17 +637,22 @@ function withCost(
     if (type === "bigquery") {
       if (history.capacity === true) {
         cost.notes.push("The project is on capacity pricing (slots): scanned bytes do not set the cost, so the dry run is not priced.")
+      } else if (history.capacity === undefined) {
+        // Neither the project's jobs nor the caller's own could say which pricing applies: a price would be a guess.
+        const why = "BigQuery pricing mode could not be read (on-demand vs reservations)"
+        if (cost.basis === "none") cost.unknownReason = cost.unknownReason ? `${cost.unknownReason} ${why}.` : why
+        else cost.notes.push(`${why}, so the dry run is not priced.`)
       } else {
         const demand = bigqueryOnDemandRate(cfg)
-        cost.selectOnly = onDemandPrice(meta.bytes, demand.rate.value)
+        // A SQL input has no manifest to count its tables from: one is assumed, which makes the range a floor.
+        const tables = history.tables
+        cost.selectOnly = onDemandPrice(meta.bytes, tables ?? 1, demand.rate.value)
         if (!cost.rate) {
           cost.rate = demand.rate
           if (demand.note) cost.notes.push(demand.note)
         }
-        if (history.capacity === undefined)
-          cost.notes.push("Could not check whether the project is on capacity pricing, so the dry run is priced assuming on-demand.")
         cost.notes.push(
-          `The dry run price covers the SELECT only${meta.lowerBound === true ? " and is a floor, since the dry run's bytes are a lower bound" : ""}.`,
+          `The dry run price covers the SELECT only, and each table it reads bills at least 10 MiB${tables === undefined ? "; the number of tables is unknown for this input, so one is assumed and the range is at least that" : ` (${tables} table${tables === 1 ? "" : "s"})`}${meta.lowerBound === true ? "; the dry run's bytes are a lower bound, so this is a floor" : ""}.`,
         )
       }
     }
@@ -666,7 +671,7 @@ function withCost(
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate what a dbt model costs, and the bytes it or a SQL query would scan, without running it. The cost (`cost`, in the metadata and first in the text) is read from what the warehouse billed for the model's runs in the last 30 days (BigQuery jobs, Snowflake query attribution, Databricks billing), never guessed; only BigQuery on-demand prices the pre-run scan, for the SELECT only; a `sql` input has no history. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate what a dbt model costs, and the bytes it or a SQL query would scan, without running it. The cost (`cost`, in the metadata and first in the text) is read from what the warehouse billed for the model's runs in the last 30 days (BigQuery jobs, Snowflake query attribution, Databricks billing), never guessed; only BigQuery on-demand prices the pre-run scan, as a range for the SELECT only; a `sql` input has no history. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
@@ -689,15 +694,13 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
       }
     }
     const signal = ctx.abort
-    // The history reads the warehouse's billing tables while the scan figure is computed; neither waits for the other.
-    const history = (async () => {
-      const cfg = cleanRates(await costHistoryInternals.readCostConfig())
-      const { getDbtProjectRoot } = await import("../native/connections/register")
-      const manifestPath = manifestPathFor(adapter, await getDbtProjectRoot().catch(() => undefined))
-      return { cfg, history: await loadHistory({ adapter, type: type!, model: args.model, manifestPath, signal, cfg }) }
-    })()
-    history.catch(() => {})
+    // The Python bridge serialises adapter calls: the scan figure completes first, then the history is read
+    // within its own deadline, which can never affect the figure already computed.
     const scan = await scanEstimate(adapter, type!, planner, args, signal)
-    return withCost(scan, await history, type!)
+    const cfg = cleanRates(await costHistoryInternals.readCostConfig())
+    const { getDbtProjectRoot } = await import("../native/connections/register")
+    const manifestPath = manifestPathFor(adapter, await getDbtProjectRoot().catch(() => undefined))
+    const history = await loadHistory({ adapter, type: type!, model: args.model, manifestPath, signal, cfg })
+    return withCost(scan, { cfg, history }, type!)
   },
 })
