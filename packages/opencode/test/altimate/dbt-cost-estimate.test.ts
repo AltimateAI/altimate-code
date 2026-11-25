@@ -1832,8 +1832,8 @@ describe("dbt_cost_estimate cost", () => {
       const main = historyLog.find((q) => q.includes("query_history q") && !q.includes("run boundary"))!
       expect(main).toContain(`to_timestamp_ltz(${start}, 3)`)
       expect(main).toContain(`to_timestamp_ltz(${asOf + 5_000}, 3)`)
-      // The boundary's cutoff is that window's start, the same literal.
-      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`to_timestamp_ltz(${start}, 3)`)
+      // The boundary's cutoff is that window's start (read one millisecond past it, to include a statement exactly at it).
+      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`to_timestamp_ltz(${start + 1}, 3)`)
       expect(historyLog.find((q) => q.includes("usage_in_currency_daily"))).toContain("to_date(\\'2026-06-01\\')")
     } finally {
       costHistoryInternals.now = defaultNow
@@ -1856,10 +1856,78 @@ describe("dbt_cost_estimate cost", () => {
       for (const q of historyLog) expect(q).not.toMatch(/current_(timestamp|date)/)
       expect(historyLog.find((q) => q.includes("countif(reservation_id"))).toContain(`timestamp_millis(${asOf + 5_000 - 7 * 86_400_000})`)
       expect(historyLog.find((q) => q.includes("strpos") && !q.includes("run boundary"))).toContain(`timestamp_millis(${start})`)
-      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`timestamp_millis(${start})`)
+      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`timestamp_millis(${start + 1})`)
     } finally {
       costHistoryInternals.now = defaultNow
     }
+  })
+
+  describe("a statement that starts exactly at the window's start", () => {
+    // The main read takes statements after the window's start, so one exactly at it is only in the boundary read, which
+    // must reach it: an adapter consistent with the SQL returns a statement iff it starts before the literal it is given.
+    const asOf = Date.UTC(2026, 5, 1, 20, 0, 0)
+    const start = asOf - 30 * 86_400_000
+    const iso = (ms: number) => new Date(ms).toISOString()
+    const before = (jinja: string, pattern: RegExp) => start < Number(pattern.exec(jinja)![1])
+    const withNow = async (run: () => Promise<void>) => {
+      costHistoryInternals.now = () => asOf
+      try {
+        await run()
+      } finally {
+        costHistoryInternals.now = defaultNow
+      }
+    }
+
+    test("Snowflake", async () => {
+      await withNow(async () => {
+        useAdapter(calls, {
+          type: "snowflake",
+          explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+          history: async (jinja) =>
+            jinja.includes("usage_in_currency_daily") || jinja.includes("rate_sheet_daily")
+              ? table(["date"], [])
+              : table(SF_COLUMNS, [["m", "s1", iso(start + 5 * 60_000), iso(start).slice(0, 10), iso(start + 6 * 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"]]),
+          boundary: async (jinja) =>
+            table(["query_id", "session_id", "start_time", "end_time"], before(jinja, /q\.start_time < to_timestamp_ltz\((\d+), 3\)/) ? [["edge", "s1", iso(start), iso(start + 60_000)]] : []),
+        })
+        const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+        expect(result.metadata.cost.basis).toBe("none")
+        expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+      })
+    })
+
+    test("Databricks", async () => {
+      await withNow(async () => {
+        useAdapter(calls, {
+          type: "databricks",
+          explain: async () => "not a plan",
+          history: async () =>
+            table(["statement_id", "session_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd", "missing_hours"], [
+              ["m", "s1", iso(start + 5 * 60_000), iso(start + 6 * 60_000), "MERGE", "w1", "1000", "1", "1", "0"],
+            ]),
+          boundary: async (jinja) =>
+            table(["statement_id", "session_id", "start_time", "end_time"], before(jinja, /start_time < timestamp_millis\((\d+)\)/) ? [["edge", "s1", iso(start), iso(start + 60_000)]] : []),
+        })
+        const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+        expect(result.metadata.cost.basis).toBe("none")
+        expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+      })
+    })
+
+    test("BigQuery", async () => {
+      await withNow(async () => {
+        useAdapter(calls, {
+          history: bigqueryHistory([job("m", iso(start + 30_000), iso(start + 90_000), TIB)]),
+          boundary: async (jinja) =>
+            table(["job_id", "user_email", "creation_time", "end_time", "statement_type"], before(jinja, /creation_time < timestamp_millis\((\d+)\)/) ? [["edge", "a@x.com", iso(start), iso(start + 5_000), "DELETE"]] : []),
+        })
+        const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+        // The only run is left out, so the cost is the dry run alone.
+        expect(result.metadata.cost.runs).toBeUndefined()
+        expect(result.metadata.cost.basis).toBe("dry_run")
+        expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+      })
+    })
   })
 
   test("Snowflake: a configured credit rate needs no rate lookup at all", async () => {

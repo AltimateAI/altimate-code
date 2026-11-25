@@ -1076,8 +1076,10 @@ export async function loadHistory(input: {
     // the main read used, never recomputed.
     const cutoff = hit ? Math.min(...starts) : windowStart
     try {
-      // One millisecond past an oldest statement read: a statement within its millisecond is not missed.
-      const found = await rows(sqlFor(hit ? cutoff + 1 : cutoff))
+      // One millisecond past the cutoff, so a statement that starts exactly at it is read: the main read takes only
+      // statements after the window's start, and the oldest statement it returned is at the cutoff itself. The
+      // statements the history already read come back too and are filtered out below.
+      const found = await rows(sqlFor(cutoff + 1))
       if (found.length >= HISTORY_LIMIT) return { cutoff }
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r[keys.id]))
