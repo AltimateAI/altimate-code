@@ -3054,10 +3054,22 @@ async function withAltimateFile<R>(content: unknown, fn: (dir: string) => Promis
 }
 
 test.each([
-  ["a blank key", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "test-instance", altimateApiKey: "" }],
-  ["a whitespace key", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "test-instance", altimateApiKey: "   " }],
-  ["a blank key and instance name", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "", altimateApiKey: "" }],
-  ["a blank instance name", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "", altimateApiKey: "test-api-key" }],
+  [
+    "a blank key",
+    { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "test-instance", altimateApiKey: "" },
+  ],
+  [
+    "a whitespace key",
+    { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "test-instance", altimateApiKey: "   " },
+  ],
+  [
+    "a blank key and instance name",
+    { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "", altimateApiKey: "" },
+  ],
+  [
+    "a blank instance name",
+    { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "", altimateApiKey: "test-api-key" },
+  ],
   ["a blank URL", { altimateUrl: "", altimateInstanceName: "test-instance", altimateApiKey: "test-api-key" }],
 ])("altimate.json with %s does not list altimate-backend or make it the default", async (_, content) => {
   await withAltimateFile(content, (dir) =>

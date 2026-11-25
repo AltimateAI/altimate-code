@@ -187,20 +187,36 @@ export namespace AltimateApi {
     }
   }
 
+  /** The key to match MCP entries by on sign-out, read as written. Unlike `getCredentials()` it accepts
+   *  a file whose fields are blank or missing: such a file holds no key to protect, so sign-out can
+   *  clear it. Undefined when there is no key; throws when one may exist but can't be read. */
+  async function savedKeyForSignOut(): Promise<string | undefined> {
+    const scoped = currentCredentials()
+    if (scoped) return scoped.altimateApiKey
+    const raw = resolveEnvVars(JSON.parse(await Filesystem.readText(credentialsPath())))
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw new Error("the file does not hold the credentials object.")
+    const key = (raw as { altimateApiKey?: unknown }).altimateApiKey
+    if (key === undefined || (typeof key === "string" && key.trim() === "")) return undefined
+    if (typeof key !== "string") throw new Error("altimateApiKey is not a string.")
+    return key
+  }
+
   /** Sign out of the gateway: remove MCP entries that carry the saved key, then delete the credential file.
    *  Standalone `datamate add` writes the key into MCP headers (`buildMcpConfig`); matching the exact key
    *  leaves user-authored entries alone. Searches the global config and every project config a session in
    *  `projectDir` loads. Fails without deleting the file when the key can't be read: the file holds the
-   *  only copy, and without it leftover MCP entries can never be matched. */
+   *  only copy, and without it leftover MCP entries can never be matched. A file with no key, or a blank
+   *  one, is simply cleared. */
   export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
     if (!(await isConfigured())) {
       await withdrawClaudeSkills(projectDir)
       await forgetTelemetryIdentity()
       return []
     }
-    let key: string
+    let key: string | undefined
     try {
-      key = (await getCredentials()).altimateApiKey
+      key = await savedKeyForSignOut()
     } catch (err) {
       throw new Error(
         `could not read the saved key from ${credentialsPath()} (${err instanceof Error ? err.message : err}); ` +
@@ -212,7 +228,7 @@ export namespace AltimateApi {
       ...(await findGlobalConfigPaths(Global.Path.config)),
     ]
     const removed: Array<{ name: string; path: string }> = []
-    for (const configPath of configPaths) {
+    for (const configPath of key ? configPaths : []) {
       for (const name of await listMcpInConfig(configPath)) {
         const entry = await readMcpEntryFromDisk(name, configPath)
         if (entry?.type !== "remote" || entry.headers?.Authorization !== `Bearer ${key}`) continue

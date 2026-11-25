@@ -4,6 +4,7 @@ import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
 // altimate_change start — translate managed Altimate Base gateway errors
 import { FreeTier } from "@/altimate/free/client"
+import { SIGN_IN_COMMAND } from "@/altimate/api/sign-in"
 
 const ALTIMATE_GATEWAY_PROVIDER_ID = "altimate-backend"
 // altimate_change end
@@ -417,8 +418,7 @@ export namespace ProviderError {
         type: "api_error",
         message:
           "Sign in to Altimate again: the Altimate LLM Gateway refused the request because the saved " +
-          "Altimate API key is missing or no longer valid. In a terminal, run " +
-          `\`altimate-code auth login -p altimate-backend\`. (${m})`,
+          `Altimate sign-in is missing or no longer valid. In a terminal, run \`${SIGN_IN_COMMAND}\`. (${m})`,
         statusCode: input.error.statusCode,
         isRetryable: false,
         responseHeaders: input.error.responseHeaders,

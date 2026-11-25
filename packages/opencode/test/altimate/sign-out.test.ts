@@ -95,6 +95,36 @@ describe("AltimateApi.signOut", () => {
     expect(await readJson(rootConfig)).toEqual({ mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
   })
 
+  test.each([
+    ["a blank key", { altimateUrl: "https://api.test", altimateInstanceName: "tenant", altimateApiKey: "" }],
+    ["a whitespace key", { altimateUrl: "https://api.test", altimateInstanceName: "tenant", altimateApiKey: "  " }],
+    ["no fields at all", {}],
+  ])("clears a credential file with %s, leaving MCP entries alone", async (_, content) => {
+    // Such a file holds no key to protect, and no MCP entry can carry it. Refusing to clear it
+    // left people who were never signed in unable to sign out.
+    await writeJson(AltimateApi.credentialsPath(), content)
+    await writeJson(rootConfig, { mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
+
+    expect(await AltimateApi.signOut(subdir)).toEqual([])
+
+    expect(await AltimateApi.isConfigured()).toBe(false)
+    expect(await readJson(rootConfig)).toEqual({ mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
+  })
+
+  test("removes entries carrying a readable key even when another field is blank", async () => {
+    await writeJson(AltimateApi.credentialsPath(), {
+      altimateUrl: "https://api.test",
+      altimateInstanceName: "",
+      altimateApiKey: "gateway-test-key",
+    })
+    await writeJson(rootConfig, { mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
+
+    expect(await AltimateApi.signOut(subdir)).toEqual([{ name: "datamate-sales", path: rootConfig }])
+
+    expect(await AltimateApi.isConfigured()).toBe(false)
+    expect(await readJson(rootConfig)).toEqual({ mcp: {} })
+  })
+
   test("is a no-op when there is no credential file", async () => {
     await writeJson(rootConfig, { mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
 
