@@ -7,7 +7,9 @@ import {
   ReviewCategory as ReviewCategoryEnum,
   makeFinding,
   dedupe,
+  findingOrigin,
   mergeRepeats,
+  repeatGroupId,
   SEVERITY_ORDER,
 } from "./finding"
 import {
@@ -2652,6 +2654,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let aiSentPaths: string[] = []
   const aiReviewed = new Set<string>()
   let aiReviewedOutside: string[] = []
+  // The rule verifier's verdict per posted rule finding (`verifyRules`).
+  const ruleVerdicts = new Map<string, "confirmed" | "refuted" | "unverifiable" | null>()
+  // The rule verifier was asked to run (it may still have skipped or failed).
+  let ruleVerifyAttempted = false
   // The AI lane runs in this review: rule types off apply only then.
   const aiLaneOn = lanes.has("ai_review") && !!input.aiReview
   if (!lanes.has("ai_review")) {
@@ -2798,6 +2804,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           },
         }
       : undefined
+    // The rule findings as the envelope would post them (rule types off already dropped), for the rule verifier.
+    const verifyRulesAfter =
+      evidence && switchOn("verifyRules", input.aiSwitches)
+        ? dropRulesOff(
+            cleanFindings(await validateSuggestions(merged, getContent, addedLinesByFile(input.changedFiles))).filter(
+              (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
+            ),
+            input.rulesOff,
+          ).kept
+        : undefined
     try {
       const res = await input.aiReview({
         files: aiFiles,
@@ -2812,10 +2828,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(otherChecked.size ? { checkedPaths: [...otherChecked] } : {}),
         ...(input.reviewDir ? { reviewDir: input.reviewDir } : {}),
         ...(input.conventions?.length ? { conventions: input.conventions } : {}),
+        ...(verifyRulesAfter?.length ? { verifyRulesAfter } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }
       else aiStatus = res.status
+      if (aiStatus.verifyRules === "drop_refuted") {
+        ruleVerifyAttempted = true
+        for (const v of aiStatus.verifier?.ruleVerdicts ?? []) ruleVerdicts.set(v.id, v.verdict)
+      }
       // A sent file counts as reviewed only when the lane answered for its call.
       if (aiStatus.state === "ok") {
         const failed = new Set(aiStatus.failedFiles ?? [])
@@ -2842,12 +2863,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // The verdict counts every instance; merging repeats is presentation only.
   let verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
 
-  // Rule types off, only when the AI lane runs. A finding not posted does not count toward the
-  // verdict either. AI findings are never dropped.
+  // Rule noise, only when the AI lane runs: rule types off, then rule findings the verifier
+  // refuted. A finding not posted does not count toward the verdict
+  // either; an unmerged instance takes the verdict of its merged group. AI findings are never
+  // dropped.
   const rulesOff = aiLaneOn ? input.rulesOff : undefined
   const off = dropRulesOff(findings, rulesOff)
   findings = off.kept
   verdictFindings = dropRulesOff(verdictFindings, rulesOff).kept
+  const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
+  const refuted = (f: Finding) => findingOrigin(f) !== "ai" && verdictOf(f) === "refuted"
+  const rulesRefuted = ruleVerifyAttempted ? findings.filter(refuted).length : undefined
+  if (ruleVerdicts.size) {
+    findings = findings.filter((f) => !refuted(f))
+    verdictFindings = verdictFindings.filter((f) => !refuted(f))
+  }
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
@@ -2889,6 +2919,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
     ...(rulesOff ? { rulesOff: off.dropped } : {}),
+    ...(rulesRefuted !== undefined ? { rulesRefuted } : {}),
     policy: input.policy,
     findings,
     verdictFindings,

@@ -368,12 +368,67 @@ export const VerdictEnvelope = z.object({
               }),
             )
             .optional(),
+          /** Rule-finding run only (`verifyRules`): the verdict for every rule finding the review would post. */
+          ruleVerdicts: z
+            .array(
+              z.object({
+                id: z.string(),
+                file: z.string(),
+                title: z.string(),
+                rule: z.string().optional(),
+                verdict: z.enum(["confirmed", "refuted", "unverifiable"]).nullable(),
+                claimType: z
+                  .enum(["code_fact", "cross_file", "convention", "intent", "test_gap", "speculation"])
+                  .nullable(),
+                value: z.enum(["actionable", "informational", "nit"]).nullable(),
+                evidence: z.string().nullable(),
+                toolsUsed: z.array(z.string()),
+                noVerdict: z.boolean(),
+                batch: z.number().int(),
+              }),
+            )
+            .optional(),
+          /** Rule-finding run only: each batch's outcome, in batch order. */
+          batches: z
+            .array(
+              z.object({
+                findings: z.number().int().nonnegative(),
+                state: z.enum(["ok", "timeout", "error", "budget"]),
+                reason: z.string().optional(),
+                turns: z.number().int().nonnegative(),
+                toolCalls: z.number().int().nonnegative(),
+                tokens: AiTokensSchema.optional(),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
+      /** The rule findings were verified after the finder and the refuted ones not posted. */
+      verifyRules: z.literal("drop_refuted").optional(),
+      /** That rule run's outcome and spend (its verdicts are in `verifier.ruleVerdicts`). */
+      ruleVerifier: z
+        .object({
+          state: z.enum(["ok", "skipped", "timeout", "error", "budget"]),
+          reason: z.string().optional(),
+          model: z.string().optional(),
+          durationMs: z.number().int().nonnegative().optional(),
+          tokens: AiTokensSchema.optional(),
+          cost: z.number().nonnegative().optional(),
+          turns: z.number().int().nonnegative().optional(),
+          toolCalls: z.number().int().nonnegative().optional(),
+          reviewed: z.number().int().nonnegative().optional(),
+          kept: z.number().int().nonnegative().optional(),
+          discarded: z.number().int().nonnegative().optional(),
+          summary: z.number().int().nonnegative().optional(),
+          unreviewed: z.number().int().nonnegative().optional(),
         })
         .optional(),
     })
     .optional(),
   /** Rule findings not posted because their rule type is off while the AI lane runs, per rule id. */
   rulesOff: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  /** Rule findings not posted because the rule verifier refuted them. */
+  rulesRefuted: z.number().int().nonnegative().optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -440,6 +495,7 @@ export interface BuildEnvelopeInput {
   policy?: VerdictEnvelope["policy"]
   engineErrors?: VerdictEnvelope["engineErrors"]
   rulesOff?: VerdictEnvelope["rulesOff"]
+  rulesRefuted?: VerdictEnvelope["rulesRefuted"]
 }
 
 /** Severity tally of `findings` for the envelope summary. */
@@ -508,6 +564,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     scope: input.scope,
     ai: input.ai,
     ...(input.rulesOff ? { rulesOff: input.rulesOff } : {}),
+    ...(input.rulesRefuted !== undefined ? { rulesRefuted: input.rulesRefuted } : {}),
     policy: input.policy,
     engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,

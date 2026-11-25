@@ -17,6 +17,7 @@ export type AiSwitchName =
   | "verify"
   | "conventions"
   | "rulesOff"
+  | "verifyRules"
 
 export type AiSwitches = Record<AiSwitchName, boolean>
 
@@ -30,6 +31,7 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
   verify: "ALTIMATE_REVIEW_AI_VERIFY",
   conventions: "ALTIMATE_REVIEW_CONVENTIONS",
   rulesOff: "ALTIMATE_REVIEW_RULES_OFF",
+  verifyRules: "ALTIMATE_REVIEW_AI_VERIFY_RULES",
 }
 
 /**
@@ -46,19 +48,26 @@ export const AI_SWITCH_DEFAULTS: AiSwitches = {
   verify: true,
   conventions: true,
   rulesOff: true,
+  verifyRules: true,
 }
 
 type Env = Record<string, string | undefined>
 
 const ENV_TRUE = new Set(["1", "true", "on", "yes"])
 const ENV_FALSE = new Set(["0", "false", "off", "no"])
+/** Extra env spellings: `ALTIMATE_REVIEW_AI_VERIFY_RULES=drop_refuted|off`. */
+const ENV_ON: Partial<Record<AiSwitchName, string>> = { verifyRules: "drop_refuted" }
+const ENV_OFF: Partial<Record<AiSwitchName, string>> = { verifyRules: "off" }
 
 /** The env override for a switch: true for `1`/`true`/`on`/`yes`, false for `0`/`false`/`off`/`no`
- *  (case-insensitive), undefined otherwise. */
+ *  (case-insensitive) or a switch's own spelling, undefined otherwise. */
 export function envSwitch(name: AiSwitchName, env: Env = process.env): boolean | undefined {
   const raw = env[AI_SWITCH_ENV[name]]
   // `ALTIMATE_REVIEW_RULES_OFF=<file>` names a replacement list: the switch is on.
   if (name === "rulesOff" && raw && raw !== "0") return true
+  const v = raw?.trim().toLowerCase()
+  if (v !== undefined && v === ENV_ON[name]) return true
+  if (v !== undefined && v === ENV_OFF[name]) return false
   return envBool(raw)
 }
 

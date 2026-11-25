@@ -57,6 +57,8 @@ export const ReviewConfig = z.object({
         rulesOff: z.boolean().optional(),
         /** Rule ids taken back out of that list (posted as before). */
         rulesOn: z.array(z.string()).optional(),
+        /** Verify the rule findings after the finder and drop the refuted ones (needs `verify`). */
+        verifyRules: z.boolean().optional(),
       }),
     ])
     .default(true),

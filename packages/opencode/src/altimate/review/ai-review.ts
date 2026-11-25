@@ -13,6 +13,7 @@ import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId }
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, runAiVerify } from "./ai-verify"
 import { aiReplayPath, runAiReplay } from "./ai-replay"
+import { runRuleVerify, skippedVerifier } from "./ai-verify-rules"
 import { walkDiffLines } from "./diff-filter"
 import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
 import { type AiSwitches, switchOn } from "./ai-switches"
@@ -753,6 +754,8 @@ export interface AiReviewInput {
   reviewDir?: string
   /** Team conventions from the base branch (`conventions` switch); each call carries those for its files. */
   conventions?: Convention[]
+  /** The rule findings the review would post, verified after the finder (`verifyRules` switch). */
+  verifyRulesAfter?: Finding[]
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -787,7 +790,13 @@ export interface AiLaneStatus {
   failedFiles?: string[]
   /** The team conventions loaded from the base branch (no text), when any were given. */
   conventions?: ConventionRecord[]
+  /** The rule findings were verified after the finder; refuted ones are not posted. */
+  verifyRules?: "drop_refuted"
+  /** That rule run's own outcome and spend (its verdicts are in `verifier.ruleVerdicts`). */
+  ruleVerifier?: RuleVerifierSummary
 }
+/** The rule verifier run, without its per-finding records. */
+export type RuleVerifierSummary = Omit<VerifierStatus, "ruleVerdicts" | "batches" | "dropped" | "decisions"> & { model?: string }
 /** One file as sent to the model. */
 export interface AiInputRecord {
   path: string
@@ -1003,6 +1012,32 @@ export function planAiInput(input: AiReviewInput, env: Record<string, string | u
  * envelope and the PR comment.
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
+  const res = await runFinderLane(input)
+  if (!input.verifyRulesAfter) return res
+  // The rule verifier over the rule findings the review would post, after the finder and its verifier.
+  return withRuleVerdicts(res, await runRuleVerify(input, input.verifyRulesAfter))
+}
+
+/** The finder lane's result with the rule run's verdicts (`verifier.ruleVerdicts`, `verifier.batches`) and its
+ *  own outcome (`ruleVerifier`). The finder verifier's counters are left as they were. */
+export function withRuleVerdicts(res: AiReviewResult, rules: AiReviewResult): AiReviewResult {
+  const rv = rules.status.verifier ?? skippedVerifier(rules.status.reason ?? "the rule verifier did not run")
+  const { ruleVerdicts, batches, dropped: _d, decisions: _x, ...summary } = rv
+  const ruleVerifier: RuleVerifierSummary = { ...summary, ...(rules.status.model ? { model: rules.status.model } : {}) }
+  const verifier: VerifierStatus = res.status.verifier ?? skippedVerifier("the AI verifier did not run on the finder's findings")
+  return {
+    findings: res.findings,
+    status: {
+      ...res.status,
+      verifyRules: "drop_refuted",
+      verifier: { ...verifier, ...(ruleVerdicts ? { ruleVerdicts } : {}), ...(batches ? { batches } : {}) },
+      ruleVerifier,
+    },
+  }
+}
+
+/** The finder lane: replay, or plan, call the finder and run its verifier as configured. */
+async function runFinderLane(input: AiReviewInput): Promise<AiReviewResult> {
   const replay = aiReplayPath()
   const startedAt = Date.now()
   const plan = planAiInput(input)

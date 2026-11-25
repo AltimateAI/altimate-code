@@ -290,6 +290,16 @@ function repeatLabel(f: Finding, first: Finding): string {
  * test, one per join onto the same kind of key) into a single finding that
  * lists every instance. Critical findings stay separate: each one can block.
  */
+/** The key `mergeRepeats` groups a finding by. */
+function repeatKey(f: Finding): string {
+  return [f.file, f.category, f.severity, !!f.degraded, !!f.preExisting, groupKeyTitle(f)].join("|")
+}
+
+/** The id `mergeRepeats` gives the merged finding of `f`'s group (when the group has more than one). */
+export function repeatGroupId(f: Finding): string {
+  return "f_" + createHash("sha256").update(`merged ${repeatKey(f)}`).digest("hex").slice(0, 16)
+}
+
 export function mergeRepeats(findings: Finding[]): Finding[] {
   const groups = new Map<string, Finding[]>()
   const out: Finding[] = []
@@ -298,7 +308,7 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
       out.push(f)
       continue
     }
-    const key = [f.file, f.category, f.severity, !!f.degraded, !!f.preExisting, groupKeyTitle(f)].join("|")
+    const key = repeatKey(f)
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])
@@ -306,14 +316,14 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
   // A merged comment replaces its members' ids: findings folded into a member (`groupedInto`)
   // follow it to the merged comment.
   const renamed = new Map<string, string>()
-  for (const [key, g] of groups) {
+  for (const g of groups.values()) {
     if (g.length === 1) {
       out.push(g[0])
       continue
     }
     g.sort((a, b) => tieKey(a).localeCompare(tieKey(b)))
     const [first, ...rest] = g
-    const id = "f_" + createHash("sha256").update(`merged ${key}`).digest("hex").slice(0, 16)
+    const id = repeatGroupId(first)
     for (const m of g) renamed.set(m.id, id)
     // Folded only when every member is folded into the same lead: a distinct finding merged in
     // must stay visible on its own.

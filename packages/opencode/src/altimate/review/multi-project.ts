@@ -309,14 +309,15 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
   return signEnvelope(VerdictEnvelope.parse(merged))
 }
 
-/** Rule-noise counts summed over the projects (present only when some project has them). */
-function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff"> {
-  const out: Pick<VerdictEnvelope, "rulesOff"> = {}
+/** Rule-noise counts summed over the projects (each present only when some project has it). */
+function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted"> {
+  const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted"> = {}
   if (envs.some((e) => e.rulesOff)) {
     const off: Record<string, number> = {}
     for (const e of envs) for (const [rule, n] of Object.entries(e.rulesOff ?? {})) off[rule] = (off[rule] ?? 0) + n
     out.rulesOff = off
   }
+  if (envs.some((e) => e.rulesRefuted !== undefined)) out.rulesRefuted = envs.reduce((n, e) => n + (e.rulesRefuted ?? 0), 0)
   return out
 }
 
@@ -377,6 +378,7 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
     failedFiles: failedFiles.length ? failedFiles : undefined,
     conventions: conventions.length ? conventions : undefined,
     verifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.verifier }))),
+    ruleVerifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.ruleVerifier as VerifierStatus | undefined }))),
     projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }
 }
@@ -423,5 +425,7 @@ function mergeVerifier(runs: Array<{ root: string; v: AiStatus["verifier"] }>): 
     unreviewed: sumOf(vs.map((v) => v.unreviewed)),
     dropped: dropped.length ? dropped.slice(0, VERIFIER_DROPPED_MAX) : undefined,
     decisions: decisions.length ? decisions : undefined,
+    ruleVerdicts: vs.some((v) => v.ruleVerdicts) ? vs.flatMap((v) => v.ruleVerdicts ?? []) : undefined,
+    batches: vs.some((v) => v.batches) ? vs.flatMap((v) => v.batches ?? []) : undefined,
   }
 }
