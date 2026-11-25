@@ -150,6 +150,20 @@ describe("ProviderError.parseAPICallError: overflow detection", () => {
     expect(result.type).toBe("context_overflow")
   })
 
+  // altimate_change start — upstream_fix: recognize LiteLLM context overflow (anomalyco/opencode#60692)
+  test("detects LiteLLM ContextWindowExceededError", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "litellm" as any,
+      error: makeAPICallError({
+        message:
+          "litellm.ContextWindowExceededError: litellm.BadRequestError: litellm._pre_call_checks: Context Window exceeded for given call. No models have context window large enough for this call.",
+        statusCode: 400,
+      }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+  // altimate_change end
+
   test("detects HTTP 413 as overflow regardless of message text", () => {
     const result = ProviderError.parseAPICallError({
       providerID: "anthropic" as any,
