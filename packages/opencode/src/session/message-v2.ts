@@ -18,6 +18,8 @@ import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
+// altimate_change — redact known credentials in results loaded from older sessions
+import { loadToolCredentialRedactor } from "@/altimate/tool-output-credentials"
 import { createHash } from "node:crypto"
 // altimate_change start — Claude Agent: stopped-tool flag for its waiting turn
 import { ToolAborted } from "@/altimate/provider/claude-agent/tools/aborted"
@@ -730,6 +732,11 @@ export namespace MessageV2 {
     options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
     // altimate_change end
   ) {
+    // altimate_change start — apply at projection before clipping historical tool output
+    const redact = input.some((message) => message.parts.some((part) => part.type === "tool"))
+      ? yield* loadToolCredentialRedactor
+      : undefined
+    // altimate_change end
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
     // Track media from tool results that need to be injected as user messages
@@ -897,11 +904,20 @@ export namespace MessageV2 {
             if (part.state.status === "completed") {
               // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
               const storedMask = part.state.metadata?.observation_mask
-              const rawOutputText = part.state.time.compacted
+              const storedOutputText = part.state.time.compacted
                 ? typeof storedMask === "string" && storedMask.length > 0
                   ? storedMask
                   : "[Old tool result content cleared]"
                 : part.state.output
+              // Redact as one result envelope so omitted credential-bearing media
+              // leaves the same visible note as newly produced tool results.
+              const storedAttachments =
+                part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+              const safeResult = redact?.output({ output: storedOutputText, attachments: storedAttachments }) ?? {
+                output: storedOutputText,
+                attachments: storedAttachments,
+              }
+              const rawOutputText = safeResult.output
               const maxChars = options?.toolOutputMaxChars
               const outputText =
                 !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars
@@ -910,7 +926,9 @@ export namespace MessageV2 {
                     } chars]`
                   : rawOutputText
               // altimate_change end
-              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+              // altimate_change start — stored attachment references may also contain credentials
+              const attachments = safeResult.attachments
+              // altimate_change end
 
               // For providers that don't support media in tool results, extract media files
               // (images, PDFs) to be sent as a separate user message
@@ -953,7 +971,7 @@ export namespace MessageV2 {
                   state: "output-available",
                   toolCallId: replayCallID,
                   input: part.state.input,
-                  output,
+                  output: redact?.text(output) ?? output,
                   ...(keepAborted ? { callProviderMetadata: callMetadata } : {}),
                 })
               } else {
@@ -962,7 +980,7 @@ export namespace MessageV2 {
                   state: "output-error",
                   toolCallId: replayCallID,
                   input: part.state.input,
-                  errorText: part.state.error,
+                  errorText: redact?.text(part.state.error) ?? part.state.error,
                   ...(keepAborted ? { callProviderMetadata: callMetadata } : {}),
                 })
               }

@@ -320,3 +320,63 @@ describe("tool.write", () => {
     )
   })
 })
+
+it.instance("refuses to replace a known credential with a read placeholder before approval", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const filepath = path.join(test.directory, "profiles.yml")
+    const secret = "synthetic-write-password"
+    const original = `password: ${secret}\nport: 5432\n`
+    yield* putRead(filepath, original)
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    let approvals = 0
+    const exit = yield* run(
+      { filePath: filepath, content: "password: [REDACTED]\nport: 5433\n" },
+      {
+        ...ctx,
+        redactCredentials: createCredentialRedactor([secret]),
+        ask: () =>
+          Effect.sync(() => {
+            approvals++
+          }),
+      },
+    ).pipe(Effect.exit)
+    expect(failureMessage(exit)).toContain("Refusing to overwrite a known credential")
+    expect(failureMessage(exit)).not.toContain(secret)
+    expect(approvals).toBe(0)
+    expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(original)
+  }),
+)
+
+it.instance("refuses a placeholder in the middle of a multiline credential", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const filepath = path.join(test.directory, "credential.txt")
+    const secret = "fixture first\nfixture second\nfixture third"
+    yield* putRead(filepath, secret)
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    const exit = yield* run(
+      { filePath: filepath, content: secret.replace("fixture second", "[REDACTED]") },
+      { ...ctx, redactCredentials: createCredentialRedactor([secret]) },
+    ).pipe(Effect.exit)
+    expect(failureMessage(exit)).toContain("Refusing to overwrite a known credential")
+    expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(secret)
+  }),
+)
+
+it.instance("allows unrelated changes with existing literal placeholders and preserved credentials", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const filepath = path.join(test.directory, "profiles.yml")
+    const secret = "synthetic-write-password"
+    const original = `password: ${secret}\nexample: [REDACTED]\nport: 5432\n`
+    const updated = original.replace("5432", "5433")
+    yield* putRead(filepath, original)
+    const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+    yield* run(
+      { filePath: filepath, content: updated },
+      { ...ctx, redactCredentials: createCredentialRedactor([secret]) },
+    )
+    expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(updated)
+  }),
+)

@@ -530,10 +530,16 @@ export const BashTool = Tool.define("bash", async () => {
 
       const append = (chunk: Buffer) => {
         output += chunk.toString()
+        const preview = ctx.redactCredentials?.previewStatus(output, MAX_METADATA_LENGTH) // altimate_change
         ctx.metadata({
           metadata: {
             // truncate the metadata to avoid GIANT blobs of data (has nothing to do w/ what agent can access)
-            output: output.length > MAX_METADATA_LENGTH ? output.slice(0, MAX_METADATA_LENGTH) + "\n\n..." : output,
+            // altimate_change start — bound the exact-match scan to the preview and its lookahead
+            output:
+              preview?.output ??
+              (output.length > MAX_METADATA_LENGTH ? output.slice(0, MAX_METADATA_LENGTH) + "\n\n..." : output),
+            ...(preview?.withheld && { credentialPreviewWithheld: true }),
+            // altimate_change end
             description: params.description,
           },
         })
@@ -650,6 +656,8 @@ export const BashTool = Tool.define("bash", async () => {
         output += "\n\n<bash_metadata>\n" + resultMetadata.join("\n") + "\n</bash_metadata>"
       }
 
+      // altimate_change — redact the aggregate stdout/stderr before deriving final metadata
+      output = ctx.redactCredentials?.text(output) ?? output
       return {
         title: params.description,
         metadata: {

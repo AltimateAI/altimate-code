@@ -136,11 +136,12 @@ const decodeField = (value: unknown): { text: string; raw?: Buffer } | undefined
  * than silently switching these records to a different unit: without it, a line beginning with one
  * bad byte reports `needle` at [3,9) of a string where [3,9) reads "edle t".
  */
-const normalizeMatch = (json: object): unknown => {
+const normalizeMatch = (json: object, onSourceLine?: (text: string) => void): unknown => {
   const data = readProp(json, "data")
   if (!data || typeof data !== "object") return json
   const lines = decodeField(readProp(data, "lines"))
   if (!lines) return json
+  onSourceLine?.(lines.text)
   const raw = lines.raw
   // Submatch `start`/`end` are BYTE offsets into the RAW line, so a lossy decode invalidates them:
   // every undecodable byte widens to a 3-byte U+FFFD. They are rebased onto the decoded text's own
@@ -256,7 +257,31 @@ export interface GrepInput {
   readonly filterPath?: (relativePath: string) => boolean
   readonly scanLimit?: number
   // altimate_change end
+  // altimate_change start — supply source context separately from the capped public match
+  readonly sourceContext?: {
+    readonly lookaround: number
+    readonly onMatch: (line: GrepSourceLine) => void
+  }
 }
+// altimate_change end
+
+// altimate_change start — retain only enough source to render the visible window and adjacent lines
+export interface GrepSourceLine {
+  readonly head: string
+  readonly tail?: string
+  readonly visibleEnd: number
+}
+
+function retainSourceLine(text: string, lookaround: number): GrepSourceLine {
+  const visibleEnd = Math.min(text.length, LINE_TEXT_CAP)
+  if (text.length <= LINE_TEXT_CAP + 2 * lookaround) return { head: text, visibleEnd }
+  return {
+    head: text.slice(0, LINE_TEXT_CAP + lookaround),
+    tail: text.slice(-lookaround),
+    visibleEnd,
+  }
+}
+// altimate_change end
 
 export interface Interface {
   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
@@ -432,7 +457,7 @@ export const layer = Layer.effect(
       grep: (input) =>
         Effect.suspend(() => {
           const skipped: { count: number; samples: string[] } = { count: 0, samples: [] }
-          return run<RawMatchData>({
+          return run<RawMatchData & { sourceLine?: GrepSourceLine }>({
             ...input,
             filter: input.filterPath ? (match) => input.filterPath!(match.path.text) : undefined,
             args: [
@@ -485,15 +510,28 @@ export const layer = Layer.effect(
                 // `normalizeMatch` is plain synchronous code. A throw there would be a DEFECT,
                 // which `Effect.catch` deliberately does not catch — so it would abort the
                 // stream rather than skip one record, defeating the point of this change.
+                const context = input.sourceContext
+                let sourceLine: GrepSourceLine | undefined
                 const normalized = yield* Effect.try({
-                  try: () => normalizeMatch(json),
+                  try: () =>
+                    normalizeMatch(
+                      json,
+                      context &&
+                        ((text) => {
+                          sourceLine = retainSourceLine(text, context.lookaround)
+                        }),
+                    ),
                   catch: (cause) => failure("record could not be normalized", cause),
                 })
                 const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalized).pipe(
                   Effect.mapError((cause) => failure("unexpected match shape", cause)),
                 )
                 // `normalizeMatch` already caps submatches and line text, so nothing is re-trimmed.
-                return { ...match.data, path: { text: match.data.path.text.replace(/^\.[\\/]/, "") } }
+                return {
+                  ...match.data,
+                  path: { text: match.data.path.text.replace(/^\.[\\/]/, "") },
+                  sourceLine,
+                }
               }).pipe(
                 Effect.catch((cause) =>
                   Effect.sync(() => {
@@ -524,6 +562,7 @@ export const layer = Layer.effect(
             // altimate_change end
             Effect.map((result) =>
               result.items.map((match) => {
+                if (match.sourceLine) input.sourceContext?.onMatch(match.sourceLine)
                 const relative = match.path.text
                   .replace(/^(?:\.[\\/])+/u, "")
                   .replace(/^[\\/]+/u, "")

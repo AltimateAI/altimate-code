@@ -131,7 +131,14 @@ describe("Ripgrep", () => {
           )
           yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "c-plain.txt"), "needle here\n"))
 
-          const matches = yield* (yield* Ripgrep.Service).grep({ cwd: tmp.path, pattern: "needle", limit: 10 })
+          const source: Ripgrep.GrepSourceLine[] = []
+          const matches = yield* (yield* Ripgrep.Service).grep({
+            cwd: tmp.path,
+            pattern: "needle",
+            limit: 10,
+            sourceContext: { lookaround: 64, onMatch: (line) => source.push(line) },
+          })
+          expect(source).toEqual(matches.map((match) => ({ head: match.text, visibleEnd: match.text.length })))
 
           // The non-UTF8 file is reported like any other rather than dropped or fatal.
           expect(matches.map((item) => item.entry.path).sort()).toEqual([
@@ -196,7 +203,7 @@ describe("Ripgrep", () => {
   // risk is a Windows-only spawn/quoting regression going unnoticed rather than a parsing one.
   const stubTest = bunTest.skipIf(process.platform === "win32")
 
-  const grepWithStubbedRecords = (records: string[]) =>
+  const grepWithStubbedRecords = (records: string[], options: Partial<Ripgrep.GrepInput> = {}) =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -209,7 +216,7 @@ describe("Ripgrep", () => {
 
           return yield* Effect.gen(function* () {
             const rg = yield* Ripgrep.Service
-            return yield* rg.grep({ cwd: tmp.path, pattern: "needle", limit: 100 })
+            return yield* rg.grep({ cwd: tmp.path, pattern: "needle", limit: 100, ...options })
           }).pipe(
             Effect.provide(
               Ripgrep.layer.pipe(
@@ -231,6 +238,41 @@ describe("Ripgrep", () => {
 
   /** The single aggregate warning for the last search, or undefined when nothing was skipped. */
   const lastSkip = () => skipWarnings.at(-1)
+
+  stubTest("keeps source context aligned with retained matches after rejected and filtered records", async () => {
+    const source: Ripgrep.GrepSourceLine[] = []
+    const longLine = "needle".padEnd(1_996, "x") + "fixture-overlapping-credential\n"
+    const decodedLine = "needle \ufffd tail\n"
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords(
+        [
+          matchRecord("a.txt", { lines: { text: longLine } }),
+          // No source callback is possible, but these cannot pass RawMatch either.
+          matchRecord("bad-lines.txt", { lines: { text: 42 } }),
+          matchRecord("bad-bytes.txt", { lines: { bytes: "!!!" } }),
+          // Normalization captures source, but schema rejection must not publish it.
+          matchRecord("bad-line-number.txt", { line_number: 0 }),
+          matchRecord("filtered.txt"),
+          matchRecord("b.txt", { lines: { bytes: Buffer.from("needle \xff tail\n", "binary").toString("base64") } }),
+          matchRecord("past-limit.txt"),
+        ],
+        {
+          limit: 2,
+          filterPath: (relative) => !relative.endsWith("filtered.txt"),
+          sourceContext: { lookaround: 64, onMatch: (line) => source.push(line) },
+        },
+      ),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("b.txt")])
+    expect(source).toEqual([
+      { head: longLine, visibleEnd: 2_000 },
+      { head: decodedLine, visibleEnd: decodedLine.length },
+    ])
+    expect(matches[0].text).toBe(longLine.slice(0, 2_000) + "...")
+    expect(matches[1].text).toBe(decodedLine)
+    expect(lastSkip()?.skipped).toBe(3)
+  })
 
   stubTest("skips an unparseable record without failing the search", async () => {
     const matches = await Effect.runPromise(

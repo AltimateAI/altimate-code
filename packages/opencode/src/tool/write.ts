@@ -3,7 +3,6 @@ import * as path from "path"
 import { Effect } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch } from "diff"
 import DESCRIPTION from "./write.txt"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { FileSystem } from "@opencode-ai/core/filesystem"
@@ -11,7 +10,7 @@ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { Format } from "../format"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { trimDiff } from "./edit"
+import { assertNoCredentialPlaceholderOverwrite, toolFileDiff } from "./edit" // altimate_change — redact diff source before rendering
 import { assertExternalDirectoryEffect, assertSensitiveWriteEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
@@ -80,7 +79,8 @@ export const WriteTool = Tool.define(
           const contentOld = source.text
           const contentNew = next.text
 
-          const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, contentNew))
+          assertNoCredentialPlaceholderOverwrite(contentOld, contentNew, ctx.redactCredentials) // altimate_change
+          const diff = toolFileDiff(filepath, contentOld, contentNew, ctx.redactCredentials) // altimate_change
           yield* ctx.ask({
             permission: "edit",
             patterns: [path.relative(instance.worktree, filepath)],

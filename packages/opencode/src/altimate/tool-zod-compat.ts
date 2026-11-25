@@ -38,6 +38,8 @@ export interface LegacyContext<M extends Metadata = Metadata> {
   abort: AbortSignal
   callID?: string
   extra?: { [key: string]: any }
+  // altimate_change — keep the same credential filter through legacy tool dispatch
+  redactCredentials?: NewContext["redactCredentials"]
   messages: SessionV1.WithParts[]
   permissions?: PermissionV1.Ruleset
   metadata(input: { title?: string; metadata?: M }): void | Promise<void>
@@ -269,6 +271,7 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
             abort: ctx.abort,
             callID: ctx.callID,
             extra: ctx.extra as { [key: string]: any } | undefined,
+            redactCredentials: ctx.redactCredentials, // altimate_change — shared tool-output filter
             messages: ctx.messages,
             permissions: ctx.permissions,
             metadata: (input) => bridge.promise(ctx.metadata(input)),
@@ -300,7 +303,7 @@ export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID>
 // CURRENT fiber's InstanceRef and only falls back to the ALS when no fiber is active. Because the
 // factory runs inside this init Effect's fiber, attach would read an unset InstanceRef and fail
 // ("InstanceRef not provided"). Provide the ALS instance as InstanceRef so attach finds it.
-function withAlsInstanceRef<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
+export function withAlsInstanceRef<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
   return Effect.suspend(() => {
     let instance: InstanceContext | undefined
     try {

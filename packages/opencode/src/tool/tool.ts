@@ -1,9 +1,11 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Context as EffectContext, Effect, Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
+// altimate_change — exact known credentials at the tool execution boundary
+import { loadToolCredentialRedactor, type CredentialRedactor } from "@/altimate/tool-output-credentials"
 import { Agent } from "@/agent/agent"
 // altimate_change start — telemetry instrumentation + legacy zod-tool adapter
 import z from "zod"
@@ -67,6 +69,8 @@ export type Context<M extends Metadata = Metadata> = {
   abort: AbortSignal
   callID?: string
   extra?: { [key: string]: unknown }
+  // altimate_change — shared with producers that format or clip output
+  redactCredentials?: CredentialRedactor
   messages: SessionV1.WithParts[]
   // altimate_change start — pass effective permission rules to search result filtering
   permissions?: PermissionV1.Ruleset
@@ -164,6 +168,25 @@ export type InferDef<T> =
     : T extends Effect.Effect<Info<infer P, infer M>, any, any>
       ? Def<P, M>
       : never
+
+// altimate_change start — preserve failures, defects, and cancellation while redacting their values.
+export function redactFailureCause<E>(cause: Cause.Cause<E>, redact: CredentialRedactor): Cause.Cause<E> {
+  return Cause.fromReasons(
+    cause.reasons.map((reason) => {
+      if (Cause.isFailReason(reason))
+        return Cause.makeFailReason(redact.failure(reason.error) as E).annotate(
+          EffectContext.makeUnsafe(new Map(reason.annotations)),
+        )
+      if (Cause.isDieReason(reason))
+        return Cause.makeDieReason(redact.failure(reason.defect)).annotate(
+          EffectContext.makeUnsafe(new Map(reason.annotations)),
+        )
+      return reason
+    }),
+  )
+}
+
+// altimate_change end
 
 // altimate_change start — telemetry helpers (ported from the fork's pre-1.17 Tool.define wrapper)
 function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: number, error: unknown) {
@@ -348,15 +371,29 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
           // Debug mode: trace each call as it starts and ends (no-op unless ALTIMATE_DEBUG).
           const endTrace = traceToolCall(id, ctx.callID)
-          const rawResult = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
+          const redact = ctx.redactCredentials ?? (yield* loadToolCredentialRedactor)
+          const metadata = ctx.metadata
+          ctx = { ...ctx, redactCredentials: redact, metadata: (value) => metadata(redact.output(value)) }
+          const executed = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
+            Effect.catchCause((cause) =>
+              Effect.gen(function* () {
+                const fresh = yield* loadToolCredentialRedactor
+                const safeCause = redactFailureCause(redactFailureCause(cause, redact), fresh)
+                return yield* Effect.failCause(safeCause)
+              }),
+            ),
+            // onError is an uninterruptible finalizer: cancellation must close the
+            // trace even when the asynchronous failure-redaction recovery is skipped.
             Effect.onError((cause) =>
               Effect.sync(() => {
-                const error = Cause.squash(cause)
+                const error = Cause.squash(redactFailureCause(cause, redact))
                 endTrace("error", error instanceof Error ? error.message : String(error))
                 altimateTrackError(id, decoded, ctx, startTime, error)
               }),
             ),
           )
+          // Refresh for tools that read or install a credential during execution.
+          const rawResult = redact.output((yield* loadToolCredentialRedactor).output(executed))
           const failed = isErrorResult(rawResult)
           const unsuccessful = hasFailureSignals(id, rawResult)
           // Ended before anything else can throw, so a call that finished is never left "running".

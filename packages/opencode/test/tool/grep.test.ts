@@ -136,6 +136,72 @@ describe("tool.grep", () => {
     }),
   )
 
+  // altimate_change start — grep matches a multiline credential before inserting line labels
+  it.instance("redacts a known credential across adjacent grep matches", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const value = "fixture-first\nfixture-second"
+      const file = path.join(test.directory, "match.txt")
+      const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+      yield* Effect.promise(() => Bun.write(file, "start " + value + " finish\n"))
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const args = { pattern: "fixture", path: file }
+      const ordinary = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([]) })
+      const redacted = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([value]) })
+      expect(redacted.output).toBe(
+        ordinary.output.replace("start fixture-first", "start [REDACTED]").replace("fixture-second finish", " finish"),
+      )
+      expect(redacted.metadata.matches).toBe(2)
+    }),
+  )
+
+  it.instance("redacts a credential crossing the retained grep line window", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const value = "fixture-overlapping-credential"
+      const file = path.join(test.directory, "match.txt")
+      const prefix = "needle".padEnd(1_996, "x")
+      const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+      yield* Effect.promise(() => Bun.write(file, prefix + value + "\n"))
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const args = { pattern: "needle", path: file }
+      const ordinary = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([]) })
+      const redacted = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([value]) })
+      expect(ordinary.output).toBe(`Found 1 matches\n${file}:\n  Line 1: ${prefix}fixt...`)
+      expect(redacted.output).toBe(`Found 1 matches\n${file}:\n  Line 1: ${prefix}[REDACTED]...`)
+      expect(redacted.metadata).toEqual(ordinary.metadata)
+    }),
+  )
+
+  it.instance("redacts multiline credentials across clipped adjacent grep records", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const value = "fixture-first-half\nfixture-second-half"
+      const file = path.join(test.directory, "match.txt")
+      const { createCredentialRedactor } = yield* Effect.promise(() => import("@/altimate/tool-output-credentials"))
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const args = { pattern: "needle|fixture", path: file }
+      const redactCredentials = createCredentialRedactor([value])
+
+      for (const [length, visibleSuffix] of [[1_996, "fixt"], [4_000, ""]] as const) {
+        const prefix = "needle".padEnd(length, "x")
+        yield* Effect.promise(() => Bun.write(file, prefix + value + " ordinary\n"))
+        const ordinary = yield* grep.execute(args, { ...ctx, redactCredentials: createCredentialRedactor([]) })
+        const redacted = yield* grep.execute(args, { ...ctx, redactCredentials })
+        const head = prefix.slice(0, 2_000)
+        const heading = `Found 2 matches\n${file}:\n  Line 1: ${head}`
+        expect(ordinary.output).toBe(`${heading}${visibleSuffix}...\n  Line 2: fixture-second-half ordinary\n`)
+        const placeholder = visibleSuffix ? "[REDACTED]" : ""
+        expect(redacted.output).toBe(`${heading}${placeholder}...\n  Line 2: [REDACTED] ordinary\n`)
+        expect(redacted.metadata).toEqual(ordinary.metadata)
+      }
+    }),
+  )
+  // altimate_change end
+
   it.instance("does not report an unknown total when results are truncated", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance

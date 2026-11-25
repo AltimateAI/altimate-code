@@ -9,6 +9,78 @@ import * as Tool from "./tool"
 // altimate_change start — enforce read permissions on bounded search results
 import type { Match } from "@opencode-ai/core/filesystem/schema"
 import { readableSearchResults, searchReadApproval } from "@/altimate/search-read-permissions"
+import type { CredentialRedactor } from "@/altimate/tool-output-credentials"
+// altimate_change end
+
+// altimate_change start — redact adjacent source lines before adding labels or clipping
+type RenderedLine = { path: string; line: number; text: string }
+
+function redactSourceLines(
+  rows: RenderedLine[],
+  sourceLines: readonly Ripgrep.GrepSourceLine[],
+  redact: CredentialRedactor,
+): void {
+  const pieces: string[] = []
+  const ranges: { row: RenderedLine; from: number; to: number; clipped: boolean }[] = []
+  let length = 0
+
+  function flush() {
+    if (ranges.length) {
+      const source = pieces.join("")
+      if (
+        ranges[0].from === 0 &&
+        ranges[ranges.length - 1].to === source.length &&
+        ranges.every((range) => !range.clipped)
+      ) {
+        const redacted = redact.lines(source)
+        if (redacted !== source) {
+          const lines = redacted.split(/(?<=\n)/)
+          for (const [index, range] of ranges.entries()) range.row.text = lines[index] ?? ""
+        }
+      } else {
+        for (const { row, from, to, clipped } of ranges) {
+          const visible = source.slice(from, to)
+          const rendered = redact.window(source, from, to)
+          if (visible === rendered) continue
+          const ending = visible.endsWith("\r\n") ? "\r\n" : visible.endsWith("\n") ? "\n" : ""
+          row.text = rendered + (rendered.endsWith(ending) ? "" : ending) + (clipped ? "..." : "")
+        }
+      }
+    }
+    pieces.length = ranges.length = length = 0
+  }
+
+  for (const [index, row] of rows.entries()) {
+    const source = sourceLines[index]
+    const previous = rows[index - 1]
+    const previousSource = sourceLines[index - 1]
+    if (
+      previous &&
+      (previous.path !== row.path ||
+        previous.line + 1 !== row.line ||
+        !(previousSource.tail ?? previousSource.head).endsWith("\n"))
+    ) {
+      flush()
+    }
+
+    ranges.push({
+      row,
+      from: length,
+      to: length + source.visibleEnd,
+      clipped: source.tail !== undefined || source.visibleEnd < source.head.length,
+    })
+    pieces.push(source.head)
+    length += source.head.length
+    if (source.tail !== undefined) {
+      // The omitted middle is a real gap. Keep the tail for matches that cross
+      // the next newline, without inventing adjacency between head and tail.
+      flush()
+      pieces.push(source.tail)
+      length = source.tail.length
+    }
+  }
+  flush()
+}
 // altimate_change end
 
 export const Parameters = Schema.Struct({
@@ -113,11 +185,30 @@ export const GrepTool = Tool.define(
             permitted++
             return true
           }
+          const redact = ctx.redactCredentials
+          const sourceLines: Ripgrep.GrepSourceLine[] = []
+          const sourceContext = redact?.windowLookaround
+            ? {
+                lookaround: redact.windowLookaround,
+                onMatch: (line: Ripgrep.GrepSourceLine) => {
+                  sourceLines.push(line)
+                },
+              }
+            : undefined
           const result: Match[] = []
           if (!listedToLimit && approved.size === candidates.length) {
             // Every candidate was listed and approved: one content search, as before. A listing cut at
             // the cap may hide unlisted files, so it always takes the restricted path below.
-            result.push(...(yield* ripgrep.grep({ cwd, pattern: params.pattern, file, include, limit, scanLimit, filterPath })))
+            result.push(...(yield* ripgrep.grep({
+              cwd,
+              pattern: params.pattern,
+              file,
+              include,
+              limit,
+              scanLimit,
+              filterPath,
+              sourceContext,
+            })))
           } else {
             // Some candidates are denied or unapproved: restrict ripgrep to the approved files so a denied
             // file with many matches neither gets read nor consumes the scan ceiling. Literal, rooted globs
@@ -144,6 +235,7 @@ export const GrepTool = Tool.define(
                 limit: limit - result.length,
                 scanLimit: scanLimit - scanned,
                 filterPath,
+                sourceContext,
               })))
             }
           }
@@ -162,6 +254,7 @@ export const GrepTool = Tool.define(
             line: item.line,
             text: item.text,
           }))
+          if (redact && sourceLines.length === final.length) redactSourceLines(final, sourceLines, redact)
           const total = final.length
           const hasMore = permitted > limit
           // altimate_change end

@@ -18,6 +18,8 @@ import { stateFileOf } from "../altimate/rules/state-path"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
+// altimate_change — known credential values in session tool results
+import { toolCredentialRedactor } from "@/altimate/tool-output-credentials"
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
@@ -2908,7 +2910,7 @@ export namespace SessionPrompt {
     const tools: Record<string, AITool> = {}
 
     // altimate_change start — carry tool identity into repeated-id metadata lookup
-    const context = (toolName: string, args: any, options: ToolCallOptions) => {
+    const context = (toolName: string, args: any, options: ToolCallOptions, external = false) => {
       const execution = input.processor.beginToolExecution(options.toolCallId)
       const ctx: Tool.Context = {
         sessionID: input.session.id,
@@ -2932,6 +2934,10 @@ export namespace SessionPrompt {
         metadata: (val: { title?: string; metadata?: any }) =>
           // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
           Effect.promise(async () => {
+            // altimate_change — an external tool can register a credential before reporting progress
+            const redact = external ? await toolCredentialRedactor() : undefined
+            const title = ctx.redactCredentials?.output(val.title) ?? val.title // altimate_change
+            const metadata = ctx.redactCredentials?.metadata(val.metadata) ?? val.metadata // altimate_change
             const match =
               input.processor.partFromToolExecution(execution) ??
               input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
@@ -2939,8 +2945,8 @@ export namespace SessionPrompt {
               await Session.updatePart({
                 ...match,
                 state: {
-                  title: val.title,
-                  metadata: val.metadata,
+                  title: redact?.output(title) ?? title, // altimate_change — plugin progress
+                  metadata: redact?.metadata(metadata) ?? metadata, // altimate_change — plugin progress
                   status: "running",
                   input: args,
                   time: {
@@ -2996,10 +3002,12 @@ export namespace SessionPrompt {
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           // altimate_change start — disambiguate repeated concurrent tool-call ids
-          const { ctx, execution } = context(item.id, args, options)
+          const { ctx, execution } = context(item.id, args, options, item.registrySource === "external") // altimate_change
           // altimate_change end
           // altimate_change start — release the execution identity on every exit path
           try {
+            const redact = await toolCredentialRedactor() // altimate_change — capture credentials before execution and hooks
+            ctx.redactCredentials = redact // altimate_change
             await Plugin.trigger(
               "tool.execute.before",
               {
@@ -3012,7 +3020,11 @@ export namespace SessionPrompt {
               },
             )
             // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
-            const result = await AppRuntime.runPromise(item.execute(args, ctx))
+            // altimate_change start — cover custom tools as well as the shared built-in wrapper
+            const raw = await AppRuntime.runPromise(item.execute(args, ctx))
+            const resultRedactor = item.registrySource === "external" ? await toolCredentialRedactor() : redact
+            const result = resultRedactor.output(redact.output(raw))
+            // altimate_change end
             // altimate_change end
             const output = {
               ...result,
@@ -3046,8 +3058,13 @@ export namespace SessionPrompt {
             await input.lessons?.appendFileLessons(ctx.sessionID, item.id, args, stamped)
             // altimate_change end
             // altimate_change start — return the source-stamped output
-            Tool.assertSuccess(stamped)
-            return stamped
+            const fresh = await toolCredentialRedactor()
+            const safeResult = fresh.output(resultRedactor.output(redact.output(stamped)))
+            Tool.assertSuccess(safeResult)
+            return safeResult
+          } catch (error) {
+            const fresh = await toolCredentialRedactor()
+            throw fresh.failure(ctx.redactCredentials?.failure(error) ?? error)
             // altimate_change end
           } finally {
             input.processor.finishToolExecution(execution)
@@ -3106,9 +3123,16 @@ export namespace SessionPrompt {
           // altimate_change start — a workspace integration call is tracked here, where MCP tools run
           const startedAt = Date.now()
           let result
+          let redact: Awaited<ReturnType<typeof toolCredentialRedactor>> // altimate_change — reuse the MCP call's filter
           try {
-            result = await execute(args, opts)
+            // altimate_change start — sanitize MCP output before hooks, rendering and truncation
+            const raw = await execute(args, opts)
+            redact = await toolCredentialRedactor()
+            result = redact.output(raw)
+            // altimate_change end
           } catch (err) {
+            // altimate_change — protect errors before tracking them or returning them to the SDK
+            const error = (await toolCredentialRedactor()).failure(err)
             trackWorkspaceToolCall({
               key,
               clientName,
@@ -3118,9 +3142,9 @@ export namespace SessionPrompt {
               turn: input.turn,
               startedAt,
               outcome: "error",
-              error: err,
+              error,
             })
-            throw err
+            throw error
           }
           trackWorkspaceToolCall({
             key,
@@ -3146,6 +3170,8 @@ export namespace SessionPrompt {
             result,
           )
 
+          // altimate_change — redact changes from the mutable tool-result hook as well
+          result = redact.output(result)
           const textParts: string[] = []
           const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
 
@@ -3174,7 +3200,7 @@ export namespace SessionPrompt {
             }
           }
 
-          const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
+          const truncated = await Truncate.output(redact.text(textParts.join("\n\n")), {}, input.agent) // altimate_change — match across joined content
           // altimate_change start — authoritative source + readable title from the original client
           // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
           const described = describeMcpTool(key, clientName)
@@ -4485,6 +4511,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       { cwd, sessionID: input.sessionID, callID: part.callID },
       { env: {} },
     )
+    // altimate_change — collect credentials before starting the manual shell
+    const redact = await toolCredentialRedactor()
     const proc = spawn(shell, args, {
       cwd,
       detached: process.platform !== "win32",
@@ -4503,7 +4531,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       output += chunk.toString()
       if (part.state.status === "running") {
         part.state.metadata = {
-          output: output,
+          output: redact.progress(output), // altimate_change — persisted shell progress
           description: "",
         }
         Session.updatePart(part)
@@ -4514,7 +4542,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       output += chunk.toString()
       if (part.state.status === "running") {
         part.state.metadata = {
-          output: output,
+          output: redact.progress(output), // altimate_change — persisted shell progress
           description: "",
         }
         Session.updatePart(part)
@@ -4549,6 +4577,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     if (aborted) {
       output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
     }
+    output = redact.text(output) // altimate_change — final manual shell result
     msg.time.completed = Date.now()
     await Session.updateMessage(msg)
     if (part.state.status === "running") {

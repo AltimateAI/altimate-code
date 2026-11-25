@@ -45,8 +45,15 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { ProjectV2 } from "@opencode-ai/core/project"
 // altimate_change end
 
+// altimate_change — sanitize result fields before SQLite and subscribers see them
+import { redactToolResultState, toolCredentialRedactor } from "@/altimate/tool-output-credentials"
+
 // altimate_change start — upstream_fix: keep stored, published, and returned parts JSON-safe
 async function persistPart(part: MessageV2.Part) {
+  if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
+    const redact = await toolCredentialRedactor()
+    part = { ...part, state: redactToolResultState(part.state, redact) }
+  }
   part = normalizeBigInts(part, "safe-number")
   const { id, messageID, sessionID, ...data } = part
   const time = Date.now()

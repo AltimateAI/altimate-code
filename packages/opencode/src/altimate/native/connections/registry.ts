@@ -258,7 +258,8 @@ function resolveStorePaths(
 // Loading
 // ---------------------------------------------------------------------------
 
-function loadFromFile(filePath: string): Record<string, ConnectionConfig> {
+// altimate_change — observational reads leave registry diagnostics to warehouse loading
+function loadFromFile(filePath: string, quiet = false): Record<string, ConnectionConfig> {
   try {
     if (!fs.existsSync(filePath)) return {}
     const raw = fs.readFileSync(filePath, "utf-8")
@@ -266,7 +267,8 @@ function loadFromFile(filePath: string): Record<string, ConnectionConfig> {
     if (typeof parsed !== "object" || parsed === null) return {}
     return parsed as Record<string, ConnectionConfig>
   } catch (e) {
-    Log.Default.warn(`Failed to load connections from ${filePath}: ${e}`)
+    // altimate_change — leave diagnostics to an explicit warehouse load
+    if (!quiet) Log.Default.warn(`Failed to load connections from ${filePath}: ${e}`)
     return {}
   }
 }
@@ -1068,6 +1070,41 @@ export async function reload(): Promise<void> {
   // altimate_change end
 }
 
+// altimate_change start — observe current sources without initializing or updating the registry
+type FileSource = "global" | "local"
+const observedFiles = new Map<
+  FileSource,
+  { file: string; version: string; configs: Record<string, ConnectionConfig> }
+>()
+
+function observeFile(file: string, source: FileSource): Record<string, ConnectionConfig> {
+  try {
+    const stat = fs.statSync(file, { bigint: true, throwIfNoEntry: false })
+    if (stat?.isFile()) {
+      const version = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":")
+      const previous = observedFiles.get(source)
+      if (previous?.file === file && previous.version === version) return previous.configs
+      const configs = loadFromFile(file, true)
+      observedFiles.set(source, { file, version, configs })
+      return configs
+    }
+  } catch {
+    // Connections files are optional, and a concurrent edit can remove one.
+  }
+  observedFiles.delete(source)
+  return {}
+}
+
+export function* knownCredentialConfigs(projectDir = projectRoot()): Iterable<ConnectionConfig> {
+  const dir = path.resolve(projectDir)
+  const active = injectionActive ? injectedState : states.get(dir)
+  if (active?.loaded) yield* active.configs.values()
+  // A file can be read by tools even when another source shadows its connection name.
+  yield* Object.values(observeFile(globalConfigPath(), "global"))
+  yield* Object.values(observeFile(localConfigPathFor(dir), "local"))
+}
+// altimate_change end
+
 /** Get the raw config for a connection (for testing). */
 export function getConfig(name: string): ConnectionConfig | undefined {
   // altimate_change start — the current project's registry
@@ -1084,6 +1121,7 @@ export function reset(): void {
   states.clear()
   injectedState = undefined
   injectionActive = false
+  observedFiles.clear()
   // altimate_change end
   censusSent = false
 }

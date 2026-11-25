@@ -7,7 +7,7 @@ import * as path from "path"
 import { Effect, Schema, Semaphore } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { createTwoFilesPatch, diffLines, formatPatch, structuredPatch } from "diff"
 import DESCRIPTION from "./edit.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
@@ -125,7 +125,7 @@ export const EditTool = Tool.define(
                 const desiredBom = next.bom
                 contentOld = ""
                 contentNew = next.text
-                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+                diff = toolFileDiff(filePath, contentOld, contentNew, ctx.redactCredentials)
                 yield* ctx.ask({
                   permission: "edit",
                   patterns: [path.relative(instance.worktree, filePath)],
@@ -166,14 +166,13 @@ export const EditTool = Tool.define(
               const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
               const desiredBom = source.bom || next.bom
               contentNew = next.text
+              assertNoCredentialPlaceholderOverwrite(contentOld, contentNew, ctx.redactCredentials)
 
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
+              diff = toolFileDiff(
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+                ctx.redactCredentials,
               )
               yield* ctx.ask({
                 permission: "edit",
@@ -194,13 +193,11 @@ export const EditTool = Tool.define(
                 file: filePath,
                 event: "change",
               })
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
+              diff = toolFileDiff(
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+                ctx.redactCredentials,
               )
               // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
               Instance.restore(instance, () => FileTime.read(ctx.sessionID, filePath))
@@ -678,6 +675,63 @@ export const ContextAwareReplacer: Replacer = function* (content, find) {
     }
   }
 }
+
+// altimate_change start — refuse whole-file rewrites with credential placeholders.
+// Targeted edits can
+// still change unrelated lines without copying credential placeholders to disk.
+export function assertNoCredentialPlaceholderOverwrite(
+  before: string,
+  after: string,
+  redact?: Tool.Context["redactCredentials"],
+) {
+  if (!redact || !after.includes("[REDACTED]")) return
+  const changes = diffLines(before, after)
+  if (!changes.some((change) => change.added && change.value.includes("[REDACTED]"))) return
+  let offset = 0
+  for (const change of changes) {
+    if (change.added) continue
+    const start = offset
+    offset += change.value.length
+    if (!change.removed || redact.window(before, start, offset) === change.value) continue
+    throw new Error(
+      "Refusing to overwrite a known credential with a [REDACTED] placeholder. Use a targeted edit that preserves credential lines.",
+    )
+  }
+}
+// altimate_change end
+
+// altimate_change start — preserve diff structure while masking lines from the original source
+export function toolFileDiff(path: string, before: string, after: string, redact?: Tool.Context["redactCredentials"]) {
+  const safeBefore = redact?.lines(before) ?? before
+  const safeAfter = redact?.lines(after) ?? after
+  if (safeBefore === before && safeAfter === after) {
+    return trimDiff(createTwoFilesPatch(path, path, before, after))
+  }
+
+  const patch = structuredPatch(path, path, before, after)
+  const oldLines = safeBefore.split("\n")
+  const newLines = safeAfter.split("\n")
+  for (const hunk of patch.hunks) {
+    let oldIndex = hunk.oldStart - 1
+    let newIndex = hunk.newStart - 1
+    hunk.lines = hunk.lines.map((line) => {
+      const prefix = line[0]
+      if (prefix === "-") return prefix + oldLines[oldIndex++]
+      if (prefix === "+") return prefix + newLines[newIndex++]
+      if (prefix !== " ") return line
+      const original = line.slice(1)
+      const oldLine = oldLines[oldIndex++]
+      const newLine = newLines[newIndex++]
+      if (oldLine === newLine) return prefix + oldLine
+      if (oldLine === original) return prefix + newLine
+      if (newLine === original) return prefix + oldLine
+      // A context line can intersect different credentials on the two sides.
+      return prefix + "[REDACTED]"
+    })
+  }
+  return trimDiff(formatPatch(patch))
+}
+// altimate_change end
 
 export function trimDiff(diff: string): string {
   const lines = diff.split("\n")

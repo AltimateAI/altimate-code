@@ -150,7 +150,13 @@ export const ReadTool = Tool.define<
     // altimate_change start — character windows preserve the existing line and byte limits
     const lines = Effect.fn("ReadTool.lines")(function* (
       filepath: string,
-      opts: { limit: number; offset: number; char_offset?: number; max_chars?: number },
+      opts: {
+        limit: number
+        offset: number
+        char_offset?: number
+        max_chars?: number
+        redactCredentials?: Tool.Context["redactCredentials"]
+      },
     ) {
       const start = opts.offset - 1
       const raw: string[] = []
@@ -165,62 +171,127 @@ export const ReadTool = Tool.define<
       // line of the upstream splitLines pipeline) and use a tagged error to stop the
       // upstream file stream as soon as the byte cap is reached.
       const decoder = new TextDecoder("utf-8")
+      // altimate_change start — bounded source context crosses read page boundaries
+      const redact = opts.redactCredentials
+      const lookaround = redact?.multilineLookaround ?? 0
+      const pending: { text: string; end: number }[] = []
+      let position = 0
+      let before = ""
+      let terminalNewline = false
+
+      const render = (text: string, after: string) => {
+        flags.count += 1
+        if (flags.count <= start) return
+        if (raw.length >= opts.limit) {
+          flags.more = true
+          return
+        }
+
+        const splitsPair = (index: number) =>
+          index > 0 && /[\uD800-\uDBFF]/.test(text[index - 1]) && /[\uDC00-\uDFFF]/.test(text[index] ?? "")
+        const windowStart = splitsPair(charOffset) ? charOffset - 1 : charOffset
+        const byteLimit = MAX_BYTES - 512
+        let stop = Math.min(text.length, windowStart + maxChars, windowStart + byteLimit)
+        if (splitsPair(stop)) stop += stop === windowStart + 1 ? 1 : -1
+        let chunk = text.slice(windowStart, stop)
+        // Reserve room for the continuation message within the same byte cap.
+        if (Buffer.byteLength(chunk, "utf-8") > byteLimit) {
+          let bytes = 0
+          let chars = 0
+          for (const char of chunk) {
+            const size = Buffer.byteLength(char, "utf-8")
+            if (bytes + size > byteLimit) break
+            bytes += size
+            chars += char.length
+          }
+          chunk = chunk.slice(0, chars)
+        }
+
+        const end = windowStart + chunk.length
+        const clipped = end < text.length
+        let visible = chunk
+        if (redact && chunk.length > 0) {
+          if (lookaround && (windowStart < lookaround || text.length - end < lookaround)) {
+            // Join neighboring fragments only when the selected characters could
+            // overlap a multiline match. A huge source line is never copied here.
+            const left = Math.max(0, windowStart - redact.windowLookaround)
+            const right = Math.min(text.length, end + redact.windowLookaround)
+            const prefix = left === 0 ? before : ""
+            const suffix = right === text.length ? after : ""
+            const context = prefix + text.slice(left, right) + suffix
+            const from = prefix.length + windowStart - left
+            visible = redact.window(context, from, from + chunk.length)
+          } else {
+            visible = redact.window(text, windowStart, end)
+          }
+        }
+        const line = clipped
+          ? `${visible}... (line truncated to ${chunk.length} chars) (Use offset=${flags.count}, limit=1, char_offset=${end}, max_chars=${Math.min(maxChars, chunk.length)} to continue this line.)`
+          : visible
+        flags.lineCut ||= clipped
+
+        const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
+        if (flags.bytes + size > MAX_BYTES) {
+          flags.cut = true
+          flags.more = true
+          flags.done = true
+          return
+        }
+        raw.push(line)
+        flags.bytes += size
+      }
+
+      const remember = (text: string) => {
+        if (!lookaround) return
+        const suffixStart = Math.max(0, text.length - lookaround + 1)
+        before = (before + text.slice(suffixStart) + "\n").slice(-lookaround)
+      }
+
+      const flush = (eof = false) => {
+        let index = 0
+        while (!flags.done && index < pending.length) {
+          const current = pending[index]
+          if (!eof && position - current.end < lookaround) break
+          let after = ""
+          for (let next = index + 1; next < pending.length && after.length < lookaround; next++) {
+            after += "\n" + pending[next].text.slice(0, lookaround - after.length - 1)
+          }
+          // splitLines drops the final delimiter. Restore it for matching only.
+          if (eof && terminalNewline && after.length < lookaround) after += "\n"
+          render(current.text, after)
+          remember(current.text)
+          index++
+        }
+        pending.splice(0, index)
+      }
+
       yield* fs.stream(filepath).pipe(
-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+        Stream.map((bytes) => {
+          const text = decoder.decode(bytes, { stream: true })
+          if (lookaround && text.length > 0) terminalNewline = text.endsWith("\n") || text.endsWith("\r")
+          return text
+        }),
         Stream.splitLines,
         Stream.runForEach((text) =>
           Effect.gen(function* () {
             if (flags.done) return yield* new ReadStop()
-            flags.count += 1
-            if (flags.count <= start) return
-
-            if (raw.length >= opts.limit) {
-              flags.more = true
+            if (!lookaround || (pending.length === 0 && (flags.count < start || raw.length >= opts.limit))) {
+              render(text, "")
+              if (flags.done) return yield* new ReadStop()
+              if (raw.length < opts.limit) remember(text)
               return
             }
 
-            // altimate_change start — expose a continuation for every clipped line
-            const splitsPair = (index: number) =>
-              index > 0 && /[\uD800-\uDBFF]/.test(text[index - 1]) && /[\uDC00-\uDFFF]/.test(text[index] ?? "")
-            const windowStart = splitsPair(charOffset) ? charOffset - 1 : charOffset
-            const byteLimit = MAX_BYTES - 512
-            let stop = Math.min(text.length, windowStart + maxChars, windowStart + byteLimit)
-            if (splitsPair(stop)) stop += stop === windowStart + 1 ? 1 : -1
-            let chunk = text.slice(windowStart, stop)
-            // Reserve room for the continuation message within the same byte cap.
-            if (Buffer.byteLength(chunk, "utf-8") > byteLimit) {
-              let bytes = 0
-              let chars = 0
-              for (const char of chunk) {
-                const size = Buffer.byteLength(char, "utf-8")
-                if (bytes + size > byteLimit) break
-                bytes += size
-                chars += char.length
-              }
-              chunk = chunk.slice(0, chars)
-            }
-            const end = windowStart + chunk.length
-            const clipped = end < text.length
-            const line = clipped
-              ? `${chunk}... (line truncated to ${chunk.length} chars) (Use offset=${flags.count}, limit=1, char_offset=${end}, max_chars=${Math.min(maxChars, chunk.length)} to continue this line.)`
-              : chunk
-            flags.lineCut ||= clipped
-            // altimate_change end
-            const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-            if (flags.bytes + size <= MAX_BYTES) {
-              raw.push(line)
-              flags.bytes += size
-              return
-            }
-
-            flags.cut = true
-            flags.more = true
-            flags.done = true
-            return yield* new ReadStop()
+            position += text.length + 1
+            pending.push({ text, end: position })
+            flush()
+            if (flags.done) return yield* new ReadStop()
           }),
         ),
         Effect.catchTag("ReadStop", () => Effect.void),
       )
+      if (!flags.done) flush(true)
+      // altimate_change end
 
       // altimate_change start — distinguish clipped text from remaining lines
       return { raw, count: flags.count, cut: flags.cut, more: flags.more, lineCut: flags.lineCut, offset: opts.offset }
@@ -392,6 +463,7 @@ export const ReadTool = Tool.define<
         offset: params.offset || 1,
         char_offset: params.char_offset,
         max_chars: params.max_chars,
+        redactCredentials: ctx.redactCredentials,
       })
       // altimate_change end
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
