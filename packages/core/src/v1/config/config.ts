@@ -110,7 +110,7 @@ export const Info = Schema.Struct({
         description: "BigQuery capacity price in USD per slot-hour, used for jobs that ran in a reservation (default 0.06)",
       }),
       snowflakeUsdPerCredit: Schema.optional(Schema.Number).annotate({
-        description: "Snowflake price per credit, used when the account's rate sheet can't be read (default 3.00)",
+        description: "Snowflake price per credit; when set it replaces the account's billed and contract rates and no rate lookup is made (default 3.00 when no account rate can be read)",
       }),
       databricksUsdPerDbu: Schema.optional(Schema.Number).annotate({
         description: "Databricks price per DBU; when set it replaces the list price",

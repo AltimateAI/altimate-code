@@ -63,12 +63,15 @@ function fakeAdapter(
     boundary?: (jinja: string) => Promise<string>
     /** What the dbt target renders. */
     target?: string
+    /** The manifest path the adapter reports (`getManifestPath`), as the project's own adapter does. */
+    manifestPath?: string
   } = {},
 ) {
   return {
     isInitialized: () => true,
     dispose: async () => {},
     getAdapterType: () => opts.type ?? "bigquery",
+    ...(opts.manifestPath ? { getManifestPath: () => opts.manifestPath } : {}),
     unsafeCompileNode: async (model: string) => {
       calls.nodes.push(model)
       if (opts.compile) return opts.compile()
@@ -1460,6 +1463,70 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.metadata.cost.lastRun).toBeCloseTo(18.75, 10)
   })
 
+  test("script children are read from the earliest parent's creation, so a child cannot slide out of a moving window", async () => {
+    const parent = Date.parse("2026-05-02T10:00:01Z")
+    const kids = [
+      ["k1", "p1", "2026-05-02 10:00:03+00:00", "CREATE_TABLE_AS_SELECT", String(TIB), "0", null, "False"],
+      ["k2", "p1", "2026-05-02 10:00:11+00:00", "MERGE", String(TIB), "0", null, "False"],
+    ]
+    useAdapter(calls, {
+      history: async (jinja) => {
+        if (!jinja.includes("parent_job_id in (")) return bigqueryHistory([job("p1", "2026-05-02 10:00:01+00:00", "2026-05-02 10:00:20+00:00", 9 * TIB, null, 0, "SCRIPT")])(jinja)
+        // An adapter consistent with the SQL: a lower bound at the parent's creation keeps both children; a sliding
+        // window (current_timestamp minus 30 days) has already moved 5 s past the parent's start and loses the first.
+        const fixed = /creation_time >= timestamp_millis\((\d+)\)/.exec(jinja)
+        const lower = fixed ? Number(fixed[1]) : parent + 5_000
+        return table(CHILD_COLUMNS, kids.filter((k) => Date.parse(String(k[2]).replace(" ", "T")) >= lower))
+      },
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.cost).toMatchObject({ runs: 1 })
+    expect(result.metadata.cost.lastRun).toBeCloseTo(12.5, 10)
+  })
+
+  test("the tool description calls the cost reported usage at a stated rate, not what the warehouse billed", async () => {
+    const tool = await initTool(DbtCostEstimateTool)
+    expect(tool.description).not.toContain("what the warehouse billed")
+    expect(tool.description).toContain("stated rate")
+    expect(tool.description).toContain("not an invoice amount")
+  })
+
+  test("the SELECT's price is in the output beside the history it is a note about", async () => {
+    useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "mart" }, ctx)
+    expect(result.output).toContain("Cost from 1 run")
+    expect(result.output).toContain("The SELECT would bill at most $")
+    expect(result.output).toContain("The price covers the SELECT only")
+  })
+
+  test("the manifest the adapter reports is the one the model is looked up in", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-cost-manifest-"))
+    try {
+      const file = path.join(dir, "manifest.json")
+      await writeFile(file, JSON.stringify({ nodes: { "model.other.custom": { resource_type: "model", name: "custom", config: {}, depends_on: { nodes: [] } } }, sources: {} }))
+      useAdapter(calls, { manifestPath: file, history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "custom" }, ctx)
+      expect(result.metadata.cost).toMatchObject({ basis: "history", runs: 1 })
+      expect(historyLog.some((q) => q.includes("model.other.custom"))).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a manifest that cannot be read leaves the scan figure and names the problem", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-cost-manifest-"))
+    try {
+      const file = path.join(dir, "manifest.json")
+      await writeFile(file, "{ broken")
+      useAdapter(calls, { manifestPath: file, history: bigqueryHistory([]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB) })
+      expect(result.metadata.cost.notes.join(" ")).toContain("could not be read")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test("a script is priced from its child jobs, which carry the reservation the script row lacks", async () => {
     useAdapter(calls, {
       history: bigqueryHistory([job("p1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:05:00+00:00", 9 * TIB, null, 0, "SCRIPT")], {
@@ -1899,9 +1966,53 @@ describe("dbt_cost_estimate cost", () => {
     }
   })
 
+  test("Databricks: a role without access to the system tables is told what to grant, and the scan stays", async () => {
+    useAdapter(calls, {
+      type: "databricks",
+      explain: async () => "not a plan",
+      history: async () => {
+        throw new Error("PERMISSION_DENIED: User does not have USE SCHEMA on Schema 'system.query'")
+      },
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.cost.basis).toBe("none")
+    expect(result.metadata.cost.unknownReason).toContain("SELECT on system.query.history and system.billing")
+  })
+
+  test("Snowflake: a boundary query that fails drops only the runs near the cutoff and keeps later complete ones", async () => {
+    const edge = Date.now() - 30 * 24 * 3_600_000
+    const iso = (ms: number) => new Date(ms).toISOString()
+    const row = (id: string, session: string, start: number) => [id, session, iso(start), iso(start).slice(0, 10), iso(start + 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"]
+    useAdapter(calls, {
+      type: "snowflake",
+      explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+      history: async (jinja) =>
+        jinja.includes("usage_in_currency_daily") || jinja.includes("rate_sheet_daily")
+          ? table(["date"], [])
+          : table(SF_COLUMNS, [row("far", "b", edge + 3 * 24 * 3_600_000), row("near", "a", edge + 5 * 60_000)]),
+      boundary: async () => {
+        throw new Error("boundary query failed")
+      },
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.cost).toMatchObject({ basis: "history", runs: 1 })
+    expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+  })
+
   test("Databricks with no run says the history covers SQL warehouses only", async () => {
     useAdapter(calls, { type: "databricks", explain: async () => "not a plan", history: async () => table([], []) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata.cost.unknownReason).toContain("SQL warehouses only")
+  })
+})
+
+describe("cost config", () => {
+  test("a configured Snowflake rate is described as replacing the account's rates", async () => {
+    const { ConfigV1 } = await import("@opencode-ai/core/v1/config/config")
+    const { Schema } = await import("effect")
+    const doc = Schema.toJsonSchemaDocument(ConfigV1.Info)
+    const text = JSON.stringify(doc)
+    expect(text).toContain("when set it replaces the account's billed and contract rates")
+    expect(text).not.toContain("used when the account's rate sheet can't be read")
   })
 })

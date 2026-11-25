@@ -184,10 +184,11 @@ order by creation_time desc limit ${HISTORY_LIMIT}`
 }
 
 /** The child jobs of matched scripts: a script's own row carries no reservation, its children do. */
-export function bigqueryChildrenSql(input: { project: string; location?: unknown; parents: string[]; view?: JobsView }): string {
+/** `sinceMs` is the earliest parent's creation: a child never starts before its parent, and a fixed bound cannot slide past a child while the parents are read. */
+export function bigqueryChildrenSql(input: { project: string; location?: unknown; parents: string[]; sinceMs: number; view?: JobsView }): string {
   return `select job_id, parent_job_id, creation_time, statement_type, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time > timestamp_sub(current_timestamp(), interval ${HISTORY_DAYS} day)
+where creation_time >= timestamp_millis(${Math.floor(input.sinceMs)})
   and job_type = 'QUERY' and state = 'DONE' and error_result is null
   and parent_job_id in (${input.parents.map(sqlString).join(",")})
 order by creation_time desc limit ${BQ_CHILD_LIMIT}`
@@ -276,7 +277,7 @@ order by usage_date`
 /** The contract rate for each day of the window: the fallback when the billed rates can't be read; it leaves out overage. */
 export const SNOWFLAKE_RATE_SQL = `select date, effective_rate, currency from snowflake.organization_usage.rate_sheet_daily
 where account_locator = current_account() and usage_type = 'compute' and service_type = 'WAREHOUSE_METERING'
-  and date > dateadd(day, -${HISTORY_DAYS + 1}, current_date())
+  and date >= dateadd(day, -${HISTORY_DAYS + 1}, to_date(convert_timezone('UTC', current_timestamp())))
 order by date`
 
 const HOUR_US = 3_600_000_000
@@ -335,7 +336,10 @@ select s.statement_id, s.session_id, s.start_time, s.end_time, s.statement_type,
        sum(s.share_ms) as total_task_duration_ms,
        sum(b.dbus * s.share_ms / nullif(t.task_ms, 0)) as dbus,
        sum(b.usd * s.share_ms / nullif(t.task_ms, 0)) as usd,
-       count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 then 1 end) as missing_hours
+       count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours,
+       count(case when b.usd is null or b.dbus is null then 1 end) as missing_billing,
+       count(case when coalesce(t.task_ms, 0) = 0 then 1 end) as zero_weight,
+       max(case when s.ms is null then 1 else 0 end) as null_duration
 from shares s
 left join tasks t on t.warehouse_id = s.warehouse_id and t.hour = s.hour
 left join billed b on b.warehouse_id = s.warehouse_id and b.hour = s.hour
@@ -392,8 +396,34 @@ export type Stmt = {
   session?: string | null
   currency?: string
   rate?: CostRate
+  /** Why the cost is unknown, when it is. */
+  cause?: Cause
+  /** Snowflake: whether the warehouse attributed compute to the statement; a run with none attributed is not priced. */
+  attributed?: boolean
 }
-export type Run = { start: number; cost: number; native: number; currency?: string; rate?: CostRate }
+export type Run = { start: number; lastStart: number; cost: number; native: number; currency?: string; rate?: CostRate }
+
+/** Why a run could not be priced. */
+export type Cause = "pending" | "currency" | "billing" | "weights" | "duration" | "nullbytes" | "nochildren" | "cutchildren" | "unknown"
+export type Causes = Partial<Record<Cause, number>>
+
+const CAUSE_TEXT: Record<Cause, string> = {
+  pending: "Snowflake has not attributed their queries yet (it lands attribution up to 8 hours late, and never attributes a run made only of statements under about 100 ms)",
+  currency: "they ran on a day billed in more than one currency",
+  billing: "the billing rows for their hours have not landed yet",
+  weights: "the warehouse recorded no task time for an hour they ran in, so that hour cannot be shared out",
+  duration: "a statement has no task duration",
+  nullbytes: "BigQuery gave no bytes billed for a job (it hides them for tables under a row access policy)",
+  nochildren: "a script's child jobs were not found",
+  cutchildren: "a script's child jobs may be cut off at the children query's limit",
+  unknown: "their cost is not known",
+}
+
+const causeList = (causes: Causes) =>
+  Object.entries(CAUSE_TEXT)
+    .filter(([cause]) => cause in causes)
+    .map(([, text]) => text)
+    .join("; ")
 
 /** A timestamp as text, read as UTC when it names no zone. */
 export function parseTime(value: string | null | undefined): number {
@@ -418,7 +448,7 @@ export const BOUNDARY_FALLBACK_MS = 24 * 3_600_000
  * left out, when any statement's cost is unknown or its statements carry more than one currency. A run that an
  * unread statement before the cutoff may belong to (same session, ending within the gap of the run's start) is dropped.
  */
-export function groupRuns(stmts: Stmt[], boundary?: Boundary): { runs: Run[]; skipped: number; dropped: number } {
+export function groupRuns(stmts: Stmt[], boundary?: Boundary): { runs: Run[]; skipped: number; dropped: number; causes: Causes } {
   const sorted = stmts.filter((s) => Number.isFinite(s.start)).sort((a, b) => a.start - b.start)
   const open = new Map<string, { group: { key: string; stmts: Stmt[] }; end: number }>()
   const groups: { key: string; stmts: Stmt[] }[] = []
@@ -437,6 +467,7 @@ export function groupRuns(stmts: Stmt[], boundary?: Boundary): { runs: Run[]; sk
   const runs: Run[] = []
   let skipped = 0
   let dropped = 0
+  const causes: Causes = {}
   for (const { key, stmts: g } of groups) {
     const first = g[0].start
     const unsure = boundary
@@ -449,13 +480,18 @@ export function groupRuns(stmts: Stmt[], boundary?: Boundary): { runs: Run[]; sk
       continue
     }
     const currencies = new Set(g.map((s) => s.currency))
-    if (!g.every((s) => s.known) || currencies.size > 1) {
+    // A run in which no statement was attributed has nothing to price: a statement too short to be attributed counts as zero only beside one that was.
+    const unattributed = g.every((s) => s.attributed === false)
+    const unknown = g.find((s) => !s.known)
+    if (unattributed || unknown || currencies.size > 1) {
       skipped++
+      const cause: Cause = unattributed ? "pending" : unknown ? (unknown.cause ?? "unknown") : "currency"
+      causes[cause] = (causes[cause] ?? 0) + 1
       continue
     }
-    runs.push({ start: first, cost: g.reduce((t, s) => t + (s.cost ?? 0), 0), native: g.reduce((t, s) => t + s.native, 0), currency: g[0].currency, rate: g[g.length - 1].rate })
+    runs.push({ start: first, lastStart: Math.max(...g.map((s) => s.start)), cost: g.reduce((t, s) => t + (s.cost ?? 0), 0), native: g.reduce((t, s) => t + s.native, 0), currency: g[0].currency, rate: g[g.length - 1].rate })
   }
-  return { runs, skipped, dropped }
+  return { runs, skipped, dropped, causes }
 }
 
 export function median(values: number[]): number {
@@ -464,7 +500,7 @@ export function median(values: number[]): number {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
 }
 
-export function summarize(runs: Run[]) {
+export function summarize(runs: Pick<Run, "start" | "cost" | "native">[]) {
   const latest = runs.reduce((a, b) => (b.start > a.start ? b : a))
   return {
     lastRun: latest.cost,
@@ -512,7 +548,7 @@ function emptyMessage(uniqueId: string, table: string): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** One BigQuery job, or the children of a script, priced as what they are: bytes billed on demand, slot time in a reservation. */
-type BqUnit = { user: string; end: number; /** A CREATE TABLE AS SELECT into dbt's temporary relation. */ tmp: boolean; /** A build that can end a run: MERGE, INSERT or a script. */ final: boolean; hasTmp: boolean; start: number; build: boolean; cost: number; known: boolean; bytes: number; slotHours: number; reserved: boolean; demand: boolean }
+type BqUnit = { cause?: Cause; user: string; end: number; /** A CREATE TABLE AS SELECT into dbt's temporary relation. */ tmp: boolean; /** A build that can end a run: MERGE, INSERT or a script. */ final: boolean; hasTmp: boolean; start: number; build: boolean; cost: number; known: boolean; bytes: number; slotHours: number; reserved: boolean; demand: boolean }
 
 function bqJob(r: Row, cfg: CostConfig): BqUnit {
   const slot = rateOf(cfg.bigquerySlotHourUsd, DEFAULT_RATES.bigquerySlotHourUsd, "USD/slot-hour", "bigquerySlotHourUsd").rate.value
@@ -524,6 +560,7 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
   const cached = String(r.cache_hit).toLowerCase() === "true"
   const known = reserved || billed !== undefined || cached
   return {
+    cause: known ? undefined : ("nullbytes" as Cause),
     user: r.user_email ?? "",
     end: parseTime(r.end_time),
     tmp: r.statement_type === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
@@ -541,6 +578,7 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
 }
 
 const sumUnits = (start: number, build: boolean, units: BqUnit[], user = units[0]?.user ?? "", final = units[0]?.final ?? false): BqUnit => ({
+  cause: units.find((u) => !u.known)?.cause,
   user,
   end: Math.max(...units.map((u) => u.end)),
   tmp: false,
@@ -558,18 +596,27 @@ const sumUnits = (start: number, build: boolean, units: BqUnit[], user = units[0
 
 
 /**
- * BigQuery runs: each build job (a script counts as one, priced from its children) is a run; a DELETE or UPDATE
- * joins the next build job of the model within a minute, else is a run of its own.
+ * BigQuery runs: each build job (a script counts as one, priced from its children) is a run, by the user who ran it.
+ * dbt builds an incremental model's temporary relation with a CREATE TABLE AS SELECT into `<model>__dbt_tmp` and then
+ * merges or inserts from it: such a CTAS joins the final build (MERGE, INSERT or script) of the same user that starts
+ * within ten minutes after it ends, one CTAS to one final build. A DELETE or UPDATE joins the build (or that pair) of
+ * the same user that starts within a minute after it, else is a run of its own.
  */
-export function bigqueryRuns(units: BqUnit[], boundary?: Boundary): { runs: BqUnit[]; skipped: number; dropped: number } {
+export function bigqueryRuns(units: BqUnit[], boundary?: Boundary): { runs: BqUnit[]; skipped: number; dropped: number; causes: Causes } {
   const builds = units.filter((u) => u.build).sort((a, b) => a.start - b.start)
   const heads = builds.filter((b) => !b.tmp)
   const groups = new Map<BqUnit, BqUnit[]>(heads.map((b) => [b, [b]]))
   // The run a build belongs to: its own, or for a temporary-relation CTAS the merge or insert that follows it.
   const headOf = new Map<BqUnit, BqUnit>()
-  for (const t of builds.filter((b) => b.tmp)) {
-    const head = heads.find((b) => b.final && b.user === t.user && b.start >= t.end && b.start - t.end <= BQ_TMP_JOIN_MS)
-    if (head) groups.get(head)!.push(t)
+  // dbt makes one temporary relation per final build: taken in the order they ended, each CTAS takes the first
+  // qualifying final build no other CTAS has claimed.
+  const claimed = new Set<BqUnit>()
+  for (const t of builds.filter((b) => b.tmp).sort((a, b) => a.end - b.end)) {
+    const head = heads.find((b) => b.final && !claimed.has(b) && b.user === t.user && b.start >= t.end && b.start - t.end <= BQ_TMP_JOIN_MS)
+    if (head) {
+      claimed.add(head)
+      groups.get(head)!.push(t)
+    }
     else groups.set(t, [t])
     headOf.set(t, head ?? t)
   }
@@ -593,13 +640,15 @@ export function bigqueryRuns(units: BqUnit[], boundary?: Boundary): { runs: BqUn
         ? boundary.stmts.some(
             (b) =>
               (b.session ?? "") === r.user &&
-              (b.tmp ? r.final && !r.hasTmp && b.end >= r.start - BQ_TMP_JOIN_MS : b.start >= r.start - BQ_ATTACH_MS),
+              (b.tmp ? r.final && !r.hasTmp && b.end <= r.start && b.end >= r.start - BQ_TMP_JOIN_MS : b.start >= r.start - BQ_ATTACH_MS),
           )
         : r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS
       : false
   const counted = all.filter((r) => !unsure(r))
   const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
-  return { runs, skipped: counted.length - runs.length, dropped: all.length - counted.length }
+  const causes: Causes = {}
+  for (const r of counted) if (!r.known) causes[r.cause ?? "unknown"] = (causes[r.cause ?? "unknown"] ?? 0) + 1
+  return { runs, skipped: counted.length - runs.length, dropped: all.length - counted.length, causes }
 }
 
 export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId: string, cfg: CostConfig, boundary?: Boundary): { cost: CostInfo; reserved: boolean } {
@@ -616,17 +665,17 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
     // A script's own row is never counted beside its children; with none found, its cost is not known.
     const start = parseTime(r.creation_time)
     const unit = sumUnits(start, true, kids, r.user_email ?? "", true)
-    return kids.length && !(childrenCut && !(start > childBoundary)) ? unit : { ...unit, known: false }
+    // At the limit, a script that began before the oldest child returned may have lost children, found or not.
+    if (childrenCut && !(start > childBoundary)) return { ...unit, known: false, cause: "cutchildren" as Cause }
+    if (!kids.length) return { ...unit, known: false, cause: "nochildren" as Cause }
+    return unit
   })
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs, skipped, dropped } = bigqueryRuns(units, boundary)
+  const { runs, skipped, dropped, causes } = bigqueryRuns(units, boundary)
   const anyReserved = units.some((u) => u.reserved)
   const notes: string[] = truncated ? [LIMIT_NOTE] : []
   if (dropped) notes.push(boundaryNote(dropped))
-  if (skipped)
-    notes.push(
-      `${plural(skipped, "run")} left out: BigQuery gave no bytes billed for ${skipped === 1 ? "it" : "them"} (it hides them for tables under a row access policy), or a script's child jobs were not found.`,
-    )
+  if (skipped) notes.push(`${plural(skipped, "run")} left out: ${causeList(causes)}.`)
   if (!runs.length && !skipped && dropped)
     return {
       reserved: anyReserved,
@@ -635,7 +684,7 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
   if (!runs.length)
     return {
       reserved: anyReserved,
-      cost: none(`Every run of ${uniqueId} found has a job with no bytes billed (BigQuery hides them for tables under a row access policy) or a script with no child jobs.`, notes, "USD", demand.rate),
+      cost: none(`No run of ${uniqueId} found could be priced: ${causeList(causes)}.`, notes, "USD", demand.rate),
     }
   const anyDemand = runs.some((r) => r.demand)
   const allReserved = !anyDemand
@@ -743,10 +792,21 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
     const execution = num(r.execution_time)
     // A day billed in more than one currency has no single rate: its statements cannot be priced.
     const known = !mixed && (compute !== undefined || (execution !== undefined && execution < SF_UNATTRIBUTED_MS))
-    return { start, end: parseTime(r.end_time), cost: credits * rate.value, native: credits, known, session: r.session_id, currency, rate }
+    return {
+      start,
+      end: parseTime(r.end_time),
+      cost: credits * rate.value,
+      native: credits,
+      known,
+      cause: mixed ? ("currency" as Cause) : ("pending" as Cause),
+      attributed: compute !== undefined,
+      session: r.session_id,
+      currency,
+      rate,
+    }
   })
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs, skipped, dropped } = groupRuns(stmts, boundary)
+  const { runs, skipped, dropped, causes } = groupRuns(stmts, boundary)
   // The headline rate and currency are the newest priced run's, never a pending or mixed-currency statement's.
   const latest = runs.length ? runs.reduce((a, b) => (b.start > a.start ? b : a)) : undefined
   const currency = latest?.currency ?? newest?.currency ?? "USD"
@@ -761,17 +821,16 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
   if (stale) notes.push(`Recent runs priced at the latest billed rate (${stale}): Snowflake's billing view lags up to three days.`)
   if (truncated) notes.push(LIMIT_NOTE)
   if (dropped) notes.push(boundaryNote(dropped))
-  if (skipped)
-    notes.push(
-      `${plural(skipped, "run")} left out: pending attribution (Snowflake lands it up to 8 hours late), or on a day billed in more than one currency.`,
-    )
+  if (skipped) notes.push(`${plural(skipped, "run")} left out: ${causeList(causes)}.`)
   const sameCurrency = runs.filter((r) => r.currency === currency)
   if (sameCurrency.length < runs.length) notes.push(`Runs priced in a currency other than ${currency} are left out.`)
   if (!sameCurrency.length && !skipped && dropped)
     return none(`Every run of ${uniqueId} found may have started before the period read, so none is priced.`, notes, currency, rate)
   if (!sameCurrency.length)
     return none(
-      `${plural(skipped || runs.length, "run")} of ${uniqueId} found cannot be priced yet: Snowflake lands attribution up to 8 hours late (statements under about 100 ms never get one).`,
+      skipped
+        ? `No run of ${uniqueId} found could be priced: ${causeList(causes)}.`
+        : `No run of ${uniqueId} found could be priced in ${currency}, the currency of the newest run.`,
       notes,
       currency,
       rate,
@@ -780,6 +839,9 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
   return { basis: "history", currency, ...stats, native: { unit: "credits", ...stats.native }, rate, notes }
 }
 
+/** The window in which a Databricks hour's billing may still be landing. */
+const BILLING_SETTLE_MS = 12 * 3_600_000
+
 export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig, boundary?: Boundary): CostInfo {
   const table = "system.query.history"
   const configured = cfg.databricksUsdPerDbu
@@ -787,45 +849,44 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig, 
     const dbus = num(r.dbus)
     const usd = configured !== undefined ? (dbus === undefined ? undefined : dbus * configured) : num(r.usd)
     const missing = num(r.missing_hours) ?? 0
+    // Why a statement is unknown: its own task duration is null, an hour has no billing row, or an hour has no task time to share by.
+    const cause: Cause = (num(r.null_duration) ?? 0) > 0 ? "duration" : (num(r.missing_billing) ?? 0) > 0 || (num(r.zero_weight) ?? 0) === 0 ? "billing" : "weights"
     return {
       start: parseTime(r.start_time),
       end: parseTime(r.end_time),
       cost: usd ?? 0,
       native: dbus ?? 0,
       known: missing === 0,
+      cause,
       session: r.session_id,
     }
   })
-  let rate: CostRate | null = null
-  if (configured !== undefined) rate = { value: configured, unit: "USD/DBU", source: "config" }
-  else {
-    const dbus = stmts.reduce((t, s) => t + (s.known ? s.native : 0), 0)
-    const usd = stmts.reduce((t, s) => t + (s.known ? (s.cost ?? 0) : 0), 0)
-    if (dbus > 0) rate = { value: usd / dbus, unit: "USD/DBU", source: "list_price" }
-  }
+  const configuredRate: CostRate | null = configured !== undefined ? { value: configured, unit: "USD/DBU", source: "config" } : null
   if (!rows.length)
     return none(
       `${emptyMessage(uniqueId, table)} Cost history covers SQL warehouses only: a dbt target on an all-purpose or job cluster has none.`,
       [],
       "USD",
-      rate,
+      configuredRate,
     )
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs, skipped, dropped } = groupRuns(stmts, boundary)
+  const { runs, skipped, dropped, causes } = groupRuns(stmts, boundary)
+  // The list-price rate is what the runs shown cost per DBU, not what runs that were left out did.
+  const retainedDbus = runs.reduce((t, r) => t + r.native, 0)
+  const rate: CostRate | null = configuredRate ?? (retainedDbus > 0 ? { value: runs.reduce((t, r) => t + r.cost, 0) / retainedDbus, unit: "USD/DBU", source: "list_price" } : null)
   const notes = [
     "Each statement carries its warehouse's billed cost for the hours it ran in, split across each hour's statements by task time, so idle time and overhead are spread over the queries that used the warehouse.",
     configured !== undefined
       ? `DBUs are priced at ${configured} USD/DBU.`
       : "Prices are list prices (with published promotions); negotiated discounts are not applied.",
   ]
+  if (runs.some((r) => r.lastStart > Date.now() - BILLING_SETTLE_MS)) notes.push("Amounts for the last 12 hours may still change as billing lands.")
   if (truncated) notes.push(LIMIT_NOTE)
   if (dropped) notes.push(boundaryNote(dropped))
-  if (skipped)
-    notes.push(`${plural(skipped, "run")} left out: the billing rows for ${skipped > 1 ? "their" : "its"} hours have not landed yet.`)
+  if (skipped) notes.push(`${plural(skipped, "run")} left out: ${causeList(causes)}.`)
   if (!runs.length && !skipped && dropped)
     return none(`Every run of ${uniqueId} found may have started before the period read, so none is priced.`, notes, "USD", rate)
-  if (!runs.length)
-    return none(`The ${plural(skipped, "run")} of ${uniqueId} found have no billing rows yet: system.billing.usage lands them late.`, notes, "USD", rate)
+  if (!runs.length) return none(`No run of ${uniqueId} found could be priced: ${causeList(causes)}.`, notes, "USD", rate)
   const stats = summarize(runs)
   return { basis: "history", currency: "USD", ...stats, native: { unit: "dbus", ...stats.native }, rate, notes }
 }
@@ -864,9 +925,14 @@ export function unreadable(type: string, message: string): CostInfo {
   return none(`Cost history could not be read${why ? `: ${why}` : ""} (${message.split("\n")[0].slice(0, 300)}).`)
 }
 
-export function formatMoney(value: number, currency: string): string {
+/**
+ * An amount as text. A figure shown as a bound is rounded the way that keeps it a bound: a ceiling up (`up`), a
+ * floor down (`down`); anything else to the nearest digit.
+ */
+export function formatMoney(value: number, currency: string, round: "nearest" | "up" | "down" = "nearest"): string {
   const digits = value === 0 ? 2 : Math.min(8, Math.max(2, 1 - Math.floor(Math.log10(Math.abs(value)))))
-  const text = value.toFixed(digits)
+  const scale = 10 ** digits
+  const text = round === "nearest" ? value.toFixed(digits) : ((round === "up" ? Math.ceil(value * scale) : Math.floor(value * scale)) / scale).toFixed(digits)
   return currency === "USD" ? `$${text}` : `${text} ${currency}`
 }
 
@@ -875,6 +941,15 @@ const NATIVE_LABEL: Record<NativeUnit, string> = { bytes_billed: "bytes billed",
 function nativeText(n: NonNullable<CostInfo["native"]>): string {
   const f = (v: number | undefined) => (v === undefined ? "-" : n.unit === "bytes_billed" ? String(Math.round(v)) : String(Number(v.toPrecision(4))))
   return `${NATIVE_LABEL[n.unit]}: last ${f(n.lastRun)}, typical ${f(n.typical)}, highest ${f(n.highest)}`
+}
+
+/** What the SELECT would bill on demand, worded as a ceiling and a floor, or without a ceiling when the table count is uncertain. */
+function selectText(c: CostInfo): string {
+  const { low, high, perTable } = c.selectOnly!
+  const atLeast = `at least ${formatMoney(low, c.currency, "down")}; pruning of clustered or partitioned tables can bill less than the dry run`
+  return perTable !== undefined
+    ? `The SELECT would bill ${formatMoney(high, c.currency, "up")} on-demand, plus 10 MiB (~${formatMoney(perTable, c.currency)}) for each table beyond those counted (${atLeast}).`
+    : `The SELECT would bill at most ${formatMoney(high, c.currency, "up")} on-demand (${atLeast}).`
 }
 
 /** The cost as plain sentences, the first being the answer (or why there is none). */
@@ -886,18 +961,12 @@ export function costText(c: CostInfo): string {
     )
     if (c.native) lines.push(`In the warehouse's own unit, ${nativeText(c.native)}.`)
   } else if (c.basis === "dry_run") {
-    const { low, high, perTable } = c.selectOnly!
-    if (perTable !== undefined)
-      lines.push(
-        `The SELECT would bill ${formatMoney(high, c.currency)} on-demand, plus 10 MiB (~${formatMoney(perTable, c.currency)}) for each table beyond those counted (at least ${formatMoney(low, c.currency)}; pruning of clustered or partitioned tables can bill less than the dry run).`,
-      )
-    else
-      lines.push(
-        `The SELECT would bill at most ${formatMoney(high, c.currency)} on-demand (at least ${formatMoney(low, c.currency)}; pruning of clustered or partitioned tables can bill less than the dry run).`,
-      )
+    lines.push(selectText(c))
   } else {
     lines.push(`Cost unknown: ${c.unknownReason}`)
   }
+  // With history the SELECT's price is a second figure, and the notes below refer to it.
+  if (c.basis === "history" && c.selectOnly) lines.push(selectText(c))
   if (c.rate) lines.push(`Rate: ${c.rate.value} ${c.rate.unit} (${c.rate.source === "account" ? `from your account${c.rate.detail ? ` (${c.rate.detail})` : ""}` : { list_price: "list price", config: "from your config", default: "default" }[c.rate.source]}).`)
   for (const n of c.notes) lines.push(n)
   return lines.join("\n")
@@ -938,6 +1007,8 @@ export async function loadHistory(input: {
   cfg: CostConfig
 }): Promise<History> {
   const { adapter, type, signal, cfg } = input
+  // A call cancelled while the scan ran stops here, whether or not any history query would have been sent.
+  signal.throwIfAborted()
   const deadline = new AbortController()
   const ms = costHistoryInternals.historyTimeoutMs
   const timer = setTimeout(() => deadline.abort(new Error(`the cost history did not answer within ${ms / 1000} s`)), ms)
@@ -1091,8 +1162,9 @@ export async function loadHistory(input: {
     try {
       const history = await read((view) => bigqueryHistorySql({ project, location, needle: needleFor(id), view }))
       const parents = history.rows.filter((r) => r.statement_type === "SCRIPT" && r.job_id).map((r) => r.job_id!)
+      const sinceMs = Math.min(...history.rows.filter((r) => r.statement_type === "SCRIPT").map((r) => parseTime(r.creation_time)))
       const children = parents.length
-        ? (await read((view) => bigqueryChildrenSql({ project, location, parents, view }))).rows
+        ? (await read((view) => bigqueryChildrenSql({ project, location, parents, sinceMs, view }))).rows
         : undefined
       // The boundary is read from the view the history came from.
       const boundary = await boundaryFor(

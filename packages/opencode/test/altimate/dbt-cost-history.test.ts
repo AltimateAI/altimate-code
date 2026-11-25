@@ -1,5 +1,8 @@
 // The cost of a model's earlier runs: the history SQL per warehouse, the grouping of statements into runs, and the
 // pricing of what each warehouse reports. No adapter or warehouse is involved.
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { describe, expect, test } from "bun:test"
 import {
   BQ_CHILD_LIMIT,
@@ -31,6 +34,10 @@ import {
   sheetRates,
   countTables,
   bigqueryChildrenSql,
+  formatMoney,
+  loadHistory,
+  manifestPathFor,
+  modelFromManifest,
   bigqueryBoundarySql,
   snowflakeBoundarySql,
   databricksBoundarySql,
@@ -98,10 +105,12 @@ describe("history SQL builders", () => {
   })
 
   test("BigQuery: the children of matched scripts are read by parent id, escaped, in the same window and region", () => {
-    const sql = bigqueryChildrenSql({ project: "p", location: "EU", parents: ["job_1", "j'2"] })
+    const sql = bigqueryChildrenSql({ project: "p", location: "EU", parents: ["job_1", "j'2"], sinceMs: 1_700_000_000_123 })
     expect(sql).toContain("parent_job_id in ('job_1','j\\'2')")
     expect(sql).toContain("`region-eu`")
-    expect(sql).toContain("interval 30 day")
+    // The lower bound is the earliest parent's creation: a fixed instant, not a window that slides while the parents are read.
+    expect(sql).toContain("creation_time >= timestamp_millis(1700000000123)")
+    expect(sql).not.toContain("current_timestamp")
   })
 
   test("BigQuery project ids with anything beyond a name's characters are refused", () => {
@@ -140,7 +149,10 @@ describe("history SQL builders", () => {
     expect(sql).toContain("least(unix_micros(a.end_time), (a.hour + 1) * 3600000000)")
     expect(sql).toContain("missing_hours")
     // Every hour a statement touches needs a billing row and a task-time denominator above zero.
-    expect(sql).toContain("count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 then 1 end) as missing_hours")
+    expect(sql).toContain("count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
+    expect(sql).toContain("max(case when s.ms is null then 1 else 0 end) as null_duration")
+    expect(sql).toContain("as missing_billing")
+    expect(sql).toContain("as zero_weight")
     expect(sql).toContain("left join tasks t on")
     expect(sql).toContain("unix_micros(end_time) - 1")
   })
@@ -166,7 +178,9 @@ describe("Snowflake rate sheet query", () => {
   test("reads the rates of the window by date", () => {
     expect(SNOWFLAKE_RATE_SQL).toContain("select date, effective_rate, currency")
     expect(SNOWFLAKE_RATE_SQL).toContain("account_locator = current_account()")
-    expect(SNOWFLAKE_RATE_SQL).toContain("dateadd(day, -31, current_date())")
+    // The window's start is a UTC date, like the statement dates and the rate dates it is joined to.
+    expect(SNOWFLAKE_RATE_SQL).toContain("date >= dateadd(day, -31, to_date(convert_timezone('UTC', current_timestamp())))")
+    expect(SNOWFLAKE_RATE_SQL).not.toContain("current_date()")
   })
 })
 
@@ -247,8 +261,8 @@ describe("runs", () => {
   test("input order does not matter and a run's cost is the sum of its statements", () => {
     const { runs } = groupRuns([stmt(30, 31, 5), stmt(0, 1, 1), stmt(2, 3, 2)])
     expect(runs).toEqual([
-      { start: 0, cost: 3, native: 3, currency: undefined },
-      { start: 30 * MIN, cost: 5, native: 5, currency: undefined },
+      { start: 0, lastStart: 2 * MIN, cost: 3, native: 3, currency: undefined, rate: undefined },
+      { start: 30 * MIN, lastStart: 30 * MIN, cost: 5, native: 5, currency: undefined, rate: undefined },
     ])
   })
 
@@ -261,7 +275,7 @@ describe("runs", () => {
   test("a run priced in two currencies is unknown", () => {
     const a = { ...stmt(0, 1), currency: "USD" }
     const b = { ...stmt(2, 3), currency: "EUR" }
-    expect(groupRuns([a, b])).toEqual({ runs: [], skipped: 1, dropped: 0 })
+    expect(groupRuns([a, b])).toEqual({ runs: [], skipped: 1, dropped: 0, causes: { currency: 1 } })
   })
 
   test("median is the middle run, or the mean of the middle two", () => {
@@ -471,13 +485,13 @@ describe("Snowflake pricing", () => {
     const cost = priceSnowflake([sf("a", 0, "1"), sf("b", 2, null), sf("c", 100, "2", null, "0", { session_id: "other" })], "model.s.m", [], {})
     expect(cost.runs).toBe(1)
     expect(cost.lastRun).toBe(6)
-    expect(cost.notes.join(" ")).toContain("1 run left out: pending attribution")
+    expect(cost.notes.join(" ")).toContain("1 run left out: Snowflake has not attributed their queries yet")
   })
 
   test("every run pending is no cost, with the reason", () => {
     const cost = priceSnowflake([sf("a", 0, null)], "model.s.m", [], {})
     expect(cost.basis).toBe("none")
-    expect(cost.unknownReason).toContain("cannot be priced yet")
+    expect(cost.unknownReason).toContain("No run of model.s.m found could be priced: Snowflake has not attributed")
   })
 
   test("statements of different sessions are separate runs", () => {
@@ -651,7 +665,7 @@ describe("Databricks pricing", () => {
   test("all runs without billing is no cost", () => {
     const cost = priceDatabricks([dbx("a", 0, null, null)], "model.s.m", {})
     expect(cost.basis).toBe("none")
-    expect(cost.unknownReason).toContain("no billing rows yet")
+    expect(cost.unknownReason).toContain("No run of model.s.m found could be priced: the billing rows for their hours have not landed yet")
   })
 
   test("statements of different sessions are separate runs", () => {
@@ -927,5 +941,173 @@ describe("script children at their limit", () => {
     const { cost } = priceBigquery([old, recent, bq("filler", 5000, TIB)], children, "model.s.m", {})
     expect(cost.runs).toBe(2)
     expect(cost.notes.join(" ")).toContain("1 run left out")
+  })
+})
+
+describe("review follow-ups: BigQuery temporary relation pairing", () => {
+  const C2 = 5_000 * MIN
+  const tmp = (id: string, startMin: number, billed: number, user = "a@x.com"): Row =>
+    bq(id, startMin, billed, null, 0, "CREATE_TABLE_AS_SELECT", { user_email: user, destination_table_id: "orders__dbt_tmp" })
+
+  test("two overlapping invocations by one user pair one CTAS with one MERGE each, never both with the first", () => {
+    // tmpA 0-1 min (1 TiB), tmpB 0.5-1.5 (2 TiB), mergeA at 2 (3 TiB), mergeB at 4 (4 TiB).
+    const rows = [tmp("tA", 0, TIB), tmp("tB", 0.5, 2 * TIB), bq("mA", 2, 3 * TIB), bq("mB", 4, 4 * TIB)]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(2)
+    // mergeB's run holds tmpB (6 TiB); mergeA's holds tmpA (4 TiB).
+    expect(cost.highest).toBeCloseTo(6 * 6.25, 10)
+    expect(cost.lastRun).toBeCloseTo(6 * 6.25, 10)
+    expect(cost.typical).toBeCloseTo(((4 + 6) / 2) * 6.25, 10)
+  })
+
+  test("a second CTAS with no unclaimed final build is a run of its own", () => {
+    const { cost } = priceBigquery([tmp("tA", 0, TIB), tmp("tB", 0.2, TIB), bq("m", 2, TIB)], undefined, "model.s.m", {})
+    expect(cost.runs).toBe(2)
+  })
+
+  test("a merge starting after an unread CTAS that ends after it cannot be that CTAS's run and is kept", () => {
+    const rows = [{ ...bq("m", 0, TIB), creation_time: new Date(C2 + 2 * MIN).toISOString() }]
+    const run = (end: number) =>
+      priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C2, stmts: [{ session: "a@x.com", start: C2 - 5 * MIN, end: C2 + end * MIN, tmp: true }] }).cost
+    // The CTAS ends an hour after the merge starts: they cannot be one run.
+    expect(run(60).runs).toBe(1)
+    // Ending a minute before it starts, it could be the merge's own temporary relation: the run is dropped.
+    expect(run(1).notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+  })
+})
+
+describe("review follow-ups: bounds, text and causes", () => {
+  test("a ceiling rounds up and a floor rounds down, so the text never excludes the real charge", () => {
+    expect(formatMoney(6.562559604645912, "USD", "up")).toBe("$6.57")
+    expect(formatMoney(6.562559604645912, "USD", "down")).toBe("$6.56")
+    expect(formatMoney(6.562559604645912, "USD")).toBe("$6.56")
+    expect(formatMoney(0.000059604644775, "USD", "down")).toBe("$0.000059")
+    expect(formatMoney(0.000059604644775, "USD", "up")).toBe("$0.000060")
+    expect(formatMoney(0, "USD", "up")).toBe("$0.00")
+  })
+
+  test("the SELECT line states its ceiling rounded up and its floor rounded down", () => {
+    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 0.000059604644775, high: 6.562559604645912 } })
+    expect(text).toContain("at most $6.57")
+    expect(text).toContain("at least $0.000059")
+  })
+
+  test("the SELECT's price is in the text beside the history, since a note refers to it", () => {
+    const text = costText({
+      basis: "history",
+      currency: "USD",
+      lastRun: 1,
+      typical: 1,
+      highest: 1,
+      runs: 1,
+      windowDays: 30,
+      rate: null,
+      notes: [],
+      selectOnly: { low: 1, high: 2 },
+    })
+    expect(text.split("\n")[0]).toContain("Cost from 1 run")
+    expect(text).toContain("The SELECT would bill at most $2.00 on-demand")
+  })
+
+  test("Snowflake: a day billed in two currencies is named as the cause, not attribution", () => {
+    const sheet = billedRates([{ usage_date: "1970-01-01", rate: "3", currency: "USD", currencies: "2" }])
+    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", sheet, {})
+    expect(cost.unknownReason).toContain("a day billed in more than one currency")
+    expect(cost.unknownReason).not.toContain("attributed")
+  })
+
+  test("Snowflake: a run made only of statements under 100 ms with no attribution is left out, not a known $0", () => {
+    const short = sf("a", 0, null, null, "0", { execution_time: "40" })
+    const cost = priceSnowflake([short], "model.s.m", [], {})
+    expect(cost.basis).toBe("none")
+    expect(cost.runs).toBeUndefined()
+    expect(cost.unknownReason).toContain("never attributes a run made only of statements under about 100 ms")
+    // Beside an attributed statement it is still a zero, so the run is priced.
+    expect(priceSnowflake([sf("b", 0, "1"), sf("c", 2, null, null, "0", { execution_time: "40" })], "model.s.m", [], {})).toMatchObject({ runs: 1, lastRun: 3 })
+  })
+
+  test("Databricks: an hour with no task time is not blamed on billing that has not landed", () => {
+    const cost = priceDatabricks([dbx("a", 0, "1", "1", { missing_hours: "1", missing_billing: "0", zero_weight: "1" })], "model.s.m", {})
+    expect(cost.unknownReason).toContain("recorded no task time")
+    expect(cost.unknownReason).not.toContain("billing rows")
+  })
+
+  test("Databricks: a matched statement with no task duration of its own makes its run unknown", () => {
+    const cost = priceDatabricks([dbx("a", 0, "1", "1", { missing_hours: "1", null_duration: "1" })], "model.s.m", {})
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("a statement has no task duration")
+  })
+
+  test("Databricks: the list-price rate is the retained runs', not one that was dropped at the boundary", () => {
+    const C3 = 9_000 * MIN
+    const kept = dbx("kept", 0, "4", "2", { session_id: "a", start_time: new Date(C3 + 600 * MIN).toISOString(), end_time: new Date(C3 + 601 * MIN).toISOString() })
+    const dropped = dbx("dropped", 0, "1", "5", { session_id: "b", start_time: new Date(C3 + 5 * MIN).toISOString(), end_time: new Date(C3 + 6 * MIN).toISOString() })
+    const cost = priceDatabricks([kept, dropped], "model.s.m", {}, { cutoff: C3, stmts: [{ session: "b", start: C3 - 30 * MIN, end: C3 }] })
+    expect(cost.runs).toBe(1)
+    expect(cost.rate?.value).toBeCloseTo(0.5, 12)
+  })
+
+  test("Databricks: amounts inside the last 12 hours are marked as possibly still changing", () => {
+    const recent = new Date(Date.now() - 2 * 3_600_000).toISOString()
+    const old = new Date(Date.now() - 48 * 3_600_000).toISOString()
+    const at = (when: string) => priceDatabricks([dbx("a", 0, "1", "1", { start_time: when, end_time: when })], "model.s.m", {})
+    expect(at(recent).notes).toContain("Amounts for the last 12 hours may still change as billing lands.")
+    expect(at(old).notes.join(" ")).not.toContain("last 12 hours")
+  })
+
+  test("BigQuery: children cut off at their limit are named as the cause, not 'not found'", () => {
+    const script = bq("s", 0, null, null, 0, "SCRIPT")
+    const kid = (i: number): Row => ({
+      job_id: `k${i}`,
+      parent_job_id: "other",
+      creation_time: new Date(10 * MIN).toISOString(),
+      statement_type: "MERGE",
+      total_bytes_billed: "1",
+      total_slot_ms: "0",
+      reservation_id: null,
+      cache_hit: "False",
+    })
+    const { cost } = priceBigquery([script], Array.from({ length: BQ_CHILD_LIMIT }, (_, i) => kid(i)), "model.s.m", {})
+    expect(cost.unknownReason).toContain("cut off at the children query's limit")
+    expect(cost.unknownReason).not.toContain("were not found")
+    const none = priceBigquery([script], [], "model.s.m", {}).cost
+    expect(none.unknownReason).toContain("child jobs were not found")
+  })
+
+  test("BigQuery: a job with no bytes billed is named as the cause", () => {
+    const { cost } = priceBigquery([bq("a", 0, null)], undefined, "model.s.m", {})
+    expect(cost.unknownReason).toContain("hides them for tables under a row access policy")
+  })
+})
+
+describe("review follow-ups: manifest and cancellation", () => {
+  test("the manifest path is the adapter's own, else its project's target, else the session's project's target", () => {
+    expect(manifestPathFor({ getManifestPath: () => "/x/m.json", getProjectRoot: () => "/p" }, "/q")).toBe("/x/m.json")
+    expect(manifestPathFor({ getProjectRoot: () => "/p" }, "/q")).toBe("/p/target/manifest.json")
+    expect(manifestPathFor({}, "/q")).toBe("/q/target/manifest.json")
+    expect(manifestPathFor({}, undefined)).toBeUndefined()
+    expect(manifestPathFor({ getManifestPath: () => "" }, "/q")).toBe("/q/target/manifest.json")
+  })
+
+  test("a manifest that cannot be read is an error that names the file", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "cost-manifest-"))
+    try {
+      const file = path.join(dir, "manifest.json")
+      await writeFile(file, "{ not json")
+      expect(modelFromManifest(file, "orders")).toEqual({ error: expect.stringContaining(`The manifest at ${file}`.replace("The", "the")) })
+      expect(modelFromManifest(path.join(dir, "missing.json"), "orders")).toEqual({ error: expect.stringContaining("no manifest at") })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a call cancelled before the history starts stops, even when no query would be sent", async () => {
+    const controller = new AbortController()
+    controller.abort(new Error("cancelled"))
+    const adapter = { unsafeCompileQuery: async () => "{}" }
+    const input = { adapter, type: "snowflake", signal: controller.signal, cfg: {} }
+    // SQL input has no history to read, and an unresolved model none either: both would otherwise return normally.
+    expect(await loadHistory({ ...input, model: undefined }).then(() => "answered", (e: unknown) => e)).toMatchObject({ message: "cancelled" })
+    expect(await loadHistory({ ...input, model: "orders", manifestPath: undefined }).then(() => "answered", (e: unknown) => e)).toMatchObject({ message: "cancelled" })
   })
 })
