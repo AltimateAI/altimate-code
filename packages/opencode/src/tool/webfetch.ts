@@ -3,6 +3,11 @@ import { Tool } from "./tool"
 import TurndownService from "turndown"
 import DESCRIPTION from "./webfetch.txt"
 import { abortAfterAny } from "../util/abort"
+// altimate_change start — upstream_fix: check webfetch redirect targets against permission rules (anomalyco/opencode#59748, anomalyco/opencode#61701)
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { PermissionEvaluate } from "@/permission/evaluate"
+import { Wildcard } from "@opencode-ai/core/util/wildcard"
+// altimate_change end
 
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
 const DEFAULT_TIMEOUT = 30 * 1000 // 30 seconds
@@ -14,6 +19,45 @@ const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 // Status codes that warrant a retry with a different User-Agent
 const RETRYABLE_STATUSES = new Set([403, 406])
+
+// altimate_change start — upstream_fix: check webfetch redirect targets against permission rules (anomalyco/opencode#59748, anomalyco/opencode#61701)
+export const MAX_REDIRECTS = 10
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
+function assertFetchableUrl(url: URL) {
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must use http:// or https://")
+  // Rules match the URL, so `https://allowed.com@evil.com` would slip past a rule for `https://allowed.com*`.
+  if (url.username || url.password) throw new Error("URL must not include credentials")
+}
+
+// Follows redirects here instead of in fetch so each new URL is checked against the rules first.
+// A target only fails when the rules deny it; the user is not asked again.
+async function fetchCheckingRedirects(
+  url: string,
+  init: RequestInit,
+  ruleset: PermissionV1.Ruleset,
+): Promise<Response> {
+  let current = url
+  for (let redirects = 0; ; redirects++) {
+    const response = await fetch(current, { ...init, redirect: "manual" })
+    const location = response.headers.get("location")
+    if (!REDIRECT_STATUSES.has(response.status) || !location) return response
+    await response.body?.cancel().catch(() => {})
+    if (redirects >= MAX_REDIRECTS) throw new Error(`Too many redirects (more than ${MAX_REDIRECTS})`)
+    const target = new URL(location, current)
+    assertFetchableUrl(target)
+    // The fragment is never sent, and would keep a rule for the exact URL from matching.
+    target.hash = ""
+    const rule = PermissionEvaluate.evaluate("webfetch", target.href, ruleset)
+    if (rule.action === "deny") {
+      throw new PermissionV1.DeniedError({
+        ruleset: ruleset.filter((item) => Wildcard.match("webfetch", item.permission)),
+      })
+    }
+    current = target.href
+  }
+}
+// altimate_change end
 
 // altimate_change start — process-level URL failure cache (#471)
 // Prevents repeated fetches to URLs that already returned 404/410 in this
@@ -308,11 +352,17 @@ export const WebFetchTool = Tool.define("webfetch", {
     if (!params.url.startsWith("http://") && !params.url.startsWith("https://")) {
       throw new Error("URL must start with http:// or https://")
     }
+    // altimate_change start — upstream_fix: reject URL credentials and match rules on the requested URL (anomalyco/opencode#61701, anomalyco/opencode#60505)
+    let parsed: URL
     try {
-      new URL(params.url)
+      parsed = new URL(params.url)
     } catch {
       throw new Error(`Invalid URL: "${params.url.slice(0, 200)}" is not a valid URL. Check the format and try again.`)
     }
+    assertFetchableUrl(parsed)
+    parsed.hash = ""
+    const url = parsed.href
+    // altimate_change end
 
     // Check failure cache — avoid re-fetching URLs that already returned 404/410/451.
     // Prefix with "(cached failure, Nm ago)" so the agent can tell a cache-hit
@@ -328,7 +378,9 @@ export const WebFetchTool = Tool.define("webfetch", {
 
     await ctx.ask({
       permission: "webfetch",
-      patterns: [params.url],
+      // altimate_change start — upstream_fix: match rules on the requested URL (anomalyco/opencode#60505)
+      patterns: [url],
+      // altimate_change end
       always: ["*"],
       metadata: {
         url: params.url,
@@ -370,13 +422,16 @@ export const WebFetchTool = Tool.define("webfetch", {
     let arrayBuffer: ArrayBuffer
     let response: Response
     try {
-      response = await fetch(params.url, { signal, headers: honestHeaders })
+      // altimate_change start — upstream_fix: check webfetch redirect targets against permission rules (anomalyco/opencode#59748)
+      const ruleset = ctx.permissions ?? []
+      response = await fetchCheckingRedirects(url, { signal, headers: honestHeaders }, ruleset)
 
       // Retry with browser UA if the honest UA was rejected
       if (!response.ok && RETRYABLE_STATUSES.has(response.status)) {
         await response.body?.cancel().catch(() => {})
-        response = await fetch(params.url, { signal, headers: browserHeaders })
+        response = await fetchCheckingRedirects(url, { signal, headers: browserHeaders }, ruleset)
       }
+      // altimate_change end
 
       // altimate_change start — actionable error messages and failure caching (#471)
       if (!response.ok) {
