@@ -60,6 +60,7 @@ import {
   isHiddenBindingConflict,
   QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
+  PlanLimitError,
   NotFoundError,
   PreconditionFailedError,
   WorkspaceApi,
@@ -2743,7 +2744,10 @@ function reportFlowFailure(api: TuiPluginApi, err: unknown): void {
   log.error("workspace flow failed", { err: err instanceof Error ? err.message : String(err) })
   api.ui.toast({
     variant: "error",
-    message: "Workspace setup failed — see the CLI log for details.",
+    // altimate_change start — a plan-limit refusal already says what to do next
+    message: err instanceof PlanLimitError ? err.message : "Workspace setup failed — see the CLI log for details.",
+    duration: err instanceof PlanLimitError ? 15_000 : undefined,
+    // altimate_change end
   })
 }
 

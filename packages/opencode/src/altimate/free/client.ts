@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
+import { safeUpgradeUrl } from "../workspace/plan-limit"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Flock } from "@opencode-ai/core/util/flock"
@@ -850,7 +851,9 @@ export async function authorizedFetch(input: RequestInfo | URL, init?: RequestIn
 export function describeRateLimit(
   input: { body?: string; retryAfter?: string },
 ): { message: string; retryable: boolean } | undefined {
-  let parsed: { error?: { type?: unknown; message?: unknown }; type?: unknown } | undefined
+  let parsed:
+    | { error?: { type?: unknown; message?: unknown; upgrade_url?: unknown }; type?: unknown; upgrade_url?: unknown }
+    | undefined
   try {
     parsed = input.body ? JSON.parse(input.body) : undefined
   } catch {
@@ -868,20 +871,24 @@ export function describeRateLimit(
     return { message: `Too many requests to Altimate Base right now.${wait}`, retryable: true }
   }
   if (kind === "budget_exceeded") {
+    // altimate_change start — point at the plan page when the gateway names one
+    const upgrade = safeUpgradeUrl(parsed?.error?.upgrade_url ?? parsed?.upgrade_url)
+    const hint = upgrade ? ` Upgrade: ${upgrade}` : ""
+    // altimate_change end
     if (detail.includes("ExceededBudget: User=")) {
       return {
-        message: "You've used today's free Altimate Base allowance. It resets tomorrow—switch models to keep going.",
+        message: "You've used today's free Altimate Base allowance. It resets tomorrow—switch models to keep going." + hint,
         retryable: false,
       }
     }
     if (detail.includes("Budget has been exceeded")) {
       return {
-        message: "Altimate Base has reached its shared daily limit. It resets tomorrow—switch models to keep going.",
+        message: "Altimate Base has reached its shared daily limit. It resets tomorrow—switch models to keep going." + hint,
         retryable: false,
       }
     }
     return {
-      message: "The daily Altimate Base limit has been reached. It resets tomorrow—switch models to keep going.",
+      message: "The daily Altimate Base limit has been reached. It resets tomorrow—switch models to keep going." + hint,
       retryable: false,
     }
   }
