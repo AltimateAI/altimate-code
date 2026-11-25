@@ -42,6 +42,7 @@ for (const learnDelivery of [true, false]) {
     const unexpectedTool = () => { throw new Error("Unexpected tool execution during compaction") }
     const processor = spyOn(SessionProcessor, "create").mockImplementation((input) => ({
       message: input.assistantMessage,
+      refusedBeforeSend: false,
       partFromToolCall: unexpectedTool,
       beginToolExecution: unexpectedTool,
       finishToolExecution: unexpectedTool,

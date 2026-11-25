@@ -20,6 +20,15 @@ import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
+// altimate_change start — recognize pre-send context budget refusals
+import {
+  isContextBudgetError,
+  REQUEST_ESTIMATE_METADATA_KEY,
+  REQUEST_MEDIA_METADATA_KEY,
+  REQUEST_SHAPE_METADATA_KEY,
+} from "@/provider/output-token-budget"
+import { NamedError } from "@opencode-ai/util/error"
+// altimate_change end
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
@@ -82,6 +91,10 @@ async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number):
   }
   return { ...part, state: { ...state, status: "error", error: "Tool execution aborted", metadata, time } }
 }
+// altimate_change end
+
+// altimate_change start — track each directive once across a pre-send refusal and retry
+const trackedDirectives = new WeakSet<NudgeArbiter.Directive>()
 // altimate_change end
 
 export namespace SessionProcessor {
@@ -338,6 +351,9 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
+    // altimate_change start — the pending compaction comes from a pre-send budget refusal (nothing was sent)
+    let refusedBeforeSend = false
+    // altimate_change end
     // altimate_change start — per-step generation telemetry
     let stepStartTime = Date.now()
     // altimate_change end
@@ -354,6 +370,11 @@ export namespace SessionProcessor {
       get message() {
         return input.assistantMessage
       },
+      // altimate_change start — see refusedBeforeSend above
+      get refusedBeforeSend() {
+        return refusedBeforeSend
+      },
+      // altimate_change end
       // altimate_change start — disambiguate repeated concurrent tool-call ids
       partFromToolCall(toolCallID: string, identity: ToolCallIdentity = {}) {
         // Tool metadata may arrive out of order too. Skip an ambiguous update
@@ -379,10 +400,25 @@ export namespace SessionProcessor {
       },
       // altimate_change end
       // altimate_change start - opt-in text buffering for committed-answer echoes
-      async process({ deferText, ...streamInput }: LLM.StreamInput & { deferText?: MessageV2.TextPart[] }) {
+      async process({
+        deferText,
+        compactable,
+        compactBlockedByMedia,
+        requestMedia,
+        ...streamInput
+      }: LLM.StreamInput & {
+        deferText?: MessageV2.TextPart[]
+        // The prompt loop can compact this conversation (a finished non-summary turn exists).
+        compactable?: boolean
+        compactBlockedByMedia?: boolean
+        requestMedia?: string[]
+      }) {
         // altimate_change end
         log.info("process")
         needsCompaction = false
+        // altimate_change start — see refusedBeforeSend above
+        refusedBeforeSend = false
+        // altimate_change end
         // altimate_change start - let the prompt's exit guard publish a recovered compaction answer
         let recoveredCommittedAnswer = false
         // altimate_change end
@@ -440,9 +476,12 @@ export namespace SessionProcessor {
         // produce a summary and cannot act on it, so the real working turn right
         // after compaction would silently never see the breaker/loop nudge.
         let effectiveStreamInput = streamInput
+        // Kept so a pre-send refusal can hand the directive to the retry.
+        let takenDirective: ReturnType<typeof NudgeArbiter.take> = undefined
         if (runMode && !input.assistantMessage.summary) {
           const directive = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)
           // altimate_change end
+          takenDirective = directive // altimate_change — see takenDirective above
           if (directive) {
             // Attribute the injection to the DIRECTIVE that won arbitration,
             // not a hardcoded "nudge" — otherwise every injected doom-loop
@@ -454,14 +493,18 @@ export namespace SessionProcessor {
               if (directive.kind === "starvation") return "starvation" as const
               return "nudge" as const
             })()
-            Telemetry.track({
-              type: "starvation_breaker",
-              timestamp: Date.now(),
-              session_id: input.sessionID,
-              mode: sbMode,
-              kind: telemetryKind,
-              action: "injected",
-            })
+            // A handed-back directive has already been counted.
+            if (!trackedDirectives.has(directive)) {
+              trackedDirectives.add(directive)
+              Telemetry.track({
+                type: "starvation_breaker",
+                timestamp: Date.now(),
+                session_id: input.sessionID,
+                mode: sbMode,
+                kind: telemetryKind,
+                action: "injected",
+              })
+            }
             log.info("nudge arbiter directive injected", {
               sessionID: input.sessionID,
               source: directive.source,
@@ -487,6 +530,7 @@ export namespace SessionProcessor {
           let interruptRequested = false
           let currentText: MessageV2.TextPart | undefined
           const reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+          let requestEstimate: Record<string, unknown> | undefined
           const interruptRequest = () => {
             if (!interruptRequested || requestController.signal.aborted || input.abort.aborted) return
             if (pendingToolExecutions || [...toolcalls.values()].some((part) => part.state.status === "running")) return
@@ -511,7 +555,20 @@ export namespace SessionProcessor {
             // upstream_fix: cancellation must also end a stalled stream open or read
             const signal = AbortSignal.any([input.abort, effectiveStreamInput.abort, requestController.signal])
             const stream = abortableStream(
-              async () => (await LLM.stream({ ...effectiveStreamInput, abort: signal })).fullStream,
+              async () =>
+                (
+                  await LLM.stream({
+                    ...effectiveStreamInput,
+                    abort: signal,
+                    onRequestEstimate: (tokens, shape) => {
+                      requestEstimate = {
+                        [REQUEST_ESTIMATE_METADATA_KEY]: tokens,
+                        [REQUEST_SHAPE_METADATA_KEY]: shape,
+                        [REQUEST_MEDIA_METADATA_KEY]: requestMedia,
+                      }
+                    },
+                  })
+                ).fullStream,
               signal,
             )
 
@@ -1043,6 +1100,12 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  // altimate_change start — persist a request estimate only after the provider responds
+                  // Only a completed provider step can confirm which request and media it saw.
+                  if (requestEstimate) {
+                    input.assistantMessage.metadata = { ...input.assistantMessage.metadata, ...requestEstimate }
+                  }
+                  // altimate_change end
                   if (value.finishReason === "content-filter") {
                     // altimate_change start — upstream_fix: content-filter
                     // finishes are session errors, not successful stops.
@@ -1327,7 +1390,44 @@ export namespace SessionProcessor {
                 ...(traceId && { trace: traceId }),
                 // altimate_change end
               })
-              const error = MessageV2.fromError(e, { providerID: input.model.providerID })
+              // altimate_change start — a pre-send budget refusal on a compactable conversation is a
+              // context overflow: compact and retry, as for a provider-reported overflow. Right after
+              // a compaction (or on a first turn) it stays the fatal budget error, so it cannot loop.
+              // A committed-answer echo recovers from an overflow without compacting (the arm below), so a
+              // refusal there converts whether or not the conversation could be compacted.
+              const echoRecovery =
+                (deferText !== undefined || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
+                !input.abort.aborted &&
+                input.assistantMessage.finish !== "content-filter"
+              refusedBeforeSend = compactable === true && !echoRecovery && isContextBudgetError(e)
+              if (refusedBeforeSend) {
+                log.warn("pre-send context budget refusal; compacting before retrying", {
+                  sessionID: input.sessionID,
+                  providerID: input.model.providerID,
+                  modelID: input.model.id,
+                })
+                // Nothing was sent: hand the directive back for the retry. It reaches the retry on the
+                // turn-start replay path; a mid-turn continuation registers its own completion nudge,
+                // which takes precedence, and detectors re-register theirs on later steps.
+                if (takenDirective) NudgeArbiter.register(input.sessionID, takenDirective, input.nudgeGeneration)
+              }
+              let error = MessageV2.fromError(e, { providerID: input.model.providerID })
+              if (refusedBeforeSend) {
+                error = new MessageV2.ContextOverflowError(
+                  { message: "The request would not fit the model's context window; compacting the conversation and retrying." },
+                  { cause: e },
+                ).toObject()
+              } else if (echoRecovery && isContextBudgetError(e)) {
+                error = new MessageV2.ContextOverflowError({ message: e.message }, { cause: e }).toObject()
+              } else if (compactBlockedByMedia && isContextBudgetError(e)) {
+                error = new NamedError.Unknown(
+                  {
+                    message: "The conversation plus a new image or PDF (attached or returned by a tool) does not fit the model's context window or input limit. Run /compact, then retry; re-attach the file if you attached it.",
+                  },
+                  { cause: e },
+                ).toObject()
+              }
+              // altimate_change end
               // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
               if (
                 (deferText || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&

@@ -4949,11 +4949,21 @@ describe("output token budget", () => {
 
     expect(estimate(dense)).toBeGreaterThan(8_000)
     expect(estimate(dense)).toBeGreaterThan(estimate(repetitive) * 3)
+    expect(estimate(`./logs/${dense.replace(/[+/]/g, "_")}.txt`)).toBeGreaterThan(8_000)
+    expect(estimate("/" + "AbCdE123/fGhIj456/".repeat(500) + "kLmNo789")).toBeGreaterThan(8_000)
 
     const shortDense = alphabet.slice(0, 32)
     for (let padding = 0; padding < 400; padding++) {
       const prefix = " ".repeat(padding)
       expect(estimate(prefix + shortDense)).toBeGreaterThan(estimate(prefix + "x".repeat(32)) + 15)
+    }
+  })
+
+  test("estimates CRLF and JSON-encoded file listings as path components", () => {
+    const paths = Array.from({ length: 200 }, (_, index) => "src/packages/warehouse/models/daily-orders_" + index + ".sql")
+    for (const listing of [paths.join("\r\n"), JSON.stringify(paths)]) {
+      const estimate = estimateInputTokens({ system: [], messages: [{ role: "user", content: listing }] })
+      expect(estimate).toBeLessThan(listing.length / 2)
     }
   })
 

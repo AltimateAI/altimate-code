@@ -15,11 +15,14 @@ import { mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
 // altimate_change start — size and clamp the finalized provider request
 import {
+  calibratedInputTokens,
   clampOutputTokens,
   clampReasoningBudget,
   effectiveContextWindow,
   estimateInputTokens,
   mergeRequestHeaders,
+  requestEstimateHash,
+  type RequestEstimateShape,
 } from "@/provider/output-token-budget"
 // altimate_change end
 // altimate_change start — tool retrieval
@@ -81,6 +84,13 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
+    // altimate_change start — calibrate from a measured step and the finalized request
+    /** Provider-reported input usage for the measured request, including cache reads and writes. */
+    measuredInputTokens?: number
+    measuredEstimateTokens?: number
+    measuredEstimateShape?: RequestEstimateShape
+    onRequestEstimate?: (tokens: number, shape: RequestEstimateShape) => void
+    // altimate_change end
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
@@ -346,10 +356,13 @@ export namespace LLM {
     // altimate_change end
 
     // altimate_change start — clamp after every context-affecting request field is finalized.
-    // Tool schemas and provider instructions consume the shared context window, while encoded
-    // media bytes do not count as literal text. The estimator runs lazily so providers that omit
-    // maxOutputTokens pay no serialization cost. Known context beta headers widen the catalog
-    // limit before the clamp. Fixed reasoning budgets are reconciled with the final reservation.
+    // Tool schemas and provider instructions share the window; encoded media is charged by the
+    // estimator's media allowances, not as literal text. The estimate runs only when the clamp needs it.
+    const effortOptions = runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options
+    // Numeric reasoning clamps leave the reasoning mode unchanged.
+    const budgetedMessages = budgetMessages(input.messages, input.model, effortOptions)
+    const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    const requestMessages = declaresNoTools ? ProviderTransform.flattenToolParts(budgetedMessages) : budgetedMessages
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,
@@ -358,25 +371,33 @@ export namespace LLM {
         // Provider defaults are lower precedence than the exact case-normalized outgoing record.
         headerSources: [provider.options, requestHeaders],
       }),
-      inputTokens: () =>
-        estimateInputTokens({
-          system,
-          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-          tools,
-          instructions: params.options.instructions,
-        }),
+      inputTokens: () => {
+        const messages = ProviderTransform.messagesForInputEstimate(requestMessages, input.model)
+        const overhead = { system, tools, instructions: params.options.instructions }
+        const estimate = estimateInputTokens({ ...overhead, messages })
+        const { measuredInputTokens, measuredEstimateTokens, measuredEstimateShape } = input
+        const overheadHash = requestEstimateHash(overhead)
+        const messageHash = requestEstimateHash(messages, messages)
+        input.onRequestEstimate?.(estimate, { messageCount: messages.length, messageHash, overheadHash })
+        // Removed text must not cancel the estimate of new, unmeasured content.
+        const prefix = measuredEstimateShape && messages.slice(0, measuredEstimateShape.messageCount)
+        const unchanged =
+          !measuredEstimateShape ||
+          (overheadHash === measuredEstimateShape.overheadHash &&
+            prefix?.length === measuredEstimateShape.messageCount &&
+            requestEstimateHash(prefix, prefix) === measuredEstimateShape.messageHash)
+        const calibrated =
+          unchanged &&
+          typeof measuredInputTokens === "number" &&
+          Number.isFinite(measuredInputTokens) &&
+          typeof measuredEstimateTokens === "number" &&
+          Number.isFinite(measuredEstimateTokens)
+            ? measuredInputTokens + Math.max(0, estimate - measuredEstimateTokens)
+            : undefined
+        return calibratedInputTokens(estimate, calibrated)
+      },
     })
-    // altimate_change start — deadline effort wins configured variants and plugin overrides
-    const requestOptions = clampReasoningBudget(
-      runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
-      maxOutputTokens,
-    )
-    const requestMessages = budgetMessages(input.messages, input.model, requestOptions)
-    // altimate_change end
-    // altimate_change end
-
-    // altimate_change start — detect a toolless request once, for the message flattening below
-    const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    const requestOptions = clampReasoningBudget(effortOptions, maxOutputTokens, params.maxOutputTokens)
     // altimate_change end
 
     // altimate_change start — record final system text and resolved tools before provider middleware
@@ -484,7 +505,7 @@ export namespace LLM {
         // never declares. The Altimate gateway fails every provider in its fallback chain on
         // that shape and reports one generic error; see ProviderTransform.flattenToolParts.
         // altimate_change start — keep interrupted reasoning in storage without sending empty disabled-thinking turns
-        ...(declaresNoTools ? ProviderTransform.flattenToolParts(requestMessages) : requestMessages),
+        ...requestMessages,
         // altimate_change end
         // altimate_change end
       ],

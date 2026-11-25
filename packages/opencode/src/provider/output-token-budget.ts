@@ -9,6 +9,29 @@ const log = Log.create({ service: "provider.output-token-budget" })
 /** Smallest completion budget worth sending for an agent turn. */
 export const OUTPUT_TOKEN_FLOOR = 1_024
 
+export const REQUEST_ESTIMATE_METADATA_KEY = "request_estimate_tokens"
+export const REQUEST_SHAPE_METADATA_KEY = "request_estimate_shape"
+export const REQUEST_MEDIA_METADATA_KEY = "request_media_fingerprints"
+
+export type RequestEstimateShape = {
+  readonly messageCount: number
+  readonly messageHash: string
+  readonly overheadHash: string
+}
+
+export function requestEstimateShape(value: unknown): RequestEstimateShape | undefined {
+  if (!isRecord(value)) return undefined
+  const { messageCount, messageHash, overheadHash } = value
+  if (typeof messageCount !== "number" || !Number.isSafeInteger(messageCount) || messageCount < 0) return undefined
+  if (typeof messageHash !== "string" || typeof overheadHash !== "string") return undefined
+  return { messageCount, messageHash, overheadHash }
+}
+
+export function requestEstimateHash(value: unknown, mediaMessages?: readonly unknown[]): string {
+  const media = mediaMessages && messageMediaAllowances(mediaMessages, false)
+  return Bun.hash(serializeForEstimate(value, media).text).toString(16)
+}
+
 const CLAMP_MARGIN_FRACTION = 0.02
 const CLAMP_MARGIN_MIN = 512
 const ESTIMATE_CHUNK_SIZE = 400
@@ -20,11 +43,21 @@ const VIDEO_TOKEN_ALLOWANCE = 8_192
 const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
+/**
+ * Lowest share of the character estimate that provider-reported usage is trusted at; below it the
+ * full estimate decides.
+ * The estimate runs ~15-20% high on SQL/JSON and higher on tool schemas; the floor bounds an
+ * undercount from usage that missed inputs changed since (per-step tool selection, refreshed rules).
+ */
+const MIN_CALIBRATED_ESTIMATE_FRACTION = 0.6
 const EMOJI = /\p{Extended_Pictographic}/u
 const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
 const DENSE_ASCII_MIN_LENGTH = 32
 const DENSE_ASCII_MIN_UNIQUE = 6
 const DENSE_ASCII_EXTRA_FRACTION = 0.75
+// The estimator scans JSON, so a listing line starts after a quote or an escaped newline.
+// Require a dot on absolute paths to distinguish them from slash-prefixed encoded data.
+const LISTING_PATH = /("|\\n)(\.\/(?:[\w.-]+\/)+[\w.-]+|\/?(?:[\w.-]+\/)+[\w.-]+\.[\w-]+)(?=\\?"|(?:\\r)?\\n)/g
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
 const CONTEXT_WINDOW_BETAS = new Map([["context-1m-2025-08-07", 1_000_000]])
 const MEDIA_PART_TYPES = new Set([
@@ -105,6 +138,7 @@ export class ReasoningTokenBudgetError extends Error {
       readonly path: string
       readonly configured: number
       readonly maxOutputTokens: number
+      readonly contextInduced?: boolean
     },
   ) {
     super(
@@ -149,7 +183,7 @@ export function mergeRequestHeaders(...sources: readonly unknown[]): Record<stri
   return result
 }
 
-/** Count opaque ASCII runs in one bounded-memory pass, including across estimator chunks. */
+/** Count opaque ASCII runs, including those that cross estimator chunk boundaries. */
 function denseAsciiCharacters(input: string): number {
   let total = 0
   let length = 0
@@ -159,7 +193,10 @@ function denseAsciiCharacters(input: string): number {
     length = 0
     unique.clear()
   }
-  for (const character of input) {
+  // Directory separators in listing lines break dense runs. Long opaque filenames and
+  // directory names still get the same surcharge as other dense text.
+  const text = input.replace(LISTING_PATH, (_, prefix: string, path: string) => prefix + path.replaceAll("/", " "))
+  for (const character of text) {
     if (!DENSE_ASCII_CHARACTER.test(character)) {
       flush()
       continue
@@ -277,7 +314,7 @@ function mediaTokenAllowance(part: JsonRecord): number {
 }
 
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
-function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
+function messageMediaAllowances(messages: readonly unknown[], charge = true): WeakMap<object, number> {
   const result = new WeakMap<object, number>()
   const visited = new WeakSet<object>()
 
@@ -286,7 +323,7 @@ function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, n
     visited.add(content)
     for (const part of content) {
       if (!isRecord(part)) continue
-      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, mediaTokenAllowance(part))
+      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, charge ? mediaTokenAllowance(part) : 0)
 
       // Tool-result media is nested in the AI SDK's typed content output.
       if (part.type !== "tool-result" || !isRecord(part.output)) continue
@@ -390,6 +427,57 @@ export function estimateInputTokens(input: {
     total += estimateTextTokens(serialized.text) + serialized.mediaTokens
   }
   return total
+}
+
+/** Provider-reported token usage of one finished assistant turn. */
+type ReportedUsage = {
+  readonly total?: number
+  readonly input: number
+  readonly output: number
+  readonly cache: { readonly read: number; readonly write: number }
+}
+
+/**
+ * The context size the compaction trigger compares against its threshold: provider-reported usage
+ * plus an estimated uncounted tail inflated by 1/fraction.
+ */
+export function reportedContextTokens(input: {
+  readonly tokens: ReportedUsage
+  readonly estimatedTokens?: number
+  readonly fraction: number
+}): number {
+  const count =
+    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
+  const estimated = input.estimatedTokens ?? 0
+  return estimated > 0 ? count + Math.ceil(estimated / input.fraction) : count
+}
+
+/**
+ * Prefer the provider-reported size of the same conversation when it is smaller than the character
+ * estimate, which runs high on SQL- and JSON-heavy context. Never raises the estimate, and distrusts
+ * usage below MIN_CALIBRATED_ESTIMATE_FRACTION of it; in those cases the estimate decides, so the
+ * guard can still refuse (and the session compact) below the compaction trigger.
+ */
+export function calibratedInputTokens(estimate: number, reported: number | undefined): number {
+  if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return estimate
+  // Usage far below the estimate more likely missed inputs (partial reporting, a changed request)
+  // than measured them: the estimate decides, so the response reservation is clamped as before.
+  if (reported < estimate * MIN_CALIBRATED_ESTIMATE_FRACTION) return estimate
+  return Math.min(estimate, reported)
+}
+
+/** True for the pre-send refusals that compacting the conversation can resolve. */
+export function isContextBudgetError(
+  error: unknown,
+): error is
+  | OutputTokenBudgetError
+  | InputTokenBudgetError
+  | (ReasoningTokenBudgetError & { readonly info: { readonly contextInduced: true } }) {
+  return (
+    error instanceof OutputTokenBudgetError ||
+    error instanceof InputTokenBudgetError ||
+    (error instanceof ReasoningTokenBudgetError && error.info.contextInduced === true)
+  )
 }
 
 /** Resolve a direct or lazy input estimate after cheap no-op checks have passed. */
@@ -523,10 +611,25 @@ function transformReasoningBudgets(
 export function clampReasoningBudget(
   options: Record<string, any>,
   maxOutputTokens: number | undefined,
+  requested?: number,
 ): Record<string, any> {
   if (maxOutputTokens === undefined) return options
   const ceiling = Math.floor(maxOutputTokens - OUTPUT_TOKEN_FLOOR)
-  return transformReasoningBudgets(options, ceiling, maxOutputTokens)
+  try {
+    return transformReasoningBudgets(options, ceiling, maxOutputTokens)
+  } catch (error) {
+    if (
+      error instanceof ReasoningTokenBudgetError &&
+      requested !== undefined &&
+      requested > maxOutputTokens
+    ) {
+      // A small explicit budget may fit below the usual minimum. Check the original options
+      // against the original reservation so only refusals compaction can fix are flagged.
+      clampReasoningBudget(options, requested)
+      throw new ReasoningTokenBudgetError({ ...error.info, contextInduced: true })
+    }
+    throw error
+  }
 }
 
 export * as OutputTokenBudget from "./output-token-budget"

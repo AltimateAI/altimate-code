@@ -30,6 +30,14 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+// altimate_change start — read the persisted request estimate for context calibration
+import {
+  REQUEST_ESTIMATE_METADATA_KEY,
+  REQUEST_MEDIA_METADATA_KEY,
+  REQUEST_SHAPE_METADATA_KEY,
+  requestEstimateShape,
+} from "@/provider/output-token-budget"
+// altimate_change end
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
@@ -1585,7 +1593,14 @@ export namespace SessionPrompt {
       // counted, and one oversized output can jump the session past the window
       // between checks (a common failure mode for long headless runs). Estimate the
       // uncounted tail and include it.
-      const uncountedTail = estimateUncountedTail(msgs, lastFinished?.id)
+      // Messages after the last finished turn by stored order (caller-supplied IDs carry no chronology).
+      const measuredID = lastFinished?.id
+      const isAfterMeasured = (id: MessageID) => {
+        if (!measuredID) return false
+        const order = compareMessageOrder(messageOrder, id, measuredID)
+        return order !== 0 ? order > 0 : id > measuredID
+      }
+      const uncountedTail = estimateUncountedTail(msgs, measuredID, isAfterMeasured)
       if (
         lastFinished &&
         lastFinished.summary !== true &&
@@ -2230,7 +2245,57 @@ export namespace SessionPrompt {
       // altimate_change start — only a request actually sent to the model counts toward the cap
       modelSteps++
       // altimate_change end
+      // altimate_change start — calibrate from the last measured request and protect unseen media
+      const loopConfig = await Config.get()
+      const measured = lastFinished && lastFinished.summary !== true ? lastFinished : undefined
+      const sameModel = measured?.providerID === model.providerID && measured.modelID === model.id
+      const recordedEstimate = measured?.metadata?.[REQUEST_ESTIMATE_METADATA_KEY]
+      const measuredEstimateShape = requestEstimateShape(measured?.metadata?.[REQUEST_SHAPE_METADATA_KEY])
+      // Compaction drops images and PDFs, so keep a refusal as a budget error if the
+      // current request includes media the model has not seen yet, including an edited attachment.
+      const media = msgs.flatMap(({ info, parts }) =>
+        parts.flatMap((part) => {
+          const files =
+            info.role === "user" && part.type === "file"
+              ? [part]
+              : part.type === "tool" && part.state.status === "completed" && !part.state.time.compacted
+                ? part.state.attachments ?? []
+                : []
+          return files
+            .filter((file) => MessageV2.isMedia(file.mime))
+            .map((file) => ({
+              fingerprint: `${info.id}:${part.id}:${file.mime}:${Bun.hash(file.url).toString(16)}`,
+              supported: model.capabilities.input[file.mime === "application/pdf" ? "pdf" : "image"],
+            }))
+        }),
+      )
+      const recordedMedia = measured?.metadata?.[REQUEST_MEDIA_METADATA_KEY]
+      const seenMedia = new Set(sameModel && Array.isArray(recordedMedia) ? recordedMedia : [])
+      const unseenMedia = media.some(({ fingerprint }) => !seenMedia.has(fingerprint))
+      const requestMedia = media.filter(({ supported }) => supported).map(({ fingerprint }) => fingerprint)
+      const currentMedia = new Set(requestMedia)
+      const measuredMediaUnchanged = [...seenMedia].every((fingerprint) => currentMedia.has(fingerprint))
+      const canAutoCompact = measured !== undefined && loopConfig.compaction?.auto !== false
+      const measuredInputTokens =
+        measured &&
+        typeof recordedEstimate === "number" &&
+        Number.isFinite(recordedEstimate) &&
+        sameModel &&
+        measuredMediaUnchanged &&
+        measured.agent === lastUser.agent &&
+        (measured.tokens.input > 0 || measured.tokens.cache.read > 0 || measured.tokens.cache.write > 0)
+          ? measured.tokens.input + measured.tokens.cache.read + measured.tokens.cache.write
+          : undefined
+      // altimate_change end
       const result = await processor.process({
+        // altimate_change start — pass the measured input usage and its matching estimate
+        compactable: canAutoCompact && !unseenMedia,
+        compactBlockedByMedia: canAutoCompact && unseenMedia,
+        measuredInputTokens,
+        measuredEstimateTokens: typeof recordedEstimate === "number" ? recordedEstimate : undefined,
+        measuredEstimateShape,
+        requestMedia,
+        // altimate_change end
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
         messageID: processor.message.id,
@@ -2284,6 +2349,9 @@ export namespace SessionPrompt {
         // altimate_change end
       })
 
+      // altimate_change start — a pre-send refusal sent nothing: it does not consume the agent's step cap
+      if (processor.refusedBeforeSend) modelSteps--
+      // altimate_change end
       // altimate_change start - finalize buffered echoes before publishing any text to clients
       const stepParts = MessageV2.parts(processor.message.id)
       // Capture before post-processing can fail or request compaction.
@@ -2642,7 +2710,21 @@ export namespace SessionPrompt {
           agent: lastUser.agent,
           model: lastUser.model,
           auto: true,
-          overflow: !processor.message.finish,
+          // altimate_change start — a pre-send refusal mid-turn compacts the whole conversation, as the
+          // proactive check does, so this turn's steps are kept; on the turn's first request the user's
+          // prompt is replayed verbatim, as for a provider overflow
+          overflow:
+            !processor.message.finish &&
+            (!processor.refusedBeforeSend ||
+              // the turn's first request: no earlier step of this turn, finished or interrupted
+              !msgs.some(
+                (msg) =>
+                  msg.info.role === "assistant" &&
+                  msg.info.parentID === lastUser.id &&
+                  msg.info.id !== processor.message.id &&
+                  msg.parts.length > 0,
+              )),
+          // altimate_change end
         })
       }
       continue
@@ -3750,7 +3832,11 @@ export namespace SessionPrompt {
    * figure); its own text is not (already inside `tokens.output`).
    * Everything after it is counted in full.
    */
-  export function estimateUncountedTail(msgs: MessageV2.WithParts[], lastFinishedID: MessageID | undefined): number {
+  export function estimateUncountedTail(
+    msgs: MessageV2.WithParts[],
+    lastFinishedID: MessageID | undefined,
+    isAfter: (id: MessageID) => boolean = (id) => id > lastFinishedID!,
+  ): number {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
     if (!lastFinished) return 0
@@ -3771,10 +3857,10 @@ export namespace SessionPrompt {
       if (part.type === "tool") tokens += Token.estimate(toolText(part))
     }
     // filterCompacted deliberately reorders retained-tail and summary messages,
-    // so array position is not chronology. IDs are monotonic; select genuinely
-    // newer messages by ID regardless of their rendered position.
+    // so array position is not chronology. Select genuinely newer messages by
+    // the caller's stored order (default: monotonic IDs), not rendered position.
     for (const m of msgs) {
-      if (m.info.id <= lastFinishedID) continue
+      if (m.info.id === lastFinishedID || !isAfter(m.info.id)) continue
       for (const part of m.parts) {
         if (part.type === "text") tokens += Token.estimate(part.text ?? "")
         if (part.type === "tool") tokens += Token.estimate(toolText(part))

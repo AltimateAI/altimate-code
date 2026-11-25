@@ -150,3 +150,11 @@ These ratios are tuned against the cl100k_base tokenizer used by Claude and GPT-
 
 !!! note "Limitations"
     The heuristic uses JavaScript string length (UTF-16 code units), which over-estimates tokens for emoji (2 code units but ~1-2 tokens) and CJK characters. For precise token counting, a future update will integrate a native tokenizer.
+
+## Pre-Send Size Check
+
+Before each request, altimate checks that the prompt plus the space reserved for the response fits the model's context window, so an oversized request is caught before it is sent instead of failing at the provider. When the prompt leaves less room than requested, the response reservation is reduced first; the request is refused only when too little room would remain.
+
+For the same model and agent, the check can start with the last response's reported input usage, including cached input, and add the estimated growth from appended messages and attachments. Replacing already-measured history, system text, tools, or provider instructions causes the full request estimate to be used. The check also uses the full estimate when the calibrated count falls below 60% of it, after a model or agent change or compaction summary, or when the last response lacks reported input usage or a recorded request estimate.
+
+If the check finds the request too large and the conversation can be compacted, altimate compacts it and retries. This also applies when context pressure reduces the response reservation so far that the reasoning budget cannot be reconciled with the visible output floor. If the original reservation also fails the reasoning budget check, the refusal is a configuration error. The size check fails with "Context budget exceeded before the request was sent" (or "Input budget exceeded" for models with a separate input limit) when the request still does not fit after compaction (the first request after a compaction is sized by the full estimate and is not compacted again), when there is nothing to compact yet (a first message that is already too large), or when auto-compaction is disabled. If an unseen image or PDF (attached, or returned by a tool) blocks auto-compaction, the error suggests running `/compact` and retrying.
