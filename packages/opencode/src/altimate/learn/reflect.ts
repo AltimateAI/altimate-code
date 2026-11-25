@@ -56,7 +56,7 @@ export interface GenerateUsage {
   totalTokens?: number
   reasoningTokens?: number
   cachedInputTokens?: number
-  inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }
+  inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
   outputTokenDetails?: { reasoningTokens?: number }
   providerMetadata?: ProviderMetadata
   estimatedCost?: number
