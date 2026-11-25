@@ -17,6 +17,13 @@ afterEach(() => {
 
 function withWorkspaceKeys(keys: Record<string, string>) {
   spies.push(spyOn(AltimateApi, "isConfigured").mockResolvedValue(true))
+  spies.push(
+    spyOn(AltimateApi, "getCredentials").mockResolvedValue({
+      altimateUrl: "https://api.example.test",
+      altimateInstanceName: "tenant",
+      altimateApiKey: "gateway-key",
+    } as any),
+  )
   spies.push(spyOn(WorkspaceApi, "captureCredentials").mockResolvedValue({ url: "https://x.test", instance: "t", apiKey: "k" }))
   spies.push(spyOn(State, "resolveBinding").mockResolvedValue({ datamateId: 7 } as any))
   spies.push(spyOn(WorkspaceApi, "getModelKeys").mockResolvedValue(keys))
@@ -46,7 +53,9 @@ test("a workspace key credentials a provider that has none, and the gateway logi
     async () => {
       const providers = await Provider.list()
       expect(providers["anthropic"]?.options["apiKey"]).toBe("ws-anthropic-key")
-      expect(providers["altimate-backend"]?.options["apiKey"]).not.toBe("ws-anthropic-key")
+      // the provider's own loader still applies, as it does for an env-supplied key
+      expect(Object.keys(providers["anthropic"]?.options["headers"] ?? {})).toContain("anthropic-beta")
+      expect(providers["altimate-backend"]?.options["apiKey"]).toBe("gateway-key")
     },
   )
 })

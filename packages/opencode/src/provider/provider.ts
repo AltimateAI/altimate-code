@@ -2001,6 +2001,17 @@ export namespace Provider {
       }
     }
 
+    // altimate_change start — the linked workspace's model keys fill in providers that have no credential of
+    // their own; env, stored logins and config all keep precedence, and the Altimate gateway login is untouched
+    if (await AltimateApi.isConfigured()) {
+      for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
+        const providerID = ProviderID.make(id)
+        if (!database[providerID] || !isProviderAllowed(providerID) || providers[providerID]) continue
+        mergeProvider(providerID, { source: "custom", options: { apiKey } })
+      }
+    }
+    // altimate_change end
+
     for (const [id, fn] of Object.entries(CUSTOM_LOADERS)) {
       const providerID = ProviderID.make(id)
       // altimate_change start — apply the same provider allowlist to managed custom loaders
@@ -2020,17 +2031,6 @@ export namespace Provider {
         mergeProvider(providerID, patch)
       }
     }
-
-    // altimate_change start — the linked workspace's model keys fill in providers that have no credential of
-    // their own; env, stored logins and config all keep precedence, and the Altimate gateway login is untouched
-    if (await AltimateApi.isConfigured()) {
-      for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
-        const providerID = ProviderID.make(id)
-        if (!database[providerID] || !isProviderAllowed(providerID) || providers[providerID]) continue
-        mergeProvider(providerID, { source: "custom", options: { apiKey } })
-      }
-    }
-    // altimate_change end
 
     // load config
     for (const [id, provider] of configProviders) {
