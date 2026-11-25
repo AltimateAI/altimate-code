@@ -109,6 +109,11 @@ describe("dropByRulePolicy", () => {
     expect(dropByRulePolicy([f], verdicts([[f, "unverifiable"]])).kept).toEqual([f])
     expect(dropByRulePolicy([f], verdicts([[f, "unverifiable"]]), { noisyRules: ["x:custom"] }).kept).toEqual([])
   })
+
+  test("noisy rule ids match in either spelling", () => {
+    const f = rule(1, "suggestion", "dbt-patterns:fanout-join")
+    expect(dropByRulePolicy([f], verdicts([[f, "unverifiable"]]), { noisyRules: ["dbt_patterns:fanout_join"] }).kept).toEqual([])
+  })
 })
 
 describe("rulePolicyApplies (fail-open)", () => {
@@ -136,6 +141,8 @@ describe("configuration", () => {
     expect(resolveAiSwitches(obj, {}).rulePolicy).toBe(true)
     expect(configuredRulePolicy(obj)).toEqual({ noisyRules: ["x:y"] })
     expect(configuredRulePolicy(DEFAULT_REVIEW_CONFIG)).toBe(DEFAULT_RULE_POST_POLICY)
+    // A typo under `rulePolicy` fails the load rather than leaving the default list.
+    expect(() => parseReviewConfig("ai:\n  rulePolicy:\n    noisyRule:\n      - x:y")).toThrow(/unrecognized_keys/)
     expect(envSwitch("rulePolicy", { ALTIMATE_REVIEW_RULE_POLICY: "0" })).toBe(false)
     expect(resolveAiSwitches(obj, { ALTIMATE_REVIEW_RULE_POLICY: "0" }).rulePolicy).toBe(false)
   })

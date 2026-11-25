@@ -6,7 +6,7 @@
 // no verdict counts as unverifiable. AI findings and critical rule findings are never touched:
 // a critical rule finding is always posted. The caller skips the policy when the rule
 // verifier did not run (fail-open).
-import { type Finding, findingOrigin } from "./finding"
+import { type Finding, findingOrigin, normalizeRuleId } from "./finding"
 
 /** Rule types at least 30% wrong over at least 3 posted findings when judged on replayed public dbt PRs. */
 export const NOISY_RULE_TYPES: readonly string[] = [
@@ -41,7 +41,8 @@ export function rulePolicyDrop(
   if (findingOrigin(f) === "ai" || f.severity === "critical") return undefined
   const v = verdict ?? "unverifiable"
   if (v === "unverifiable" && f.severity === "warning") return "unverifiable_high_sev"
-  if (f.rule && policy.noisyRules.includes(f.rule) && v !== "confirmed") return "noisy_type_not_confirmed"
+  if (f.rule && v !== "confirmed" && policy.noisyRules.some((r) => normalizeRuleId(r) === normalizeRuleId(f.rule!)))
+    return "noisy_type_not_confirmed"
   return undefined
 }
 

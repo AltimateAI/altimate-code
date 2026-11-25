@@ -7,6 +7,7 @@
 // down; code called without them (direct callers, unit tests) reads only the
 // env variable, as before, so an unset variable means off there.
 import type { ReviewConfig } from "./config"
+import { rulesOffEnv } from "./rules-off"
 
 export type AiSwitchName =
   | "coverage"
@@ -66,8 +67,8 @@ const ENV_OFF: Partial<Record<AiSwitchName, string>> = { verifyRules: "off" }
  *  (case-insensitive) or a switch's own spelling, undefined otherwise. */
 export function envSwitch(name: AiSwitchName, env: Env = process.env): boolean | undefined {
   const raw = env[AI_SWITCH_ENV[name]]
-  // `ALTIMATE_REVIEW_RULES_OFF=<file>` names a replacement list: the switch is on.
-  if (name === "rulesOff" && raw && raw !== "0") return true
+  // `ALTIMATE_REVIEW_RULES_OFF` also takes on/off/true/false, or a path naming a replacement list.
+  if (name === "rulesOff") return rulesOffEnv(raw).on
   const v = raw?.trim().toLowerCase()
   if (v !== undefined && v === ENV_ON[name]) return true
   if (v !== undefined && v === ENV_OFF[name]) return false

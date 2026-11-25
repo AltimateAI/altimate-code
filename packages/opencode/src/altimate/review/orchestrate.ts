@@ -2662,8 +2662,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let ruleVerifierRan = false
   // The rule verifier was asked to run (it may still have skipped or failed).
   let ruleVerifyAttempted = false
-  // The AI lane runs in this review: rule types off apply only then.
-  const aiLaneOn = lanes.has("ai_review") && !!input.aiReview
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2868,28 +2866,48 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // The verdict counts every instance; merging repeats is presentation only.
   let verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
 
-  // Rule noise, only when the AI lane runs: rule types off, then rule findings the verifier
-  // refuted, then the rule-post policy. A finding not posted does not count toward the verdict
-  // either; an unmerged instance takes the verdict of its merged group. AI findings are never
-  // dropped by these steps, and neither verifier step drops a critical rule finding.
-  const rulesOff = aiLaneOn ? input.rulesOff : undefined
-  const off = dropRulesOff(findings, rulesOff)
-  findings = off.kept
-  verdictFindings = dropRulesOff(verdictFindings, rulesOff).kept
+  // Rule noise, only when the AI lane ran and answered (fail-open otherwise, like the
+  // verifier): rule types off, then rule findings the verifier refuted, then the rule-post
+  // policy. A finding not posted does not count toward the verdict either; an unmerged instance
+  // takes the verdict of its merged group. AI findings and critical rule findings are never
+  // dropped by these steps. A merged repeat group with an AI member is left alone too, so a
+  // rule finding it was merged with cannot take the AI finding down with it.
+  const aiLaneRan = lanes.has("ai_review") && !!input.aiReview && aiStatus?.state === "ok"
+  const mixedGroups = new Set(verdictFindings.filter((f) => findingOrigin(f) === "ai").map(repeatGroupId))
+  // A merged finding of such a group (by id), or an unmerged instance of one (by its group id).
+  const inMixed = (f: Finding) => mixedGroups.has(f.id) || mixedGroups.has(repeatGroupId(f))
+  const ruleStep = (list: Finding[], step: (rules: Finding[]) => Finding[]) => {
+    const kept = new Set(step(list.filter((f) => !inMixed(f))))
+    return list.filter((f) => inMixed(f) || kept.has(f))
+  }
+  const rulesOff = aiLaneRan ? input.rulesOff : undefined
+  let offDropped: Record<string, number> = {}
+  findings = ruleStep(findings, (list) => {
+    const r = dropRulesOff(list, rulesOff)
+    offDropped = r.dropped
+    return r.kept
+  })
+  verdictFindings = ruleStep(verdictFindings, (list) => dropRulesOff(list, rulesOff).kept)
   const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
-  const refuted = (f: Finding) => findingOrigin(f) !== "ai" && f.severity !== "critical" && verdictOf(f) === "refuted"
+  const refuted = (f: Finding) =>
+    findingOrigin(f) !== "ai" && !inMixed(f) && f.severity !== "critical" && verdictOf(f) === "refuted"
   const rulesRefuted = ruleVerifyAttempted ? findings.filter(refuted).length : undefined
   if (ruleVerdicts.size) {
     findings = findings.filter((f) => !refuted(f))
     verdictFindings = verdictFindings.filter((f) => !refuted(f))
   }
   let rulePolicy: { applied: boolean; dropped: RulePolicyDrops } | undefined
-  if (aiLaneOn && input.rulePolicy && ruleVerifyAttempted) {
+  if (aiLaneRan && input.rulePolicy && ruleVerifyAttempted) {
     if (ruleVerifierRan) {
       const byId = (list: Finding[]) => new Map(list.map((f) => [f.id, verdictOf(f) ?? null] as const))
-      const posted = dropByRulePolicy(findings, byId(findings), input.rulePolicy)
-      findings = posted.kept
-      verdictFindings = dropByRulePolicy(verdictFindings, byId(verdictFindings), input.rulePolicy).kept
+      let postedDropped: RulePolicyDrops = { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 }
+      findings = ruleStep(findings, (list) => {
+        const r = dropByRulePolicy(list, byId(list), input.rulePolicy)
+        postedDropped = r.dropped
+        return r.kept
+      })
+      const posted = { dropped: postedDropped }
+      verdictFindings = ruleStep(verdictFindings, (list) => dropByRulePolicy(list, byId(list), input.rulePolicy).kept)
       rulePolicy = { applied: true, dropped: posted.dropped }
     } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }
@@ -2933,7 +2951,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const envelope = buildEnvelope({
     engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
-    ...(rulesOff ? { rulesOff: off.dropped } : {}),
+    ...(rulesOff ? { rulesOff: offDropped } : {}),
     ...(rulesRefuted !== undefined ? { rulesRefuted } : {}),
     ...(rulePolicy ? { rulePolicy } : {}),
     policy: input.policy,

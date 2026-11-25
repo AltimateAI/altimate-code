@@ -1,33 +1,20 @@
-import { describe, test, expect, afterEach } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { describe, test, expect } from "bun:test"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { tmpdir } from "../fixture/fixture"
 import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG, parseReviewConfig } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
-import { makeFinding, ruleId, type Finding } from "../../src/altimate/review/finding"
-import { NOISY_RULES_OFF, dropRulesOff, resolveRulesOff } from "../../src/altimate/review/rules-off"
+import { makeFinding, repeatGroupId, ruleId, type Finding } from "../../src/altimate/review/finding"
+import { NOISY_RULES_OFF, dropRulesOff, resolveRulesOff, rulesOffEnv } from "../../src/altimate/review/rules-off"
 import { envSwitch, resolveAiSwitches } from "../../src/altimate/review/ai-switches"
-import type { AiReviewInput } from "../../src/altimate/review/ai-review"
+import type { AiLaneStatus, AiReviewInput } from "../../src/altimate/review/ai-review"
 
 // Rule types off: the shipped list drops those rule findings once the AI lane runs.
 
-const dirs: string[] = []
-afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
-})
-
-function listFile(body: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "rules-off-"))
-  dirs.push(dir)
-  const file = join(dir, "rules_off.json")
-  writeFileSync(file, body)
-  return file
-}
-
-const finding = (rule: string, tool = "dbt-patterns", n = 1): Finding =>
+const finding = (rule: string, tool = "dbt-patterns", n = 1, severity: Finding["severity"] = "warning"): Finding =>
   makeFinding({
-    severity: "warning",
+    severity,
     category: "sql_quality",
     title: `m: ${rule} ${n}`,
     body: "b",
@@ -67,7 +54,14 @@ describe("resolveRulesOff", () => {
     expect(resolveRulesOff({ ai: true }, resolveAiSwitches({ ai: true }, env), env)).toBeUndefined()
   })
 
-  test("`ALTIMATE_REVIEW_RULES_OFF=<file>` replaces the list, even over `ai.rulesOff: false`; a bad file is an error", () => {
+  test("`ALTIMATE_REVIEW_RULES_OFF=<file>` replaces the list, even over `ai.rulesOff: false`; a bad file is an error", async () => {
+    await using tmp = await tmpdir()
+    let n = 0
+    const listFile = (body: string) => {
+      const file = join(tmp.path, `rules_off_${n++}.json`)
+      writeFileSync(file, body)
+      return file
+    }
     const file = listFile('["a:b", "c:d"]')
     const env = { ALTIMATE_REVIEW_RULES_OFF: file }
     expect(envSwitch("rulesOff", env)).toBe(true)
@@ -77,6 +71,35 @@ describe("resolveRulesOff", () => {
     expect(() => resolveRulesOff({ ai: true }, on, bad('{"a": 1}'))).toThrow(/JSON list of rule ids/)
     expect(() => resolveRulesOff({ ai: true }, on, bad("[1]"))).toThrow(/JSON list of rule ids/)
     expect(() => resolveRulesOff({ ai: true }, on, { ALTIMATE_REVIEW_RULES_OFF: "/nonexistent/rules_off.json" })).toThrow()
+  })
+
+  test("`ALTIMATE_REVIEW_RULES_OFF` spellings: on/off/true/false switch; only a path-like value is a file", () => {
+    for (const v of ["0", "off", "OFF", "false", "False"]) {
+      const env = { ALTIMATE_REVIEW_RULES_OFF: v }
+      expect(envSwitch("rulesOff", env)).toBe(false)
+      expect(resolveRulesOff({ ai: true }, resolveAiSwitches({ ai: true }, env), env)).toBeUndefined()
+    }
+    for (const v of ["1", "on", "true", "TRUE"]) {
+      const env = { ALTIMATE_REVIEW_RULES_OFF: v }
+      expect(envSwitch("rulesOff", env)).toBe(true)
+      // The shipped list; no file is read.
+      expect([...resolveRulesOff({ ai: true }, resolveAiSwitches({ ai: true }, env), env)!]).toEqual([...NOISY_RULES_OFF])
+    }
+    // Not a switch value and not a path: ignored (config and default decide), never read as a file.
+    const odd = { ALTIMATE_REVIEW_RULES_OFF: "yes please" }
+    expect(envSwitch("rulesOff", odd)).toBeUndefined()
+    expect([...resolveRulesOff({ ai: true }, resolveAiSwitches({ ai: true }, odd), odd)!]).toEqual([...NOISY_RULES_OFF])
+    expect(rulesOffEnv("rules_off.json")).toEqual({ on: true, file: "rules_off.json" })
+    expect(rulesOffEnv("./list")).toEqual({ on: true, file: "./list" })
+    expect(rulesOffEnv("C:\\lists\\off")).toEqual({ on: true, file: "C:\\lists\\off" })
+  })
+
+  test("`ai.rulesOn` ids match in either spelling", () => {
+    const cfg = parseReviewConfig("ai:\n  rulesOn:\n    - dbt_patterns:self_join\n    - RULE-CATALOG:Nested_Case")
+    const off = resolveRulesOff(cfg, resolveAiSwitches(cfg, {}), {})!
+    expect(off.has("dbt-patterns:self-join")).toBe(false)
+    expect(off.has("rule-catalog:nested-case")).toBe(false)
+    expect(off.size).toBe(NOISY_RULES_OFF.length - 2)
   })
 })
 
@@ -95,6 +118,22 @@ describe("dropRulesOff", () => {
     expect(r.dropped).toEqual({ "dbt-patterns:select-star": 2, "rule-catalog:order-by": 1 })
     expect(dropRulesOff(fs, undefined)).toEqual({ kept: fs, dropped: {} })
     expect(dropRulesOff(fs, new Set())).toEqual({ kept: fs, dropped: {} })
+  })
+
+  test("critical rule findings are never dropped, e.g. a new high-confidence PII column in a mart", () => {
+    const pii = "altimate-core.classify-pii:exposes"
+    expect(NOISY_RULES_OFF).toContain(pii)
+    const critical = finding(pii, "altimate_core.classify_pii", 1, "critical")
+    const warning = finding(pii, "altimate_core.classify_pii", 2, "warning")
+    const r = dropRulesOff([critical, warning], new Set(NOISY_RULES_OFF))
+    expect(r.kept).toEqual([critical])
+    expect(r.dropped).toEqual({ [pii]: 1 })
+  })
+
+  test("a finding's rule id matches the list in either spelling", () => {
+    const r = dropRulesOff([finding("dbt_patterns:self_join")], new Set(["dbt-patterns:self-join"]))
+    expect(r.kept).toEqual([])
+    expect(r.dropped).toEqual({ "dbt_patterns:self_join": 1 })
   })
 })
 
@@ -117,7 +156,7 @@ describe("orchestrator: rule types off", () => {
     },
   } as ReviewRunner
   const SQL = "select *\nfrom raw.orders\nwhere status = 'x'\norder by 1"
-  const run = (opts: { seen?: AiReviewInput[]; rulesOff?: Set<string>; ai?: boolean }) =>
+  const run = (opts: { seen?: AiReviewInput[]; rulesOff?: Set<string>; ai?: boolean; status?: AiLaneStatus; aiFindings?: Finding[] }) =>
     runReview({
       changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` }],
       config: { ...DEFAULT_REVIEW_CONFIG },
@@ -133,7 +172,7 @@ describe("orchestrator: rule types off", () => {
         : {
             aiReview: async (input: AiReviewInput) => {
               opts.seen?.push(input)
-              return { findings: [], status: { state: "ok" as const } }
+              return { findings: opts.aiFindings ?? [], status: opts.status ?? { state: "ok" as const } }
             },
           }),
     })
@@ -159,6 +198,46 @@ describe("orchestrator: rule types off", () => {
     const none = await run({ rulesOff: new Set(["x:y"]) })
     expect(none.findings).toEqual(base.findings)
     expect(none.rulesOff).toEqual({})
+  })
+
+  test("AI lane configured but skipped or failed: the list is not applied (fail-open)", async () => {
+    const base = await run({})
+    const target = base.findings[0].rule!
+    for (const status of [
+      { state: "skipped", reason: "dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call" },
+      { state: "skipped", reason: "no usable model: none configured" },
+      { state: "error", reason: "provider unreachable" },
+      { state: "timeout", reason: "slow" },
+    ] as AiLaneStatus[]) {
+      const env = await run({ rulesOff: new Set([target]), status })
+      expect(env.findings).toEqual(base.findings)
+      expect(env.rulesOff).toBeUndefined()
+    }
+  })
+
+  test("a repeat-merged comment with an AI member is not dropped with its rule finding", async () => {
+    const base = await run({})
+    const rule = base.findings.find((f) => f.severity !== "critical" && f.startLine)!
+    // The same file, category, severity and title as the rule finding, so the two merge; its body
+    // sorts after the rule finding's, so the merged comment is led by the rule finding.
+    const ai = makeFinding({
+      severity: rule.severity,
+      category: rule.category,
+      title: rule.title,
+      body: "zzz the AI finder's own catch",
+      file: rule.file,
+      startLine: rule.startLine,
+      endLine: rule.startLine,
+      confidence: "medium",
+      evidence: { tool: "ai-review", result: {} },
+      ruleKey: "ai:merged-with-rule",
+      rule: ruleId("ai-review", rule.category),
+    })
+    const merged = await run({ aiFindings: [ai] })
+    const group = merged.findings.find((f) => f.id === repeatGroupId(rule))
+    expect(group?.body).toContain("zzz the AI finder's own catch")
+    const off = await run({ aiFindings: [ai], rulesOff: new Set([rule.rule!]) })
+    expect(off.findings.find((f) => f.id === repeatGroupId(rule))).toEqual(group)
   })
 
   test("AI lane off: the list is ignored and the envelope is unchanged", async () => {
