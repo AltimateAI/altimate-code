@@ -979,6 +979,34 @@ export namespace WorkspaceApi {
     }
   }
 
+  /** The workspace's decrypted model keys by provider id. An absent endpoint (404/405), a failed request
+   * or an answer without keys all give an empty map. */
+  export async function getModelKeys(datamateId: number, actAs?: ActAs): Promise<Record<string, string>> {
+    try {
+      const body = await req<{ keys?: Array<{ provider?: unknown; key?: unknown }> } | undefined>(
+        "GET",
+        `/${datamateId}/model-keys`,
+        {
+          base: "/datamates",
+          reportErrors: false,
+          allowEmptyBody: true,
+          expectedStatuses: [404, 405],
+          timeoutMs: SIGNED_IN_LOOKUP_TIMEOUT_MS,
+          ...(actAs ? { actAs } : {}),
+        },
+      )
+      const keys: Record<string, string> = {}
+      for (const entry of Array.isArray(body?.keys) ? body.keys : []) {
+        if (typeof entry?.provider !== "string" || typeof entry.key !== "string") continue
+        const key = entry.key.trim()
+        if (key) keys[entry.provider] = key
+      }
+      return keys
+    } catch {
+      return {}
+    }
+  }
+
   /** ``GET /users/me``. Not a workspace call: no workspace_api_error row for it. */
   function me(actAs?: ActAs, timeoutMs?: number) {
     return req<{ id?: unknown; email?: unknown }>("GET", "/me", {
