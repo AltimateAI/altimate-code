@@ -4,6 +4,7 @@ import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
 // altimate_change start — translate managed Altimate Base gateway errors
 import { FreeTier } from "@/altimate/free/client"
+import { describePlanLimitBody } from "@/altimate/workspace/plan-limit"
 // altimate_change end
 
 export namespace ProviderError {
@@ -449,6 +450,22 @@ export namespace ProviderError {
           responseHeaders: described.retryable
             ? capRetryAfterHeader(input.error.responseHeaders)
             : input.error.responseHeaders,
+          metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+        }
+      }
+    }
+    // altimate_change end
+
+    // altimate_change start — the gateway refuses a model call over the plan's token limit with a 402 that names the upgrade path
+    if (String(input.providerID) === "altimate-backend" && input.error.statusCode === 402) {
+      const message = describePlanLimitBody(input.error.responseBody)
+      if (message) {
+        return {
+          type: "api_error",
+          message,
+          statusCode: 402,
+          isRetryable: false,
+          responseHeaders: input.error.responseHeaders,
           metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
         }
       }

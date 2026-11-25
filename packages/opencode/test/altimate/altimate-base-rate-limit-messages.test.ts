@@ -337,3 +337,29 @@ describe("describeRequestTooLarge — 413 with a body that never parses (nginx e
     expect(FreeTier.describeRequestTooLarge({ status: 502, body: html })).toBeUndefined()
   })
 })
+
+describe("budget_exceeded upgrade link", () => {
+  const url = "https://acme.app.myaltimate.com/settings/credits?tab=plans"
+  const body = (extra: Record<string, unknown>, message = "ExceededBudget: User=abc") =>
+    JSON.stringify({ error: { type: "budget_exceeded", message, ...extra } })
+
+  test("appends the upgrade url when the body carries an https one", () => {
+    const described = FreeTier.describeRateLimit({ body: body({ upgrade_url: url }) })
+    expect(described?.retryable).toBe(false)
+    expect(described?.message).toEndWith(` Upgrade: ${url}`)
+  })
+
+  test("leaves the message unchanged without a url or with a non-https one", () => {
+    const plain = FreeTier.describeRateLimit({ body: body({}) })
+    expect(plain?.message).not.toContain("Upgrade")
+    expect(FreeTier.describeRateLimit({ body: body({ upgrade_url: "http://x.test" }) })).toEqual(plain)
+  })
+
+  test("applies to the shared and fallback budget messages", () => {
+    for (const msg of ["Budget has been exceeded", "something else"]) {
+      expect(FreeTier.describeRateLimit({ body: body({ upgrade_url: url }, msg) })?.message).toEndWith(
+        ` Upgrade: ${url}`,
+      )
+    }
+  })
+})

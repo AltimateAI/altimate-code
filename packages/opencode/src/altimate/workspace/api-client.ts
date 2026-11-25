@@ -13,6 +13,7 @@
 import { AltimateApi } from "@/altimate/api/client"
 import { Telemetry } from "@/altimate/telemetry"
 import { inertMessageValue } from "./workspace-name"
+import { formatPlanLimit, safeUpgradeUrl, type PlanLimitDetail } from "./plan-limit"
 
 const REQUEST_TIMEOUT_MS = 15_000
 const SIGNED_IN_LOOKUP_TIMEOUT_MS = 3_000
@@ -204,6 +205,27 @@ export class ForbiddenError extends Error {
   }
 }
 
+// altimate_change start — plan-limit refusals (HTTP 402) carry an upgrade path
+export class PlanLimitError extends Error {
+  public readonly limitKey?: string
+  public readonly plan?: string
+  public readonly limit?: number | null
+  public readonly current?: number | null
+  public readonly requiredPlan?: string
+  public readonly upgradeUrl?: string
+  constructor(d: PlanLimitDetail) {
+    super(formatPlanLimit(d))
+    this.name = "PlanLimitError"
+    this.limitKey = d.limit_key
+    this.plan = d.plan
+    this.limit = d.limit
+    this.current = d.current
+    this.requiredPlan = d.required_plan
+    this.upgradeUrl = safeUpgradeUrl(d.upgrade_url)
+  }
+}
+// altimate_change end
+
 export class WorkspaceApiError extends Error {
   constructor(
     msg: string,
@@ -255,7 +277,9 @@ const ROUTES: Record<string, Array<[RegExp, string]>> = {
     [/^\/?$/, "/"],
     [/^\/[^/]+\/reviews$/, "/:id/reviews"],
     [/^\/[^/]+\/reviews\/summary$/, "/:id/reviews/summary"],
+    [/^\/[^/]+\/model-keys$/, "/:id/model-keys"],
   ],
+  "/workspace-runs": [[/^\/?$/, "/"]],
   "/skills": [
     [/^\/[^/]+$/, "/:id"],
     [/^\/[^/]+\/datamates$/, "/:id/datamates"],
@@ -322,7 +346,8 @@ function reportApiErrorRow(input: {
 }
 
 /** The reason class of a failed link call, for `workspace_link_failed`. */
-export function linkFailureReason(err: unknown): "auth" | "not_found" | "network" | "conflict" | "other" {
+export function linkFailureReason(err: unknown): "auth" | "not_found" | "network" | "conflict" | "plan_limit" | "other" {
+  if (err instanceof PlanLimitError) return "plan_limit"
   if (err instanceof ForbiddenError) return "auth"
   if (err instanceof NotFoundError) return "not_found"
   if (err instanceof ConflictError || err instanceof PreconditionFailedError) return "conflict"
@@ -536,6 +561,7 @@ async function req<T>(
       workspaceId: bodyWorkspaceId,
     })
   }
+  if (res.status === 402 && coded?.code === "plan_limit_reached") throw new PlanLimitError(coded as PlanLimitDetail)
   if (res.status === 404) throw new NotFoundError(typeof detail === "string" ? detail : "Not found", coded)
   if (res.status === 403) throw new ForbiddenError(typeof detail === "string" ? detail : "Forbidden", coded)
   if (res.status === 409) {
