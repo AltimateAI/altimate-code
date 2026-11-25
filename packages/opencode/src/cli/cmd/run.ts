@@ -987,6 +987,26 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = options?.turnLimit ?? args.maxTurns
         let budgetAborted = false
+        // The request whose ContextOverflowError is pending recovery, captured
+        // while the error surfaces (compaction rows emit no request boundary, so
+        // the active request is still the overflowing one). The
+        // session.compacted budget check consults it to keep the committed-answer
+        // exemption the step-start check grants the echo.
+        let overflowingRequestID: string | undefined
+        // One shared turn-budget abort for both enforcement points: stop the time
+        // budget, attribute the exhaustion, report, and abort the session. Two
+        // hand-maintained copies of this transition are how the step-start check
+        // and the recovery check drift apart.
+        const abortOnTurnBudget = async (sessionID: string) => {
+          stopTimeBudget()
+          budgetAborted = true
+          accounting.onBudgetExhausted()
+          error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
+          if (!emit("budget_exhausted", { limit: maxTurns })) {
+            UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
+          }
+          await sdk.session.abort({ sessionID }, { signal: options?.signal })
+        }
         // altimate_change end
 
         // altimate_change start — parameterized stream
@@ -1157,18 +1177,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
-                stopTimeBudget()
-                // altimate_change end
-                budgetAborted = true
-                accounting.onBudgetExhausted()
-                error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
-                if (!emit("budget_exhausted", { limit: maxTurns })) {
-                  UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
-                }
-                await sdk.session.abort({ sessionID }, { signal: options?.signal })
+                await abortOnTurnBudget(sessionID)
                 // Drain the ordered abort/error/idle tail before starting another phase.
                 continue
               }
+              // altimate_change end
               // altimate_change end
               if (emit("step_start", { part })) continue
             }
@@ -1293,7 +1306,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
             // altimate_change end
             // altimate_change start — keep overflow trace failures recoverable only through compaction
-            if (props.error.name === "ContextOverflowError") recoverableOverflowTraceErrors.add(err)
+            if (props.error.name === "ContextOverflowError") {
+              recoverableOverflowTraceErrors.add(err)
+              // altimate_change start — remember whose request is pending recovery so
+              // the session.compacted budget check can honor the committed-answer
+              // exemption for the echo (the active request is still the overflowing
+              // one here: compaction rows emit no request boundary).
+              overflowingRequestID = requestOwnership.activeRequestID
+              // altimate_change end
+            }
             else error = error ? error + EOL + err : err
             // altimate_change end
             if (emit("error", { error: props.error })) continue
@@ -1305,8 +1326,32 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // completes. This event closes the pending-overflow accounting state;
           // without it (disabled/failed compaction) the run exits nonzero.
           if (event.type === "session.compacted" && event.properties.sessionID === sessionID) {
-            accounting.onCompactionRecovered()
+            const charged = accounting.onCompactionRecovered()
+            // altimate_change start — the recovering request decides the committed-answer exemption
+            const committedRecovery = overflowingRequestID !== undefined && committedRequests.has(overflowingRequestID)
+            overflowingRequestID = undefined
             recoverableOverflowTraceErrors.recover()
+            // altimate_change end
+            // altimate_change start — enforce the turn budget at the recovery boundary
+            // A pre-step overflow recovered by compaction starts the next request
+            // without streaming any counted step-start, so an every-request-
+            // overflows run never reaches the step-start budget check and loops
+            // overflow -> compaction forever. Each unproductive cycle is charged
+            // a turn (see onCompactionRecovered); abort exactly when that charge
+            // fired — where the cycle is visible — instead of waiting for a step
+            // that never comes. The committed-answer echo keeps the exemption the
+            // step-start check grants it: its recovery must not cut off the stored
+            // answer before it is delivered. Productive recoveries stay governed by
+            // the step-start check on the next counted step, as before.
+            if (
+              charged && !committedRecovery && !budgetAborted &&
+              maxTurns && accounting.turnCount > maxTurns &&
+              (!timeExhausted() || options?.turnLimit !== undefined)
+            ) {
+              await abortOnTurnBudget(sessionID)
+              continue
+            }
+            // altimate_change end
           }
           // altimate_change end
 
