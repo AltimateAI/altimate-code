@@ -644,16 +644,23 @@ function withCost(
         else cost.notes.push(`${why}, so the dry run is not priced.`)
       } else {
         const demand = bigqueryOnDemandRate(cfg)
-        // A SQL input has no manifest to count its tables from: one is assumed, which makes the range a floor.
+        // A SQL input has no manifest to count its tables from: at least one is assumed.
         const tables = history.tables
-        cost.selectOnly = onDemandPrice(meta.bytes, tables ?? 1, demand.rate.value)
+        cost.selectOnly = onDemandPrice({
+          bytes: meta.bytes,
+          maxBytes: typeof meta.maxBytes === "number" ? meta.maxBytes : undefined,
+          lowerBound: meta.lowerBound === true,
+          tables: tables ?? 1,
+          usdPerTib: demand.rate.value,
+        })
         if (!cost.rate) {
           cost.rate = demand.rate
           if (demand.note) cost.notes.push(demand.note)
         }
         cost.notes.push(
-          `The dry run price covers the SELECT only, and each table it reads bills at least 10 MiB${tables === undefined ? "; the number of tables is unknown for this input, so one is assumed and the range is at least that" : ` (${tables} table${tables === 1 ? "" : "s"})`}${meta.lowerBound === true ? "; the dry run's bytes are a lower bound, so this is a floor" : ""}.`,
+          `The price covers the SELECT only, and each table it reads bills at least 10 MiB (${tables === undefined ? "at least one table: the number of tables is unknown for SQL input, so the high bound adds 10 MiB for each further table" : `${tables} table${tables === 1 ? "" : "s"}`}).`,
         )
+        if (history.sources) cost.notes.push("A source that is a view in BigQuery bills 10 MiB more for each table it reads.")
       }
     }
     if (history.materialized === "incremental")

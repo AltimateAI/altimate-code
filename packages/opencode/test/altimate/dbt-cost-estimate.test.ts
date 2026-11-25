@@ -1359,10 +1359,12 @@ describe("dbt_cost_estimate cost", () => {
       native: { unit: "bytes_billed", lastRun: 3 * TIB, highest: 4 * TIB },
       rate: { value: 6.25, unit: "USD/TiB", source: "default" },
     })
-    // The model reads two tables, so the SELECT bills between the larger of the total and 2 x 10 MiB, and the total plus them.
+    // The model reads two tables: at least 2 x 10 MiB, and at most the dry run's upper bound (4.25 TiB, the rounding edge) plus them.
     const bytes = Math.round(4.2 * TIB)
-    expect(cost.selectOnly.low).toBeCloseTo((bytes / TIB) * 6.25, 6)
-    expect(cost.selectOnly.high).toBeCloseTo(((bytes + 2 * 10 * 1024 ** 2) / TIB) * 6.25, 6)
+    expect(cost.selectOnly.low).toBeCloseTo(((2 * 10 * 1024 ** 2) / TIB) * 6.25, 10)
+    expect(cost.selectOnly.high).toBeCloseTo(((Math.ceil(4.25 * TIB) + 2 * 10 * 1024 ** 2) / TIB) * 6.25, 4)
+    expect(cost.selectOnly.high).toBeGreaterThan((bytes / TIB) * 6.25)
+    expect(cost.notes.join(" ")).toContain("A source that is a view in BigQuery bills 10 MiB more")
     expect(result.output.startsWith("Cost from 2 runs in the last 30 days: last run $18.75")).toBe(true)
     expect(result.output).toContain("would process 4.2 TiB")
     expect(result.metadata).toMatchObject({ supported: true, bytes, display: "4.2 TiB", model: "orders" })
@@ -1458,10 +1460,12 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.basis).toBe("dry_run")
     const tenMiB = 10 * 1024 ** 2
     expect(cost.selectOnly.low).toBeCloseTo((tenMiB / TIB) * 6.25, 10)
-    expect(cost.selectOnly.high).toBeCloseTo(((1024 + tenMiB) / TIB) * 6.25, 10)
+    // "1.0 KiB" is rounded: the dry run can have read up to 1.05 KiB.
+    expect(cost.selectOnly.high).toBeCloseTo(((Math.ceil(1.05 * 1024) + tenMiB) / TIB) * 6.25, 9)
     expect(cost.notes.join(" ")).toContain("SELECT only")
     expect(cost.notes.join(" ")).toContain("No runs of model.shop.stg_orders in the last 30 days")
-    expect(result.output).toContain("The SELECT would bill between $")
+    expect(result.output).toContain("The SELECT would bill at most $")
+    expect(result.output).toContain("pruning of clustered or partitioned tables can bill less")
   })
 
   test("when neither the project's jobs nor the caller's own say the pricing mode, the dry run is not priced and the scan stays", async () => {
@@ -1528,7 +1532,8 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.runs).toBeUndefined()
     expect(cost.notes.join(" ")).toContain("A SQL input has no run history")
     // The number of tables is unknown for SQL, so one is assumed and the range is called a floor.
-    expect(cost.notes.join(" ")).toContain("at least")
+    expect(cost.notes.join(" ")).toContain("at least one table")
+    expect(cost.notes.join(" ")).toContain("10 MiB for each further table")
   })
 
   test("a model name that matches two nodes is reported ambiguous and no history is read", async () => {
@@ -1562,13 +1567,13 @@ describe("dbt_cost_estimate cost", () => {
     }
   })
 
-  const SF_COLUMNS = ["query_id", "session_id", "start_time", "end_time", "execution_time", "query_type", "warehouse_name", "warehouse_size", "credits_attributed_compute", "credits_used_query_acceleration", "credits_used_cloud_services"]
+  const SF_COLUMNS = ["query_id", "session_id", "start_time", "start_date_utc", "end_time", "execution_time", "query_type", "warehouse_name", "warehouse_size", "credits_attributed_compute", "credits_used_query_acceleration", "credits_used_cloud_services"]
   const snowflakeFlow = (rate: (jinja: string) => string | Promise<string>) => async (jinja: string) =>
     jinja.includes("rate_sheet_daily")
       ? rate(jinja)
       : table(SF_COLUMNS, [
-          ["q2", "s1", "2026-05-02 10:03:00.000", "2026-05-02 10:04:00.000", "9000", "MERGE", "W", "XS", "0.2", "0.05", "0.001"],
-          ["q1", "s1", "2026-05-02 10:00:00.000", "2026-05-02 10:01:00.000", "9000", "CREATE_TABLE_AS_SELECT", "W", "XS", "0.1", null, "0.001"],
+          ["q2", "s1", "2026-05-02 10:03:00.000", "2026-05-02", "2026-05-02 10:04:00.000", "9000", "MERGE", "W", "XS", "0.2", "0.05", "0.001"],
+          ["q1", "s1", "2026-05-02 10:00:00.000", "2026-05-02", "2026-05-02 10:01:00.000", "9000", "CREATE_TABLE_AS_SELECT", "W", "XS", "0.1", null, "0.001"],
         ])
 
   test("Snowflake: credits of the run, priced at the rate sheet's rate for the day, and its currency", async () => {

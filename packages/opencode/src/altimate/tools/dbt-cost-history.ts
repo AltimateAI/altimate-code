@@ -6,6 +6,9 @@ import { loadRawManifest } from "../native/dbt/helpers"
 
 export const HISTORY_DAYS = 30
 export const HISTORY_LIMIT = 500
+/** The most child jobs of matched scripts the children query returns. */
+export const BQ_CHILD_LIMIT = 10000
+const TRUNCATED_NOTE = `Runs older than the newest ${HISTORY_LIMIT} statements were not read.`
 /** A statement that starts more than this after the previous one ended begins a new run. */
 export const RUN_GAP_MS = 10 * 60_000
 /** BigQuery bills at least this many bytes for a query. */
@@ -32,8 +35,8 @@ export type CostInfo = {
   highest?: number
   runs?: number
   windowDays?: 30
-  /** BigQuery on-demand: what the SELECT would bill, between a floor and a ceiling (per-table minimums make the exact figure unknowable from the total). */
-  selectOnly?: { low: number; high: number }
+  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, `high` the dry run's upper bound plus each table's minimum (absent when the dry run only gives a lower bound). */
+  selectOnly?: { low: number; high?: number }
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
   notes: string[]
@@ -72,7 +75,7 @@ export function sqlString(value: string): string {
   return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
 }
 
-export type ModelRef = { uniqueId: string; materialized?: string; /** Distinct tables the model reads, ephemeral models resolved to what they read. */ tables?: number }
+export type ModelRef = { uniqueId: string; materialized?: string; /** Physical relations the model reads (views and ephemeral models resolved to what they read), and how many of them are sources. */ tables?: number; sources?: number }
 
 /**
  * The one model node a name stands for: a unique_id, a plain name, or a package-qualified or versioned
@@ -84,28 +87,35 @@ export function resolveModel(nodes: Record<string, any>, name: string, sources: 
   if (!hits.length) hits = models.filter(([, n]) => n.name === name)
   if (!hits.length && name.includes(".")) hits = models.filter(([id]) => id.endsWith(`.${name}`))
   if (hits.length === 1)
-    return { uniqueId: hits[0][0], materialized: hits[0][1]?.config?.materialized, tables: countTables(nodes, sources, hits[0][0]) }
+    return { uniqueId: hits[0][0], materialized: hits[0][1]?.config?.materialized, ...countTables(nodes, sources, hits[0][0]) }
   if (hits.length === 0) return { error: `no model named ${name} in the manifest` }
   const ids = hits.map(([id]) => id).sort()
   return { error: `${name} is ambiguous: it matches ${ids.join(", ")}; pass a unique_id` }
 }
 
-/** The distinct models, seeds, snapshots and sources a model reads; an ephemeral model counts as what it reads. */
-export function countTables(nodes: Record<string, any>, sources: Record<string, any>, uniqueId: string): number {
+/**
+ * The physical relations a model reads: tables, incremental models, snapshots, seeds and sources. A view or an
+ * ephemeral model holds no data of its own, so it counts as what it reads. A source counts as one relation.
+ */
+export function countTables(nodes: Record<string, any>, sources: Record<string, any>, uniqueId: string): { tables: number; sources: number } {
   const seen = new Set<string>()
   const tables = new Set<string>()
+  const origins = new Set<string>()
   const visit = (id: string) => {
     if (seen.has(id)) return
     seen.add(id)
     for (const dep of nodes[id]?.depends_on?.nodes ?? []) {
       const node = nodes[dep]
-      if (node && node.resource_type === "model" && node.config?.materialized === "ephemeral") visit(dep)
+      if (node && node.resource_type === "model" && ["ephemeral", "view"].includes(node.config?.materialized)) visit(dep)
       else if (node && ["model", "seed", "snapshot"].includes(node.resource_type)) tables.add(dep)
-      else if (!node && sources[dep]) tables.add(dep)
+      else if (!node && sources[dep]) {
+        tables.add(dep)
+        origins.add(dep)
+      }
     }
   }
   visit(uniqueId)
-  return tables.size
+  return { tables: tables.size, sources: origins.size }
 }
 
 /** The model the manifest the adapter wrote holds under `name`. */
@@ -160,12 +170,12 @@ order by creation_time desc limit ${HISTORY_LIMIT}`
 
 /** The child jobs of matched scripts: a script's own row carries no reservation, its children do. */
 export function bigqueryChildrenSql(input: { project: string; location?: unknown; parents: string[]; view?: JobsView }): string {
-  return `select job_id, parent_job_id, statement_type, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
+  return `select job_id, parent_job_id, creation_time, statement_type, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_sub(current_timestamp(), interval ${HISTORY_DAYS} day)
   and job_type = 'QUERY' and state = 'DONE' and error_result is null
   and parent_job_id in (${input.parents.map(sqlString).join(",")})
-limit 10000`
+order by creation_time desc limit ${BQ_CHILD_LIMIT}`
 }
 
 /** How many query jobs ran in the last week, and how many of them in a reservation. */
@@ -177,7 +187,7 @@ where creation_time > timestamp_sub(current_timestamp(), interval 7 day)
 }
 
 export function snowflakeHistorySql(needle: string): string {
-  return `select q.query_id, q.session_id, q.start_time, q.end_time, q.execution_time, q.query_type, q.warehouse_name, q.warehouse_size,
+  return `select q.query_id, q.session_id, q.start_time, to_varchar(convert_timezone('UTC', q.start_time), 'YYYY-MM-DD') as start_date_utc, q.end_time, q.execution_time, q.query_type, q.warehouse_name, q.warehouse_size,
        a.credits_attributed_compute, a.credits_used_query_acceleration, q.credits_used_cloud_services
 from snowflake.account_usage.query_history q
 left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id
@@ -211,13 +221,13 @@ export function databricksHistorySql(needle: string): string {
     and instr(statement_text, ${sqlString(needle)}) > 0
 ),
 q_hours as (
-  select q.*, explode(sequence(date_trunc('HOUR', start_time), date_trunc('HOUR', greatest(end_time, start_time)), interval 1 hour)) as hour
+  select q.*, explode(sequence(date_trunc('HOUR', start_time), date_trunc('HOUR', greatest(timestamp_micros(unix_micros(end_time) - 1), start_time)), interval 1 hour)) as hour
   from q
 ),
 hours as (select distinct warehouse_id, hour from q_hours),
 all_hours as (
   select compute.warehouse_id as warehouse_id, start_time, coalesce(end_time, start_time) as end_time, total_task_duration_ms as ms,
-         explode(sequence(date_trunc('HOUR', start_time), date_trunc('HOUR', greatest(coalesce(end_time, start_time), start_time)), interval 1 hour)) as hour
+         explode(sequence(date_trunc('HOUR', start_time), date_trunc('HOUR', greatest(timestamp_micros(unix_micros(coalesce(end_time, start_time)) - 1), start_time)), interval 1 hour)) as hour
   from system.query.history
   where start_time > current_timestamp() - interval ${HISTORY_DAYS + 1} days and compute.warehouse_id is not null
     and compute.warehouse_id in (select warehouse_id from q)
@@ -243,9 +253,9 @@ select s.statement_id, s.session_id, s.start_time, s.end_time, s.statement_type,
        sum(s.share_ms) as total_task_duration_ms,
        sum(b.dbus * s.share_ms / nullif(t.task_ms, 0)) as dbus,
        sum(b.usd * s.share_ms / nullif(t.task_ms, 0)) as usd,
-       count(case when s.share_ms > 0 and (b.usd is null or coalesce(t.task_ms, 0) = 0) then 1 end) as missing_hours
+       count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 then 1 end) as missing_hours
 from shares s
-join tasks t on t.warehouse_id = s.warehouse_id and t.hour = s.hour
+left join tasks t on t.warehouse_id = s.warehouse_id and t.hour = s.hour
 left join billed b on b.warehouse_id = s.warehouse_id and b.hour = s.hour
 group by s.statement_id, s.session_id, s.start_time, s.end_time, s.statement_type, s.warehouse_id
 order by s.start_time desc limit ${HISTORY_LIMIT}`
@@ -314,7 +324,7 @@ export function parseTime(value: string | null | undefined): number {
  * starts no more than ten minutes after the last one ended. Sessions are never merged. A run is unknown, and
  * left out, when any statement's cost is unknown or its statements carry more than one currency.
  */
-export function groupRuns(stmts: Stmt[]): { runs: Run[]; skipped: number } {
+export function groupRuns(stmts: Stmt[], dropOldest = false): { runs: Run[]; skipped: number } {
   const sorted = stmts.filter((s) => Number.isFinite(s.start)).sort((a, b) => a.start - b.start)
   const open = new Map<string, { group: Stmt[]; end: number }>()
   const groups: Stmt[][] = []
@@ -332,7 +342,10 @@ export function groupRuns(stmts: Stmt[]): { runs: Run[]; skipped: number } {
   }
   const runs: Run[] = []
   let skipped = 0
+  // A query that returned its limit may not have returned all of its oldest run: that run is not trusted.
+  const oldest = dropOldest ? groups[0] : undefined
   for (const g of groups) {
+    if (g === oldest) continue
     const currencies = new Set(g.map((s) => s.currency))
     if (!g.every((s) => s.known) || currencies.size > 1) {
       skipped++
@@ -375,8 +388,9 @@ export type History = {
   capacity?: boolean
   /** The model's materialization, when the manifest names it. */
   materialized?: string
-  /** The tables the model reads, when the manifest names it. */
+  /** The physical relations the model reads, and how many are sources, when the manifest names them. */
   tables?: number
+  sources?: number
 }
 
 const none = (reason: string, notes: string[] = [], currency = "USD", rate: CostRate | null = null): CostInfo => ({
@@ -435,7 +449,7 @@ export const BQ_ATTACH_MS = 60_000
  * BigQuery runs: each build job (a script counts as one, priced from its children) is a run; a DELETE or UPDATE
  * joins the next build job of the model within a minute, else is a run of its own.
  */
-export function bigqueryRuns(units: BqUnit[]): { runs: BqUnit[]; skipped: number } {
+export function bigqueryRuns(units: BqUnit[], dropOldest = false): { runs: BqUnit[]; skipped: number } {
   const builds = units.filter((u) => u.build).sort((a, b) => a.start - b.start)
   const groups = new Map<BqUnit, BqUnit[]>(builds.map((b) => [b, [b]]))
   const alone: BqUnit[][] = []
@@ -445,8 +459,11 @@ export function bigqueryRuns(units: BqUnit[]): { runs: BqUnit[]; skipped: number
     else alone.push([u])
   }
   const all = [...groups.values(), ...alone].map((g) => sumUnits(Math.min(...g.map((u) => u.start)), true, g))
-  const runs = all.filter((r) => r.known && Number.isFinite(r.start))
-  return { runs, skipped: all.length - runs.length }
+  // A query that returned its limit may not have returned all of its oldest run: that run is not trusted.
+  const oldest = dropOldest && all.length ? all.reduce((a, b) => (b.start < a.start ? b : a)) : undefined
+  const counted = all.filter((r) => r !== oldest)
+  const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
+  return { runs, skipped: counted.length - runs.length }
 }
 
 export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId: string, cfg: CostConfig): { cost: CostInfo; reserved: boolean } {
@@ -454,16 +471,21 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
   const demand = rateOf(cfg.bigqueryUsdPerTib, DEFAULT_RATES.bigqueryUsdPerTib, "USD/TiB", "bigqueryUsdPerTib")
   const slot = rateOf(cfg.bigquerySlotHourUsd, DEFAULT_RATES.bigquerySlotHourUsd, "USD/slot-hour", "bigquerySlotHourUsd")
   if (!rows.length) return { cost: none(emptyMessage(uniqueId, table), [], "USD", demand.rate), reserved: false }
+  // Children come newest first, up to a limit: a script that started before the oldest child returned may have more.
+  const childrenCut = (children?.length ?? 0) >= BQ_CHILD_LIMIT
+  const childBoundary = Math.min(...(children ?? []).map((c) => parseTime(c.creation_time)))
   const units = rows.map((r) => {
     if (r.statement_type !== "SCRIPT") return bqJob(r, cfg)
     const kids = (children ?? []).filter((c) => c.parent_job_id === r.job_id).map((c) => bqJob(c, cfg))
     // A script's own row is never counted beside its children; with none found, its cost is not known.
-    const unit = sumUnits(parseTime(r.creation_time), true, kids)
-    return kids.length ? unit : { ...unit, known: false }
+    const start = parseTime(r.creation_time)
+    const unit = sumUnits(start, true, kids)
+    return kids.length && !(childrenCut && !(start > childBoundary)) ? unit : { ...unit, known: false }
   })
-  const { runs, skipped } = bigqueryRuns(units)
+  const truncated = rows.length >= HISTORY_LIMIT
+  const { runs, skipped } = bigqueryRuns(units, truncated)
   const anyReserved = units.some((u) => u.reserved)
-  const notes: string[] = []
+  const notes: string[] = truncated ? [TRUNCATED_NOTE] : []
   if (skipped)
     notes.push(
       `${plural(skipped, "run")} left out: BigQuery gave no bytes billed for ${skipped === 1 ? "it" : "them"} (it hides them for tables under a row access policy), or a script's child jobs were not found.`,
@@ -534,7 +556,7 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
     const compute = num(r.credits_attributed_compute)
     const credits = (compute ?? 0) + (num(r.credits_used_query_acceleration) ?? 0)
     cloud += num(r.credits_used_cloud_services) ?? 0
-    const { rate, currency, note } = snowflakeRateFor((r.start_time ?? "").slice(0, 10), sheet, cfg)
+    const { rate, currency, note } = snowflakeRateFor(r.start_date_utc ?? "", sheet, cfg)
     if (note) defaults.add(note)
     const start = parseTime(r.start_time)
     if (!newest || start > newest.start) newest = { start, rate, currency }
@@ -543,7 +565,8 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
     const known = compute !== undefined || (execution !== undefined && execution < SF_UNATTRIBUTED_MS)
     return { start, end: parseTime(r.end_time), cost: credits * rate.value, native: credits, known, session: r.session_id, currency }
   })
-  const { runs, skipped } = groupRuns(stmts)
+  const truncated = rows.length >= HISTORY_LIMIT
+  const { runs, skipped } = groupRuns(stmts, truncated)
   const currency = newest?.currency ?? "USD"
   const rate = newest?.rate ?? null
   const notes = ["Credits are the warehouse compute attributed to the statements; warehouse idle time is not included."]
@@ -552,12 +575,15 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
       `Cloud-services credits (${Number(cloud.toFixed(4))} over these statements) are not added: Snowflake bills them only above 10% of the day's compute.`,
     )
   notes.push(...defaults)
+  if (truncated) notes.push(TRUNCATED_NOTE)
   if (skipped)
     notes.push(
       `${plural(skipped, "run")} left out: pending attribution (Snowflake lands it up to 8 hours late) or priced in more than one currency.`,
     )
   const sameCurrency = runs.filter((r) => r.currency === currency)
   if (sameCurrency.length < runs.length) notes.push(`Runs priced in a currency other than ${currency} are left out.`)
+  if (!sameCurrency.length && !skipped && truncated)
+    return none(`Only the newest ${HISTORY_LIMIT} statements of ${uniqueId} were read, and they are all in one run that may be incomplete.`, notes, currency, rate)
   if (!sameCurrency.length)
     return none(
       `${plural(skipped || runs.length, "run")} of ${uniqueId} found cannot be priced yet: Snowflake lands attribution up to 8 hours late (statements under about 100 ms never get one).`,
@@ -599,15 +625,19 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig):
       "USD",
       rate,
     )
-  const { runs, skipped } = groupRuns(stmts)
+  const truncated = rows.length >= HISTORY_LIMIT
+  const { runs, skipped } = groupRuns(stmts, truncated)
   const notes = [
     "Each statement carries its warehouse's billed cost for the hours it ran in, split across each hour's statements by task time, so idle time and overhead are spread over the queries that used the warehouse.",
     configured !== undefined
       ? `DBUs are priced at ${configured} USD/DBU.`
       : "Prices are list prices (with published promotions); negotiated discounts are not applied.",
   ]
+  if (truncated) notes.push(TRUNCATED_NOTE)
   if (skipped)
     notes.push(`${plural(skipped, "run")} left out: the billing rows for ${skipped > 1 ? "their" : "its"} hours have not landed yet.`)
+  if (!runs.length && !skipped && truncated)
+    return none(`Only the newest ${HISTORY_LIMIT} statements of ${uniqueId} were read, and they are all in one run that may be incomplete.`, notes, "USD", rate)
   if (!runs.length)
     return none(`The ${plural(skipped, "run")} of ${uniqueId} found have no billing rows yet: system.billing.usage lands them late.`, notes, "USD", rate)
   const stats = summarize(runs)
@@ -617,12 +647,19 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig):
 // ---- BigQuery's pre-run price ----
 
 /**
- * What a scan bills on demand. Each table a query reads bills at least 10 MiB, but the dry run gives only the total
- * T, so with n tables the bill is between max(T, n x 10 MiB) and T + n x 10 MiB.
+ * What a scan bills on demand. The dry run is an upper bound on bytes (a clustered table can bill less), so `maxBytes`
+ * is the most it reads; each table a query reads bills at least 10 MiB. The charge is therefore at least n x 10 MiB and
+ * at most `maxBytes` plus n x 10 MiB (each table's bytes rounded up to the MiB stay within its 10 MiB allowance).
+ * When the dry run gives only a floor (`lowerBound`), the charge is at least the larger of it and n x 10 MiB, with no ceiling.
  */
-export function onDemandPrice(bytes: number, tables: number, usdPerTib: number): { low: number; high: number } {
-  const floor = Math.max(1, tables) * BQ_MIN_BILLED_BYTES
-  return { low: (Math.max(bytes, floor) / TIB) * usdPerTib, high: ((bytes + floor) / TIB) * usdPerTib }
+export function onDemandPrice(input: { bytes: number; maxBytes?: number; lowerBound?: boolean; tables: number; usdPerTib: number }): {
+  low: number
+  high?: number
+} {
+  const floor = Math.max(1, input.tables) * BQ_MIN_BILLED_BYTES
+  const price = (bytes: number) => (bytes / TIB) * input.usdPerTib
+  if (input.lowerBound || input.maxBytes === undefined) return { low: price(Math.max(input.bytes, floor)) }
+  return { low: price(floor), high: price(input.maxBytes + floor) }
 }
 
 export function bigqueryOnDemandRate(cfg: CostConfig) {
@@ -668,8 +705,11 @@ export function costText(c: CostInfo): string {
     )
     if (c.native) lines.push(`In the warehouse's own unit, ${nativeText(c.native)}.`)
   } else if (c.basis === "dry_run") {
+    const { low, high } = c.selectOnly!
     lines.push(
-      `The SELECT would bill between ${formatMoney(c.selectOnly!.low, c.currency)} and ${formatMoney(c.selectOnly!.high, c.currency)} on-demand.`,
+      high === undefined
+        ? `The SELECT would bill at least ${formatMoney(low, c.currency)} on-demand (the dry run's bytes are a lower bound).`
+        : `The SELECT would bill at most ${formatMoney(high, c.currency)} on-demand (at least ${formatMoney(low, c.currency)}; pruning of clustered or partitioned tables can bill less than the dry run).`,
     )
   } else {
     lines.push(`Cost unknown: ${c.unknownReason}`)
@@ -730,15 +770,16 @@ export async function loadHistory(input: {
   let uniqueId: string | undefined
   let materialized: string | undefined
   let tables: number | undefined
+  let sources: number | undefined
   let unavailable: string | undefined
   if (!input.model) unavailable = "A SQL input has no run history; pass a model to price its earlier runs."
   else if (!input.manifestPath) unavailable = "No dbt manifest was found, so the model's unique_id is unknown."
   else {
     const found = modelFromManifest(input.manifestPath, input.model)
     if ("error" in found) unavailable = `Cost history needs the model's unique_id: ${found.error}.`
-    else ({ uniqueId, materialized, tables } = found)
+    else ({ uniqueId, materialized, tables, sources } = found)
   }
-  const base = { materialized, tables }
+  const base = { materialized, tables, sources }
   try {
     if (type === "bigquery") return { ...(await bigqueryHistory()), ...base }
     if (!uniqueId) return { cost: none(unavailable!), ...base }
@@ -756,7 +797,7 @@ export async function loadHistory(input: {
     clearTimeout(timer)
   }
 
-  async function bigqueryHistory(): Promise<Omit<History, "materialized" | "tables">> {
+  async function bigqueryHistory(): Promise<Omit<History, "materialized" | "tables" | "sources">> {
     let target: Record<string, unknown>
     try {
       target = JSON.parse(String(await run(() => adapter.unsafeCompileQuery(TARGET_JINJA, undefined))).trim())

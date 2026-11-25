@@ -2,7 +2,9 @@
 // pricing of what each warehouse reports. No adapter or warehouse is involved.
 import { describe, expect, test } from "bun:test"
 import {
+  BQ_CHILD_LIMIT,
   BQ_MIN_BILLED_BYTES,
+  HISTORY_LIMIT,
   bigqueryCapacitySql,
   bigqueryHistorySql,
   bqProject,
@@ -109,6 +111,7 @@ describe("history SQL builders", () => {
     expect(sql).toContain("q.execution_status = 'SUCCESS'")
     expect(sql).toContain("query_type in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','DELETE','UPDATE','MULTI_STATEMENT')")
     expect(sql).toContain("left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id")
+    expect(sql).toContain("to_varchar(convert_timezone('UTC', q.start_time), 'YYYY-MM-DD') as start_date_utc")
     expect(sql).toContain("q.session_id")
     expect(sql).toContain("q.execution_time")
     expect(sql).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
@@ -129,6 +132,10 @@ describe("history SQL builders", () => {
     expect(sql).toContain("explode(sequence(date_trunc('HOUR', start_time)")
     expect(sql).toContain("unix_micros(least(")
     expect(sql).toContain("missing_hours")
+    // Every hour a statement touches needs a billing row and a task-time denominator above zero.
+    expect(sql).toContain("count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 then 1 end) as missing_hours")
+    expect(sql).toContain("left join tasks t on")
+    expect(sql).toContain("unix_micros(end_time) - 1")
     expect(sql).not.toMatch(/\blike\b/i)
     expect(sql).toContain("limit 500")
   })
@@ -160,7 +167,7 @@ describe("resolveModel", () => {
   }
 
   test("a name, a unique_id and a package-qualified name each reach one node", () => {
-    expect(resolveModel(nodes, "orders")).toEqual({ uniqueId: "model.shop.orders", materialized: "incremental", tables: 0 })
+    expect(resolveModel(nodes, "orders")).toEqual({ uniqueId: "model.shop.orders", materialized: "incremental", tables: 0, sources: 0 })
     expect(resolveModel(nodes, "model.shop.orders")).toMatchObject({ uniqueId: "model.shop.orders" })
     expect(resolveModel(nodes, "shop.orders")).toMatchObject({ uniqueId: "model.shop.orders" })
     expect(resolveModel(nodes, "other.dup")).toMatchObject({ uniqueId: "model.other.dup" })
@@ -368,29 +375,48 @@ describe("BigQuery pricing", () => {
 })
 
 describe("BigQuery pre-run price", () => {
-  test("each table bills at least 10 MiB: the price is a range from the larger of the total and n minimums to the total plus them", () => {
-    const rate = 6.25
-    const tenMiB = BQ_MIN_BILLED_BYTES
-    expect(onDemandPrice(1024, 3, rate)).toEqual({ low: (3 * tenMiB * rate) / TIB, high: ((1024 + 3 * tenMiB) * rate) / TIB })
-    expect(onDemandPrice(TIB, 2, rate).low).toBe(6.25)
-    expect(onDemandPrice(TIB, 2, rate).high).toBeCloseTo(((TIB + 2 * tenMiB) / TIB) * rate, 10)
+  const tenMiB = BQ_MIN_BILLED_BYTES
+  const rate = 6.25
+
+  test("the charge is at least n x 10 MiB and at most the dry run's upper bound plus n x 10 MiB", () => {
+    const price = onDemandPrice({ bytes: 1024, maxBytes: 2048, tables: 3, usdPerTib: rate })
+    expect(price.low).toBeCloseTo((3 * tenMiB * rate) / TIB, 14)
+    expect(price.high).toBeCloseTo(((2048 + 3 * tenMiB) * rate) / TIB, 14)
+  })
+
+  test("the ceiling uses maxBytes (the rounding upper edge), not the displayed bytes", () => {
+    const price = onDemandPrice({ bytes: TIB, maxBytes: Math.ceil(1.05 * TIB), tables: 1, usdPerTib: rate })
+    expect(price.high).toBeCloseTo(((Math.ceil(1.05 * TIB) + tenMiB) * rate) / TIB, 10)
+    expect(price.high!).toBeGreaterThan(((TIB + tenMiB) * rate) / TIB)
+  })
+
+  test("a dry run that is only a floor has a floor price and no ceiling", () => {
+    const price = onDemandPrice({ bytes: TIB, lowerBound: true, tables: 1, usdPerTib: rate })
+    expect(price).toEqual({ low: rate })
   })
 
   test("no tables counts as one, so the 10 MiB minimum still applies", () => {
-    expect(onDemandPrice(0, 0, 6.25).low).toBeGreaterThan(0)
+    expect(onDemandPrice({ bytes: 0, maxBytes: 0, tables: 0, usdPerTib: rate }).low).toBeGreaterThan(0)
   })
 })
 
 describe("tables a model reads", () => {
   const nodes = {
-    "model.s.m": { resource_type: "model", config: {}, depends_on: { nodes: ["model.s.a", "model.s.eph", "source.s.raw", "seed.s.x", "model.s.a"] } },
+    "model.s.m": { resource_type: "model", config: {}, depends_on: { nodes: ["model.s.a", "model.s.eph", "source.s.raw", "seed.s.x", "model.s.a", "model.s.v"] } },
     "model.s.a": { resource_type: "model", config: { materialized: "table" } },
     "model.s.eph": { resource_type: "model", config: { materialized: "ephemeral" }, depends_on: { nodes: ["model.s.b", "model.s.a"] } },
-    "model.s.b": { resource_type: "model", config: { materialized: "view" } },
+    "model.s.b": { resource_type: "model", config: { materialized: "incremental" } },
+    "model.s.v": { resource_type: "model", config: { materialized: "view" }, depends_on: { nodes: ["model.s.c", "source.s.raw2"] } },
+    "model.s.c": { resource_type: "model", config: { materialized: "table" } },
     "seed.s.x": { resource_type: "seed" },
   }
-  test("distinct models, seeds and sources; an ephemeral model is what it reads", () => {
-    expect(countTables(nodes, { "source.s.raw": {} }, "model.s.m")).toBe(4)
+  test("physical relations only: a view or an ephemeral model is what it reads, a source is one", () => {
+    // a, b (through the ephemeral), c (through the view), seed x, source raw, source raw2.
+    expect(countTables(nodes, { "source.s.raw": {}, "source.s.raw2": {} }, "model.s.m")).toEqual({ tables: 6, sources: 2 })
+  })
+  test("a view is not counted as a table of its own", () => {
+    const only = { "model.s.m": { resource_type: "model", depends_on: { nodes: ["model.s.v"] } }, "model.s.v": { resource_type: "model", config: { materialized: "view" }, depends_on: { nodes: [] } } }
+    expect(countTables(only, {}, "model.s.m").tables).toBe(0)
   })
 })
 
@@ -405,6 +431,7 @@ const sf = (
   query_id: id,
   session_id: "sess",
   start_time: new Date(startMin * MIN).toISOString(),
+  start_date_utc: new Date(startMin * MIN).toISOString().slice(0, 10),
   end_time: new Date((startMin + 1) * MIN).toISOString(),
   execution_time: "5000",
   credits_attributed_compute: compute,
@@ -467,6 +494,17 @@ describe("Snowflake pricing", () => {
     expect(cost.rate).toEqual({ value: 4, unit: "EUR/credit", source: "account" })
   })
 
+  test("the day is the statement's UTC date, never a slice of a local timestamp", () => {
+    // 23:30 at UTC-8 on the 1st is the 2nd in UTC: its rate is the 2nd's.
+    const sheet = [
+      { date: "2026-05-01", value: 2, currency: "USD" },
+      { date: "2026-05-02", value: 5, currency: "USD" },
+    ]
+    const local = { ...sf("a", 0, "1"), start_time: "2026-05-01 23:30:00.000-08:00", start_date_utc: "2026-05-02" }
+    expect(priceSnowflake([local], "model.s.m", sheet, {}).lastRun).toBe(5)
+    expect(priceSnowflake([{ ...local, start_date_utc: null }], "model.s.m", sheet, {}).rate?.source).toBe("default")
+  })
+
   test("a day with no rate row uses the nearest earlier day's, and one before every row uses the default", () => {
     const sheet = [{ date: "1970-01-02", value: 4, currency: "USD" }]
     expect(snowflakeRateFor("1970-01-05", sheet, {}).rate.value).toBe(4)
@@ -521,6 +559,13 @@ describe("Databricks pricing", () => {
     expect(cost.notes.join(" ")).toContain("1 run left out")
   })
 
+  test("a statement is known only when its SQL counted no hour without billing or denominator, whatever dbus came back", () => {
+    expect(priceDatabricks([dbx("a", 0, "1", "0.5", { missing_hours: "2" })], "model.s.m", {}).basis).toBe("none")
+    expect(priceDatabricks([dbx("a", 0, "1", "0.5", { missing_hours: "0" })], "model.s.m", {}).basis).toBe("history")
+    // No dbus and no usd but no missing hour: a zero-task statement that costs 0, not an unknown.
+    expect(priceDatabricks([dbx("a", 0, null, null, { missing_hours: "0" })], "model.s.m", {})).toMatchObject({ basis: "history", lastRun: 0 })
+  })
+
   test("a partly billed statement (one of its hours missing) is unknown even though some cost came back", () => {
     const cost = priceDatabricks([dbx("a", 0, "1", "0.5", { missing_hours: "1" })], "model.s.m", {})
     expect(cost.basis).toBe("none")
@@ -564,8 +609,65 @@ describe("rates config and the text", () => {
     expect(costText({ basis: "none", currency: "USD", rate: null, notes: [], unknownReason: "no history" })).toBe("Cost unknown: no history")
   })
 
-  test("a dry-run price is worded as a range", () => {
+  test("a dry-run price is worded as a ceiling and a floor", () => {
     const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 1, high: 2 } })
-    expect(text).toBe("The SELECT would bill between $1.00 and $2.00 on-demand.")
+    expect(text).toBe(
+      "The SELECT would bill at most $2.00 on-demand (at least $1.00; pruning of clustered or partitioned tables can bill less than the dry run).",
+    )
+    expect(costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 1 } })).toContain("at least $1.00 on-demand (the dry run's bytes are a lower bound)")
+  })
+})
+
+describe("truncation at the statement limit", () => {
+  const many = <T,>(make: (i: number) => T) => Array.from({ length: HISTORY_LIMIT }, (_, i) => make(i))
+
+  test("Snowflake: when the query returns its limit, the run holding the oldest statement is dropped and said so", () => {
+    // Statement i starts i hours apart, in its own session: each is a run; the oldest is index 0.
+    const rows = many((i) => sf(`q${i}`, i * 120, "1", null, "0", { session_id: `s${i}` }))
+    const cost = priceSnowflake(rows, "model.s.m", [], {})
+    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
+    expect(cost.notes.join(" ")).toContain("Runs older than the newest 500 statements were not read.")
+  })
+
+  test("Snowflake: below the limit nothing is dropped", () => {
+    const cost = priceSnowflake([sf("a", 0, "1"), sf("b", 200, "1", null, "0", { session_id: "o" })], "model.s.m", [], {})
+    expect(cost.runs).toBe(2)
+    expect(cost.notes.join(" ")).not.toContain("older than")
+  })
+
+  test("Databricks: the oldest run of a full result is dropped", () => {
+    const rows = many((i) => dbx(`s${i}`, i * 120, "1", "1", { session_id: `s${i}` }))
+    const cost = priceDatabricks(rows, "model.s.m", {})
+    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
+    expect(cost.notes.join(" ")).toContain("Runs older than the newest 500 statements were not read.")
+  })
+
+  test("BigQuery: the oldest run of a full result is dropped", () => {
+    const rows = many((i) => bq(`j${i}`, i * 120, TIB))
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
+    expect(cost.notes.join(" ")).toContain("Runs older than the newest 500 statements were not read.")
+  })
+
+  test("BigQuery: when the children query hits its limit, a script that began before the oldest child returned is unknown", () => {
+    const old = bq("old", 0, null, null, 0, "SCRIPT")
+    const recent = bq("recent", 1000, null, null, 0, "SCRIPT")
+    const kid = (id: string, parent: string, startMin: number): Row => ({
+      job_id: id,
+      parent_job_id: parent,
+      creation_time: new Date(startMin * MIN).toISOString(),
+      statement_type: "MERGE",
+      total_bytes_billed: String(TIB),
+      total_slot_ms: "0",
+      reservation_id: null,
+      cache_hit: "False",
+    })
+    // The oldest child returned (minute 500) is another script's: the cut happened there, so a script from minute 1000 is whole.
+    // The old script has a child past the cut, but may have had more before it.
+    const children = [kid("edge", "elsewhere", 500), kid("oc", "old", 700), ...Array.from({ length: BQ_CHILD_LIMIT - 2 }, (_, i) => kid(`x${i}`, "recent", 1001 + i))]
+    const { cost } = priceBigquery([old, recent, bq("filler", 5000, TIB)], children, "model.s.m", {})
+    // The old script is unknown and left out; the recent one and the plain job are priced.
+    expect(cost.runs).toBe(2)
+    expect(cost.notes.join(" ")).toContain("1 run left out")
   })
 })
