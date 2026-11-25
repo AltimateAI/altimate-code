@@ -189,17 +189,19 @@ export namespace AltimateApi {
 
   /** The key to match MCP entries by on sign-out, read as written. Unlike `getCredentials()` it accepts
    *  a file whose fields are blank or missing: such a file holds no key to protect, so sign-out can
-   *  clear it. Undefined when there is no key; throws when one may exist but can't be read. */
+   *  clear it. Undefined when there is no key; throws when one may exist but can't be read. Only the
+   *  key is substituted, so an unset `${env:…}` in another field cannot keep a keyless file. */
   async function savedKeyForSignOut(): Promise<string | undefined> {
     const scoped = currentCredentials()
     if (scoped) return scoped.altimateApiKey
-    const raw = resolveEnvVars(JSON.parse(await Filesystem.readText(credentialsPath())))
+    const raw: unknown = JSON.parse(await Filesystem.readText(credentialsPath()))
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
       throw new Error("the file does not hold the credentials object.")
-    const key = (raw as { altimateApiKey?: unknown }).altimateApiKey
-    if (key === undefined || (typeof key === "string" && key.trim() === "")) return undefined
-    if (typeof key !== "string") throw new Error("altimateApiKey is not a string.")
-    return key
+    const written = (raw as { altimateApiKey?: unknown }).altimateApiKey
+    if (written === undefined) return undefined
+    if (typeof written !== "string") throw new Error("altimateApiKey is not a string.")
+    const key = resolveEnvVars(written) as string
+    return key.trim() === "" ? undefined : key
   }
 
   /** Sign out of the gateway: remove MCP entries that carry the saved key, then delete the credential file.

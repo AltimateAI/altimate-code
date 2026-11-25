@@ -111,6 +111,18 @@ describe("AltimateApi.signOut", () => {
     expect(await readJson(rootConfig)).toEqual({ mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
   })
 
+  test("clears a keyless file even when another field names an unset env var", async () => {
+    delete process.env.SIGN_OUT_TEST_UNSET_URL
+    await writeJson(AltimateApi.credentialsPath(), {
+      altimateUrl: "${env:SIGN_OUT_TEST_UNSET_URL}",
+      altimateInstanceName: "tenant",
+      altimateApiKey: "",
+    })
+
+    expect(await AltimateApi.signOut(subdir)).toEqual([])
+    expect(await AltimateApi.isConfigured()).toBe(false)
+  })
+
   test("removes entries carrying a readable key even when another field is blank", async () => {
     await writeJson(AltimateApi.credentialsPath(), {
       altimateUrl: "https://api.test",
