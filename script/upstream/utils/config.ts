@@ -14,6 +14,8 @@ export interface StringReplacement {
 export interface MergeConfig {
   upstreamRemote: string
   upstreamRepo: string
+  /** Upstream tag the fork is based on; ownership checks use it. Bump when a merge lands. */
+  upstreamBaseline: string
   originRepo: string
   baseBranch: string
   changeMarker: string
@@ -253,6 +255,7 @@ const cliBinaryRules: StringReplacement[] = [
 export const defaultConfig: MergeConfig = {
   upstreamRemote: "upstream",
   upstreamRepo: "anomalyco/opencode",
+  upstreamBaseline: "v1.17.9",
   originRepo: "AltimateAI/altimate-code",
   baseBranch: "main",
   changeMarker: "altimate_change",
