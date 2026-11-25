@@ -291,13 +291,14 @@ dialect: snowflake
                               # on constructs one of those adapters lacks. Set true to see all of it.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 ai: true                      # the advisory AI lane; false turns it off. Or an object, all keys
-                              # optional and on by default (see "AI reviewer lane" below):
+                              # optional and on by default; an unknown key fails the load
+                              # (see "AI reviewer lane" below):
 # ai:
 #   enabled: true
 #   coverage: true            # per-kind file quotas and hunk excerpts instead of a 20-file cap
 #   contextCard: true         # dbt manifest context with each changed model
 #   focused: true             # related files reviewed together in a few calls on larger PRs
-#   otherFiles: true          # other/analysis files inside the project (.sql/.yml/.yaml/.py)
+#   otherFiles: true          # other/analysis files inside the project (.sql/.yml/.yaml)
 #   pythonFiles: true         # changed Python files, inside or outside the project
 #   verify: true              # the dbt-grounded verifier over the AI comments
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
@@ -625,9 +626,12 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    changed project files (analyses, CI and config yml, scripts) and changed Python
    files anywhere in the repository, each labeled with its role, under per-kind
    quotas (models 12, macros 8, tests 4, yml 6, other 8, Python 6). Related files
-   are reviewed together, each model with its manifest context, and a dbt-grounded
-   verifier then checks every AI comment against the code: refuted ones are dropped
-   and ones it cannot check go to the summary. Findings are clamped to ≤ warning
+   are reviewed together, with manifest context where a manifest has facts for the
+   file, and a dbt-grounded verifier then checks every AI comment against the code:
+   refuted ones are dropped; unverifiable cross-file and speculative ones go to the
+   summary, as do ones the verifier did not reach before its budget or timeout;
+   unverifiable local comments with a valid evidence line stay inline (the rest are
+   dropped). Findings are clamped to ≤ warning
    and never block. Skipped (clean degrade) if no model is available. Each part can
    be turned off under `ai:` in `.altimate/review.yml` or with its env variable set
    to `0` (`ALTIMATE_REVIEW_AI_COVERAGE`, `_CONTEXT_CARD`, `_FOCUSED`,

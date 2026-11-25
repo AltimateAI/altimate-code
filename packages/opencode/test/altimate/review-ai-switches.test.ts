@@ -51,5 +51,14 @@ describe("`ai:` in .altimate/review.yml", () => {
   test("the default policy hash is unchanged by the object form", () => {
     expect(DEFAULT_REVIEW_CONFIG.ai).toBe(true)
     expect(policyHash(parseReviewConfig("mode: comment"))).toBe(policyHash(DEFAULT_REVIEW_CONFIG))
+    // The object form hashes as written: an empty object or a set switch is a different policy.
+    const empty = parseReviewConfig("ai: {}")
+    expect(aiLaneEnabled(empty)).toBe(true)
+    expect(resolveAiSwitches(empty, {})).toEqual(AI_SWITCH_DEFAULTS)
+    expect(policyHash(parseReviewConfig("ai:\n  verify: false"))).not.toBe(policyHash(DEFAULT_REVIEW_CONFIG))
+  })
+
+  test("an unknown key under `ai:` fails the load and names the key", () => {
+    expect(() => parseReviewConfig("ai:\n  enable: false")).toThrow(/unrecognized_keys[\s\S]*"enable"/)
   })
 })

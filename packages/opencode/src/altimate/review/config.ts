@@ -28,14 +28,16 @@ export const ReviewConfig = z.object({
   /**
    * The advisory LLM reviewer lane (needs a configured model): `true`/`false`,
    * or an object with `enabled` and per-switch settings for what the lane does
-   * (see ai-switches.ts). An env variable set to `1` or `0` overrides a switch.
-   * Read from the base branch, so a PR cannot change them for itself. Every key
-   * is optional so the default policy hash does not change.
+   * (see ai-switches.ts). Read from the base branch, so a PR cannot change them
+   * for itself through this file. An env variable set to `1` or `0` overrides a
+   * switch: that is the operator's setting in the CI workflow, not repository
+   * policy. Every key is optional so the default policy hash does not change;
+   * an unknown key fails the load, so a typo cannot leave a switch on.
    */
   ai: z
     .union([
       z.boolean(),
-      z.object({
+      z.strictObject({
         enabled: z.boolean().optional(),
         /** Per-kind file quotas and hunk-centred excerpts instead of a 20-file cap. */
         coverage: z.boolean().optional(),
@@ -43,7 +45,7 @@ export const ReviewConfig = z.object({
         contextCard: z.boolean().optional(),
         /** Related changed files reviewed together in a few calls on larger PRs. */
         focused: z.boolean().optional(),
-        /** Changed `other`/`analysis` files inside the project (.sql/.yml/.yaml/.py). */
+        /** Changed `other`/`analysis` files inside the project (.sql/.yml/.yaml; Python files go through `pythonFiles`). */
         otherFiles: z.boolean().optional(),
         /** Changed Python files, inside or outside the dbt project. */
         pythonFiles: z.boolean().optional(),

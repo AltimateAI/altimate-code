@@ -89,6 +89,8 @@ describe("flags-off identity: every switch off is today's lane", () => {
       const { switches: _s, ...rest } = seen!
       return { input: rest, env }
     }
+    // The env-only baseline reads the switch variables: clear them so ambient values cannot leak in.
+    for (const k of Object.values(AI_SWITCH_ENV)) delete process.env[k]
     const legacy = await run()
     const off = await run(ALL_OFF)
     expect(off.input).toEqual(legacy.input)
