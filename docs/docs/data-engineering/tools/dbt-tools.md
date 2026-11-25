@@ -77,6 +77,43 @@ Source Freshness:
 
 ---
 
+## dbt_cost_estimate
+
+Say what a dbt model cost the last times it ran, and what its compiled query would scan before it runs again. Pass `model` (a model name, `package.model`, a versioned `model.v2`, or a unique_id) or `sql`. It starts the dbt adapter, so it needs write permission.
+
+Bytes are not money on most warehouses. Snowflake bills warehouse credits, Databricks bills DBUs for warehouse uptime, and BigQuery capacity (reservations) bills slot time; only BigQuery on-demand bills bytes. So the cost comes from what the warehouse billed for the model's earlier runs, and the scan figure stays a separate pre-run number.
+
+**Cost (`cost` in the result, first in the text).** The tool finds the model's statements in the last 30 days by dbt's query comment (`"node_id": "<unique_id>"`, matched as exact text), groups them into runs (a statement that starts more than 10 minutes after the previous one ended begins a new run), and reports the last run, the typical (median) run and the highest, in money and in the warehouse's own unit. Only successful statements that build the model count, newest 500.
+
+| Warehouse | Read from | Cost per statement |
+|---|---|---|
+| BigQuery | `INFORMATION_SCHEMA.JOBS` of the target's execution project and location | On demand: bytes billed per TiB. In a reservation: slot-hours at a slot-hour rate; the bill follows the reservation, so this is attribution, not the invoice |
+| Snowflake | `snowflake.account_usage.query_history` and `query_attribution_history` | Attributed compute credits plus query acceleration credits, at the account's rate sheet rate when readable. Idle warehouse time is not included; cloud-services credits are reported, not added |
+| Databricks | `system.query.history`, `system.billing.usage` and `list_prices` (SQL warehouses only) | The warehouse's billed cost for the hour the statement started, split across that hour's statements by task time. List price; your discount is not applied |
+
+When cost cannot be known, `cost.unknownReason` says why: no runs in the window, a role without access (Snowflake needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database), a `sql` input (it has no history), a model name that matches several nodes, a Snowflake run not attributed yet (attribution lands up to 8 hours late), a Databricks run whose billing has not landed, or a Databricks cluster target. The tool never estimates a cost it did not read.
+
+**Pre-run scan (unchanged fields).** BigQuery answers from a dry run (`bytes`, `maxBytes`, `lowerBound`); Snowflake and Databricks from the planner's EXPLAIN (`source: "explain"`). Only BigQuery on-demand turns it into money (`cost.selectOnly`): the larger of the bytes and 10 MiB, per TiB. That price covers the SELECT only; an incremental model also writes a temp table and runs a MERGE that reads the target, which the history shows. If the project is on capacity pricing the dry run is not priced.
+
+`cost.rate` names the rate and where it came from: `account`, `list_price`, `config` or `default`. The history queries run through the project's dbt connection, are bounded to 60 seconds, and never remove the pre-run figure.
+
+Set your own rates in the config (see [Configuration](../../configure/config.md)):
+
+```json
+{
+  "cost": {
+    "bigqueryUsdPerTib": 6.25,
+    "bigquerySlotHourUsd": 0.06,
+    "snowflakeUsdPerCredit": 3.0,
+    "databricksUsdPerDbu": 0.55
+  }
+}
+```
+
+`snowflakeUsdPerCredit` is used when the account's rate sheet can't be read; `databricksUsdPerDbu`, when set, replaces the list price.
+
+---
+
 ## dbt_unit_test_gen
 
 Generate dbt unit tests (v1.8+) from a compiled manifest. Analyzes model SQL for testable logic (CASE/WHEN, JOINs, NULLs, window functions, division, incremental), generates type-correct mock inputs, and assembles complete YAML.

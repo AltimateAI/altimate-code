@@ -1,6 +1,17 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { dbtAdapterFor } from "./dbt-adapter-access"
+import {
+  bigqueryOnDemandRate,
+  cleanRates,
+  costHistoryInternals,
+  costText,
+  loadHistory,
+  manifestPathFor,
+  onDemandPrice,
+  type CostConfig,
+  type History,
+} from "./dbt-cost-history"
 
 /**
  * Every dbt integration but the Python bridge writes the SQL into a `{{ validate_sql('...') }}` Jinja
@@ -543,9 +554,119 @@ async function explainEstimate(
   }
 }
 
+/** The pre-run scan figure for the compiled model or SQL: a BigQuery dry run, or a planner's EXPLAIN. */
+async function scanEstimate(
+  adapter: any,
+  type: string,
+  planner: (typeof PLANNERS)[string] | undefined,
+  args: { model?: string; sql?: string },
+  signal: AbortSignal,
+) {
+  let compiled: unknown
+  try {
+    // A model compiles by name, so its node context (`this`, config) is kept; SQL compiles inline.
+    compiled = await untilAbort(
+      () => (args.model ? adapter.unsafeCompileNode(args.model) : adapter.unsafeCompileQuery(args.sql!, undefined)),
+      signal,
+    )
+  } catch (e) {
+    if (signal.aborted) throw e
+    return failure("compile failed", e instanceof Error ? e.message : String(e), { adapter: type })
+  }
+  if (typeof compiled !== "string" || !compiled.trim()) {
+    return failure("compile failed", "The query compiled to nothing.", { adapter: type })
+  }
+  if (planner) return explainEstimate(adapter, type, planner, compiled, args.model, signal)
+  let display: unknown
+  try {
+    const integration = await untilAbort(async () => {
+      const { dbtAdapterInternals } = await import("../native/connections/register")
+      const read = dbtAdapterInternals.readConfig ?? (await import("../../../../dbt-tools/src/config")).read
+      return ((await read()) as { dbtIntegration?: unknown } | null)?.dbtIntegration
+    }, signal)
+    const result = await untilAbort(() => adapter.validateSQLDryRun(forDryRun(compiled as string, integration)), signal)
+    if (result == null) {
+      return failure("dry run failed", "The dry run returned no estimate: dbt-core before 1.6 can't dry run.", { adapter: type })
+    }
+    display = (result as { bytes_processed?: unknown }).bytes_processed
+  } catch (e) {
+    if (signal.aborted) throw e
+    return failure("dry run failed", e instanceof Error ? e.message : String(e), { adapter: type })
+  }
+  const parsed = parseBytesProcessed(display)
+  if (!parsed) {
+    return failure("unreadable estimate", `The dry run returned an amount this tool can't read: ${JSON.stringify(display)}.`, {
+      adapter: type,
+    })
+  }
+  const name = args.model
+  const shown = typeof display === "number" ? `${parsed.bytes} Bytes` : String(display)
+  // A dry run can report 0 for a query that still reads data (BigQuery federated sources), and it skips
+  // what a script runs after its first statement or inside EXECUTE IMMEDIATE: those figures are lower
+  // bounds and carry no upper bound.
+  const zero = parsed.bytes === 0
+  const lower = zero || isScript(compiled as string)
+  return {
+    title: `dbt_cost_estimate: ${shown}`,
+    metadata: {
+      success: true,
+      supported: true,
+      adapter: type,
+      ...(lower ? { bytes: parsed.bytes, lowerBound: true } : parsed),
+      display: shown,
+      ...(name && { model: name }),
+    },
+    output: `${name ? `${name} ` : "The query "}would process ${shown} ${
+      lower
+        ? "(a dry run can undercount a script or a zero estimate, so this is a lower bound, not a cap)."
+        : `(bytes processed by the dry run, at most ${parsed.maxBytes}; BigQuery bills at least 10 MiB per query).`
+    }`,
+  }
+}
+
+/** The scan result with the cost put in front: what earlier runs cost, and on BigQuery on-demand what the SELECT would. */
+function withCost(
+  scan: { title: string; metadata: Record<string, unknown>; output: string },
+  loaded: { cfg: CostConfig; history: History },
+  type: string,
+) {
+  const { cfg, history } = loaded
+  const cost = { ...history.cost, notes: [...history.cost.notes] }
+  const meta = scan.metadata
+  if (meta.success === true && typeof meta.bytes === "number") {
+    if (type === "bigquery") {
+      if (history.capacity === true) {
+        cost.notes.push("The project is on capacity pricing (slots): scanned bytes do not set the cost, so the dry run is not priced.")
+      } else {
+        const demand = bigqueryOnDemandRate(cfg)
+        cost.selectOnly = onDemandPrice(meta.bytes, demand.rate.value)
+        if (!cost.rate) {
+          cost.rate = demand.rate
+          if (demand.note) cost.notes.push(demand.note)
+        }
+        if (history.capacity === undefined)
+          cost.notes.push("Could not check whether the project is on capacity pricing, so the dry run is priced assuming on-demand.")
+        cost.notes.push(
+          `The dry run price covers the SELECT only${meta.lowerBound === true ? " and is a floor, since the dry run's bytes are a lower bound" : ""}.`,
+        )
+      }
+    }
+    if (history.materialized === "incremental")
+      cost.notes.push(
+        "This model is incremental: a run also writes a temp table and a MERGE that reads it and the target, which a scan figure for the SELECT leaves out.",
+      )
+  }
+  if (cost.basis === "none" && cost.selectOnly !== undefined) {
+    cost.basis = "dry_run"
+    if (cost.unknownReason) cost.notes.unshift(cost.unknownReason)
+    delete cost.unknownReason
+  }
+  return { ...scan, metadata: { ...meta, cost }, output: `${costText(cost)}\n${scan.output}` }
+}
+
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, without running it. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate what a dbt model costs, and the bytes it or a SQL query would scan, without running it. The cost (`cost`, in the metadata and first in the text) is read from what the warehouse billed for the model's runs in the last 30 days (BigQuery jobs, Snowflake query attribution, Databricks billing), never guessed; only BigQuery on-demand prices the pre-run scan, for the SELECT only; a `sql` input has no history. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
@@ -568,63 +689,15 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
       }
     }
     const signal = ctx.abort
-    let compiled: unknown
-    try {
-      // A model compiles by name, so its node context (`this`, config) is kept; SQL compiles inline.
-      compiled = await untilAbort(
-        () => (args.model ? adapter.unsafeCompileNode(args.model) : adapter.unsafeCompileQuery(args.sql!, undefined)),
-        signal,
-      )
-    } catch (e) {
-      if (signal.aborted) throw e
-      return failure("compile failed", e instanceof Error ? e.message : String(e), { adapter: type })
-    }
-    if (typeof compiled !== "string" || !compiled.trim()) {
-      return failure("compile failed", "The query compiled to nothing.", { adapter: type })
-    }
-    if (planner) return explainEstimate(adapter, type!, planner, compiled, args.model, signal)
-    let display: unknown
-    try {
-      const integration = await untilAbort(async () => {
-        const { dbtAdapterInternals } = await import("../native/connections/register")
-        const read = dbtAdapterInternals.readConfig ?? (await import("../../../../dbt-tools/src/config")).read
-        return ((await read()) as { dbtIntegration?: unknown } | null)?.dbtIntegration
-      }, signal)
-      const result = await untilAbort(() => adapter.validateSQLDryRun(forDryRun(compiled as string, integration)), signal)
-      if (result == null) {
-        return failure("dry run failed", "The dry run returned no estimate: dbt-core before 1.6 can't dry run.", { adapter: type })
-      }
-      display = (result as { bytes_processed?: unknown }).bytes_processed
-    } catch (e) {
-      if (signal.aborted) throw e
-      return failure("dry run failed", e instanceof Error ? e.message : String(e), { adapter: type })
-    }
-    const parsed = parseBytesProcessed(display)
-    if (!parsed) {
-      return failure("unreadable estimate", `The dry run returned an amount this tool can't read: ${JSON.stringify(display)}.`, {
-        adapter: type,
-      })
-    }
-    const name = args.model
-    const shown = typeof display === "number" ? `${parsed.bytes} Bytes` : String(display)
-    // A dry run can report 0 for a query that still reads data (BigQuery federated sources), and it skips
-    // what a script runs after its first statement or inside EXECUTE IMMEDIATE: those figures are lower
-    // bounds and carry no upper bound.
-    const zero = parsed.bytes === 0
-    const lower = zero || isScript(compiled as string)
-    return {
-      title: `dbt_cost_estimate: ${shown}`,
-      metadata: {
-        success: true,
-        supported: true,
-        adapter: type,
-        ...(lower ? { bytes: parsed.bytes, lowerBound: true } : parsed),
-        display: shown,
-        ...(name && { model: name }),
-      },
-      output: `${name ? `${name} ` : "The query "}would process ${shown} ${
-        lower ? "(a dry run can undercount a script or a zero estimate, so this is a lower bound, not a cap)." : `(at most ${parsed.maxBytes} bytes).`
-      }`,
-    }
+    // The history reads the warehouse's billing tables while the scan figure is computed; neither waits for the other.
+    const history = (async () => {
+      const cfg = cleanRates(await costHistoryInternals.readCostConfig())
+      const { getDbtProjectRoot } = await import("../native/connections/register")
+      const manifestPath = manifestPathFor(adapter, await getDbtProjectRoot().catch(() => undefined))
+      return { cfg, history: await loadHistory({ adapter, type: type!, model: args.model, manifestPath, signal, cfg }) }
+    })()
+    history.catch(() => {})
+    const scan = await scanEstimate(adapter, type!, planner, args, signal)
+    return withCost(scan, await history, type!)
   },
 })
