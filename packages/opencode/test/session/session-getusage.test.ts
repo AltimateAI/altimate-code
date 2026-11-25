@@ -216,6 +216,20 @@ describe("Session.getUsage — provider edge cases", () => {
   })
 })
 
+// altimate_change start — upstream_fix: malformed model cost fields (anomalyco/opencode#43248)
+describe("Session.getUsage — malformed model cost", () => {
+  test("ignores non-numeric cost fields instead of throwing", () => {
+    const model = fakeModel("@ai-sdk/openai")
+    model.cost = { input: {}, output: 15, cache: { read: Number.NaN, write: "x" } }
+    const result = Session.getUsage({
+      model,
+      usage: { inputTokens: 1_000_000, outputTokens: 100_000, totalTokens: 1_100_000 } as any,
+    })
+    expect(result.cost).toBe(1.5)
+  })
+})
+// altimate_change end
+
 describe("Session.getUsage — invariant", () => {
   test("input + cache.read + cache.write === inputTotal for cache-using calls", () => {
     for (const npm of ["@ai-sdk/anthropic", "@ai-sdk/openai", "@ai-sdk/amazon-bedrock"] as const) {
