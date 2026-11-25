@@ -643,26 +643,38 @@ function withCost(
         if (cost.basis === "none") cost.unknownReason = cost.unknownReason ? `${cost.unknownReason} ${why}.` : why
         else cost.notes.push(`${why}, so the dry run is not priced.`)
       } else if (meta.lowerBound === true || typeof meta.maxBytes !== "number") {
-        // A script or a zero estimate: the dry run saw only part of the work, so any price from it would be too low.
-        cost.notes.push("The dry run covers only the first statement, so it is not priced.")
+        // A zero estimate is not a size (BigQuery reports 0 for a federated or external source); a script's dry run saw only its first statement.
+        cost.notes.push(
+          meta.bytes === 0
+            ? "The dry run reported 0 bytes, which BigQuery also reports for sources it cannot size (federated and external tables), so it is not priced."
+            : "The dry run covers only the first statement, so it is not priced.",
+        )
       } else {
         const demand = bigqueryOnDemandRate(cfg)
-        // A SQL input has no manifest to count its tables from: at least one is assumed.
-        const tables = history.tables
-        cost.selectOnly = onDemandPrice({ maxBytes: meta.maxBytes, tables: tables ?? 1, usdPerTib: demand.rate.value })
+        // Without a table count (SQL input, no manifest, an ambiguous name) or with none found, one table is assumed.
+        const counted = history.tables
+        const used = Math.max(1, counted ?? 1)
+        // The count is a floor when it is unknown or a source may be a view, so the high figure is no ceiling.
+        const open = counted === undefined || counted === 0 || Boolean(history.sources)
+        const price = onDemandPrice({ maxBytes: meta.maxBytes, tables: used, usdPerTib: demand.rate.value })
+        cost.selectOnly = open ? { ...price, perTable: onDemandPrice({ maxBytes: 0, tables: 1, usdPerTib: demand.rate.value }).low } : price
         if (!cost.rate) {
           cost.rate = demand.rate
           if (demand.note) cost.notes.push(demand.note)
         }
-        cost.notes.push(
-          `The price covers the SELECT only, and each table it reads bills at least 10 MiB (${tables === undefined ? "at least one table: the number of tables is unknown for SQL input, so the high bound adds 10 MiB for each further table" : `${tables} table${tables === 1 ? "" : "s"}`}).`,
-        )
+        const why =
+          counted === undefined
+            ? `: ${history.tablesReason ?? "the tables could not be counted"}, so at least one is assumed`
+            : counted === 0
+              ? ": none was found in the manifest, so one is assumed"
+              : ""
+        cost.notes.push(`The price covers the SELECT only, and each table it reads bills at least 10 MiB (${used} table${used === 1 ? "" : "s"} counted${why}).`)
         if (history.sources) cost.notes.push("A source that is a view in BigQuery bills 10 MiB more for each table it reads.")
       }
     }
     if (history.materialized === "incremental")
       cost.notes.push(
-        "This model is incremental: a run also writes a temp table and a MERGE that reads it and the target, which a scan figure for the SELECT leaves out.",
+        "This model is incremental: depending on its strategy (merge, delete+insert, insert_overwrite) a run can also write a temp table and read the target, which a scan figure for the SELECT leaves out.",
       )
   }
   if (cost.basis === "none" && cost.selectOnly !== undefined) {
@@ -675,7 +687,7 @@ function withCost(
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate what a dbt model costs, and the bytes it or a SQL query would scan, without running it. The cost (`cost`, in the metadata and first in the text) is read from what the warehouse billed for the model's runs in the last 30 days (BigQuery jobs, Snowflake query attribution, Databricks billing), never guessed; only BigQuery on-demand prices the pre-run scan, as a range for the SELECT only; a `sql` input has no history. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate what a dbt model costs, and the bytes it or a SQL query would scan, without running it. The cost (`cost`, in the metadata and first in the text) is read from what the warehouse billed for the model's runs in the last 30 days (BigQuery jobs, Snowflake query attribution, Databricks billing), with a labelled default rate where no account rate can be read, and is never invented when no history exists; only BigQuery on-demand prices the pre-run scan, as a range for the SELECT only; a `sql` input has no history. BigQuery answers from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor); Snowflake (`EXPLAIN USING JSON`, bytes left after pruning) and Databricks (`EXPLAIN COST`, the sizes of the tables it reads) answer from the planner (`source: \"explain\"`; `bound` is \"upper\" on Snowflake (\"unknown\" when the plan leaves out a source it cannot size: it reports 0 for one, or a scan of an external table, a stage or a secure view, or a scan with no size), \"estimate\" on Databricks), and none when Databricks has no table statistics. EXPLAIN compiles the query on the warehouse and scans no data: on Snowflake it needs no running warehouse (cloud-services time only); on Databricks it runs on the SQL warehouse or cluster the profile connects to, and starts it (billed while up) if it is stopped. A query that may be more than one statement is never EXPLAINed, nor on Databricks one that reads files directly (read_files, cloud_files, json.`path`), whose planning reads the files to infer a schema. Any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
