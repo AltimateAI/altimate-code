@@ -1648,7 +1648,11 @@ export const layer = Layer.effect(
     })
 
     const getAuthStatus = Effect.fn("MCP.getAuthStatus")(function* (mcpName: string) {
-      const entry = yield* auth.get(mcpName)
+      // altimate_change start — upstream_fix: only credentials stored for the configured server URL count (anomalyco/opencode#33924)
+      const mcpConfig = yield* getMcpConfig(mcpName)
+      if (!mcpConfig || mcpConfig.type !== "remote") return "not_authenticated"
+      const entry = yield* auth.getForUrl(mcpName, mcpConfig.url)
+      // altimate_change end
       if (!entry?.tokens) return "not_authenticated"
       const expired = yield* auth.isTokenExpired(mcpName)
       return expired ? "expired" : "authenticated"
