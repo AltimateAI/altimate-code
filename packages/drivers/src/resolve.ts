@@ -879,10 +879,12 @@ export function findOnWindowsPath(
     .split(";")
     .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
     .filter(Boolean)
-  const searchDirs = windowsEnv(env, "NoDefaultCurrentDirectoryInExePath") === undefined ? [cwd, ...dirs] : dirs
+  // Resolved once: a relative cwd (a relative ALTIMATE_DRIVER_DIR) resolved against itself would name a folder inside it.
+  const here = path.win32.resolve(cwd)
+  const searchDirs = windowsEnv(env, "NoDefaultCurrentDirectoryInExePath") === undefined ? [here, ...dirs] : dirs
   for (const dir of searchDirs) {
     for (const ext of extensions) {
-      const file = path.win32.resolve(cwd, dir, command + ext)
+      const file = path.win32.resolve(here, dir, command + ext)
       if (isFile(file)) return file
     }
   }
@@ -1114,6 +1116,7 @@ export const _testing = {
   runTaskkill,
   installOptionalDriver: installOptionalDriverInternal,
   isRequireOfEsm,
+  isRegularFile,
 }
 
 /**
