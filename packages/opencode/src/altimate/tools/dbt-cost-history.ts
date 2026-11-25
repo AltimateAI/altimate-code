@@ -8,7 +8,8 @@ export const HISTORY_DAYS = 30
 export const HISTORY_LIMIT = 500
 /** The most child jobs of matched scripts the children query returns. */
 export const BQ_CHILD_LIMIT = 10000
-const TRUNCATED_NOTE = `Runs older than the newest ${HISTORY_LIMIT} statements were not read.`
+const truncatedNote = (dropped: number) =>
+  `Runs older than the newest ${HISTORY_LIMIT} statements were not read (${dropped} run${dropped === 1 ? "" : "s"} near the cutoff left out).`
 /** A statement that starts more than this after the previous one ended begins a new run. */
 export const RUN_GAP_MS = 10 * 60_000
 /** BigQuery bills at least this many bytes for a query. */
@@ -35,8 +36,8 @@ export type CostInfo = {
   highest?: number
   runs?: number
   windowDays?: 30
-  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, `high` the dry run's upper bound plus each table's minimum (absent when the dry run only gives a lower bound). */
-  selectOnly?: { low: number; high?: number }
+  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, `high` the dry run's upper bound plus each table's minimum. */
+  selectOnly?: { low: number; high: number }
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
   notes: string[]
@@ -142,7 +143,7 @@ export function manifestPathFor(adapter: any, projectRoot: string | undefined): 
 const BQ_BUILD_TYPES = ["CREATE_TABLE_AS_SELECT", "CREATE_TABLE", "CREATE_VIEW", "INSERT", "MERGE", "SCRIPT"]
 const BQ_TYPES = [...BQ_BUILD_TYPES, "DELETE", "UPDATE"]
 const SF_TYPES = ["CREATE_TABLE_AS_SELECT", "CREATE_TABLE", "CREATE_VIEW", "INSERT", "MERGE", "DELETE", "UPDATE", "MULTI_STATEMENT"]
-const DBX_TYPES = ["CREATE", "INSERT", "MERGE", "DELETE", "UPDATE", "REPLACE", "COPY"]
+const DBX_TYPES = ["CREATE", "INSERT", "MERGE", "DELETE", "UPDATE", "REPLACE", "COPY", "OPTIMIZE", "ANALYZE"]
 const list = (xs: string[]) => xs.map((x) => `'${x}'`).join(",")
 
 /** A BigQuery project id as a backtick-quoted name, or undefined when it holds anything a name can't. */
@@ -204,10 +205,17 @@ where account_locator = current_account() and usage_type = 'compute' and service
   and date > dateadd(day, -${HISTORY_DAYS + 1}, current_date())
 order by date`
 
-/** A statement's task milliseconds that fall in `hour`: prorated by overlap, and all of it in its start hour when it has no length. */
+const HOUR_US = 3_600_000_000
+/** The UTC hour of a timestamp as a whole number of hours since the epoch: independent of the session's time zone. */
+const hourOf = (ts: string) => `(unix_micros(${ts}) div ${HOUR_US})`
+/** The hours a statement touches: its start hour through the hour holding its last microsecond. */
+const hoursOf = (start: string, end: string) =>
+  `explode(sequence(${hourOf(start)}, ${hourOf(`timestamp_micros(greatest(unix_micros(${end}) - 1, unix_micros(${start})))`)}))`
+
+/** A statement's task milliseconds that fall in `a.hour`: prorated by overlap, and all of it in its start hour when it has no length. */
 const prorated = (a: string) =>
-  `case when ${a}.end_time <= ${a}.start_time then (case when ${a}.hour = date_trunc('HOUR', ${a}.start_time) then coalesce(${a}.ms, 0) else 0 end)
-    else coalesce(${a}.ms, 0) * (unix_micros(least(${a}.end_time, ${a}.hour + interval 1 hour)) - unix_micros(greatest(${a}.start_time, ${a}.hour)))
+  `case when ${a}.end_time <= ${a}.start_time then (case when ${a}.hour = ${hourOf(`${a}.start_time`)} then coalesce(${a}.ms, 0) else 0 end)
+    else coalesce(${a}.ms, 0) * (least(unix_micros(${a}.end_time), (${a}.hour + 1) * ${HOUR_US}) - greatest(unix_micros(${a}.start_time), ${a}.hour * ${HOUR_US}))
          / (unix_micros(${a}.end_time) - unix_micros(${a}.start_time)) end`
 
 export function databricksHistorySql(needle: string): string {
@@ -221,13 +229,13 @@ export function databricksHistorySql(needle: string): string {
     and instr(statement_text, ${sqlString(needle)}) > 0
 ),
 q_hours as (
-  select q.*, explode(sequence(date_trunc('HOUR', start_time), date_trunc('HOUR', greatest(timestamp_micros(unix_micros(end_time) - 1), start_time)), interval 1 hour)) as hour
+  select q.*, ${hoursOf("start_time", "end_time")} as hour
   from q
 ),
 hours as (select distinct warehouse_id, hour from q_hours),
 all_hours as (
   select compute.warehouse_id as warehouse_id, start_time, coalesce(end_time, start_time) as end_time, total_task_duration_ms as ms,
-         explode(sequence(date_trunc('HOUR', start_time), date_trunc('HOUR', greatest(timestamp_micros(unix_micros(coalesce(end_time, start_time)) - 1), start_time)), interval 1 hour)) as hour
+         ${hoursOf("start_time", "coalesce(end_time, start_time)")} as hour
   from system.query.history
   where start_time > current_timestamp() - interval ${HISTORY_DAYS + 1} days and compute.warehouse_id is not null
     and compute.warehouse_id in (select warehouse_id from q)
@@ -238,13 +246,13 @@ tasks as (
   group by 1, 2
 ),
 billed as (
-  select u.usage_metadata.warehouse_id as warehouse_id, date_trunc('HOUR', u.usage_start_time) as hour,
+  select u.usage_metadata.warehouse_id as warehouse_id, ${hourOf("u.usage_start_time")} as hour,
          sum(u.usage_quantity) as dbus,
          sum(u.usage_quantity * coalesce(p.pricing.effective_list.default, p.pricing.default)) as usd
   from system.billing.usage u
   join system.billing.list_prices p on p.sku_name = u.sku_name and p.cloud = u.cloud
     and u.usage_start_time >= p.price_start_time and (p.price_end_time is null or u.usage_start_time < p.price_end_time)
-  join hours h on u.usage_metadata.warehouse_id = h.warehouse_id and date_trunc('HOUR', u.usage_start_time) = h.hour
+  join hours h on u.usage_metadata.warehouse_id = h.warehouse_id and ${hourOf("u.usage_start_time")} = h.hour
   where u.usage_unit = 'DBU' and u.usage_start_time > current_timestamp() - interval ${HISTORY_DAYS + 1} days
   group by 1, 2
 ),
@@ -324,7 +332,7 @@ export function parseTime(value: string | null | undefined): number {
  * starts no more than ten minutes after the last one ended. Sessions are never merged. A run is unknown, and
  * left out, when any statement's cost is unknown or its statements carry more than one currency.
  */
-export function groupRuns(stmts: Stmt[], dropOldest = false): { runs: Run[]; skipped: number } {
+export function groupRuns(stmts: Stmt[], truncated = false): { runs: Run[]; skipped: number; dropped: number } {
   const sorted = stmts.filter((s) => Number.isFinite(s.start)).sort((a, b) => a.start - b.start)
   const open = new Map<string, { group: Stmt[]; end: number }>()
   const groups: Stmt[][] = []
@@ -342,10 +350,15 @@ export function groupRuns(stmts: Stmt[], dropOldest = false): { runs: Run[]; ski
   }
   const runs: Run[] = []
   let skipped = 0
-  // A query that returned its limit may not have returned all of its oldest run: that run is not trusted.
-  const oldest = dropOldest ? groups[0] : undefined
+  // A query that returned its limit read nothing before its oldest statement: a run that starts within the grouping
+  // window of that cutoff may have lost its first statements, whichever session it is in, so it is not trusted.
+  const cutoff = sorted[0]?.start ?? Number.NaN
+  let dropped = 0
   for (const g of groups) {
-    if (g === oldest) continue
+    if (truncated && g[0].start <= cutoff + RUN_GAP_MS) {
+      dropped++
+      continue
+    }
     const currencies = new Set(g.map((s) => s.currency))
     if (!g.every((s) => s.known) || currencies.size > 1) {
       skipped++
@@ -353,7 +366,7 @@ export function groupRuns(stmts: Stmt[], dropOldest = false): { runs: Run[]; ski
     }
     runs.push({ start: g[0].start, cost: g.reduce((t, s) => t + (s.cost ?? 0), 0), native: g.reduce((t, s) => t + s.native, 0), currency: g[0].currency })
   }
-  return { runs, skipped }
+  return { runs, skipped, dropped }
 }
 
 export function median(values: number[]): number {
@@ -449,7 +462,7 @@ export const BQ_ATTACH_MS = 60_000
  * BigQuery runs: each build job (a script counts as one, priced from its children) is a run; a DELETE or UPDATE
  * joins the next build job of the model within a minute, else is a run of its own.
  */
-export function bigqueryRuns(units: BqUnit[], dropOldest = false): { runs: BqUnit[]; skipped: number } {
+export function bigqueryRuns(units: BqUnit[], truncated = false): { runs: BqUnit[]; skipped: number; dropped: number } {
   const builds = units.filter((u) => u.build).sort((a, b) => a.start - b.start)
   const groups = new Map<BqUnit, BqUnit[]>(builds.map((b) => [b, [b]]))
   const alone: BqUnit[][] = []
@@ -459,11 +472,12 @@ export function bigqueryRuns(units: BqUnit[], dropOldest = false): { runs: BqUni
     else alone.push([u])
   }
   const all = [...groups.values(), ...alone].map((g) => sumUnits(Math.min(...g.map((u) => u.start)), true, g))
-  // A query that returned its limit may not have returned all of its oldest run: that run is not trusted.
-  const oldest = dropOldest && all.length ? all.reduce((a, b) => (b.start < a.start ? b : a)) : undefined
-  const counted = all.filter((r) => r !== oldest)
+  // A query that returned its limit read nothing before its oldest job: a run that starts within a minute of that
+  // cutoff may have lost the delete or update that belongs to it, so it is not trusted.
+  const cutoff = Math.min(...all.map((r) => r.start))
+  const counted = truncated ? all.filter((r) => r.start > cutoff + BQ_ATTACH_MS) : all
   const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
-  return { runs, skipped: counted.length - runs.length }
+  return { runs, skipped: counted.length - runs.length, dropped: all.length - counted.length }
 }
 
 export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId: string, cfg: CostConfig): { cost: CostInfo; reserved: boolean } {
@@ -483,9 +497,9 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
     return kids.length && !(childrenCut && !(start > childBoundary)) ? unit : { ...unit, known: false }
   })
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs, skipped } = bigqueryRuns(units, truncated)
+  const { runs, skipped, dropped } = bigqueryRuns(units, truncated)
   const anyReserved = units.some((u) => u.reserved)
-  const notes: string[] = truncated ? [TRUNCATED_NOTE] : []
+  const notes: string[] = truncated ? [truncatedNote(dropped)] : []
   if (skipped)
     notes.push(
       `${plural(skipped, "run")} left out: BigQuery gave no bytes billed for ${skipped === 1 ? "it" : "them"} (it hides them for tables under a row access policy), or a script's child jobs were not found.`,
@@ -566,7 +580,7 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
     return { start, end: parseTime(r.end_time), cost: credits * rate.value, native: credits, known, session: r.session_id, currency }
   })
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs, skipped } = groupRuns(stmts, truncated)
+  const { runs, skipped, dropped } = groupRuns(stmts, truncated)
   const currency = newest?.currency ?? "USD"
   const rate = newest?.rate ?? null
   const notes = ["Credits are the warehouse compute attributed to the statements; warehouse idle time is not included."]
@@ -575,7 +589,7 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
       `Cloud-services credits (${Number(cloud.toFixed(4))} over these statements) are not added: Snowflake bills them only above 10% of the day's compute.`,
     )
   notes.push(...defaults)
-  if (truncated) notes.push(TRUNCATED_NOTE)
+  if (truncated) notes.push(truncatedNote(dropped))
   if (skipped)
     notes.push(
       `${plural(skipped, "run")} left out: pending attribution (Snowflake lands it up to 8 hours late) or priced in more than one currency.`,
@@ -626,14 +640,14 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig):
       rate,
     )
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs, skipped } = groupRuns(stmts, truncated)
+  const { runs, skipped, dropped } = groupRuns(stmts, truncated)
   const notes = [
     "Each statement carries its warehouse's billed cost for the hours it ran in, split across each hour's statements by task time, so idle time and overhead are spread over the queries that used the warehouse.",
     configured !== undefined
       ? `DBUs are priced at ${configured} USD/DBU.`
       : "Prices are list prices (with published promotions); negotiated discounts are not applied.",
   ]
-  if (truncated) notes.push(TRUNCATED_NOTE)
+  if (truncated) notes.push(truncatedNote(dropped))
   if (skipped)
     notes.push(`${plural(skipped, "run")} left out: the billing rows for ${skipped > 1 ? "their" : "its"} hours have not landed yet.`)
   if (!runs.length && !skipped && truncated)
@@ -650,15 +664,10 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig):
  * What a scan bills on demand. The dry run is an upper bound on bytes (a clustered table can bill less), so `maxBytes`
  * is the most it reads; each table a query reads bills at least 10 MiB. The charge is therefore at least n x 10 MiB and
  * at most `maxBytes` plus n x 10 MiB (each table's bytes rounded up to the MiB stay within its 10 MiB allowance).
- * When the dry run gives only a floor (`lowerBound`), the charge is at least the larger of it and n x 10 MiB, with no ceiling.
  */
-export function onDemandPrice(input: { bytes: number; maxBytes?: number; lowerBound?: boolean; tables: number; usdPerTib: number }): {
-  low: number
-  high?: number
-} {
+export function onDemandPrice(input: { maxBytes: number; tables: number; usdPerTib: number }): { low: number; high: number } {
   const floor = Math.max(1, input.tables) * BQ_MIN_BILLED_BYTES
   const price = (bytes: number) => (bytes / TIB) * input.usdPerTib
-  if (input.lowerBound || input.maxBytes === undefined) return { low: price(Math.max(input.bytes, floor)) }
   return { low: price(floor), high: price(input.maxBytes + floor) }
 }
 
@@ -707,9 +716,7 @@ export function costText(c: CostInfo): string {
   } else if (c.basis === "dry_run") {
     const { low, high } = c.selectOnly!
     lines.push(
-      high === undefined
-        ? `The SELECT would bill at least ${formatMoney(low, c.currency)} on-demand (the dry run's bytes are a lower bound).`
-        : `The SELECT would bill at most ${formatMoney(high, c.currency)} on-demand (at least ${formatMoney(low, c.currency)}; pruning of clustered or partitioned tables can bill less than the dry run).`,
+      `The SELECT would bill at most ${formatMoney(high, c.currency)} on-demand (at least ${formatMoney(low, c.currency)}; pruning of clustered or partitioned tables can bill less than the dry run).`,
     )
   } else {
     lines.push(`Cost unknown: ${c.unknownReason}`)

@@ -1468,6 +1468,19 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.output).toContain("pruning of clustered or partitioned tables can bill less")
   })
 
+  test.each([["a script", "select 1; select * from big", "1.0 GiB"], ["a zero estimate", "select 1", 0]])(
+    "%s: a dry run that is only a lower bound is not priced, with the reason",
+    async (_name, sql, bytes) => {
+      useAdapter(calls, { bytes, history: bigqueryHistory([]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ sql }, ctx)
+      const cost = result.metadata.cost
+      expect(result.metadata).toMatchObject({ lowerBound: true })
+      expect(cost.selectOnly).toBeUndefined()
+      expect(cost.basis).toBe("none")
+      expect(cost.notes.join(" ")).toContain("The dry run covers only the first statement, so it is not priced.")
+    },
+  )
+
   test("when neither the project's jobs nor the caller's own say the pricing mode, the dry run is not priced and the scan stays", async () => {
     useAdapter(calls, {
       history: async (jinja) => {

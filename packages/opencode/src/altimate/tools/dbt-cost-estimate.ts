@@ -642,17 +642,14 @@ function withCost(
         const why = "BigQuery pricing mode could not be read (on-demand vs reservations)"
         if (cost.basis === "none") cost.unknownReason = cost.unknownReason ? `${cost.unknownReason} ${why}.` : why
         else cost.notes.push(`${why}, so the dry run is not priced.`)
+      } else if (meta.lowerBound === true || typeof meta.maxBytes !== "number") {
+        // A script or a zero estimate: the dry run saw only part of the work, so any price from it would be too low.
+        cost.notes.push("The dry run covers only the first statement, so it is not priced.")
       } else {
         const demand = bigqueryOnDemandRate(cfg)
         // A SQL input has no manifest to count its tables from: at least one is assumed.
         const tables = history.tables
-        cost.selectOnly = onDemandPrice({
-          bytes: meta.bytes,
-          maxBytes: typeof meta.maxBytes === "number" ? meta.maxBytes : undefined,
-          lowerBound: meta.lowerBound === true,
-          tables: tables ?? 1,
-          usdPerTib: demand.rate.value,
-        })
+        cost.selectOnly = onDemandPrice({ maxBytes: meta.maxBytes, tables: tables ?? 1, usdPerTib: demand.rate.value })
         if (!cost.rate) {
           cost.rate = demand.rate
           if (demand.note) cost.notes.push(demand.note)
