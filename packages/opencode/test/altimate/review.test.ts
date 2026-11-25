@@ -2331,7 +2331,8 @@ describe("orchestrate", () => {
   test("an alias the base exposes from a different source does not hide a newly exposed PII column", async () => {
     // Same output alias, different source: base `c.email as contact`, head
     // `c.ssn as contact`. detectPii and the classifier see `contact` on both
-    // sides, so the regex twins are the only detectors left and must stay.
+    // sides. The broad fallback (tiers with the pii_exposure lane) reports it
+    // because the base never exposed raw `ssn`; otherwise the regex twin must.
     for (const [from, to] of [
       ["c.email as contact", "c.ssn as contact"],
       ["c.email as customer_key", "c.ssn as customer_key"],
@@ -2346,9 +2347,15 @@ describe("orchestrate", () => {
           runner: piiRunner(["email", "ssn"]),
           getContent: content(base.replace(from, to), base),
         })
+        const broad = env.findings.filter((f) => f.evidence?.tool === "schema.detect_pii")
         const intoMart = env.findings.filter((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
-        expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["ssn"])
-        expect(intoMart[0].severity).toBe("critical")
+        if (broad.length) {
+          expect((broad[0].evidence?.result as any)?.columns).toEqual([to.split(" as ")[1]])
+          expect(broad[0].severity).toBe("critical")
+        } else {
+          expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["ssn"])
+          expect(intoMart[0].severity).toBe("critical")
+        }
         expect(env.verdict).toBe("REQUEST_CHANGES")
       }
     }
@@ -2366,8 +2373,33 @@ describe("orchestrate", () => {
         runner: piiRunner(["ssn"]),
         getContent: content(base.replace("tax_ref", "tax_id"), base),
       })
-      expect(env.findings.filter(isTwin)).toEqual([])
+      expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
     }
+  })
+
+  test("the broad fallback keeps a PII column the base exposed only masked under the same name", async () => {
+    // base `md5(home_address) as home_address` → head `home_address`: detectPii
+    // reports `home_address` on both sides, but the base never exposed it raw.
+    const masked = "select customer_id,\n  md5(home_address) as home_address\nfrom customers"
+    const raw = "select customer_id,\n  home_address\nfrom customers"
+    const run = (head: string, base: string, diff: string) =>
+      runReview({
+        changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["pii_exposure"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["home_address"]),
+        getContent: content(head, base),
+      })
+    const unmasked = await run(raw, masked, "-  md5(home_address) as home_address\n+  home_address\n")
+    const broad = unmasked.findings.filter((f) => f.evidence?.tool === "schema.detect_pii")
+    expect(broad.map((f) => (f.evidence?.result as any)?.columns)).toEqual([["home_address"]])
+    expect(broad[0].severity).toBe("critical")
+    // Controls: masking a raw base column, or reindenting a raw one, exposes nothing new.
+    const maskedNow = await run(masked, raw, "-  home_address\n+  md5(home_address) as home_address\n")
+    expect(maskedNow.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+    const reindented = await run(raw.replace("  home", "    home"), raw, "-  home_address\n+    home_address\n")
+    expect(reindented.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
   })
 
   test("a CTE alias does not count as a base exposure of the final output", async () => {

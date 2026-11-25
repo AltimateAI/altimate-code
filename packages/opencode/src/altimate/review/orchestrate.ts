@@ -1244,6 +1244,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const exposures = baseOutputs(file).raw
     return [...basePii].some((name) => !!exposures.get(name)?.has(column))
   }
+  // A head PII output name the base already exposed. When the head selects a
+  // column raw under it, that same source column must be raw in the base's final
+  // output (base `md5(home_address) as home_address` → head `home_address` is new).
+  // A head output that is not a raw column exposes no new raw value when the base
+  // had the name. A name the head's final select doesn't resolve (`select *` from a
+  // table) counts as base-exposed only when the base had it and did not mask it.
+  const isBaseExposedOutput = (file: string, name: string, basePii: Set<string>) => {
+    const head = finalOutputs(ctxByPath.get(file)?.engineNewSql ?? "")
+    const rawColumns = head.raw.get(name)
+    if (rawColumns?.size) return [...rawColumns].every((col) => isBaseExposed(file, col))
+    if (!basePii.has(name)) return false
+    if (head.names.has(name)) return true
+    const base = baseOutputs(file)
+    return !base.names.has(name) || base.raw.has(name)
+  }
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1307,7 +1322,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ? currentCtx.pii.filter((col) => !diffScopedPii.classifiedColumns.has(col.toLowerCase()))
             : currentCtx.pii
           // The fallback reports only columns the base did not already expose.
-          fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
+          fallbackPii = fallbackPii.filter(
+            (col) => !isBaseExposedOutput(currentCtx.file.path, col.toLowerCase(), basePii),
+          )
           const baseUnknown = hasOldSide(currentCtx.file) && !currentCtx.engineOldSql
           findings.push(...piiLane(currentCtx.file, fallbackPii, baseUnknown))
         }
