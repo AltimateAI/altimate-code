@@ -109,4 +109,27 @@ describe("run --output collector", () => {
     out.text("   ")
     expect(out.content()).toBe(NO_TEXT_OUTPUT)
   })
+
+  // altimate_change start — the run-mode completion token is a harness signal, not part of the answer
+  test("run mode strips a trailing DONE line from the reply", () => {
+    const out = new OutputCollector({ stripCompletionToken: true })
+    out.stepStart()
+    out.text('{"title":"x"}\n\nDONE')
+    expect(out.content()).toBe('{"title":"x"}')
+  })
+
+  test("run mode keeps a DONE that is quoted inside a code fence", () => {
+    const out = new OutputCollector({ stripCompletionToken: true })
+    out.stepStart()
+    out.text("Example:\n```\nDONE")
+    expect(out.content()).toBe("Example:\n```\nDONE")
+  })
+
+  test("without run mode the reply is written as the model gave it", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text('{"title":"x"}\n\nDONE')
+    expect(out.content()).toBe('{"title":"x"}\n\nDONE')
+  })
+  // altimate_change end
 })

@@ -1842,6 +1842,111 @@ it.instance("subtask child inherits parent session external_directory allow", ()
   }),
 )
 
+// altimate_change start — run mode gives a custom subagent started by the task tool the
+// completion contract; interactive mode gives it nothing. Neither mode's prompts offer a
+// clarification stop.
+for (const runMode of [true, false]) {
+  it.instance(`a custom subagent's prompt ${runMode ? "carries" : "omits"} the completion contract (run mode: ${runMode})`, () =>
+    Effect.gen(function* () {
+      const previous = process.env.ALTIMATE_RUN_MODE
+      process.env.ALTIMATE_RUN_MODE = runMode ? "1" : "0"
+      try {
+        const { llm } = yield* useServerConfig((url) => ({
+          ...providerCfg(url),
+          agent: { reviewer: { mode: "subagent", description: "Reviews a change.", prompt: "You review changes." } },
+        }))
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Parent" })
+        yield* llm.text("Reviewed the cache key path.\nDONE")
+        yield* llm.text("All done.\nDONE")
+        const msg = yield* user(chat.id, "hello")
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: chat.id,
+          type: "subtask",
+          prompt: "look into the cache key path",
+          description: "inspect bug",
+          agent: "reviewer",
+          model: ref,
+        })
+
+        yield* prompt.loop({ sessionID: chat.id })
+
+        const kids = yield* sessions.children(chat.id)
+        expect(kids).toHaveLength(1)
+        const child = yield* MessageV2.filterCompactedEffect(kids[0]!.id)
+        expect(child.some((item) => item.info.role === "assistant" && item.info.agent === "reviewer")).toBe(true)
+        const inputs = yield* llm.inputs
+        expect(inputs.length).toBeGreaterThanOrEqual(1)
+        // The first request is the reviewer child's own turn.
+        expect(systemBytes(inputs[0]!)).toContain("You review changes.")
+        for (const input of inputs) {
+          const system = requestMessages(input)
+            .filter((message) => message.role === "system")
+            .map((message) => requestText(message.content))
+            .join("\n")
+          if (runMode) expect(system).toContain(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+          else expect(system).not.toContain(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+          expect(JSON.stringify(input.messages)).not.toContain("stop and ask for clarification")
+        }
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_RUN_MODE
+        else process.env.ALTIMATE_RUN_MODE = previous
+      }
+    }),
+  )
+}
+
+// altimate_change start — a custom PRIMARY agent gets the contract in run mode; plan never does
+for (const agentName of ["auditor", "plan"]) {
+  it.instance(`a run-mode ${agentName === "plan" ? "plan agent's prompt omits" : "custom primary agent's prompt carries"} the completion contract`, () =>
+    Effect.gen(function* () {
+      const previous = process.env.ALTIMATE_RUN_MODE
+      process.env.ALTIMATE_RUN_MODE = "1"
+      try {
+        const { llm } = yield* useServerConfig((url) => ({
+          ...providerCfg(url),
+          agent: { auditor: { mode: "primary", description: "Audits a change.", prompt: "You audit changes." } },
+        }))
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Primary" })
+        yield* llm.text("Audited.\nDONE")
+        const msg = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: chat.id,
+          agent: agentName,
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID: chat.id, type: "text", text: "audit it" })
+
+        yield* prompt.loop({ sessionID: chat.id })
+
+        const inputs = yield* llm.inputs
+        expect(inputs.length).toBeGreaterThanOrEqual(1)
+        const system = requestMessages(inputs[0]!)
+          .filter((message) => message.role === "system")
+          .map((message) => requestText(message.content))
+          .join("\n")
+        if (agentName === "plan") expect(system).not.toContain(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+        else {
+          expect(system).toContain("You audit changes.")
+          expect(system).toContain(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+        }
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_RUN_MODE
+        else process.env.ALTIMATE_RUN_MODE = previous
+      }
+    }),
+  )
+}
+// altimate_change end
+// altimate_change end
+
 noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
   Effect.gen(function* () {
     const prompt = yield* SessionPrompt.Service

@@ -30,3 +30,17 @@ export function applyRunModeDefault(
   if (env["ALTIMATE_RUN_MODE"]?.trim()) return
   env["ALTIMATE_RUN_MODE"] = "1"
 }
+
+// altimate_change start — run-mode output handling is local-only
+/** Stderr line and trace error for a run that ended on a `BLOCKED:` line. */
+export const RUN_BLOCKED_MESSAGE = "run blocked: the model reported it cannot proceed (done_reason=blocked)"
+
+/**
+ * True when this `run` process owns run-mode output handling: completion-token
+ * stripping and the blocked exit. Off with ALTIMATE_RUN_MODE=0 and with --attach,
+ * whose session runs on a remote, possibly interactive, server.
+ */
+export function isLocalRunMode(opts: { runMode: boolean; attach?: boolean }): boolean {
+  return opts.runMode && !opts.attach
+}
+// altimate_change end

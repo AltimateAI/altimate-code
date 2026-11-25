@@ -1,17 +1,28 @@
 import { MessageV2 } from "./message-v2"
 import type { MessageID, SessionID } from "./schema"
+// altimate_change start — run-mode task report without the completion token
+import { stripCompletionToken } from "./termination"
+// altimate_change end
 
-export async function interruptedTaskOutput(sessionID: SessionID, parentID?: MessageID): Promise<string | undefined> {
+// altimate_change start — run mode: partial findings get the same report selection as a finished task
+export async function interruptedTaskOutput(
+  sessionID: SessionID,
+  parentID?: MessageID,
+  options: { runMode?: boolean } = {},
+): Promise<string | undefined> {
   for await (const message of MessageV2.stream(sessionID)) {
     if (message.info.role === "user") break
     if (message.info.role !== "assistant") continue
     if (parentID && message.info.parentID !== parentID) continue
-    const text = message.parts
+    const raw = message.parts
       .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored && !part.synthetic)
       .map((part) => part.text)
       .join("\n")
-      .trim()
+    // In run mode the completion token is dropped, and a bare-token reply falls through to
+    // the child's earlier report.
+    const text = (options.runMode ? stripCompletionToken(raw) : raw).trim()
     if (!text) continue
+    // altimate_change end
     return [
       `task_id: ${sessionID} (for resuming to continue this task if needed)`,
       "",
@@ -28,17 +39,33 @@ export async function interruptedTaskOutput(sessionID: SessionID, parentID?: Mes
 // The prompt's own user message is the boundary: a compaction marker, its summary and the
 // continuation turns it creates all come after it and belong to the same prompt. When that user
 // message is not found, nothing is returned, so text from an earlier prompt is never used.
-export async function lastTaskText(sessionID: SessionID, promptID: MessageID): Promise<string | undefined> {
+// In run mode the completion token is dropped, so a bare-token reply is skipped.
+export async function lastTaskText(
+  sessionID: SessionID,
+  promptID: MessageID,
+  options: { runMode?: boolean } = {},
+): Promise<string | undefined> {
   let latest: string | undefined
   for await (const message of MessageV2.stream(sessionID)) {
     if (message.info.id === promptID) return latest
     if (latest !== undefined || message.info.role !== "assistant" || message.info.summary) continue
-    const text = message.parts
+    const raw = message.parts
       .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored && !part.synthetic)
       .map((part) => part.text)
       .join("\n")
-      .trim()
+    const text = (options.runMode ? stripCompletionToken(raw) : raw).trim()
     if (text) latest = text
   }
+}
+
+/**
+ * Run-mode task report: the child's final text without the completion token. When the
+ * child's last reply is a bare token (the post-compaction nudge's acknowledgement), the
+ * report is its most recent earlier non-summary assistant text in this prompt.
+ */
+export async function runModeTaskReport(sessionID: SessionID, text: string, promptID: MessageID): Promise<string> {
+  const stripped = stripCompletionToken(text)
+  if (stripped.trim() || !text.trim()) return stripped
+  return (await lastTaskText(sessionID, promptID, { runMode: true })) ?? stripped
 }
 // altimate_change end
