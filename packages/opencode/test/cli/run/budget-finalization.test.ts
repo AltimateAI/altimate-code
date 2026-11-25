@@ -4,6 +4,9 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { RunAccounting } from "@/cli/cmd/run-accounting"
+// altimate_change start — --max-tokens shares the budget finalization path
+import { RunTokenBudget } from "@/cli/cmd/run-token-budget"
+// altimate_change end
 import { SessionTermination } from "@/session/termination"
 import { cliIt } from "../../lib/cli-process"
 import { raw, reply } from "../../lib/llm-server"
@@ -210,6 +213,180 @@ describe("budget finalization accounting", () => {
     expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
   })
 })
+
+// altimate_change start — token budget: child-session usage counts, exhaustion fires once, no flag means no change
+describe("token budget accounting", () => {
+  const root = "ses_root"
+  const stepFinish = (sessionID: string, id: string, tokens: Partial<RunTokenBudget.StepTokens>) => ({
+    type: "message.part.updated",
+    properties: { part: { id, sessionID, messageID: `${id}_msg`, type: "step-finish", reason: "tool-calls", tokens } },
+  })
+  const child = (id: string, parentID: string) => ({ type: "session.created", properties: { info: { id, parentID } } })
+
+  test("bills cache reads at a tenth and everything else at face value", () => {
+    expect(RunTokenBudget.billedTokens({ input: 100, output: 20, cache: { read: 1000, write: 30 } })).toBe(250)
+  })
+
+  test.each([0, -1, 1.5, NaN, Infinity, "100", undefined])("rejects an unenforceable limit: %p", (value) => {
+    expect(RunTokenBudget.isValidMaxTokens(value)).toBe(false)
+  })
+
+  test("a child session's usage counts toward the root's total", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 50, output: 10, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(60)
+    budget.observe(child("ses_child", root))
+    expect(budget.isDescendant("ses_child")).toBe(true)
+    expect(budget.observe(stepFinish("ses_child", "child_1", { input: 30, output: 10, cache: { read: 0, write: 0 } }))).toBe(
+      true,
+    )
+    expect(budget.total).toBe(100)
+    expect(budget.exhausted).toBe(true)
+  })
+
+  test("a grandchild linked before its parent is admitted once the chain closes", () => {
+    const budget = RunTokenBudget.create(root, 10)
+    budget.observe(child("ses_grandchild", "ses_child"))
+    expect(budget.isDescendant("ses_grandchild")).toBe(false)
+    budget.observe(child("ses_child", root))
+    expect(budget.isDescendant("ses_grandchild")).toBe(true)
+    expect(budget.observe(stepFinish("ses_grandchild", "gc_1", { input: 10, output: 0, cache: { read: 0, write: 0 } }))).toBe(
+      true,
+    )
+  })
+
+  test("a task tool part links the child before its session event arrives", () => {
+    const budget = RunTokenBudget.create(root, 10)
+    budget.observe({
+      type: "message.part.updated",
+      properties: {
+        part: { id: "task_1", sessionID: root, messageID: "m", type: "tool", tool: "task", state: { metadata: { sessionId: "ses_task" } } },
+      },
+    })
+    expect(budget.isDescendant("ses_task")).toBe(true)
+  })
+
+  test("another session's usage and a repeated step are not counted", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish("ses_other", "other_1", { input: 500, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(0)
+    budget.observe(stepFinish(root, "root_1", { input: 40, output: 0, cache: { read: 0, write: 0 } }))
+    budget.observe(stepFinish(root, "root_1", { input: 40, output: 0, cache: { read: 0, write: 0 } }))
+    expect(budget.total).toBe(40)
+  })
+
+  test("exhaustion is reported once and later steps keep counting", () => {
+    const budget = RunTokenBudget.create(root, 50)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 60, output: 0, cache: { read: 0, write: 0 } }))).toBe(true)
+    expect(budget.observe(stepFinish(root, "root_2", { input: 60, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(120)
+    expect(budget.exhausted).toBe(true)
+  })
+
+  test("without a limit nothing is ever exhausted", () => {
+    const budget = RunTokenBudget.create(root, undefined)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 1_000_000, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.exhausted).toBe(false)
+    expect(budget.limit).toBeUndefined()
+  })
+
+  test("a token abort recovers the exit status only through an answered finalization, like a time abort", () => {
+    const accounting = RunAccounting.create()
+    accounting.onStepStart("work")
+    accounting.onBudgetExhausted("time")
+    accounting.onSessionError("MessageAbortedError", "intentional token-budget abort")
+    expect(accounting.fatal).toBe(true)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
+    accounting.onStepStart("finalization")
+    accounting.onText("finalization", "The partial result.")
+    accounting.onStepFinish("finalization", "stop")
+    accounting.onPromptResult({ finish: "stop" })
+    expect(accounting.completeBudgetFinalization(true)).toBe(true)
+    expect(accounting.fatal).toBe(false)
+    expect(accounting.termination().why_harness_stopped).toBe("budget-exhausted")
+  })
+
+  test("reported usage keeps the tenth a cache read contributes instead of rounding it away", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 97, output: 3, cache: { read: 4, write: 0 } }))).toBe(true)
+    expect(RunTokenBudget.reportedTokens(budget.total)).toBe(100.4)
+    // 0.1 × 3 is 0.30000000000000004 in binary floating point; the report stays at one decimal.
+    expect(RunTokenBudget.reportedTokens(100 + 0.1 * 3)).toBe(100.3)
+    expect(RunTokenBudget.reportedTokens(110)).toBe(110)
+  })
+
+  test("reasoning tokens are billed like output and count toward the limit", () => {
+    expect(RunTokenBudget.billedTokens({ input: 10, output: 5, reasoning: 5000, cache: { read: 0, write: 0 } })).toBe(5015)
+    const budget = RunTokenBudget.create(root, 1000)
+    expect(
+      budget.observe(stepFinish(root, "root_1", { input: 10, output: 5, reasoning: 5000, cache: { read: 0, write: 0 } })),
+    ).toBe(true)
+    expect(budget.total).toBe(5015)
+    expect(budget.exhausted).toBe(true)
+  })
+
+  test("a limit reached through cache-read tenths is met exactly, not missed by float drift", () => {
+    const budget = RunTokenBudget.create(root, 81)
+    const reached = Array.from({ length: 10 }, (_, i) =>
+      budget.observe(stepFinish(root, `root_${i}`, { input: 7, output: 1, cache: { read: 1, write: 0 } })),
+    )
+    expect(reached).toEqual([...Array(9).fill(false), true])
+    expect(budget.total).toBe(81)
+    expect(RunTokenBudget.reportedTokens(budget.total)).toBe(81)
+  })
+
+  test("a step from a session linked only afterwards is held and counted on admission", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish("ses_child", "child_1", { input: 120, output: 0, cache: { read: 0, write: 0 } }))).toBe(
+      false,
+    )
+    expect(budget.total).toBe(0)
+    expect(budget.observe(child("ses_child", root))).toBe(true)
+    expect(budget.total).toBe(120)
+    // The held step is counted once, even if it is reported again.
+    budget.observe(stepFinish("ses_child", "child_1", { input: 120, output: 0, cache: { read: 0, write: 0 } }))
+    expect(budget.total).toBe(120)
+  })
+
+  test("held steps are bounded and a session that is never linked never counts", () => {
+    const budget = RunTokenBudget.create(root, undefined)
+    for (let i = 0; i <= RunTokenBudget.MAX_PENDING_STEPS; i++)
+      budget.observe(stepFinish("ses_late", `late_${i}`, { input: 1, output: 0, cache: { read: 0, write: 0 } }))
+    budget.observe(stepFinish("ses_other", "other_1", { input: 500, output: 0, cache: { read: 0, write: 0 } }))
+    budget.observe(child("ses_late", root))
+    expect(budget.total).toBe(RunTokenBudget.MAX_PENDING_STEPS - 1)
+  })
+
+  test("a requested task_id is not linked; only the session the task tool resolved is", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    budget.observe({
+      type: "message.part.updated",
+      properties: {
+        part: { id: "task_1", sessionID: root, messageID: "m", type: "tool", tool: "task", state: { input: { task_id: "ses_unrelated" } } },
+      },
+    })
+    expect(budget.isDescendant("ses_unrelated")).toBe(false)
+    expect(budget.observe(stepFinish("ses_unrelated", "u_1", { input: 500, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(0)
+    budget.observe({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "task_1",
+          sessionID: root,
+          messageID: "m",
+          type: "tool",
+          tool: "task",
+          state: { input: { task_id: "ses_unrelated" }, metadata: { sessionId: "ses_new_child" } },
+        },
+      },
+    })
+    expect(budget.isDescendant("ses_new_child")).toBe(true)
+    expect(budget.isDescendant("ses_unrelated")).toBe(false)
+  })
+})
+// altimate_change end
 
 function isFinalization(body: Record<string, unknown>) {
   const messages = body.messages as { role?: string; content?: unknown }[] | undefined
@@ -754,13 +931,16 @@ describe("opencode run: budget finalization subprocess", () => {
   )
   // altimate_change end
   // altimate_change start — exhausted budgets must disable execution even if the model calls a tool
-  for (const budget of ["turn", "time"] as const) {
+  for (const budget of ["turn", "time", "token"] as const) {
     cliIt.concurrent(
       `${budget}-budget finalization omits tools and rejects a model-requested write`,
       ({ llm, opencode, home }) =>
         Effect.gen(function* () {
           const forbidden = path.join(home, "after-budget.txt")
-          yield* llm.tool("glob", { pattern: "*.sql", path: home })
+          // The token budget is reached by this one step's usage: 80 + 30 billed against a limit of 100.
+          if (budget === "token") {
+            yield* llm.push(reply().tool("glob", { pattern: "*.sql", path: home }).usage({ input: 80, output: 30 }).item())
+          } else yield* llm.tool("glob", { pattern: "*.sql", path: home })
           yield* llm.toolMatch(({ body }) => isFinalization(body), "write", {
             filePath: forbidden,
             content: "work continued after the hard budget",
@@ -769,7 +949,8 @@ describe("opencode run: budget finalization subprocess", () => {
           if (budget === "time") yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
           const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
             format: "json",
-            extraArgs: budget === "turn" ? ["--max-turns", "1"] : ["--time-budget", "5"],
+            extraArgs:
+              budget === "turn" ? ["--max-turns", "1"] : budget === "time" ? ["--time-budget", "5"] : ["--max-tokens", "100"],
             env: {
               OPENCODE_CONFIG_CONTENT: JSON.stringify({
                 ...testProviderConfig(llm.url),
@@ -783,7 +964,18 @@ describe("opencode run: budget finalization subprocess", () => {
           const events = opencode.parseJsonEvents(result.stdout)
           const exhausted = events.filter((event) => event.type === "budget_exhausted")
           expect(exhausted).toHaveLength(1)
-          expect(exhausted[0]).toMatchObject(budget === "turn" ? { limit: 1 } : { limit_seconds: 5 })
+          expect(exhausted[0]).toMatchObject(
+            budget === "turn" ? { limit: 1 } : budget === "time" ? { limit_seconds: 5 } : { limit_tokens: 100, tokens_used: 110 },
+          )
+          // altimate_change start — the token budget is reported where the time budget is
+          if (budget === "token") {
+            expect(events.filter((event) => event.type === "termination")).toMatchObject([
+              { why_harness_stopped: "budget-exhausted", max_tokens: 100, tokens_used: 110, token_budget_exhausted: true },
+            ])
+          } else {
+            expect(events.filter((event) => event.type === "termination")[0]).not.toHaveProperty("max_tokens")
+          }
+          // altimate_change end
           expect(events.filter((event) => event.type === "tool_use").map((event) => event.part)).toContainEqual(
             expect.objectContaining({ tool: "glob", state: expect.objectContaining({ status: "completed" }) }),
           )
@@ -794,6 +986,41 @@ describe("opencode run: budget finalization subprocess", () => {
       90_000,
     )
   }
+  // altimate_change end
+
+  // altimate_change start — a token limit first crossed by a finalization step is still reported once
+  cliIt.concurrent(
+    "a token limit first crossed during a turn-budget finalization emits budget_exhausted and warns once",
+    ({ llm, opencode, home }) =>
+      Effect.gen(function* () {
+        // The work step stays under the limit (15 of 100); the finalization step takes it to 125.
+        yield* llm.push(reply().tool("glob", { pattern: "*.sql", path: home }).usage({ input: 10, output: 5 }).item())
+        yield* llm.textMatch(({ body }) => isFinalization(body), "The available evidence supports this limited answer.", {
+          usage: { input: 80, output: 30 },
+        })
+        yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
+        const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
+          format: "json",
+          extraArgs: ["--max-turns", "1", "--max-tokens", "100"],
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...testProviderConfig(llm.url), permission: { glob: "allow" } }),
+          },
+          timeoutMs: 60_000,
+          bunRun: true,
+        })
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([
+          { limit: 1 },
+          { limit_tokens: 100, tokens_used: 125 },
+        ])
+        expect(result.stderr.match(/reached 100 token limit/g) ?? []).toHaveLength(1)
+        expect(events.filter((event) => event.type === "termination")).toMatchObject([
+          { max_tokens: 100, tokens_used: 125, token_budget_exhausted: true },
+        ])
+        expect((yield* llm.inputs).filter(isFinalization)).toHaveLength(1)
+      }),
+    90_000,
+  )
   // altimate_change end
 
   cliIt.concurrent(
@@ -1100,4 +1327,61 @@ for (const finalAnswer of ["The available evidence supports this limited answer.
     60_000,
   )
 }
+// altimate_change end
+
+// altimate_change start — a reached token budget finalizes at the downgraded effort, like a hard time deadline
+cliIt.live(
+  "token-budget finalization uses low effort like the hard time deadline",
+  ({ llm, opencode, home }) =>
+    Effect.gen(function* () {
+      const config = testProviderConfig(llm.url)
+      const model = config.provider.test.models["test-model"]
+      // This one step's usage, 80 + 30 billed, reaches the limit of 100.
+      yield* llm.push(reply().tool("glob", { pattern: "*.sql", path: home }).usage({ input: 80, output: 30 }).item())
+      yield* llm.textMatch(({ body }) => isFinalization(body), "The available evidence supports this limited answer.")
+      yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
+      const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
+        format: "json",
+        extraArgs: ["--max-tokens", "100", "--variant", "high"],
+        bunRun: true,
+        env: {
+          ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE: "1",
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            ...config,
+            permission: { glob: "allow" },
+            provider: {
+              test: {
+                ...config.provider.test,
+                models: {
+                  "test-model": {
+                    ...model,
+                    id: "o3",
+                    reasoning: true,
+                    variants: { high: { reasoningEffort: "high" }, low: { reasoningEffort: "low" } },
+                  },
+                },
+              },
+            },
+          }),
+        },
+        timeoutMs: 60_000,
+      })
+      const requests = (yield* llm.inputs).filter(
+        (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+      )
+      expect(requests[0]?.reasoning_effort).toBe("high")
+      const finalizations = requests.filter(isFinalization)
+      expect(finalizations).toHaveLength(1)
+      expect(finalizations.map((body) => body.reasoning_effort)).toEqual(["low"])
+      opencode.expectExit(result, 0)
+      const events = opencode.parseJsonEvents(result.stdout)
+      expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([
+        { limit_tokens: 100, tokens_used: 110 },
+      ])
+      expect(events.filter((event) => event.type === "termination")).toMatchObject([
+        { why_harness_stopped: "budget-exhausted", max_tokens: 100, token_budget_exhausted: true },
+      ])
+    }),
+  60_000,
+)
 // altimate_change end
