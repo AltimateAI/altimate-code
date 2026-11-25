@@ -29,7 +29,7 @@ beforeEach(() => {
       altimateApiKey: "gateway-key",
     } as any),
   )
-  spies.push(spyOn(State, "resolveBinding").mockResolvedValue(binding as any))
+  spies.push(spyOn(State, "readLocalBinding").mockResolvedValue(binding as any))
 })
 afterEach(() => {
   globalThis.fetch = realFetch
@@ -81,7 +81,7 @@ describe("WorkspaceByok", () => {
   })
 
   test("unlinked project makes no request", async () => {
-    ;(State.resolveBinding as any).mockResolvedValue(null)
+    ;(State.readLocalBinding as any).mockResolvedValue(null)
     const f = respond(200, KEYS)
     expect(await WorkspaceByok.resolve("/p")).toEqual({})
     expect(f).not.toHaveBeenCalled()

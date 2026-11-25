@@ -25,7 +25,7 @@ function withWorkspaceKeys(keys: Record<string, string>) {
     } as any),
   )
   spies.push(spyOn(WorkspaceApi, "captureCredentials").mockResolvedValue({ url: "https://x.test", instance: "t", apiKey: "k" }))
-  spies.push(spyOn(State, "resolveBinding").mockResolvedValue({ datamateId: 7 } as any))
+  spies.push(spyOn(State, "readLocalBinding").mockResolvedValue({ datamateId: 7 } as any))
   spies.push(spyOn(WorkspaceApi, "getModelKeys").mockResolvedValue(keys))
 }
 
