@@ -355,6 +355,7 @@ describe("postGitHubReview", () => {
       reviews?: Array<{ body: string; user?: { login: string } }>
       listFails?: boolean
       files?: Array<{ filename: string; patch?: string }>
+      reviewComments?: Array<{ body: string; user?: { login: string } }>
       createReview?: (call: number) => unknown
     } = {},
   ) {
@@ -371,7 +372,7 @@ describe("postGitHubReview", () => {
           updateComment: async () => ({ data: { id: 1, user: { login: BOT } } }),
         },
         pulls: {
-          listReviewComments: opts.listFails ? fail : async () => [],
+          listReviewComments: opts.listFails ? fail : async () => opts.reviewComments ?? [],
           listReviews: opts.listFails ? fail : async () => opts.reviews ?? [],
           listFiles: opts.listFails ? fail : async () => opts.files ?? [{ filename: "models/m.sql", patch: PATCH }],
           get: async () => ({ data: { head: { sha: "abc" } } }),
@@ -452,6 +453,20 @@ describe("postGitHubReview", () => {
       "models/m.sql:3",
       "models/big.sql:900",
     ])
+  })
+
+  test("a finding marker counts only in this bot's own review comments", async () => {
+    const env = buildEnvelope({ findings: [finding({ startLine: 3, title: "m: a" })], tier: "lite", mode: "comment" })
+    const [first] = inlineComments(env, new Set(), undefined)
+    // Another account posting (or quoting) the marker does not suppress the finding.
+    const foreign = fakeOcto({ reviewComments: [{ body: first.body, user: { login: "pr-author" } }] })
+    const r = await postGitHubReview(env, target, foreign.octo)
+    expect(foreign.reviewCalls[0].comments.map((c: { line: number }) => c.line)).toEqual([3])
+    expect(r.inlineSkippedAsPosted).toBe(0)
+    // The bot's own earlier comment does.
+    const own = fakeOcto({ reviewComments: [{ body: first.body, user: { login: BOT } }] })
+    const again = await postGitHubReview(env, target, own.octo)
+    expect(again.inlineSkippedAsPosted).toBe(1)
   })
 
   test("when listing fails, everything is posted and nothing is skipped", async () => {

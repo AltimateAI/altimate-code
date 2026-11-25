@@ -114,7 +114,9 @@ export async function postGitHubReview(
       octo.paginate(octo.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 }),
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
-    posted = postedFindingIds(reviewComments.map((c) => c.body))
+    // Only this bot's own comments count: a marker anyone else posts (or quotes)
+    // must not suppress a finding. Unknown bot login: dedup nothing.
+    posted = postedFindingIds(reviewComments.filter((c) => !!botLogin && c.user?.login === botLogin).map((c) => c.body))
     // Reviews are listed oldest first; only this bot's own latest review counts.
     const mine = botLogin
       ? reviews.filter((r) => r.user?.login === botLogin && BOT_REVIEW_RE.test(r.body ?? ""))
@@ -135,6 +137,8 @@ export async function postGitHubReview(
     /* fall back to the positioning retry below */
   }
   const comments = inlineComments(env, posted, commentable)
+  // Both calls use the same `commentable`, so the difference is exactly the
+  // comments skipped because this bot already posted them.
   result.inlineSkippedAsPosted = inlineComments(env, new Set(), commentable).length - comments.length
 
   // Nothing new inline, not blocking, and this bot's latest review already says
