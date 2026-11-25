@@ -400,6 +400,22 @@ export function describeToolError(raw: string) {
   }
 }
 
+/**
+ * Message prefixes of the permission system's own outcomes (PermissionNext.DeniedError,
+ * RejectedError, CorrectedError). Those are already reported by the `permission_denied`
+ * event, so they are not tool failures. Other permission-class errors (EACCES, HTTP 403) are.
+ */
+const PERMISSION_OUTCOME_PREFIXES = [
+  "The user has specified a rule which prevents you from using this specific tool call.",
+  "The user rejected permission to use this specific tool call",
+]
+
+/** True for a tool error that should produce an error_fingerprint record. */
+export function shouldFingerprintToolError(raw: string): boolean {
+  const message = raw.startsWith("Error: ") ? raw.slice("Error: ".length) : raw
+  return !PERMISSION_OUTCOME_PREFIXES.some((prefix) => message.startsWith(prefix))
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
