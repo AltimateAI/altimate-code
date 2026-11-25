@@ -14,7 +14,23 @@ const log = Log.create({ service: "permission" })
 // An alias match can never relax a stricter authored match.
 const STRICTNESS = { allow: 0, ask: 1, deny: 2 } as const
 
+// altimate_change start — upstream_fix: match file permission rules without case on macOS (anomalyco/opencode#64626)
+// macOS volumes ignore case by default, so `.OPENCODE/x` opens `.opencode/x` and `Secrets.ENV` is
+// `secrets.env`. Rules for file paths must match those spellings too. Windows already matches without case.
+const PATH_PERMISSIONS = ["external_directory", "sensitive_write", "read", "edit"]
+
+export function ignoresCase(permission: string, platform: NodeJS.Platform = process.platform) {
+  return platform === "darwin" && PATH_PERMISSIONS.includes(permission)
+}
+// altimate_change end
+
 function matchPattern(permission: string, input: string, pattern: string) {
+  // altimate_change start — upstream_fix: match file permission rules without case on macOS (anomalyco/opencode#64626)
+  if (ignoresCase(permission)) {
+    input = input.toLowerCase()
+    pattern = pattern.toLowerCase()
+  }
+  // altimate_change end
   return permission === "external_directory" || permission === "sensitive_write"
     ? Wildcard.matchPath(input, pattern)
     : Wildcard.match(input, pattern)
