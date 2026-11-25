@@ -14,18 +14,21 @@ export type UsageModel = { cost?: Provider.Model["cost"]; api?: Pick<Provider.Mo
 export async function accountUsage(model: UsageModel, usage: GenerateUsage, metadata = usage.providerMetadata): Promise<UsageSummary> {
   // Loading the session lazily avoids a cycle through the learning hooks during startup.
   const { Session } = await import("@/session")
+  const sdkUsage = {
+    // Accounted callbacks retain original counts so import estimates can fill missing values
+    // without normalizing Anthropic's cache counters a second time.
+    inputTokens: usage.rawUsage?.inputTokens ?? usage.inputTokens,
+    outputTokens: usage.rawUsage?.outputTokens ?? usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    reasoningTokens: usage.reasoningTokens ?? usage.outputTokenDetails?.reasoningTokens,
+    cachedInputTokens: usage.cachedInputTokens ?? usage.inputTokenDetails?.cacheReadTokens,
+    // The SDK's cache split; without it an inclusive input count is billed as uncached.
+    inputTokenDetails: usage.inputTokenDetails,
+  }
   const accounted = Session.getUsage({
     // Session accounting only reads cost metadata and the provider's SDK name.
     model: { ...model, api: model.api ?? { npm: "" } } as Provider.Model,
-    usage: {
-      // Accounted callbacks retain original counts so import estimates can fill missing values
-      // without normalizing Anthropic's cache counters a second time.
-      inputTokens: usage.rawUsage?.inputTokens ?? usage.inputTokens,
-      outputTokens: usage.rawUsage?.outputTokens ?? usage.outputTokens,
-      totalTokens: usage.totalTokens,
-      reasoningTokens: usage.reasoningTokens ?? usage.outputTokenDetails?.reasoningTokens,
-      cachedInputTokens: usage.cachedInputTokens ?? usage.inputTokenDetails?.cacheReadTokens,
-    },
+    usage: sdkUsage,
     metadata,
   })
   return {

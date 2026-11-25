@@ -123,6 +123,83 @@ describe("Session.getUsage — OpenAI-style (inclusive input)", () => {
   })
 })
 
+describe("Session.getUsage — AI SDK v6 usage (inclusive input with inputTokenDetails)", () => {
+  // Shape @ai-sdk/anthropic 3.x + ai 6 deliver for one cached agent step.
+  const opusPricing = { input: 4, output: 20, cache: { read: 0.2, write: 5 } }
+  const v6Step = {
+    inputTokens: 31_767,
+    inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 29_128, cacheWriteTokens: 2_635 },
+    outputTokens: 256,
+    cachedInputTokens: 29_128,
+  }
+
+  test("Anthropic: cached tokens are not also billed as uncached input", () => {
+    const result = Session.getUsage({
+      model: { ...fakeModel("@ai-sdk/anthropic"), cost: opusPricing },
+      usage: v6Step as any,
+      metadata: { anthropic: { cacheCreationInputTokens: 2_635 } } as any,
+    })
+    expect(result.tokens.input).toBe(4)
+    expect(result.tokens.cache.read).toBe(29_128)
+    expect(result.tokens.cache.write).toBe(2_635)
+    expect(result.tokens.inputTotal).toBe(31_767)
+    expect(result.tokens.total).toBe(31_767 + 256)
+    // 4*4 + 256*20 + 29128*0.2 + 2635*5 per million; the old path charged all 31,767 at $4/M (≈ $0.151).
+    expect(result.cost).toBeCloseTo(0.0241366, 7)
+  })
+
+  test("Bedrock: same inclusive shape is split the same way", () => {
+    const result = Session.getUsage({
+      model: fakeModel("@ai-sdk/amazon-bedrock"),
+      usage: v6Step as any,
+      metadata: { bedrock: { usage: { cacheWriteInputTokens: 2_635 } } } as any,
+    })
+    expect(result.tokens.input).toBe(4)
+    expect(result.tokens.inputTotal).toBe(31_767)
+  })
+
+  test("cache writes count toward the over-200K price tier", () => {
+    const tiered = { input: 1, output: 1, cache: { read: 0, write: 1 }, experimentalOver200K: { input: 2, output: 2, cache: { read: 0, write: 2 } } }
+    const result = Session.getUsage({
+      model: { ...fakeModel("@ai-sdk/anthropic"), cost: tiered },
+      usage: { inputTokens: 210_000, inputTokenDetails: { noCacheTokens: 10_000, cacheReadTokens: 0, cacheWriteTokens: 200_000 }, outputTokens: 0 } as any,
+      metadata: { anthropic: { cacheCreationInputTokens: 200_000 } } as any,
+    })
+    // 10K uncached + 200K cache write at the over-200K rates of $2/M each.
+    expect(result.cost).toBeCloseTo(0.42, 10)
+  })
+
+  test("full cache hit reports zero uncached input", () => {
+    const result = Session.getUsage({
+      model: fakeModel("@ai-sdk/anthropic"),
+      usage: { inputTokens: 8_000, inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 8_000, cacheWriteTokens: 0 }, outputTokens: 10 } as any,
+      metadata: { anthropic: { cacheCreationInputTokens: 0 } } as any,
+    })
+    expect(result.tokens.input).toBe(0)
+    expect(result.tokens.inputTotal).toBe(8_000)
+  })
+
+  test("OpenAI v6 shape without cache write matches the legacy subtraction", () => {
+    const result = Session.getUsage({
+      model: fakeModel("@ai-sdk/openai"),
+      usage: { inputTokens: 5_000, inputTokenDetails: { noCacheTokens: 3_000, cacheReadTokens: 2_000 }, outputTokens: 10, totalTokens: 5_010 } as any,
+    })
+    expect(result.tokens.input).toBe(3_000)
+    expect(result.tokens.cache.write).toBe(0)
+    expect(result.tokens.inputTotal).toBe(5_000)
+  })
+
+  test("cache write comes from inputTokenDetails when provider metadata lacks it", () => {
+    const result = Session.getUsage({
+      model: fakeModel("@ai-sdk/anthropic"),
+      usage: v6Step as any,
+      metadata: { anthropic: {} } as any,
+    })
+    expect(result.tokens.cache.write).toBe(2_635)
+    expect(result.tokens.input).toBe(4)
+  })
+})
+
 describe("Session.getUsage — provider edge cases", () => {
   test("@ai-sdk/google-vertex/anthropic uses Anthropic-style accounting (per total branch)", () => {
     // The `total` computation at session/index.ts:828 includes this NPM as
