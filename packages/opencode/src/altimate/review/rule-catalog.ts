@@ -182,8 +182,9 @@ export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColu
 
 // One identifier segment: bare, double-quoted or backtick-quoted.
 const SEGMENT = String.raw`(?:[A-Za-z_][\w$]*|"[^"]+"|` + "`[^`]+`)"
-// A column reference, optionally table-qualified (`c.ssn`, `"c"."ssn"`); group 1 is the column.
-const COLUMN_REF = String.raw`(?:${SEGMENT}\s*\.\s*)*(${SEGMENT})`
+// A column reference, optionally table-qualified (`c.ssn`, `"c"."ssn"`); group 1 is
+// the qualifier's last segment (the table or its alias), group 2 the column.
+const COLUMN_REF = String.raw`(?:(?:${SEGMENT}\s*\.\s*)*(${SEGMENT})\s*\.\s*)?(${SEGMENT})`
 // Select-item expressions that expose a column RAW: a bare reference, or one only
 // cast to a type (`cast(c.ssn as varchar)`, `c.ssn::varchar(20)`).
 const RAW_COLUMN_EXPRS = [
@@ -212,6 +213,8 @@ export interface SelectItem {
   name?: string
   /** The column the item exposes RAW (bare or qualified reference, or only cast). */
   rawColumn?: string
+  /** The qualifier of `rawColumn` (`c` in `c.ssn`): a FROM/JOIN alias or table name. */
+  rawQualifier?: string
   /** Whitespace-normalised item text, for comparing one item across base and head. */
   text: string
   /** `final` for the outermost query, the CTE name for a CTE body, `<parent>>sub<n>` for a nested query. */
@@ -241,7 +244,7 @@ function maskSql(sql: string): string {
 
 const isWordChar = (c: string | undefined) => !!c && /[\w$."`]/.test(c)
 
-function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "text"> {
+function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text"> {
   const text = raw
     .replace(/\s+/g, " ")
     .replace(/\(\s+/g, "(")
@@ -254,19 +257,43 @@ function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "tex
   const implicit = explicit ? null : IMPLICIT_ALIAS.exec(text)
   if (explicit) [, expr, alias] = explicit
   else if (implicit && !NOT_AN_ALIAS.has(unquote(implicit[2]))) [, expr, alias] = implicit
-  const column = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)?.[1]).find(Boolean)
-  const rawColumn = column ? unquote(column) : undefined
-  return { name: alias ? unquote(alias) : rawColumn, rawColumn, text }
+  const ref = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
+  const rawColumn = ref ? unquote(ref[2]) : undefined
+  const rawQualifier = ref?.[1] ? unquote(ref[1]) : undefined
+  return { name: alias ? unquote(alias) : rawColumn, rawColumn, rawQualifier, text }
 }
 
 // Words that end a FROM clause's table list at its own nesting level.
 const FROM_LIST_END = /^(where|group|order|limit|qualify|having|union|intersect|except|minus|window|fetch|offset|on|using)\b/i
 const SET_OPERATOR = /^(union|intersect|except|minus)\b/i
+// Words after a FROM/JOIN source that are not its alias.
+const NOT_A_SOURCE_ALIAS = new Set(
+  "on using where join left right inner outer full cross natural group order limit qualify having union intersect except minus window fetch offset lateral pivot unpivot tablesample sample for at before changes match_recognize with".split(
+    " ",
+  ),
+)
+
+/** One FROM/JOIN source of a select: a table (last name segment), a CTE, or a
+ *  FROM subquery (named by its scope), with the alias it is read under. */
+interface Source {
+  name: string
+  alias?: string
+}
 
 interface ParsedSelects {
   items: SelectItem[]
-  /** Per `scope#branch`, the table or CTE names its FROM / JOIN clauses read. */
-  sources: Map<string, string[]>
+  /** Per `scope#branch`, the sources its FROM / JOIN clauses read. */
+  sources: Map<string, Source[]>
+}
+
+/** Offset of the `)` closing the `(` at `open` in masked SQL, or the end. */
+function closingParen(s: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === "(") depth++
+    else if (s[i] === ")" && --depth === 0) return i
+  }
+  return s.length
 }
 
 function parseSelects(sql: string): ParsedSelects {
@@ -284,7 +311,11 @@ function parseSelects(sql: string): ParsedSelects {
     return lo + 1
   }
   const items: SelectItem[] = []
-  const sources = new Map<string, string[]>()
+  const sources = new Map<string, Source[]>()
+  // The scope each nested query's `(` opens, so a FROM subquery is a named source.
+  const parenScope = new Map<number, string>()
+  // Each select's scope, branch and the offset its select list ends at.
+  const selects: Array<{ scope: string; branch: number; end: number }> = []
   const scopes: string[] = ["final"]
   const branches = new Map<string, number>()
   const cteHead = new RegExp(String.raw`(${SEGMENT})\s+as\s*(?:(?:not\s+)?materialized\s*)?$`, "i")
@@ -298,8 +329,10 @@ function parseSelects(sql: string): ParsedSelects {
       // A CTE body is named by its CTE; a nested query gets its own scope; any
       // other parenthesis (a call, a grouping) stays in its parent's scope.
       if (cte && !/^as$/i.test(cte[1])) scopes.push(unquote(cte[1]))
-      else if (/^[\s(]*select\b/i.test(s.slice(i + 1, i + 200))) scopes.push(`${parent}>sub${++nested}`)
-      else scopes.push(parent)
+      else if (/^[\s(]*select\b/i.test(s.slice(i + 1, i + 200))) {
+        scopes.push(`${parent}>sub${++nested}`)
+        parenScope.set(i, scopes[scopes.length - 1])
+      } else scopes.push(parent)
       continue
     }
     if (c === ")") {
@@ -344,11 +377,16 @@ function parseSelects(sql: string): ParsedSelects {
         break
       }
     }
-    // Tables read at this select's own level: the name after `from`, `join`, or a
-    // `,` inside a FROM list, up to the end of the select (`)`, `;`, a set operator).
-    const read: string[] = []
+    selects.push({ scope, branch, end })
+  }
+  // Sources read at each select's own level: the table, CTE or subquery after
+  // `from`, `join`, or a `,` inside a FROM list, with its alias, up to the end of
+  // the select (`)`, `;`, a set operator).
+  const aliasRe = new RegExp(String.raw`^\s+(?:as\s+)?(${SEGMENT})`, "i")
+  for (const { scope, branch, end } of selects) {
+    const read: Source[] = []
     let inFrom = false
-    depth = 0
+    let depth = 0
     for (let j = end; j < s.length; j++) {
       const d = s[j]
       if (depth === 0 && (d === ")" || d === ";")) break
@@ -360,8 +398,28 @@ function parseSelects(sql: string): ParsedSelects {
       const kw = boundary ? /^(from|join)\b/i.exec(s.slice(j, j + 5)) : null
       if (kw || (inFrom && d === ",")) {
         const after = j + (kw ? kw[0].length : 1)
-        const ref = tableRef.exec(s.slice(after, after + 300))
-        if (ref) read.push(unquote(ref[1].split(".").pop()!.trim()))
+        const lead = after + (/^\s*/.exec(s.slice(after))?.[0].length ?? 0)
+        let name: string | undefined
+        let rest = lead
+        if (s[lead] === "(") {
+          // A FROM subquery is a source under its alias; any other parenthesis
+          // (a parenthesised join) names no source here.
+          name = parenScope.get(lead)
+          rest = closingParen(s, lead) + 1
+        } else {
+          const ref = tableRef.exec(s.slice(after, after + 300))
+          if (ref) {
+            const last = ref[1].split(".").pop()!.trim()
+            const at = after + ref[0].length - last.length
+            // A Jinja `{{ ref('x') }}` is masked to underscores: name it by its source text.
+            name = /^_+$/.test(last) ? sql.slice(at, at + last.length).replace(/\s+/g, "").toLowerCase() : unquote(last)
+            rest = after + ref[0].length
+          }
+        }
+        if (name) {
+          const alias = aliasRe.exec(s.slice(rest, rest + 200))?.[1]
+          read.push(alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias)) ? { name, alias: unquote(alias) } : { name })
+        }
         inFrom = true
         j = after - 1
       } else if (boundary && FROM_LIST_END.test(s.slice(j, j + 10))) inFrom = false
@@ -383,67 +441,142 @@ export function selectItems(sql: string): SelectItem[] {
 
 const STAR = new RegExp(String.raw`^(?:${SEGMENT}\.)*\*$`)
 
+/** The model's final output, as `finalOutputs` resolves it. */
+export interface FinalOutputs {
+  /** Per output name, the `source.column` refs it exposes RAW (see `rawColumnExposures`). */
+  raw: Map<string, Set<string>>
+  /** Every output name the final projection resolves. */
+  names: Set<string>
+  /** Per output name, a signature of how it is computed: the item text plus the
+   *  full text of every CTE or subquery its select reads. Equal signatures on two
+   *  sides mean the name is computed the same way. */
+  signatures: Map<string, Set<string>>
+}
+
+interface ScopeOutputs extends FinalOutputs {
+  /** `*` items, whose columns pass through unnamed (`select * from customers`). */
+  stars: Array<{ branch: number; qualifier?: string }>
+  /** Every item's text, and that of every scope it reads. */
+  body: string
+}
+
 /**
  * Per output name of the model (its FINAL projection, never a CTE's or a
  * nested query's own aliases), the source columns it exposes RAW under that
- * name (`c.ssn as tax_ref` → `tax_ref: {ssn}`, bare `ssn` → `ssn: {ssn}`).
- * A final item that reads a CTE takes the CTE's exposure for that column
- * (`select contact from b` with `b` = `select email as contact` → `contact:
- * {email}`), and `*` over CTEs takes all of theirs. A later set-operation
- * branch takes the first branch's name at the same position. An item that
- * wraps the column in any other function or expression (`sha2(c.ssn)`,
- * `left(c.ssn, 4)`, `case …`, `a || b`) exposes nothing raw and is left out.
+ * name, each as `source.column` where the source is the table (last name
+ * segment) the column is read from: `c.ssn as tax_ref` with `customers c` →
+ * `tax_ref: {customers.ssn}`, so the same column name from another table
+ * (`s.ssn` with `spouses s`) is a different exposure. A qualifier resolves
+ * through its own FROM/JOIN source only; a column read from a CTE or a FROM
+ * subquery takes that scope's exposure for it (masked there → nothing raw), and
+ * `*` over them takes all of theirs. An unqualified column resolves through the
+ * CTEs/subqueries that output it, else the single table read (several tables →
+ * one combined `a|b.column` ref). A qualifier that matches no source gets a ref
+ * that matches nothing on the other side. A later set-operation branch takes the
+ * first branch's name at the same position. An item that wraps the column in any
+ * other function or expression (`sha2(c.ssn)`, `left(c.ssn, 4)`, `case …`,
+ * `a || b`) exposes nothing raw and is left out.
  */
 export function rawColumnExposures(sql: string): Map<string, Set<string>> {
   return finalOutputs(sql).raw
 }
 
-/** The model's final output: every name it resolves (`names`) and, per name, the
- *  source columns exposed raw under it (`raw`, as `rawColumnExposures`). */
-export function finalOutputs(sql: string): { raw: Map<string, Set<string>>; names: Set<string> } {
+let unresolvedRefs = 0
+
+/** The model's final output: every name it resolves, the source columns each
+ *  exposes raw (as `rawColumnExposures`), and how each is computed. */
+export function finalOutputs(sql: string): FinalOutputs {
   const { items, sources } = parseSelects(sql)
   const byScope = new Map<string, SelectItem[]>()
-  for (const item of items) byScope.set(item.scope, [...(byScope.get(item.scope) ?? []), item])
-  const memo = new Map<string, { raw: Map<string, Set<string>>; names: Set<string> }>()
-  const resolve = (scope: string, seen: Set<string>) => {
+  for (const item of items) {
+    const list = byScope.get(item.scope)
+    if (list) list.push(item)
+    else byScope.set(item.scope, [item])
+  }
+  // A ref no source explains: unique, so it is never "already exposed".
+  const unresolved = (col: string) => new Set([`?${++unresolvedRefs}.${col}`])
+  const union = (sets: Iterable<Set<string>>) => {
+    const out = new Set<string>()
+    for (const set of sets) for (const x of set) out.add(x)
+    return out
+  }
+  const memo = new Map<string, ScopeOutputs>()
+  const isDerived = (src: Source, scope: string, seen: Set<string>) =>
+    src.name !== scope && byScope.has(src.name) && !seen.has(src.name)
+  // The `source.column` refs a column read in `scope#branch` resolves to.
+  const resolveRef = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>) => {
+    const srcs = sources.get(`${scope}#${branch}`) ?? []
+    const inner = new Set([...seen, scope])
+    const fromSource = (src: Source): Set<string> => {
+      if (!isDerived(src, scope, seen)) return byScope.has(src.name) ? unresolved(col) : new Set([`${src.name}.${col}`])
+      const out = resolve(src.name, inner)
+      if (out.names.has(col)) return out.raw.get(col) ?? new Set()
+      if (out.stars.length) return union(out.stars.map((st) => resolveRef(src.name, st.branch, st.qualifier, col, inner)))
+      return unresolved(col)
+    }
+    if (qualifier) {
+      const src =
+        srcs.find((x) => x.alias === qualifier) ??
+        srcs.find((x) => !x.alias && x.name === qualifier) ??
+        srcs.find((x) => x.name === qualifier)
+      return src ? fromSource(src) : unresolved(col)
+    }
+    const named = srcs.filter((x) => isDerived(x, scope, seen) && resolve(x.name, inner).names.has(col))
+    if (named.length) return union(named.map(fromSource))
+    const open = srcs.filter((x) =>
+      isDerived(x, scope, seen) ? resolve(x.name, inner).stars.length > 0 : !byScope.has(x.name),
+    )
+    if (open.length === 1) return fromSource(open[0])
+    if (open.length > 1) return new Set([`${[...new Set(open.map((x) => x.name))].sort().join("|")}.${col}`])
+    return unresolved(col)
+  }
+  const resolve = (scope: string, seen: Set<string>): ScopeOutputs => {
     const cached = memo.get(scope)
     if (cached) return cached
+    const inner = new Set([...seen, scope])
     const raw = new Map<string, Set<string>>()
     const names = new Set<string>()
-    const add = (name: string, cols: Iterable<string>) => {
-      const set = raw.get(name) ?? new Set<string>()
-      for (const col of cols) set.add(col)
-      raw.set(name, set)
+    const signatures = new Map<string, Set<string>>()
+    const stars: ScopeOutputs["stars"] = []
+    const addTo = (map: Map<string, Set<string>>, name: string, values: Iterable<string>) => {
+      const set = map.get(name) ?? new Set<string>()
+      for (const v of values) set.add(v)
+      map.set(name, set)
     }
     const scopeItems = byScope.get(scope) ?? []
     const firstNames = new Map(scopeItems.filter((i) => i.branch === 0).map((i) => [i.position, i.name]))
+    const readBodies = new Set<string>()
     for (const item of scopeItems) {
-      const ctes = (sources.get(`${scope}#${item.branch}`) ?? [])
-        .filter((src) => src !== scope && byScope.has(src) && !seen.has(src))
-        .map((src) => resolve(src, new Set([...seen, scope])))
+      const derived = (sources.get(`${scope}#${item.branch}`) ?? []).filter((src) => isDerived(src, scope, seen))
+      const bodies = derived.map((src) => resolve(src.name, inner).body).sort()
+      for (const b of bodies) readBodies.add(b)
       if (STAR.test(item.text)) {
-        for (const cte of ctes) {
-          for (const n of cte.names) names.add(n)
-          for (const [n, cols] of cte.raw) add(n, cols)
+        const qualifier = /([^.]+)\.\*$/.exec(item.text)?.[1]
+        const q = qualifier ? unquote(qualifier) : undefined
+        stars.push({ branch: item.branch, qualifier: q })
+        for (const src of derived) {
+          if (q && src.alias !== q && src.name !== q) continue
+          const out = resolve(src.name, inner)
+          for (const n of out.names) names.add(n)
+          for (const [n, cols] of out.raw) addTo(raw, n, cols)
+          for (const [n, sigs] of out.signatures) addTo(signatures, n, [...sigs].map((sig) => `*${sig}`))
         }
         continue
       }
       const name = item.branch === 0 ? item.name : firstNames.get(item.position)
       if (!name) continue
       names.add(name)
-      if (!item.rawColumn) continue
-      // A column a source CTE outputs resolves through that CTE (masked there →
-      // nothing raw); one no CTE outputs comes straight from a table.
-      const via = ctes.filter((cte) => cte.names.has(item.rawColumn!))
-      if (via.length) add(name, via.flatMap((cte) => [...(cte.raw.get(item.rawColumn!) ?? [])]))
-      else add(name, [item.rawColumn])
+      addTo(signatures, name, [`${item.text.toLowerCase()}\u0001${bodies.join("\u0002")}`])
+      if (item.rawColumn) addTo(raw, name, resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen))
     }
     for (const [n, cols] of raw) if (!cols.size) raw.delete(n)
-    const result = { raw, names }
+    const body = [scopeItems.map((i) => i.text.toLowerCase()).join(","), ...[...readBodies].sort()].join("\u0003")
+    const result = { raw, names, signatures, stars, body }
     memo.set(scope, result)
     return result
   }
-  return resolve("final", new Set())
+  const { raw, names, signatures } = resolve("final", new Set())
+  return { raw, names, signatures }
 }
 
 /** A diff line with comments and whitespace normalised (and a leading/trailing

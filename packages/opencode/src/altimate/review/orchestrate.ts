@@ -14,7 +14,14 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type SelectItem, type SelectItemColumn, finalOutputs, normalizeSelectLine, selectItems } from "./rule-catalog"
+import {
+  type FinalOutputs,
+  type SelectItem,
+  type SelectItemColumn,
+  finalOutputs,
+  normalizeSelectLine,
+  selectItems,
+} from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -1215,49 +1222,66 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Per file: PII columns the compiled base already exposed. Neither the broad
   // fallback nor the regex twins report these (this PR did not expose them).
   const basePiiColumnsByFile = new Map<string, Set<string>>()
-  // Per file, the base model's final output (raw and compiled base SQL, each
-  // parsed on its own): every output name, and the source columns each exposes RAW.
-  const baseOutputsByFile = new Map<string, ReturnType<typeof finalOutputs>>()
-  const baseOutputs = (file: string) => {
-    let outputs = baseOutputsByFile.get(file)
-    if (!outputs) {
+  // Per file, the final output of the base and head models, parsed from the SQL
+  // the engine reads (compiled, or raw only when it holds no Jinja): a raw Jinja
+  // base would credit it with every `{% if %}` branch, including ones the target
+  // never renders. No engine SQL → nothing is known exposed.
+  const outputsByFile = new Map<string, FinalOutputs>()
+  const outputs = (file: string, side: "old" | "new") => {
+    const key = `${side}\u0000${file}`
+    let parsed = outputsByFile.get(key)
+    if (!parsed) {
       const ctx = ctxByPath.get(file)
-      outputs = { raw: new Map(), names: new Set() }
-      for (const sql of new Set([ctx?.oldSql, ctx?.engineOldSql].filter((x): x is string => !!x))) {
-        const parsed = finalOutputs(sql)
-        for (const n of parsed.names) outputs.names.add(n)
-        for (const [n, cols] of parsed.raw) outputs.raw.set(n, new Set([...(outputs.raw.get(n) ?? []), ...cols]))
-      }
-      baseOutputsByFile.set(file, outputs)
+      parsed = finalOutputs((side === "old" ? ctx?.engineOldSql : ctx?.engineNewSql) ?? "")
+      outputsByFile.set(key, parsed)
     }
-    return outputs
+    return parsed
   }
-  // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a SOURCE
-  // column is already exposed only when a base PII output exposes that same column
-  // RAW in the base's final projection, under its own name or an alias (`c.ssn as
-  // tax_ref` → `c.ssn as tax_id` re-exposes nothing new). An alias alone is not
+  // `source.column` refs the base exposed raw under a name its PII detection reported.
+  const baseRawPii = (file: string) => {
+    const basePii = basePiiColumnsByFile.get(file)
+    const refs = new Set<string>()
+    if (!basePii) return refs
+    const raw = outputs(file, "old").raw
+    for (const name of basePii) for (const ref of raw.get(name) ?? []) refs.add(ref)
+    return refs
+  }
+  // A regex twin's SOURCE column (`ssn`, with its output alias when it has one) is
+  // already exposed only when the head reads it raw from sources that a base PII
+  // output also exposed raw: same table and column (`c.ssn` → `cust.ssn` on
+  // `customers` is not new; `s.ssn` from `spouses` is). An alias alone is not
   // proof (`c.email as contact` → `c.ssn as contact` newly exposes `ssn`), and
   // neither is a base output that only masks the column (`sha2(c.ssn) as ssn_hash`)
-  // or a CTE's own alias that never reaches the final select.
-  const isBaseExposed = (file: string, column: string) => {
-    const basePii = basePiiColumnsByFile.get(file)
-    if (!basePii) return false
-    const exposures = baseOutputs(file).raw
-    return [...basePii].some((name) => !!exposures.get(name)?.has(column))
+  // or a CTE's own alias that never reaches the final select. A column the head's
+  // final output doesn't expose raw under that name is reported.
+  const isBaseExposed = (file: string, column: string, alias?: string) => {
+    const refs = [...(outputs(file, "new").raw.get(alias ?? column) ?? [])].filter((r) => r.endsWith(`.${column}`))
+    if (!refs.length) return false
+    const exposed = baseRawPii(file)
+    return refs.every((r) => exposed.has(r))
   }
   // A head PII output name the base already exposed. When the head selects a
-  // column raw under it, that same source column must be raw in the base's final
-  // output (base `md5(home_address) as home_address` → head `home_address` is new).
-  // A head output that is not a raw column exposes no new raw value when the base
-  // had the name. A name the head's final select doesn't resolve (`select *` from a
-  // table) counts as base-exposed only when the base had it and did not mask it.
+  // column raw under it, the base must expose that same source column raw (base
+  // `md5(home_address) as home_address` → head `home_address` is new). A head
+  // output that is not a raw column is base-exposed when the base exposed that
+  // name raw, or computes it the same way (same item text, same CTEs/subqueries
+  // read): `md5(x) as x` → `lower(x) as x` unmasks. A name the head's final select doesn't resolve
+  // (`select *` from a table) counts as base-exposed only when the base had it and
+  // did not mask it.
   const isBaseExposedOutput = (file: string, name: string, basePii: Set<string>) => {
-    const head = finalOutputs(ctxByPath.get(file)?.engineNewSql ?? "")
+    const head = outputs(file, "new")
     const rawColumns = head.raw.get(name)
-    if (rawColumns?.size) return [...rawColumns].every((col) => isBaseExposed(file, col))
+    if (rawColumns?.size) {
+      const exposed = baseRawPii(file)
+      return [...rawColumns].every((ref) => exposed.has(ref))
+    }
     if (!basePii.has(name)) return false
-    if (head.names.has(name)) return true
-    const base = baseOutputs(file)
+    const base = outputs(file, "old")
+    if (head.names.has(name)) {
+      if (base.raw.has(name)) return true
+      const baseSigs = base.signatures.get(name)
+      return !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
+    }
     return !base.names.has(name) || base.raw.has(name)
   }
   for (const ctx of ctxByPath.values()) {
@@ -1507,12 +1531,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         const classified = classifiedPiiColumnsByFile.get(f.file)
         if (classified?.has(result.column) || (result.alias && classified?.has(result.alias))) return false
         // A column the base already exposed is not newly exposed by this PR.
-        return !isBaseExposed(f.file, result.column)
+        return !isBaseExposed(f.file, result.column, result.alias)
       }
       // `select-pii-columns` keeps every matched column with its alias and line:
       // drop it when each one is a reindented base line or already base-exposed.
       const items = result.items ?? []
-      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i.column))) return false
+      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i.column, i.alias))) return false
       // Otherwise suppress only when a precise detector actually EMITTED a PII
       // finding for the file (so the exposure is reported by the better source,
       // not silently dropped).

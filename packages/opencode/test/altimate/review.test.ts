@@ -2402,6 +2402,139 @@ describe("orchestrate", () => {
     expect(reindented.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
   })
 
+  // Runs one model through every PII path (the broad fallback, the default
+  // tier, the regex twins) and returns, per reviewers setting, the PII findings.
+  const piiRuns = async (
+    head: string,
+    base: string,
+    diff: string,
+    cols: string[],
+    compiled?: { head: string; base: string },
+  ) => {
+    const out: Array<{ reviewers: string[]; env: Awaited<ReturnType<typeof runReview>> }> = []
+    for (const reviewers of [["pii_exposure"], [], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(cols),
+        getContent: content(head, base),
+        ...(compiled ? { getCompiled: async (_f: string, side: "old" | "new") => (side === "new" ? compiled.head : compiled.base) } : {}),
+      })
+      out.push({ reviewers, env })
+    }
+    return out
+  }
+  // Every run reports the PII: critical with REQUEST_CHANGES where the broad lane
+  // runs. The regex twins alone (`dbt_patterns`) rate `email` a warning by design,
+  // and match only a line that starts with an item from their fixed column list.
+  const expectReportedPii = (
+    runs: Awaited<ReturnType<typeof piiRuns>>,
+    broadColumns: string[],
+    twins: "critical" | "warning" | "none" = "critical",
+  ) => {
+    for (const { reviewers, env } of runs) {
+      if (reviewers[0] === "dbt_patterns" && twins === "none") continue
+      const pii = env.findings.filter((f) => f.category === "pii_exposure")
+      expect({ reviewers, reported: pii.length > 0 }).toEqual({ reviewers, reported: true })
+      if (reviewers[0] === "dbt_patterns" && twins === "warning") continue
+      expect({ reviewers, critical: pii.some((f) => f.severity === "critical") }).toEqual({ reviewers, critical: true })
+      expect({ reviewers, verdict: env.verdict }).toEqual({ reviewers, verdict: "REQUEST_CHANGES" })
+      if (reviewers[0] === "pii_exposure") {
+        const broad = env.findings.filter((f) => f.evidence?.tool === "schema.detect_pii")
+        expect(broad.map((f) => (f.evidence?.result as any)?.columns)).toEqual([broadColumns])
+      }
+    }
+  }
+
+  test("a same-named PII column from a different source is new exposure", async () => {
+    // Base exposes `c.ssn` (customers); head adds `s.ssn as spouse_ssn` (spouses).
+    const base = "select c.customer_id,\n  c.ssn\nfrom customers c\njoin spouses s on s.customer_id = c.customer_id"
+    const head = base.replace("  c.ssn\n", "  c.ssn,\n  s.ssn as spouse_ssn\n")
+    expectReportedPii(await piiRuns(head, base, "-  c.ssn\n+  c.ssn,\n+  s.ssn as spouse_ssn\n", ["ssn"]), ["spouse_ssn"])
+    const baseE = "select c.customer_id,\n  c.email\nfrom customers c\njoin employees e on e.id = c.rep_id"
+    const headE = baseE.replace("  c.email\n", "  c.email,\n  e.email as rep_email\n")
+    expectReportedPii(
+      await piiRuns(headE, baseE, "-  c.email\n+  c.email,\n+  e.email as rep_email\n", ["email"]),
+      ["rep_email"],
+      "warning",
+    )
+    // Control: the same source under a new table alias is not new exposure.
+    const renamed = base.replace(/\bc\./g, "cust.").replace("customers c", "customers cust")
+    for (const { env } of await piiRuns(renamed, base, "-  c.ssn\n+  cust.ssn\n", ["ssn"]))
+      expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+  })
+
+  test("a head expression that unmasks a name the base masked is reported", async () => {
+    for (const [from, to, col] of [
+      ["md5(home_address) as home_address", "lower(home_address) as home_address", "home_address"],
+      ["sha2(ssn) as ssn", "lower(ssn) as ssn", "ssn"],
+    ]) {
+      const base = `select customer_id,\n  ${from}\nfrom customers`
+      const runs = await piiRuns(base.replace(from, to), base, `-  ${from}\n+  ${to}\n`, [col])
+      const broad = runs[0].env.findings.filter((f) => f.evidence?.tool === "schema.detect_pii")
+      expect(broad.map((f) => (f.evidence?.result as any)?.columns)).toEqual([[col]])
+      expect(broad[0].severity).toBe("critical")
+      // Control: the same masked item, untouched, next to an unrelated change.
+      const touched = base.replace("customer_id,", "customer_id, region,")
+      const quiet = await piiRuns(touched, base, "-select customer_id,\n+select customer_id, region,\n", [col])
+      expect(quiet[0].env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+    }
+  })
+
+  test("a qualified reference resolves through its own source, not any CTE with that column", async () => {
+    // Base reads `home_address` masked from CTE `m`; head reads it raw from `customers c`.
+    const base = [
+      "with m as (select customer_id, md5(home_address) as home_address from customers)",
+      "select m.customer_id, m.home_address",
+      "from m join customers c on c.customer_id = m.customer_id",
+    ].join("\n")
+    const head = base.replace("m.home_address", "c.home_address")
+    const runs = await piiRuns(head, base, "-select m.customer_id, m.home_address\n+select m.customer_id, c.home_address\n", [
+      "home_address",
+    ])
+    expectReportedPii(runs, ["home_address"], "none")
+    // Reverse: two CTEs output `ssn`, one raw and one masked; head switches to the raw one.
+    const base2 = [
+      "with r as (select customer_id, ssn from customers),",
+      "k as (select customer_id, sha2(ssn) as ssn from customers)",
+      "select r.customer_id, k.ssn",
+      "from r join k on k.customer_id = r.customer_id",
+    ].join("\n")
+    const head2 = base2.replace("k.ssn\n", "r.ssn\n")
+    const runs2 = await piiRuns(head2, base2, "-select r.customer_id, k.ssn\n+select r.customer_id, r.ssn\n", ["ssn"])
+    expectReportedPii(runs2, ["ssn"], "none")
+  })
+
+  test("a FROM subquery is a source: a column it masked is not credited as raw", async () => {
+    const base = "select s.customer_id, s.ssn\nfrom (select customer_id, sha2(ssn) as ssn from customers) s"
+    const head = "select customer_id, ssn\nfrom customers"
+    const runs = await piiRuns(head, base, `-${base.split("\n")[0]}\n+${head.split("\n")[0]}\n`, ["ssn"])
+    expectReportedPii(runs, ["ssn"], "none")
+    // Control: the subquery exposed it raw, so reading the table directly is not new.
+    const rawBase = base.replace("sha2(ssn) as ssn", "ssn")
+    const quiet = await piiRuns(head, rawBase, `-${rawBase.split("\n")[0]}\n+${head.split("\n")[0]}\n`, ["ssn"])
+    expect(quiet[0].env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+  })
+
+  test("base exposure comes from the compiled base, not a Jinja branch the target never renders", async () => {
+    const rawBase = [
+      "select customer_id,",
+      "{% if target.name == 'dev' %}  ssn,",
+      "{% else %}  sha2(ssn) as ssn,",
+      "{% endif %}  region",
+      "from customers",
+    ].join("\n")
+    const compiledBase = "select customer_id,\n  sha2(ssn) as ssn,\n  region\nfrom customers"
+    const head = "select customer_id,\n  ssn,\n  region\nfrom customers"
+    const runs = await piiRuns(head, rawBase, "-{% if target.name == 'dev' %}  ssn,\n+  ssn,\n", ["ssn"], {
+      head,
+      base: compiledBase,
+    })
+    expectReportedPii(runs, ["ssn"])
+  })
+
   test("a PII line moved from a CTE into the final select is not a reindent", async () => {
     // `    email,` leaves the CTE and the same text lands in the final select: the
     // model's output now carries `email`, though the line matches a removed one.
