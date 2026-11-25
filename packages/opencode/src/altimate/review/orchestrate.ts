@@ -217,14 +217,15 @@ export function isCatalogPortability(f: Finding): boolean {
 }
 
 /**
- * Portability advice that is noise for a project on `dialect`: dropped unless
- * the rule names the engines that support the construct and `dialect` isn't
- * one of them — then it is an error on this project's own engine.
+ * Portability advice that is noise for a project on `dialect`: dropped only
+ * when the rule names `dialect` among the engines that support the construct.
+ * Otherwise (engine not listed, or support never established) it may be an
+ * error on this project's own engine and is kept.
  */
 export function isSuppressiblePortability(f: Finding, dialect: string): boolean {
   if (!isCatalogPortability(f)) return false
   const worksOn = (f.evidence?.result as { worksOn?: string[] })?.worksOn
-  return !worksOn || worksOn.includes(dialect.toLowerCase())
+  return !!worksOn && worksOn.includes(dialect.toLowerCase())
 }
 
 /** True when SQL text contains Jinja (`{{ }}`, `{% %}` or `{# #}`). */

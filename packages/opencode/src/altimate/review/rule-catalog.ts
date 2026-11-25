@@ -46,8 +46,10 @@ export interface Rule {
   pathGlob?: RegExp
   /**
    * Cross-engine portability advice: dropped for a project on one known
-   * engine, unless that engine is missing from `worksOn` (then it is a real
-   * error there and is kept). Omit `worksOn` when support isn't established.
+   * engine only when that engine is listed in `worksOn` (dialect names as
+   * `run.ts` maps them: `postgres`, `tsql`, `databricks`, ...). An engine
+   * missing from it, or a rule with no `worksOn`, keeps the advice: it may be
+   * a real error on that engine.
    */
   portability?: { worksOn?: string[] }
   /** Column-token pattern (first capture group is the column name) collected on
@@ -2080,7 +2082,11 @@ const STYLE: Rule[] = [
     "suggestion",
     "PIVOT/UNPIVOT is dialect-specific",
     "`PIVOT`/`UNPIVOT` syntax varies by warehouse and is hard to test; consider conditional aggregation.",
-    { added: /\b(pivot|unpivot)\s*\(/i, portability: {} },
+    {
+      added: /\b(pivot|unpivot)\s*\(/i,
+      // No PIVOT/UNPIVOT on Postgres, MySQL, Trino or Athena.
+      portability: { worksOn: ["snowflake", "bigquery", "databricks", "redshift", "tsql", "oracle", "duckdb"] },
+    },
     { add: "from t pivot(sum(x) for k in ('a'))" },
     { add: "sum(case when k='a' then x end)" },
   ),
@@ -2110,7 +2116,12 @@ const STYLE: Rule[] = [
     "suggestion",
     "string interval literal portability",
     "`interval '1 day'` literal syntax differs across warehouses; prefer dateadd/date_add functions.",
-    { added: /interval\s+'\d+\s*\w+'/i, portability: {} },
+    {
+      added: /interval\s+'\d+\s*\w+'/i,
+      // BigQuery, MySQL, T-SQL, Oracle, Trino and Athena need `INTERVAL 1 DAY` /
+      // `INTERVAL '1' DAY` (or have no interval literal).
+      portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "databricks"] },
+    },
     { add: "d + interval '1 day'" },
     { add: "dateadd(day, 1, d)" },
   ),

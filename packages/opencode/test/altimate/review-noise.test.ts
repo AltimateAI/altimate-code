@@ -287,7 +287,8 @@ describe("portability noise", () => {
     expect(isSuppressiblePortability(portability, "postgres")).toBe(true)
     expect(isSuppressiblePortability(portability, "snowflake")).toBe(false)
     const untagged = { ...portability, evidence: { tool: "rule-catalog", result: { rule: "pivot-portability", portability: true } } }
-    expect(isSuppressiblePortability(untagged, "snowflake")).toBe(true)
+    // Support never established: the advice may be an error here, so it stays.
+    expect(isSuppressiblePortability(untagged, "snowflake")).toBe(false)
   })
 
   test("catalog portability advice is recognised; core's dialect-aware check is not", () => {
@@ -329,6 +330,44 @@ describe("portability noise", () => {
     expect((await runReview({ ...pg, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBe(0)
     // Snowflake doesn't: on a Snowflake project it is a real error and stays.
     expect((await runReview({ ...base, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBeGreaterThan(0)
+  })
+
+  test("PIVOT is kept on Postgres and a string interval literal on BigQuery; both drop where they work", async () => {
+    const runner = {
+      async impact() {
+        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: [], ran: true }
+      },
+      async equivalence() {
+        return { decided: true, equivalent: true }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+    } as ReviewRunner
+    const rules = async (sql: string, dialect: string) => {
+      const env = await runReview({
+        changedFiles: [{ path: "models/m.sql", status: "added" as const, diff: `+${sql}\n` }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"], dialect },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment" as const,
+        runner,
+        getContent: async () => sql,
+        suppressPortability: true,
+      })
+      return env.findings.filter(isCatalogPortability).map((f) => (f.evidence?.result as any)?.rule)
+    }
+    const pivot = "select * from t pivot(sum(x) for k in ('a'))"
+    expect(await rules(pivot, "postgres")).toContain("pivot-portability")
+    expect(await rules(pivot, "snowflake")).not.toContain("pivot-portability")
+    const interval = "select d + interval '1 day' as next_day from t"
+    expect(await rules(interval, "bigquery")).toContain("interval-string-literal")
+    expect(await rules(interval, "postgres")).not.toContain("interval-string-literal")
   })
 })
 
