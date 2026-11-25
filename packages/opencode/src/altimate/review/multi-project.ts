@@ -310,14 +310,23 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
 }
 
 /** Rule-noise counts summed over the projects (each present only when some project has it). */
-function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted"> {
-  const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted"> = {}
+function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy"> {
+  const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy"> = {}
   if (envs.some((e) => e.rulesOff)) {
     const off: Record<string, number> = {}
     for (const e of envs) for (const [rule, n] of Object.entries(e.rulesOff ?? {})) off[rule] = (off[rule] ?? 0) + n
     out.rulesOff = off
   }
   if (envs.some((e) => e.rulesRefuted !== undefined)) out.rulesRefuted = envs.reduce((n, e) => n + (e.rulesRefuted ?? 0), 0)
+  const policies = envs.flatMap((e) => (e.rulePolicy ? [e.rulePolicy] : []))
+  if (policies.length)
+    out.rulePolicy = {
+      applied: policies.some((p) => p.applied),
+      dropped: {
+        unverifiable_high_sev: policies.reduce((n, p) => n + p.dropped.unverifiable_high_sev, 0),
+        noisy_type_not_confirmed: policies.reduce((n, p) => n + p.dropped.noisy_type_not_confirmed, 0),
+      },
+    }
   return out
 }
 

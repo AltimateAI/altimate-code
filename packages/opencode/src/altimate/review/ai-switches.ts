@@ -18,6 +18,7 @@ export type AiSwitchName =
   | "conventions"
   | "rulesOff"
   | "verifyRules"
+  | "rulePolicy"
 
 export type AiSwitches = Record<AiSwitchName, boolean>
 
@@ -32,6 +33,7 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
   conventions: "ALTIMATE_REVIEW_CONVENTIONS",
   rulesOff: "ALTIMATE_REVIEW_RULES_OFF",
   verifyRules: "ALTIMATE_REVIEW_AI_VERIFY_RULES",
+  rulePolicy: "ALTIMATE_REVIEW_RULE_POLICY",
 }
 
 /**
@@ -49,6 +51,7 @@ export const AI_SWITCH_DEFAULTS: AiSwitches = {
   conventions: true,
   rulesOff: true,
   verifyRules: true,
+  rulePolicy: true,
 }
 
 type Env = Record<string, string | undefined>
@@ -99,9 +102,15 @@ export function resolveAiSwitches(
       WARNED.add(warning)
       process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
     }
-    out[name] = fromEnv ?? configured[name] ?? AI_SWITCH_DEFAULTS[name]
+    out[name] = fromEnv ?? configuredSwitch(configured[name as keyof typeof configured]) ?? AI_SWITCH_DEFAULTS[name]
   }
   return out
+}
+
+/** A config value as a switch: a boolean as is, an object (settings for the switch) as on. */
+function configuredSwitch(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v
+  return v && typeof v === "object" && !Array.isArray(v) ? true : undefined
 }
 
 /** A switch from resolved switches when given, else from its env variable alone (unset = off). */

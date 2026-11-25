@@ -32,6 +32,7 @@ import { resolveAiSwitches } from "./ai-switches"
 import { isAiPythonFile } from "./ai-python-files"
 import { loadConventions } from "./conventions"
 import { resolveRulesOff } from "./rules-off"
+import { configuredRulePolicy } from "./rule-post-policy"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -544,6 +545,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     reviewDir: gitRoot,
     ...(conventions.length ? { conventions } : {}),
     ...(rulesOff ? { rulesOff } : {}),
+    ...(aiOn && aiSwitches.rulePolicy ? { rulePolicy: configuredRulePolicy(config) } : {}),
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
       const dirs = layout

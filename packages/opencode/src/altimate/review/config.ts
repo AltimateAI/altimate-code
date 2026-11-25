@@ -59,6 +59,8 @@ export const ReviewConfig = z.object({
         rulesOn: z.array(z.string()).optional(),
         /** Verify the rule findings after the finder and drop the refuted ones (needs `verify`). */
         verifyRules: z.boolean().optional(),
+        /** The rule-post policy over verified rule findings (rule-post-policy.ts); an object changes its noisy list. */
+        rulePolicy: z.union([z.boolean(), z.object({ noisyRules: z.array(z.string()).optional() })]).optional(),
       }),
     ])
     .default(true),

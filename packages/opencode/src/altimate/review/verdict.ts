@@ -429,6 +429,16 @@ export const VerdictEnvelope = z.object({
   rulesOff: z.record(z.string(), z.number().int().nonnegative()).optional(),
   /** Rule findings not posted because the rule verifier refuted them. */
   rulesRefuted: z.number().int().nonnegative().optional(),
+  /** The rule-post policy: whether it applied (the rule verifier reviewed findings) and what it dropped. */
+  rulePolicy: z
+    .object({
+      applied: z.boolean(),
+      dropped: z.object({
+        unverifiable_high_sev: z.number().int().nonnegative(),
+        noisy_type_not_confirmed: z.number().int().nonnegative(),
+      }),
+    })
+    .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -496,6 +506,7 @@ export interface BuildEnvelopeInput {
   engineErrors?: VerdictEnvelope["engineErrors"]
   rulesOff?: VerdictEnvelope["rulesOff"]
   rulesRefuted?: VerdictEnvelope["rulesRefuted"]
+  rulePolicy?: VerdictEnvelope["rulePolicy"]
 }
 
 /** Severity tally of `findings` for the envelope summary. */
@@ -565,6 +576,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     ai: input.ai,
     ...(input.rulesOff ? { rulesOff: input.rulesOff } : {}),
     ...(input.rulesRefuted !== undefined ? { rulesRefuted: input.rulesRefuted } : {}),
+    ...(input.rulePolicy ? { rulePolicy: input.rulePolicy } : {}),
     policy: input.policy,
     engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,

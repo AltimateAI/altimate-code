@@ -1,0 +1,346 @@
+import { describe, test, expect } from "bun:test"
+import {
+  DEFAULT_RULE_POST_POLICY,
+  NOISY_RULE_TYPES,
+  configuredRulePolicy,
+  dropByRulePolicy,
+  rulePolicyApplies,
+  type RuleVerdictValue,
+} from "../../src/altimate/review/rule-post-policy"
+import { envSwitch, resolveAiSwitches, AI_SWITCH_DEFAULTS, type AiSwitches } from "../../src/altimate/review/ai-switches"
+import { makeFinding, ruleId, type Finding, type Severity } from "../../src/altimate/review/finding"
+import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { DEFAULT_REVIEW_CONFIG, parseReviewConfig } from "../../src/altimate/review/config"
+import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
+import type { AiLaneStatus, AiReviewInput } from "../../src/altimate/review/ai-review"
+
+// The rule-post policy: after rule types off and refuted rule findings, a rule finding is not
+// posted when its verdict is unverifiable at warning/critical, or its type is noisy and not confirmed.
+
+const NOISY = NOISY_RULE_TYPES[0]
+
+function rule(n: number, severity: Severity, r = ruleId("dbt-patterns", `rule-${n}`)): Finding {
+  return makeFinding({
+    severity,
+    category: "sql_correctness",
+    title: `m: rule ${n}`,
+    body: "b",
+    file: "models/m.sql",
+    evidence: { tool: r.split(":")[0], result: {} },
+    ruleKey: `${r}-${n}`,
+    rule: r,
+  })
+}
+function ai(n: number, severity: Severity, r = ruleId("ai-review", "sql_correctness")): Finding {
+  return makeFinding({
+    severity,
+    category: "sql_correctness",
+    title: `m: ai ${n}`,
+    body: "b",
+    file: "models/m.sql",
+    evidence: { tool: "ai-review", result: {} },
+    ruleKey: `ai:${n}`,
+    rule: r,
+  })
+}
+const verdicts = (pairs: Array<[Finding, RuleVerdictValue | null]>) => new Map(pairs.map(([f, v]) => [f.id, v] as const))
+
+describe("dropByRulePolicy", () => {
+  test("condition 1: unverifiable at warning or critical is dropped; at suggestion it stays", () => {
+    const w = rule(1, "warning")
+    const c = rule(2, "critical")
+    const s = rule(3, "suggestion")
+    const r = dropByRulePolicy([w, c, s], verdicts([[w, "unverifiable"], [c, "unverifiable"], [s, "unverifiable"]]))
+    expect(r.kept).toEqual([s])
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 2, noisy_type_not_confirmed: 0 })
+  })
+
+  test("condition 2: a noisy type stays only when confirmed", () => {
+    const confirmed = rule(1, "suggestion", NOISY)
+    const unverifiable = rule(2, "suggestion", NOISY)
+    const refuted = rule(3, "warning", NOISY)
+    const r = dropByRulePolicy(
+      [confirmed, unverifiable, refuted],
+      verdicts([[confirmed, "confirmed"], [unverifiable, "unverifiable"], [refuted, "refuted"]]),
+    )
+    expect(r.kept).toEqual([confirmed])
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 0, noisy_type_not_confirmed: 2 })
+  })
+
+  test("confirmed and refuted findings of other types stay (refuted ones are the refuted filter's job)", () => {
+    const a = rule(1, "warning")
+    const b = rule(2, "critical")
+    const r = dropByRulePolicy([a, b], verdicts([[a, "confirmed"], [b, "refuted"]]))
+    expect(r.kept).toEqual([a, b])
+  })
+
+  test("a finding with no verdict (null or absent) counts as unverifiable", () => {
+    const nul = rule(1, "warning")
+    const absent = rule(2, "warning")
+    const noisySuggestion = rule(3, "suggestion", NOISY)
+    const plainSuggestion = rule(4, "suggestion")
+    const r = dropByRulePolicy([nul, absent, noisySuggestion, plainSuggestion], verdicts([[nul, null]]))
+    expect(r.kept).toEqual([plainSuggestion])
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 2, noisy_type_not_confirmed: 1 })
+  })
+
+  test("AI findings are never dropped, whatever their verdict, severity or rule id", () => {
+    const fs = [ai(1, "warning"), ai(2, "critical"), ai(3, "suggestion", NOISY)]
+    const r = dropByRulePolicy(fs, new Map())
+    expect(r.kept).toEqual(fs)
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 })
+  })
+
+  test("a custom noisy list replaces the default", () => {
+    const f = rule(1, "suggestion", "x:custom")
+    expect(dropByRulePolicy([f], verdicts([[f, "unverifiable"]])).kept).toEqual([f])
+    expect(dropByRulePolicy([f], verdicts([[f, "unverifiable"]]), { noisyRules: ["x:custom"] }).kept).toEqual([])
+  })
+})
+
+describe("rulePolicyApplies (fail-open)", () => {
+  test("only when the rule verifier ran and reviewed at least one finding", () => {
+    expect(rulePolicyApplies(undefined)).toBe(false)
+    expect(rulePolicyApplies({ state: "skipped", reviewed: 0 })).toBe(false)
+    expect(rulePolicyApplies({ state: "error", reviewed: 0 })).toBe(false)
+    expect(rulePolicyApplies({ state: "budget", reviewed: 0 })).toBe(false)
+    expect(rulePolicyApplies({ state: "timeout" })).toBe(false)
+    expect(rulePolicyApplies({ state: "budget", reviewed: 2 })).toBe(true)
+    expect(rulePolicyApplies({ state: "ok", reviewed: 1 })).toBe(true)
+  })
+})
+
+describe("configuration", () => {
+  test("seven noisy types by default", () => {
+    expect(NOISY_RULE_TYPES).toHaveLength(7)
+    expect(DEFAULT_RULE_POST_POLICY.noisyRules).toBe(NOISY_RULE_TYPES)
+  })
+
+  test("`ai.rulePolicy`: false off, an object on with its noisy list; env `0` off", () => {
+    expect(AI_SWITCH_DEFAULTS.rulePolicy).toBe(true)
+    expect(resolveAiSwitches(parseReviewConfig("ai:\n  rulePolicy: false"), {}).rulePolicy).toBe(false)
+    const obj = parseReviewConfig("ai:\n  rulePolicy:\n    noisyRules:\n      - x:y")
+    expect(resolveAiSwitches(obj, {}).rulePolicy).toBe(true)
+    expect(configuredRulePolicy(obj)).toEqual({ noisyRules: ["x:y"] })
+    expect(configuredRulePolicy(DEFAULT_REVIEW_CONFIG)).toBe(DEFAULT_RULE_POST_POLICY)
+    expect(envSwitch("rulePolicy", { ALTIMATE_REVIEW_RULE_POLICY: "0" })).toBe(false)
+    expect(resolveAiSwitches(obj, { ALTIMATE_REVIEW_RULE_POLICY: "0" }).rulePolicy).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Orchestrator
+// ---------------------------------------------------------------------------
+
+const runner: ReviewRunner = {
+  async impact() {
+    return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+  },
+  async grade() {
+    return { grade: "B" }
+  },
+  // One error-severity engine issue: a warning-severity rule finding.
+  async check() {
+    return { issues: [{ rule: "ambiguous-column", severity: "error", category: "correctness", message: "ambiguous column status", line: 3 }], ran: true }
+  },
+  async equivalence() {
+    return { decided: true, equivalent: true }
+  },
+  async detectPii() {
+    return { columns: [] }
+  },
+} as ReviewRunner
+const SQL = "select *\nfrom raw.orders\nwhere status = 'x'\norder by 1"
+const aiFinding = makeFinding({
+  severity: "warning",
+  category: "sql_correctness",
+  title: "m: ai claim",
+  body: "AI body.",
+  file: "models/marts/m.sql",
+  model: "m",
+  startLine: 2,
+  endLine: 2,
+  evidence: { tool: "ai-review", result: {} },
+  ruleKey: "ai:sql_correctness:ai claim",
+  rule: ruleId("ai-review", "sql_correctness"),
+})
+
+type RuleVerifierState = NonNullable<AiLaneStatus["ruleVerifier"]>["state"]
+interface RunOpts {
+  switches?: Partial<AiSwitches>
+  /** The verdict per rule finding sent (by index); undefined leaves the finding without a verdict. */
+  verdictAt?: (i: number) => RuleVerdictValue | undefined
+  ruleState?: RuleVerifierState
+  policy?: boolean
+  rulesOff?: Set<string>
+  ai?: boolean
+}
+
+function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
+  return runReview({
+    changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` }],
+    config: { ...DEFAULT_REVIEW_CONFIG },
+    rubric: DEFAULT_RUBRIC,
+    mode: "comment",
+    runner,
+    forceTier: "full",
+    aiVerify: true,
+    aiSwitches: o.switches ?? { verifyRules: true, rulePolicy: true },
+    getContent: async (_f, side) => (side === "old" ? "select 1" : SQL),
+    generatedAt: "2026-11-25T00:00:00Z",
+    ...(o.policy === false ? {} : { rulePolicy: DEFAULT_RULE_POST_POLICY }),
+    ...(o.rulesOff ? { rulesOff: o.rulesOff } : {}),
+    ...(o.ai === false
+      ? {}
+      : {
+          aiReview: async (input: AiReviewInput) => {
+            seen.push(input)
+            const rules = input.verifyRulesAfter
+            if (!rules) return { findings: [aiFinding], status: { state: "ok" as const } }
+            const at = o.verdictAt ?? (() => "confirmed" as const)
+            const records = rules.map((f, i) => {
+              const v = at(i)
+              return {
+                id: f.id,
+                file: f.file,
+                title: f.title,
+                rule: f.rule,
+                verdict: v ?? null,
+                claimType: v ? ("code_fact" as const) : null,
+                value: v ? ("actionable" as const) : null,
+                evidence: v ? "quoted" : null,
+                toolsUsed: [],
+                noVerdict: !v,
+                batch: 0,
+              }
+            })
+            const reviewed = records.filter((r) => !r.noVerdict).length
+            const state = o.ruleState ?? "ok"
+            return {
+              findings: [aiFinding],
+              status: {
+                state: "ok" as const,
+                verifyRules: "drop_refuted" as const,
+                verifier: {
+                  state: "skipped" as const,
+                  durationMs: 0,
+                  turns: 0,
+                  toolCalls: 0,
+                  reviewed: 0,
+                  kept: 0,
+                  discarded: 0,
+                  summary: 0,
+                  unreviewed: 0,
+                  ...(state === "skipped" ? {} : { ruleVerdicts: records }),
+                },
+                ruleVerifier: {
+                  state,
+                  durationMs: 1,
+                  turns: 1,
+                  toolCalls: 0,
+                  reviewed: state === "skipped" ? 0 : reviewed,
+                  kept: rules.length,
+                  discarded: 0,
+                  summary: 0,
+                  unreviewed: rules.length - reviewed,
+                },
+              },
+            }
+          },
+        }),
+  })
+}
+
+describe("orchestrator: rule-post policy", () => {
+  test("drops unverifiable warning rule findings, keeps the AI finding, records counts", async () => {
+    const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    const seen: AiReviewInput[] = []
+    // Every rule finding unverifiable.
+    const env = await run({ verdictAt: () => "unverifiable" }, seen)
+    const sent = seen[0].verifyRulesAfter!
+    const highSev = sent.filter((f) => f.severity !== "suggestion")
+    expect(highSev.length).toBeGreaterThan(0)
+    expect(env.findings.map((f) => f.id)).toEqual(
+      base.findings.filter((f) => !highSev.some((h) => h.id === f.id)).map((f) => f.id),
+    )
+    expect(env.findings.some((f) => f.origin === "ai")).toBe(true)
+    expect(env.rulePolicy?.applied).toBe(true)
+    expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(highSev.length)
+    expect(env.rulesRefuted).toBe(0)
+  })
+
+  test("a single rule finding with no verdict counts as unverifiable", async () => {
+    const seen: AiReviewInput[] = []
+    const all = await run({}, seen)
+    const sent = seen[0].verifyRulesAfter!
+    const idx = sent.findIndex((f) => f.severity !== "suggestion")
+    expect(idx).toBeGreaterThanOrEqual(0)
+    const env = await run({ verdictAt: (i) => (i === idx ? undefined : "confirmed") })
+    expect(env.findings).toEqual(all.findings.filter((f) => f.id !== sent[idx].id))
+    expect(env.rulePolicy).toEqual({ applied: true, dropped: { unverifiable_high_sev: 1, noisy_type_not_confirmed: 0 } })
+  })
+
+  test("all confirmed: nothing dropped, applied with zero counts", async () => {
+    const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    const env = await run({ verdictAt: () => "confirmed" })
+    expect(env.findings).toEqual(base.findings)
+    expect(env.rulePolicy).toEqual({ applied: true, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } })
+  })
+
+  test("fail-open: the rule verifier skipped, failed, or stopped on budget with nothing reviewed", async () => {
+    const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    for (const ruleState of ["skipped", "error", "budget"] as const) {
+      const env = await run({ verdictAt: () => undefined, ruleState })
+      expect(env.findings).toEqual(base.findings)
+      expect(env.rulePolicy).toEqual({ applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } })
+    }
+  })
+
+  test("budget with some findings reviewed: the policy applies, unreviewed findings count as unverifiable", async () => {
+    const seen: AiReviewInput[] = []
+    const env = await run({ verdictAt: (i) => (i === 0 ? "confirmed" : undefined), ruleState: "budget" }, seen)
+    expect(env.rulePolicy?.applied).toBe(true)
+    const sent = seen[0].verifyRulesAfter!
+    const expected = sent.slice(1).filter((f) => f.severity !== "suggestion").length
+    expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(expected)
+  })
+
+  test("policy off (switch or no policy given): only refuted findings are dropped", async () => {
+    const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    const env = await run({ verdictAt: () => "unverifiable", policy: false })
+    expect(env.findings).toEqual(base.findings)
+    expect(env.rulePolicy).toBeUndefined()
+  })
+})
+
+describe("flags off: unchanged behaviour", () => {
+  test("AI lane on with every rule-noise switch off: the envelope equals a run without them", async () => {
+    const plain = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      aiVerify: true,
+      aiSwitches: {},
+      getContent: async (_f, side) => (side === "old" ? "select 1" : SQL),
+      generatedAt: "2026-11-25T00:00:00Z",
+      aiReview: async () => ({ findings: [aiFinding], status: { state: "ok" as const } }),
+    })
+    const off = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    expect(off).toEqual(plain)
+    expect(off.rulesOff).toBeUndefined()
+    expect(off.rulesRefuted).toBeUndefined()
+    expect(off.rulePolicy).toBeUndefined()
+  })
+
+  test("AI lane off: rule types off, the rule verifier and the policy are all no-ops", async () => {
+    const plain = await run({ ai: false, switches: {}, policy: false })
+    const first = plain.findings[0].rule!
+    const withAll = await run({ ai: false, rulesOff: new Set([first]) })
+    expect(withAll).toEqual(plain)
+    expect(withAll.rulesOff).toBeUndefined()
+    expect(withAll.rulePolicy).toBeUndefined()
+  })
+})

@@ -72,6 +72,7 @@ import { isAiOtherFile } from "./ai-other-files"
 import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
 import { type Convention, conventionTexts } from "./conventions"
 import { dropRulesOff } from "./rules-off"
+import { type RulePolicyDrops, type RulePostPolicy, type RuleVerdictValue, dropByRulePolicy, rulePolicyApplies } from "./rule-post-policy"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -307,6 +308,8 @@ export interface OrchestrateInput {
   conventions?: Convention[]
   /** Rule ids not posted when the AI lane runs (rules-off.ts); undefined keeps every type. */
   rulesOff?: Set<string>
+  /** The rule-post policy over verified rule findings (rule-post-policy.ts); undefined turns it off. */
+  rulePolicy?: RulePostPolicy
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2654,8 +2657,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let aiSentPaths: string[] = []
   const aiReviewed = new Set<string>()
   let aiReviewedOutside: string[] = []
-  // The rule verifier's verdict per posted rule finding (`verifyRules`).
-  const ruleVerdicts = new Map<string, "confirmed" | "refuted" | "unverifiable" | null>()
+  // The rule verifier's verdict per posted rule finding (`verifyRules`), and whether it ran.
+  const ruleVerdicts = new Map<string, RuleVerdictValue | null>()
+  let ruleVerifierRan = false
   // The rule verifier was asked to run (it may still have skipped or failed).
   let ruleVerifyAttempted = false
   // The AI lane runs in this review: rule types off apply only then.
@@ -2836,6 +2840,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       if (aiStatus.verifyRules === "drop_refuted") {
         ruleVerifyAttempted = true
         for (const v of aiStatus.verifier?.ruleVerdicts ?? []) ruleVerdicts.set(v.id, v.verdict)
+        ruleVerifierRan = rulePolicyApplies(aiStatus.ruleVerifier)
       }
       // A sent file counts as reviewed only when the lane answered for its call.
       if (aiStatus.state === "ok") {
@@ -2864,7 +2869,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
 
   // Rule noise, only when the AI lane runs: rule types off, then rule findings the verifier
-  // refuted. A finding not posted does not count toward the verdict
+  // refuted, then the rule-post policy. A finding not posted does not count toward the verdict
   // either; an unmerged instance takes the verdict of its merged group. AI findings are never
   // dropped.
   const rulesOff = aiLaneOn ? input.rulesOff : undefined
@@ -2877,6 +2882,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   if (ruleVerdicts.size) {
     findings = findings.filter((f) => !refuted(f))
     verdictFindings = verdictFindings.filter((f) => !refuted(f))
+  }
+  let rulePolicy: { applied: boolean; dropped: RulePolicyDrops } | undefined
+  if (aiLaneOn && input.rulePolicy && ruleVerifyAttempted) {
+    if (ruleVerifierRan) {
+      const byId = (list: Finding[]) => new Map(list.map((f) => [f.id, verdictOf(f) ?? null] as const))
+      const posted = dropByRulePolicy(findings, byId(findings), input.rulePolicy)
+      findings = posted.kept
+      verdictFindings = dropByRulePolicy(verdictFindings, byId(verdictFindings), input.rulePolicy).kept
+      rulePolicy = { applied: true, dropped: posted.dropped }
+    } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }
 
   // Lint-only means no changed model resolved against a manifest. A single
@@ -2920,6 +2935,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ai: aiStatus,
     ...(rulesOff ? { rulesOff: off.dropped } : {}),
     ...(rulesRefuted !== undefined ? { rulesRefuted } : {}),
+    ...(rulePolicy ? { rulePolicy } : {}),
     policy: input.policy,
     findings,
     verdictFindings,
