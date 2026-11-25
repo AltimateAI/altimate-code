@@ -4,6 +4,8 @@ export type PlanLimitDetail = {
   limit?: number | null
   current?: number | null
   required_plan?: string
+  addon_available?: boolean
+  max_with_addons?: number | null
   upgrade_url?: string
   message?: string
 }
@@ -36,6 +38,9 @@ export function formatPlanLimit(detail: PlanLimitDetail): string {
   const base = message || "Your current plan does not include this."
   const sentence = /[.!?]$/.test(base) ? base : `${base}.`
   if (!url) return sentence
+  const current = typeof detail.plan === "string" ? strip(detail.plan) : ""
+  const sameTier = !!required && required.toLowerCase() === current.toLowerCase()
+  if (sameTier) return `${sentence} Add capacity: ${url}`
   return `${sentence} Upgrade${required ? ` to ${capitalize(required)}` : ""}: ${url}`
 }
 

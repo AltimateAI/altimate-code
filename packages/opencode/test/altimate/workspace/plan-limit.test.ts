@@ -14,7 +14,9 @@ writeFileSync(
 const { altimateRequest, PlanLimitError, WorkspaceApiError, linkFailureReason } = await import(
   "../../../src/altimate/workspace/api-client"
 )
-const { describePlanLimitBody, formatPlanLimit, safeUpgradeUrl } = await import("../../../src/altimate/workspace/plan-limit")
+const { describePlanLimitBody, formatPlanLimit, safeUpgradeUrl } = await import(
+  "../../../src/altimate/workspace/plan-limit"
+)
 
 const URL_OK = "https://acme.app.myaltimate.com/settings/credits?tab=plans"
 const detail = {
@@ -102,5 +104,35 @@ describe("describePlanLimitBody", () => {
     expect(describePlanLimitBody("not json")).toBeUndefined()
     expect(describePlanLimitBody(JSON.stringify({ detail: { code: "other" } }))).toBeUndefined()
     expect(describePlanLimitBody(JSON.stringify({ detail: "x" }))).toBeUndefined()
+  })
+})
+
+describe("same-tier refusal", () => {
+  const addonDetail = {
+    ...detail,
+    limit_key: "members",
+    plan: "team",
+    limit: 5,
+    current: 5,
+    required_plan: "team",
+    addon_available: true,
+    max_with_addons: 10,
+    message: "Your Team plan includes 5 members. Add more members (up to 10) to continue.",
+  }
+
+  test("offers add-ons instead of an upgrade to the plan already in use", () => {
+    expect(formatPlanLimit(addonDetail)).toBe(`${addonDetail.message} Add capacity: ${URL_OK}`)
+    expect(formatPlanLimit(addonDetail)).not.toContain("Upgrade")
+  })
+
+  test("a gateway body for the same tier reads the same way", () => {
+    expect(describePlanLimitBody(JSON.stringify({ detail: addonDetail }))).toBe(
+      `${addonDetail.message} Add capacity: ${URL_OK}`,
+    )
+  })
+
+  test("a refusal at the tier maximum still names the next tier", () => {
+    const atMax = { ...addonDetail, required_plan: "business", addon_available: false }
+    expect(formatPlanLimit(atMax)).toBe(`${addonDetail.message} Upgrade to Business: ${URL_OK}`)
   })
 })
