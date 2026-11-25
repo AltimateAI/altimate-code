@@ -372,6 +372,8 @@ export const VerdictEnvelope = z.object({
         .optional(),
     })
     .optional(),
+  /** Rule findings not posted because their rule type is off while the AI lane runs, per rule id. */
+  rulesOff: z.record(z.string(), z.number().int().nonnegative()).optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -437,6 +439,7 @@ export interface BuildEnvelopeInput {
   ai?: VerdictEnvelope["ai"]
   policy?: VerdictEnvelope["policy"]
   engineErrors?: VerdictEnvelope["engineErrors"]
+  rulesOff?: VerdictEnvelope["rulesOff"]
 }
 
 /** Severity tally of `findings` for the envelope summary. */
@@ -504,6 +507,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     staleManifest: input.staleManifest ? true : undefined,
     scope: input.scope,
     ai: input.ai,
+    ...(input.rulesOff ? { rulesOff: input.rulesOff } : {}),
     policy: input.policy,
     engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,

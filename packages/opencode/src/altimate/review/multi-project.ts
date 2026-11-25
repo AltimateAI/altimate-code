@@ -303,9 +303,21 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       })),
     },
     ai: mergeAi(runs),
+    ...mergeRuleNoise(envs),
     generatedAt: first.generatedAt,
   }
   return signEnvelope(VerdictEnvelope.parse(merged))
+}
+
+/** Rule-noise counts summed over the projects (present only when some project has them). */
+function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff"> {
+  const out: Pick<VerdictEnvelope, "rulesOff"> = {}
+  if (envs.some((e) => e.rulesOff)) {
+    const off: Record<string, number> = {}
+    for (const e of envs) for (const [rule, n] of Object.entries(e.rulesOff ?? {})) off[rule] = (off[rule] ?? 0) + n
+    out.rulesOff = off
+  }
+  return out
 }
 
 /** Least-trusted source first: a policy the PR controls outranks the defaults, which outrank the base branch's. */

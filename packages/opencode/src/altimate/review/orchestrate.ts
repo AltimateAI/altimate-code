@@ -69,6 +69,7 @@ import { type AiSwitches, switchOn } from "./ai-switches"
 import { isAiOtherFile } from "./ai-other-files"
 import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
 import { type Convention, conventionTexts } from "./conventions"
+import { dropRulesOff } from "./rules-off"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -302,6 +303,8 @@ export interface OrchestrateInput {
   reviewDir?: string
   /** Team conventions from the base branch (`conventions` switch), for the AI finder. */
   conventions?: Convention[]
+  /** Rule ids not posted when the AI lane runs (rules-off.ts); undefined keeps every type. */
+  rulesOff?: Set<string>
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2649,6 +2652,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let aiSentPaths: string[] = []
   const aiReviewed = new Set<string>()
   let aiReviewedOutside: string[] = []
+  // The AI lane runs in this review: rule types off apply only then.
+  const aiLaneOn = lanes.has("ai_review") && !!input.aiReview
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2833,9 +2838,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])]),
   )
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
-  const findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  let findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // The verdict counts every instance; merging repeats is presentation only.
-  const verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  let verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+
+  // Rule types off, only when the AI lane runs. A finding not posted does not count toward the
+  // verdict either. AI findings are never dropped.
+  const rulesOff = aiLaneOn ? input.rulesOff : undefined
+  const off = dropRulesOff(findings, rulesOff)
+  findings = off.kept
+  verdictFindings = dropRulesOff(verdictFindings, rulesOff).kept
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
@@ -2876,6 +2888,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const envelope = buildEnvelope({
     engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
+    ...(rulesOff ? { rulesOff: off.dropped } : {}),
     policy: input.policy,
     findings,
     verdictFindings,

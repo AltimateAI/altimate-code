@@ -53,6 +53,10 @@ export const ReviewConfig = z.object({
         verify: z.boolean().optional(),
         /** Repo review instructions (AGENTS.md, CLAUDE.md, REVIEW.md, Cursor/CodeRabbit/Copilot rules, CONTRIBUTING.md) from the base branch. */
         conventions: z.boolean().optional(),
+        /** Drop the rule types in `NOISY_RULES_OFF` (rules-off.ts) once the AI lane runs. */
+        rulesOff: z.boolean().optional(),
+        /** Rule ids taken back out of that list (posted as before). */
+        rulesOn: z.array(z.string()).optional(),
       }),
     ])
     .default(true),

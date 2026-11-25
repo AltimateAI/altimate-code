@@ -8,7 +8,15 @@
 // env variable, as before, so an unset variable means off there.
 import type { ReviewConfig } from "./config"
 
-export type AiSwitchName = "coverage" | "contextCard" | "focused" | "otherFiles" | "pythonFiles" | "verify" | "conventions"
+export type AiSwitchName =
+  | "coverage"
+  | "contextCard"
+  | "focused"
+  | "otherFiles"
+  | "pythonFiles"
+  | "verify"
+  | "conventions"
+  | "rulesOff"
 
 export type AiSwitches = Record<AiSwitchName, boolean>
 
@@ -21,6 +29,7 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
   pythonFiles: "ALTIMATE_REVIEW_AI_PYTHON_FILES",
   verify: "ALTIMATE_REVIEW_AI_VERIFY",
   conventions: "ALTIMATE_REVIEW_CONVENTIONS",
+  rulesOff: "ALTIMATE_REVIEW_RULES_OFF",
 }
 
 /**
@@ -36,6 +45,7 @@ export const AI_SWITCH_DEFAULTS: AiSwitches = {
   pythonFiles: true,
   verify: true,
   conventions: true,
+  rulesOff: true,
 }
 
 type Env = Record<string, string | undefined>
@@ -46,7 +56,10 @@ const ENV_FALSE = new Set(["0", "false", "off", "no"])
 /** The env override for a switch: true for `1`/`true`/`on`/`yes`, false for `0`/`false`/`off`/`no`
  *  (case-insensitive), undefined otherwise. */
 export function envSwitch(name: AiSwitchName, env: Env = process.env): boolean | undefined {
-  return envBool(env[AI_SWITCH_ENV[name]])
+  const raw = env[AI_SWITCH_ENV[name]]
+  // `ALTIMATE_REVIEW_RULES_OFF=<file>` names a replacement list: the switch is on.
+  if (name === "rulesOff" && raw && raw !== "0") return true
+  return envBool(raw)
 }
 
 /** An env value as a boolean: `1`/`true`/`on`/`yes` true, `0`/`false`/`off`/`no` false (trimmed,
