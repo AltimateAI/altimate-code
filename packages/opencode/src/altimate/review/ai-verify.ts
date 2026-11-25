@@ -749,16 +749,7 @@ function ruleStatus(
   }))
   const usage = outcomes.flatMap((o) => (o.usage ? [o.usage] : []))
   const spent = usage.length ? usage.reduce(addUsage) : undefined
-  const errors = outcomes.filter((o) => o.state === "error")
-  const timeout = outcomes.find((o) => o.state === "timeout")
-  let state: VerifierStatus["state"] = "ok"
-  let reason: string | undefined
-  if (timeout) [state, reason] = ["timeout", timeout.reason]
-  else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
-  else if (outcomes.some((o) => o.state === "budget"))
-    [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
-  if (errors.length && state !== "error")
-    reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`].filter(Boolean).join("; ")
+  const { state, reason } = batchOutcomeState(outcomes)
   const reviewed = ruleVerdicts.filter((v) => !v.noVerdict).length
   return {
     state,
@@ -1117,6 +1108,26 @@ function requestChars(fixedChars: number, messages: ModelMessage[]): number {
   return fixedChars + JSON.stringify(messages).length
 }
 
+/**
+ * The verifier's state over its batches (pure): a timeout wins; every batch failing is an error;
+ * an early forced answer is budget. A partial failure is reported in the reason, not hidden.
+ */
+export function batchOutcomeState(
+  outcomes: Array<Pick<BatchOutcome, "state" | "reason">>,
+): { state: VerifierStatus["state"]; reason?: string } {
+  const errors = outcomes.filter((o) => o.state === "error")
+  const timeout = outcomes.find((o) => o.state === "timeout")
+  let state: VerifierStatus["state"] = "ok"
+  let reason: string | undefined
+  if (timeout) [state, reason] = ["timeout", timeout.reason]
+  else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
+  else if (outcomes.some((o) => o.state === "budget"))
+    [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
+  if (errors.length && state !== "error")
+    reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`].filter(Boolean).join("; ")
+  return reason ? { state, reason } : { state }
+}
+
 interface BatchOutcome {
   verdicts: Map<string, ModelFeatures>
   state: "ok" | "timeout" | "error" | "budget"
@@ -1371,20 +1382,7 @@ export async function runAiVerify(
 
     const usage = outcomes.flatMap((o) => (o.usage ? [o.usage] : []))
     const spent = usage.length ? usage.reduce(addUsage) : undefined
-    // A timeout wins; every batch failing is an error; an early forced answer is budget. A
-    // partial failure is reported, not hidden.
-    const errors = outcomes.filter((o) => o.state === "error")
-    const timeout = outcomes.find((o) => o.state === "timeout")
-    let state: VerifierStatus["state"] = "ok"
-    let reason: string | undefined
-    if (timeout) [state, reason] = ["timeout", timeout.reason]
-    else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
-    else if (outcomes.some((o) => o.state === "budget"))
-      [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
-    if (errors.length && state !== "error")
-      reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`]
-        .filter(Boolean)
-        .join("; ")
+    const { state, reason } = batchOutcomeState(outcomes)
     return {
       findings: triaged.findings,
       status: status({

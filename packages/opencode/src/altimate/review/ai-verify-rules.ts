@@ -15,9 +15,20 @@ const log = Log.create({ service: "ai-verify-rules" })
 
 export const NO_RULE_FINDINGS_REASON = "nothing to verify: the PR has no rule findings"
 
-/** A verifier record for a rule run that made no model call. */
-export function skippedVerifier(reason: string): VerifierStatus {
-  return { state: "skipped", reason, durationMs: 0, turns: 0, toolCalls: 0, reviewed: 0, kept: 0, discarded: 0, summary: 0, unreviewed: 0 }
+/** A verifier record for a run that made no model call: its `findings` are all kept, unreviewed (fail-open). */
+export function skippedVerifier(reason: string, findings = 0): VerifierStatus {
+  return {
+    state: "skipped",
+    reason,
+    durationMs: 0,
+    turns: 0,
+    toolCalls: 0,
+    reviewed: 0,
+    kept: findings,
+    discarded: 0,
+    summary: 0,
+    unreviewed: findings,
+  }
 }
 
 /** Verify `rules` (never calls the finder, returns no findings): the verdicts are on `status.verifier`. */
@@ -32,7 +43,7 @@ export async function runRuleVerify(
     findings: [],
     status: { ...status, durationMs: Date.now() - startedAt },
   })
-  const skip = (reason: string) => done({ state: "skipped", reason, verifier: skippedVerifier(reason) })
+  const skip = (reason: string) => done({ state: "skipped", reason, verifier: skippedVerifier(reason, rules.length) })
   if (!input.evidence) return skip("the verifier's evidence is unavailable")
   if (!rules.length) return skip(NO_RULE_FINDINGS_REASON)
   if (aiDryRunEnabled(env)) return skip("dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call")

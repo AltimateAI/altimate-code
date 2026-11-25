@@ -387,9 +387,20 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
     failedFiles: failedFiles.length ? failedFiles : undefined,
     conventions: conventions.length ? conventions : undefined,
     verifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.verifier }))),
-    ruleVerifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.ruleVerifier as VerifierStatus | undefined }))),
+    // Set when any project verified its rule findings, not only the project `base` came from.
+    verifyRules: ais.some((a) => a.verifyRules) ? "drop_refuted" : undefined,
+    ruleVerifier: mergeRuleVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.ruleVerifier }))),
     projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }
+}
+
+function offsetRuleVerdicts(vs: VerifierStatus[]): NonNullable<VerifierStatus["ruleVerdicts"]> {
+  let offset = 0
+  return vs.flatMap((v) => {
+    const out = (v.ruleVerdicts ?? []).map((r) => (r.batch >= 0 ? { ...r, batch: r.batch + offset } : r))
+    offset += v.batches?.length ?? 0
+    return out
+  })
 }
 
 function sumOf(vals: Array<number | undefined>): number | undefined {
@@ -408,6 +419,14 @@ function sumTokens(vals: Array<AiStatus["tokens"]>): AiStatus["tokens"] {
         cacheRead: a.cacheRead + b.cacheRead,
       }))
     : undefined
+}
+
+/** Every project's rule-verifier summary, merged like the verifier, keeping a model (the first project's that has one). */
+function mergeRuleVerifier(runs: Array<{ root: string; v: AiStatus["ruleVerifier"] }>): AiStatus["ruleVerifier"] {
+  const merged = mergeVerifier(runs.map((r) => ({ root: r.root, v: r.v as VerifierStatus | undefined })))
+  if (!merged) return undefined
+  const model = runs.map((r) => r.v?.model).find((m) => m !== undefined)
+  return { ...merged, ...(model ? { model } : {}) }
 }
 
 /** Every project's verifier: the worst state (with its project's reason), summed usage and counters, all decisions. */
@@ -434,7 +453,8 @@ function mergeVerifier(runs: Array<{ root: string; v: AiStatus["verifier"] }>): 
     unreviewed: sumOf(vs.map((v) => v.unreviewed)),
     dropped: dropped.length ? dropped.slice(0, VERIFIER_DROPPED_MAX) : undefined,
     decisions: decisions.length ? decisions : undefined,
-    ruleVerdicts: vs.some((v) => v.ruleVerdicts) ? vs.flatMap((v) => v.ruleVerdicts ?? []) : undefined,
+    // A verdict's `batch` indexes its project's `batches`: offset by the batches merged before it.
+    ruleVerdicts: vs.some((v) => v.ruleVerdicts) ? offsetRuleVerdicts(vs) : undefined,
     batches: vs.some((v) => v.batches) ? vs.flatMap((v) => v.batches ?? []) : undefined,
   }
 }

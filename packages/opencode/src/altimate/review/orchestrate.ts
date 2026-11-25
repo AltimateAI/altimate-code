@@ -2662,6 +2662,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let ruleVerifierRan = false
   // The rule verifier was asked to run (it may still have skipped or failed).
   let ruleVerifyAttempted = false
+  // The deterministic findings validated before the AI lane ran (the first `count` of `merged`), reused after it.
+  let preAiValidated: { count: number; list: Finding[] } | undefined
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2807,15 +2809,19 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         }
       : undefined
     // The rule findings as the envelope would post them (rule types off already dropped), for the rule verifier.
-    const verifyRulesAfter =
-      evidence && switchOn("verifyRules", input.aiSwitches)
-        ? dropRulesOff(
-            cleanFindings(await validateSuggestions(merged, getContent, addedLinesByFile(input.changedFiles))).filter(
-              (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
-            ),
-            input.rulesOff,
-          ).kept
-        : undefined
+    if (evidence && switchOn("verifyRules", input.aiSwitches))
+      preAiValidated = {
+        count: merged.length,
+        list: await validateSuggestions(merged, getContent, addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])])),
+      }
+    const verifyRulesAfter = preAiValidated
+      ? dropRulesOff(
+          cleanFindings(preAiValidated.list).filter(
+            (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
+          ),
+          input.rulesOff,
+        ).kept
+      : undefined
     try {
       const res = await input.aiReview({
         files: aiFiles,
@@ -2855,12 +2861,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
   }
 
-  // Flatten, drop excluded, dedupe, threshold-filter.
-  const validated = await validateSuggestions(
-    merged,
-    getContent,
-    addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])]),
-  )
+  // Flatten, drop excluded, dedupe, threshold-filter. Findings validated before the AI lane are not validated again.
+  const addedForSuggestions = addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])])
+  const validated = preAiValidated
+    ? [...preAiValidated.list, ...(await validateSuggestions(merged.slice(preAiValidated.count), getContent, addedForSuggestions))]
+    : await validateSuggestions(merged, getContent, addedForSuggestions)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   let findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // The verdict counts every instance; merging repeats is presentation only.

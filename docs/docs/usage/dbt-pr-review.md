@@ -302,9 +302,11 @@ ai: true                      # the advisory AI lane; false turns it off. Or an 
 #   pythonFiles: true         # changed Python files, inside or outside the project
 #   verify: true              # the dbt-grounded verifier over the AI comments
 #   conventions: true         # repo review instructions from the base branch (see below)
-#   rulesOff: true            # stop posting 36 noisy rule types while the AI lane runs
+#   rulesOff: true            # stop posting 36 noisy rule types once the AI lane answers
+#                             # (critical findings of those types are still posted)
 #   rulesOn: []               # rule ids taken back out of that list
-#   verifyRules: true         # verify the posted rule findings; refuted ones are not posted
+#   verifyRules: true         # verify the posted rule findings with the verifier (needs
+#                             # `verify`); refuted ones are not posted, except critical ones
 #   rulePolicy: true          # post-verification rule policy; or {noisyRules: [...]}
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
@@ -673,18 +675,24 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    secret-named settings whose value looks like a credential are redacted; ordinary
    text such as `env_var('DBT_PASSWORD')` examples is left as written. The verifier reads a
    convention file's base-branch text, not the PR's edit of it.
-   While the AI lane runs, the rule findings are filtered too. 36 rule types that
-   were almost never real defects on public dbt PRs are not posted (`ai.rulesOff:
-   false` or `ALTIMATE_REVIEW_RULES_OFF=0` keeps them, `ai.rulesOn: [ids]` keeps
-   single types, `ALTIMATE_REVIEW_RULES_OFF=<file>` replaces the list with a JSON
-   list of rule ids). With the verifier on, the rule findings that would be posted
-   are verified too and refuted ones are dropped (`ai.verifyRules: false` or
-   `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`). Then a rule finding is not posted when
-   the verifier could not check it and it is a warning, or when its type is one
-   of 7 noisy types and the verifier did not confirm it (`ai.rulePolicy: false`
-   or `ALTIMATE_REVIEW_RULE_POLICY=0`). Critical rule findings are never dropped
-   by the verifier or the policy. If the rule verifier did not run, every rule
-   finding is posted as before. The envelope counts what each step dropped (`rulesOff`, `rulesRefuted`, `rulePolicy`).
+   When the AI lane runs and answers, the rule findings are filtered too. 36 rule
+   types that were almost never real defects on public dbt PRs are not posted
+   (`ai.rulesOff: false` or `ALTIMATE_REVIEW_RULES_OFF=0`/`off`/`false` keeps them,
+   `ai.rulesOn: [ids]` keeps single types, `ALTIMATE_REVIEW_RULES_OFF=<path>.json`
+   replaces the list with a JSON list of rule ids; rule ids match in either
+   spelling, `dbt_patterns:self_join` or `dbt-patterns:self-join`). With the
+   verifier on (`ai.verify`), the rule findings that would be posted are verified
+   too and refuted ones are dropped (`ai.verifyRules: false` or
+   `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`; `ai.verify: false` turns it off too). Then
+   a rule finding is not posted when the verifier could not check it and it is a
+   warning, or when its type is one of 7 noisy types and the verifier did not
+   confirm it (`ai.rulePolicy: false` or `ALTIMATE_REVIEW_RULE_POLICY=0`). Critical
+   rule findings are never dropped by any of these steps, nor is a repeat-merged
+   comment that includes an AI finding. When the AI lane is skipped or fails (no
+   model, dry run, provider error), none of the steps applies and every rule
+   finding is posted as before; when only the rule verifier did not run, the rule
+   types off still apply and every other rule finding is posted unchanged. The
+   envelope counts what each step dropped (`rulesOff`, `rulesRefuted`, `rulePolicy`).
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →

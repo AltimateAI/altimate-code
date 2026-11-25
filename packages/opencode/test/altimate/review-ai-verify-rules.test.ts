@@ -23,6 +23,7 @@ import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import { Dispatcher } from "../../src/altimate/native"
 import { LLM } from "../../src/session/llm"
 import { Provider } from "../../src/provider/provider"
+import { mergeProjectEnvelopes } from "../../src/altimate/review/multi-project"
 
 // The rule verifier: after the finder (and its verifier), the rule findings the review would post
 // are verified and the refuted ones are not posted. Every model here is scripted.
@@ -147,6 +148,12 @@ describe("verifyRules switch", () => {
     expect(resolveAiSwitches(cfg, {}).verifyRules).toBe(false)
     expect(resolveAiSwitches(cfg, { ALTIMATE_REVIEW_AI_VERIFY_RULES: "drop_refuted" }).verifyRules).toBe(true)
   })
+
+  test("`ai.verify: false` (or its env `0`) turns rule verification off too", () => {
+    expect(resolveAiSwitches(parseReviewConfig("ai:\n  verify: false"), {}).verifyRules).toBe(false)
+    expect(resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_VERIFY: "0" }).verifyRules).toBe(false)
+    expect(resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_VERIFY: "0", ALTIMATE_REVIEW_AI_VERIFY_RULES: "1" }).verifyRules).toBe(false)
+  })
 })
 
 describe("runAiVerify with rulesOnly: verdicts recorded, nothing triaged", () => {
@@ -218,6 +225,14 @@ describe("runRuleVerify", () => {
     const dry = await runRuleVerify({ ...base, evidence: evidence() }, [ruleFinding(1)], { env: { ALTIMATE_REVIEW_AI_DRYRUN: "1" } })
     expect(dry.status.verifier?.state).toBe("skipped")
     expect(llm).not.toHaveBeenCalled()
+  })
+
+  test("a skipped run reports every rule finding as kept and unreviewed (fail-open)", async () => {
+    const rules = [ruleFinding(1), ruleFinding(2), ruleFinding(3)]
+    const noEvidence = await runRuleVerify({ files: [FILE], grounding: [] }, rules)
+    expect(noEvidence.status.verifier).toMatchObject({ state: "skipped", reviewed: 0, kept: 3, unreviewed: 3, discarded: 0 })
+    const dry = await runRuleVerify({ files: [FILE], grounding: [], evidence: evidence() }, rules, { env: { ALTIMATE_REVIEW_AI_DRYRUN: "1" } })
+    expect(dry.status.verifier).toMatchObject({ kept: 3, unreviewed: 3 })
   })
 })
 
@@ -459,5 +474,37 @@ describe("orchestrator: drop_refuted", () => {
     })
     expect(less[0].verifyRulesAfter).toEqual(first.filter((f) => f.rule !== first[0].rule))
     expect(seenRules.rulesOff).toEqual({ [first[0].rule!]: first.filter((f) => f.rule === first[0].rule).length })
+  })
+})
+
+describe("--all-projects merge of the rule verifier", () => {
+  const ON = { verifyRules: true, rulePolicy: false }
+  const OFF = { verifyRules: false, rulePolicy: false }
+
+  test("verdict batches are offset by the batches of earlier projects; the model is kept", async () => {
+    const a = await run([], ON)
+    const b = await run([], ON)
+    a.ai!.ruleVerifier!.model = "fake/a"
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: ["a/models/m.sql"], env: a },
+      { root: "b", paths: ["b/models/m.sql"], env: b },
+    ])
+    const v = merged.ai!.verifier!
+    const na = a.ai!.verifier!.ruleVerdicts!.length
+    expect(v.batches).toHaveLength(2)
+    expect(v.ruleVerdicts!.slice(0, na).every((r) => r.batch === 0)).toBe(true)
+    expect(v.ruleVerdicts!.slice(na).every((r) => r.batch === 1)).toBe(true)
+    expect(merged.ai!.ruleVerifier?.model).toBe("fake/a")
+  })
+
+  test("verifyRules is set when only a later project verified its rule findings", async () => {
+    const a = await run([], OFF)
+    const b = await run([], ON)
+    expect(a.ai!.verifyRules).toBeUndefined()
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: ["a/models/m.sql"], env: a },
+      { root: "b", paths: ["b/models/m.sql"], env: b },
+    ])
+    expect(merged.ai!.verifyRules).toBe("drop_refuted")
   })
 })

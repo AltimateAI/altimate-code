@@ -105,6 +105,8 @@ export function resolveAiSwitches(
     }
     out[name] = fromEnv ?? configuredSwitch(configured[name as keyof typeof configured]) ?? AI_SWITCH_DEFAULTS[name]
   }
+  // The rule findings are verified by the same verifier: `verify` off turns `verifyRules` off too.
+  out.verifyRules &&= out.verify
   return out
 }
 
