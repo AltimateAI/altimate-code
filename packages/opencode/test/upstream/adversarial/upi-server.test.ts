@@ -3,7 +3,10 @@ import fs from "fs/promises"
 import path from "path"
 import { ServerAuth } from "../../../src/server/auth"
 import { cspForHtml, upstreamURL } from "../../../src/server/shared/ui"
-import { hasPtyConnectTicketURL, isPtyConnectPath } from "../../../src/server/shared/pty-ticket"
+// altimate_change start — upstream_fix: authorize PTY ticket bypass from the matched route (anomalyco/opencode#58258)
+import { PTY_CONNECT_PATH } from "../../../src/server/shared/pty-ticket"
+import { PtyPaths } from "../../../src/server/routes/instance/httpapi/groups/pty"
+// altimate_change end
 import { isPublicUIPath } from "../../../src/server/shared/public-ui"
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..", "..")
@@ -36,13 +39,12 @@ describe("UPI-29 authorization and PTY-ticket boundaries", () => {
     }
   })
 
-  test("PTY connect ticket bypass is path-specific and still requires the ticket query", () => {
-    expect(isPtyConnectPath("/pty/abc/connect")).toBe(true)
-    expect(isPtyConnectPath("/pty/abc/other")).toBe(false)
-    expect(hasPtyConnectTicketURL(new URL("http://localhost/pty/abc/connect?ticket=one"))).toBe(true)
-    expect(hasPtyConnectTicketURL(new URL("http://localhost/pty/abc/connect"))).toBe(false)
-    expect(hasPtyConnectTicketURL(new URL("http://localhost/session?ticket=one"))).toBe(false)
+  // altimate_change start — upstream_fix: authorize PTY ticket bypass from the matched route (anomalyco/opencode#58258)
+  test("PTY connect ticket bypass is keyed to the routed connect path", () => {
+    expect(PTY_CONNECT_PATH).toBe("/pty/:ptyID/connect")
+    expect(PtyPaths.connect).toBe(PTY_CONNECT_PATH)
   })
+  // altimate_change end
 
   test("public UI auth bypass is limited to GET asset paths", () => {
     expect(isPublicUIPath("GET", "/site.webmanifest")).toBe(true)
@@ -66,8 +68,10 @@ describe("UPI-29 authorization and PTY-ticket boundaries", () => {
     const ptyBody = source.slice(source.indexOf("export const ptyConnectAuthorizationLayer"))
     const regularBody = source.slice(source.indexOf("export const authorizationLayer"), source.indexOf("export const ptyConnectAuthorizationLayer"))
 
-    expect(ptyBody).toContain("if (hasPtyConnectTicketURL(url)) return yield* effect")
-    expect(regularBody).not.toContain("hasPtyConnectTicketURL")
+    // altimate_change start — upstream_fix: authorize PTY ticket bypass from the matched route (anomalyco/opencode#58258)
+    expect(ptyBody).toContain("route.route.path === PTY_CONNECT_PATH && !!url.searchParams.get(PTY_CONNECT_TICKET_QUERY)")
+    expect(regularBody).not.toContain("PTY_CONNECT_TICKET_QUERY")
+    // altimate_change end
   })
 })
 
