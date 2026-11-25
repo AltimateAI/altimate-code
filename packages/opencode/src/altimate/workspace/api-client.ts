@@ -698,6 +698,19 @@ export namespace WorkspaceApi {
     return null
   }
 
+  /** Counts one headless run against the workspace's monthly runs. Idempotent on `client_run_id`. */
+  export async function reportRun(input: {
+    client_run_id: string
+    kind: "headless" | "ci" | "scheduled"
+    datamate_id?: number
+  }): Promise<{ counted?: boolean; runs_this_month?: number; limit?: number | null }> {
+    return req("POST", "", {
+      base: "/workspace-runs",
+      body: input,
+      expectedStatuses: [404, 405],
+    })
+  }
+
   /** Detach this project from its workspace, server-side.
    *
    * Returns false when the server had no active binding to remove — the project

@@ -2271,6 +2271,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
       await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
     }
     // altimate_change end
+    // altimate_change start — count headless/CI/scheduled runs against the linked workspace's plan
+    {
+      const { reportHeadlessRun } = await import("../../altimate/workspace/run-report")
+      const outcome = await reportHeadlessRun()
+      if (outcome.status === "blocked") {
+        UI.error(outcome.error.message)
+        process.exit(1)
+      }
+    }
+    // altimate_change end
     await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)
