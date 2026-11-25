@@ -205,6 +205,24 @@ describe("sql_execute generated reads", () => {
     })
   }
 
+  test("a refused source says once which statement writes", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const error = await tool
+      .execute({ query_from: { ...source, sql: "SELECT 1; DELETE FROM orders" }, warehouse: "analytics" }, ctx)
+      .then(() => "", (e: Error) => e.message)
+    expect(error).toContain("query_from source must be a single read-only SELECT")
+    expect(error.split("statement 2 of 2 is not a read (DELETE)").length).toBe(2)
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  test.each(["SELECT 1; SELECT 2", "SHOW TABLES"])("explains the refused source shape %s", async (sql) => {
+    const tool = await initTool(SqlExecuteTool)
+    await expect(tool.execute({ query_from: { ...source, sql }, warehouse: "analytics" }, ctx)).rejects.toThrow(
+      "send a single SELECT or WITH query",
+    )
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
   for (const sql of [
     "DELETE FROM orders",
     "CREATE TEMP TABLE generated AS SELECT 1",

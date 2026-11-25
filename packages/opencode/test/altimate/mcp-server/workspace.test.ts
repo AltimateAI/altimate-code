@@ -33,6 +33,9 @@ test("only the supported workspace read capabilities cross the facade", () => {
 
 test("workspace SQL reuses the native classifier and refuses mutation, hidden side effects and absent SQL", () => {
   expect(() => checkEngineRead("snowflake_execute_database_query", { query: "SELECT 1" })).not.toThrow()
+  expect(() => checkEngineRead("postgresql_execute_database_query", { query: "SELECT 1; DELETE FROM t" })).toThrow(
+    "statement 2 of 2 is not a read (DELETE)",
+  )
   expect(() =>
     checkEngineRead("postgresql_execute_database_query", { sql: "SELECT count(*) FROM orders" }),
   ).not.toThrow()

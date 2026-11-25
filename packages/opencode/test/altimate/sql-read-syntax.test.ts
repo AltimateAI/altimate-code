@@ -60,7 +60,7 @@ describe("read-only dialect syntax", () => {
     ]) {
       expect(classifyAndCheck(sql, "duckdb").queryType).toBe("write")
     }
-    expect(classifyAndCheck("SELECT 10//3; TRUNCATE users", "duckdb")).toEqual({ queryType: "write", blocked: true })
+    expect(classifyAndCheck("SELECT 10//3; TRUNCATE users", "duckdb")).toEqual({ queryType: "write", blocked: true, cause: "TRUNCATE" })
   })
 
   test("unsupported dialects do not inherit DuckDB-only syntax", () => {

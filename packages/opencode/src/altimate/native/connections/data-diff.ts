@@ -9,7 +9,7 @@
 
 import type { DataDiffParams, DataDiffResult, PartitionDiffResult } from "../types"
 import * as Registry from "./registry"
-import { requireReadOnlyQuery } from "../../tools/read-only-sql"
+import { requireReadOnlyQuery, writeReason } from "../../tools/read-only-sql"
 import { classifyAndCheck } from "../../tools/sql-classify"
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ async function executeQuery(sql: string, warehouseName: string | undefined, meta
   const dialect = warehouseTypeToDialect(Registry.getConfig(warehouseName)?.type ?? "generic")
   if (metadata) {
     const check = classifyAndCheck(sql, dialect)
-    if (check.blocked || check.queryType !== "read") throw new Error("Data diff metadata must be read-only")
+    if (check.blocked || check.queryType !== "read") throw new Error(`Data diff metadata must be read-only.${writeReason(sql, dialect)}`)
   } else {
     requireReadOnlyQuery(sql, dialect)
   }
@@ -900,8 +900,11 @@ export async function runDataDiff(params: DataDiffParams): Promise<DataDiffResul
     ] as const) {
       const type = warehouse ? Registry.getConfig(warehouse)?.type : Registry.list().warehouses[0]?.type
       const dialect = warehouseTypeToDialect(type ?? "generic")
-      requireReadOnlyQuery(isQuery(source) ? source : `SELECT * FROM ${source}`, dialect)
-      if (params.where_clause) requireReadOnlyQuery(`SELECT 1 WHERE (${params.where_clause})`, dialect)
+      // A query source is checked as sent; a table name and the filter are named, since the SQL wrapped around them
+      // is not what the user wrote.
+      if (isQuery(source)) requireReadOnlyQuery(source, dialect)
+      else requireReadOnlyQuery(`SELECT * FROM ${source}`, dialect, "source or target table name")
+      if (params.where_clause) requireReadOnlyQuery(`SELECT 1 WHERE (${params.where_clause})`, dialect, "where_clause")
     }
   } catch (error) {
     return { success: false, error: `Data diff requires read-only inputs: ${error instanceof Error ? error.message : String(error)}`, steps: 0 }

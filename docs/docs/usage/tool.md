@@ -51,7 +51,7 @@ Only the data tools are exposed. Coding tools (`bash`, `read`, `edit`, ...), `db
 
 ## Permissions
 
-Runs are read-only by default. Reads such as `sql_execute` on a SELECT and `schema_inspect` are allowed; anything else is refused with `Permission denied: <kind>. Re-run with --allow-write to enable writes.` Tools that change local configuration (`warehouse_add`, `warehouse_remove`, `warehouse_install_driver`) also need `--allow-write`.
+Runs are read-only by default. Reads such as `sql_execute` on a SELECT and `schema_inspect` are allowed; anything else is refused with `Permission denied: <kind>. Re-run with --allow-write to enable writes.` For `sql_execute`, the refusal first says why the query counts as a write, so a malformed read can be fixed instead. Tools that change local configuration (`warehouse_add`, `warehouse_remove`, `warehouse_install_driver`) also need `--allow-write`.
 
 `DROP` of a database, schema, catalog or namespace (including `DROP EXTERNAL SCHEMA` and `DROP PLUGGABLE DATABASE`), `TRUNCATE`, and MySQL/MariaDB executable comments (`/*! ... */`, `/*M! ... */`) are refused even with `--allow-write` when the SQL check recognises them. The check reads the SQL text, so it is best effort: a statement the warehouse builds or decodes at run time (dynamic SQL assembled by concatenation, a stored routine, an unusual literal encoding) can get past it. For a hard guarantee, connect with a database user that has no `DROP` or `TRUNCATE` privilege.
 

@@ -93,7 +93,13 @@ function hasQueryWriteClause(sql: string, dialect?: string): boolean {
 function maskedHasWriteClause(masked: string, dialect?: string): boolean {
   // UNPIVOT's INTO NAME labels output columns; it does not create a table.
   if (dialect?.toLowerCase() === "duckdb") masked = maskUnpivotLabels(masked)
-  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked)
+  // A name qualified by a table or alias (t.update, s.delete) is a column, not a clause. The qualifier
+  // must be a whole unquoted identifier directly before the dot: `1. INTO t` and `0x1.INTO t` are a
+  // number followed by SELECT INTO, and anything else stays a write. The lookbehind runs only where a
+  // keyword matched, so long masked literals are not rescanned at every position.
+  // The bundled ClickHouse parser accepts trailing text it cannot read, so there every keyword counts.
+  if (dialect?.toLowerCase() === "clickhouse") return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked)
+  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b(?<!(?:^|[^\w$.])[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*\.(?:INTO|INSERT|UPDATE|DELETE|MERGE))/i.test(masked)
 }
 
 const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*)$/i
@@ -257,19 +263,47 @@ const HARD_DENY_TYPES = new Set(["DROP DATABASE", "DROP SCHEMA", "TRUNCATE", "TR
 
 const HARD_DENY_PATTERN = /^\s*(DROP\s+((EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b|TRUNCATE(\s+TABLE)?\b)/i
 
+// The label of a hard-deny match (DROP DATABASE, DROP SCHEMA, ..., TRUNCATE): a match that starts with
+// DROP and a fixed object kind is that DROP; any other is TRUNCATE. Only fixed words reach the label.
+function hardDenyLabel(match: string): string {
+  const drop = /^\W*DROP\s+(?:(?:EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\b/i.exec(match)
+  return drop ? `DROP ${drop[1].toUpperCase()}` : "TRUNCATE"
+}
+
+/** A name quoted the way the dialect always reads as an identifier: backticks where double quotes can make a
+ * string (or, on ClickHouse, as data_diff quotes), brackets on SQL Server, where QUOTED_IDENTIFIER may be off. */
+function quoteName(name: string, dialect?: string): string {
+  if (isSqlServerDialect(dialect)) return `[${name}]`
+  return /^(mysql|mariadb|clickhouse|bigquery|spark|databricks|hive)$/i.test(dialect ?? "") ? `\`${name}\`` : `"${name}"`
+}
+
+/** SQL Server and its aliases, whose batches run statements without separators and whose XML .query() takes XQuery. */
+export function isSqlServerDialect(dialect?: string): boolean {
+  return /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")
+}
+
+// Parse errors that mean the installation, not the SQL, is at fault; explainWrite reports them as such.
+const PARSER_UNAVAILABLE = "SQL parser is unavailable"
+const PARSER_INVALID_RESULT = "SQL parser returned an invalid statement list"
+
 /**
  * Fail closed when the parser is unavailable or rejects the input. Lexical
  * statement boundaries still enforce hard denies without reading quoted text.
  */
-function classifyFallback(sql: string, dialect?: string, write = true): { queryType: "read" | "write"; blocked: boolean } {
+function classifyFallback(
+  sql: string,
+  dialect?: string,
+  write = true,
+): { queryType: "read" | "write"; blocked: boolean; cause?: string } {
   const statements = statementsOf(sql, dialect)
+  // The first rule that blocks names the cause (a fixed label, no SQL text).
+  let cause: string | undefined
   // Executable comments can contain entire statements or fragments of a hard
   // deny. Reject them outright because generic parsers discard their bodies.
-  let blocked = tokenizeSql(sql, dialect).tokens.some(
-    ({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text),
-  )
+  if (hasExecutableComment(sql, dialect)) cause = "an executable comment"
   for (const stmt of statements) {
-    if (HARD_DENY_PATTERN.test(stmt)) blocked = true
+    const match = HARD_DENY_PATTERN.exec(stmt)
+    if (match) cause ??= hardDenyLabel(match[0])
   }
   // When quoting or comments cannot be read with certainty, no reading of the literals or comments
   // can be trusted to hide a hard deny (a misread literal can make a real statement look like a
@@ -277,7 +311,7 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     // Escapes decoded too: dynamic SQL may run a literal such as '\x44ROP SCHEMA s'.
-    if (mentionsHardDenyAnywhere(sql)) blocked = true
+    if (mentionsHardDenyAnywhere(sql)) cause ??= "hard-blocked words (such as DROP DATABASE or TRUNCATE) in text that cannot be fully read"
   } else {
     // Read with certainty: the statement words in code (literals and comments masked, each quoted
     // identifier a placeholder name, so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
@@ -288,24 +322,32 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
     const chained =
       (/^snowflake$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
       /(->>|\bASYNC\s*\(|:=\s*\(|\bDEFAULT\s*\()\s*TRUNCATE\b(?!\s*\()/i.test(names)
-    if (CODE_HARD_DENY.test(names) || handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names)))
-      blocked = true
+    const code = CODE_HARD_DENY.exec(names)
+    if (code) cause ??= hardDenyLabel(code[0])
+    else if (handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names))) cause ??= "TRUNCATE"
     // Dynamic SQL runs its literals, joined into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
     // adjacent constants), whether the call reads as a read (SELECT exec('...')) or a write. This runs at
     // every nesting depth, as on main. Both readings count: quoted names masked to spaces, as on main, so
     // EXEC[sp_executesql] and PREPARE`p`FROM keep their word boundaries, and quoted names unwrapped, so
     // "exec"('...') and [exec]('...') count as calls.
     const dynamic = DYNAMIC_SQL.test(maskSql(lexical.tokens)) || DYNAMIC_SQL.test(maskSql(lexical.tokens, true))
-    if (dynamic && mentionsHardDenyAnywhere(sql)) blocked = true
+    if (dynamic && mentionsHardDenyAnywhere(sql))
+      cause ??= "dynamic SQL (EXEC, PREPARE or DO) with hard-blocked words (such as DROP DATABASE or TRUNCATE) in its text"
   }
-  return { queryType: "write", blocked }
+  return { queryType: "write", blocked: cause !== undefined, ...(cause && { cause }) }
 }
 
-/** Where statements need no separator (T-SQL) or the dialect is not one the lexer models, a read
+/** The statement keyword, if any. Where statements need no separator (T-SQL) or the dialect is not one the lexer models, a read
  * must hold no statement keyword in its code (literals, identifiers and comments masked): the
  * engine would run `SELECT ... DELETE FROM t` as two statements however a parser reads it. */
-function batchedStatement(masked: string, dialect?: string): boolean {
-  return (/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) && BATCH_STATEMENT.test(masked)
+function batchedStatement(masked: string, dialect?: string): string | undefined {
+  if (!isSqlServerDialect(dialect) && isModeledDialect(dialect)) return undefined
+  // A name qualified by a whole unquoted identifier (t.update, s.t.into) cannot start a statement:
+  // every part after the first of a dotted name (s.t.update) is a name.
+  const names = masked.replace(/((?:^|[^\w$.])[A-Za-z_][\w$]*)((?:\.[A-Za-z_][\w$]*)+)/g, (_, head: string, rest: string) =>
+    head + rest.replace(/[A-Za-z_][\w$]*/g, "_"),
+  )
+  return BATCH_STATEMENT.exec(names)?.[0]
 }
 
 // T-SQL statements that can follow a read in the same batch. Words that are also common column names
@@ -516,7 +558,7 @@ function functionSafety(sql: string, dialect: string | undefined, depth: number,
       Object.hasOwn(SQL_ARGUMENTS, call.name) && call.qualifier === undefined && !hasSideEffectFunction(call.name)
     if (depth > 0 && !nestedExecutor && !isReadOnlyNestedFunction(call.name, call.qualifier)) write = true
     // SQL Server's XML .query() takes XQuery, not executable SQL.
-    if (call.name === "query" && /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")) continue
+    if (call.name === "query" && isSqlServerDialect(dialect)) continue
     const argument = Object.hasOwn(SQL_ARGUMENTS, call.name) ? SQL_ARGUMENTS[call.name] : undefined
     if (!argument) continue
     const inner = sqlLiteral(call.args[argument.index], dialect)
@@ -539,13 +581,16 @@ export function classifyAndCheck(sql: string, dialect?: string): {
   queryType: "read" | "write"
   blocked: boolean
   parseError?: string
+  /** Which hard-block rule matched, as a fixed label with no SQL text; set when blocked. */
+  cause?: string
 } {
   const result = classifySql(sql, dialect, 0)
   if (result.queryType !== "write" || result.blocked) return result
   // A write may also run the SQL in its literals: a routine body created and called in the same call. Only
   // SQL read with certainty; otherwise the word scan of the whole text already covered its literals.
   const lexical = tokenizeSql(sql, dialect)
-  if (lexical.complete && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
+  if (lexical.complete && quotedHardDeny(lexical.tokens, dialect))
+    return { ...result, blocked: true, cause: "a string literal this write may run, holding a hard-blocked statement or a Unicode escape" }
   return result
 }
 
@@ -560,29 +605,32 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
   queryType: "read" | "write"
   blocked: boolean
   parseError?: string
+  cause?: string
 } {
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
   const lexical = tokenizeSql(sql, dialect)
   if (!lexical.complete) {
     return { ...classifyFallback(sql, dialect), parseError: "SQL contains unterminated or unsupported quoted text or comments" }
   }
-  if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: "SQL parser is unavailable" }
+  if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: PARSER_UNAVAILABLE }
   try {
     const result = getStatementTypes(parserSql(sql, dialect), dialect)
     if (!Array.isArray(result?.statements) || result.statement_count !== result.statements.length) {
-      return { ...classifyFallback(sql, dialect), parseError: "SQL parser returned an invalid statement list" }
+      return { ...classifyFallback(sql, dialect), parseError: PARSER_INVALID_RESULT }
     }
 
     // A generic parser can treat MySQL arithmetic (--2) as a comment and omit
     // trailing statements. Keep dialect-aware lexical hard denies authoritative.
     const functions = functionSafety(sql, dialect, depth)
     const masked = maskSql(lexical.tokens)
-    const blocked =
-      functions.blocked ||
-      classifyFallback(sql, dialect, false).blocked ||
-      result.statements.some(
-        (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
-      )
+    const hardType = result.statements.find(
+      (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
+    )?.statement_type
+    const cause =
+      (functions.blocked ? "SQL run from a string literal" : undefined) ??
+      classifyFallback(sql, dialect, false).cause ??
+      (hardType ? hardDenyLabel(hardType) : undefined)
+    const blocked = cause !== undefined
 
     const queryType =
       !functions.write &&
@@ -599,10 +647,251 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
       otherIsReadOnly(sql, result.statements, dialect)
       ? "read"
       : "write"
-    return { queryType, blocked: blocked || (queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))) }
+    // ClickHouse's bundled parser accepts trailing text, so a shell redirect to a descriptor or /dev/null
+    // (never SQL) would pass as a read. Treat such a read as unreadable so the residue is named, as on other
+    // dialects; a write is already refused and named by its type.
+    // A trailing pipe into a shell command with a flag counts too (never `||`, ClickHouse's concatenation). A file
+    // tail does not: `a > b.csv` compares a column there.
+    if (
+      queryType === "read" &&
+      dialect?.toLowerCase() === "clickhouse" &&
+      (masked.search(SHELL_REDIRECT) >= 0 || CLICKHOUSE_PIPE_TAIL.test(masked.slice(-400)))
+    ) {
+      return { ...classifyFallback(sql, dialect), parseError: "shell redirect after the SQL" }
+    }
+    const writeTruncate = queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))
+    const finalCause = cause ?? (writeTruncate ? "TRUNCATE" : undefined)
+    return { queryType, blocked: finalCause !== undefined, ...(finalCause && { cause: finalCause }) }
   } catch (error) {
     return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }
+}
+
+// Shell syntax pasted into a query out of terminal habit. A redirect to a descriptor or /dev/null
+// (`2>/dev/null`, `2>&1`) can sit anywhere, even before LIMIT. At the very end there may also be one pipe
+// into a shell command (`| head -20`) or one redirect into a file (`> out.csv`). A file target must start
+// like a path (/, ./, ../, ~/) or end in a known output extension, so comparisons such as `x > 2`,
+// `x > 1.5` and `x > t.total` never match. The tail patterns run on at most 400 characters and have no
+// nested repetition.
+const SHELL_REDIRECT = /\s(?:[12]|&)?>>?[ \t]*(?:&[12]|\/dev\/null)(?![\w/])/g
+// ClickHouse parses `|` as an operator, so only a command with a flag argument (`| head -5`, `| wc -l`) counts:
+// `a | head` may be an expression on a column named head.
+const CLICKHOUSE_PIPE_TAIL = /(?<!\|)\|(?!\|)[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)[ \t]+-[^|;\n]*[\s;]*$/i
+const SHELL_PIPE_TAIL = /\|[ \t]*(head|tail|grep|egrep|less|more|cat|wc|sort|uniq|cut|column|jq|tee|awk|sed)\b[^|;\n]*$/i
+const SHELL_FILE_TAIL =
+  /\s(?:[12]|&)?>>?[ \t]*(?:(?:\/|\.\.?\/|~\/)[\w./~-]*|[\w~-][\w~.-]*\.(?:csv|tsv|txt|json|jsonl|log|out|err|sql|parquet|tmp))[ \t]*$/i
+
+/** The shell syntax in a query that is a read without it, or undefined. Only code counts (literals and
+ * comments are masked), and only text that does not parse as sent. The query is never rewritten: the
+ * caller names the residue so the sender removes it, since running the query without it would run SQL
+ * other than what was sent. Fragments are named by their form (`2>/dev/null`, `> <file>`, `| head ...`),
+ * since a path or a pipe's arguments may hold private text and telemetry records the error. */
+export function shellResidue(sql: string, dialect?: string): string | undefined {
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete || !classifyAndCheck(sql, dialect).parseError) return undefined
+  // Masking keeps every offset, so a span of the masked text cuts the same span of the original.
+  let masked = maskSql(lexical.tokens)
+  const cuts: Array<{ start: number; end: number; label: string }> = []
+  for (const match of masked.matchAll(SHELL_REDIRECT)) {
+    cuts.push({ start: match.index!, end: match.index! + match[0].length, label: match[0].replace(/\s+/g, "") })
+  }
+  // Only the last 400 characters can hold a tail; strip trailing ; and whitespace first.
+  // A backward loop, not a `$`-anchored regex: masked literals can be long runs of spaces, and a regex
+  // would retry the end-of-text match from every position in them.
+  let end = masked.length
+  while (end > 0 && /[\s;]/.test(masked[end - 1])) end--
+  const offset = Math.max(0, end - 400)
+  const window = masked.slice(offset, end)
+  const pipe = SHELL_PIPE_TAIL.exec(window)
+  const file = pipe ? undefined : SHELL_FILE_TAIL.exec(window)
+  if (pipe) cuts.push({ start: offset + pipe.index, end: masked.length, label: `| ${pipe[1].toLowerCase()} ...` })
+  if (file) cuts.push({ start: offset + file.index, end: masked.length, label: `${file[0].trim().match(/^[12&]?>>?/)![0]} <file>` })
+  if (!cuts.length) return undefined
+  cuts.sort((a, b) => a.start - b.start)
+  const labels: string[] = []
+  let query = ""
+  let position = 0
+  for (const cut of cuts) {
+    if (cut.end <= position) continue
+    query += sql.slice(position, Math.max(cut.start, position)) + " "
+    labels.push(cut.label)
+    position = cut.end
+  }
+  query += sql.slice(position)
+  if (!query.trim()) return undefined
+  const result = classifyAndCheck(query, dialect)
+  return result.queryType === "read" && !result.blocked ? labels.join("`, `") : undefined
+}
+
+/** What to do when the SQL classifier itself is unavailable: no rewrite of the SQL can help. */
+export const UNAVAILABLE_NEXT_STEP = "Changing the SQL will not help; ask the user to check the installation."
+
+// Whether the SQL holds an executable comment (a /*! comment) as a comment token, not inside a literal.
+export function hasExecutableComment(sql: string, dialect?: string): boolean {
+  return tokenizeSql(sql, dialect).tokens.some(({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text))
+}
+
+// Which hard-block rule a blocked statement matched, as the classifier recorded it (no SQL text).
+export function hardBlockCause(sql: string, dialect?: string): string {
+  return classifyAndCheck(sql, dialect).cause ?? "a hard-blocked statement"
+}
+
+// Statement keywords that may name an UNKNOWN statement in a refusal.
+const STATEMENT_KEYWORDS = new Set([
+  "ATTACH", "DETACH", "INSTALL", "LOAD", "SET", "RESET", "PRAGMA", "COPY", "CALL", "EXEC", "EXECUTE", "GRANT", "REVOKE",
+  "VACUUM", "ANALYZE", "EXPORT", "IMPORT", "USE", "BEGIN", "COMMIT", "ROLLBACK", "CHECKPOINT", "OPTIMIZE", "SYSTEM",
+  "KILL", "RENAME", "COMMENT", "REFRESH", "UNLOAD", "PUT", "GET", "REMOVE", "LIST",
+])
+
+/** The parser's position and the kind of error only: everything from the first quoted or named token
+ * (`got`, `found`, `near`, a parenthesis, a quote, a colon after the kind) is cut, since telemetry records
+ * this error and its masking does not cover every token the parser prints. */
+function parserMessage(message: string): string {
+  const located = /^(.*?line \d+, column \d+:\s*)([\s\S]*)$/.exec(message)
+  const prefix = located ? located[1] : ""
+  const detail = (located ? located[2] : message)
+    .split(/\s+(?:got|found|near)\b|\s*[('"`[:]/i)[0]
+    .replace(/[\s,;:]+$/, "")
+  return `${prefix}${detail}`.trim() || "parse error"
+}
+
+function batchKeywordExplanation(dialect?: string): string {
+  return isSqlServerDialect(dialect)
+    ? "SQL Server runs a statement there even without a separator"
+    : "this dialect is not modeled, so it may run as a statement"
+}
+
+/**
+ * Why classifyAndCheck treats this SQL as a write, in words an agent can act on: shell residue to
+ * remove, the parser error and its position, or the first statement that is not a read. `unreadable`
+ * is true when the SQL could not be read at all (fix the text), false when a statement writes.
+ */
+export function explainWrite(
+  sql: string,
+  dialect?: string,
+): { reason: string; unreadable: boolean; unavailable?: boolean; residue?: boolean } {
+  const unreadable = (reason: string) => ({ reason, unreadable: true })
+  const writes = (reason: string) => ({ reason, unreadable: false })
+  const residue = shellResidue(sql, dialect)
+  if (residue) {
+    return { ...unreadable(`it contains shell syntax (\`${residue}\`), which is not SQL. Remove it and send only the SQL`), residue: true }
+  }
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) {
+    // An executable comment (/*! ... */) is closed but runs as SQL on some engines, so it is never read as one.
+    if (hasExecutableComment(sql, dialect)) {
+      return unreadable("it contains an executable comment (/*! ... */), which some engines run as SQL; remove it or use a plain comment")
+    }
+    return unreadable(
+      "it has unterminated or unsupported quoted text or comments, so it cannot be proven read-only. To fix the syntax, check that every " +
+      "quote and comment is closed; inside a string literal, write a single quote as ''"
+    )
+  }
+  const statements = statementsOf(sql, dialect)
+  for (const [index, statement] of statements.entries()) {
+    const result = classifySql(statement, dialect, 0)
+    if (result.queryType === "read" && !result.blocked) continue
+    // Statements are not quoted back, since telemetry records this error; the parser's own message
+    // quotes at most a token, which telemetry masks as a literal.
+    const where = statements.length > 1 ? `statement ${index + 1} of ${statements.length}` : "it"
+    // Where statements need no separator, a statement keyword is the real reason, even if it breaks the parse.
+    const batchKeyword = batchedStatement(maskSql(tokenizeSql(statement, dialect).tokens), dialect)
+    // The classifier itself could not run: no rewrite of the SQL can help.
+    if (result.parseError === PARSER_UNAVAILABLE || result.parseError === PARSER_INVALID_RESULT) {
+      return {
+        reason: "the SQL classifier is unavailable in this installation, so no query can be proven read-only",
+        unreadable: false,
+        unavailable: true,
+      }
+    }
+    if (result.parseError && batchKeyword) {
+      return writes(
+        `${where} holds the statement keyword ${batchKeyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
+          `${batchKeywordExplanation(dialect)}` +
+          "; run each statement in its own call, or quote it if it is a column name",
+      )
+    }
+    // A SELECT ... INTO the parser cannot read (MySQL INTO OUTFILE or @var) is still a write: say so, not "fix the syntax".
+    const code = maskSql(tokenizeSql(statement, dialect).tokens)
+    if (result.parseError && /^\s*(SELECT|WITH)\b/i.test(code) && /\bINTO\b/i.test(code) && hasQueryWriteClause(statement, dialect)) {
+      return writes(`${where} has a write clause, such as SELECT ... INTO a table, file or variable; remove it to read`)
+    }
+    if (result.parseError) {
+      return unreadable(
+        `the ${dialect ?? "generic"} SQL parser could not read ${where} (${parserMessage(result.parseError)}), so it cannot be proven read-only. ` +
+        "The position is approximate: it counts within that statement, with each comment read as one space. " +
+        `Fix the syntax there: quote identifiers that contain spaces or are keywords (${quoteName("order date", dialect)}), ` +
+        "check the clause order, and replace any placeholder text (...)"
+      )
+    }
+    // The checks below follow classifySql's conditions.
+    let parsed: { category?: string; statement_type?: string } | undefined
+    try {
+      parsed = getStatementTypes?.(parserSql(statement, dialect), dialect)?.statements?.[0]
+    } catch {
+      parsed = undefined
+    }
+    const reported = String(parsed?.statement_type ?? "").toUpperCase()
+    // An UNKNOWN type is named by its first word only when that is a known statement keyword: any other
+    // word is the user's text, which telemetry would record.
+    const first = (/^\s*([A-Za-z_]+)/.exec(maskSql(tokenizeSql(statement, dialect).tokens))?.[1] ?? "").toUpperCase()
+    const type =
+      reported && reported !== "UNKNOWN"
+        ? reported
+        : STATEMENT_KEYWORDS.has(first)
+          ? first
+          : "an unrecognized statement"
+    const tokens = tokenizeSql(statement, dialect).tokens
+    const masked = maskSql(tokens)
+    if (functionSafety(statement, dialect, 0).write) return writes(`${where} calls a function that can modify data or run other SQL`)
+    // A statement that is itself a write is named by its type, before any batch keyword inside it.
+    if (parsed && parsed.category !== "query") return writes(`${where} is not a read (${type})`)
+    if (parsed?.category === "query" && hasQueryWriteClause(statement, dialect)) {
+      // Quoted names keep their case; engines that store unquoted names in uppercase need it written so.
+      const quoted = /^(snowflake|oracle)$/i.test(dialect ?? "")
+        ? `${quoteName("t", dialect)}.${quoteName("UPDATE", dialect)}, keeping the qualifier as written and the column in uppercase, as this engine stores unquoted names`
+        : `${quoteName("t", dialect)}.${quoteName("update", dialect)}`
+      // Name the dotted-keyword case only when the statement has a keyword right after a dot (after a quoted
+      // name, or any name on ClickHouse); otherwise the hint would point away from the real write clause.
+      const clickhouse = dialect?.toLowerCase() === "clickhouse"
+      // Read on masked code (quoted names blanked, literals and comments ignored) with numbers blanked too, so
+      // `1. INTO` and `.5 INTO` stay a SELECT INTO: a keyword after a quoted name or a spaced dot counts; an unquoted t.update
+      // is a column and never reaches here.
+      const statementMasked = masked.replace(/(?<![\w$])\.\d+|\b\d+(?:\.\d*|\s*\.)?/g, (number) => " ".repeat(number.length))
+      const dotted = (
+        clickhouse ? /\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i : /(?:(?:^|[^\w$])\s*|\s)\.\s*(INTO|INSERT|UPDATE|DELETE|MERGE)\b|\.\s+(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i
+      ).test(statementMasked)
+      const clause = clickhouse
+        ? "a write clause (SELECT ... INTO or a modifying CTE)"
+        : "a write clause (SELECT ... INTO, or INSERT/UPDATE/DELETE/MERGE inside a CTE)"
+      return writes(
+        !dotted
+          ? `${where} contains ${clause}`
+          : clickhouse
+          ? `${where} contains a write keyword that on ClickHouse counts even after a dot: quote the column, t.${quoteName("update", dialect)}`
+          : `${where} contains a write keyword after a quoted name or a spaced dot, such as ${quoteName("t", dialect)}.update: quote the column too, ${quoted}`,
+      )
+    }
+    const keyword = batchedStatement(masked, dialect)
+    if (keyword) {
+      return writes(
+        `${where} holds the statement keyword ${keyword.trim().split(/\s+/)[0].toUpperCase()} outside a literal or comment; ` +
+          `${batchKeywordExplanation(dialect)}; quote it if it is a column name`,
+      )
+    }
+    if (/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) return writes(`${where} chains statements with ->>`)
+    if (
+      (/^(spark|databricks|hive)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
+      /\bTRANSFORM\s*\(/i.test(masked) &&
+      /\bUSING\b(?!\s*\()/i.test(masked)
+    ) {
+      return writes(`${where} runs a command through TRANSFORM ... USING`)
+    }
+    if (advancesSequence(tokens, masked, dialect)) return writes(`${where} advances a sequence`)
+    if (parsed?.category !== "query") return writes(`${where} is not a read (${type})`)
+    return writes(`${where} could not be proven read-only`)
+  }
+  return writes("the statements together could not be proven read-only")
 }
 
 // MongoDB commands are JSON, not SQL: the SQL classifier reads every one as a write, which denied
@@ -677,8 +966,13 @@ function hasLocalScratchTarget(statement: string): boolean {
     "i",
   ).exec(statement)
   if (!target) return false
-  const names = target[1].match(new RegExp(identifier, "g"))!
-  if (names.length > 2 || (names.length === 2 && names[0].replace(/^"|"$/g, "").toLowerCase() !== "main")) return false
+  const names = target[1].match(new RegExp(identifier, "g"))!.map((name) => name.replace(/^"|"$/g, "").toLowerCase())
+  // The scratch database's own catalog is named scratch: scratch.t and scratch.main.t are local too.
+  const local =
+    names.length === 1 ||
+    (names.length === 2 && (names[0] === "main" || names[0] === "scratch")) ||
+    (names.length === 3 && names[0] === "scratch" && names[1] === "main")
+  if (!local) return false
   // A DROP statement can name more than one table, unlike the other forms.
   return !/^\s*DROP\b/i.test(statement) || !statement.slice(target[0].length).includes(",")
 }

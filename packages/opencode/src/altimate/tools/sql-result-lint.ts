@@ -56,7 +56,8 @@ export async function lintSqlResult(sql: string, warehouse: string | undefined, 
     const name = warehouse ?? Registry.list().warehouses[0]?.name
     const type = Registry.canonicalType(name ? Registry.getConfig(name)?.type : undefined)
     // The general classifier also labels modifying CTEs and SELECT INTO as queries.
-    readSql(sql, type ?? undefined)
+    // Only the yes/no matters here: skip the refusal's explanation on this per-result path.
+    readSql(sql, type ?? undefined, { explain: false })
     const timeout = new Promise<undefined>((resolve) => {
       timer = setTimeout(() => {
         slowSessions.add(sessionID)

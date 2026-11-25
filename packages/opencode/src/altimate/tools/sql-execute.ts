@@ -13,7 +13,9 @@ import {
   classifyAndCheck,
   classifyMongoCommand,
   computeSqlFingerprint,
+  explainWrite,
   isScratchSafeWrite,
+  UNAVAILABLE_NEXT_STEP,
   mentionsHardDenyAnywhere,
 } from "./sql-classify"
 import { statementsOf } from "./sql-tokenize"
@@ -25,6 +27,8 @@ function isMongoWarehouse(name: string | undefined): boolean {
   return MONGO_WAREHOUSE_TYPES.has(type)
 }
 import { Telemetry } from "../telemetry"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { PermissionNext } from "../../permission/next"
 // altimate_change end
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
@@ -41,6 +45,8 @@ import * as Precedence from "../workspace/precedence"
 import { normalizeError } from "./response-normalization"
 // altimate_change end
 import { readSql } from "./sql-check"
+import { NOT_OVERRIDABLE, hardBlockRefusal, writeReason } from "./read-only-sql"
+import { WriteDeniedError } from "../tool-cli/permissions"
 import { MaterializeError, storeRows } from "./sql-materialize"
 import { firstTime } from "./session-hints"
 
@@ -67,10 +73,11 @@ const STEP_REF = /\{\{([A-Za-z_]\w*)(?:\.([A-Za-z_]\w*))?\}\}/g
 const MAX_BOUND_ROWS = 1000
 
 function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
+  const dialect = Registry.canonicalType(Registry.getConfig(warehouse)?.type) ?? undefined
   try {
-    return readSql(sql, Registry.canonicalType(Registry.getConfig(warehouse)?.type) ?? undefined)
+    return readSql(sql, dialect, { explain: false })
   } catch {
-    throw new Error(`query_from ${stage} must be a single read-only SELECT (or WITH ... SELECT).`)
+    throw new Error(`query_from ${stage} must be a single read-only SELECT (or WITH ... SELECT).${writeReason(sql, dialect)}`)
   }
 }
 
@@ -218,7 +225,8 @@ export const SqlExecuteTool = Tool.define(
               })
             }
             // altimate_change start - SQL write access control
-            // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
+            // Permission checks OUTSIDE the execution try/catch: a rule denial of sql_execute_write is rethrown
+            // with its reason below, and every other permission error propagates unchanged
             // MongoDB warehouses take JSON command documents; the SQL classifier would read
             // every one as a write. Dispatch the normalized `{command, collection}` form.
             const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
@@ -245,12 +253,19 @@ export const SqlExecuteTool = Tool.define(
             const blocked = classification.blocked || (jinja && mentionsHardDenyAnywhere(sql))
             const query = mongo?.normalized ?? sql
             if (blocked) {
-              throw new Error(
-                "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
-              )
+              const head = "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety."
+              // Name the matched rule, or the unreadable quote that made a word count, for the dialect that blocked it.
+              const blockedIn = "blockedIndex" in classification ? classification.blockedIndex : -1
+              if (blockedIn >= 0) throw new Error(hardBlockRefusal(head, sql, dialects[blockedIn]))
+              if (jinja)
+                throw new Error(
+                  `${head} ${NOT_OVERRIDABLE} dbt renders Jinja before the SQL runs, so DROP DATABASE, DROP SCHEMA or ` +
+                    "TRUNCATE words count wherever they sit, even in a literal or comment. Remove those words, or send plain SQL without Jinja.",
+                )
+              throw new Error(`${head} ${NOT_OVERRIDABLE}`)
             }
             if (budget && queryType !== "read") {
-              throw new Error("Batched queries must be read-only; run a write as its own sql_execute call.")
+              throw new Error("Batched queries must be read-only. To use write permission, run a write as its own sql_execute call.")
             }
             const parseError = "parseError" in classification ? classification.parseError : undefined
             if (!mongo && queryType === "read") {
@@ -274,17 +289,60 @@ export const SqlExecuteTool = Tool.define(
             // the hard-deny list above still applies.
             if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(sql))) {
               // Unprovable SQL still goes through write approval; the prompt carries the parse error.
-              await ctx.ask({
-                permission: "sql_execute_write",
-                patterns: [sql.slice(0, 200)],
-                always: ["*"],
-                metadata: {
-                  queryType,
-                  warehouse: args.warehouse || target?.warehouse,
-                  hardDenyChecked: true,
-                  ...(parseError && { parseError }),
-                },
-              })
+              // A denied write says why and how to proceed, instead of a rule dump.
+              try {
+                await ctx.ask({
+                  permission: "sql_execute_write",
+                  patterns: [sql.slice(0, 200)],
+                  always: ["*"],
+                  metadata: {
+                    queryType,
+                    warehouse: args.warehouse || target?.warehouse,
+                    hardDenyChecked: true,
+                    ...(parseError && { parseError }),
+                  },
+                })
+              } catch (error) {
+                let permitted: string[] = []
+                const explain = (readOnly: boolean, cli = false) =>
+                  deniedWriteMessage({
+                    sql,
+                    dialects,
+                    jinja,
+                    mongo: mongo !== null,
+                    scratch: isScratch(args.warehouse),
+                    warehouseGiven: !!args.warehouse,
+                    readOnly,
+                    cli,
+                    dbt: target?.dbt === true,
+                    permitted,
+                  })
+                // The MCP server and `altimate tool` refuse writes unless --allow-write was given.
+                if (error instanceof WriteDeniedError) throw new Error(`${explain(true, true)} ${error.message}`)
+                if (!(error instanceof PermissionV1.DeniedError || error instanceof PermissionNext.DeniedError)) throw error
+                const rules: Array<{ permission?: string; pattern?: string; action?: string }> = Array.isArray(error.ruleset)
+                  ? error.ruleset
+                  : []
+                // Rules apply last-match-wins: the agent is read-only when the last catch-all rule denies and
+                // nothing after it allows or asks (an agent's own deny can override a user's earlier "ask").
+                let lastCatchAllDeny = -1
+                rules.forEach((rule, index) => {
+                  if (rule.pattern === "*" && rule.action === "deny") lastCatchAllDeny = index
+                })
+                // Name only patterns still in effect (after that deny), from this permission's own rules (wildcard-
+                // permission rules such as the builder's "*": "allow" are about every tool), and never a catch-all,
+                // which would read as "everything is allowed". Allow before ask.
+                const own = rules
+                  .slice(lastCatchAllDeny + 1)
+                  .filter((rule) => rule.permission === "sql_execute_write" && rule.pattern && rule.pattern !== "*")
+                permitted = [...own.filter((rule) => rule.action === "allow"), ...own.filter((rule) => rule.action === "ask")].map(
+                  (rule) => rule.pattern!,
+                )
+                // With no catch-all deny, writes the rules do not name fall to the default ("ask").
+                throw new Error(
+                  explain(lastCatchAllDeny >= 0 && !rules.slice(lastCatchAllDeny + 1).some((rule) => rule.action !== "deny")),
+                )
+              }
             }
             // altimate_change end
 
@@ -717,9 +775,86 @@ function classifyEvery(sql: string, dialects: (string | undefined)[]) {
   return {
     queryType: results.some((result) => result.queryType === "write") ? ("write" as const) : ("read" as const),
     blocked: results.some((result) => result.blocked),
+    blockedIndex: results.findIndex((result) => result.blocked),
     ...(parseError && { parseError }),
   }
 }
+
+// altimate_change start — a denied write says why and how to proceed
+/** The error a read-only agent gets when its query counts as a write: the reason, then what to do next,
+ * so the agent fixes the query instead of resending it. */
+export function deniedWriteMessage(input: {
+  sql: string
+  dialects: (string | undefined)[]
+  jinja: boolean
+  mongo: boolean
+  scratch: boolean
+  warehouseGiven: boolean
+  readOnly?: boolean
+  /** Refused because this MCP server or tool CLI run was started without --allow-write. */
+  cli?: boolean
+  /** The default route is dbt: passing a warehouse would also move the query off dbt, so no hint names it. */
+  dbt?: boolean
+  /** Configured sql_execute_write patterns that allow or ask, named so the agent can comply. Single-quoted, so
+   * telemetry's literal masking keeps config text out of recorded errors. */
+  permitted?: string[]
+}): string {
+  const readOnly = input.readOnly !== false
+  const head = input.cli
+    ? "sql_execute did not run this query. Write permission is disabled for this run, and the query counts as a write because"
+    : readOnly
+    ? "sql_execute did not run this query. This agent may only read (write permission is denied), and the query counts as a write because"
+    : "sql_execute did not run this query. A sql_execute_write permission rule denies it, and the query counts as a write because"
+  if (input.jinja) {
+    return `${head} it contains Jinja ({{ }}, {% %} or {# #}), which dbt renders and runs before the SQL. Send plain SQL without Jinja.`
+  }
+  if (input.mongo) {
+    return `${head} it is a MongoDB write (a write command, or an aggregate with a $out or $merge stage). Use a read command (find, aggregate, countDocuments, distinct) instead.`
+  }
+  // Classify once per dialect. Prefer a dialect that reads the text and names a concrete write over one that
+  // cannot parse it.
+  const results = input.dialects.map((d) => ({ dialect: d, ...classifyAndCheck(input.sql, d) }))
+  let chosen: ReturnType<typeof explainWrite> | undefined
+  for (const result of results) {
+    if (result.queryType !== "write") continue
+    const explanation = explainWrite(input.sql, result.dialect)
+    if (!explanation.unreadable) {
+      chosen = explanation
+      break
+    }
+    chosen ??= explanation
+  }
+  const { reason, unreadable, unavailable, residue } = chosen ?? explainWrite(input.sql, undefined)
+  // Without a warehouse (and off the dbt route, where a warehouse also moves the query off dbt), a query the
+  // reachable dialects disagree on, or cannot read, may be fine in the real warehouse's dialect.
+  const disagree = results.some((result) => result.queryType === "read" && !result.blocked)
+  // Shell syntax is not SQL in any dialect, so checking another dialect cannot help.
+  const dialectHint =
+    residue || input.warehouseGiven || input.dbt || input.dialects.length < 2
+      ? ""
+      : disagree
+        ? " No warehouse was given and the reachable dialects disagree on whether this is a write; pass warehouse to check it in that warehouse's dialect only."
+        : unreadable
+          ? " No warehouse was given, so the query was checked in every dialect it could reach; pass warehouse to check it in that warehouse's dialect only."
+          : ""
+  const next = unavailable
+    ? UNAVAILABLE_NEXT_STEP
+    : unreadable
+    ? "Fix the query and call sql_execute again; the same text will be refused again." +
+      (readOnly ? "" : " The configured sql_execute_write rules may still deny it once it parses.") +
+      dialectHint
+    : input.cli
+      ? "If a write is intended, see the --allow-write note at the end; otherwise rewrite it as a single read (SELECT, or WITH ... SELECT)."
+    : !readOnly
+      ? "Change it to a statement the configured sql_execute_write rules allow" +
+        (input.permitted?.length ? ` (they allow or ask for: ${input.permitted.slice(0, 10).map((p) => `'${p.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`).join(", ")})` : "") +
+        ", or ask the user to change the rules."
+      : input.scratch
+      ? "On scratch, only CREATE/DROP/ALTER of local tables and views and INSERT/UPDATE/DELETE on them run without write permission, each call without reads; other statements (ATTACH, COPY, INSTALL, SET, ...) need write permission."
+      : "Rewrite it as a single read (SELECT, or WITH ... SELECT). To keep an intermediate result, store it in scratch with sql_materialize if that tool is available."
+  return `${head} ${reason}. ${next}${unreadable ? "" : dialectHint}`
+}
+// altimate_change end
 
 /** Dialects whose string literals treat a backslash as an escape character. */
 const BACKSLASH_ESCAPE_TYPES = new Set(["mysql", "bigquery", "snowflake", "databricks", "clickhouse", "redshift"])
