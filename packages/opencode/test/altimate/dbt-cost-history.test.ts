@@ -40,6 +40,7 @@ import {
   manifestPathFor,
   modelFromManifest,
   bigqueryBoundarySql,
+  boundaryWindow,
   snowflakeBoundarySql,
   databricksBoundarySql,
   sqlString,
@@ -763,6 +764,15 @@ describe("run boundary", () => {
     expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
+  test("an unreadable boundary is measured from the cutoff itself: a run exactly a day after it is dropped, one a millisecond later is kept", () => {
+    const at = (ms: number) => new Date(C + ms).toISOString()
+    const day = 24 * 3_600_000
+    const run = (offset: number) =>
+      priceSnowflake([sf("a", 0, "1", null, "0", { start_time: at(offset), end_time: at(offset + 1000) })], "model.s.m", [], {}, { cutoff: C }).basis
+    expect(run(day)).toBe("none")
+    expect(run(day + 1)).toBe("history")
+  })
+
   test("without a boundary nothing is dropped, and a full result says only 500 statements were read", () => {
     const rows = Array.from({ length: HISTORY_LIMIT }, (_, i) => sf(`q${i}`, i * 120, "1", null, "0", { session_id: `s${i}` }))
     const cost = priceSnowflake(rows, "model.s.m", [], {})
@@ -904,43 +914,61 @@ describe("run boundary", () => {
 describe("boundary SQL", () => {
   const needle = needleFor("model.shop.orders")
 
-  test("Snowflake: before the cutoff, ending within the ten-minute gap, same filters", () => {
-    const sql = snowflakeBoundarySql(needle, 1234)
+  // A cutoff far enough from zero that every derived instant is distinct and positive.
+  const CUT = 1_780_000_000_000
+  const w = boundaryWindow(CUT)
+
+  test("the window is derived from the cutoff itself: the start bound reaches it, every lookback is measured from it", () => {
+    expect(w).toEqual({
+      startBeforeMs: CUT + 1,
+      startAfterMs: CUT - 86_400_000,
+      endAtLeastMs: CUT - 600_000,
+      attachStartAtLeastMs: CUT - 60_000,
+      tmpEndAtLeastMs: CUT - 600_000,
+    })
+  })
+
+  test("Snowflake: starting before the cutoff's millisecond, ending at or after the cutoff less the ten-minute gap, same filters", () => {
+    const sql = snowflakeBoundarySql(needle, w)
     expect(sql).toContain("/* run boundary */")
-    expect(sql).toContain("q.start_time < to_timestamp_ltz(1234, 3)")
-    expect(sql).toContain("q.end_time >= dateadd(second, -600, to_timestamp_ltz(1234, 3))")
+    expect(sql).toContain(`q.start_time < to_timestamp_ltz(${CUT + 1}, 3)`)
+    expect(sql).toContain(`q.end_time >= to_timestamp_ltz(${CUT - 600_000}, 3)`)
+    expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
     expect(sql).toContain("q.execution_status = 'SUCCESS'")
     expect(sql).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
     expect(sql).toContain("limit 500")
   })
 
-  test("Databricks: same filters, a cutoff as a timestamp", () => {
-    const sql = databricksBoundarySql(needle, 1234)
-    expect(sql).toContain("start_time < timestamp_millis(1234)")
-    expect(sql).toContain("- interval 600 seconds")
+  test("Databricks: same filters, instants as timestamps", () => {
+    const sql = databricksBoundarySql(needle, w)
+    expect(sql).toContain(`start_time < timestamp_millis(${CUT + 1})`)
+    expect(sql).toContain(`coalesce(end_time, start_time) >= timestamp_millis(${CUT - 600_000})`)
+    expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
     expect(sql).toContain("execution_status = 'FINISHED'")
     expect(sql).toContain("statement_type in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
   })
 
-  test("BigQuery: top-level jobs of the same view, within a minute of the cutoff", () => {
-    const sql = bigqueryBoundarySql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", cutoffMs: 99 })
+  test("BigQuery: top-level jobs of the same view, each lookback measured from the cutoff", () => {
+    const sql = bigqueryBoundarySql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", window: w })
     expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
-    expect(sql).toContain("creation_time < timestamp_millis(99)")
+    expect(sql).toContain(`creation_time < timestamp_millis(${CUT + 1})`)
     // Only a delete or update can attach to a later build, by creation time.
-    expect(sql).toContain("creation_time >= timestamp_sub(timestamp_millis(99), interval 60 second)")
+    expect(sql).toContain(`creation_time >= timestamp_millis(${CUT - 60_000})`)
     expect(sql).toContain("statement_type in ('DELETE','UPDATE')")
     expect(sql).toContain("user_email")
     // And the CTAS into dbt's temporary relation that ended within ten minutes before it.
     expect(sql).toContain("statement_type = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
-    expect(sql).toContain("end_time >= timestamp_sub(timestamp_millis(99), interval 10 minute)")
+    expect(sql).toContain(`end_time >= timestamp_millis(${CUT - 600_000})`)
+    expect(sql).not.toContain(`${CUT + 1 - 60_000}`)
+    expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
     expect(sql).toContain("parent_job_id is null")
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
 
   test("every boundary query returns the id of each statement, so the ones already read can be excluded", () => {
-    expect(snowflakeBoundarySql("n", 1)).toContain("select /* run boundary */ q.query_id")
-    expect(databricksBoundarySql("n", 1)).toContain("select /* run boundary */ statement_id")
-    expect(bigqueryBoundarySql({ project: "p", needle: "n", cutoffMs: 1 })).toContain("select /* run boundary */ job_id")
+    expect(snowflakeBoundarySql("n", boundaryWindow(1))).toContain("select /* run boundary */ q.query_id")
+    expect(databricksBoundarySql("n", boundaryWindow(1))).toContain("select /* run boundary */ statement_id")
+    expect(bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(1) })).toContain("select /* run boundary */ job_id")
   })
 
   test("the BigQuery history reads the job's user, which a delete must share with the build it joins", () => {

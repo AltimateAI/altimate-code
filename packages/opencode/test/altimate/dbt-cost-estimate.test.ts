@@ -1930,6 +1930,101 @@ describe("dbt_cost_estimate cost", () => {
     })
   })
 
+  describe("a boundary statement that ends exactly at the cutoff less the gap", () => {
+    // 500 statements were returned, so the cutoff is the oldest one's start. An unread statement of the oldest run's
+    // session that ends exactly the grouping gap before it still belongs to that run (a gap of exactly the limit
+    // joins); one a millisecond earlier does not. An adapter consistent with the SQL returns a statement iff it starts
+    // before the start literal and ends at or after the end literal.
+    const T0 = Date.UTC(2026, 4, 10)
+    const asOf = T0 + 5 * 86_400_000
+    const iso = (ms: number) => new Date(ms).toISOString()
+    const withNow = async (run: () => Promise<void>) => {
+      costHistoryInternals.now = () => asOf
+      try {
+        await run()
+      } finally {
+        costHistoryInternals.now = defaultNow
+      }
+    }
+    const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
+
+    test.each([
+      ["Snowflake gap", 600_000, true],
+      ["Snowflake gap, a millisecond earlier", 600_001, false],
+    ])("%s", async (_name, before, dropped) => {
+      await withNow(async () => {
+        const rows = [
+          ["old", "s1", iso(T0), iso(T0).slice(0, 10), iso(T0 + 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"],
+          ...Array.from({ length: 499 }, (_, i) => [`f${i}`, `f${i}`, iso(T0 + (i + 1) * 3 * 3_600_000), iso(T0).slice(0, 10), iso(T0 + (i + 1) * 3 * 3_600_000 + 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"]),
+        ]
+        useAdapter(calls, {
+          type: "snowflake",
+          explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+          history: async (jinja) => (jinja.includes("usage_in_currency_daily") || jinja.includes("rate_sheet_daily") ? table(["date"], []) : table(SF_COLUMNS, rows)),
+          boundary: async (jinja) => {
+            const s = lit(jinja, /q\.start_time < to_timestamp_ltz\((\d+), 3\)/)
+            const e = lit(jinja, /q\.end_time >= to_timestamp_ltz\((\d+), 3\)/)
+            const stmt = { start: T0 - 3_600_000, end: T0 - before }
+            return table(["query_id", "session_id", "start_time", "end_time"], stmt.start < s && stmt.end >= e ? [["edge", "s1", iso(stmt.start), iso(stmt.end)]] : [])
+          },
+        })
+        const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+        expect(result.metadata.cost.runs).toBe(dropped ? 499 : 500)
+        expect(result.metadata.cost.notes.join(" ").includes("1 run that may have started before the period read was left out.")).toBe(dropped)
+      })
+    })
+
+    test.each([
+      ["Databricks gap", 600_000, true],
+      ["Databricks gap, a millisecond earlier", 600_001, false],
+    ])("%s", async (_name, before, dropped) => {
+      await withNow(async () => {
+        const cols = ["statement_id", "session_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd", "missing_hours"]
+        const rows = [
+          ["old", "s1", iso(T0), iso(T0 + 60_000), "MERGE", "w1", "1000", "1", "1", "0"],
+          ...Array.from({ length: 499 }, (_, i) => [`f${i}`, `f${i}`, iso(T0 + (i + 1) * 3 * 3_600_000), iso(T0 + (i + 1) * 3 * 3_600_000 + 60_000), "MERGE", "w1", "1000", "1", "1", "0"]),
+        ]
+        useAdapter(calls, {
+          type: "databricks",
+          explain: async () => "not a plan",
+          history: async () => table(cols, rows),
+          boundary: async (jinja) => {
+            const s = lit(jinja, /start_time < timestamp_millis\((\d+)\)/)
+            const e = lit(jinja, /coalesce\(end_time, start_time\) >= timestamp_millis\((\d+)\)/)
+            const stmt = { start: T0 - 3_600_000, end: T0 - before }
+            return table(["statement_id", "session_id", "start_time", "end_time"], stmt.start < s && stmt.end >= e ? [["edge", "s1", iso(stmt.start), iso(stmt.end)]] : [])
+          },
+        })
+        const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+        expect(result.metadata.cost.runs).toBe(dropped ? 499 : 500)
+        expect(result.metadata.cost.notes.join(" ").includes("1 run that may have started before the period read was left out.")).toBe(dropped)
+      })
+    })
+
+    test.each([
+      ["BigQuery attach window", 60_000, true],
+      ["BigQuery attach window, a millisecond earlier", 60_001, false],
+    ])("%s (a delete created exactly that long before the cutoff)", async (_name, before, dropped) => {
+      await withNow(async () => {
+        const rows = [
+          job("old", iso(T0), iso(T0 + 60_000), TIB),
+          ...Array.from({ length: 499 }, (_, i) => job(`f${i}`, iso(T0 + (i + 1) * 3 * 3_600_000), iso(T0 + (i + 1) * 3 * 3_600_000 + 60_000), TIB, null, 0, "MERGE", `u${i}@x.com`)),
+        ]
+        useAdapter(calls, {
+          history: bigqueryHistory(rows),
+          boundary: async (jinja) => {
+            const s = lit(jinja, /creation_time < timestamp_millis\((\d+)\)/)
+            const d = lit(jinja, /creation_time >= timestamp_millis\((\d+)\)/)
+            const created = T0 - before
+            return table(["job_id", "user_email", "creation_time", "end_time", "statement_type"], created < s && created >= d ? [["edge", "a@x.com", iso(created), iso(created + 1_000), "DELETE"]] : [])
+          },
+        })
+        const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+        expect(result.metadata.cost.runs).toBe(dropped ? 499 : 500)
+      })
+    })
+  })
+
   test("Snowflake: a configured credit rate needs no rate lookup at all", async () => {
     costHistoryInternals.readCostConfig = async () => ({ snowflakeUsdPerCredit: 4 })
     try {

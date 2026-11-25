@@ -226,43 +226,73 @@ order by q.start_time desc limit ${HISTORY_LIMIT}`
  */
 export const BOUNDARY_LOOKBACK_DAYS = 1
 
-export function snowflakeBoundarySql(needle: string, cutoffMs: number): string {
-  const c = `to_timestamp_ltz(${Math.trunc(cutoffMs)}, 3)`
+/**
+ * The instants a boundary query is written with, all derived from the cutoff itself. `startBeforeMs` is one
+ * millisecond past it, so a statement that starts exactly at the cutoff is read; the lookbacks are measured from the
+ * cutoff, not from that millisecond.
+ */
+export type BoundaryWindow = {
+  /** Statements must start before this (the cutoff plus one millisecond). */
+  startBeforeMs: number
+  /** ... and after this (a day of lookback). */
+  startAfterMs: number
+  /** Snowflake and Databricks: a statement must end at or after this (the cutoff less the grouping gap). */
+  endAtLeastMs: number
+  /** BigQuery: a delete or update must be created at or after this (the cutoff less the attach window). */
+  attachStartAtLeastMs: number
+  /** BigQuery: a temporary-relation CTAS must end at or after this (the cutoff less the join window). */
+  tmpEndAtLeastMs: number
+}
+
+export function boundaryWindow(cutoffMs: number): BoundaryWindow {
+  const cutoff = Math.trunc(cutoffMs)
+  return {
+    startBeforeMs: cutoff + 1,
+    startAfterMs: cutoff - BOUNDARY_LOOKBACK_DAYS * DAY_MS,
+    endAtLeastMs: cutoff - RUN_GAP_MS,
+    attachStartAtLeastMs: cutoff - BQ_ATTACH_MS,
+    tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
+  }
+}
+
+export function snowflakeBoundarySql(needle: string, w: BoundaryWindow): string {
+  const at = (ms: number) => `to_timestamp_ltz(${ms}, 3)`
   return `select /* run boundary */ q.query_id, q.session_id, q.start_time, q.end_time
 from snowflake.account_usage.query_history q
-where q.start_time < ${c} and q.start_time > dateadd(day, -${BOUNDARY_LOOKBACK_DAYS}, ${c})
-  and q.end_time >= dateadd(second, -${RUN_GAP_MS / 1000}, ${c})
+where q.start_time < ${at(w.startBeforeMs)} and q.start_time > ${at(w.startAfterMs)}
+  and q.end_time >= ${at(w.endAtLeastMs)}
   and q.execution_status = 'SUCCESS'
   and q.query_type in (${list(SF_TYPES)})
   and contains(q.query_text, ${sqlString(needle)})
 order by q.start_time desc limit ${HISTORY_LIMIT}`
 }
 
-export function databricksBoundarySql(needle: string, cutoffMs: number): string {
-  const c = `timestamp_millis(${Math.trunc(cutoffMs)})`
+export function databricksBoundarySql(needle: string, w: BoundaryWindow): string {
+  const at = (ms: number) => `timestamp_millis(${ms})`
   return `select /* run boundary */ statement_id, session_id, start_time, coalesce(end_time, start_time) as end_time
 from system.query.history
-where start_time < ${c} and start_time > ${c} - interval ${BOUNDARY_LOOKBACK_DAYS} day
-  and coalesce(end_time, start_time) >= ${c} - interval ${RUN_GAP_MS / 1000} seconds
+where start_time < ${at(w.startBeforeMs)} and start_time > ${at(w.startAfterMs)}
+  and coalesce(end_time, start_time) >= ${at(w.endAtLeastMs)}
   and execution_status = 'FINISHED' and compute.warehouse_id is not null
   and statement_type in (${list(DBX_TYPES)})
   and instr(statement_text, ${sqlString(needle)}) > 0
 order by start_time desc limit ${HISTORY_LIMIT}`
 }
 
-export function bigqueryBoundarySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; cutoffMs: number }): string {
-  const c = `timestamp_millis(${Math.trunc(input.cutoffMs)})`
+export function bigqueryBoundarySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; window: BoundaryWindow }): string {
+  const at = (ms: number) => `timestamp_millis(${ms})`
+  const w = input.window
   // What can join a build that starts after the cutoff: a delete or update created within a minute before it, or the
   // CTAS into dbt's temporary relation that ended within ten minutes before it.
   return `select /* run boundary */ job_id, user_email, creation_time, end_time, statement_type
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time < ${c} and creation_time > timestamp_sub(${c}, interval ${BOUNDARY_LOOKBACK_DAYS} day)
+where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.startAfterMs)}
   and job_type = 'QUERY' and state = 'DONE' and error_result is null
   and parent_job_id is null
   and (
-    (statement_type in ('DELETE','UPDATE') and creation_time >= timestamp_sub(${c}, interval ${BQ_ATTACH_MS / 1000} second))
+    (statement_type in ('DELETE','UPDATE') and creation_time >= ${at(w.attachStartAtLeastMs)})
     or (statement_type = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
-        and end_time >= timestamp_sub(${c}, interval ${BQ_TMP_JOIN_MS / 60_000} minute))
+        and end_time >= ${at(w.tmpEndAtLeastMs)})
   )
   and strpos(query, ${sqlString(input.needle)}) > 0
 order by creation_time desc limit ${HISTORY_LIMIT}`
@@ -1066,7 +1096,7 @@ export async function loadHistory(input: {
   const boundaryFor = async (
     read: Row[],
     startKey: string,
-    sqlFor: (cutoffMs: number) => string,
+    sqlFor: (window: BoundaryWindow) => string,
     keys: { id: string; session: string },
   ): Promise<Boundary | undefined> => {
     if (!read.length) return undefined
@@ -1076,10 +1106,10 @@ export async function loadHistory(input: {
     // the main read used, never recomputed.
     const cutoff = hit ? Math.min(...starts) : windowStart
     try {
-      // One millisecond past the cutoff, so a statement that starts exactly at it is read: the main read takes only
-      // statements after the window's start, and the oldest statement it returned is at the cutoff itself. The
-      // statements the history already read come back too and are filtered out below.
-      const found = await rows(sqlFor(cutoff + 1))
+      // The window reaches the cutoff's own instant (a statement that starts exactly at it is read: the main read takes
+      // only statements after the window's start, and the oldest statement it returned is at the cutoff itself) while
+      // every lookback is measured from the cutoff. The statements already read come back too and are filtered out below.
+      const found = await rows(sqlFor(boundaryWindow(cutoff)))
       if (found.length >= HISTORY_LIMIT) return { cutoff }
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r[keys.id]))
@@ -1105,7 +1135,7 @@ export async function loadHistory(input: {
     if (type === "snowflake") {
       const needle = needleFor(uniqueId)
       const history = await rows(snowflakeHistorySql(needle, asOfMs))
-      const boundary = await boundaryFor(history, "start_time", (c) => snowflakeBoundarySql(needle, c), {
+      const boundary = await boundaryFor(history, "start_time", (w) => snowflakeBoundarySql(needle, w), {
         id: "query_id",
         session: "session_id",
       })
@@ -1129,7 +1159,7 @@ export async function loadHistory(input: {
     }
     const needle = needleFor(uniqueId)
     const history = await rows(databricksHistorySql(needle, asOfMs))
-    const boundary = await boundaryFor(history, "start_time", (c) => databricksBoundarySql(needle, c), {
+    const boundary = await boundaryFor(history, "start_time", (w) => databricksBoundarySql(needle, w), {
       id: "statement_id",
       session: "session_id",
     })
@@ -1188,7 +1218,7 @@ export async function loadHistory(input: {
       const boundary = await boundaryFor(
         history.rows,
         "creation_time",
-        (cutoffMs) => bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, cutoffMs }),
+        (window) => bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, window }),
         { id: "job_id", session: "user_email" },
       )
       ;({ cost, reserved } = priceBigquery(history.rows, children, uniqueId, cfg, boundary))
