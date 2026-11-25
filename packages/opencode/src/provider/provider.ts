@@ -32,7 +32,9 @@ import { Filesystem } from "../util/filesystem"
 import { isPublicZen } from "./public-zen"
 // altimate_change end
 import { AltimateApi } from "../altimate/api/client"
+// altimate_change start — workspace model keys
 import { WorkspaceByok } from "../altimate/workspace/byok"
+// altimate_change end
 // altimate_change start — managed Altimate Base provider and credential boundary
 import { FreeTier } from "../altimate/free/client"
 // altimate_change end
@@ -569,15 +571,13 @@ export namespace Provider {
       if (isConfigured) {
         try {
           const creds = await AltimateApi.getCredentials()
-          const byok = await WorkspaceByok.resolve(Instance.directory)
           return {
             autoload: true,
             options: {
               baseURL: `${creds.altimateUrl.replace(/\/+$/, "")}/agents/v1`,
-              apiKey: byok?.apiKey ?? creds.altimateApiKey,
+              apiKey: creds.altimateApiKey,
               headers: {
                 "x-tenant": creds.altimateInstanceName,
-                ...(byok ? WorkspaceByok.HEADERS : {}),
               },
             },
           }
@@ -2020,6 +2020,17 @@ export namespace Provider {
         mergeProvider(providerID, patch)
       }
     }
+
+    // altimate_change start — the linked workspace's model keys fill in providers that have no credential of
+    // their own; env, stored logins and config all keep precedence, and the Altimate gateway login is untouched
+    if (await AltimateApi.isConfigured()) {
+      for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
+        const providerID = ProviderID.make(id)
+        if (!database[providerID] || !isProviderAllowed(providerID) || providers[providerID]) continue
+        mergeProvider(providerID, { source: "custom", options: { apiKey } })
+      }
+    }
+    // altimate_change end
 
     // load config
     for (const [id, provider] of configProviders) {

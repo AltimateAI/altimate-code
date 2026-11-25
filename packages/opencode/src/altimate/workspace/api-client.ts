@@ -980,24 +980,31 @@ export namespace WorkspaceApi {
     }
   }
 
-  /** The workspace's decrypted model key, or undefined when the workspace exposes none. An absent
-   * endpoint (404/405), a failed request or an empty/malformed answer are all "no key". */
-  export async function getModelKey(datamateId: number, actAs?: ActAs): Promise<string | undefined> {
-    type Entry = { key?: unknown; api_key?: unknown }
+  /** The workspace's decrypted model keys by provider id. An absent endpoint (404/405), a failed request
+   * or an answer without keys all give an empty map. */
+  export async function getModelKeys(datamateId: number, actAs?: ActAs): Promise<Record<string, string>> {
     try {
-      const body = await req<(Entry & { keys?: Entry[] }) | undefined>("GET", `/${datamateId}/model-keys`, {
-        base: "/datamates",
-        reportErrors: false,
-        allowEmptyBody: true,
-        expectedStatuses: [404, 405],
-        ...(actAs ? { actAs } : {}),
-      })
-      if (!body || typeof body !== "object") return undefined
-      const first = Array.isArray(body.keys) ? body.keys[0] : body
-      const raw = first?.key ?? first?.api_key
-      return typeof raw === "string" && raw.trim() ? raw.trim() : undefined
+      const body = await req<{ keys?: Array<{ provider?: unknown; key?: unknown }> } | undefined>(
+        "GET",
+        `/${datamateId}/model-keys`,
+        {
+          base: "/datamates",
+          reportErrors: false,
+          allowEmptyBody: true,
+          expectedStatuses: [404, 405],
+          timeoutMs: SIGNED_IN_LOOKUP_TIMEOUT_MS,
+          ...(actAs ? { actAs } : {}),
+        },
+      )
+      const keys: Record<string, string> = {}
+      for (const entry of Array.isArray(body?.keys) ? body.keys : []) {
+        if (typeof entry?.provider !== "string" || typeof entry.key !== "string") continue
+        const key = entry.key.trim()
+        if (key) keys[entry.provider] = key
+      }
+      return keys
     } catch {
-      return undefined
+      return {}
     }
   }
 

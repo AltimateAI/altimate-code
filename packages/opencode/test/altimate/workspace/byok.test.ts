@@ -1,7 +1,6 @@
 // altimate_change - new file
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { AltimateApi } from "../../../src/altimate/api/client"
-import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
 import * as State from "../../../src/altimate/workspace/state"
 import { WorkspaceByok } from "../../../src/altimate/workspace/byok"
 
@@ -44,48 +43,52 @@ function respond(status: number, body?: unknown) {
   return f
 }
 
+const KEYS = {
+  keys: [
+    { provider: "anthropic", key: SECRET, created_at: "2026-01-01T00:00:00Z" },
+    { provider: "openai", key: "  sk-openai-2  ", created_at: "2026-01-01T00:00:00Z" },
+  ],
+}
+
 describe("WorkspaceByok", () => {
-  test("a present key is used and usage is marked BYOK", async () => {
-    const f = respond(200, { key: SECRET })
+  test("returns each provider's key, pinned to the captured credential", async () => {
+    const f = respond(200, KEYS)
     const out = await WorkspaceByok.resolve("/p")
-    expect(out).toEqual({ apiKey: SECRET })
+    expect(out).toEqual({ anthropic: SECRET, openai: "sk-openai-2" })
     expect(String(f.mock.calls[0][0])).toBe("https://api.example.test/datamates/7/model-keys")
-    expect(WorkspaceByok.HEADERS).toEqual({ "x-altimate-byok": "true" })
+    expect(new Headers(f.mock.calls[0][1]?.headers).get("authorization")).toBe("Bearer gateway-key")
   })
 
-  test("accepts a keys list", async () => {
-    respond(200, { keys: [{ provider: "x", api_key: SECRET }] })
-    expect(await WorkspaceApi.getModelKey(7)).toBe(SECRET)
-  })
-
-  test("no key in the answer leaves behaviour unchanged", async () => {
-    respond(200, { key: "" })
-    expect(await WorkspaceByok.resolve("/p")).toBeUndefined()
+  test("drops entries without a provider or a key", async () => {
+    respond(200, { keys: [{ key: SECRET }, { provider: "x", key: "" }, { provider: "y" }, { provider: "z", api_key: SECRET }] })
+    expect(await WorkspaceByok.resolve("/p")).toEqual({})
     respond(200, { keys: [] })
-    expect(await WorkspaceByok.resolve("/p")).toBeUndefined()
+    expect(await WorkspaceByok.resolve("/p")).toEqual({})
+    respond(200, {})
+    expect(await WorkspaceByok.resolve("/p")).toEqual({})
   })
 
   test.each([404, 405, 500])("status %d leaves behaviour unchanged", async (status) => {
     respond(status, { detail: "nope" })
-    expect(await WorkspaceByok.resolve("/p")).toBeUndefined()
+    expect(await WorkspaceByok.resolve("/p")).toEqual({})
   })
 
   test("network failure leaves behaviour unchanged", async () => {
     globalThis.fetch = mock(async () => {
       throw new Error("offline")
     }) as any
-    expect(await WorkspaceByok.resolve("/p")).toBeUndefined()
+    expect(await WorkspaceByok.resolve("/p")).toEqual({})
   })
 
   test("unlinked project makes no request", async () => {
     ;(State.resolveBinding as any).mockResolvedValue(null)
-    const f = respond(200, { key: SECRET })
-    expect(await WorkspaceByok.resolve("/p")).toBeUndefined()
+    const f = respond(200, KEYS)
+    expect(await WorkspaceByok.resolve("/p")).toEqual({})
     expect(f).not.toHaveBeenCalled()
   })
 
-  test("the key is never logged or printed", async () => {
-    respond(200, { key: SECRET })
+  test("the keys are never logged or printed", async () => {
+    respond(200, KEYS)
     await WorkspaceByok.resolve("/p")
     respond(500, { detail: SECRET })
     await WorkspaceByok.resolve("/p")
