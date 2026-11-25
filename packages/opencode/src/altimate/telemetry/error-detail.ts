@@ -400,6 +400,15 @@ export function describeToolError(raw: string) {
   }
 }
 
+// Messages of PermissionNext/PermissionV1 RejectedError and CorrectedError, optionally prefixed by toString()'s error name
+const USER_REJECTION =
+  /^(?:[\w.]+: )?The user rejected permission to use this specific tool call(?:\.|\s+with the following feedback:)/
+
+/** True when the tool error is the user declining a permission prompt: an expected decision, not a tool failure. */
+export function isUserRejection(raw: string): boolean {
+  return USER_REJECTION.test(raw)
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
