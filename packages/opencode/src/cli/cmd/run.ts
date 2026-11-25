@@ -2235,6 +2235,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
     }
 
+    // altimate_change start — count this run against the plan of the workspace this client directory is linked to, attached or not
+    {
+      const { reportHeadlessRun } = await import("../../altimate/workspace/run-report")
+      const outcome = await reportHeadlessRun()
+      if (outcome.status === "blocked") {
+        UI.error(outcome.error.message)
+        process.exitCode = 1
+        return
+      }
+    }
+    // altimate_change end
+
     if (args.attach) {
       const headers = (() => {
         // altimate_change start — documented ALTIMATE_CLI_SERVER_* names read first (core `env`)

@@ -423,6 +423,34 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
     }
   })
 
+  test("shows the upgrade path for a plan-limit 402 from the Altimate gateway", () => {
+    const body = JSON.stringify({
+      detail: {
+        code: "plan_limit_reached",
+        limit_key: "tokens",
+        required_plan: "team",
+        upgrade_url: "https://acme.app.myaltimate.com/settings/credits?tab=plans",
+        message: "You have used all your tokens.",
+      },
+    })
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-backend" as any,
+      error: makeAPICallError({ message: "Payment Required", statusCode: 402, responseBody: body }),
+    })
+    expect(result.message).toBe(
+      "You have used all your tokens. Upgrade to Team: https://acme.app.myaltimate.com/settings/credits?tab=plans",
+    )
+    expect((result as any).isRetryable).toBe(false)
+  })
+
+  test("leaves a 402 that is not a plan limit alone", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-backend" as any,
+      error: makeAPICallError({ message: "Payment Required", statusCode: 402, responseBody: "{}" }),
+    })
+    expect(result.message).toContain("Payment Required")
+  })
+
   test("does not rewrite another provider's 429", () => {
     const result = ProviderError.parseAPICallError({
       providerID: "openai" as any,

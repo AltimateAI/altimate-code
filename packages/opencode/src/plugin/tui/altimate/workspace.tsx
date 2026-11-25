@@ -60,6 +60,7 @@ import {
   isHiddenBindingConflict,
   QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
+  PlanLimitError,
   NotFoundError,
   PreconditionFailedError,
   WorkspaceApi,
@@ -680,6 +681,7 @@ async function runBrowserHandoff(
     }, { account: digestOf(bindAs) })
     await confirmLink(api, recorded, "Linked", res.binding.datamate_id, res.binding.datamate_name)
   } catch (err) {
+    if (showPlanLimit(api, err)) return // altimate_change
     if (err instanceof ConflictError) {
       api.ui.toast({
         variant: "warning",
@@ -810,6 +812,7 @@ export async function createAndBindInline(
       res = { via: "bound", datamate: created.datamate, binding: created.binding }
     }
   } catch (err) {
+    if (showPlanLimit(api, err)) return // altimate_change
     // Only the bound path sends identifiers, so only it can lose an identity
     // race. The unbound create sends none.
     if (err instanceof ConflictError && !rebindFrom) {
@@ -1193,6 +1196,7 @@ function PickerDialog(props: PickerProps) {
       // the account lookup below, which can take a moment: closing after it
       // would dismiss whatever dialog the user opened in the meantime.
       props.api.ui.dialog.clear()
+      if (showPlanLimit(props.api, err)) return // altimate_change
       let msg: string
       if (err instanceof ConflictError) {
         // The picker doesn't have a "Re-link" option; the referral used to
@@ -1450,6 +1454,7 @@ export async function bindOrRebindInline(
       res.binding.datamate_name,
     )
   } catch (err) {
+    if (showPlanLimit(api, err)) return // altimate_change
     let msg: string
     if (err instanceof ConflictError) {
       msg = isHiddenBindingConflict(err)
@@ -2741,11 +2746,40 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
  * flow bailed. (CR round 2.) */
 function reportFlowFailure(api: TuiPluginApi, err: unknown): void {
   log.error("workspace flow failed", { err: err instanceof Error ? err.message : String(err) })
+  // altimate_change start — a plan-limit refusal offers the upgrade page instead of a bare failure
+  if (showPlanLimit(api, err)) return
+  // altimate_change end
   api.ui.toast({
     variant: "error",
     message: "Workspace setup failed — see the CLI log for details.",
   })
 }
+
+// altimate_change start — a plan-limit refusal says what to do next and, with an upgrade page, offers to open it.
+// Returns false when `err` is not a plan-limit refusal so the caller keeps its own handling.
+function showPlanLimit(api: TuiPluginApi, err: unknown): boolean {
+  if (!(err instanceof PlanLimitError)) return false
+  const url = err.upgradeUrl
+  if (!url) {
+    api.ui.toast({ variant: "error", message: err.message, duration: 15_000 })
+    return true
+  }
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={err.message}
+      options={[
+        { title: "Open upgrade page", value: "open", description: url },
+        { title: "Dismiss", value: "dismiss" },
+      ]}
+      onSelect={(option) => {
+        if (option.value === "open") openManageUrl(api, url)
+        api.ui.dialog.clear()
+      }}
+    />
+  ))
+  return true
+}
+// altimate_change end
 
 const tui: TuiPlugin = async (api) => {
   api.keymap.registerLayer({

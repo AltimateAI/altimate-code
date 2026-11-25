@@ -603,7 +603,7 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         how: "bind_existing" | "create_and_bind" | "create_unbound" | "rebind_remote" | "rebind_path"
-        reason: "auth" | "not_found" | "network" | "conflict" | "other"
+        reason: "auth" | "not_found" | "network" | "conflict" | "plan_limit" | "other"
         workspace_id?: number
       }
     | {
