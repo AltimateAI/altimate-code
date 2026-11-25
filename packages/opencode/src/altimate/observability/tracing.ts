@@ -357,9 +357,9 @@ export class FileExporter implements TraceExporter {
       // altimate_change end
       await fs.rename(tmpPath, filePath)
 
-      if (this.maxFiles > 0) {
-        this.pruneOldTraces().catch(() => {})
-      }
+      // altimate_change start — #874: always run, so the .tmp.* sweep also covers maxFiles: 0 (unlimited)
+      this.pruneOldTraces().catch(() => {})
+      // altimate_change end
 
       return filePath
     } catch {
@@ -386,6 +386,9 @@ export class FileExporter implements TraceExporter {
       }),
     )
 
+    // altimate_change start — #874: maxFiles <= 0 means unlimited; only the tmp sweep above applies
+    if (this.maxFiles <= 0) return
+    // altimate_change end
     const jsonFiles = entries.filter((e) => e.isFile() && e.name.endsWith(".json")).map((e) => e.name)
 
     if (jsonFiles.length <= this.maxFiles) return
