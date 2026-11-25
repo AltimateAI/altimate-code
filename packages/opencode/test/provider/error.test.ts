@@ -638,9 +638,10 @@ describe("ProviderError.parseAPICallError: Altimate Base request-too-large isola
 })
 
 describe("ProviderError.parseAPICallError: Altimate LLM Gateway refusing the key", () => {
+  const statusText: Record<number, string> = { 401: "Unauthorized", 402: "Payment Required", 403: "Forbidden" }
   const gatewayError = (statusCode: number, detail: string) =>
     makeAPICallError({
-      message: statusCode === 401 ? "Unauthorized" : "Forbidden",
+      message: statusText[statusCode],
       statusCode,
       responseBody: JSON.stringify({ detail }),
       url: "https://api.myaltimate.com/agents/v1/chat/completions",
@@ -669,6 +670,7 @@ describe("ProviderError.parseAPICallError: Altimate LLM Gateway refusing the key
     expect(result.type).toBe("api_error")
     if (result.type !== "api_error") return
     expect(result.message).toStartWith("Sign in to Altimate again")
+    expect(result.message).toContain('Unauthorized: {"detail":"Incorrect auth token"}')
     expect(result.statusCode).toBe(401)
   })
 
@@ -678,7 +680,9 @@ describe("ProviderError.parseAPICallError: Altimate LLM Gateway refusing the key
       error: gatewayError(402, "Your free credits are used up"),
     })
     expect(result.type).toBe("api_error")
-    if (result.type === "api_error") expect(result.message).not.toContain("Sign in to Altimate again")
+    if (result.type !== "api_error") return
+    expect(result.message).not.toContain("Sign in to Altimate again")
+    expect(result.message).toContain('Payment Required: {"detail":"Your free credits are used up"}')
   })
 
   test("a 403 from another provider keeps its own message", () => {
@@ -687,6 +691,8 @@ describe("ProviderError.parseAPICallError: Altimate LLM Gateway refusing the key
       error: gatewayError(403, "Not authenticated"),
     })
     expect(result.type).toBe("api_error")
-    if (result.type === "api_error") expect(result.message).not.toContain("Sign in to Altimate again")
+    if (result.type !== "api_error") return
+    expect(result.message).not.toContain("Sign in to Altimate again")
+    expect(result.message).toContain('Forbidden: {"detail":"Not authenticated"}')
   })
 })
