@@ -25,8 +25,9 @@ import {
   priceSnowflake,
   resolveModel,
   rowsJinja,
-  SNOWFLAKE_RATE_SQL,
-  SNOWFLAKE_BILLED_RATE_SQL,
+  snowflakeRateSql,
+  snowflakeBilledRateSql,
+  windowStartMs,
   billedRates,
   type SheetRate,
   snowflakeHistorySql,
@@ -49,6 +50,9 @@ import {
 
 const TIB = 1024 ** 4
 const MIN = 60_000
+/** The instant the SQL under test is read as of. */
+const ASOF = Date.UTC(2026, 5, 1, 20, 0, 0)
+const WINDOW = windowStartMs(ASOF)
 const stmt = (startMin: number, endMin: number, cost = 1, known = true, session = "s"): Stmt => ({
   session,
   start: startMin * MIN,
@@ -74,9 +78,9 @@ describe("history SQL builders", () => {
   const needle = needleFor("model.shop.orders")
 
   test("BigQuery: project, lowercased region, window, type filter, parent jobs and exact match", () => {
-    const sql = bigqueryHistorySql({ project: "my-proj", location: "EU", needle })
+    const sql = bigqueryHistorySql({ project: "my-proj", location: "EU", needle, asOfMs: ASOF })
     expect(sql).toContain("from `my-proj`.`region-eu`.INFORMATION_SCHEMA.JOBS")
-    expect(sql).toContain("interval 30 day")
+    expect(sql).toContain(`creation_time > timestamp_millis(${WINDOW}) and creation_time <= timestamp_millis(${ASOF})`)
     expect(sql).toContain("parent_job_id is null")
     expect(sql).toContain("error_result is null")
     expect(sql).toContain("statement_type in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','SCRIPT','DELETE','UPDATE')")
@@ -86,22 +90,22 @@ describe("history SQL builders", () => {
   })
 
   test("BigQuery: no location falls back to us, and a hostile one cannot leave the quoted name", () => {
-    expect(bigqueryHistorySql({ project: "p", needle })).toContain("`region-us`")
-    expect(bigqueryHistorySql({ project: "p", location: "eu`; drop", needle })).toContain("`region-eudrop`")
+    expect(bigqueryHistorySql({ project: "p", needle, asOfMs: ASOF })).toContain("`region-us`")
+    expect(bigqueryHistorySql({ project: "p", location: "eu`; drop", needle, asOfMs: ASOF })).toContain("`region-eudrop`")
   })
 
   test("BigQuery: the capacity check counts a week of query jobs and those in a reservation", () => {
-    const sql = bigqueryCapacitySql({ project: "p", location: "us" })
-    expect(sql).toContain("interval 7 day")
+    const sql = bigqueryCapacitySql({ project: "p", location: "us", asOfMs: ASOF })
+    expect(sql).toContain(`creation_time > timestamp_millis(${windowStartMs(ASOF, 7)}) and creation_time <= timestamp_millis(${ASOF})`)
     expect(sql).toContain("countif(reservation_id is not null) as reserved")
     expect(sql).toContain("count(*) as jobs")
     expect(sql).toContain("job_type = 'QUERY'")
   })
 
   test("BigQuery: a role that cannot list every user's jobs reads its own from JOBS_BY_USER", () => {
-    expect(bigqueryHistorySql({ project: "p", needle: "n", view: "JOBS_BY_USER" })).toContain("INFORMATION_SCHEMA.JOBS_BY_USER")
-    expect(bigqueryHistorySql({ project: "p", needle: "n" })).toContain("INFORMATION_SCHEMA.JOBS\n")
-    expect(bigqueryCapacitySql({ project: "p", view: "JOBS_BY_USER" })).toContain("JOBS_BY_USER")
+    expect(bigqueryHistorySql({ project: "p", needle: "n", view: "JOBS_BY_USER", asOfMs: ASOF })).toContain("INFORMATION_SCHEMA.JOBS_BY_USER")
+    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("INFORMATION_SCHEMA.JOBS\n")
+    expect(bigqueryCapacitySql({ project: "p", view: "JOBS_BY_USER", asOfMs: ASOF })).toContain("JOBS_BY_USER")
   })
 
   test("BigQuery: the children of matched scripts are read by parent id, escaped, in the same window and region", () => {
@@ -121,8 +125,8 @@ describe("history SQL builders", () => {
   })
 
   test("Snowflake: window, successful statements of build types, attribution join, exact match", () => {
-    const sql = snowflakeHistorySql(needle)
-    expect(sql).toContain("dateadd(day, -30, current_timestamp())")
+    const sql = snowflakeHistorySql(needle, ASOF)
+    expect(sql).toContain(`q.start_time > to_timestamp_ltz(${WINDOW}, 3) and q.start_time <= to_timestamp_ltz(${ASOF}, 3)`)
     expect(sql).toContain("q.execution_status = 'SUCCESS'")
     expect(sql).toContain("query_type in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','DELETE','UPDATE','MULTI_STATEMENT')")
     expect(sql).toContain("left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id")
@@ -135,8 +139,8 @@ describe("history SQL builders", () => {
   })
 
   test("Databricks: window, finished build statements on a warehouse, hour split by task time, exact match", () => {
-    const sql = databricksHistorySql(needle)
-    expect(sql).toContain("interval 30 days")
+    const sql = databricksHistorySql(needle, ASOF)
+    expect(sql).toContain(`start_time > timestamp_millis(${WINDOW}) and start_time <= timestamp_millis(${ASOF})`)
     expect(sql).toContain("execution_status = 'FINISHED' and compute.warehouse_id is not null")
     // dbt-databricks runs OPTIMIZE and ANALYZE inside the model's materialization, with its query comment.
     expect(sql).toContain("statement_type in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
@@ -158,7 +162,7 @@ describe("history SQL builders", () => {
   })
 
   test("Databricks: hours are UTC instants from epoch arithmetic, never the session time zone's date_trunc", () => {
-    const sql = databricksHistorySql("n")
+    const sql = databricksHistorySql("n", ASOF)
     expect(sql).not.toMatch(/date_trunc/i)
     expect(sql).toContain("(unix_micros(u.usage_start_time) div 3600000000)")
     expect(sql).toContain("(unix_micros(start_time) div 3600000000)")
@@ -168,19 +172,19 @@ describe("history SQL builders", () => {
 
   test("a quote in the needle is escaped in every warehouse's SQL", () => {
     const hostile = `"node_id": "model.a.b' or 1=1 --"`
-    expect(bigqueryHistorySql({ project: "p", needle: hostile })).toContain("b\\' or 1=1")
-    expect(snowflakeHistorySql(hostile)).toContain("b\\' or 1=1")
-    expect(databricksHistorySql(hostile)).toContain("b\\' or 1=1")
+    expect(bigqueryHistorySql({ project: "p", needle: hostile, asOfMs: ASOF })).toContain("b\\' or 1=1")
+    expect(snowflakeHistorySql(hostile, ASOF)).toContain("b\\' or 1=1")
+    expect(databricksHistorySql(hostile, ASOF)).toContain("b\\' or 1=1")
   })
 })
 
 describe("Snowflake rate sheet query", () => {
   test("reads the rates of the window by date", () => {
-    expect(SNOWFLAKE_RATE_SQL).toContain("select date, effective_rate, currency")
-    expect(SNOWFLAKE_RATE_SQL).toContain("account_locator = current_account()")
+    expect(snowflakeRateSql(ASOF)).toContain("select date, effective_rate, currency")
+    expect(snowflakeRateSql(ASOF)).toContain("account_locator = current_account()")
     // The window's start is a UTC date, like the statement dates and the rate dates it is joined to.
-    expect(SNOWFLAKE_RATE_SQL).toContain("date >= dateadd(day, -31, to_date(convert_timezone('UTC', current_timestamp())))")
-    expect(SNOWFLAKE_RATE_SQL).not.toContain("current_date()")
+    expect(snowflakeRateSql(ASOF)).toContain("date >= to_date('2026-05-01') and date <= to_date('2026-06-01')")
+    expect(snowflakeRateSql(ASOF)).not.toMatch(/current_(date|timestamp)/)
   })
 })
 
@@ -606,14 +610,15 @@ describe("Snowflake pricing", () => {
   })
 
   test("the billed rate query reads the blended compute and overage usage by day", () => {
-    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("sum(usage_in_currency) / nullif(sum(usage), 0) as rate")
-    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("snowflake.organization_usage.usage_in_currency_daily")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("sum(usage_in_currency) / nullif(sum(usage), 0) as rate")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("snowflake.organization_usage.usage_in_currency_daily")
     // The documented columns, with every balance source (contract and overage) kept.
-    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'")
-    expect(SNOWFLAKE_BILLED_RATE_SQL).not.toContain("usage_type")
-    expect(SNOWFLAKE_BILLED_RATE_SQL).not.toContain("balance_source")
-    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("count(distinct currency) as currencies")
-    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("group by usage_date")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'")
+    expect(snowflakeBilledRateSql(ASOF)).not.toContain("usage_type")
+    expect(snowflakeBilledRateSql(ASOF)).not.toContain("balance_source")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("count(distinct currency) as currencies")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("usage_date >= to_date('2026-05-01') and usage_date <= to_date('2026-06-01')")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("group by usage_date")
   })
 
   test("rate sheet rows are read by date, positive rates only", () => {
@@ -838,10 +843,43 @@ describe("run boundary", () => {
     expect(priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 30 * MIN, end: C - 20 * MIN, tmp: true })).cost.runs).toBe(1)
   })
 
-  test("BigQuery: a merge that has its temporary CTAS in the result is not dropped for an unread one", () => {
+  test("BigQuery: an unread CTAS that could have been a merge's temporary relation drops it even when the merge already pairs with a CTAS read", () => {
+    // The merge has its own CTAS in the result, but an unread one ended just before it too and could have been the one it took.
     const rows = [{ ...tmpCtas("t", 0, TIB), creation_time: at(0), end_time: at(1) }, { ...bq("m", 0, TIB), creation_time: at(2) }]
     const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 5 * MIN, end: C + 0, tmp: true }))
-    expect(cost.runs).toBe(1)
+    expect(cost.basis).toBe("none")
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+  })
+
+  test("BigQuery: the temporary-relation rule is measured from the final build's start, not an attached delete's", () => {
+    // delete at +1 min attaches to the CTAS at +1.2, which pairs with the merge at +3: the run starts at +1, its final build at +3.
+    const rows = [
+      { ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(1) },
+      { ...tmpCtas("t", 0, TIB), creation_time: at(1.2), end_time: at(2.2) },
+      { ...bq("m", 0, TIB), creation_time: at(3) },
+    ]
+    const price = (end: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 30 * MIN, end: C + end * MIN, tmp: true })).cost
+    // Ending 8 minutes before the merge's start is outside its ten minutes of the merge (-7): the run is whole.
+    expect(price(-8).runs).toBe(1)
+    // Ending 6 minutes before the cutoff is inside them.
+    expect(price(-6).basis).toBe("none")
+  })
+
+  test("BigQuery: an unread delete is measured from the run's first build, not from an attached delete that started earlier", () => {
+    // A delete read at +0.1 min attaches to the merge at +0.5: the run starts at +0.1, its first build at +0.5.
+    const rows = [{ ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(0.1) }, { ...bq("m", 0, TIB), creation_time: at(0.5) }]
+    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
+    // Created 42 s before the cutoff: more than a minute before the merge, so it cannot have attached to it.
+    expect(run(-0.7).runs).toBe(1)
+    expect(run(-0.3).basis).toBe("none")
+  })
+
+  test("BigQuery: a delete before the cutoff is measured against the run's first build, not against the merge", () => {
+    // tmp CTAS read at +0.5, merge at +3; an unread delete 90 s before the CTAS cannot have attached to it (over a minute).
+    const rows = [{ ...tmpCtas("t", 0, TIB), creation_time: at(0.5), end_time: at(1.5) }, { ...bq("m", 0, TIB), creation_time: at(3) }]
+    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
+    expect(run(-1).runs).toBe(1)
+    expect(run(-0.4).basis).toBe("none")
   })
 
   test("BigQuery: a delete joins only a build by the same user", () => {
@@ -866,15 +904,14 @@ describe("run boundary", () => {
 describe("boundary SQL", () => {
   const needle = needleFor("model.shop.orders")
 
-  test("Snowflake: before the window, or before a given cutoff, ending within the ten-minute gap, same filters", () => {
-    const window = snowflakeBoundarySql(needle)
-    expect(window).toContain("/* run boundary */")
-    expect(window).toContain("q.start_time < dateadd(day, -30, current_timestamp())")
-    expect(window).toContain("q.end_time >= dateadd(second, -600, dateadd(day, -30, current_timestamp()))")
-    expect(window).toContain("q.execution_status = 'SUCCESS'")
-    expect(window).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
-    expect(window).toContain("limit 500")
-    expect(snowflakeBoundarySql(needle, 1234)).toContain("q.start_time < to_timestamp_ltz(1234, 3)")
+  test("Snowflake: before the cutoff, ending within the ten-minute gap, same filters", () => {
+    const sql = snowflakeBoundarySql(needle, 1234)
+    expect(sql).toContain("/* run boundary */")
+    expect(sql).toContain("q.start_time < to_timestamp_ltz(1234, 3)")
+    expect(sql).toContain("q.end_time >= dateadd(second, -600, to_timestamp_ltz(1234, 3))")
+    expect(sql).toContain("q.execution_status = 'SUCCESS'")
+    expect(sql).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
+    expect(sql).toContain("limit 500")
   })
 
   test("Databricks: same filters, a cutoff as a timestamp", () => {
@@ -883,7 +920,6 @@ describe("boundary SQL", () => {
     expect(sql).toContain("- interval 600 seconds")
     expect(sql).toContain("execution_status = 'FINISHED'")
     expect(sql).toContain("statement_type in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
-    expect(databricksBoundarySql(needle)).toContain("current_timestamp() - interval 30 days")
   })
 
   test("BigQuery: top-level jobs of the same view, within a minute of the cutoff", () => {
@@ -902,18 +938,18 @@ describe("boundary SQL", () => {
   })
 
   test("every boundary query returns the id of each statement, so the ones already read can be excluded", () => {
-    expect(snowflakeBoundarySql("n")).toContain("select /* run boundary */ q.query_id")
-    expect(databricksBoundarySql("n")).toContain("select /* run boundary */ statement_id")
-    expect(bigqueryBoundarySql({ project: "p", needle: "n" })).toContain("select /* run boundary */ job_id")
+    expect(snowflakeBoundarySql("n", 1)).toContain("select /* run boundary */ q.query_id")
+    expect(databricksBoundarySql("n", 1)).toContain("select /* run boundary */ statement_id")
+    expect(bigqueryBoundarySql({ project: "p", needle: "n", cutoffMs: 1 })).toContain("select /* run boundary */ job_id")
   })
 
   test("the BigQuery history reads the job's user, which a delete must share with the build it joins", () => {
-    expect(bigqueryHistorySql({ project: "p", needle: "n" })).toContain("select job_id, user_email,")
-    expect(bigqueryHistorySql({ project: "p", needle: "n" })).toContain("destination_table.table_id as destination_table_id")
+    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("select job_id, user_email,")
+    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("destination_table.table_id as destination_table_id")
   })
 
   test("Databricks proration multiplies in double, never BIGINT by BIGINT", () => {
-    const sql = databricksHistorySql(needle)
+    const sql = databricksHistorySql(needle, ASOF)
     expect(sql).toContain("cast(coalesce(a.ms, 0) as double) * (least(")
     expect(sql).toContain("cast(coalesce(q_hours.ms, 0) as double) * (least(")
     expect(sql).toContain("/ cast(unix_micros(a.end_time) - unix_micros(a.start_time) as double)")

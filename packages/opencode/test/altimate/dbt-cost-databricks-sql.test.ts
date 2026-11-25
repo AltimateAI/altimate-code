@@ -6,6 +6,8 @@ import { describe, expect, test } from "bun:test"
 import { databricksHistorySql, needleFor } from "@/altimate/tools/dbt-cost-history"
 
 const HOUR = 3_600_000_000
+/** Read as of a time far after the fixtures (timestamps here are microseconds from the epoch). */
+const ASOF_MS = 1_000_000_000
 const NEEDLE = needleFor("model.shop.orders")
 const TEXT = `/* {"node_id": "model.shop.orders"} */ merge into t`
 
@@ -46,7 +48,7 @@ function toSqlite(spark: string): string {
     .replace(/timestamp_micros\(/g, "(")
     .replace(/\bleast\(/g, "min(")
     .replace(/\bgreatest\(/g, "max(")
-    .replace(/current_timestamp\(\) - interval \d+ days/g, "-1")
+    .replace(/timestamp_millis\((-?\d+)\)/g, (_, ms) => `(${ms} * 1000)`)
   // explode(sequence(a, b)) as hour  ->  a join on the hours a..b
   for (let at = sql.indexOf("explode(sequence("); at !== -1; at = sql.indexOf("explode(sequence(")) {
     const seq = at + "explode(".length + "sequence".length
@@ -79,7 +81,7 @@ function run(stmts: Stmt[], bills: Bill[], prices = { def: 0.7, eff: null as num
   for (const b of bills) db.run("insert into billing_usage values (?, ?, ?, 'DBU', 'sku', 'aws')", [b.wh ?? "w1", b.hour * HOUR, b.dbus])
   db.run("create table list_prices (sku_name text, cloud text, price_start_time integer, price_end_time integer, pricing_default real, pricing_effective_list_default real)")
   db.run("insert into list_prices values ('sku', 'aws', 0, null, ?, ?)", [prices.def, prices.eff])
-  const rows = db.query<Record<string, number | string | null>, []>(toSqlite(databricksHistorySql(NEEDLE))).all()
+  const rows = db.query<Record<string, number | string | null>, []>(toSqlite(databricksHistorySql(NEEDLE, ASOF_MS))).all()
   db.close()
   return Object.fromEntries(rows.map((r) => [String(r.statement_id), r]))
 }

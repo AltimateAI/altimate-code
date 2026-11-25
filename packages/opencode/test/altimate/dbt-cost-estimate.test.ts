@@ -39,6 +39,7 @@ let project: string
 /** The history queries (as Jinja) the tool sent through the adapter. */
 let historyLog: string[] = []
 const defaultReadCostConfig = costHistoryInternals.readCostConfig
+const defaultNow = costHistoryInternals.now
 
 /** What the history Jinja renders: the columns and rows of a table, every value text or null. */
 function table(columns: string[], rows: (string | null)[][]) {
@@ -1806,6 +1807,59 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.lastRun).toBe(4)
     expect(cost.rate).toEqual({ value: 4, unit: "USD/credit", source: "account", detail: "billed" })
     expect(result.output).toContain("from your account (billed)")
+  })
+
+  test("one instant for the whole call: every Snowflake query carries the same window as a literal, and none asks the warehouse for the time", async () => {
+    let asked = 0
+    const asOf = Date.UTC(2026, 5, 1, 20, 0, 0)
+    costHistoryInternals.now = () => (asked++, asOf + asked * 5_000)
+    try {
+      useAdapter(calls, {
+        type: "snowflake",
+        explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+        history: async (jinja) =>
+          jinja.includes("usage_in_currency_daily") || jinja.includes("rate_sheet_daily")
+            ? table(["date"], [])
+            : table(SF_COLUMNS, [
+                ["q1", "s1", "2026-05-20 10:00:00.000", "2026-05-20", "2026-05-20 10:01:00.000", "9000", "MERGE", "W", "XS", "1", null, "0"],
+              ]),
+      })
+      await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      const start = asOf + 5_000 - 30 * 86_400_000
+      expect(asked).toBe(1)
+      expect(historyLog.length).toBeGreaterThanOrEqual(3)
+      for (const q of historyLog) expect(q).not.toMatch(/current_(timestamp|date)/)
+      const main = historyLog.find((q) => q.includes("query_history q") && !q.includes("run boundary"))!
+      expect(main).toContain(`to_timestamp_ltz(${start}, 3)`)
+      expect(main).toContain(`to_timestamp_ltz(${asOf + 5_000}, 3)`)
+      // The boundary's cutoff is that window's start, the same literal.
+      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`to_timestamp_ltz(${start}, 3)`)
+      expect(historyLog.find((q) => q.includes("usage_in_currency_daily"))).toContain("to_date(\\'2026-06-01\\')")
+    } finally {
+      costHistoryInternals.now = defaultNow
+    }
+  })
+
+  test("one instant for the whole BigQuery call: capacity, history and boundary share it", async () => {
+    let asked = 0
+    const asOf = Date.UTC(2026, 5, 1, 20, 0, 0)
+    costHistoryInternals.now = () => (asked++, asOf + asked * 5_000)
+    try {
+      useAdapter(calls, {
+        history: bigqueryHistory([job("p1", "2026-05-20 10:00:00+00:00", "2026-05-20 10:01:00+00:00", 9 * TIB, null, 0, "SCRIPT")], {
+          children: [["k1", "p1", "2026-05-20 10:00:05+00:00", "MERGE", String(TIB), "0", null, "False"]],
+        }),
+      })
+      await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      const start = asOf + 5_000 - 30 * 86_400_000
+      expect(asked).toBe(1)
+      for (const q of historyLog) expect(q).not.toMatch(/current_(timestamp|date)/)
+      expect(historyLog.find((q) => q.includes("countif(reservation_id"))).toContain(`timestamp_millis(${asOf + 5_000 - 7 * 86_400_000})`)
+      expect(historyLog.find((q) => q.includes("strpos") && !q.includes("run boundary"))).toContain(`timestamp_millis(${start})`)
+      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`timestamp_millis(${start})`)
+    } finally {
+      costHistoryInternals.now = defaultNow
+    }
   })
 
   test("Snowflake: a configured credit rate needs no rate lookup at all", async () => {

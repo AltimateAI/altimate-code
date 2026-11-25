@@ -6,6 +6,10 @@ import { loadRawManifest } from "../native/dbt/helpers"
 
 export const HISTORY_DAYS = 30
 export const HISTORY_LIMIT = 500
+const DAY_MS = 86_400_000
+/** The start of a read's window: `days` before the instant the whole call reads as of. */
+export const windowStartMs = (asOfMs: number, days = HISTORY_DAYS) => asOfMs - days * DAY_MS
+const utcDate = (ms: number) => new Date(ms).toISOString().slice(0, 10)
 /** A delete or update attaches to a build job of the model that starts within this long after it. */
 export const BQ_ATTACH_MS = 60_000
 /** The most child jobs of matched scripts the children query returns. */
@@ -172,10 +176,11 @@ function bqJobs(project: string, location: unknown, view: JobsView): string {
   return `\`${project}\`.\`region-${sanitizeBqRegion(location)}\`.INFORMATION_SCHEMA.${view}`
 }
 
-export function bigqueryHistorySql(input: { project: string; location?: unknown; needle: string; view?: JobsView }): string {
+/** Every query reads the same instant, `asOfMs`, as a literal: a window that slid between queries would not describe one period. */
+export function bigqueryHistorySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; asOfMs: number }): string {
   return `select job_id, user_email, creation_time, end_time, statement_type, destination_table.table_id as destination_table_id, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time > timestamp_sub(current_timestamp(), interval ${HISTORY_DAYS} day)
+where creation_time > timestamp_millis(${windowStartMs(input.asOfMs)}) and creation_time <= timestamp_millis(${input.asOfMs})
   and job_type = 'QUERY' and state = 'DONE' and error_result is null
   and parent_job_id is null
   and statement_type in (${list(BQ_TYPES)})
@@ -195,19 +200,19 @@ order by creation_time desc limit ${BQ_CHILD_LIMIT}`
 }
 
 /** How many query jobs ran in the last week, and how many of them in a reservation. */
-export function bigqueryCapacitySql(input: { project: string; location?: unknown; view?: JobsView }): string {
+export function bigqueryCapacitySql(input: { project: string; location?: unknown; view?: JobsView; asOfMs: number }): string {
   return `select count(*) as jobs, countif(reservation_id is not null) as reserved
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time > timestamp_sub(current_timestamp(), interval 7 day)
+where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and creation_time <= timestamp_millis(${input.asOfMs})
   and job_type = 'QUERY' and state = 'DONE'`
 }
 
-export function snowflakeHistorySql(needle: string): string {
+export function snowflakeHistorySql(needle: string, asOfMs: number): string {
   return `select q.query_id, q.session_id, q.start_time, to_varchar(convert_timezone('UTC', q.start_time), 'YYYY-MM-DD') as start_date_utc, q.end_time, q.execution_time, q.query_type, q.warehouse_name, q.warehouse_size,
        a.credits_attributed_compute, a.credits_used_query_acceleration, q.credits_used_cloud_services
 from snowflake.account_usage.query_history q
 left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id
-where q.start_time > dateadd(day, -${HISTORY_DAYS}, current_timestamp())
+where q.start_time > to_timestamp_ltz(${windowStartMs(asOfMs)}, 3) and q.start_time <= to_timestamp_ltz(${asOfMs}, 3)
   and q.execution_status = 'SUCCESS'
   and q.query_type in (${list(SF_TYPES)})
   and contains(q.query_text, ${sqlString(needle)})
@@ -221,8 +226,8 @@ order by q.start_time desc limit ${HISTORY_LIMIT}`
  */
 export const BOUNDARY_LOOKBACK_DAYS = 1
 
-export function snowflakeBoundarySql(needle: string, cutoffMs?: number): string {
-  const c = cutoffMs === undefined ? `dateadd(day, -${HISTORY_DAYS}, current_timestamp())` : `to_timestamp_ltz(${Math.trunc(cutoffMs)}, 3)`
+export function snowflakeBoundarySql(needle: string, cutoffMs: number): string {
+  const c = `to_timestamp_ltz(${Math.trunc(cutoffMs)}, 3)`
   return `select /* run boundary */ q.query_id, q.session_id, q.start_time, q.end_time
 from snowflake.account_usage.query_history q
 where q.start_time < ${c} and q.start_time > dateadd(day, -${BOUNDARY_LOOKBACK_DAYS}, ${c})
@@ -233,8 +238,8 @@ where q.start_time < ${c} and q.start_time > dateadd(day, -${BOUNDARY_LOOKBACK_D
 order by q.start_time desc limit ${HISTORY_LIMIT}`
 }
 
-export function databricksBoundarySql(needle: string, cutoffMs?: number): string {
-  const c = cutoffMs === undefined ? `(current_timestamp() - interval ${HISTORY_DAYS} days)` : `timestamp_millis(${Math.trunc(cutoffMs)})`
+export function databricksBoundarySql(needle: string, cutoffMs: number): string {
+  const c = `timestamp_millis(${Math.trunc(cutoffMs)})`
   return `select /* run boundary */ statement_id, session_id, start_time, coalesce(end_time, start_time) as end_time
 from system.query.history
 where start_time < ${c} and start_time > ${c} - interval ${BOUNDARY_LOOKBACK_DAYS} day
@@ -245,8 +250,8 @@ where start_time < ${c} and start_time > ${c} - interval ${BOUNDARY_LOOKBACK_DAY
 order by start_time desc limit ${HISTORY_LIMIT}`
 }
 
-export function bigqueryBoundarySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; cutoffMs?: number }): string {
-  const c = input.cutoffMs === undefined ? `timestamp_sub(current_timestamp(), interval ${HISTORY_DAYS} day)` : `timestamp_millis(${Math.trunc(input.cutoffMs)})`
+export function bigqueryBoundarySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; cutoffMs: number }): string {
+  const c = `timestamp_millis(${Math.trunc(input.cutoffMs)})`
   // What can join a build that starts after the cutoff: a delete or update created within a minute before it, or the
   // CTAS into dbt's temporary relation that ended within ten minutes before it.
   return `select /* run boundary */ job_id, user_email, creation_time, end_time, statement_type
@@ -267,17 +272,17 @@ order by creation_time desc limit ${HISTORY_LIMIT}`
  * The account's blended rate actually billed for each day (contract and overage compute together), so a statement is
  * priced at what its day cost. The view lags up to about three days. A day billed in more than one currency has no single rate.
  */
-export const SNOWFLAKE_BILLED_RATE_SQL = `select usage_date, sum(usage_in_currency) / nullif(sum(usage), 0) as rate, max(currency) as currency, count(distinct currency) as currencies
+export const snowflakeBilledRateSql = (asOfMs: number) => `select usage_date, sum(usage_in_currency) / nullif(sum(usage), 0) as rate, max(currency) as currency, count(distinct currency) as currencies
 from snowflake.organization_usage.usage_in_currency_daily
 where account_locator = current_account() and rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'
-  and usage_date >= dateadd(day, -${HISTORY_DAYS + 1}, to_date(convert_timezone('UTC', current_timestamp())))
+  and usage_date >= to_date('${utcDate(windowStartMs(asOfMs, HISTORY_DAYS + 1))}') and usage_date <= to_date('${utcDate(asOfMs)}')
 group by usage_date
 order by usage_date`
 
 /** The contract rate for each day of the window: the fallback when the billed rates can't be read; it leaves out overage. */
-export const SNOWFLAKE_RATE_SQL = `select date, effective_rate, currency from snowflake.organization_usage.rate_sheet_daily
+export const snowflakeRateSql = (asOfMs: number) => `select date, effective_rate, currency from snowflake.organization_usage.rate_sheet_daily
 where account_locator = current_account() and usage_type = 'compute' and service_type = 'WAREHOUSE_METERING'
-  and date >= dateadd(day, -${HISTORY_DAYS + 1}, to_date(convert_timezone('UTC', current_timestamp())))
+  and date >= to_date('${utcDate(windowStartMs(asOfMs, HISTORY_DAYS + 1))}') and date <= to_date('${utcDate(asOfMs)}')
 order by date`
 
 const HOUR_US = 3_600_000_000
@@ -293,12 +298,12 @@ const prorated = (a: string) =>
     else cast(coalesce(${a}.ms, 0) as double) * (least(unix_micros(${a}.end_time), (${a}.hour + 1) * ${HOUR_US}) - greatest(unix_micros(${a}.start_time), ${a}.hour * ${HOUR_US}))
          / cast(unix_micros(${a}.end_time) - unix_micros(${a}.start_time) as double) end`
 
-export function databricksHistorySql(needle: string): string {
+export function databricksHistorySql(needle: string, asOfMs: number): string {
   return `with q as (
   select statement_id, session_id, compute.warehouse_id as warehouse_id, start_time, coalesce(end_time, start_time) as end_time,
          statement_type, total_task_duration_ms as ms
   from system.query.history
-  where start_time > current_timestamp() - interval ${HISTORY_DAYS} days
+  where start_time > timestamp_millis(${windowStartMs(asOfMs)}) and start_time <= timestamp_millis(${asOfMs})
     and execution_status = 'FINISHED' and compute.warehouse_id is not null
     and statement_type in (${list(DBX_TYPES)})
     and instr(statement_text, ${sqlString(needle)}) > 0
@@ -312,7 +317,7 @@ all_hours as (
   select compute.warehouse_id as warehouse_id, start_time, coalesce(end_time, start_time) as end_time, total_task_duration_ms as ms,
          ${hoursOf("start_time", "coalesce(end_time, start_time)")} as hour
   from system.query.history
-  where start_time > current_timestamp() - interval ${HISTORY_DAYS + 1} days and compute.warehouse_id is not null
+  where start_time > timestamp_millis(${windowStartMs(asOfMs, HISTORY_DAYS + 1)}) and start_time <= timestamp_millis(${asOfMs}) and compute.warehouse_id is not null
     and compute.warehouse_id in (select warehouse_id from q)
 ),
 tasks as (
@@ -328,7 +333,7 @@ billed as (
   join system.billing.list_prices p on p.sku_name = u.sku_name and p.cloud = u.cloud
     and u.usage_start_time >= p.price_start_time and (p.price_end_time is null or u.usage_start_time < p.price_end_time)
   join hours h on u.usage_metadata.warehouse_id = h.warehouse_id and ${hourOf("u.usage_start_time")} = h.hour
-  where u.usage_unit = 'DBU' and u.usage_start_time > current_timestamp() - interval ${HISTORY_DAYS + 1} days
+  where u.usage_unit = 'DBU' and u.usage_start_time > timestamp_millis(${windowStartMs(asOfMs, HISTORY_DAYS + 1)}) and u.usage_start_time <= timestamp_millis(${asOfMs})
   group by 1, 2
 ),
 shares as (select q_hours.*, ${prorated("q_hours")} as share_ms from q_hours)
@@ -548,7 +553,7 @@ function emptyMessage(uniqueId: string, table: string): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** One BigQuery job, or the children of a script, priced as what they are: bytes billed on demand, slot time in a reservation. */
-type BqUnit = { cause?: Cause; user: string; end: number; /** A CREATE TABLE AS SELECT into dbt's temporary relation. */ tmp: boolean; /** A build that can end a run: MERGE, INSERT or a script. */ final: boolean; hasTmp: boolean; start: number; build: boolean; cost: number; known: boolean; bytes: number; slotHours: number; reserved: boolean; demand: boolean }
+type BqUnit = { /** The earliest build in the run (an attached delete or update is not one). */ buildStart?: number; /** The start of the run's final build (MERGE, INSERT, script), when it has one. */ finalStart?: number; cause?: Cause; user: string; end: number; /** A CREATE TABLE AS SELECT into dbt's temporary relation. */ tmp: boolean; /** A build that can end a run: MERGE, INSERT or a script. */ final: boolean; hasTmp: boolean; start: number; build: boolean; cost: number; known: boolean; bytes: number; slotHours: number; reserved: boolean; demand: boolean }
 
 function bqJob(r: Row, cfg: CostConfig): BqUnit {
   const slot = rateOf(cfg.bigquerySlotHourUsd, DEFAULT_RATES.bigquerySlotHourUsd, "USD/slot-hour", "bigquerySlotHourUsd").rate.value
@@ -629,18 +634,23 @@ export function bigqueryRuns(units: BqUnit[], boundary?: Boundary): { runs: BqUn
   }
   const all = [...groups.values(), ...alone].map((g) => {
     const head = g.find((u) => !u.tmp && u.build) ?? g[0]
-    return sumUnits(Math.min(...g.map((u) => u.start)), true, g, head.user, head.final)
+    const unit = sumUnits(Math.min(...g.map((u) => u.start)), true, g, head.user, head.final)
+    const builds = g.filter((u) => u.build)
+    return { ...unit, buildStart: Math.min(...(builds.length ? builds : g).map((u) => u.start)), finalStart: head.final ? head.start : Number.NaN }
   })
-  // Unread statements before the cutoff that would have joined a run: a delete or update by the run's user created
-  // within a minute before its start, or a temporary-relation CTAS by the same user that ended within ten minutes
-  // before it (only for a run that has no such CTAS of its own). Such a run is not trusted.
+  // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a delete or
+  // update by the run's user created within a minute before its first build, or a temporary-relation CTAS by the same
+  // user that ended at or before its final build's start and within ten minutes of it (an unread CTAS could have been
+  // the one that build took). Such a run is not trusted.
   const unsure = (r: BqUnit) =>
     boundary
       ? boundary.stmts
         ? boundary.stmts.some(
             (b) =>
               (b.session ?? "") === r.user &&
-              (b.tmp ? r.final && !r.hasTmp && b.end <= r.start && b.end >= r.start - BQ_TMP_JOIN_MS : b.start >= r.start - BQ_ATTACH_MS),
+              (b.tmp
+                ? r.final && b.end <= (r.finalStart ?? r.start) && b.end >= (r.finalStart ?? r.start) - BQ_TMP_JOIN_MS
+                : b.start >= (r.buildStart ?? r.start) - BQ_ATTACH_MS),
           )
         : r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS
       : false
@@ -842,7 +852,7 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
 /** The window in which a Databricks hour's billing may still be landing. */
 const BILLING_SETTLE_MS = 12 * 3_600_000
 
-export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig, boundary?: Boundary): CostInfo {
+export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig, boundary?: Boundary, asOfMs = Date.now()): CostInfo {
   const table = "system.query.history"
   const configured = cfg.databricksUsdPerDbu
   const stmts: Stmt[] = rows.map((r) => {
@@ -880,7 +890,7 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig, 
       ? `DBUs are priced at ${configured} USD/DBU.`
       : "Prices are list prices (with published promotions); negotiated discounts are not applied.",
   ]
-  if (runs.some((r) => r.lastStart > Date.now() - BILLING_SETTLE_MS)) notes.push("Amounts for the last 12 hours may still change as billing lands.")
+  if (runs.some((r) => r.lastStart > asOfMs - BILLING_SETTLE_MS)) notes.push("Amounts for the last 12 hours may still change as billing lands.")
   if (truncated) notes.push(LIMIT_NOTE)
   if (dropped) notes.push(boundaryNote(dropped))
   if (skipped) notes.push(`${plural(skipped, "run")} left out: ${causeList(causes)}.`)
@@ -978,6 +988,8 @@ export function costText(c: CostInfo): string {
 export const costHistoryInternals = {
   /** How long the history queries together wait for the warehouse; a slower one is no history, and the scan figure stands. */
   historyTimeoutMs: 60_000,
+  /** The instant a call reads the history as of: taken once, and written into every query as a literal. */
+  now: () => Date.now(),
   /** The `cost` block of the config. */
   readCostConfig: async (): Promise<unknown> => {
     try {
@@ -1007,6 +1019,9 @@ export async function loadHistory(input: {
   cfg: CostConfig
 }): Promise<History> {
   const { adapter, type, signal, cfg } = input
+  // One instant for the whole call: the main read, its boundary, the children, the capacity check and the rates all use it.
+  const asOfMs = costHistoryInternals.now()
+  const windowStart = windowStartMs(asOfMs)
   // A call cancelled while the scan ran stops here, whether or not any history query would have been sent.
   signal.throwIfAborted()
   const deadline = new AbortController()
@@ -1051,17 +1066,18 @@ export async function loadHistory(input: {
   const boundaryFor = async (
     read: Row[],
     startKey: string,
-    sqlFor: (cutoffMs?: number) => string,
+    sqlFor: (cutoffMs: number) => string,
     keys: { id: string; session: string },
   ): Promise<Boundary | undefined> => {
     if (!read.length) return undefined
     const starts = read.map((r) => parseTime(r[startKey])).filter(Number.isFinite)
     const hit = read.length >= HISTORY_LIMIT && starts.length > 0
-    const cutoffMs = hit ? Math.min(...starts) : undefined
-    const cutoff = cutoffMs ?? Date.now() - HISTORY_DAYS * 86_400_000
+    // The cutoff is the oldest statement read when the limit was hit, else the window's own start: the same instant
+    // the main read used, never recomputed.
+    const cutoff = hit ? Math.min(...starts) : windowStart
     try {
-      // One millisecond past the cutoff: a statement within the same millisecond as the oldest one read is not missed.
-      const found = await rows(sqlFor(cutoffMs === undefined ? undefined : cutoffMs + 1))
+      // One millisecond past an oldest statement read: a statement within its millisecond is not missed.
+      const found = await rows(sqlFor(hit ? cutoff + 1 : cutoff))
       if (found.length >= HISTORY_LIMIT) return { cutoff }
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r[keys.id]))
@@ -1086,7 +1102,7 @@ export async function loadHistory(input: {
     if (!uniqueId) return { cost: none(unavailable!), ...base }
     if (type === "snowflake") {
       const needle = needleFor(uniqueId)
-      const history = await rows(snowflakeHistorySql(needle))
+      const history = await rows(snowflakeHistorySql(needle, asOfMs))
       const boundary = await boundaryFor(history, "start_time", (c) => snowflakeBoundarySql(needle, c), {
         id: "query_id",
         session: "session_id",
@@ -1104,18 +1120,18 @@ export async function loadHistory(input: {
       }
       let sheet: SheetRate[] = []
       if (cfg.snowflakeUsdPerCredit === undefined) {
-        sheet = await lookup(SNOWFLAKE_BILLED_RATE_SQL, billedRates)
-        if (!sheet.length) sheet = await lookup(SNOWFLAKE_RATE_SQL, sheetRates)
+        sheet = await lookup(snowflakeBilledRateSql(asOfMs), billedRates)
+        if (!sheet.length) sheet = await lookup(snowflakeRateSql(asOfMs), sheetRates)
       }
       return { cost: priceSnowflake(history, uniqueId, sheet, cfg, boundary), ...base }
     }
     const needle = needleFor(uniqueId)
-    const history = await rows(databricksHistorySql(needle))
+    const history = await rows(databricksHistorySql(needle, asOfMs))
     const boundary = await boundaryFor(history, "start_time", (c) => databricksBoundarySql(needle, c), {
       id: "statement_id",
       session: "session_id",
     })
-    return { cost: priceDatabricks(history, uniqueId, cfg, boundary), ...base }
+    return { cost: priceDatabricks(history, uniqueId, cfg, boundary, asOfMs), ...base }
   } catch (e) {
     if (signal.aborted) throw e
     return { cost: unreadable(type, message(e)), ...base }
@@ -1149,7 +1165,7 @@ export async function loadHistory(input: {
     }
     let pricing: boolean | undefined
     try {
-      const { rows: seen } = await read((view) => bigqueryCapacitySql({ project, location, view }))
+      const { rows: seen } = await read((view) => bigqueryCapacitySql({ project, location, view, asOfMs }))
       const reserved = num(seen[0]?.reserved) ?? 0
       pricing = reserved > 0 ? true : (num(seen[0]?.jobs) ?? 0) > 0 ? false : undefined
     } catch (e) {
@@ -1160,7 +1176,7 @@ export async function loadHistory(input: {
     let cost: CostInfo
     let reserved = false
     try {
-      const history = await read((view) => bigqueryHistorySql({ project, location, needle: needleFor(id), view }))
+      const history = await read((view) => bigqueryHistorySql({ project, location, needle: needleFor(id), view, asOfMs }))
       const parents = history.rows.filter((r) => r.statement_type === "SCRIPT" && r.job_id).map((r) => r.job_id!)
       const sinceMs = Math.min(...history.rows.filter((r) => r.statement_type === "SCRIPT").map((r) => parseTime(r.creation_time)))
       const children = parents.length
