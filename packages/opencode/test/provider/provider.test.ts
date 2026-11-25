@@ -1429,6 +1429,49 @@ test("getSmallModel respects config small_model override", async () => {
   })
 })
 
+// altimate_change start — offline small model stays on the configured endpoint
+for (const [smallModel, expected] of [
+  ["anthropic/claude-sonnet-4-20250514", undefined],
+  ["local/small", "small"],
+] as const) {
+  test(`offline getSmallModel honors ${smallModel} only on the configured endpoint`, async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            model: "local/main",
+            small_model: smallModel,
+            provider: {
+              local: {
+                npm: "@ai-sdk/openai-compatible",
+                options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "local" },
+                models: { main: { name: "Main" }, small: { name: "Small" } },
+              },
+            },
+          }),
+        )
+      },
+    })
+    const previous = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const model = await Provider.getSmallModel(ProviderID.make("local"))
+          expect(model?.id === undefined ? undefined : String(model.id)).toBe(expected)
+        },
+      })
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  })
+}
+// altimate_change end
+
 test("provider.sort prioritizes preferred models", () => {
   const models = [
     { id: "random-model", name: "Random" },

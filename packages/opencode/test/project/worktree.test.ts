@@ -1,5 +1,6 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
+import { chmod, rename } from "node:fs/promises"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Result } from "effect"
@@ -81,6 +82,87 @@ const gitResult = Effect.fn("WorktreeTest.gitResult")(function* (cwd: string, ar
 
 describe("Worktree", () => {
   afterEach(() => disposeAllInstances())
+
+  wintest(
+    "creates, resets, and removes a local worktree offline",
+    Effect.gen(function* () {
+      // The base branch is a cached remote-tracking ref whose remote cannot be reached: online, reset would fetch it.
+      const { directory } = yield* TestInstance
+      const run = (args: string[]) => {
+        const result = Bun.spawnSync(["git", ...args], { cwd: directory, stdout: "pipe", stderr: "pipe" })
+        if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+        return result.stdout.toString().trim()
+      }
+      const branch = run(["rev-parse", "--abbrev-ref", "HEAD"])
+      run(["remote", "add", "origin", path.join(directory, "missing-remote.git")])
+      run(["update-ref", `refs/remotes/origin/${branch}`, "HEAD"])
+      run(["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${branch}`])
+      // A submodule the new worktree has not cloned, whose source is gone: online, reset would try to clone it.
+      const lib = path.join(directory, "lib-source")
+      const nested = path.join(directory, "nested-source")
+      const commit = ["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q"]
+      run(["init", "-q", lib])
+      run(["init", "-q", nested])
+      const fs = yield* FSUtil.Service
+      yield* fs.writeWithDirs(path.join(nested, "tracked"), "clean")
+      run(["-C", nested, "add", "tracked"])
+      run(["-C", nested, ...commit, "-m", "nested"])
+      run(["-C", lib, "-c", "protocol.file.allow=always", "submodule", "add", "-q", nested, "nested"])
+      run(["-C", lib, ...commit, "-m", "lib"])
+      run(["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "lib"])
+      run([...commit, "-m", "add submodule"])
+      run(["update-ref", `refs/remotes/origin/${branch}`, "HEAD"])
+      yield* Effect.promise(() => rename(lib, `${lib}-hidden`))
+      const previous = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        const svc = yield* Worktree.Service
+        yield* withCreatedWorktree({ name: "offline" }, ({ info }) =>
+          Effect.gen(function* () {
+            const file = path.join(info.directory, "offline-change")
+            yield* fs.writeWithDirs(file, "fixture")
+            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
+            expect(yield* fs.existsSafe(file)).toBe(false)
+            expect(yield* fs.existsSafe(path.join(info.directory, "lib", ".git"))).toBe(false)
+
+            yield* Effect.promise(() => rename(`${lib}-hidden`, lib))
+            run(["-C", info.directory, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+            const nestedWorktree = path.join(info.directory, "lib", "nested")
+            const nestedCommit = run(["-C", nestedWorktree, "rev-parse", "HEAD"])
+            const tracked = path.join(nestedWorktree, "tracked")
+            yield* fs.writeWithDirs(tracked, "modified")
+            expect(yield* svc.reset({ directory: info.directory })).toBe(true)
+            expect(run(["-C", nestedWorktree, "rev-parse", "HEAD"])).toBe(nestedCommit)
+            expect(yield* Effect.promise(() => Bun.file(tracked).text())).toBe("clean")
+
+            const bin = path.join(directory, "test-bin")
+            const realGit = Bun.which("git")!
+            const previousPath = process.env.PATH
+            yield* fs.writeWithDirs(
+              path.join(bin, "git"),
+              `#!/bin/sh\nif [ "$1 $2" = "submodule status" ]; then\n  echo 'fixture: submodule status failed' >&2\n  exit 1\nfi\nexec ${JSON.stringify(realGit)} "$@"\n`,
+            )
+            yield* Effect.promise(() => chmod(path.join(bin, "git"), 0o755))
+            process.env.PATH = `${bin}:${previousPath ?? ""}`
+            try {
+              const result = yield* Effect.result(svc.reset({ directory: info.directory }))
+              expect(result).toMatchObject({
+                _tag: "Failure",
+                failure: { _tag: "WorktreeResetFailedError", message: "fixture: submodule status failed\n" },
+              })
+            } finally {
+              if (previousPath === undefined) delete process.env.PATH
+              else process.env.PATH = previousPath
+            }
+          }),
+        )
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = previous
+      }
+    }),
+    { git: true },
+  )
 
   describe("makeWorktreeInfo", () => {
     it.instance(

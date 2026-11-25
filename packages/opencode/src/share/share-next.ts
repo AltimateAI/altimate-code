@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Bus } from "@/bus"
 import { Account } from "@/account"
 import { Config } from "@/config/config"
@@ -75,7 +78,9 @@ export namespace ShareNext {
   const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
 
   export async function init() {
-    if (disabled) return
+    // altimate_change start — offline mode does not sync shared sessions
+    if (Offline.enabled() || disabled) return
+    // altimate_change end
     Bus.subscribe(Session.Event.Updated, async (evt) => {
       await sync(evt.properties.info.id, [
         {
@@ -204,7 +209,9 @@ export namespace ShareNext {
 
   const queue = new Map<string, { timeout: NodeJS.Timeout; data: Map<string, Data> }>()
   async function sync(sessionID: SessionID, data: Data[]) {
-    if (disabled) return
+    // altimate_change start — offline mode does not sync shared sessions
+    if (Offline.enabled() || disabled) return
+    // altimate_change end
     const existing = queue.get(sessionID)
     if (existing) {
       for (const item of data) {

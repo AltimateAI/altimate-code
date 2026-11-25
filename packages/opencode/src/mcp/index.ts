@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -420,6 +423,15 @@ export const layer = Layer.effect(
       key: string,
       mcp: ConfigMCPV1.Info & { type: "remote" },
     ) {
+      // altimate_change start — offline mode refuses remote MCP servers
+      if (Offline.enabled() && !Offline.isLocalURL(mcp.url)) {
+        return {
+          client: undefined as MCPClient | undefined,
+          status: { status: "failed" as const, error: "Offline mode allows only stdio MCP servers or ones on this machine (localhost, 127.0.0.1, [::1] or 0.0.0.0)." },
+          transport: undefined as TransportLabel | undefined,
+        }
+      }
+      // altimate_change end
       const url = remoteURL(mcp.url)
       if (!url) {
         return {
@@ -1375,6 +1387,7 @@ export const layer = Layer.effect(
     })
 
     const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
+      if (Offline.enabled()) throw new Error("Authenticate MCP servers while online.")
       const lifecycle = yield* InstanceState.get(state)
       // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)

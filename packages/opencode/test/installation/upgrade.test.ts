@@ -54,6 +54,27 @@ describe("VERSION normalization", () => {
 // 2. Upgrade skip logic — version comparison
 // ---------------------------------------------------------------------------
 describe("upgrade version comparison", () => {
+  test("offline version lookup performs no HTTP requests", async () => {
+    const original = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    const seen: string[] = []
+    const layer = Installation.layer.pipe(
+      Layer.provide(mockHttpClient((request) => {
+        seen.push(request.url)
+        return Response.json({ version: "0.4.1" })
+      })),
+      Layer.provide(AppProcess.defaultLayer),
+    )
+    try {
+      const result = await Effect.runPromise(Installation.use.latest("npm").pipe(Effect.provide(layer)))
+      expect(seen).toEqual([])
+      expect(result).toBe(Installation.VERSION)
+    } finally {
+      if (original === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = original
+    }
+  })
+
   test("same version from GitHub API matches (no false upgrade)", async () => {
     const latest = await latestWith({ tag_name: "v0.4.1" }, "unknown")
     // If VERSION were "0.4.1" (normalized), they'd match → upgrade skipped

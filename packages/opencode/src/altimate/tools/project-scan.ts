@@ -3,6 +3,8 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
+// altimate_change — offline mode
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
 import { Telemetry } from "@/telemetry"
 // altimate_change — onboarding funnel: environment_scan_completed
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
@@ -484,6 +486,8 @@ export async function detectDataTools(skip: boolean): Promise<DataToolInfo[]> {
   // non-zero" (binary present but the version check failed).
   const results = await Promise.all(
     DATA_TOOL_NAMES.map(async (tool): Promise<DataToolInfo> => {
+      // altimate_change — `dbt --version` asks PyPI for the latest release, so offline mode only checks PATH
+      if (tool === "dbt" && offlineModeEnabled()) return { name: tool, installed: Bun.which(tool, { PATH: process.env.PATH ?? "" }) !== null }
       const result = safeSpawnSync([tool, "--version"], { timeout: 5000 })
       if (result && result.exitCode === 0) {
         return {

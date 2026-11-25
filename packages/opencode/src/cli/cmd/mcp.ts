@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { cmd } from "./cmd"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { effectCmd } from "../effect-cmd"
@@ -137,8 +140,16 @@ export const McpServeCommand = cmd({
     .option("workspace-tools", { type: "boolean", default: false, describe: "Expose linked workspace context, skills and read tools" })
     .option("all-tools", { type: "boolean", default: false, describe: "Expose every tool on the allow-list, not just the default set" }),
   async handler(args) {
+    // The CLI middleware skips `mcp serve`, so offline mode starts here.
+    if (Offline.enabled() || (await Offline.optedIn(process.cwd()))) Offline.start()
+    if (Offline.enabled() && args.workspaceTools) process.stderr.write("Workspace tools are unavailable in offline mode.\n")
     const { serveStdio } = await import("../../altimate/mcp-server/server")
-    await serveStdio({ connections: args.connections, allowWrite: args.allowWrite, allTools: args.allTools, workspaceTools: args.workspaceTools })
+    await serveStdio({
+      connections: args.connections,
+      allowWrite: args.allowWrite,
+      allTools: args.allTools,
+      workspaceTools: !Offline.enabled() && args.workspaceTools,
+    })
   },
 })
 // altimate_change end
@@ -506,6 +517,9 @@ async function resolveConfigPath(baseDir: string, global = false) {
 }
 
 async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configPath: string) {
+  // altimate_change start — offline mode refuses remote MCP servers
+  Offline.assertLocalMcp(mcpConfig)
+  // altimate_change end
   let text = "{}"
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
@@ -877,6 +891,9 @@ export const McpDebugCommand = effectCmd({
         return
       }
 
+      // altimate_change start — offline mode refuses remote MCP servers
+      Offline.assertLocalMcp(serverConfig)
+      // altimate_change end
       prompts.log.info(`Server: ${serverName}`)
       prompts.log.info(`URL: ${serverConfig.url}`)
 

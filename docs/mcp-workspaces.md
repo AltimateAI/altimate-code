@@ -20,6 +20,8 @@ Workspace context adds bounded data to a client's prompt; skills load on demand.
 
 Verification covers unit contracts, a real stdio protocol fixture and existing SQLite MCP behavior. A non-empty cloud memory round trip and real workspace-engine SQL and knowledge calls are not covered by tests yet.
 
+In [offline mode](docs/configure/config.md#offline-air-gapped-mode), Altimate Code sessions use the local workspace skill snapshot. Refresh it with `altimate-code workspace refresh` while online. The external workspace gateway requires an online run.
+
 ## Automatic-client setup and stable gateway
 
 The opt-in workspace catalog is always `workspace_context`, `workspace_skill` and `workspace_execute`, including when initially unlinked. `workspace_context` reports `needs_auth`, `needs_workspace`, `disabled` or `unavailable` without returning raw credential errors. A ready context includes the workspace receipt. Context loads coalesce and cache for 30 seconds; identity is verified on every use. `refresh: true` bypasses that cache.

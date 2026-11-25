@@ -101,6 +101,8 @@ async function open(p) {
     temp_directory: process.env.TMPDIR + "/duckdb-" + process.pid,
     ...(p.accessMode ? { access_mode: p.accessMode } : {}),
     ...(p.extensionDirectory ? { extension_directory: p.extensionDirectory } : {}),
+    // altimate_change — offline mode never downloads extensions; installed ones still load
+    ...(p.offline ? { autoinstall_known_extensions: "false" } : {}),
   };
   let instance;
   await new Promise((resolve, reject) => {

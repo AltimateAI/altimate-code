@@ -65,6 +65,17 @@ describe("Discovery.pull", () => {
     }),
   )
 
+  // altimate_change start — with offline mode off, the skill cache layout is unchanged
+  it.live("caches each skill directly under cache/skills/<name>", () =>
+    Effect.gen(function* () {
+      const discovery = yield* Discovery.Service
+      const dirs = yield* discovery.pull(CLOUDFLARE_SKILLS_URL)
+      expect(dirs.length).toBeGreaterThan(0)
+      for (const dir of dirs) expect(path.dirname(dir)).toBe(cacheDir)
+    }),
+  )
+  // altimate_change end
+
   it.live("url without trailing slash works", () =>
     Effect.gen(function* () {
       const fsys = yield* FSUtil.Service

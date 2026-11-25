@@ -157,6 +157,33 @@ describe("Vcs", () => {
 })
 
 describe("Vcs diff", () => {
+  worktreeIt.instance(
+    "offline VCS shows local changes and refuses remote Git operations",
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      yield* write(path.join(directory, "data.txt"), "before\n")
+      yield* git(directory, ["add", "."])
+      yield* git(directory, ["commit", "-m", "test offline fixture"])
+      yield* write(path.join(directory, "data.txt"), "after\n")
+      const prior = process.env.ALTIMATE_OFFLINE
+      process.env.ALTIMATE_OFFLINE = "1"
+      try {
+        const vcs = yield* Vcs.Service
+        expect(yield* vcs.status()).not.toEqual([])
+        expect(yield* vcs.diff("git")).not.toEqual([])
+        const result = yield* Git.Service.use((git) => git.run(
+          ["-c", "core.quotepath=false", "fetch", "https://unreachable.invalid/repo"],
+          { cwd: directory },
+        ))
+        expect(result.stderr.toString()).toContain("Git remote operations require an online run.")
+      } finally {
+        if (prior === undefined) delete process.env.ALTIMATE_OFFLINE
+        else process.env.ALTIMATE_OFFLINE = prior
+      }
+    }),
+    { git: true },
+  )
+
   afterEach(async () => {
     await disposeAllInstances()
   })

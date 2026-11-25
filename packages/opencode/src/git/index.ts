@@ -1,3 +1,7 @@
+// altimate_change start — offline mode refuses Git commands that use the network
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+import { GIT_OFFLINE_REFUSAL, gitCommandUsesNetwork } from "@opencode-ai/core/git"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
 import { Effect, Layer, Context, Stream } from "effect"
@@ -109,6 +113,9 @@ export const layer = Layer.effect(
 
     const run = Effect.fn("Git.run")(
       function* (args: string[], opts: Options) {
+        // altimate_change start — offline mode refuses Git commands that use the network
+        if (offlineModeEnabled() && gitCommandUsesNetwork(args)) return fail(new Error(GIT_OFFLINE_REFUSAL))
+        // altimate_change end
         const result = yield* appProcess.run(
           ChildProcess.make("git", [...cfg, ...args], {
             cwd: opts.cwd,

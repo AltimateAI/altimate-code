@@ -65,6 +65,11 @@ export const Info = Schema.Struct({
   autoshare: Schema.optional(Schema.Boolean).annotate({
     description: "@deprecated Use 'share' field instead. Share newly created sessions automatically",
   }),
+  // altimate_change start — offline mode
+  offline: Schema.optional(Schema.Boolean).annotate({
+    description: "Use the configured model endpoint and cached local resources without other network access",
+  }),
+  // altimate_change end
   autoupdate: Schema.optional(Schema.Union([Schema.Boolean, Schema.Literal("notify")])).annotate({
     description:
       "Automatically update to the latest version. Set to true to auto-update, false to disable, or 'notify' to show update notifications",

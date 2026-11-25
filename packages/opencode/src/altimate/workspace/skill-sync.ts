@@ -1,4 +1,5 @@
 // altimate_change - new file
+import { Offline } from "@/config/offline"
 //
 // Mirror a bound workspace's custom skill bundles onto disk, where the existing
 // skill discovery in ``@/skill`` finds them with no other change.
@@ -1240,6 +1241,8 @@ class SupersededRunError extends Error {
  * failure path leaves whatever is already on disk in place, except the
  * deliberate purge described below. */
 export async function syncSkills(directory: string): Promise<SyncResult> {
+  // altimate_change — offline mode keeps the snapshot on disk as it is
+  if (Offline.enabled()) return { changed: false, skipped: [], error: "Run workspace refresh while online." }
   const canon = path.resolve(directory)
   // Joined BEFORE the flag is read, so the opt-out purge is serialised against
   // a sync too. Both paths write the same tree; with the purge outside this

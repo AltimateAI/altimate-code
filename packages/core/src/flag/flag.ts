@@ -20,6 +20,11 @@ export function env(key: string): string | undefined {
   return documented !== undefined && documented !== "" ? documented : process.env[key]
 }
 
+export function offlineModeEnabled() {
+  const value = process.env.ALTIMATE_OFFLINE?.trim().toLowerCase()
+  return killSwitchSet(value) && value !== "off" && value !== "no"
+}
+
 export function truthy(key: string) {
   const value = env(key)?.toLowerCase()
   return value === "true" || value === "1"

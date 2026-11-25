@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import z from "zod"
 import path from "node:path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -85,6 +88,16 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
     }
 
     const packages = DRIVER_PACKAGES[driver].join(" ")
+    // altimate_change start — skip network work in offline mode
+    if (Offline.enabled()) {
+      const error = `Offline mode. Install the driver while online: npm install --prefix ${shellQuote(dir)} ${packages}`
+      return {
+        title: `${label} driver: offline`,
+        metadata: { success: false, driver, installed: false, alreadyPresent: false, dir, error },
+        output: error,
+      }
+    }
+    // altimate_change end
     const externalPattern = FSUtil.normalizePathPattern(path.join(dir, "*"))
     // The cross-process install lock is a sibling of the managed directory, not
     // a child of it — it lives outside so npm never treats it as stray package

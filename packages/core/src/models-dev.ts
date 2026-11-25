@@ -2,7 +2,9 @@ import path from "path"
 import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Global } from "./global"
-import { Flag } from "./flag/flag"
+// altimate_change start — offline mode
+import { Flag, offlineModeEnabled } from "./flag/flag"
+// altimate_change end
 import { Flock } from "./util/flock"
 import { Hash } from "./util/hash"
 import { FSUtil } from "./fs-util"
@@ -201,7 +203,9 @@ export const layer = Layer.effect(
       if (fromDisk) return fromDisk
       const snapshot = yield* loadSnapshot
       if (snapshot) return snapshot
-      if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
+      // altimate_change start — offline mode uses only the cached or bundled catalog
+      if (offlineModeEnabled() || Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
+      // altimate_change end
       // Flock is cross-process: concurrent opencode CLIs can race on this cache file.
       const text = yield* Effect.scoped(
         Effect.gen(function* () {
@@ -217,6 +221,9 @@ export const layer = Layer.effect(
     const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
 
     const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
+      // altimate_change start — skip forced catalog refresh in offline mode
+      if (offlineModeEnabled()) return
+      // altimate_change end
       if (!force && (yield* fresh())) return
       yield* Effect.scoped(
         Effect.gen(function* () {
@@ -234,7 +241,9 @@ export const layer = Layer.effect(
       )
     })
 
-    if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
+    // altimate_change start — skip background refresh in offline mode
+    if (!offlineModeEnabled() && !Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
+    // altimate_change end
       // Schedule.spaced runs the effect once, then waits between completions.
       yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore))
     }

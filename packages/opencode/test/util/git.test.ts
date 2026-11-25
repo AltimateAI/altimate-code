@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test"
 import { tmpdir } from "../fixture/fixture"
+import { gitCommandUsesNetwork } from "@opencode-ai/core/git"
 import { git } from "../../src/util/git"
 
 describe("git() utility", () => {
@@ -48,4 +49,45 @@ describe("git() utility", () => {
     expect(result.exitCode).not.toBe(0)
     expect(result.stdout.length).toBe(0)
   })
+
+  // altimate_change start — offline mode refuses remote Git commands and keeps local ones
+  test("offline refuses remote commands without spawning git and still runs local ones", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const previous = process.env.ALTIMATE_OFFLINE
+    process.env.ALTIMATE_OFFLINE = "1"
+    try {
+      const fetched = await git(["fetch", "origin"], { cwd: tmp.path })
+      expect(fetched.exitCode).toBe(1)
+      expect(fetched.stdout.length).toBe(0)
+      expect(fetched.stderr.toString()).toContain("Git remote operations require an online run.")
+      const local = await git(["rev-parse", "--is-inside-work-tree"], { cwd: tmp.path })
+      expect(local.text().trim()).toBe("true")
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_OFFLINE
+      else process.env.ALTIMATE_OFFLINE = previous
+    }
+  })
+
+  test("offline treats submodule clones, LFS transfers and remote archives as network commands", () => {
+    for (const args of [["submodule", "update", "--init"], ["submodule", "update", "--recursive", "--no-fetch"], ["submodule", "add", "url"], ["remote", "add", "-f", "o", "url"], ["remote", "prune", "origin"], ["submodule", "--quiet", "update"], ["submodule", "foreach", "git", "fetch"], ["remote", "-v", "update"], ["remote", "set-head", "origin", "--auto"], ["lfs", "fetch"], ["lfs", "pull"], ["archive", "--remote=origin", "HEAD"], ["-C", "x", "fetch"]])
+      expect(gitCommandUsesNetwork(args)).toBe(true)
+    for (const args of [["submodule", "foreach", "git", "status"], ["remote", "add", "o", "url"], ["lfs", "ls-files"], ["archive", "HEAD"], ["status"], ["remote", "show", "-n", "origin"]])
+      expect(gitCommandUsesNetwork(args)).toBe(false)
+  })
+
+  test("offline permits only literal local submodule foreach commands", () => {
+    for (const args of [
+      ["git", "remote", "update"],
+      ["git submodule update --init"],
+      ['git fet"ch"'],
+      ["git lfs fetch"],
+      ["git reset --hard && git fetch"],
+    ])
+      expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "--quiet", ...args])).toBe(true)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "git", "reset", "--hard"])).toBe(false)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--recursive", "git clean -fdx"])).toBe(false)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--quiet", "git status"])).toBe(false)
+    expect(gitCommandUsesNetwork(["submodule", "foreach", "--quiet", "--recursive", "git status"])).toBe(false)
+  })
+  // altimate_change end
 })

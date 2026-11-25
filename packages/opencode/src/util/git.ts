@@ -1,4 +1,8 @@
 import { Process } from "./process"
+// altimate_change start — offline mode refuses Git commands that use the network
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+import { GIT_OFFLINE_REFUSAL, gitCommandUsesNetwork } from "@opencode-ai/core/git"
+// altimate_change end
 
 export interface GitResult {
   exitCode: number
@@ -14,6 +18,10 @@ export interface GitResult {
  * issues in embedded/client environments.
  */
 export async function git(args: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<GitResult> {
+  // altimate_change start — offline mode refuses Git commands that use the network
+  if (offlineModeEnabled() && gitCommandUsesNetwork(args))
+    return { exitCode: 1, text: () => "", stdout: Buffer.alloc(0), stderr: Buffer.from(GIT_OFFLINE_REFUSAL) }
+  // altimate_change end
   return Process.run(["git", ...args], {
     cwd: opts.cwd,
     env: opts.env,

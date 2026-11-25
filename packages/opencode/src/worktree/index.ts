@@ -1,3 +1,6 @@
+// altimate_change start — offline mode resets from local Git objects
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { path } from "@opencode-ai/core/effect/layer-node-platform"
 import { Global } from "@opencode-ai/core/global"
@@ -173,7 +176,13 @@ export const layer: Layer.Layer<
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
         const result = yield* appProcess.run(
-          ChildProcess.make("git", args, { cwd: opts?.cwd, extendEnv: true, stdin: "ignore" }),
+          // altimate_change — offline mode keeps Git LFS from downloading objects during checkout and reset
+          ChildProcess.make("git", args, {
+            cwd: opts?.cwd,
+            ...(offlineModeEnabled() ? { env: { GIT_LFS_SKIP_SMUDGE: "1" } } : {}),
+            extendEnv: true,
+            stdin: "ignore",
+          }),
         )
         return {
           code: result.exitCode,
@@ -573,7 +582,8 @@ export const layer: Layer.Layer<
       }
 
       const sep = base.ref.indexOf("/")
-      if (base.ref !== base.name && sep > 0) {
+      // altimate_change — offline mode resets to the locally cached base ref
+      if (!offlineModeEnabled() && base.ref !== base.name && sep > 0) {
         const remote = base.ref.slice(0, sep)
         const branch = base.ref.slice(sep + 1)
         yield* gitExpect(
@@ -596,11 +606,29 @@ export const layer: Layer.Layer<
         })
       }
 
-      yield* gitExpect(
-        ["submodule", "update", "--init", "--recursive", "--force"],
-        { cwd: worktreePath },
-        (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
-      )
+      // altimate_change start — offline mode moves only checked-out top-level submodules, from objects already on
+      // disk (`submodule update` would clone the others); nested ones stay at their commits. `submodule status`
+      // prints "<state><sha> <path>[ (<describe>)]" and marks a not-checked-out submodule with "-".
+      const checkedOut = offlineModeEnabled()
+        ? (yield* gitExpect(
+            ["submodule", "status"],
+            { cwd: worktreePath },
+            (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to read submodules" }),
+          )).text
+            .split("\n")
+            .filter((line) => line.length > 1 && !line.startsWith("-"))
+            .map((line) => /^.[0-9a-f]+ (.+?)(?: \([^)]*\))?$/.exec(line)?.[1])
+            .filter((entry): entry is string => Boolean(entry))
+        : undefined
+      if (!checkedOut || checkedOut.length > 0)
+        yield* gitExpect(
+          checkedOut
+            ? ["submodule", "update", "--no-fetch", "--force", "--", ...checkedOut]
+            : ["submodule", "update", "--init", "--recursive", "--force"],
+          { cwd: worktreePath },
+          (r) => new ResetFailedError({ message: r.stderr || r.text || "Failed to update submodules" }),
+        )
+      // altimate_change end
 
       yield* gitExpect(
         ["submodule", "foreach", "--recursive", "git", "reset", "--hard"],

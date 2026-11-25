@@ -1022,3 +1022,23 @@ describe("safeSpawnSync", () => {
     expect(result).not.toBeNull()
   })
 })
+
+// altimate_change start — offline mode does not run `dbt --version`, which asks PyPI for the latest release
+test.skipIf(process.platform === "win32")("offline data tool detection finds dbt on PATH without running it", async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "offline-scan-"))
+  const previous = { path: process.env.PATH, offline: process.env.ALTIMATE_OFFLINE }
+  try {
+    const ran = path.join(dir, "ran")
+    await fsp.writeFile(path.join(dir, "dbt"), `#!/bin/sh\ntouch "${ran}"\necho "dbt 1.9.3"\n`, { mode: 0o755 })
+    process.env.PATH = `${dir}${path.delimiter}${previous.path}`
+    process.env.ALTIMATE_OFFLINE = "1"
+    expect((await detectDataTools(false)).find((tool) => tool.name === "dbt")).toEqual({ name: "dbt", installed: true })
+    expect(await fsp.stat(ran).then(() => true, () => false)).toBe(false)
+  } finally {
+    process.env.PATH = previous.path
+    if (previous.offline === undefined) delete process.env.ALTIMATE_OFFLINE
+    else process.env.ALTIMATE_OFFLINE = previous.offline
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+// altimate_change end

@@ -1,4 +1,5 @@
 // altimate_change start — top-level `skill` command for managing skills and user tools
+import { Offline } from "@/config/offline"
 import { EOL } from "os"
 import path from "path"
 import fs from "fs/promises"
@@ -657,6 +658,9 @@ const SkillInstallCommand = cmd({
       }),
   async handler(args) {
     let source = (args.source as string).trim().replace(/\.git$/, "")
+    // Offline mode: a URL or owner/repo shorthand is fetched from GitHub. A local directory such as ./owner/repo is fine.
+    if (Offline.enabled() && (/^https?:\/\//.test(source) || /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(source)))
+      throw new Error("Install remote skills while online, or install a local skill directory.")
     const isGlobal = args.global as boolean
 
     if (!source) {

@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Global } from "../global"
 import { Log } from "../util/log"
 import path from "path"
@@ -126,7 +129,9 @@ export namespace ModelsDev {
       .then((m) => m.snapshot as Record<string, unknown>)
       .catch(() => undefined)
     if (snapshot) return snapshot
-    if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
+    // altimate_change start — use only the local model catalog in offline mode
+    if (Offline.enabled() || Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
+    // altimate_change end
     return Flock.withLock(`models-dev:${filepath}`, async () => {
       const cachedUnderLock: unknown = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
       if (isCatalog(cachedUnderLock)) return cachedUnderLock
@@ -164,6 +169,9 @@ export namespace ModelsDev {
   }
 
   export async function refresh(force = false) {
+    // altimate_change start — skip explicit model catalog refresh in offline mode
+    if (Offline.enabled()) return
+    // altimate_change end
     if (skip(force)) return ModelsDev.Data.reset()
     await Flock.withLock(`models-dev:${filepath}`, async () => {
       if (skip(force)) return ModelsDev.Data.reset()

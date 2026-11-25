@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import path from "path"
 import { Token } from "@/util/token"
 import { existsSync, readFileSync, statSync } from "node:fs"
@@ -475,6 +478,12 @@ export namespace SessionPrompt {
     // snapshot is actually there keeps the tick off the path that regressed —
     // a user who never used workspaces has no directory, so this costs one `stat` and
     // does not even load the sync module.
+    // altimate_change start — offline mode uses the cached workspace skill snapshot as it is, without syncing
+    if (Offline.enabled()) {
+      const dir = Instance.directory
+      if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) await refreshSkillRegistry(dir)
+    } else
+    // altimate_change end
     if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
       // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined

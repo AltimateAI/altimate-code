@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offlineModeEnabled } from "./flag/flag"
+// altimate_change end
 export * as Npm from "./npm"
 
 import path from "path"
@@ -126,6 +129,14 @@ export const layer = Layer.effect(
         return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
+      // altimate_change start — offline mode skips registry installs
+      if (offlineModeEnabled())
+        return yield* new InstallFailedError({
+          add: [pkg],
+          dir,
+          cause: new Error(`Install ${pkg} while online.`),
+        })
+      // altimate_change end
       const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
@@ -137,6 +148,9 @@ export const layer = Layer.effect(
     }, Effect.scoped)
 
     const install: Interface["install"] = Effect.fn("Npm.install")(function* (dir, input) {
+      // altimate_change start — offline mode skips registry installs
+      if (offlineModeEnabled()) return
+      // altimate_change end
       const canWrite = yield* afs.access(dir, { writable: true }).pipe(
         Effect.as(true),
         Effect.orElseSucceed(() => false),
@@ -225,6 +239,8 @@ export const layer = Layer.effect(
           return Option.some(path.join(binDir, bin.value))
         }
 
+        // altimate_change — a missing offline binary should leave the cache untouched
+        if (offlineModeEnabled()) return Option.none<string>()
         yield* fs.remove(path.join(dir, "package-lock.json")).pipe(Effect.orElseSucceed(() => {}))
 
         yield* add(pkg)

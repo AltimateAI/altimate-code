@@ -112,6 +112,8 @@ export async function connect(
   // altimate_change start — configurable open budget
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
+  // altimate_change — offline mode turns off automatic DuckDB extension installs (explicit INSTALL still downloads)
+  const offline = !["", "0", "false", "off", "no"].includes(process.env.ALTIMATE_OFFLINE?.trim().toLowerCase() ?? "")
   const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath, cwd } as const
   // altimate_change start — preserve caller DuckDB state while keeping scratch secrets isolated
   const duckdbHome = path.join(process.env.HOME || process.env.USERPROFILE || os.homedir(), ".duckdb")
@@ -209,7 +211,7 @@ export async function connect(
         const key =
           dbPath === ":memory:"
             ? undefined
-            : JSON.stringify([dbPath, accessMode ?? "READ_WRITE", config.sandbox_directory, cwd, extensionDirectory])
+            : JSON.stringify([dbPath, accessMode ?? "READ_WRITE", config.sandbox_directory, cwd, extensionDirectory, offline])
         let entry = key === undefined ? undefined : engines.get(key)
         while (entry?.closing) {
           await entry.closing
@@ -231,6 +233,7 @@ export async function connect(
                   extensionDirectory,
                   secretDirectory,
                   sandboxDirectory: config.sandbox_directory,
+                  offline,
                 },
                 // altimate_change end
                 openTimeoutMs,

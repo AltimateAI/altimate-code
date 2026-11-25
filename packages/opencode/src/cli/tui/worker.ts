@@ -4,6 +4,9 @@
 // rationale (this is the systemic fix for the log-flood class that regresses on every upstream merge).
 import "./worker-console-guard"
 // altimate_change end
+// altimate_change start — install inherited offline policy before the worker builds its runtime
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Server } from "@/server/server"
 import { InstanceRuntime } from "@/project/instance-runtime"
 import { Rpc } from "@/util/rpc"
@@ -42,6 +45,8 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // (NOT here: at module top level Config.get() throws and doInit() proceeds as enabled, which
 // silently bypassed a `telemetry.disabled` config opt-out for the whole first session).
 Telemetry.startLoopMonitor()
+// The worker inherits offline mode from its parent; install the fetch guard here too.
+if (Offline.enabled()) Offline.start()
 // altimate_change end
 // altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
 // this sync before listening (cli/cmd/serve.ts), but the TUI worker never did, so an

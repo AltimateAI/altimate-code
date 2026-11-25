@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { PlanExitTool } from "./plan"
 import { QuestionTool } from "./question"
 import { BashTool } from "./bash"
@@ -428,6 +431,8 @@ export namespace ToolRegistry {
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
     // built-in tool-definition effects against the AppRuntime layers (Truncate/Agent) before use.
+    // Offline sessions drop only the tools that contact remote services.
+    const offline = Offline.enabled()
     const builtins = [
       InvalidTool,
       ...(question ? [QuestionTool] : []),
@@ -438,11 +443,11 @@ export namespace ToolRegistry {
       EditTool,
       WriteTool,
       TaskTool,
-      WebFetchTool,
+      // These tools contact remote services; order unchanged with offline mode off.
+      ...(!offline ? [WebFetchTool] : []),
       TodoWriteTool,
       // TodoReadTool,
-      WebSearchTool,
-      CodeSearchTool,
+      ...(!offline ? [WebSearchTool, CodeSearchTool] : []),
       SkillTool,
       ApplyPatchTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
@@ -528,8 +533,8 @@ export namespace ToolRegistry {
       AltimateCoreParseDbtTool,
       ToolLookupTool,
       ProjectScanTool,
-      DatamateManagerTool,
-      FeedbackSubmitTool,
+      ...(!offline ? [DatamateManagerTool] : []),
+      ...(!offline ? [FeedbackSubmitTool] : []),
       SampleSetupTool,
       // altimate_change end
       // altimate_change start - register altimate persistent memory tools
@@ -539,7 +544,7 @@ export namespace ToolRegistry {
             // Workspace-only: `refresh` no-ops with workspaces disabled, so
             // shipping its description then costs a tool slot and
             // invites a wasted call that can only answer "not enabled".
-            ...(CoreFlag.ALTIMATE_DISABLE_WORKSPACE ? [] : [MemoryRefreshTool]),
+            ...(offline || CoreFlag.ALTIMATE_DISABLE_WORKSPACE ? [] : [MemoryRefreshTool]),
             MemoryWriteTool,
             MemoryDeleteTool,
             MemoryAuditTool,

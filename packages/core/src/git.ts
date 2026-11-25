@@ -7,6 +7,39 @@ import { AbsolutePath } from "./schema"
 import { FSUtil } from "./fs-util"
 import { AppProcess } from "./process"
 import { LayerNode } from "./effect/layer-node"
+// altimate_change start — offline mode refuses Git commands that use the network
+import { offlineModeEnabled } from "./flag/flag"
+
+const remoteCommands = new Set(["clone", "fetch", "pull", "push", "ls-remote", "send-pack", "fetch-pack", "submodule--helper"])
+
+export function gitCommandUsesNetwork(args: string[]) {
+  let index = 0
+  while (args[index]?.startsWith("-")) {
+    index += ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(args[index]) ? 2 : 1
+  }
+  const [command, ...after] = args.slice(index)
+  // The operation is the first word after the subcommand's own options (`submodule --quiet update`).
+  const at = after.findIndex((arg) => !arg.startsWith("-"))
+  const operation = at === -1 ? "" : after[at]
+  const rest = at === -1 ? after : [...after.slice(0, at), ...after.slice(at + 1)]
+  // Git runs foreach through a shell. Allow only these literal local commands.
+  if (command === "submodule" && operation === "foreach") {
+    const nested = rest.findIndex((arg) => arg === "--" || !arg.startsWith("-"))
+    return nested === -1 || !["git reset --hard", "git clean -fdx", "git status"].includes(rest.slice(nested).join(" "))
+  }
+  return (
+    remoteCommands.has(command) ||
+    (command === "remote" && (operation === "update" || (operation === "show" && !rest.includes("-n")))) ||
+    (command === "submodule" && ["update", "add"].includes(operation)) ||
+    (command === "remote" && operation === "add" && rest.some((arg) => arg === "-f" || arg === "--fetch")) ||
+    (command === "remote" && (operation === "prune" || (operation === "set-head" && rest.some((arg) => arg === "-a" || arg === "--auto")))) ||
+    (command === "lfs" && ["fetch", "pull", "push", "clone"].includes(operation)) ||
+    (command === "archive" && [operation, ...rest].some((arg) => arg?.startsWith("--remote")))
+  )
+}
+
+export const GIT_OFFLINE_REFUSAL = "Git remote operations require an online run."
+// altimate_change end
 
 export interface Repo {
   /**
@@ -416,6 +449,10 @@ function run(cwd: string, proc: AppProcess.Interface) {
 
 function execute(cwd: string, proc: AppProcess.Interface) {
   return (args: string[]) =>
+    // altimate_change start — offline mode refuses Git commands that use the network
+    offlineModeEnabled() && gitCommandUsesNetwork(args)
+      ? Effect.succeed({ exitCode: 1, text: "", stderr: GIT_OFFLINE_REFUSAL } satisfies Result)
+      : // altimate_change end
     proc
       .run(
         ChildProcess.make("git", args, {

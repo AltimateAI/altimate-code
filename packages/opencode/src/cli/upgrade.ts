@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import { Config } from "@/config/config"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -96,6 +99,9 @@ export function isAutoupdateDisabledByEnv() {
 // altimate_change end
 
 export async function upgrade() {
+  // altimate_change start — skip automatic update checks in offline mode
+  if (Offline.enabled()) return
+  // altimate_change end
   // altimate_change start — skip the upgrade check for local / branch / dev builds.
   // These are never published to npm or GitHub releases, so the version lookup
   // 404s and spams the TUI bottom bar (e.g. a build off branch

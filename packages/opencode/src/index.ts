@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+// altimate_change end
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 // altimate_change start - stdin tool arguments
@@ -167,6 +170,28 @@ let cli = yargs(args)
     }
     // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
     if (opts._[0] === "mcp" && opts._[1] === "serve") return
+    // altimate_change end
+
+    // altimate_change start — offline mode: install the fetch guard and refuse commands that need a remote service
+    const command = String(opts._[0] ?? "")
+    // `attach --dir` and `run --attach --dir` name a directory on the server, so they read the invoking project's setting.
+    const offlineTarget = command === "attach" || (command === "run" && opts.attach) ? undefined : (opts.dir ?? opts.cwd ?? opts.directory)
+    const offlineDir = typeof offlineTarget === "string" ? path.resolve(offlineTarget) : resolveThreadDirectory(opts.project as string | undefined)
+    if (Offline.enabled() || (await Offline.optedIn(offlineDir))) {
+      Offline.start()
+      const sub = String(opts._[1] ?? "")
+      const attach = command === "attach" ? opts.url : command === "run" ? opts.attach : undefined
+      if (
+        ["github", "gitlab", "pr", "link", "workspace-client", "web", "integrations", "upgrade"].includes(command) ||
+        (command === "review" && opts.post === true) ||
+        (command === "learn" && sub === "import-reviews") ||
+        (command === "console" && sub === "open") ||
+        (["providers", "auth", "console"].includes(command) && sub === "login") ||
+        (command === "mcp" && sub === "auth") ||
+        (typeof attach === "string" && attach !== "" && !Offline.isLocalURL(attach))
+      )
+        throw new Error("This command requires network access. Run it while online.")
+    }
     // altimate_change end
 
     Heap.start()

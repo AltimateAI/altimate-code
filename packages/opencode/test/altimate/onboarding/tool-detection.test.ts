@@ -204,3 +204,46 @@ Plugins:
     expect(third.hasDbtDuckdb).toBe(false)
   })
 })
+
+// altimate_change start — offline mode does not run `dbt --version`, which asks PyPI for the latest release
+test.skipIf(process.platform === "win32")("offline detection finds dbt without running it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "offline-dbt-detect-"))
+  const previous = { offline: process.env.ALTIMATE_OFFLINE, dbt: process.env.ALTIMATE_DBT_PATH }
+  const previousPath = process.env.PATH
+  try {
+    const ran = path.join(dir, "ran")
+    // The stub sits in its own bin directory so the adapter lookup stays inside this fixture.
+    fs.mkdirSync(path.join(dir, "bin"))
+    fs.writeFileSync(path.join(dir, "bin", "dbt"), `#!/bin/sh\ntouch "${ran}"\n`, { mode: 0o755 })
+    process.env.ALTIMATE_DBT_PATH = path.join(dir, "bin", "dbt")
+    process.env.ALTIMATE_OFFLINE = "1"
+    _resetDbtRuntimeCacheForTests()
+    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: false })
+    expect(fs.existsSync(ran)).toBe(false)
+    // dbt linked from a virtual environment (as pipx and uv install it) whose site-packages has dbt-duckdb.
+    const venvBin = path.join(dir, "venv", "bin")
+    fs.mkdirSync(venvBin, { recursive: true })
+    fs.mkdirSync(path.join(dir, "venv", "lib", "python3.12", "site-packages", "dbt", "adapters", "duckdb"), { recursive: true })
+    fs.renameSync(path.join(dir, "bin", "dbt"), path.join(venvBin, "dbt"))
+    fs.symlinkSync(path.join(venvBin, "dbt"), path.join(dir, "bin", "dbt"))
+    _resetDbtRuntimeCacheForTests()
+    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true })
+    expect(fs.existsSync(ran)).toBe(false)
+
+    // Only the fixture binary is on PATH, so the resolver cannot launch external `which`.
+    delete process.env.ALTIMATE_DBT_PATH
+    process.env.PATH = path.join(dir, "bin")
+    expect(await detectDbtRuntime({ force: true })).toEqual({ hasDbt: true, hasDbtDuckdb: true })
+    expect(fs.existsSync(ran)).toBe(false)
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    for (const [key, value] of [["ALTIMATE_OFFLINE", previous.offline], ["ALTIMATE_DBT_PATH", previous.dbt]] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    _resetDbtRuntimeCacheForTests()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+// altimate_change end

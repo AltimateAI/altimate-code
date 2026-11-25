@@ -1,3 +1,7 @@
+// altimate_change start — offline mode
+import { Offline } from "@/config/offline"
+import { assertLocalConnection } from "./offline"
+// altimate_change end
 /**
  * ConnectionRegistry — manages database connections.
  *
@@ -446,6 +450,9 @@ async function createConnector(
 
   // Resolve credentials from keychain
   resolvedConfig = await resolveConfig(name, resolvedConfig)
+  // altimate_change start — validate the resolved target before any tunnel rewrites it
+  if (Offline.enabled()) assertLocalConnection(resolvedConfig)
+  // altimate_change end
 
   // altimate_change start — validate password is a string for drivers that require it
   // Prevents cryptic SASL/SCRAM errors from database drivers
@@ -675,14 +682,14 @@ export async function get(name: string): Promise<Connector> {
   if (cached) {
     // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
     SignInNotice.rememberOrigin(accountOf(configs.get(name)))
-    // altimate_change end
     return cached
+    // altimate_change end
   }
 
   // If a connector is already being created, await the same Promise
   // altimate_change start — the slot holds the attempt
-  const inflight = pending.get(name)?.promise
-  if (inflight) return inflight
+  const inflight = pending.get(name)
+  if (inflight?.promise) return inflight.promise
   // altimate_change end
 
   const config = configs.get(name)

@@ -1,3 +1,6 @@
+// altimate_change start — offline mode
+import { offlineModeEnabled } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start — debug report: gathers the facts `report.ts` analyses
 /**
  * Every probe here is read-only and independently guarded: a failing probe is
@@ -407,9 +410,13 @@ export function readLogTail(file: string, maxBytes = LOG_READ_BYTES): string | u
 }
 
 export async function collect(opts: { network: boolean }): Promise<Facts> {
+  // altimate_change — offline mode runs no network probes and does not start telemetry
+  if (offlineModeEnabled()) opts = { ...opts, network: false }
   const ctx = redactContext()
   const mcpServers = mcpFacts()
-  const [account, connections, telemetry] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network)])
+  const [account, connections, checked] = await Promise.all([accountFacts(), connectionFacts(), telemetryFacts(opts.network)])
+  // altimate_change — offline mode reports its own reason rather than --no-network
+  const telemetry: Facts["telemetry"] = offlineModeEnabled() ? { enabled: false, checked: false, reason: "offline mode" } : checked
   const proxy = PROXY_VARS.some((k) => k.toLowerCase() !== "no_proxy" && process.env[k])
   const network = opts.network
     ? await Promise.all(networkTargets(connections, account, telemetry).map((t) => probe(t.target, t.host, { proxy })))
