@@ -11,6 +11,9 @@ export const Tokens = Schema.Struct({
   refreshToken: Schema.mutableKey(Schema.optional(Schema.String)),
   expiresAt: Schema.mutableKey(Schema.optional(Schema.Number)),
   scope: Schema.mutableKey(Schema.optional(Schema.String)),
+  // altimate_change start — MCP SDK >= 1.32 binds stored credentials to the authorization server that issued them
+  issuer: Schema.mutableKey(Schema.optional(Schema.String)),
+  // altimate_change end
 })
 export type Tokens = Schema.Schema.Type<typeof Tokens>
 
@@ -19,6 +22,9 @@ export const ClientInfo = Schema.Struct({
   clientSecret: Schema.mutableKey(Schema.optional(Schema.String)),
   clientIdIssuedAt: Schema.mutableKey(Schema.optional(Schema.Number)),
   clientSecretExpiresAt: Schema.mutableKey(Schema.optional(Schema.Number)),
+  // altimate_change start — see Tokens.issuer
+  issuer: Schema.mutableKey(Schema.optional(Schema.String)),
+  // altimate_change end
 })
 export type ClientInfo = Schema.Schema.Type<typeof ClientInfo>
 
