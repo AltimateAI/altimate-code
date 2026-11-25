@@ -110,6 +110,12 @@ export function emitReviewRun(input: {
       // Optional in the schema and explicitly invalid as `false`, so normalise rather than copy.
       tier_forced: env.tierForced === true,
       degraded: env.summary.degraded,
+      undecided: env.findings.filter((f) => f.degraded).length,
+      unverified_models: env.scope?.unverified?.length ?? 0,
+      ai_state: env.ai?.state,
+      ai_duration_ms: env.ai?.durationMs,
+      base_source: env.scope?.baseSource,
+      out_of_scope_files: env.scope?.outOfScopeFiles ?? 0,
       stale_manifest: env.staleManifest === true,
       critical: env.summary.critical,
       warning: env.summary.warning,

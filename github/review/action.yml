@@ -9,8 +9,12 @@ inputs:
     description: "comment (never blocks) | gate (blocks the merge on REQUEST_CHANGES)"
     required: false
     default: "comment"
+  project_dir:
+    description: "Directory of the dbt project (the one holding dbt_project.yml), relative to the repository root. Only changes inside it are reviewed — set it in a monorepo. `manifest_path` is resolved relative to it."
+    required: false
+    default: "."
   manifest_path:
-    description: "Path to the compiled dbt manifest.json. Run `dbt compile` before this step for the full (non-degraded) verdict."
+    description: "Path to the compiled dbt manifest.json, relative to `project_dir`. Run `dbt compile` before this step for the full (non-degraded) verdict; `dbt docs generate` (catalog.json) and a base compile into `target-base/` enable column-lineage breakage and equivalence proofs."
     required: false
     default: "target/manifest.json"
   severity_threshold:
@@ -170,6 +174,7 @@ runs:
       # from `${{ }}` would be a shell-injection vector. Build an arg array instead.
       env:
         IN_MODE: ${{ inputs.mode }}
+        IN_PROJECT_DIR: ${{ inputs.project_dir }}
         IN_MANIFEST: ${{ inputs.manifest_path }}
         IN_SEVERITY: ${{ inputs.severity_threshold }}
         IN_BASE: ${{ inputs.base }}
@@ -181,6 +186,7 @@ runs:
         ALTIMATE_REVIEW_SIGNING_KEY: ${{ inputs.signing_key }}
       run: |
         args=(--mode "$IN_MODE" --manifest "$IN_MANIFEST" --severity "$IN_SEVERITY")
+        [[ -n "$IN_PROJECT_DIR" && "$IN_PROJECT_DIR" != "." ]] && args+=(--cwd "$IN_PROJECT_DIR")
         [[ -n "$IN_BASE" ]] && args+=(--base "$IN_BASE")
         [[ -n "$IN_HEAD" ]] && args+=(--head "$IN_HEAD")
         [[ "$IN_POST" == "true" ]] && args+=(--post)
