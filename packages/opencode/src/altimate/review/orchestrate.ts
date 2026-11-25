@@ -14,7 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type SelectItemColumn, finalOutputs, normalizeSelectLine } from "./rule-catalog"
+import { type SelectItem, type SelectItemColumn, finalOutputs, normalizeSelectLine, selectItems } from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -1448,17 +1448,32 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }
     }
   }
-  // Per file, the normalised removed lines: an added line found here is a pure
-  // reindent (or comment/comma-only edit) of a base line and exposes nothing new.
-  const removedLinesByFile = new Map<string, Set<string>>()
+  // An added line is a pure reindent (or comment/comma-only edit) only when it
+  // matches a removed line AND every select item it belongs to in the head is the
+  // same item, in the same query scope (CTE, nested query or final select), in the
+  // base. Matching a removed line elsewhere is not enough: `email,` moved from a
+  // CTE into the final select, or `ssn` left behind when `sha2(\n ssn\n) as x`
+  // is unwrapped, exposes something new.
+  const reindentByFile = new Map<string, { removed: Set<string>; head: SelectItem[]; headLines: string[]; base: Set<string> }>()
+  const itemKey = (i: SelectItem) => `${i.scope}#${i.branch}\u0000${i.text.toLowerCase()}`
   const isReindented = (file: string, line: string) => {
-    let removed = removedLinesByFile.get(file)
-    if (!removed) {
-      removed = new Set(splitDiff(ctxByPath.get(file)?.file.diff).removed.map(normalizeSelectLine).filter(Boolean))
-      removedLinesByFile.set(file, removed)
+    const ctx = ctxByPath.get(file)
+    if (!ctx?.newSql || !ctx.oldSql) return false
+    let r = reindentByFile.get(file)
+    if (!r) {
+      r = {
+        removed: new Set(splitDiff(ctx.file.diff).removed.map(normalizeSelectLine).filter(Boolean)),
+        head: selectItems(ctx.newSql),
+        headLines: ctx.newSql.split("\n").map(normalizeSelectLine),
+        base: new Set(selectItems(ctx.oldSql).map(itemKey)),
+      }
+      reindentByFile.set(file, r)
     }
     const normalized = normalizeSelectLine(line)
-    return !!normalized && removed.has(normalized)
+    if (!normalized || !r.removed.has(normalized)) return false
+    const lineNos = r.headLines.flatMap((l, i) => (l === normalized ? [i + 1] : []))
+    const items = r.head.filter((i) => lineNos.some((n) => i.startLine <= n && n <= i.endLine))
+    return items.length > 0 && items.every((i) => r.base.has(itemKey(i)))
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool

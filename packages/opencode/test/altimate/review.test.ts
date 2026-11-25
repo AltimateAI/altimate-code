@@ -2402,6 +2402,83 @@ describe("orchestrate", () => {
     expect(reindented.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
   })
 
+  test("a PII line moved from a CTE into the final select is not a reindent", async () => {
+    // `    email,` leaves the CTE and the same text lands in the final select: the
+    // model's output now carries `email`, though the line matches a removed one.
+    const base = [
+      "with c as (",
+      "  select",
+      "    customer_id,",
+      "    email,",
+      "    region",
+      "  from customers",
+      ")",
+      "select",
+      "    customer_id,",
+      "    region",
+      "from c",
+    ].join("\n")
+    const head = [
+      "with c as (",
+      "  select",
+      "    customer_id,",
+      "    region",
+      "  from customers",
+      ")",
+      "select",
+      "    customer_id,",
+      "    email,",
+      "    region",
+      "from c",
+    ].join("\n")
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-    email,\n+    email,\n" }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner([]),
+        getContent: content(head, base),
+      })
+      const intoMart = env.findings.filter((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+      expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["email"])
+    }
+  })
+
+  test("a column left on its own line when a multi-line mask is unwrapped is not a reindent", async () => {
+    // `sha2(\n    ssn\n  ) as contact` → `ssn\n  as contact`: the `ssn` line matches
+    // the removed hash-input line, but the final item went from masked to raw.
+    const base = "select customer_id,\n  sha2(\n    ssn\n  ) as contact\nfrom customers"
+    const head = "select customer_id,\n    ssn\n  as contact\nfrom customers"
+    const env = await runReview({
+      changedFiles: [
+        {
+          path: "models/marts/m.sql",
+          status: "modified",
+          diff: "-  sha2(\n-    ssn\n-  ) as contact\n+    ssn\n+  as contact\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner([]),
+      getContent: content(head, base),
+    })
+    const intoMart = env.findings.filter((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+    expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["ssn"])
+    expect(intoMart[0].severity).toBe("critical")
+    // Control: the same final-select item, only reindented, stays quiet.
+    const same = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-    ssn\n+      ssn\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner([]),
+      getContent: content(base.replace("    ssn", "      ssn"), base),
+    })
+    expect(same.findings.filter(isTwin)).toEqual([])
+  })
+
   test("a CTE alias does not count as a base exposure of the final output", async () => {
     // Base CTE `ssn as contact`, base final `c.email as contact`: the base's
     // output `contact` carried `email`, never raw `ssn`.
