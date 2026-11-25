@@ -59,7 +59,7 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       "",
     )
   }
-  lines.push(...coverageNotes(env))
+  lines.push(...coverageNotes(env, budget(maxChars, NOTES_SHARE)))
 
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
   // them, so a customer can see why the review ran at this tier. Also surfaces
@@ -73,29 +73,27 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     // Pick an inline-code-span fence longer than any backtick run inside `r`
     // so a path like `packages/…/foo`bar`.sql` cannot terminate the span
     // (cubic-review P3).
-    const shown = env.tierReasons
-      .slice(0, RENDER_CAP)
-      .map((r) => {
-        const runs = r.match(/`+/g)
-        const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
-        const fence = "`".repeat(maxRun + 1)
-        // If the reason itself starts/ends with a backtick, pad with a space so
-        // the leading/trailing backtick isn't glued to the fence.
-        const pad = /^`|`$/.test(r) ? " " : ""
-        return `${fence}${pad}${r}${pad}${fence}`
-      })
-      .join(", ")
-    const overflow =
-      env.tierReasons.length > RENDER_CAP
-        ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
-        : ""
-    lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
+    const spans = env.tierReasons.slice(0, RENDER_CAP).map((r) => {
+      const runs = r.match(/`+/g)
+      const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
+      const fence = "`".repeat(maxRun + 1)
+      // If the reason itself starts/ends with a backtick, pad with a space so
+      // the leading/trailing backtick isn't glued to the fence.
+      const pad = /^`|`$/.test(r) ? " " : ""
+      return `${fence}${pad}${r}${pad}${fence}`
+    })
+    // Whole reasons only, within the tier line's share of the budget.
+    const prefix = `> 🧭 **Tier: ${env.tier}** — `
+    const shown = takeWhole(spans, budget(maxChars, TIER_SHARE) - prefix.length - 60, ", ")
+    const rest = env.tierReasons.length - shown.length
+    const overflow = rest ? `${shown.length ? " " : ""}(+${rest} more in verdict envelope)` : ""
+    lines.push(`${prefix}${shown.join(", ")}${overflow}`, "")
   }
 
   const tail: string[] = []
   if (env.override) {
     tail.push(
-      `> 🔓 **Break-glass override** by @${env.override.by}: ${env.override.reason}`,
+      `> 🔓 **Break-glass override** by @${env.override.by}: ${clip(env.override.reason, budget(maxChars, OVERRIDE_SHARE))}`,
       `> (would have been \`${env.override.priorVerdict}\`)`,
       "",
     )
@@ -116,42 +114,84 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   }
 
   // Findings fill the budget left after the fixed parts, most severe first.
-  // What does not fit is counted, never silently dropped: the envelope keeps
-  // every finding. The reserve keeps room for the "… N more finding(s)" line.
-  const overflowReserve = 220
+  // Listing stops at the first bullet that does not fit, so a later, shorter
+  // finding is never shown while a more severe one is hidden. What does not fit
+  // is counted per severity, never silently dropped: the envelope keeps every
+  // finding. The reserve keeps room for the "… N more finding(s)" line.
+  const overflowReserve = 260
   let used = [...lines, ...tail].join("\n").length + overflowReserve
-  let hidden = 0
+  const hidden: Record<Severity, number> = { critical: 0, warning: 0, suggestion: 0 }
+  let full = false
   const grouped = groupBySeverity(env.findings)
   for (const sev of ["critical", "warning", "suggestion"] as const) {
     const items = grouped[sev]
     if (!items.length) continue
-    const heading = [`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""]
     // Uncapped (local) output lists every finding with its own location.
     const bullets = bulletsFor(items, maxChars !== Infinity)
-    let headed = false
+    const shown: string[] = []
+    let shownCount = 0
+    // Room for the heading in its longest form (`k of N`).
+    let headCost = `### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length} of ${items.length})`.length + 3
     for (const b of bullets) {
-      const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + 2)
-      if (used + cost > maxChars) {
-        hidden += b.count
+      const cost = b.text.length + 1 + headCost
+      if (full || used + cost > maxChars) {
+        full = true
+        hidden[sev] += b.count
         continue
       }
-      if (!headed) {
-        lines.push(...heading)
-        headed = true
-      }
-      lines.push(b.text)
+      shown.push(b.text)
+      shownCount += b.count
       used += cost
+      headCost = 0
     }
-    if (headed) lines.push("")
+    if (!shown.length) continue
+    const count = shownCount < items.length ? `${shownCount} of ${items.length}` : `${items.length}`
+    lines.push(`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${count})`, "", ...shown, "")
   }
-  if (hidden) {
+  const hiddenTotal = hidden.critical + hidden.warning + hidden.suggestion
+  if (hiddenTotal) {
+    const bySeverity = (["critical", "warning", "suggestion"] as const)
+      .filter((sev) => hidden[sev])
+      .map((sev) => `${hidden[sev]} ${sev}`)
+      .join(", ")
     lines.push(
-      `> … ${hidden} more finding(s) not shown to keep this comment short — the full list is in the verdict envelope ` +
+      `> … ${hiddenTotal} more finding(s) not shown (${bySeverity}) to keep this comment short — the full list is in the verdict envelope ` +
         "(`altimate review --json`, or the action's `--output` artifact).",
       "",
     )
   }
   return [...lines, ...tail].join("\n")
+}
+
+// Shares of the comment budget for the fixed metadata, so it never crowds out
+// the findings or pushes the comment past the budget on its own.
+const TIER_SHARE = 0.15
+const NOTES_SHARE = 0.25
+const OVERRIDE_SHARE = 0.1
+
+/** `share` of a finite budget; unlimited stays unlimited. */
+function budget(maxChars: number, share: number): number {
+  return maxChars === Infinity ? Infinity : Math.floor(maxChars * share)
+}
+
+/** The leading whole units whose `sep`-joined length fits in `max`. */
+function takeWhole(units: string[], max: number, sep: string): string[] {
+  const out: string[] = []
+  let len = 0
+  for (const u of units) {
+    const next = len + (out.length ? sep.length : 0) + u.length
+    if (next > max) break
+    out.push(u)
+    len = next
+  }
+  return out
+}
+
+/** Free text cut at a word boundary to fit `max` (with `…`). */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text
+  const cut = text.slice(0, Math.max(0, max - 1))
+  return `${cut.replace(/\s+\S*$/, "") || cut}…`
 }
 
 /** Backticked names blanked, so the same rule on different models/columns
@@ -216,7 +256,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
  * the advisory AI lane when it did not run. Kept separate from the lint-only
  * banner so one undecidable finding never mislabels a manifest-backed run.
  */
-export function coverageNotes(env: VerdictEnvelope): string[] {
+export function coverageNotes(env: VerdictEnvelope, maxChars = Infinity): string[] {
   const notes: string[] = []
   const undecided = env.findings.filter((f) => f.degraded).length
   if (undecided) notes.push(`${undecided} finding(s) could not be decided by the engine and are marked _unverified_.`)
@@ -226,9 +266,15 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     const byReason = new Map<string, string[]>()
     for (const u of unverified) byReason.set(u.reason, [...(byReason.get(u.reason) ?? []), u.path])
     for (const [reason, paths] of byReason) {
-      const head = paths.slice(0, 5).map((p) => `\`${p}\``).join(", ")
-      const more = paths.length > 5 ? ` and ${paths.length - 5} more` : ""
-      notes.push(`${paths.length} model(s) not verified by the engine — ${reason}: ${head}${more}.`)
+      const label = `${paths.length} model(s) not verified by the engine — ${clip(reason, 200)}`
+      // Whole paths only: at most 5, and within an even share of the notes budget.
+      const shown = takeWhole(
+        paths.slice(0, 5).map((p) => `\`${p}\``),
+        maxChars / (byReason.size + 1) - label.length - 30,
+        ", ",
+      )
+      const more = paths.length > shown.length ? `${shown.length ? " and " : " "}${paths.length - shown.length} more` : ""
+      notes.push(`${label}:${shown.length ? " " : ""}${shown.join(", ")}${more}.`)
     }
     notes.push("Run `dbt compile` (and compile the base into `target-base/`) for equivalence and lineage checks.")
   }
@@ -241,9 +287,16 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
     )
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
-    notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
+    notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${clip(env.ai.reason, 200)}` : ""}.`)
   }
-  return notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
+  // Whole notes within the budget; the rest are counted.
+  const lines = takeWhole(
+    notes.map((n) => `> ℹ️ ${n}`),
+    maxChars - 80,
+    "\n",
+  )
+  if (lines.length < notes.length) lines.push(`> ℹ️ +${notes.length - lines.length} more note(s) in the verdict envelope.`)
+  return lines.length ? [...lines, ""] : []
 }
 
 /** GitHub `pulls.createReview` inline comments — only findings with a line. */

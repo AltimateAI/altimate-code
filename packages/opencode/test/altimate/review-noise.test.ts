@@ -254,6 +254,60 @@ describe("summary grouping and budget", () => {
     // Local output is complete.
     expect(renderSummary(env, { maxChars: Infinity })).toContain("m199: distinct issue number 199")
   })
+
+  test("a critical that does not fit stops the listing: no later, shorter finding jumps ahead of it", () => {
+    const fs: Finding[] = [
+      finding({ severity: "critical", category: "lineage_breakage", model: "a", file: "models/a.sql", title: "a: short critical" }),
+      finding({
+        severity: "critical",
+        category: "lineage_breakage",
+        model: "b",
+        file: "models/b.sql",
+        title: "b: long critical",
+        body: "y".repeat(4_800),
+      }),
+      ...Array.from({ length: 10 }, (_, i) =>
+        finding({ model: `s${i}`, file: `models/s${i}.sql`, title: `s${i}: short suggestion ${i}` }),
+      ),
+    ]
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "full", mode: "comment" }))
+    expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
+    expect(md).toContain("a: short critical")
+    expect(md).not.toContain("b: long critical")
+    expect(md).not.toContain("short suggestion")
+    expect(md).toContain("Critical (1 of 2)")
+    expect(md).not.toMatch(/### 💡 Suggestion/)
+    expect(md).toContain("11 more finding(s) not shown (1 critical, 10 suggestion)")
+  })
+
+  test("the metadata is budgeted too: a run with no findings and huge metadata stays within budget", () => {
+    const long = (tag: string, i: number) => `models/${"deeply/nested/".repeat(8)}${tag}_${i}.sql`
+    const env = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierReasons: Array.from({ length: 40 }, (_, i) => `PII column in ${long("tier", i)}`),
+      scope: {
+        unverified: Array.from({ length: 30 }, (_, i) => ({
+          path: long("unverified", i),
+          reason: `reason ${i % 3}: ${"no compiled SQL for the head ".repeat(10)}`,
+        })),
+        outOfScopeFiles: 4,
+        movedUnchangedFiles: 2,
+      } as any,
+      ai: { state: "error", reason: "z".repeat(2_000) } as any,
+    })
+    const withOverride = { ...env, override: { by: "lead", reason: "because ".repeat(400), priorVerdict: "REQUEST_CHANGES" } }
+    for (const e of [env, withOverride as typeof env]) {
+      const md = renderSummary(e)
+      expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
+      expect(md).toContain("No issues found")
+      expect(md).toContain("more in verdict envelope)")
+      expect(md).toMatch(/\d+ model\(s\) not verified by the engine/)
+      // Local output keeps every reason.
+      expect(renderSummary(e, { maxChars: Infinity })).toContain(long("tier", 7))
+    }
+  })
 })
 
 describe("portability noise", () => {
