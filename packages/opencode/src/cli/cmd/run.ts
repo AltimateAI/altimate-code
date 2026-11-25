@@ -2235,10 +2235,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
     }
 
-    // altimate_change start — count this run against the linked workspace's plan, attached or not
+    // altimate_change start — count this run against the plan of the workspace this client directory is linked to, attached or not
     {
       const { reportHeadlessRun } = await import("../../altimate/workspace/run-report")
-      const outcome = await reportHeadlessRun({ directory })
+      const outcome = await reportHeadlessRun()
       if (outcome.status === "blocked") {
         UI.error(outcome.error.message)
         process.exitCode = 1
