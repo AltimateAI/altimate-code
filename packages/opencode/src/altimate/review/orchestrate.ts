@@ -1266,8 +1266,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // output that is not a raw column is base-exposed when the base exposed that
   // name raw, or computes it the same way (same item text, same CTEs/subqueries
   // read): `md5(x) as x` → `lower(x) as x` unmasks. A name the head's final select doesn't resolve
-  // (`select *` from a table) counts as base-exposed only when the base had it and
-  // did not mask it.
+  // counts as base-exposed only when the head passes it through a plain `*` (from
+  // a table) and the base exposed it raw, or passed it through a `*` as well.
   const isBaseExposedOutput = (file: string, name: string, basePii: Set<string>) => {
     const head = outputs(file, "new")
     const rawColumns = head.raw.get(name)
@@ -1282,7 +1282,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       const baseSigs = base.signatures.get(name)
       return !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
     }
-    return !base.names.has(name) || base.raw.has(name)
+    // Unresolved only through a plain `*`: a shape the parser does not model (a
+    // parenthesised top-level union, `* except (…)`) is reported.
+    if (!head.passthrough) return false
+    return base.raw.has(name) || (!base.names.has(name) && base.passthrough)
   }
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []

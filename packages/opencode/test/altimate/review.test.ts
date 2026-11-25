@@ -2535,6 +2535,28 @@ describe("orchestrate", () => {
     expectReportedPii(runs, ["ssn"])
   })
 
+  test("query shapes the parser does not model are reported, not assumed exposed", async () => {
+    const cases: Array<[string, string]> = [
+      // Top-level parenthesised set operation: the final select has no items of its own.
+      [
+        "(select customer_id, sha2(ssn) as ssn from a)\nunion all\n(select customer_id, sha2(ssn) as ssn from b)",
+        "(select customer_id, ssn from a)\nunion all\n(select customer_id, ssn from b)",
+      ],
+      // A CTE column list renames the body's outputs.
+      [
+        "with m (id, tax) as (select customer_id, sha2(ssn) from customers)\nselect id, tax as ssn from m",
+        "with m (id, tax) as (select customer_id, ssn from customers)\nselect id, tax as ssn from m",
+      ],
+    ]
+    for (const [base, head] of cases) {
+      const runs = await piiRuns(head, base, `-${base.split("\n").pop()}\n+${head.split("\n").pop()}\n`, ["ssn"])
+      expectReportedPii(runs, ["ssn"], "none")
+    }
+    // Control: a plain `select *` on both sides is not new exposure.
+    const star = await piiRuns("select *\nfrom customers", "select * from customers", "-select * from customers\n+select *\n", ["ssn"])
+    expect(star[0].env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+  })
+
   test("a PII line moved from a CTE into the final select is not a reindent", async () => {
     // `    email,` leaves the CTE and the same text lands in the final select: the
     // model's output now carries `email`, though the line matches a removed one.

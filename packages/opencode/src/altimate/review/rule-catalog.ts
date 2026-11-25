@@ -318,7 +318,12 @@ function parseSelects(sql: string): ParsedSelects {
   const selects: Array<{ scope: string; branch: number; end: number }> = []
   const scopes: string[] = ["final"]
   const branches = new Map<string, number>()
-  const cteHead = new RegExp(String.raw`(${SEGMENT})\s+as\s*(?:(?:not\s+)?materialized\s*)?$`, "i")
+  // `name as (`, or `name (col, …) as (`: a column list still names the CTE, whose
+  // outputs then keep the body's own names (so a renamed column resolves to nothing).
+  const cteHead = new RegExp(
+    String.raw`(${SEGMENT})\s*(?:\([^()]*\)\s*)?\s+as\s*(?:(?:not\s+)?materialized\s*)?$`,
+    "i",
+  )
   const tableRef = new RegExp(String.raw`^\s*((?:${SEGMENT}\s*\.\s*)*${SEGMENT})`, "i")
   let nested = 0
   for (let i = 0; i < s.length; i++) {
@@ -371,7 +376,13 @@ function parseSelects(sql: string): ParsedSelects {
       else if (depth === 0 && d === ",") {
         push(j)
         itemStart = j + 1
-      } else if (depth === 0 && !isWordChar(s[j - 1]) && SELECT_LIST_END.test(s.slice(j, j + 10))) {
+      } else if (
+        depth === 0 &&
+        !isWordChar(s[j - 1]) &&
+        SELECT_LIST_END.test(s.slice(j, j + 10)) &&
+        // `* except (…)` (BigQuery) is one item, not a set operation.
+        !(/^except\b/i.test(s.slice(j, j + 7)) && /\*\s*$/.test(s.slice(itemStart, j)))
+      ) {
         push(j)
         end = j
         break
@@ -447,13 +458,15 @@ export interface FinalOutputs {
   raw: Map<string, Set<string>>
   /** Every output name the final projection resolves. */
   names: Set<string>
+  /** The final projection has a plain `*`, so it also passes through unnamed columns. */
+  passthrough: boolean
   /** Per output name, a signature of how it is computed: the item text plus the
    *  full text of every CTE or subquery its select reads. Equal signatures on two
    *  sides mean the name is computed the same way. */
   signatures: Map<string, Set<string>>
 }
 
-interface ScopeOutputs extends FinalOutputs {
+interface ScopeOutputs extends Omit<FinalOutputs, "passthrough"> {
   /** `*` items, whose columns pass through unnamed (`select * from customers`). */
   stars: Array<{ branch: number; qualifier?: string }>
   /** Every item's text, and that of every scope it reads. */
@@ -575,8 +588,8 @@ export function finalOutputs(sql: string): FinalOutputs {
     memo.set(scope, result)
     return result
   }
-  const { raw, names, signatures } = resolve("final", new Set())
-  return { raw, names, signatures }
+  const { raw, names, signatures, stars } = resolve("final", new Set())
+  return { raw, names, signatures, passthrough: stars.length > 0 }
 }
 
 /** A diff line with comments and whitespace normalised (and a leading/trailing

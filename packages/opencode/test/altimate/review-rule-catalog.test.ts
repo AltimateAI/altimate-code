@@ -1,5 +1,12 @@
 import { describe, test, expect } from "bun:test"
-import { CATALOG, ruleMatches, inputFromExample, rawColumnExposures, selectItemColumns } from "../../src/altimate/review/rule-catalog"
+import {
+  CATALOG,
+  ruleMatches,
+  inputFromExample,
+  finalOutputs,
+  rawColumnExposures,
+  selectItemColumns,
+} from "../../src/altimate/review/rule-catalog"
 
 describe("rule catalog (self-verifying scenario corpus)", () => {
   test("every rule fires on its example and stays clean on its counter", () => {
@@ -102,6 +109,15 @@ describe("rawColumnExposures", () => {
       email: ["customers.email"],
     })
     expect(asObject(rawColumnExposures("select ssn from (select * from customers) as s"))).toEqual({ ssn: ["customers.ssn"] })
+  })
+  test("only a plain `*` passes columns through; `* except (…)` does not", () => {
+    expect(finalOutputs("select * from customers").passthrough).toBe(true)
+    expect(finalOutputs("select c.* from customers c").passthrough).toBe(true)
+    expect(finalOutputs("select * except (ssn) from customers").passthrough).toBe(false)
+  })
+  test("a CTE with a column list is still a CTE: a renamed column resolves to nothing known", () => {
+    const sql = "with m (id, tax) as (select customer_id, ssn from customers)\nselect tax as ssn from m"
+    expect([...(rawColumnExposures(sql).get("ssn") ?? [])][0]).toMatch(/^\?\d+\.tax$/)
   })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
