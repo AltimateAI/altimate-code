@@ -2235,6 +2235,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
     }
 
+    // altimate_change start — count this run against the linked workspace's plan, attached or not
+    {
+      const { reportHeadlessRun } = await import("../../altimate/workspace/run-report")
+      const outcome = await reportHeadlessRun({ directory })
+      if (outcome.status === "blocked") {
+        UI.error(outcome.error.message)
+        process.exitCode = 1
+        return
+      }
+    }
+    // altimate_change end
+
     if (args.attach) {
       const headers = (() => {
         // altimate_change start — documented ALTIMATE_CLI_SERVER_* names read first (core `env`)
@@ -2269,16 +2281,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // A registration that outlasts the wait still gets its notice in this launch, not the next.
       const result = await FreeTier.autoRegisterWithin(undefined, () => void FreeTierConsent.printDisclosureOnceForHeadless(true))
       await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
-    }
-    // altimate_change end
-    // altimate_change start — count headless/CI/scheduled runs against the linked workspace's plan
-    {
-      const { reportHeadlessRun } = await import("../../altimate/workspace/run-report")
-      const outcome = await reportHeadlessRun()
-      if (outcome.status === "blocked") {
-        UI.error(outcome.error.message)
-        process.exit(1)
-      }
     }
     // altimate_change end
     await bootstrap(process.cwd(), async () => {

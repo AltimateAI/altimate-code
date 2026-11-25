@@ -709,7 +709,8 @@ export namespace WorkspaceApi {
     return req("POST", "", {
       base: "/workspace-runs",
       body: input,
-      expectedStatuses: [404, 405],
+      expectedStatuses: [402, 404, 405],
+      timeoutMs: SIGNED_IN_LOOKUP_TIMEOUT_MS,
     })
   }
 

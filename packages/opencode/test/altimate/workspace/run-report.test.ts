@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { PlanLimitError, WorkspaceApiError } from "../../../src/altimate/workspace/api-client"
+import { NotFoundError, PlanLimitError, WorkspaceApiError } from "../../../src/altimate/workspace/api-client"
 import {
   clientRunId,
   detectRunKind,
@@ -7,7 +7,7 @@ import {
   resetClientRunId,
 } from "../../../src/altimate/workspace/run-report"
 
-const binding = { datamate: { id: 7, name: "w" }, binding: {}, matchedBy: "path" } as any
+const binding = { datamateId: 7 } as any
 const limit = () =>
   new PlanLimitError({
     code: "plan_limit_reached",
@@ -36,13 +36,14 @@ function deps(over: Record<string, unknown> = {}) {
 beforeEach(() => resetClientRunId())
 
 describe("detectRunKind", () => {
-  test("interactive terminal is not reported", () => {
-    expect(detectRunKind({}, { stdin: true, stdout: true })).toBeUndefined()
+  test("a plain terminal or piped run is headless", () => {
+    expect(detectRunKind({})).toBe("headless")
   })
-  test("no tty is headless, CI env is ci, scheduled wins", () => {
-    expect(detectRunKind({}, { stdin: false, stdout: true })).toBe("headless")
-    expect(detectRunKind({ CI: "true" }, { stdin: true, stdout: true })).toBe("ci")
-    expect(detectRunKind({ CI: "true", ALTIMATE_RUN_KIND: "scheduled" }, {})).toBe("scheduled")
+  test("CI env is ci, a GitHub schedule trigger is scheduled", () => {
+    expect(detectRunKind({ CI: "true" })).toBe("ci")
+    expect(detectRunKind({ CI: "0" })).toBe("headless")
+    expect(detectRunKind({ CI: "true", GITHUB_EVENT_NAME: "schedule" })).toBe("scheduled")
+    expect(detectRunKind({ CI: "true", GITHUB_EVENT_NAME: "push" })).toBe("ci")
   })
 })
 
@@ -54,11 +55,6 @@ describe("reportHeadlessRun", () => {
     expect(calls[0].kind).toBe("headless")
     expect(calls[0].datamate_id).toBe(7)
     expect(calls[0].client_run_id).toMatch(/^[0-9a-f-]{36}$/)
-  })
-  test("never reports interactive sessions", async () => {
-    const { calls, d } = deps({ kind: undefined })
-    expect(await reportHeadlessRun(d)).toEqual({ status: "skipped" })
-    expect(calls).toHaveLength(0)
   })
   test("never reports an unlinked project", async () => {
     const { calls, d } = deps({ lookup: async () => null })
@@ -89,7 +85,7 @@ describe("reportHeadlessRun", () => {
   })
   test("404, 405 and network errors continue", async () => {
     for (const err of [
-      new WorkspaceApiError("nf", 404),
+      new NotFoundError("nf"),
       new WorkspaceApiError("na", 405),
       new WorkspaceApiError("Cannot reach"),
     ]) {
