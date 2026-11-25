@@ -277,7 +277,9 @@ const ROUTES: Record<string, Array<[RegExp, string]>> = {
     [/^\/?$/, "/"],
     [/^\/[^/]+\/reviews$/, "/:id/reviews"],
     [/^\/[^/]+\/reviews\/summary$/, "/:id/reviews/summary"],
+    [/^\/[^/]+\/model-keys$/, "/:id/model-keys"],
   ],
+  "/workspace-runs": [[/^\/?$/, "/"]],
   "/skills": [
     [/^\/[^/]+$/, "/:id"],
     [/^\/[^/]+\/datamates$/, "/:id/datamates"],

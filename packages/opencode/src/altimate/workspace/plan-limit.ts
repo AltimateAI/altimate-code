@@ -38,3 +38,16 @@ export function formatPlanLimit(detail: PlanLimitDetail): string {
   if (!url) return sentence
   return `${sentence} Upgrade${required ? ` to ${capitalize(required)}` : ""}: ${url}`
 }
+
+/** The user-facing text for a gateway refusal body (`{"detail": {"code": "plan_limit_reached", ...}}`), if it is one. */
+export function describePlanLimitBody(body: string | undefined): string | undefined {
+  if (!body) return undefined
+  try {
+    const detail = JSON.parse(body)?.detail
+    return detail && typeof detail === "object" && detail.code === "plan_limit_reached"
+      ? formatPlanLimit(detail as PlanLimitDetail)
+      : undefined
+  } catch {
+    return undefined
+  }
+}

@@ -14,7 +14,7 @@ writeFileSync(
 const { altimateRequest, PlanLimitError, WorkspaceApiError, linkFailureReason } = await import(
   "../../../src/altimate/workspace/api-client"
 )
-const { formatPlanLimit, safeUpgradeUrl } = await import("../../../src/altimate/workspace/plan-limit")
+const { describePlanLimitBody, formatPlanLimit, safeUpgradeUrl } = await import("../../../src/altimate/workspace/plan-limit")
 
 const URL_OK = "https://acme.app.myaltimate.com/settings/credits?tab=plans"
 const detail = {
@@ -90,5 +90,17 @@ describe("formatPlanLimit", () => {
   test("safeUpgradeUrl rejects non-strings and garbage", () => {
     expect(safeUpgradeUrl(undefined)).toBeUndefined()
     expect(safeUpgradeUrl("not a url")).toBeUndefined()
+  })
+})
+
+describe("describePlanLimitBody", () => {
+  test("formats a plan_limit_reached body", () => {
+    expect(describePlanLimitBody(JSON.stringify({ detail }))).toBe(formatPlanLimit(detail))
+  })
+  test("ignores other bodies", () => {
+    expect(describePlanLimitBody(undefined)).toBeUndefined()
+    expect(describePlanLimitBody("not json")).toBeUndefined()
+    expect(describePlanLimitBody(JSON.stringify({ detail: { code: "other" } }))).toBeUndefined()
+    expect(describePlanLimitBody(JSON.stringify({ detail: "x" }))).toBeUndefined()
   })
 })
