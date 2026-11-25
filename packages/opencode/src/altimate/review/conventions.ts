@@ -10,7 +10,7 @@ import { type Finding, SEVERITY_ORDER } from "./finding"
  * Sources: `.altimate/review.md` (or `.altimate/REVIEW.md`); `REVIEW.md`, `AGENTS.md`,
  * `CLAUDE.md` and `.claude/CLAUDE.md` at the root and at every ancestor directory of a
  * changed path; `.coderabbit.yaml` (`reviews.path_instructions[]`, one convention per
- * entry scoped by its glob, plus `reviews.tone_instructions`); `.cursor/rules/*.mdc`
+ * entry scoped by its glob, plus the document-level `tone_instructions`); `.cursor/rules/*.mdc`
  * (frontmatter `globs` / `alwaysApply`; rules with neither are manual and skipped);
  * `.cursorrules`; `.github/copilot-instructions.md`; `CONTRIBUTING.md` cut to its
  * dbt/SQL/test/naming sections.
@@ -21,16 +21,19 @@ import { type Finding, SEVERITY_ORDER } from "./finding"
  * finder's input is unchanged.
  */
 
-export type ConventionSource =
-  | "altimate"
-  | "review_md"
-  | "agents_md"
-  | "claude_md"
-  | "coderabbit"
-  | "cursor"
-  | "cursorrules"
-  | "copilot"
-  | "contributing"
+/** Where a convention came from; the envelope schema accepts only these. */
+export const CONVENTION_SOURCES = [
+  "altimate",
+  "review_md",
+  "agents_md",
+  "claude_md",
+  "coderabbit",
+  "cursor",
+  "cursorrules",
+  "copilot",
+  "contributing",
+] as const
+export type ConventionSource = (typeof CONVENTION_SOURCES)[number]
 
 export interface Convention {
   /** The repo-relative file it came from (what a finding cites). */
@@ -63,8 +66,10 @@ const CODERABBIT_FILES = [".coderabbit.yaml", ".coderabbit.yml"]
 const CONTRIBUTING_FILES = ["CONTRIBUTING.md", ".github/CONTRIBUTING.md", "docs/CONTRIBUTING.md"]
 const CONTRIBUTING_HEADING = /dbt|model|sql|test|yml|naming|macro|incremental/i
 
+const TRUNCATED = "\n… (truncated)"
+
 function cut(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) + "\n… (truncated)" : text
+  return text.length > max ? text.slice(0, max) + TRUNCATED : text
 }
 
 function depth(scope: string): number {
@@ -116,34 +121,75 @@ function splitTopLevel(list: string): string[] {
   return out
 }
 
-/** Frontmatter of a Cursor `.mdc` rule: `globs` (string, comma list or list), `alwaysApply`, and the body. */
-export function parseMdc(text: string): { globs: string[]; alwaysApply: boolean; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
-  if (!m) return { globs: [], alwaysApply: false, body: text.trim() }
+/** A frontmatter value without an inline YAML comment, and without its quotes. */
+function frontmatterValue(raw: string): string {
+  const v = raw.trim()
+  const q = /^(["'])(.*?)\1/.exec(v)
+  if (q) return q[2].trim()
+  return v.replace(/\s+#.*$/, "").trim()
+}
+
+/** `globs` as Cursor writes it: a string (comma list, optionally `[…]`) or a YAML list. */
+function globList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap((v) => (typeof v === "string" ? globList(v) : []))
+  if (typeof value !== "string") return []
+  return splitTopLevel(value.trim().replace(/^\[|\]$/g, ""))
+    .map((g) => g.trim().replace(/^["']|["']$/g, "").trim())
+    .filter(Boolean)
+}
+
+/** Frontmatter lines read one by one: for Cursor's unquoted globs (`globs: **\/*.sql`), which are not valid YAML. */
+function parseFrontmatterLines(text: string): { globs: string[]; alwaysApply: boolean } {
   const globs: string[] = []
   let alwaysApply = false
   let inGlobList = false
-  const unquote = (s: string) => s.trim().replace(/^["']|["']$/g, "").trim()
-  for (const line of m[1].split(/\r?\n/)) {
+  for (const line of text.split(/\r?\n/)) {
     const item = /^\s+-\s*(.+)$/.exec(line)
     if (inGlobList && item) {
-      globs.push(unquote(item[1]))
+      globs.push(...globList(frontmatterValue(item[1])))
       continue
     }
     inGlobList = false
     const kv = /^(\w+)\s*:\s*(.*)$/.exec(line)
     if (!kv) continue
     const [, key, raw] = kv
-    if (key === "alwaysApply") alwaysApply = /^true$/i.test(raw.trim())
+    const value = frontmatterValue(raw)
+    if (key === "alwaysApply") alwaysApply = /^true$/i.test(value)
     if (key !== "globs") continue
-    const value = raw.trim()
     if (!value) inGlobList = true
-    else globs.push(...splitTopLevel(value.replace(/^\[|\]$/g, "")).map(unquote))
+    else globs.push(...globList(value))
   }
-  return { globs: globs.filter(Boolean), alwaysApply, body: text.slice(m[0].length).trim() }
+  return { globs, alwaysApply }
 }
 
-/** `.coderabbit.yaml`: one convention per `reviews.path_instructions[]` entry, plus `reviews.tone_instructions`. */
+/**
+ * Frontmatter of a Cursor `.mdc` rule: `globs` (string, comma list or list), `alwaysApply`, and the
+ * body. Parsed as YAML (comments, quoting, lists); frontmatter that is not valid YAML, such as
+ * Cursor's unquoted `globs: **\/*.sql`, is read line by line.
+ */
+export function parseMdc(text: string): { globs: string[]; alwaysApply: boolean; body: string } {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
+  if (!m) return { globs: [], alwaysApply: false, body: text.trim() }
+  const body = text.slice(m[0].length).trim()
+  let doc: unknown
+  try {
+    doc = YAML.parse(m[1])
+  } catch {
+    return { ...parseFrontmatterLines(m[1]), body }
+  }
+  const fm = doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as Record<string, unknown>) : {}
+  const always = fm.alwaysApply
+  return {
+    globs: globList(fm.globs),
+    alwaysApply: always === true || (typeof always === "string" && /^true$/i.test(always.trim())),
+    body,
+  }
+}
+
+/**
+ * `.coderabbit.yaml`: one convention per `reviews.path_instructions[]` entry, plus the
+ * document-level `tone_instructions` (`reviews.tone_instructions` when the root has none).
+ */
 export function parseCoderabbit(text: string, path: string): Convention[] {
   let doc: unknown
   try {
@@ -151,12 +197,13 @@ export function parseCoderabbit(text: string, path: string): Convention[] {
   } catch {
     return []
   }
-  const reviews = (doc as { reviews?: Record<string, unknown> } | undefined)?.reviews
-  if (!reviews || typeof reviews !== "object") return []
+  if (!doc || typeof doc !== "object") return []
+  const root = doc as { reviews?: unknown; tone_instructions?: unknown }
+  const reviews = root.reviews && typeof root.reviews === "object" ? (root.reviews as Record<string, unknown>) : {}
   const out: Convention[] = []
-  const tone = reviews.tone_instructions
-  if (typeof tone === "string" && tone.trim())
-    out.push({ path, source: "coderabbit", scope: "", text: cut(`Tone: ${tone.trim()}`, CONVENTION_FILE_CHARS) })
+  const nonEmpty = (v: unknown): v is string => typeof v === "string" && !!v.trim()
+  const tone = nonEmpty(root.tone_instructions) ? root.tone_instructions : reviews.tone_instructions
+  if (nonEmpty(tone)) out.push({ path, source: "coderabbit", scope: "", text: cut(`Tone: ${tone.trim()}`, CONVENTION_FILE_CHARS) })
   const entries = Array.isArray(reviews.path_instructions) ? reviews.path_instructions : []
   for (const e of entries) {
     const glob = (e as { path?: unknown })?.path
@@ -192,10 +239,10 @@ export function sliceContributing(text: string, max = CONTRIBUTING_CHARS): strin
 }
 
 export interface LoadConventionsInput {
-  /** Reads a repo-relative file at the base commit; undefined when absent. */
+  /** Reads a repo-relative file at the base commit; undefined when absent, throws when git fails. */
   readBase: (rel: string) => Promise<string | undefined>
-  /** Lists the files under a repo-relative directory at the base commit (recursive, repo-relative). */
-  listBase?: (dir: string) => Promise<string[] | undefined>
+  /** Every file at the base commit (repo-relative), listed once; throws when git fails. */
+  listBase?: () => Promise<string[]>
   /** Every path the PR changes (repo-relative): their ancestor directories are searched for scoped files. */
   changedPaths: string[]
 }
@@ -203,11 +250,12 @@ export interface LoadConventionsInput {
 /**
  * Load the team conventions from the base commit (see the module comment for
  * the sources). Each file is cut to 4,000 characters; root files come before
- * deeper ones. Never throws: an unreadable file is skipped.
+ * deeper ones. A file absent at the base commit is skipped; a git failure
+ * throws, as the base-policy read does, so it cannot pass for "no conventions".
  */
 export async function loadConventions(input: LoadConventionsInput): Promise<Convention[]> {
-  const read = (rel: string) => input.readBase(rel).catch(() => undefined)
-  const list = async (dir: string) => (input.listBase ? ((await input.listBase(dir).catch(() => undefined)) ?? []) : [])
+  const read = input.readBase
+  const baseFiles = input.listBase ? await input.listBase() : []
   const scopes = scopesOf(input.changedPaths)
   const plain = (path: string, source: ConventionSource, scope: string, text: string | undefined): Convention[] =>
     text?.trim() ? [{ path, source, scope, text: cut(text.trim(), CONVENTION_FILE_CHARS) }] : []
@@ -227,8 +275,8 @@ export async function loadConventions(input: LoadConventionsInput): Promise<Conv
   }
   const cursor: Convention[] = []
   for (const scope of scopes) {
-    const dir = join(scope, ".cursor/rules")
-    const files = (await list(dir)).filter((p) => p.endsWith(".mdc")).sort()
+    const dir = join(scope, ".cursor/rules") + "/"
+    const files = baseFiles.filter((p) => p.startsWith(dir) && p.endsWith(".mdc")).sort()
     for (const p of files) {
       const text = await read(p)
       if (!text) continue
@@ -303,9 +351,9 @@ export function conventionSpecificity(c: Convention, file: string): number | und
   return scopeLen + Math.max(...matched.map(literalLength))
 }
 
-/** What a convention entry costs in a call: its heading and text. */
+/** What a convention entry costs in a call: its `### path (applies to …)` heading, its text and the joining newline. */
 function entryChars(c: Convention): number {
-  return c.path.length + appliesTo(c).length + 20 + c.text.length
+  return c.path.length + appliesTo(c).length + 21 + c.text.length
 }
 
 /** Take conventions in order within `budget` characters; the first one is cut to fit when it alone is over. */
@@ -318,7 +366,8 @@ function withinBudget(ordered: Convention[], budget: number): Convention[] {
       out.push(c)
       used += cost
     } else if (!out.length) {
-      const room = budget - (cost - c.text.length)
+      // The truncation marker counts toward the budget too.
+      const room = budget - (cost - c.text.length) - TRUNCATED.length
       if (room > 200) {
         out.push({ ...c, text: cut(c.text, room) })
         used = budget
@@ -328,17 +377,23 @@ function withinBudget(ordered: Convention[], budget: number): Convention[] {
   return out
 }
 
+/** The conventions that apply to any of `files`, by their best specificity, most specific first (pure; ties keep load order). */
+function rankConventions(all: Convention[], files: string[]): Convention[] {
+  const best = new Map<Convention, { s: number; i: number }>()
+  all.forEach((c, i) => {
+    for (const f of files) {
+      const s = conventionSpecificity(c, f)
+      if (s === undefined) continue
+      const prev = best.get(c)
+      if (!prev || s > prev.s) best.set(c, { s, i })
+    }
+  })
+  return [...best.entries()].sort((a, b) => b[1].s - a[1].s || a[1].i - b[1].i).map(([c]) => c)
+}
+
 /** The conventions that apply to `file`, most specific first, within `budget` characters (pure; ties keep load order). */
 export function conventionsFor(all: Convention[], file: string, budget = CONVENTIONS_CALL_BUDGET): Convention[] {
-  const scored = all.flatMap((c, i) => {
-    const s = conventionSpecificity(c, file)
-    return s === undefined ? [] : [{ c, s, i }]
-  })
-  scored.sort((a, b) => b.s - a.s || a.i - b.i)
-  return withinBudget(
-    scored.map((x) => x.c),
-    budget,
-  )
+  return withinBudget(rankConventions(all, [file]), budget)
 }
 
 /** What a convention applies to, in words: its globs, its directory, or the whole repo. */
@@ -353,7 +408,8 @@ export const CONVENTIONS_HEADING =
 
 /**
  * The TEAM CONVENTIONS section for one finder call (pure): the conventions that apply to any of
- * `files`, most specific first, within `budget` characters for the whole call. Empty text when none.
+ * `files`, most specific first, within `budget` characters for the whole section, heading
+ * included. Empty text when none.
  */
 export function renderConventions(
   all: Convention[],
@@ -361,17 +417,7 @@ export function renderConventions(
   budget = CONVENTIONS_CALL_BUDGET,
 ): { text: string; paths: string[] } {
   if (!all.length) return { text: "", paths: [] }
-  const best = new Map<Convention, { s: number; i: number }>()
-  all.forEach((c, i) => {
-    for (const f of files) {
-      const s = conventionSpecificity(c, f)
-      if (s === undefined) continue
-      const prev = best.get(c)
-      if (!prev || s > prev.s) best.set(c, { s, i })
-    }
-  })
-  const ordered = [...best.entries()].sort((a, b) => b[1].s - a[1].s || a[1].i - b[1].i).map(([c]) => c)
-  const picked = withinBudget(ordered, budget)
+  const picked = withinBudget(rankConventions(all, files), budget - CONVENTIONS_HEADING.length)
   if (!picked.length) return { text: "", paths: [] }
   const entries = picked.map((c) => `\n### ${c.path} (applies to ${appliesTo(c)})\n${c.text}`)
   return { text: [CONVENTIONS_HEADING, ...entries].join("\n"), paths: [...new Set(picked.map((c) => c.path))] }

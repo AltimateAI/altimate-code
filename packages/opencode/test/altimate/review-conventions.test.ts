@@ -11,13 +11,15 @@ import {
   conventionSpecificity,
   conventionsFor,
   loadConventions,
+  parseCoderabbit,
   parseMdc,
   renderConventions,
   sliceContributing,
   type Convention,
 } from "../../src/altimate/review/conventions"
 import { planAiInput, runAiReview, type AiReviewFile, type AiReviewInput } from "../../src/altimate/review/ai-review"
-import { lsTreeAtRef, showAtRef } from "../../src/altimate/review/git"
+import { listFilesAt, showAtRef } from "../../src/altimate/review/git"
+import { VerdictEnvelope } from "../../src/altimate/review/verdict"
 import { runReview, type ReviewRunner } from "../../src/altimate/review/orchestrate"
 import { DEFAULT_REVIEW_CONFIG } from "../../src/altimate/review/config"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
@@ -51,7 +53,7 @@ async function fixtureBase() {
       reads.push(rel)
       return files.includes(rel) ? fs.readFile(path.join(FIXTURE, rel), "utf8") : undefined
     },
-    listBase: async (dir: string) => files.filter((f) => f.startsWith(dir + "/")),
+    listBase: async () => files,
   }
 }
 
@@ -114,13 +116,20 @@ describe("loadConventions (fixture as the base commit)", () => {
     ])
   })
 
-  test("per-file cap of 4,000 characters; unreadable files are skipped", async () => {
+  test("per-file cap of 4,000 characters; absent files are skipped", async () => {
     const all = await loadConventions({
-      readBase: async (rel) => (rel === "AGENTS.md" ? "x".repeat(9_000) : rel === "REVIEW.md" ? Promise.reject(new Error("boom")) : undefined),
+      readBase: async (rel) => (rel === "AGENTS.md" ? "x".repeat(9_000) : undefined),
       changedPaths: ["models/a.sql"],
     })
     expect(all.map((c) => c.path)).toEqual(["AGENTS.md"])
     expect(all[0].text.startsWith("x".repeat(4_000) + "\n… (truncated)")).toBe(true)
+  })
+
+  test("a git failure reading or listing the base commit throws instead of passing for no conventions", async () => {
+    const boom = async (rel: string) => (rel === "REVIEW.md" ? Promise.reject(new Error("boom")) : undefined)
+    await expect(loadConventions({ readBase: boom, changedPaths: ["models/a.sql"] })).rejects.toThrow("boom")
+    const noList = async (): Promise<string[]> => Promise.reject(new Error("ls-tree failed"))
+    await expect(loadConventions({ readBase: async () => undefined, listBase: noList, changedPaths: [] })).rejects.toThrow("ls-tree failed")
   })
 
   test(".altimate/review.md, .claude/CLAUDE.md, .cursorrules and copilot instructions apply to the whole repo", async () => {
@@ -148,6 +157,38 @@ describe("parsing helpers", () => {
     expect(parseMdc("---\nglobs:\n  - a/*.sql\n  - \"b/**\"\ndescription: x\n---\nb").globs).toEqual(["a/*.sql", "b/**"])
     expect(parseMdc("---\nalwaysApply: true\n---\nalways").alwaysApply).toBe(true)
     expect(parseMdc("no frontmatter")).toEqual({ globs: [], alwaysApply: false, body: "no frontmatter" })
+  })
+
+  test("parseMdc: inline YAML comments, in valid YAML and in Cursor's unquoted-glob form", () => {
+    expect(parseMdc('---\nglobs: "models/**/*.sql" # marts only\nalwaysApply: false # manual\n---\nb')).toEqual({
+      globs: ["models/**/*.sql"],
+      alwaysApply: false,
+      body: "b",
+    })
+    expect(parseMdc("---\nglobs:\n  - a/*.sql # first\n  - b/** # second\n---\nb").globs).toEqual(["a/*.sql", "b/**"])
+    // `**/*.sql` unquoted is not valid YAML (an alias): read line by line, comments dropped.
+    expect(parseMdc("---\nglobs: **/*.sql # all sql\nalwaysApply: true # always\n---\nb")).toEqual({
+      globs: ["**/*.sql"],
+      alwaysApply: true,
+      body: "b",
+    })
+  })
+
+  test("parseCoderabbit: tone_instructions at the document root, or under reviews when the root has none", () => {
+    expect(parseCoderabbit("tone_instructions: Be terse.\nreviews:\n  path_instructions: []\n", ".coderabbit.yaml").map((c) => c.text)).toEqual([
+      "Tone: Be terse.",
+    ])
+    expect(parseCoderabbit("tone_instructions: Root.\n", ".coderabbit.yaml").map((c) => c.text)).toEqual(["Tone: Root."])
+    expect(parseCoderabbit("reviews:\n  tone_instructions: Nested.\n", ".coderabbit.yaml").map((c) => c.text)).toEqual(["Tone: Nested."])
+    expect(
+      parseCoderabbit("tone_instructions: Root.\nreviews:\n  tone_instructions: Nested.\n", ".coderabbit.yaml").map((c) => c.text),
+    ).toEqual(["Tone: Root."])
+  })
+
+  test("the envelope accepts only the known convention sources", () => {
+    const source = VerdictEnvelope.shape.ai.unwrap().shape.conventions.unwrap().element.shape.source
+    expect(source.safeParse("claude_md").success).toBe(true)
+    expect(source.safeParse("bogus").success).toBe(false)
   })
 
   test("sliceContributing: matching sections and their subsections, capped", () => {
@@ -213,7 +254,10 @@ describe("scoping and budget", () => {
     expect(r.paths).toEqual([".coderabbit.yaml", ".cursor/rules/dbt-models.mdc", "CLAUDE.md", "CONTRIBUTING.md"])
     const marts = renderConventions(all, ["models/marts/fct_orders.sql"])
     expect(marts.text.indexOf("### models/marts/CLAUDE.md (applies to models/marts/)")).toBeLessThan(marts.text.indexOf("### CLAUDE.md"))
-    expect(renderConventions(all, ["models/marts/fct_orders.sql"], 400).text.length).toBeLessThan(400 + CONVENTIONS_HEADING.length + 10)
+    // The budget covers the whole section, heading and truncation marker included.
+    for (const budget of [400, 600, 3_000]) expect(renderConventions(all, ["models/marts/fct_orders.sql"], budget).text.length).toBeLessThanOrEqual(budget)
+    const big: Convention = { path: "AGENTS.md", source: "agents_md", scope: "", text: "z".repeat(5_000) }
+    expect(renderConventions([big], ["a.sql"], 1_000).text.length).toBeLessThanOrEqual(1_000)
     expect(renderConventions([], ["a.sql"])).toEqual({ text: "", paths: [] })
     expect(appliesTo({ scope: "", globs: ["a/**", "b/*.sql"] })).toBe("a/**, b/*.sql")
   })
@@ -224,10 +268,12 @@ describe("loadConventions over git: the base commit, never the PR's edits", () =
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
 
-  test("showAtRef + lsTreeAtRef at the merge base read the base versions and the base Cursor rules", async () => {
+  test("showAtRef + listFilesAt at the merge base read the base versions and the base Cursor rules", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "review-conventions-"))
     try {
       await fs.cp(FIXTURE, dir, { recursive: true })
+      // A rule whose name git would C-quote without -z.
+      await fs.writeFile(path.join(dir, ".cursor/rules/naïve rule.mdc"), "---\nalwaysApply: true\n---\nNon-ASCII name.\n")
       git(dir, "init", "-q", "-b", "main")
       git(dir, "add", "-A")
       git(dir, "commit", "-q", "-m", "base")
@@ -239,12 +285,19 @@ describe("loadConventions over git: the base commit, never the PR's edits", () =
       git(dir, "commit", "-q", "-m", "pr")
       const all = await loadConventions({
         readBase: (rel) => showAtRef(dir, base, rel),
-        listBase: (d) => lsTreeAtRef(dir, base, d),
+        listBase: async () => (await listFilesAt(dir, base))!,
         changedPaths: CHANGED,
       })
-      expect(all.map((c) => c.path)).toEqual((await loadFixture()).map((c) => c.path))
+      const fixturePaths = (await loadFixture()).map((c) => c.path)
+      expect(all.map((c) => c.path)).toEqual([
+        ...fixturePaths.filter((p) => p !== "CONTRIBUTING.md"),
+        ".cursor/rules/naïve rule.mdc",
+        "CONTRIBUTING.md",
+      ])
       expect(all.find((c) => c.path === "CLAUDE.md")!.text).toContain("snake_case")
       expect(all.some((c) => c.text.includes("Added by the PR"))).toBe(false)
+      // An unreadable base commit is an error, not "no conventions".
+      await expect(loadConventions({ readBase: (rel) => showAtRef(dir, "no-such-ref", rel), changedPaths: CHANGED })).rejects.toThrow()
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }

@@ -2,6 +2,7 @@ import z from "zod"
 import { createHmac, createHash } from "node:crypto"
 import { Finding, ReviewCategory, Severity, catalogRuleId, findingOrigin, normalizeRuleId } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
+import { CONVENTION_SOURCES } from "./conventions"
 
 /**
  * The verdict contract — the signed, replayable artifact that is altimate's
@@ -296,7 +297,7 @@ export const VerdictEnvelope = z.object({
         .array(
           z.object({
             path: z.string(),
-            source: z.string(),
+            source: z.enum(CONVENTION_SOURCES),
             scope: z.string(),
             globs: z.array(z.string()).optional(),
             chars: z.number().int().nonnegative(),

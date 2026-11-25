@@ -656,10 +656,11 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    The repo's own review instructions go with each call, read from the base branch
    so a PR cannot change them: `.altimate/review.md`, `REVIEW.md`, `AGENTS.md` and
    `CLAUDE.md` (at the root and in each changed path's directories),
-   `.claude/CLAUDE.md`, `.cursor/rules/*.mdc`, `.cursorrules`,
-   `.github/copilot-instructions.md`, `.coderabbit.yaml` `path_instructions` and the
-   dbt/SQL/test sections of `CONTRIBUTING.md`, most specific first, up to 3,000
-   characters per call (`ai.conventions: false` or `ALTIMATE_REVIEW_CONVENTIONS=0`
+   `.claude/CLAUDE.md`, `.cursor/rules/*.mdc` (rules with `globs` or `alwaysApply`;
+   manual rules with neither are skipped), `.cursorrules`,
+   `.github/copilot-instructions.md`, `.coderabbit.yaml` `path_instructions` and
+   `tone_instructions`, and the dbt/SQL/test sections of `CONTRIBUTING.md`, most
+   specific first, up to 3,000 characters per call (`ai.conventions: false` or `ALTIMATE_REVIEW_CONVENTIONS=0`
    turns this off).
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings

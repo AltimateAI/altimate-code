@@ -19,7 +19,6 @@ import {
   resolveCommit,
   commitParents,
   showAtRef,
-  lsTreeAtRef,
 } from "./git"
 import { makeCompiledResolver, dbtProjectName, dbtProjectLayout } from "./compiled"
 import { scopeToProject } from "./diff-filter"
@@ -480,12 +479,17 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
   // Repo review instructions come from the base commit, like the policy, so a PR cannot
-  // change the conventions it is reviewed under; only when the AI lane runs.
+  // change the conventions it is reviewed under; only when the AI lane runs. A git failure
+  // reading that commit fails the review, as it does for the policy read just before.
   const conventions =
     aiOn && aiSwitches.conventions && resolved
       ? await loadConventions({
           readBase: (rel) => showAtRef(gitRoot, resolved.sha, rel),
-          listBase: (dir) => lsTreeAtRef(gitRoot, resolved.sha, dir),
+          listBase: async () => {
+            const files = await listFilesAt(gitRoot, resolved.sha)
+            if (!files) throw new Error(`cannot list the files of the base commit ${resolved.sha} for the team conventions`)
+            return files
+          },
           changedPaths: opts.prFiles ?? collected.map((f) => f.path),
         })
       : []

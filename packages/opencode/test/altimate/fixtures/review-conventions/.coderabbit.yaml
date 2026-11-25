@@ -1,6 +1,6 @@
 language: en-US
+tone_instructions: "Be brief; name the column."
 reviews:
-  tone_instructions: "Be brief; name the column."
   path_instructions:
     - path: "models/staging/**/*.sql"
       instructions: |

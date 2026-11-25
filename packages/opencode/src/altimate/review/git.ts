@@ -173,16 +173,6 @@ export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
   }
 }
 
-/** Tracked files under the repo-relative directory `dir` at `ref`, repo-root relative (recursive); undefined when git can't list them. */
-export async function lsTreeAtRef(cwd: string, ref: string, dir: string): Promise<string[] | undefined> {
-  try {
-    const out = await git(["ls-tree", "-r", "--full-tree", "--name-only", ref, "--", `:(top)${dir.replace(/\/+$/, "")}/`], cwd)
-    return out.split("\n").filter(Boolean)
-  } catch {
-    return undefined
-  }
-}
-
 /** Every tracked file at `ref` (default HEAD), repo-root relative; undefined when git can't list it. */
 export async function listFilesAt(cwd: string, ref?: string): Promise<string[] | undefined> {
   try {
