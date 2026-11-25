@@ -59,6 +59,8 @@ function fakeAdapter(
     explain?: () => Promise<string>
     /** The table a history query renders (see `table`), or a failure to throw; the SQL it was asked is passed in. */
     history?: (jinja: string) => Promise<string>
+    /** What the boundary query (the matching statements just before the period read) renders; none by default. */
+    boundary?: (jinja: string) => Promise<string>
     /** What the dbt target renders. */
     target?: string
   } = {},
@@ -76,6 +78,8 @@ function fakeAdapter(
     unsafeCompileQuery: async (query: string, name?: string) => {
       if (query.startsWith("{%- if execute -%}{%- set altimate_rows")) {
         historyLog.push(query)
+        if (query.includes("/* run boundary */"))
+          return opts.boundary ? opts.boundary(query) : table(["session_id", "creation_time", "start_time", "end_time"], [])
         if (opts.history) return opts.history(query)
         throw new Error("no history in this test")
       }
@@ -1606,6 +1610,50 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.notes.join(" ")).toContain("Cloud-services credits")
     expect(cost.notes.join(" ")).toContain("idle time")
     expect(result.metadata).toMatchObject({ source: "explain", bytes: 1024 })
+  })
+
+  test("Snowflake: a CTAS that began before the 30-day window and its MERGE inside it is a run of unknown start, left out", async () => {
+    const edge = Date.now() - 30 * 24 * 3_600_000
+    const iso = (ms: number) => new Date(ms).toISOString()
+    useAdapter(calls, {
+      type: "snowflake",
+      explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+      history: async (jinja) =>
+        jinja.includes("rate_sheet_daily")
+          ? table(["date", "effective_rate", "currency"], [])
+          : table(SF_COLUMNS, [
+              ["m", "s1", iso(edge + 5 * 60_000), iso(edge + 5 * 60_000).slice(0, 10), iso(edge + 6 * 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"],
+            ]),
+      boundary: async () => table(["session_id", "start_time", "end_time"], [["s1", iso(edge - 20 * 60_000), iso(edge + 2 * 60_000)]]),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    const cost = result.metadata.cost
+    expect(historyLog.some((q) => q.includes("/* run boundary */"))).toBe(true)
+    expect(cost.basis).toBe("none")
+    expect(cost.runs).toBeUndefined()
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+    expect(result.metadata).toMatchObject({ source: "explain", bytes: 1024 })
+  })
+
+  test("Snowflake: a boundary query that hits its limit cannot clear a run near the cutoff", async () => {
+    const edge = Date.now() - 30 * 24 * 3_600_000
+    const iso = (ms: number) => new Date(ms).toISOString()
+    useAdapter(calls, {
+      type: "snowflake",
+      explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+      history: async (jinja) =>
+        jinja.includes("rate_sheet_daily")
+          ? table(["date", "effective_rate", "currency"], [])
+          : table(SF_COLUMNS, [
+              ["m", "s1", iso(edge + 5 * 60_000), iso(edge + 5 * 60_000).slice(0, 10), iso(edge + 6 * 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"],
+            ]),
+      // 500 statements of other sessions: none is s1's, but the list may be cut before s1's.
+      boundary: async () =>
+        table(["session_id", "start_time", "end_time"], Array.from({ length: 500 }, (_, i) => [`other${i}`, iso(edge - 60_000), iso(edge - 30_000)])),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.cost.basis).toBe("none")
+    expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
   test("Snowflake: a configured credit rate overrides the account's rate sheet", async () => {

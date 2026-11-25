@@ -28,6 +28,9 @@ import {
   sheetRates,
   countTables,
   bigqueryChildrenSql,
+  bigqueryBoundarySql,
+  snowflakeBoundarySql,
+  databricksBoundarySql,
   sqlString,
   summarize,
   type Row,
@@ -619,38 +622,129 @@ describe("rates config and the text", () => {
   })
 })
 
-describe("truncation at the statement limit", () => {
-  const many = <T,>(make: (i: number) => T) => Array.from({ length: HISTORY_LIMIT }, (_, i) => make(i))
+describe("run boundary", () => {
+  const C = 1_000 * MIN
+  const at = (min: number) => new Date(C + min * MIN).toISOString()
+  const boundary = (...stmts: { session: string | null; start: number; end: number }[]) => ({ cutoff: C, stmts })
+  const before = (session: string, startMin: number, endMin: number) => ({ session, start: C + startMin * MIN, end: C + endMin * MIN })
 
-  test("Snowflake: when the query returns its limit, the run holding the oldest statement is dropped and said so", () => {
-    // Statement i starts i hours apart, in its own session: each is a run; the oldest is index 0.
-    const rows = many((i) => sf(`q${i}`, i * 120, "1", null, "0", { session_id: `s${i}` }))
+  test("Snowflake: a CTAS before the window and its MERGE after it (fewer than 500 rows) is a run of unknown start, and is left out", () => {
+    const rows = [
+      sf("merge", 0, "1", null, "0", { session_id: "a", start_time: at(5), end_time: at(6), start_date_utc: "2026-05-02" }),
+      sf("other", 0, "2", null, "0", { session_id: "b", start_time: at(300), end_time: at(301) }),
+    ]
+    // The CTAS began 40 minutes before the window and ended 2 minutes into it: within the gap of the MERGE's start.
+    const cost = priceSnowflake(rows, "model.s.m", [], {}, boundary(before("a", -40, 2)))
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBe(6)
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+  })
+
+  test("a long CTAS in one session truncates the result for another: the run it ends beside is dropped, the rest kept", () => {
+    // 500 rows were returned, the oldest at the cutoff; session x's CTAS began before it and ended 25 minutes after.
+    const filler = Array.from({ length: HISTORY_LIMIT - 2 }, (_, i) => sf(`f${i}`, 0, "1", null, "0", { session_id: `f${i}`, start_time: at(500 + i * 120), end_time: at(501 + i * 120) }))
+    const rows = [
+      sf("oldest", 0, "1", null, "0", { session_id: "o", start_time: at(0), end_time: at(1) }),
+      sf("merge", 0, "1", null, "0", { session_id: "x", start_time: at(30), end_time: at(31) }),
+      ...filler,
+    ]
+    const cost = priceSnowflake(rows, "model.s.m", [], {}, boundary(before("x", -60, 25)))
+    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+    expect(cost.notes.join(" ")).toContain("Only the newest 500 statements were read")
+  })
+
+  test("a boundary statement of another session, or one that ended long before the run, drops nothing", () => {
+    const rows = [sf("m", 0, "1", null, "0", { session_id: "a", start_time: at(30), end_time: at(31) })]
+    expect(priceSnowflake(rows, "model.s.m", [], {}, boundary(before("b", -5, 25))).runs).toBe(1)
+    expect(priceSnowflake(rows, "model.s.m", [], {}, boundary(before("a", -5, 5))).runs).toBe(1)
+    expect(priceSnowflake(rows, "model.s.m", [], {}, boundary(before("a", -5, 25))).basis).toBe("none")
+  })
+
+  test("a boundary that could not be read drops runs starting within a day of the cutoff and keeps later ones", () => {
+    const rows = [
+      sf("near", 0, "1", null, "0", { session_id: "a", start_time: at(60), end_time: at(61) }),
+      sf("far", 0, "2", null, "0", { session_id: "b", start_time: at(3 * 24 * 60), end_time: at(3 * 24 * 60 + 1) }),
+    ]
+    const cost = priceSnowflake(rows, "model.s.m", [], {}, { cutoff: C })
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBe(6)
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+  })
+
+  test("without a boundary nothing is dropped, and a full result says only 500 statements were read", () => {
+    const rows = Array.from({ length: HISTORY_LIMIT }, (_, i) => sf(`q${i}`, i * 120, "1", null, "0", { session_id: `s${i}` }))
     const cost = priceSnowflake(rows, "model.s.m", [], {})
-    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
-    expect(cost.notes.join(" ")).toContain("Runs older than the newest 500 statements were not read")
+    expect(cost.runs).toBe(HISTORY_LIMIT)
+    expect(cost.notes.join(" ")).toContain("Only the newest 500 statements were read")
   })
 
-  test("Snowflake: below the limit nothing is dropped", () => {
-    const cost = priceSnowflake([sf("a", 0, "1"), sf("b", 200, "1", null, "0", { session_id: "o" })], "model.s.m", [], {})
-    expect(cost.runs).toBe(2)
-    expect(cost.notes.join(" ")).not.toContain("older than")
+  test("Databricks: the same boundary rule", () => {
+    const rows = [
+      dbx("m", 0, "1", "1", { session_id: "a", start_time: at(5), end_time: at(6) }),
+      dbx("o", 0, "1", "1", { session_id: "b", start_time: at(400), end_time: at(401) }),
+    ]
+    const cost = priceDatabricks(rows, "model.s.m", {}, boundary(before("a", -30, 0)))
+    expect(cost.runs).toBe(1)
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
-  test("Databricks: the oldest run of a full result is dropped", () => {
-    const rows = many((i) => dbx(`s${i}`, i * 120, "1", "1", { session_id: `s${i}` }))
-    const cost = priceDatabricks(rows, "model.s.m", {})
-    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
-    expect(cost.notes.join(" ")).toContain("Runs older than the newest 500 statements were not read")
+  test("BigQuery: a delete before the cutoff that ended within a minute of a build's start may belong to it; a build far from it is kept", () => {
+    const rows = [
+      { ...bq("near", 0, TIB), creation_time: at(0.5) },
+      { ...bq("far", 0, TIB), creation_time: at(120) },
+    ]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: null, start: C - 5 * MIN, end: C + 0.2 * MIN }))
+    expect(cost.runs).toBe(1)
+    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+    const none = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: null, start: C - 5 * MIN, end: C - 5 * MIN + 10_000 })).cost
+    expect(none.runs).toBe(2)
+  })
+})
+
+describe("boundary SQL", () => {
+  const needle = needleFor("model.shop.orders")
+
+  test("Snowflake: before the window, or before a given cutoff, ending within the ten-minute gap, same filters", () => {
+    const window = snowflakeBoundarySql(needle)
+    expect(window).toContain("/* run boundary */")
+    expect(window).toContain("q.start_time < dateadd(day, -30, current_timestamp())")
+    expect(window).toContain("q.end_time >= dateadd(second, -600, dateadd(day, -30, current_timestamp()))")
+    expect(window).toContain("q.execution_status = 'SUCCESS'")
+    expect(window).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
+    expect(window).toContain("limit 500")
+    expect(snowflakeBoundarySql(needle, 1234)).toContain("q.start_time < to_timestamp_ltz(1234, 3)")
   })
 
-  test("BigQuery: the oldest run of a full result is dropped", () => {
-    const rows = many((i) => bq(`j${i}`, i * 120, TIB))
-    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
-    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
-    expect(cost.notes.join(" ")).toContain("Runs older than the newest 500 statements were not read")
+  test("Databricks: same filters, a cutoff as a timestamp", () => {
+    const sql = databricksBoundarySql(needle, 1234)
+    expect(sql).toContain("start_time < timestamp_millis(1234)")
+    expect(sql).toContain("- interval 600 seconds")
+    expect(sql).toContain("execution_status = 'FINISHED'")
+    expect(sql).toContain("statement_type in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
+    expect(databricksBoundarySql(needle)).toContain("current_timestamp() - interval 30 days")
   })
 
-  test("BigQuery: when the children query hits its limit, a script that began before the oldest child returned is unknown", () => {
+  test("BigQuery: top-level jobs of the same view, within a minute of the cutoff", () => {
+    const sql = bigqueryBoundarySql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", cutoffMs: 99 })
+    expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
+    expect(sql).toContain("creation_time < timestamp_millis(99)")
+    expect(sql).toContain("timestamp_sub(timestamp_millis(99), interval 60 second)")
+    expect(sql).toContain("parent_job_id is null")
+    expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
+  })
+
+  test("Databricks proration multiplies in double, never BIGINT by BIGINT", () => {
+    const sql = databricksHistorySql(needle)
+    expect(sql).toContain("cast(coalesce(a.ms, 0) as double) * (least(")
+    expect(sql).toContain("cast(coalesce(q_hours.ms, 0) as double) * (least(")
+    expect(sql).toContain("/ cast(unix_micros(a.end_time) - unix_micros(a.start_time) as double)")
+    expect(sql).not.toMatch(/coalesce\((a|q_hours)\.ms, 0\) \* \(/)
+  })
+})
+
+describe("script children at their limit", () => {
+  test("a script that began before the oldest child returned is unknown, a later one is priced", () => {
     const old = bq("old", 0, null, null, 0, "SCRIPT")
     const recent = bq("recent", 1000, null, null, 0, "SCRIPT")
     const kid = (id: string, parent: string, startMin: number): Row => ({
@@ -667,48 +761,7 @@ describe("truncation at the statement limit", () => {
     // The old script has a child past the cut, but may have had more before it.
     const children = [kid("edge", "elsewhere", 500), kid("oc", "old", 700), ...Array.from({ length: BQ_CHILD_LIMIT - 2 }, (_, i) => kid(`x${i}`, "recent", 1001 + i))]
     const { cost } = priceBigquery([old, recent, bq("filler", 5000, TIB)], children, "model.s.m", {})
-    // The old script is unknown and left out; the recent one and the plain job are priced.
     expect(cost.runs).toBe(2)
     expect(cost.notes.join(" ")).toContain("1 run left out")
-  })
-})
-
-describe("truncation cutoff across sessions", () => {
-  const rowsWith = (extra: Row[]) => [
-    sf("oldest", 0, "1", null, "0", { session_id: "a" }),
-    ...Array.from({ length: HISTORY_LIMIT - 1 - extra.length }, (_, i) => sf(`q${i}`, 1000 + i * 120, "1", null, "0", { session_id: `s${i}` })),
-    ...extra,
-  ]
-
-  test("Snowflake: a run in another session that starts within ten minutes of the cutoff is dropped too, and counted", () => {
-    const near = sf("near", 5, "1", null, "0", { session_id: "b" })
-    const far = sf("far", 30, "1", null, "0", { session_id: "c" })
-    const cost = priceSnowflake(rowsWith([near, far]), "model.s.m", [], {})
-    // Dropped: "oldest" (minute 0) and "near" (minute 5); kept: "far" and the others.
-    expect(cost.runs).toBe(HISTORY_LIMIT - 2)
-    expect(cost.notes.join(" ")).toContain("(2 runs near the cutoff left out)")
-  })
-
-  test("Databricks: the same cutoff applies", () => {
-    const rows = [
-      dbx("oldest", 0, "1", "1", { session_id: "a" }),
-      dbx("near", 9, "1", "1", { session_id: "b" }),
-      ...Array.from({ length: HISTORY_LIMIT - 2 }, (_, i) => dbx(`q${i}`, 1000 + i * 120, "1", "1", { session_id: `s${i}` })),
-    ]
-    const cost = priceDatabricks(rows, "model.s.m", {})
-    expect(cost.runs).toBe(HISTORY_LIMIT - 2)
-    expect(cost.notes.join(" ")).toContain("(2 runs near the cutoff left out)")
-  })
-
-  test("BigQuery: a build job within a minute of the cutoff is dropped, one beyond it is kept", () => {
-    const rows = [
-      bq("oldest", 0, TIB),
-      { ...bq("near", 0, TIB), creation_time: new Date(30_000).toISOString() },
-      { ...bq("far", 0, TIB), creation_time: new Date(5 * MIN).toISOString() },
-      ...Array.from({ length: HISTORY_LIMIT - 3 }, (_, i) => bq(`q${i}`, 1000 + i * 120, TIB)),
-    ]
-    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
-    expect(cost.runs).toBe(HISTORY_LIMIT - 2)
-    expect(cost.notes.join(" ")).toContain("(2 runs near the cutoff left out)")
   })
 })
