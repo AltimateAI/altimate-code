@@ -423,6 +423,27 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         )
 
         test(
+          "on a stale manifest, parents answer from the last successful parse and mark no model external",
+          () => {
+            // As for children: the renamed profile fails the project check, and the answer comes from
+            // the manifest the build left.
+            const profiles = join(workDir, "profiles.yml")
+            const original = readFileSync(profiles, "utf-8")
+            writeFileSync(profiles, original.replace(/^test_jaffle_shop:/m, "test_jaffle_shop_renamed:"))
+            try {
+              const out = altDbt(version.pythonPath, workDir, ["parents", "--model", "customers"])
+              expect(out.stale_manifest).toBeDefined()
+              const labels = (out.models ?? []).map((m: { label: string }) => m.label)
+              expect(labels).toContain("stg_customers")
+              expect(out.models.every((m: { isExternalProject: boolean }) => m.isExternalProject === false)).toBe(true)
+            } finally {
+              writeFileSync(profiles, original)
+            }
+          },
+          TEST_TIMEOUT,
+        )
+
+        test(
           "dbt ls lists models",
           () => {
             const out = dbt(version, workDir, [

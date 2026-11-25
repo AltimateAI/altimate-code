@@ -60,6 +60,8 @@ let dbtAdapterInflight: Promise<any | null> | undefined
 let dbtProjectRoot: string | null = null
 /** The Python the cached attempt runs dbt with; null when it found no config. */
 let dbtPythonPath: string | null = null
+/** The dbt-integration mode (`dbtIntegration`) the cached attempt read; null when it found no config or none was set. */
+let dbtIntegrationMode: string | null = null
 
 /** Test seams for the single-flight. Production leaves `readConfig` unset. */
 export const dbtAdapterInternals: {
@@ -113,6 +115,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
       if (dbtAdapterInflight === mine) {
         dbtProjectRoot = typeof dbtConfig?.projectRoot === "string" ? dbtConfig.projectRoot : null
         dbtPythonPath = typeof dbtConfig?.pythonPath === "string" ? dbtConfig.pythonPath : null
+        dbtIntegrationMode = typeof dbtConfig?.dbtIntegration === "string" ? dbtConfig.dbtIntegration : null
       }
       if (!dbtConfig) return publish(null)
 
@@ -346,6 +349,11 @@ export function getDbtPythonPath(): string | undefined {
   return dbtPythonPath ?? undefined
 }
 
+/** The dbt-integration mode the dbt adapter was started in, once an attempt has read the dbt config. */
+export function getDbtIntegration(): string | undefined {
+  return dbtIntegrationMode ?? undefined
+}
+
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
@@ -357,6 +365,7 @@ export function resetDbtAdapter(): void {
   dbtAdapterInternals.writes = 0
   dbtProjectRoot = null
   dbtPythonPath = null
+  dbtIntegrationMode = null
 }
 
 // ---------------------------------------------------------------------------

@@ -88,6 +88,19 @@ describe("prerequisites in dbt Fusion mode", () => {
     )
   })
 
+  test("name no interpreter's folder for a bare command name, which the lookup skips", async () => {
+    fusionBinary.find = async () => undefined
+
+    for (const pythonPath of ["python3", "python"]) {
+      const issue = await validate(config({ pythonPath }))
+      expect(issue).toContain("fusion: dbt Fusion was not found: no dbt 2.x binary in ~/.local/bin or on PATH")
+    }
+    // A relative path has a folder, which the lookup does search.
+    expect(await validate(config({ pythonPath: ".venv/bin/python" }))).toContain(
+      "no dbt 2.x binary next to .venv/bin/python, in ~/.local/bin or on PATH",
+    )
+  })
+
   test("still require the project", async () => {
     fusionBinary.find = async () => FUSION
 
@@ -101,7 +114,8 @@ describe("prerequisites in dbt Fusion mode", () => {
 // The real lookup, through the CLI in its own process: another test file here mocks
 // `child_process`, and bun's module mocks reach every file of the run. A stand-in `dbt` is the
 // only thing on PATH. The lookup always tries ~/.local/bin/dbt first (Bun ignores HOME for that),
-// so the rejection test can't run where that is a real Fusion.
+// so neither test can run where that is a real Fusion: the lookup would stop there, before the
+// stand-in.
 function realFusionInLocalBin(): boolean {
   const dbt = join(homedir(), ".local", "bin", "dbt")
   if (!existsSync(dbt)) return false
@@ -125,15 +139,18 @@ describe.skipIf(process.platform === "win32")("the Fusion lookup, run by `altima
       mode: 0o755,
     })
     mkdirSync(join(home, ".altimate-code"))
-    writeFileSync(
-      join(home, ".altimate-code", "dbt.json"),
-      JSON.stringify({ projectRoot: project(), dbtIntegration: "fusion", queryLimit: 500 }),
-    )
+    // A Fusion-only user's config, which has no pythonPath key at all.
+    const cfg: Partial<Config> = config({})
+    delete cfg.pythonPath
+    writeFileSync(join(home, ".altimate-code", "dbt.json"), JSON.stringify(cfg))
     const result = Bun.spawnSync([process.execPath, entry, "doctor"], { env: { HOME: home, PATH: bin } })
+    // `doctor` exits 0 whether the checks pass or not, so anything else is a crash: say what it printed.
+    if (result.exitCode !== 0)
+      throw new Error(`doctor exited ${result.exitCode}:\n${result.stdout.toString()}${result.stderr.toString()}`)
     return JSON.parse(result.stdout.toString())
   }
 
-  test("accepts a Fusion behind a script launcher that reports 2.x", () => {
+  test.skipIf(realFusionInLocalBin())("accepts a Fusion behind a script launcher that reports 2.x", () => {
     const report = doctorWith("dbt 2.0.9")
 
     expect(report.passed).toBe(true)

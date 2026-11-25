@@ -8,7 +8,7 @@ import { failureLines } from "./failure-text"
 const USAGE = {
   commands: {
     init: "Auto-detect dbt project and write config",
-    doctor: "Check prerequisites (Python, dbt, project)",
+    doctor: "Check prerequisites: Python, dbt-core and the project, or in Fusion mode the dbt Fusion binary and the project",
     info: "Get project info (paths, targets, version)",
     compile: "Compile a model (Jinja to SQL) --model <name>",
     "compile-query": "Compile a raw query --query <sql> [--model <name>]",
@@ -138,9 +138,9 @@ async function main() {
   const issue = await validate(cfg)
   if (issue) return { error: issue }
 
-  // Configure CLI fallbacks with the project's Python environment
+  // Configure CLI fallbacks with the project's Python environment, or its dbt Fusion
   const { configure } = await import("./dbt-cli")
-  configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
+  configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot, dbtIntegration: cfg.dbtIntegration })
 
   // Lazy import: the adapter loads dbt-integration, which commands above don't need
   let adapter
