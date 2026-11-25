@@ -2995,6 +2995,28 @@ describe("orchestrate", () => {
     expect(env.summary.degraded).toBe(false)
   })
 
+  test("a run with nothing reviewable approves without findings or the lint-only banner", async () => {
+    // Only non-dbt files changed: nothing reaches a lane, nothing resolves
+    // against a manifest, and that is not a lint-only run.
+    const env = await runReview({
+      changedFiles: [
+        { path: "README.md", status: "modified", diff: "+docs\n" },
+        { path: ".github/workflows/ci.yml", status: "modified", diff: "+on: push\n" },
+      ],
+      config: DEFAULT_REVIEW_CONFIG,
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+    })
+    expect(env.findings).toEqual([])
+    expect(env.verdict).toBe("APPROVE")
+    expect(env.summary.degraded).toBe(false)
+    const md = renderSummary(env)
+    expect(md).not.toContain("Lint-only run")
+    expect(md).toContain("No issues found")
+  })
+
   test("manifest availability errors degrade safely instead of aborting the review", async () => {
     const files: ChangedFile[] = [{ path: "models/staging/stg_x.sql", status: "modified", diff: "+select 1\n" }]
     const runner: ReviewRunner = {

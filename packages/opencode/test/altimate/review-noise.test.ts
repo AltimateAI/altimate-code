@@ -70,6 +70,14 @@ describe("inline anchors", () => {
     expect([...commentableLines(d)].sort()).toEqual([1, 2])
   })
 
+  test("a deleted file has no commentable line; a pure rename without a patch has none either", () => {
+    const deleted = "diff --git a/models/old.sql b/models/old.sql\n--- a/models/old.sql\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-select\n-  id\n-from src\n"
+    expect(commentableLines(deleted).size).toBe(0)
+    expect(commentableLines("@@ -1,3 +0,0 @@\n-select\n-  id\n-from src").size).toBe(0)
+    // GitHub lists a pure rename with no `patch` field.
+    expect(commentableLines(undefined).size).toBe(0)
+  })
+
   test("a line outside the diff is not posted inline but keeps its location in the envelope", () => {
     const inDiff = finding({ startLine: 3, endLine: 3, title: "m: a" })
     const outside = finding({ startLine: 40, endLine: 40, title: "m: b" })
@@ -560,6 +568,27 @@ describe("postGitHubReview", () => {
     const own = fakeOcto({ reviewComments: [{ body: first.body, user: { login: BOT } }] })
     const again = await postGitHubReview(env, target, own.octo)
     expect(again.inlineSkippedAsPosted).toBe(1)
+  })
+
+  test("a deleted file gets no inline comment; a pure rename without a patch keeps its comments", async () => {
+    const env = buildEnvelope({
+      findings: [
+        finding({ file: "models/old.sql", model: "old", startLine: 2, title: "old: a" }),
+        finding({ file: "models/renamed.sql", model: "renamed", startLine: 5, title: "renamed: b" }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    const { octo, reviewCalls } = fakeOcto({
+      files: [
+        { filename: "models/old.sql", patch: "@@ -1,3 +0,0 @@\n-select\n-  id\n-from src" },
+        { filename: "models/renamed.sql" },
+      ],
+    })
+    await postGitHubReview(env, target, octo)
+    expect(reviewCalls[0].comments.map((c: { path: string; line: number }) => `${c.path}:${c.line}`)).toEqual([
+      "models/renamed.sql:5",
+    ])
   })
 
   test("when listing fails, everything is posted and nothing is skipped", async () => {
