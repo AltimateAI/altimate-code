@@ -215,7 +215,13 @@ describe("the Databricks history SQL, executed", () => {
 
   test("an hour whose DBUs are all priced is known at list price, whatever other hours do", () => {
     const stmt = [{ id: "x", start: at(100, 10), end: at(100, 20), ms: 10 }]
-    const out = run(stmt, [{ hour: 100, dbus: 10 }, { hour: 100, dbus: 5 }], { def: 0.7, eff: null }, false)
+    // Hour 101 has DBUs of a SKU with no list price, and no statement of the model runs in it.
+    const bill = [
+      { hour: 100, dbus: 10 },
+      { hour: 100, dbus: 5 },
+      { hour: 101, dbus: 40, sku: "unlisted" },
+    ]
+    const out = run(stmt, bill, { def: 0.7, eff: null }, false)
     expect(out.x.missing_hours).toBe(0)
     expect(out.x.usd).toBeCloseTo(15 * 0.7, 9)
   })
