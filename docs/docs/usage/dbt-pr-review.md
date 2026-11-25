@@ -680,17 +680,17 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    list of rule ids). With the verifier on, the rule findings that would be posted
    are verified too and refuted ones are dropped (`ai.verifyRules: false` or
    `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`). Then a rule finding is not posted when
-   the verifier could not check it and it is a warning or critical, or when its
-   type is one of 7 noisy types and the verifier did not confirm it
-   (`ai.rulePolicy: false` or `ALTIMATE_REVIEW_RULE_POLICY=0`). If the rule
-   verifier did not run, every rule finding is posted as before. The envelope
-   counts what each step dropped (`rulesOff`, `rulesRefuted`, `rulePolicy`).
+   the verifier could not check it and it is a warning, or when its type is one
+   of 7 noisy types and the verifier did not confirm it (`ai.rulePolicy: false`
+   or `ALTIMATE_REVIEW_RULE_POLICY=0`). Critical rule findings are never dropped
+   by the verifier or the policy. If the rule verifier did not run, every rule
+   finding is posted as before. The envelope counts what each step dropped (`rulesOff`, `rulesRefuted`, `rulePolicy`).
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →
    `APPROVE`. Only layer-1 findings reach `critical`, so only the engine can
-   block (with the AI lane on, a critical rule finding the rule verifier refuted
-   or could not check is not posted and does not block). In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   block (the rule verifier and the rule-post policy never drop a critical rule
+   finding). In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.

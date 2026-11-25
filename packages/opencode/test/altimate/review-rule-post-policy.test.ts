@@ -15,7 +15,8 @@ import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
 import type { AiLaneStatus, AiReviewInput } from "../../src/altimate/review/ai-review"
 
 // The rule-post policy: after rule types off and refuted rule findings, a rule finding is not
-// posted when its verdict is unverifiable at warning/critical, or its type is noisy and not confirmed.
+// posted when its verdict is unverifiable at warning, or its type is noisy and not confirmed.
+// Critical rule findings are never dropped by the policy or the refuted filter.
 
 const NOISY = NOISY_RULE_TYPES[0]
 
@@ -46,13 +47,25 @@ function ai(n: number, severity: Severity, r = ruleId("ai-review", "sql_correctn
 const verdicts = (pairs: Array<[Finding, RuleVerdictValue | null]>) => new Map(pairs.map(([f, v]) => [f.id, v] as const))
 
 describe("dropByRulePolicy", () => {
-  test("condition 1: unverifiable at warning or critical is dropped; at suggestion it stays", () => {
+  test("condition 1: unverifiable at warning is dropped; at suggestion it stays", () => {
     const w = rule(1, "warning")
-    const c = rule(2, "critical")
     const s = rule(3, "suggestion")
-    const r = dropByRulePolicy([w, c, s], verdicts([[w, "unverifiable"], [c, "unverifiable"], [s, "unverifiable"]]))
+    const r = dropByRulePolicy([w, s], verdicts([[w, "unverifiable"], [s, "unverifiable"]]))
     expect(r.kept).toEqual([s])
-    expect(r.dropped).toEqual({ unverifiable_high_sev: 2, noisy_type_not_confirmed: 0 })
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 1, noisy_type_not_confirmed: 0 })
+  })
+
+  test("critical rule findings are always kept: unverifiable, no verdict, or a noisy type not confirmed", () => {
+    const unverifiable = rule(1, "critical")
+    const none = rule(2, "critical")
+    const noisy = rule(3, "critical", NOISY)
+    const warning = rule(4, "warning")
+    const r = dropByRulePolicy(
+      [unverifiable, none, noisy, warning],
+      verdicts([[unverifiable, "unverifiable"], [noisy, "refuted"], [warning, "unverifiable"]]),
+    )
+    expect(r.kept).toEqual([unverifiable, none, noisy])
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 1, noisy_type_not_confirmed: 0 })
   })
 
   test("condition 2: a noisy type stays only when confirmed", () => {
@@ -150,6 +163,19 @@ const runner: ReviewRunner = {
     return { columns: [] }
   },
 } as ReviewRunner
+// Adds an error-severity contract issue: a critical rule finding.
+const critRunner: ReviewRunner = {
+  ...runner,
+  async check() {
+    return {
+      issues: [
+        { rule: "ambiguous-column", severity: "error", category: "correctness", message: "ambiguous column status", line: 3 },
+        { rule: "contract-column-dropped", severity: "error", category: "contract", message: "contract column dropped", line: 2 },
+      ],
+      ran: true,
+    }
+  },
+} as ReviewRunner
 const SQL = "select *\nfrom raw.orders\nwhere status = 'x'\norder by 1"
 const aiFinding = makeFinding({
   severity: "warning",
@@ -174,6 +200,7 @@ interface RunOpts {
   policy?: boolean
   rulesOff?: Set<string>
   ai?: boolean
+  runner?: ReviewRunner
 }
 
 function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
@@ -182,7 +209,7 @@ function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
     config: { ...DEFAULT_REVIEW_CONFIG },
     rubric: DEFAULT_RUBRIC,
     mode: "comment",
-    runner,
+    runner: o.runner ?? runner,
     forceTier: "full",
     aiVerify: true,
     aiSwitches: o.switches ?? { verifyRules: true, rulePolicy: true },
@@ -303,6 +330,31 @@ describe("orchestrator: rule-post policy", () => {
     const sent = seen[0].verifyRulesAfter!
     const expected = sent.slice(1).filter((f) => f.severity !== "suggestion").length
     expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(expected)
+  })
+
+  test("a critical rule finding the verifier could not check is posted; the warning one is not", async () => {
+    const seen: AiReviewInput[] = []
+    const env = await run({ runner: critRunner, verdictAt: () => "unverifiable" }, seen)
+    const sent = seen[0].verifyRulesAfter!
+    const crit = sent.filter((f) => f.severity === "critical")
+    const warn = sent.filter((f) => f.severity === "warning")
+    expect(crit.length).toBe(1)
+    expect(warn.length).toBeGreaterThan(0)
+    expect(env.findings.some((f) => f.id === crit[0].id)).toBe(true)
+    expect(env.findings.some((f) => warn.some((w) => w.id === f.id))).toBe(false)
+    expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(warn.length)
+  })
+
+  test("a critical rule finding the verifier refuted is posted; a refuted warning one is not", async () => {
+    const seen: AiReviewInput[] = []
+    const env = await run({ runner: critRunner, verdictAt: () => "refuted" }, seen)
+    const sent = seen[0].verifyRulesAfter!
+    const crit = sent.filter((f) => f.severity === "critical")
+    const rest = sent.filter((f) => f.severity !== "critical")
+    expect(crit.length).toBe(1)
+    expect(env.findings.some((f) => f.id === crit[0].id)).toBe(true)
+    expect(env.findings.some((f) => rest.some((w) => w.id === f.id))).toBe(false)
+    expect(env.rulesRefuted).toBe(rest.length)
   })
 
   test("policy off (switch or no policy given): only refuted findings are dropped", async () => {

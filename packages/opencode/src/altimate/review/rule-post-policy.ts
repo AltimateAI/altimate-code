@@ -1,10 +1,11 @@
 // altimate_change - new file: which verified rule findings are posted
 //
 // After the rule types off and the refuted rule findings are dropped, a rule finding is not
-// posted when (1) the verifier's verdict on it is `unverifiable` and its severity is warning
-// or critical, or (2) its rule type is on the noisy list and the verdict is not `confirmed`.
-// A finding with no verdict counts as unverifiable. AI findings are never touched. The
-// caller skips the policy when the rule verifier did not run (fail-open).
+// posted when (1) the verifier's verdict on it is `unverifiable` and its severity is warning,
+// or (2) its rule type is on the noisy list and the verdict is not `confirmed`. A finding with
+// no verdict counts as unverifiable. AI findings and critical rule findings are never touched:
+// a critical rule finding is always posted. The caller skips the policy when the rule
+// verifier did not run (fail-open).
 import { type Finding, findingOrigin } from "./finding"
 
 /** Rule types at least 30% wrong over at least 3 posted findings when judged on replayed public dbt PRs. */
@@ -37,9 +38,9 @@ export function rulePolicyDrop(
   verdict: RuleVerdictValue | null | undefined,
   policy: RulePostPolicy,
 ): keyof RulePolicyDrops | undefined {
-  if (findingOrigin(f) === "ai") return undefined
+  if (findingOrigin(f) === "ai" || f.severity === "critical") return undefined
   const v = verdict ?? "unverifiable"
-  if (v === "unverifiable" && (f.severity === "warning" || f.severity === "critical")) return "unverifiable_high_sev"
+  if (v === "unverifiable" && f.severity === "warning") return "unverifiable_high_sev"
   if (f.rule && policy.noisyRules.includes(f.rule) && v !== "confirmed") return "noisy_type_not_confirmed"
   return undefined
 }

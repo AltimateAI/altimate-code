@@ -2871,13 +2871,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Rule noise, only when the AI lane runs: rule types off, then rule findings the verifier
   // refuted, then the rule-post policy. A finding not posted does not count toward the verdict
   // either; an unmerged instance takes the verdict of its merged group. AI findings are never
-  // dropped.
+  // dropped by these steps, and neither verifier step drops a critical rule finding.
   const rulesOff = aiLaneOn ? input.rulesOff : undefined
   const off = dropRulesOff(findings, rulesOff)
   findings = off.kept
   verdictFindings = dropRulesOff(verdictFindings, rulesOff).kept
   const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
-  const refuted = (f: Finding) => findingOrigin(f) !== "ai" && verdictOf(f) === "refuted"
+  const refuted = (f: Finding) => findingOrigin(f) !== "ai" && f.severity !== "critical" && verdictOf(f) === "refuted"
   const rulesRefuted = ruleVerifyAttempted ? findings.filter(refuted).length : undefined
   if (ruleVerdicts.size) {
     findings = findings.filter((f) => !refuted(f))
