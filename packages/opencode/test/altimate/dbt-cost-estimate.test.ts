@@ -1606,7 +1606,8 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.lastRun).toBeCloseTo(0.35 * 2.5, 10)
     expect(cost.native).toMatchObject({ unit: "credits" })
     expect(cost.native.lastRun).toBeCloseTo(0.35, 10)
-    expect(cost.rate).toEqual({ value: 2.5, unit: "EUR/credit", source: "account" })
+    expect(cost.rate).toEqual({ value: 2.5, unit: "EUR/credit", source: "account", detail: "contract" })
+    expect(cost.notes.join(" ")).toContain("Contract rate; overage not reflected.")
     expect(cost.notes.join(" ")).toContain("Cloud-services credits")
     expect(cost.notes.join(" ")).toContain("idle time")
     expect(result.metadata).toMatchObject({ source: "explain", bytes: 1024 })
@@ -1654,6 +1655,26 @@ describe("dbt_cost_estimate cost", () => {
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata.cost.basis).toBe("none")
     expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+  })
+
+  test("Snowflake: the billed rate (contract plus overage) is used when the billing view can be read, and beats the contract rate sheet", async () => {
+    useAdapter(calls, {
+      type: "snowflake",
+      explain: async () => '[{"GlobalStats":{"bytesAssigned":1024}}]',
+      history: async (jinja) =>
+        jinja.includes("usage_in_currency_daily")
+          ? table(["usage_date", "rate", "currency", "currencies"], [["2026-05-02", "4.0", "USD", "1"]])
+          : jinja.includes("rate_sheet_daily")
+            ? table(["date", "effective_rate", "currency"], [["2026-05-02", "2.0", "USD"]])
+            : table(SF_COLUMNS, [
+                ["q1", "s1", "2026-05-02 10:00:00.000", "2026-05-02", "2026-05-02 10:01:00.000", "9000", "MERGE", "W", "XS", "1", null, "0"],
+              ]),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    const cost = result.metadata.cost
+    expect(cost.lastRun).toBe(4)
+    expect(cost.rate).toEqual({ value: 4, unit: "USD/credit", source: "account", detail: "billed" })
+    expect(result.output).toContain("from your account (billed)")
   })
 
   test("Snowflake: a configured credit rate overrides the account's rate sheet", async () => {

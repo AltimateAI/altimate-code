@@ -23,6 +23,9 @@ import {
   resolveModel,
   rowsJinja,
   SNOWFLAKE_RATE_SQL,
+  SNOWFLAKE_BILLED_RATE_SQL,
+  billedRates,
+  type SheetRate,
   snowflakeHistorySql,
   snowflakeRateFor,
   sheetRates,
@@ -496,7 +499,8 @@ describe("Snowflake pricing", () => {
     expect(cost.lastRun).toBe(4)
     expect(cost.highest).toBe(4)
     expect(cost.typical).toBe(3)
-    expect(cost.rate).toEqual({ value: 4, unit: "EUR/credit", source: "account" })
+    expect(cost.rate).toEqual({ value: 4, unit: "EUR/credit", source: "account", detail: "contract" })
+    expect(cost.notes.join(" ")).toContain("Contract rate; overage not reflected.")
   })
 
   test("the day is the statement's UTC date, never a slice of a local timestamp", () => {
@@ -530,9 +534,44 @@ describe("Snowflake pricing", () => {
     expect(fallback.note).toContain("cost.snowflakeUsdPerCredit")
   })
 
+  const billed = (date: string, value: number, extra: Partial<SheetRate> = {}): SheetRate => ({ date, value, currency: "USD", detail: "billed", ...extra })
+
+  test("a day's billed rate is the blended contract and overage rate, so a statement costs what its day was billed", () => {
+    // Day 1 had overage: 100 credits at 2 and 100 at 4 is a blended 3 per credit.
+    const rows: Row[] = [{ usage_date: "1970-01-01", rate: "3", currency: "USD", currencies: "1" }]
+    expect(billedRates(rows)).toEqual([billed("1970-01-01", 3, { mixed: false })])
+    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", billedRates(rows), {})
+    expect(cost.lastRun).toBe(30)
+    expect(cost.rate).toEqual({ value: 3, unit: "USD/credit", source: "account", detail: "billed" })
+    expect(cost.notes.join(" ")).not.toContain("Contract rate")
+  })
+
+  test("a day billed in more than one currency leaves its statements unknown", () => {
+    const sheet = [billed("1970-01-01", 3, { mixed: true })]
+    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", sheet, {})
+    expect(cost.basis).toBe("none")
+  })
+
+  test("a statement newer than the last billed day uses the latest billed rate and says so", () => {
+    const sheet = [billed("1970-01-01", 3), billed("1970-01-02", 5)]
+    const cost = priceSnowflake([sf("a", 4 * 24 * 60, "1")], "model.s.m", sheet, {})
+    expect(cost.lastRun).toBe(5)
+    expect(cost.notes.join(" ")).toContain("Recent runs priced at the latest billed rate (1970-01-02)")
+    const inside = priceSnowflake([sf("a", 0, "1")], "model.s.m", sheet, {})
+    expect(inside.notes.join(" ")).not.toContain("Recent runs priced")
+  })
+
+  test("the billed rate query reads the blended compute and overage usage by day", () => {
+    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("sum(usage_in_currency) / nullif(sum(usage), 0) as rate")
+    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("snowflake.organization_usage.usage_in_currency_daily")
+    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("usage_type in ('compute', 'overage-compute')")
+    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("count(distinct currency) as currencies")
+    expect(SNOWFLAKE_BILLED_RATE_SQL).toContain("group by usage_date")
+  })
+
   test("rate sheet rows are read by date, positive rates only", () => {
     expect(sheetRates([{ date: "2026-05-02 00:00:00", effective_rate: "2.5", currency: "EUR" }, { date: "2026-05-01", effective_rate: "0", currency: "EUR" }])).toEqual([
-      { date: "2026-05-02", value: 2.5, currency: "EUR" },
+      { date: "2026-05-02", value: 2.5, currency: "EUR", detail: "contract" },
     ])
   })
 })

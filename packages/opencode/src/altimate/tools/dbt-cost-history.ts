@@ -28,7 +28,13 @@ export type CostConfig = {
 
 export const DEFAULT_RATES = { bigqueryUsdPerTib: 6.25, bigquerySlotHourUsd: 0.06, snowflakeUsdPerCredit: 3 }
 
-export type CostRate = { value: number; unit: string; source: "account" | "list_price" | "config" | "default" }
+export type CostRate = {
+  value: number
+  unit: string
+  source: "account" | "list_price" | "config" | "default"
+  /** For `account`: the blended rate actually billed (contract plus overage), or the contract rate alone. */
+  detail?: "billed" | "contract"
+}
 export type NativeUnit = "bytes_billed" | "slot_hours" | "credits" | "dbus"
 
 export type CostInfo = {
@@ -246,7 +252,18 @@ where creation_time < ${c} and creation_time > timestamp_sub(${c}, interval ${BO
 order by creation_time desc limit ${HISTORY_LIMIT}`
 }
 
-/** The account's compute rate for each day of the window, so a statement is priced at the rate of its own day. */
+/**
+ * The account's blended rate actually billed for each day (contract and overage compute together), so a statement is
+ * priced at what its day cost. The view lags up to about three days. A day billed in more than one currency has no single rate.
+ */
+export const SNOWFLAKE_BILLED_RATE_SQL = `select usage_date, sum(usage_in_currency) / nullif(sum(usage), 0) as rate, max(currency) as currency, count(distinct currency) as currencies
+from snowflake.organization_usage.usage_in_currency_daily
+where account_locator = current_account() and usage_type in ('compute', 'overage-compute')
+  and usage_date >= dateadd(day, -${HISTORY_DAYS + 1}, to_date(convert_timezone('UTC', current_timestamp())))
+group by usage_date
+order by usage_date`
+
+/** The contract rate for each day of the window: the fallback when the billed rates can't be read; it leaves out overage. */
 export const SNOWFLAKE_RATE_SQL = `select date, effective_rate, currency from snowflake.organization_usage.rate_sheet_daily
 where account_locator = current_account() and usage_type = 'compute' and service_type = 'WAREHOUSE_METERING'
   and date > dateadd(day, -${HISTORY_DAYS + 1}, current_date())
@@ -598,22 +615,54 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
 }
 
 /** A day's account rate. */
-export type SheetRate = { date: string; value: number; currency: string }
+export type SheetRate = { date: string; value: number; currency: string; detail?: "billed" | "contract"; mixed?: boolean }
 
+/** The contract rates (`rate_sheet_daily`). */
 export function sheetRates(rows: Row[]): SheetRate[] {
   return rows
-    .map((r) => ({ date: (r.date ?? "").slice(0, 10), value: num(r.effective_rate) ?? Number.NaN, currency: r.currency || "USD" }))
+    .map((r): SheetRate => ({ date: (r.date ?? "").slice(0, 10), value: num(r.effective_rate) ?? Number.NaN, currency: r.currency || "USD", detail: "contract" }))
     .filter((r) => r.date && r.value > 0)
     .sort((a, b) => (a.date < b.date ? -1 : 1))
 }
 
-/** The rate a Snowflake statement is priced at: a configured rate, else the account's rate for its day (or the nearest earlier day), else the default. */
-export function snowflakeRateFor(day: string, sheet: SheetRate[], cfg: CostConfig): { rate: CostRate; currency: string; note?: string } {
+/** The blended billed rates (`usage_in_currency_daily`); a day in more than one currency is `mixed`. */
+export function billedRates(rows: Row[]): SheetRate[] {
+  return rows
+    .map((r): SheetRate => ({
+      date: (r.usage_date ?? "").slice(0, 10),
+      value: num(r.rate) ?? Number.NaN,
+      currency: r.currency || "USD",
+      detail: "billed",
+      mixed: (num(r.currencies) ?? 1) > 1,
+    }))
+    .filter((r) => r.date && (r.mixed || r.value > 0))
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+}
+
+/**
+ * The rate a Snowflake statement is priced at: a configured rate, else the account's rate for its day (or the nearest
+ * earlier day), else the default. `stale` is set when a billed day has no row yet and the latest one is used.
+ */
+export function snowflakeRateFor(
+  day: string,
+  sheet: SheetRate[],
+  cfg: CostConfig,
+): { rate: CostRate; currency: string; note?: string; mixed?: boolean; stale?: string; contract?: boolean } {
   if (cfg.snowflakeUsdPerCredit !== undefined)
     return { rate: { value: cfg.snowflakeUsdPerCredit, unit: "USD/credit", source: "config" }, currency: "USD" }
   let found: SheetRate | undefined
   for (const r of sheet) if (r.date <= day) found = r
-  if (found) return { rate: { value: found.value, unit: `${found.currency}/credit`, source: "account" }, currency: found.currency }
+  if (found) {
+    const detail = found.detail ?? "contract"
+    const last = sheet[sheet.length - 1]
+    return {
+      rate: { value: found.value, unit: `${found.currency}/credit`, source: "account", detail },
+      currency: found.currency,
+      mixed: found.mixed,
+      stale: detail === "billed" && day > last.date ? found.date : undefined,
+      contract: detail === "contract",
+    }
+  }
   const fallback = rateOf(undefined, DEFAULT_RATES.snowflakeUsdPerCredit, "USD/credit", "snowflakeUsdPerCredit")
   return { rate: fallback.rate, currency: "USD", note: fallback.note }
 }
@@ -626,18 +675,23 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
   if (!rows.length) return none(emptyMessage(uniqueId, table), [], "USD", snowflakeRateFor("9999-12-31", sheet, cfg).rate)
   let cloud = 0
   const defaults = new Set<string>()
+  let stale: string | undefined
+  let contract = false
   let newest: { start: number; rate: CostRate; currency: string } | undefined
   const stmts: Stmt[] = rows.map((r) => {
     const compute = num(r.credits_attributed_compute)
     const credits = (compute ?? 0) + (num(r.credits_used_query_acceleration) ?? 0)
     cloud += num(r.credits_used_cloud_services) ?? 0
-    const { rate, currency, note } = snowflakeRateFor(r.start_date_utc ?? "", sheet, cfg)
+    const { rate, currency, note, mixed, stale: late, contract: fromContract } = snowflakeRateFor(r.start_date_utc ?? "", sheet, cfg)
     if (note) defaults.add(note)
+    if (late && (!stale || late > stale)) stale = late
+    if (fromContract) contract = true
     const start = parseTime(r.start_time)
     if (!newest || start > newest.start) newest = { start, rate, currency }
     // An unattributed statement is a zero only when it was too short for Snowflake to attribute; otherwise it is still pending.
     const execution = num(r.execution_time)
-    const known = compute !== undefined || (execution !== undefined && execution < SF_UNATTRIBUTED_MS)
+    // A day billed in more than one currency has no single rate: its statements cannot be priced.
+    const known = !mixed && (compute !== undefined || (execution !== undefined && execution < SF_UNATTRIBUTED_MS))
     return { start, end: parseTime(r.end_time), cost: credits * rate.value, native: credits, known, session: r.session_id, currency }
   })
   const truncated = rows.length >= HISTORY_LIMIT
@@ -650,11 +704,13 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
       `Cloud-services credits (${Number(cloud.toFixed(4))} over these statements) are not added: Snowflake bills them only above 10% of the day's compute.`,
     )
   notes.push(...defaults)
+  if (contract) notes.push("Contract rate; overage not reflected.")
+  if (stale) notes.push(`Recent runs priced at the latest billed rate (${stale}): Snowflake's billing view lags up to three days.`)
   if (truncated) notes.push(LIMIT_NOTE)
   if (dropped) notes.push(boundaryNote(dropped))
   if (skipped)
     notes.push(
-      `${plural(skipped, "run")} left out: pending attribution (Snowflake lands it up to 8 hours late) or priced in more than one currency.`,
+      `${plural(skipped, "run")} left out: pending attribution (Snowflake lands it up to 8 hours late), or on a day billed in more than one currency.`,
     )
   const sameCurrency = runs.filter((r) => r.currency === currency)
   if (sameCurrency.length < runs.length) notes.push(`Runs priced in a currency other than ${currency} are left out.`)
@@ -784,7 +840,7 @@ export function costText(c: CostInfo): string {
   } else {
     lines.push(`Cost unknown: ${c.unknownReason}`)
   }
-  if (c.rate) lines.push(`Rate: ${c.rate.value} ${c.rate.unit} (${{ account: "from your account", list_price: "list price", config: "from your config", default: "default" }[c.rate.source]}).`)
+  if (c.rate) lines.push(`Rate: ${c.rate.value} ${c.rate.unit} (${c.rate.source === "account" ? `from your account${c.rate.detail ? ` (${c.rate.detail})` : ""}` : { list_price: "list price", config: "from your config", default: "default" }[c.rate.source]}).`)
   for (const n of c.notes) lines.push(n)
   return lines.join("\n")
 }
@@ -881,7 +937,8 @@ export async function loadHistory(input: {
       const history = await rows(snowflakeHistorySql(needle))
       const boundary = await boundaryFor(history, "start_time", (c) => snowflakeBoundarySql(needle, c))
       // Without the rate sheet (it needs the organization account) the configured or default rate prices the credits.
-      const sheet = await rows(SNOWFLAKE_RATE_SQL).then(sheetRates, () => [] as SheetRate[])
+      let sheet = await rows(SNOWFLAKE_BILLED_RATE_SQL).then(billedRates, () => [] as SheetRate[])
+      if (!sheet.length) sheet = await rows(SNOWFLAKE_RATE_SQL).then(sheetRates, () => [] as SheetRate[])
       return { cost: priceSnowflake(history, uniqueId, sheet, cfg, boundary), ...base }
     }
     const needle = needleFor(uniqueId)
