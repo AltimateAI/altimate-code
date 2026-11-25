@@ -58,6 +58,10 @@ export namespace ProviderError {
     /exceeded model token limit/i, // Kimi For Coding, Moonshot
     /context[_ ]length[_ ]exceeded/i, // Generic fallback
     /request entity too large/i, // HTTP 413
+    // altimate_change start — upstream_fix: oversized image payloads are overflows (anomalyco/opencode#62270)
+    /request body too large/i,
+    /multimodal data size is too large/i,
+    // altimate_change end
     /the request was too long/i, // Azure OpenAI
     /maximum tokens for requested operation/i, // Azure OpenAI
   ]
