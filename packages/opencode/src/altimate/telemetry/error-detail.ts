@@ -400,6 +400,14 @@ export function describeToolError(raw: string) {
   }
 }
 
+/**
+ * A tool part the processor closed because the session itself was aborted (user cancel) is
+ * not a tool failure. Interrupts the session did not request are still reported.
+ */
+export function isRequestedToolAbort(state: { status: string; metadata?: Record<string, any> }, sessionAborted: boolean) {
+  return sessionAborted && state.status === "error" && state.metadata?.interrupted === true
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
