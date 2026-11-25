@@ -2742,12 +2742,32 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
  * flow bailed. (CR round 2.) */
 function reportFlowFailure(api: TuiPluginApi, err: unknown): void {
   log.error("workspace flow failed", { err: err instanceof Error ? err.message : String(err) })
+  // altimate_change start — a plan-limit refusal offers the upgrade page instead of a bare failure
+  if (err instanceof PlanLimitError) {
+    const url = err.upgradeUrl
+    if (!url) {
+      api.ui.toast({ variant: "error", message: err.message, duration: 15_000 })
+      return
+    }
+    api.ui.dialog.replace(() => (
+      <api.ui.DialogSelect
+        title={err.message}
+        options={[
+          { title: "Open upgrade page", value: "open", description: url },
+          { title: "Dismiss", value: "dismiss" },
+        ]}
+        onSelect={(option) => {
+          if (option.value === "open") openManageUrl(api, url)
+          api.ui.dialog.clear()
+        }}
+      />
+    ))
+    return
+  }
+  // altimate_change end
   api.ui.toast({
     variant: "error",
-    // altimate_change start — a plan-limit refusal already says what to do next
-    message: err instanceof PlanLimitError ? err.message : "Workspace setup failed — see the CLI log for details.",
-    duration: err instanceof PlanLimitError ? 15_000 : undefined,
-    // altimate_change end
+    message: "Workspace setup failed — see the CLI log for details.",
   })
 }
 
