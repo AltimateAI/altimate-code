@@ -8,6 +8,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import * as SafeFS from "./safe-fs"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { projectConfigNames } from "@/config/paths"
 
 /**
  * The highest-precedence existing project config file, from `directory` up to `root`, and its text; the default
@@ -21,7 +22,7 @@ export async function projectConfigFile(root: string, directory: string): Promis
   for await (const dir of Filesystem.up({ targets: [".altimate-code", ".opencode"], start: directory, stop: root }))
     directories.push(dir)
   const candidates = directories.reverse().flatMap((dir) => names.map((name) => path.join(dir, name)))
-  for await (const file of Filesystem.up({ targets: ["opencode.jsonc", "opencode.json"], start: directory, stop: root }))
+  for await (const file of Filesystem.up({ targets: projectConfigNames.toReversed(), start: directory, stop: root }))
     candidates.push(file)
   let file = path.join(root, ".altimate-code", "altimate-code.json")
   let text = "{}\n"

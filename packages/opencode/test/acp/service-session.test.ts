@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { it as effectIt } from "../lib/effect"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Global } from "@/global"
@@ -815,6 +816,55 @@ describe("ACP service sessions", () => {
     expect(select(resumed, "effort")?.currentValue).toBe("high")
     expect(select(updated, "effort")?.currentValue).toBe("default")
   })
+
+  effectIt.effect("resumes from the last real prompt, skipping shell and direct MCP rows", () =>
+    Effect.gen(function* () {
+      const { service } = makeService([
+        { info: { role: "user", model: { providerID: "test", modelID: "test-model", variant: "high" }, agent: "plan" }, parts: [] },
+        {
+          info: { role: "user", model: { providerID: "test", modelID: "test-model", variant: "default" }, agent: "build" },
+          parts: [{ type: "text", text: "The following tool was executed by the user", synthetic: true }],
+        },
+        {
+          info: { role: "user", model: { providerID: "test", modelID: "test-model", variant: "default" }, agent: "build" },
+          parts: [{ type: "text", text: "/mcps", metadata: { modelMetadataOnly: true } }],
+        },
+      ])
+      const resumed = yield* service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] })
+      expect(select(resumed, "effort")?.currentValue).toBe("high")
+    }),
+  )
+
+  effectIt.effect("does not restore the model of a reply to a shell row", () =>
+    Effect.gen(function* () {
+      const { service } = makeService([
+        {
+          info: { id: "msg_shell", role: "user", model: { providerID: "test", modelID: "test-model" }, agent: "build" },
+          parts: [{ type: "text", text: "The following tool was executed by the user", synthetic: true }],
+        },
+        {
+          info: { id: "msg_reply", parentID: "msg_shell", role: "assistant", providerID: "test", modelID: "test-model", variant: "high" },
+          parts: [],
+        },
+      ])
+      const resumed = yield* service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] })
+      expect(select(resumed, "effort")?.currentValue).toBeDefined()
+      expect(select(resumed, "effort")?.currentValue).not.toBe("high")
+    }),
+  )
+
+  effectIt.effect("restores a long agent turn whose prompt is outside the fetched page", () =>
+    Effect.gen(function* () {
+      const { service } = makeService([
+        {
+          info: { id: "msg_reply", parentID: "msg_older", role: "assistant", providerID: "test", modelID: "test-model", variant: "high" },
+          parts: [],
+        },
+      ])
+      const resumed = yield* service.resumeSession({ cwd: "/workspace", sessionId: "ses_resume", mcpServers: [] })
+      expect(select(resumed, "effort")?.currentValue).toBe("high")
+    }),
+  )
 
   it("closes local ACP state and aborts the backing session best-effort", async () => {
     const { service, aborts } = makeService()

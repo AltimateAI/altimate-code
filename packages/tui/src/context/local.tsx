@@ -18,6 +18,7 @@ import type { ConnectedProviderShape } from "../util/connected"
 // altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` below needs to see the
 // same migration-decline kv key app.tsx writes.
 import { useKV } from "./kv"
+import { isConfigModelSource } from "@opencode-ai/core/altimate-model-source"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -365,6 +366,40 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       return !!provider?.models[model.modelID]
     }
 
+    // altimate_change start — upstream_fix: keep unavailable explicit selections visible and recoverable.
+    let reportedInvalidModel: string | undefined
+    function validateModel(model: ModelRef, passive = false, source?: string, pickable = true) {
+      if (sync.status === "loading") return false
+      if (isModelValid(model)) {
+        reportedInvalidModel = undefined
+        return true
+      }
+      const key = JSON.stringify([model.providerID, model.modelID])
+      if (passive && reportedInvalidModel === key) return false
+      const from = source ? ` (from ${source})` : ""
+      const fromConfig = isConfigModelSource(source)
+      const empty = model.providerID ? `Empty model name in "${model.providerID}/"${from}` : `Empty model value${from}`
+      const problem =
+        !model.modelID
+          ? fromConfig
+            ? `${empty}: the model key is incomplete. If it references an environment variable, check that the variable is set, or remove the key`
+            : empty
+          : `Model ${model.providerID}/${model.modelID} is not available${from}`
+      const advice = !pickable
+        ? "A /models pick does not override this setting; change it to an available model"
+        : fromConfig
+          ? "Choose an available model with /models for this conversation; picking one does not change your config, so update that setting to make it permanent"
+          : "Choose an available model with /models"
+      const locations = fromConfig
+        ? " Check the provider and model in your project config (altimate-code.json[c] or opencode.json[c], at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/)."
+        : ""
+      const message = `${problem}. ${advice}.${locations}`
+      reportedInvalidModel = key
+      if (toast.currentToast?.message !== message) toast.show({ variant: "error", message, duration: 10000 })
+      return false
+    }
+    // altimate_change end
+
     function createAgent() {
       const agents = createMemo(() => sync.data.agent.filter((agent) => agent.mode !== "subagent" && !agent.hidden))
       const visibleAgents = createMemo(() => sync.data.agent.filter((agent) => !agent.hidden))
@@ -598,14 +633,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `fallbackModel()`'s recents/allowlist implicit tail) so `currentModel()` can tell them apart
       // without duplicating `fallbackModel()`'s own logic inline.
       const explicitFallbackModel = createMemo(() => {
-        if (args.model) {
-          const { providerID, modelID } = parseModel(args.model)
-          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
-        }
-        if (sync.data.config.model) {
-          const { providerID, modelID } = parseModel(sync.data.config.model)
-          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
-        }
+        // Keep unavailable explicit selections so validation can reject them.
+        if (args.model !== undefined) return parseModel(args.model)
+        if (sync.data.config.model !== undefined) return parseModel(sync.data.config.model)
         return undefined
       })
       // altimate_change end
@@ -615,6 +645,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
       // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
       const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
+      const [pickedModels, setPickedModels] = createStore<Record<string, ModelRef | undefined>>({})
+      const [restoredModels, setRestoredModels] = createStore<Record<string, { scope: string; model: ModelRef }>>({})
+      const [sessionVariants, setSessionVariants] =
+        createStore<Record<string, { value: string; explicit: boolean } | undefined>>({})
+      const sessionScope = () => route.data.type === "session" ? route.data.sessionID : "home"
+      const variantKey = (model: ModelRef, scope = sessionScope()) =>
+        JSON.stringify([scope, model.providerID, model.modelID])
+      const pickerKey = (name: string, scope = sessionScope()) => JSON.stringify([scope, name])
       const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
       // altimate_change end
 
@@ -685,9 +723,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // Codex review finding: that substitution must only ever reach an IMPLICIT pick — the
       // persisted per-agent selection below, or `fallbackModel()`'s own implicit recents/allowlist
       // tail — never something explicitly asked for: an agent's own configured `model` field, or
-      // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
-      // candidate is checked in the SAME priority order this memo used before; only the two
-      // implicit branches route through `substituteStaleZen`.
+      // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`).
+      // Picker choices and CLI overrides take priority, followed by agent configuration,
+      // restored session history, project configuration, and implicit defaults. Only implicit
+      // selections route through `substituteStaleZen`.
 
       function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
         if (!model) return model
@@ -698,18 +737,36 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         return model
       }
 
-      const currentModel = createMemo(() => {
+      // A model picked for this conversation takes precedence over launch defaults and history.
+      const sessionOverride = createMemo(() => {
         const a = agent.current()
+        const picked = a ? pickedModels[pickerKey(a.name)] : undefined
+        return picked ?? (args.model !== undefined ? parseModel(args.model) : a?.model)
+      })
 
+      // Where the current model came from, for error text; undefined for implicit defaults.
+      const currentSource = createMemo((): string | undefined => {
+        const a = agent.current()
+        if (a && pickedModels[pickerKey(a.name)]) return "model picker"
+        if (args.model !== undefined) return "CLI --model"
+        if (a?.model) return `agent "${a.name}" config (model)`
+        const restored = a ? restoredModels[a.name] : undefined
+        if (restored?.scope === sessionScope()) return "session history"
+        if (explicitFallbackModel()) return "project or global config (model)"
+        return undefined
+      })
+
+      const currentModel = createMemo(() => {
+        const override = sessionOverride()
+        if (override) return override
+
+        const a = agent.current()
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
-        if (persistedAgentPick && isModelValid(persistedAgentPick))
-          return substituteStaleZen(persistedAgentPick)
-
-        const agentConfiguredModel = a?.model
-        if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
-
-        const explicit = explicitFallbackModel()
-        if (explicit) return explicit
+        const restored = a ? restoredModels[a.name] : undefined
+        if (restored?.scope === sessionScope()) return restored.model
+        const configured = explicitFallbackModel()
+        if (configured) return configured
+        if (persistedAgentPick && isModelValid(persistedAgentPick)) return substituteStaleZen(persistedAgentPick)
 
         return substituteStaleZen(fallbackModel())
       })
@@ -733,7 +790,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           // selections into it, so storing a caller's object (e.g. a message's recorded model from
           // the sync store) would rewrite that record on every later selection.
           setModelStore("model", a.name, { providerID: model.providerID, modelID: model.modelID })
-          if (options?.explicit) setExplicitPicks(pickKey(model), true)
+          if (options?.explicit) {
+            setExplicitPicks(pickKey(model), true)
+            setPickedModels(pickerKey(a.name), { ...model })
+          }
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
@@ -866,6 +926,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       return {
         current: currentModel,
+        // altimate_change start — upstream_fix: callers can reject submission without losing the draft.
+        source: currentSource,
+        validate(value = currentModel(), source?: string, pickable = true) {
+          if (!value) return false
+          const current = currentModel()
+          const same = current && current.providerID === value.providerID && current.modelID === value.modelID
+          return validateModel(value, false, source ?? (same ? currentSource() : undefined), pickable)
+        },
+        // altimate_change end
         get ready() {
           return modelStore.ready
         },
@@ -998,6 +1067,29 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           selectModel(model, { ...options, explicit: true })
         },
         // altimate_change end
+        // altimate_change start — carry a home-screen picker correction into the session just created by this prompt,
+        // including shell/MCP sessions that have no chat-model history to restore it from.
+        adoptSession(sessionID: string) {
+          const a = agent.current()
+          if (!a || route.data.type !== "home") return
+          const picked = pickedModels[pickerKey(a.name, "home")]
+          const active = currentModel()
+          batch(() => {
+            if (picked) {
+              setPickedModels(pickerKey(a.name, sessionID), { ...picked })
+              setPickedModels(pickerKey(a.name, "home"), undefined)
+            }
+            if (active) {
+              const key = variantKey(active, "home")
+              const variant = sessionVariants[key]
+              if (variant) {
+                setSessionVariants(variantKey(active, sessionID), { ...variant })
+                setSessionVariants(key, undefined)
+              }
+            }
+          })
+        },
+        // altimate_change end
         // altimate_change start — migrate Big Pickle defaults after managed-model consent
         usesLegacyDefault,
         hasExistingLegacySelection,
@@ -1099,7 +1191,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]
               ? { ...ALTIMATE_BASE_MODEL }
               : model
-          if (!selectModel(resolved)) return undefined
+          const a = agent.current()
+          if (!a) return undefined
+          // Record history separately so a command response cannot replace a deliberate pick in this session.
+          setRestoredModels(a.name, {
+            scope: sessionScope(),
+            model: { providerID: resolved.providerID, modelID: resolved.modelID },
+          })
+          const current = currentModel()
+          if (!sameModel(current, resolved) || sessionVariants[variantKey(resolved)]?.explicit) return undefined
           return resolved
         },
         // altimate_change end
@@ -1132,7 +1232,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             const m = currentModel()
             if (!m) return undefined
             const key = `${m.providerID}/${m.modelID}`
-            return modelStore.variant[key]
+            // altimate_change start — a conversation keeps its own effort for the same model
+            return sessionVariants[variantKey(m)]?.value ?? modelStore.variant[key]
+            // altimate_change end
           },
           current() {
             const v = this.selected()
@@ -1152,9 +1254,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             const m = currentModel()
             if (!m) return
             const key = `${m.providerID}/${m.modelID}`
+            // altimate_change start — retain explicit effort in the active conversation
+            setSessionVariants(variantKey(m), { value: value ?? "default", explicit: true })
+            // altimate_change end
             setModelStore("variant", key, value ?? "default")
             save()
           },
+          // altimate_change start — restoring effort does not replace the global picker default
+          restore(value: string | undefined) {
+            const model = currentModel()
+            if (model) setSessionVariants(variantKey(model), { value: value ?? "default", explicit: false })
+          },
+          // altimate_change end
           cycle() {
             const variants = this.list()
             if (variants.length === 0) return
@@ -1290,14 +1401,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     }
 
     createEffect(() => {
-      const value = agent.current()
-      if (!value?.model) return
-      if (isModelValid(value.model)) return
-      toast.show({
-        variant: "warning",
-        message: `Agent ${value.name}'s configured model ${value.model.providerID}/${value.model.modelID} is not valid`,
-        duration: 3000,
-      })
+      // altimate_change start — upstream_fix: explain invalid explicit choices without substituting a model.
+      if (sync.status === "loading" || !model.ready) return
+      const value = model.current()
+      if (value) validateModel(value, true, model.source())
+      // altimate_change end
     })
 
     const result = {

@@ -31,6 +31,10 @@ import { PermissionNext } from "@/permission/next"
 // altimate_change end
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — recognize model selection errors already reported by the prompt
+import { ModelMetadata } from "@/altimate/session/model-metadata"
+import { Provider } from "@/provider/provider"
+// altimate_change end
 import { errors } from "../error"
 import { NotFoundError as StorageNotFoundError } from "../../storage/db"
 import { lazy } from "../../util/lazy"
@@ -929,32 +933,38 @@ export const SessionRoutes = lazy(() =>
       ),
       validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
       async (c) => {
-        c.status(200)
-        c.header("Content-Type", "application/json")
-        return stream(c, async (stream) => {
-          const sessionID = c.req.valid("param").sessionID
-          const body = c.req.valid("json")
-          // altimate_change start — bind the client's trace to this turn's user message (see TraceContext).
-          // A noReply prompt runs no turn, so binds nothing; a prompt that fails before its loop is released.
-          const messageID = body.messageID ?? MessageID.ascending()
-          TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
-          // altimate_change start — save the soft reminder before interrupting, with run-scoped effort
-          const msg = await withBudgetControl(
-            {
-              sessionID,
-              control: c.req.header("x-altimate-run-budget"),
-              noReply: body.noReply,
-              queryDeadline: c.req.header("x-altimate-run-query-deadline"),
-            },
-            () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
-          ).catch((error) => {
-            TraceContext.release(sessionID, [messageID])
+        // altimate_change start — request errors keep their status; failures during the turn keep the empty 200 reply
+        const sessionID = c.req.valid("param").sessionID
+        const body = c.req.valid("json")
+        // Bind the client's trace to this turn's user message.
+        // A noReply prompt runs no turn, so binds nothing; a prompt that fails before its loop is released.
+        const messageID = body.messageID ?? MessageID.ascending()
+        TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
+        // Save the soft reminder before interrupting, with run-scoped effort.
+        const msg = await withBudgetControl(
+          {
+            sessionID,
+            control: c.req.header("x-altimate-run-budget"),
+            noReply: body.noReply,
+            queryDeadline: c.req.header("x-altimate-run-query-deadline"),
+          },
+          () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
+        ).catch((error) => {
+          TraceContext.release(sessionID, [messageID])
+          // Request errors keep their status (unavailable model, missing or busy session); a failure while
+          // the turn runs keeps main's empty 200 and reaches the client through the session error event.
+          if (
+            Provider.ModelNotFoundError.isInstance(error) ||
+            error instanceof Session.BusyError ||
+            (error instanceof Error && error.name === "NotFoundError")
+          )
             throw error
-          })
-          // altimate_change end
-          // altimate_change end
-          stream.write(JSON.stringify(msg))
+          log.error("prompt failed", { sessionID, error })
+          return undefined
         })
+        if (msg === undefined) return c.body(null, 200, { "Content-Type": "application/json" })
+        return c.json(msg)
+        // altimate_change end
       },
     )
     .post(
@@ -994,6 +1004,9 @@ export const SessionRoutes = lazy(() =>
             TraceContext.release(sessionID, [messageID])
             // altimate_change end
             log.error("prompt_async failed", { sessionID, error: err })
+            // altimate_change start — the prompt already published this error (unavailable model or unknown agent)
+            if (ModelMetadata.wasReported(err)) return
+            // altimate_change end
             Bus.publish(Session.Event.Error, {
               sessionID,
               error: new NamedError.Unknown({ message: err instanceof Error ? err.message : String(err) }).toObject(),

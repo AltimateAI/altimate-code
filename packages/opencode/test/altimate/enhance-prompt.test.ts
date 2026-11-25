@@ -247,6 +247,19 @@ describe("enhancePrompt()", () => {
     expect(await enhancePrompt("   ")).toBe("   ")
   })
 
+  test("uses the configured provider's small model when the configured model is unavailable", async () => {
+    mockConfig = { model: "anthropic/claude-typo" }
+    defaultModelSpy.mockImplementationOnce(() => Promise.reject(new Error("Model not found")))
+    getSmallModelSpy.mockClear()
+    mockStreamResult = "Rewritten on the small model."
+    try {
+      expect(await enhancePrompt("fix it")).toBe("Rewritten on the small model.")
+      expect(getSmallModelSpy).toHaveBeenCalledWith("anthropic")
+    } finally {
+      mockConfig = {}
+    }
+  })
+
   test("returns enhanced text from LLM", async () => {
     mockStreamResult = "Investigate the failing test and fix it."
     const result = await enhancePrompt("fix the test")

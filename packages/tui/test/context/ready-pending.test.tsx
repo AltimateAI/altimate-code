@@ -44,6 +44,7 @@ import { testRender } from "@opentui/solid"
 import { expect, test } from "bun:test"
 import { createSignal } from "solid-js"
 import { createDeferredRetry } from "../../src/util/signal"
+import { deferredSubmitRevision } from "../../src/prompt/model"
 
 async function waitUntil(predicate: () => boolean, timeout = 2_000) {
   const started = Date.now()
@@ -63,6 +64,7 @@ function DeferThenRetryHarness(props: {
   /** The SAME object on every call, mutated in place by `setPromptText` — exactly what
    *  `unwrap(store.prompt)` hands component/prompt/index.tsx (cursor 3987286236). */
   livePrompt: () => { input: string }
+  mode: () => "normal" | "shell"
   onSend: (value: string) => void
   onDiscard: () => void
   exposeSubmit: (fn: () => boolean) => void
@@ -89,7 +91,7 @@ function DeferThenRetryHarness(props: {
   // itself and never saw an edit; this harness shape is what makes the edited-while-deferred test
   // below fail on that bug.
   const deferredSubmit = createDeferredRetry(props.pending, () => void attemptSubmit(), {
-    getRevision: () => props.livePrompt(),
+    getRevision: () => deferredSubmitRevision(props.livePrompt(), props.mode()),
   })
   props.exposeSubmit(attemptSubmit)
   return null
@@ -100,7 +102,8 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
   const ready = () => !pending() && options.willBeReady
   const [promptText, setPromptTextSignal] = createSignal(options.promptText ?? "hello from before kv.ready")
   // One object, mutated in place — see `livePrompt` on the harness props.
-  const livePrompt = { input: promptText() }
+  const livePrompt: { input: string } = { input: promptText() }
+  let mode: "normal" | "shell" = "normal"
   const setPromptText = (value: string) => {
     livePrompt.input = value
     setPromptTextSignal(value)
@@ -116,6 +119,7 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
       promptText={promptText}
       setPromptText={setPromptText}
       livePrompt={() => livePrompt}
+      mode={() => mode}
       onSend={(value) => submitSpy.push(value)}
       onDiscard={() => {
         discarded = true
@@ -133,6 +137,9 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
     setPending,
     promptText,
     setPromptText,
+    setMode(next: "normal" | "shell") {
+      mode = next
+    },
     submitSpy,
     discarded: () => discarded,
     cleanup() {
@@ -248,3 +255,19 @@ test.serial("defer-then-retry: a submit issued once already ready sends immediat
   }
 })
 // altimate_change end
+
+
+test.serial("a mode change cancels an unchanged deferred draft until Enter is pressed again", async () => {
+  const h = await mountHarness({ initialPending: true, willBeReady: true })
+  try {
+    expect(h.attemptSubmit()).toBe(false)
+    h.setMode("shell")
+    h.setPending(false)
+    await Bun.sleep(20)
+    expect(h.submitSpy).toEqual([])
+    expect(h.attemptSubmit()).toBe(true)
+    expect(h.submitSpy).toEqual(["hello from before kv.ready"])
+  } finally {
+    h.cleanup()
+  }
+})

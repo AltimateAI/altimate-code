@@ -1,0 +1,27 @@
+import type { MessageV2 } from "../../session/message-v2"
+
+const SHELL_MARKER = "The following tool was executed by the user"
+
+// Shell and direct MCP commands record a model on their user row for display only; model
+// resolution must skip those rows instead of treating them as a model choice.
+export function isModelMetadataOnly(parts: readonly MessageV2.Part[]) {
+  return parts.some(
+    (part) =>
+      part.type === "text" &&
+      (part.metadata?.modelMetadataOnly === true || (part.synthetic === true && part.text === SHELL_MARKER)),
+  )
+}
+
+const reported = new WeakSet<object>()
+
+// Record that the session already received an error event for this error (an unavailable model or an
+// unknown agent), so a route that catches it does not publish it again.
+export function markReported(error: unknown) {
+  if (typeof error === "object" && error !== null) reported.add(error)
+}
+
+export function wasReported(error: unknown) {
+  return typeof error === "object" && error !== null && reported.has(error)
+}
+
+export * as ModelMetadata from "./model-metadata"

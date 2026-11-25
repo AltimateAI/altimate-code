@@ -149,7 +149,12 @@ describe("MCP config as the loader normalises it", () => {
       const nested = path.join(root, "x", "y")
       fs.mkdirSync(nested, { recursive: true })
       const files = configFiles({ global: path.join(root, "g"), cwd: nested, home: path.join(root, "h") })
-      expect(files).toContain(path.join(root, "opencode.json"))
+      expect(files.filter((file) => path.dirname(file) === root)).toEqual([
+        "opencode.json",
+        "opencode.jsonc",
+        "altimate-code.json",
+        "altimate-code.jsonc",
+      ].map((name) => path.join(root, name)))
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }

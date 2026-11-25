@@ -35,6 +35,11 @@ import { redactSecrets } from "@/altimate/learn/digest"
 import { AsyncLocalStorage } from "async_hooks"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
+// altimate_change start — name an agent's configured model as the source of an unavailable-model error
+import { Provider } from "@/provider/provider"
+import { modelSelectionErrorText } from "@/altimate/provider/model-hint"
+import { ModelReport } from "../altimate/session/model-report"
+// altimate_change end
 const log = Log.create({ service: "tool.task" })
 
 /**
@@ -425,10 +430,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
-      const model = agent.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // altimate_change start — run command subtasks with the model selected at command dispatch
+      const recordedModel = { modelID: msg.info.modelID, providerID: msg.info.providerID }
+      const model = ctx.extra?.useRecordedModel === true ? recordedModel : agent.model ?? recordedModel
+      // altimate_change end
 
       // altimate_change start — upstream_fix: bind partial findings to this child prompt during parent cancellation.
       const messageID = MessageID.ascending()
@@ -442,10 +447,6 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
       // altimate_change end
 
-      // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
-      // parent assistant message's user message); none when that turn is untraced
-      TraceContext.inherit(messageID, msg.info.parentID)
-      // altimate_change end
       const promptOps = ctx.extra?.promptOps as TaskPromptOps | undefined
 
       function cancel() {
@@ -457,6 +458,25 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
         // altimate_change end
       }
+      // altimate_change start — report an agent's unavailable model against its config on the child session
+      // before any child prompt runs, foreground or background; a cancelled parent turn reports the cancellation
+      ctx.abort.throwIfAborted()
+      if (ctx.extra?.useRecordedModel !== true && agent.model)
+        await ModelReport.validateOrReport(
+          session.id,
+          { providerID: ProviderID.make(model.providerID), modelID: ModelID.make(model.modelID) },
+          `agent "${agent.name}" config (model)`,
+        ).catch((error) => {
+          if (Provider.ModelNotFoundError.isInstance(error)) throw new Error(modelSelectionErrorText(error.data))
+          throw error
+        })
+      // The lookup awaits, so cancellation may have arrived meanwhile.
+      ctx.abort.throwIfAborted()
+      // altimate_change end
+      // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
+      // parent assistant message's user message); none when that turn is untraced; bound only once the child prompt will run
+      TraceContext.inherit(messageID, msg.info.parentID)
+      // altimate_change end
       // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
       const run = async (): Promise<TaskResult> => {
         ctx.abort.addEventListener("abort", cancel)

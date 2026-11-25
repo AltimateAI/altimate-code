@@ -62,11 +62,13 @@ test("reads ALTIMATE_CLI_CONFIG and ALTIMATE_CLI_CONFIG_DIR", async () => {
   expect(await outputLimits()).toEqual({ maxLines: 4, maxBytes: 400 })
 })
 
-test("stops at the git worktree and ignores altimate-code.* at the project root, as the agent does", async () => {
+test("stops at the git worktree and loads branded root config", async () => {
   await writeFile(path.join(root, "opencode.json"), output({ max_bytes: 999 }))
   await writeFile(path.join(repo, "altimate-code.json"), output({ max_lines: 9 }))
   await writeFile(path.join(repo, "opencode.json"), output({ max_lines: 5 }))
-  expect(await outputLimits()).toEqual({ maxLines: 5, maxBytes: MAX_BYTES })
+  expect(await outputLimits()).toEqual({ maxLines: 9, maxBytes: MAX_BYTES })
+  await writeFile(path.join(repo, "altimate-code.jsonc"), output({ max_lines: 10 }))
+  expect(await outputLimits()).toEqual({ maxLines: 10, maxBytes: MAX_BYTES })
 })
 
 test("opencode.jsonc overrides opencode.json in the same directory; .opencode/ applies after", async () => {

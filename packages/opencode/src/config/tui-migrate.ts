@@ -1,6 +1,7 @@
 import path from "path"
 import { type ParseError as JsoncParseError, applyEdits, modify, parse as parseJsonc } from "jsonc-parser"
-import { unique } from "remeda"
+// altimate_change — upstream_fix: group legacy migration sources by destination directory
+import { groupBy, unique } from "remeda"
 import { Option, Schema } from "effect"
 import { TuiConfig } from "@opencode-ai/tui/config"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -30,50 +31,53 @@ interface MigrateInput {
 }
 
 /**
- * Migrates tui-specific keys (theme, keybinds, tui) from opencode.json files
+ * Migrates tui-specific keys (theme, keybinds, tui) from project config files
  * into dedicated tui.json files. Migration is performed per-directory and
  * skips only locations where a tui.json already exists.
  */
+// altimate_change start — upstream_fix: merge same-directory legacy TUI settings before writing the target
 export async function migrateTuiConfig(input: MigrateInput) {
   const opencode = await opencodeFiles(input)
-  for (const file of opencode) {
-    const source = await Filesystem.readText(file).catch(() => undefined)
-    if (!source) continue
-    const errors: JsoncParseError[] = []
-    const data = parseJsonc(source, errors, { allowTrailingComma: true })
-    if (errors.length || !data || typeof data !== "object" || Array.isArray(data)) continue
+  for (const files of Object.values(groupBy(opencode, (file) => path.dirname(file)))) {
+    const target = path.join(path.dirname(files[0]), "tui.json")
+    if (await Filesystem.exists(target)) continue
 
-    const theme = decodeTheme("theme" in data ? data.theme : undefined)
-    const keybinds = decodeRecord("keybinds" in data ? data.keybinds : undefined)
-    const legacyTui = decodeRecord("tui" in data ? data.tui : undefined)
-    const extracted = {
-      theme: Option.getOrUndefined(theme),
-      keybinds: Option.getOrUndefined(keybinds),
-      tui: Option.getOrUndefined(legacyTui),
+    const payload: Record<string, unknown> = { $schema: TUI_SCHEMA_URL }
+    const sources: { file: string; source: string }[] = []
+    // Discovery is highest precedence first. Merge in reverse so missing keys
+    // survive while higher-priority values replace conflicting ones.
+    for (const file of files.toReversed()) {
+      const source = await Filesystem.readText(file).catch(() => undefined)
+      if (!source) continue
+      const errors: JsoncParseError[] = []
+      const data = parseJsonc(source, errors, { allowTrailingComma: true })
+      if (errors.length || !data || typeof data !== "object" || Array.isArray(data)) continue
+
+      const theme = Option.getOrUndefined(decodeTheme(data.theme))
+      const keybinds = Option.getOrUndefined(decodeRecord(data.keybinds))
+      const legacyTui = Option.getOrUndefined(decodeRecord(data.tui))
+      const tui = legacyTui ? normalizeTui(legacyTui) : undefined
+      if (theme === undefined && keybinds === undefined && !tui) continue
+
+      if (theme !== undefined) payload.theme = theme
+      if (keybinds !== undefined) payload.keybinds = { ...(payload.keybinds as Record<string, unknown>), ...keybinds }
+      if (tui) {
+        for (const [key, value] of Object.entries(tui)) {
+          if (value !== undefined) payload[key] = value
+        }
+      }
+      sources.push({ file, source })
     }
-    const tui = extracted.tui ? normalizeTui(extracted.tui) : undefined
-    if (extracted.theme === undefined && extracted.keybinds === undefined && !tui) continue
-
-    const target = path.join(path.dirname(file), "tui.json")
-    const targetExists = await Filesystem.exists(target)
-    if (targetExists) continue
-
-    const payload: Record<string, unknown> = {
-      $schema: TUI_SCHEMA_URL,
-    }
-    if (extracted.theme !== undefined) payload.theme = extracted.theme
-    if (extracted.keybinds !== undefined) payload.keybinds = extracted.keybinds
-    if (tui) Object.assign(payload, tui)
+    if (!sources.length) continue
 
     const wrote = await Filesystem.write(target, JSON.stringify(payload, null, 2))
       .then(() => true)
       .catch(() => false)
     if (!wrote) continue
-
-    const stripped = await backupAndStripLegacy(file, source)
-    if (!stripped) continue
+    for (const { file, source } of sources) await backupAndStripLegacy(file, source)
   }
 }
+// altimate_change end
 
 function normalizeTui(data: Record<string, unknown>):
   | {
@@ -128,18 +132,31 @@ async function opencodeFiles(input: { directories: string[]; cwd: string; worktr
   // altimate_change start — upstream_fix: restore worktree-bounded TUI migration
   const walkedUp = (
     await Array.fromAsync(
-      Filesystem.up({ targets: ["opencode.json", "opencode.jsonc"], start: input.cwd, stop: input.worktree }),
+      Filesystem.up({ targets: [...ConfigPaths.projectConfigNames], start: input.cwd, stop: input.worktree }),
     )
   ).reverse()
   // altimate_change end
-  const files = [...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"), ...walkedUp]
+  // altimate_change start — the global loader merges branded names after legacy ones, so they rank first here
+  const files = [
+    ...ConfigPaths.fileInDirectory(Global.Path.config, "altimate-code"),
+    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
+    ...walkedUp,
+  ]
+  // altimate_change end
   // altimate_change end
   for (const dir of unique(input.directories)) {
-    files.push(...ConfigPaths.fileInDirectory(dir, "opencode"))
+    // altimate_change start — config directories also load branded names, below the legacy names
+    files.push(...ConfigPaths.fileInDirectory(dir, "opencode"), ...ConfigPaths.fileInDirectory(dir, "altimate-code"))
+    // altimate_change end
   }
   if (Flag.OPENCODE_CONFIG) files.push(Flag.OPENCODE_CONFIG)
   // altimate_change start — upstream_fix: include managed config dir in TUI migration
-  if (input.managed) files.push(...ConfigPaths.fileInDirectory(input.managed, "opencode"))
+  if (input.managed)
+    files.push(
+      ...ConfigPaths.fileInDirectory(input.managed, "opencode"),
+      // altimate_change — managed config also loads branded names
+      ...ConfigPaths.fileInDirectory(input.managed, "altimate-code"),
+    )
   // altimate_change end
 
   const existing = await Promise.all(

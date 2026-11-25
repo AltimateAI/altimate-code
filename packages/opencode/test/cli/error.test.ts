@@ -74,7 +74,7 @@ describe("cli.error", () => {
       "Model not found: anthropic/claude-sonet-4",
       "Did you mean: claude-sonnet-4",
       "Try: `altimate models` to list available models",
-      "Or check your config (altimate-code.json) provider/model names",
+      "Check the provider and model in your project config (altimate-code.json or opencode.json, including .jsonc files, at the project root or in .altimate-code/ or .opencode/) or global config (~/.config/altimate-code/).",
     ].join("\n")
 
     expect(FormatError({ name: "ProviderModelNotFoundError", data })).toBe(expected)
@@ -108,6 +108,17 @@ describe("cli.error", () => {
       }),
     ).not.toContain("Claude subscription")
   })
+
+  // altimate_change start — config-file advice only where a config setting chose the model
+  test("config-file advice follows the model source", () => {
+    const format = (source?: string) =>
+      FormatError({ name: "ProviderModelNotFoundError", data: { providerID: "p", modelID: "m", suggestions: [], source } })
+    for (const source of ["CLI --model", "request (model)", 'subtask "plan" request (model)', "session history"])
+      expect(format(source)).not.toContain("altimate-code.json")
+    expect(format('agent "build" config (model)')).toContain("altimate-code.json")
+    expect(format()).toContain("altimate-code.json")
+  })
+  // altimate_change end
 
   test("formats legacy and tagged provider init errors the same way", () => {
     const data = { providerID: "anthropic" }

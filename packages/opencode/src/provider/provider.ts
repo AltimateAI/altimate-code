@@ -104,6 +104,23 @@ const FREE_TIER_HEADER_TIMEOUT_DEFAULT = 300_000
 const FREE_TIER_HEADER_TIMEOUT_MIN = 1_000
 // altimate_change end
 
+// altimate_change start — retain selection provenance in model lookup errors
+export async function validateModelSelection(model: { providerID: ProviderID; modelID: ModelID }, source: string) {
+  try {
+    // The lookup runs first so a missing provider keeps its suggestions and connect guidance.
+    const info = await Provider.getModel(model.providerID, model.modelID)
+    // An unset variable in "provider/${VAR}" leaves the model id empty; report it as an empty value.
+    if (!model.modelID) throw new Provider.ModelNotFoundError({ ...model })
+    return info
+  } catch (error) {
+    if (Provider.ModelNotFoundError.isInstance(error)) {
+      throw new Provider.ModelNotFoundError({ ...error.data, source })
+    }
+    throw error
+  }
+}
+// altimate_change end
+
 export namespace Provider {
   const log = Log.create({ service: "provider" })
 
@@ -2494,7 +2511,13 @@ export namespace Provider {
 
   export async function defaultModel() {
     const cfg = await Config.get()
-    if (cfg.model) return parseModel(cfg.model)
+    // altimate_change start — resolve a configured model before returning it
+    if (cfg.model !== undefined) {
+      const requested = parseModel(cfg.model)
+      await validateModelSelection(requested, "project or global config (model)")
+      return requested
+    }
+    // altimate_change end
 
     const providers = await list()
     // altimate_change start — preserve explicit/recent precedence without bypassing managed consent
@@ -2598,6 +2621,8 @@ export namespace Provider {
     suggestions: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
     // altimate_change — true when the provider itself is not available, not only the model
     providerMissing: Schema.optional(Schema.Boolean),
+    // altimate_change — identify the model selection that failed
+    source: Schema.optional(Schema.String),
   })
 
   export const InitError = NamedError.create("ProviderInitError", {
