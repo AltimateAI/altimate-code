@@ -55,6 +55,9 @@ export namespace ProviderError {
     /exceeds the available context size/i, // llama.cpp server
     /greater than the context length/i, // LM Studio
     /context window exceeds limit/i, // MiniMax
+    // altimate_change start — upstream_fix: recognize LiteLLM context overflow (anomalyco/opencode#60692)
+    /context window exceeded/i, // LiteLLM ContextWindowExceededError
+    // altimate_change end
     /exceeded model token limit/i, // Kimi For Coding, Moonshot
     /context[_ ]length[_ ]exceeded/i, // Generic fallback
     /request entity too large/i, // HTTP 413
