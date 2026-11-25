@@ -52,7 +52,7 @@ test("a workspace key credentials a provider that has none, and the gateway logi
     async () => void delete process.env.ANTHROPIC_API_KEY,
     async () => {
       const providers = await Provider.list()
-      expect(providers["anthropic"]?.options["apiKey"]).toBe("ws-anthropic-key")
+      expect(providers["anthropic"]?.key).toBe("ws-anthropic-key")
       // the provider's own loader still applies, as it does for an env-supplied key
       expect(Object.keys(providers["anthropic"]?.options["headers"] ?? {})).toContain("anthropic-beta")
       expect(providers["altimate-backend"]?.options["apiKey"]).toBe("gateway-key")
@@ -69,7 +69,6 @@ test("a key the user already has wins over the workspace key", async () => {
     async () => {
       const providers = await Provider.list()
       expect(providers["anthropic"]?.key).toBe("own-key")
-      expect(providers["anthropic"]?.options["apiKey"]).toBeUndefined()
     },
   )
 })
@@ -86,7 +85,7 @@ test("a disabled provider is not enabled by a workspace key", async () => {
   )
 })
 
-test("a provider configured only with non-secret environment settings still takes the workspace key", async () => {
+test("a provider that needs several settings is left to the user's own configuration", async () => {
   withWorkspaceKeys({ azure: "ws-azure-key" })
   await using tmp = await tmpdir({})
   await inInstance(
@@ -96,7 +95,7 @@ test("a provider configured only with non-secret environment settings still take
       Env.set("AZURE_RESOURCE_NAME", "my-resource")
     },
     async () => {
-      expect((await Provider.list())["azure"]?.options["apiKey"]).toBe("ws-azure-key")
+      expect((await Provider.list())["azure"]?.key).toBeUndefined()
     },
   )
 })

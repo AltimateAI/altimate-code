@@ -1896,6 +1896,20 @@ export namespace Provider {
       database[providerID] = parsed
     }
 
+    // altimate_change start — the linked workspace's model keys act as the provider's own API-key variable when the
+    // user has set neither that variable nor a stored login, so the provider, its loader and every precedence rule
+    // treat it like any environment key. Only providers with a single key variable are filled in.
+    if (await AltimateApi.isConfigured()) {
+      const own = Env.all()
+      for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
+        const providerID = ProviderID.make(id)
+        const variable = database[providerID]?.env.length === 1 ? database[providerID].env[0] : undefined
+        if (!variable || own[variable] || !isProviderAllowed(providerID) || (await Auth.get(providerID))) continue
+        Env.set(variable, apiKey)
+      }
+    }
+    // altimate_change end
+
     // load env
     const env = Env.all()
     // altimate_change start — skip github-models/github-copilot auto-enable from machine-scoped GITHUB_TOKEN
@@ -2001,20 +2015,6 @@ export namespace Provider {
       }
     }
 
-    // altimate_change start — the linked workspace's model keys fill in providers that have no credential of
-    // their own (no key from env or a stored login); config keeps precedence, and the Altimate gateway login is
-    // untouched. A provider's loader still runs on top, then the workspace key is put back in case it reset it.
-    const workspaceKeys: Record<string, string> = {}
-    if (await AltimateApi.isConfigured()) {
-      for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
-        const providerID = ProviderID.make(id)
-        if (!database[providerID] || !isProviderAllowed(providerID) || providers[providerID]?.key) continue
-        workspaceKeys[providerID] = apiKey
-        mergeProvider(providerID, { source: "custom", options: { apiKey } })
-      }
-    }
-    // altimate_change end
-
     for (const [id, fn] of Object.entries(CUSTOM_LOADERS)) {
       const providerID = ProviderID.make(id)
       // altimate_change start — apply the same provider allowlist to managed custom loaders
@@ -2034,13 +2034,6 @@ export namespace Provider {
         mergeProvider(providerID, patch)
       }
     }
-
-    // altimate_change start — see the workspace model keys above
-    for (const [id, apiKey] of Object.entries(workspaceKeys)) {
-      const providerID = ProviderID.make(id)
-      if (providers[providerID]) mergeProvider(providerID, { options: { apiKey } })
-    }
-    // altimate_change end
 
     // load config
     for (const [id, provider] of configProviders) {
