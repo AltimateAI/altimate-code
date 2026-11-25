@@ -22,35 +22,142 @@ describe("RunAccounting recoverable overflow trace errors", () => {
 })
 
 describe("RunAccounting turn accounting", () => {
-  test("counts ordinary assistant steps", () => {
+  test("counts ordinary assistant steps when they finish", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
-    expect(acc.onStepStart("msg_1")).toBe(true)
-    expect(acc.onStepStart("msg_1")).toBe(true)
+    acc.onStepFinish("msg_1", "tool-calls")
+    acc.onStepFinish("msg_1", "stop")
     expect(acc.turnCount).toBe(2)
+  })
+
+  test("a step that fails mid-stream and is retried costs exactly one turn", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    // Attempt 1 started and its stream broke, so it wrote no step-finish. The
+    // retry's start is checked against completed steps only, so a one-turn
+    // budget still lets it run.
+    acc.onStepAttempt("msg_1")
+    acc.onStepAttempt("msg_1")
+    expect(acc.turnCount).toBe(0)
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    acc.onStepFinish("msg_1", "stop")
+    expect(acc.turnCount).toBe(1)
+    expect(acc.turnBudgetReached(1)).toBe(true)
+  })
+
+  test("a session error with no completed step charges no turn and stays fatal", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    // Every attempt the processor allows failed before finishing.
+    for (let i = 0; i < 6; i++) acc.onStepAttempt("msg_1")
+    acc.onSessionError("APIError", "upstream stream reset")
+    expect(acc.turnCount).toBe(0)
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    expect(acc.fatal).toBe(true)
+    expect(acc.termination().why_harness_stopped).toBe("error")
+  })
+
+  test("the budget is reached only after maxTurns steps complete", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    expect(acc.turnBudgetReached(1)).toBe(false)
+    acc.onStepFinish("msg_1", "tool-calls")
+    expect(acc.turnBudgetReached(1)).toBe(true)
+    expect(acc.turnBudgetReached(2)).toBe(false)
+    expect(acc.turnBudgetReached(undefined)).toBe(false)
+  })
+
+  test("a step cut short by context overflow still costs its turn, once", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    // An overflow reported before any step started is not charged.
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(0)
+    acc.onStepAttempt("msg_1")
+    // The prompt result may report it before the session event; only the event charges.
+    acc.onPromptResult({ error: { name: "ContextOverflowError" } })
+    acc.onSessionError("ContextOverflowError", "too long")
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(1)
+  })
+
+  test("a step that compaction replaces is charged once, whichever event arrives first", () => {
+    for (const overflowFirst of [true, false]) {
+      const acc = RunAccounting.create()
+      acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+      acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
+      acc.onStepAttempt("msg_1")
+      if (overflowFirst) acc.onSessionError("ContextOverflowError", "too long")
+      acc.onStepAttempt("msg_compact")
+      if (!overflowFirst) acc.onSessionError("ContextOverflowError", "too long")
+      // The summary's own overflow is never charged.
+      acc.onSessionError("ContextOverflowError", "summary too long")
+      expect(acc.turnCount).toBe(1)
+    }
+  })
+
+  test("after the session goes idle, a later pre-step overflow is not charged to an interrupted step", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1") // soft-deadline interrupt: no step-finish
+    acc.closeOpenStep()
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(0)
+  })
+
+  test("an overflow after a finished step is not charged again", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1")
+    acc.onStepFinish("msg_1", "tool-calls")
+    acc.onSessionError("ContextOverflowError", "too long")
+    expect(acc.turnCount).toBe(1)
+  })
+
+  test("an overflow reported only on the prompt result charges nothing", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1")
+    acc.onPromptResult({ error: { name: "ContextOverflowError" } })
+    expect(acc.turnCount).toBe(0)
+  })
+
+  test("once a retry begins, a later pre-step overflow is not charged to the failed attempt", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_1", agent: "build" })
+    acc.onStepAttempt("msg_1") // fails mid-stream
+    acc.closeOpenStep() // retry status
+    acc.onSessionError("ContextOverflowError", "too long") // retry rejected before streaming
+    expect(acc.turnCount).toBe(0)
   })
 
   test("excludes compaction-machinery steps from turnCount", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })
     acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
-    expect(acc.onStepStart("msg_work")).toBe(true)
-    expect(acc.onStepStart("msg_compact")).toBe(false)
-    expect(acc.onStepStart("msg_compact")).toBe(false)
-    expect(acc.onStepStart("msg_work")).toBe(true)
+    expect(acc.isCompactionStep("msg_work")).toBe(false)
+    acc.onStepFinish("msg_work", "tool-calls")
+    expect(acc.isCompactionStep("msg_compact")).toBe(true)
+    acc.onStepFinish("msg_compact", "stop")
+    expect(acc.isCompactionStep("msg_compact")).toBe(true)
+    acc.onStepFinish("msg_compact", "stop")
+    expect(acc.isCompactionStep("msg_work")).toBe(false)
+    acc.onStepFinish("msg_work", "stop")
     expect(acc.turnCount).toBe(2)
   })
 
   test("an explicitly selected agent named compaction still consumes the turn budget", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_user_agent", agent: "compaction", summary: false })
-    expect(acc.onStepStart("msg_user_agent")).toBe(true)
+    expect(acc.isCompactionStep("msg_user_agent")).toBe(false)
+    acc.onStepFinish("msg_user_agent", "stop")
     expect(acc.turnCount).toBe(1)
   })
 
   test("a step whose owning message is unknown is counted (conservative default)", () => {
     const acc = RunAccounting.create()
-    expect(acc.onStepStart("msg_unknown")).toBe(true)
+    expect(acc.isCompactionStep("msg_unknown")).toBe(false)
+    acc.onStepFinish("msg_unknown", "stop")
     expect(acc.turnCount).toBe(1)
   })
 
@@ -77,7 +184,6 @@ describe("RunAccounting termination attribution (E4)", () => {
   test("natural finish: model=stop, harness=none", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onStepStart("m1")
     acc.onStepFinish("m1", "stop")
     expect(acc.termination()).toEqual({ why_model_stopped: "stop", why_harness_stopped: "none", done_reason: "none" })
     expect(acc.fatal).toBe(false)
@@ -86,7 +192,6 @@ describe("RunAccounting termination attribution (E4)", () => {
   test("model still tool-calling when harness exhausts the budget", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onStepStart("m1")
     acc.onStepFinish("m1", "tool-calls")
     acc.onBudgetExhausted()
     expect(acc.termination()).toEqual({
@@ -303,7 +408,6 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
   test("synthetic text appended after DONE does not clear explicit-DONE attribution", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "plan" })
-    acc.onStepStart("m1")
     acc.onText("m1", "Plan is complete.\nDONE")
     acc.onText("m1", "altimate-code: plan agent stopped without writing a plan", true)
     acc.onStepFinish("m1", "stop")
@@ -373,17 +477,14 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     // the heuristic's doing.
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onStepStart("m1")
     acc.onIdleDoneChallengeIssued()
     acc.onIdleDoneChallengeReplySent()
     acc.onText("m1", "Remaining: wire the config flag. Continuing.")
     acc.onStepFinish("m1", "stop")
     acc.onIdleDoneChallengeCompleted()
     acc.onAssistantMessage({ id: "m2", agent: "build" })
-    acc.onStepStart("m2")
     acc.onStepFinish("m2", "tool-calls")
     acc.onAssistantMessage({ id: "m3", agent: "build" })
-    acc.onStepStart("m3")
     acc.onText("m3", "All checks green.\nDONE")
     acc.onStepFinish("m3", "stop")
     const t = acc.termination()
@@ -396,10 +497,8 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     acc.onIdleDoneChallengeIssued()
     acc.onIdleDoneChallengeReplySent()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onStepStart("m1")
     acc.onStepFinish("m1", "tool-calls")
     acc.onAssistantMessage({ id: "m2", agent: "build" })
-    acc.onStepStart("m2")
     acc.onText("m2", "Verified.\nDONE")
     acc.onStepFinish("m2", "stop")
     acc.onIdleDoneChallengeCompleted()
@@ -418,11 +517,9 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
   test("stale DONE from a tool-calls message is not paired with a later textless stop", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onStepStart("m1")
     acc.onText("m1", "Wrapping up.\nDONE")
     acc.onStepFinish("m1", "tool-calls")
     acc.onAssistantMessage({ id: "m2", agent: "build" })
-    acc.onStepStart("m2")
     acc.onStepFinish("m2", "stop") // no onText for m2 — no text part at all
     const t = acc.termination()
     expect(t.done_reason).toBe("none")

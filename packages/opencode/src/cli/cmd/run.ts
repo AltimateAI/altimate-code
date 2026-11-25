@@ -416,7 +416,8 @@ export const RunCommand = cmd({
         // altimate_change start — budget limits for CI/enterprise governance
         .option("max-turns", {
           type: "number",
-          describe: "maximum assistant work turns; allows one committed-answer echo, or one best-effort reply after a budget abort",
+          describe:
+            "maximum completed assistant work turns, including harness follow-up turns (a failed or retried attempt is not counted); allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
@@ -1136,25 +1137,29 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "step-start") {
+              // altimate_change start — one compaction lookup serves output, `step` and the turn budget
+              const compactionStep = accounting.isCompactionStep(part.messageID)
+              // altimate_change end
               // altimate_change start — `--output` keeps only the last step's text (see run-output.ts)
-              outputParts.stepStart(accounting.isCompactionStep(part.messageID))
+              outputParts.stepStart(compactionStep)
               // altimate_change end
               // altimate_change start — see `step` (#1334). Compaction steps do not count,
               // as for the turn budget below: one running after the final answer would
               // otherwise move `step` past `lastTextStep` and ask for a reply the model
               // already gave. (release review)
-              if (!accounting.isCompactionStep(part.messageID)) step++
+              if (!compactionStep) step++
               // altimate_change end
               // altimate_change start — enforce max-turns budget
               // compaction-machinery steps are excluded from turn accounting —
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
-              const counted = accounting.onStepStart(part.messageID)
+              // Turns are charged on step-finish: a step may start only while fewer
+              // than maxTurns steps have completed, so a retried attempt is free.
               const requestID = requestOwnership.ownerOf(part.messageID)
               const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
+                !compactionStep && accounting.turnBudgetReached(maxTurns) && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
@@ -1169,6 +1174,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 // Drain the ordered abort/error/idle tail before starting another phase.
                 continue
               }
+              accounting.onStepAttempt(part.messageID)
               // altimate_change end
               if (emit("step_start", { part })) continue
             }
@@ -1353,6 +1359,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
           }
           // altimate_change end
 
+          // altimate_change start — a retry begins: the failed attempt is over and stays uncharged
+          if (
+            event.type === "session.status" &&
+            event.properties.sessionID === sessionID &&
+            event.properties.status.type === "retry"
+          )
+            accounting.closeOpenStep()
+          // altimate_change end
           if (
             event.type === "session.status" &&
             event.properties.sessionID === sessionID &&
@@ -1363,6 +1377,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
             // altimate_change start — idle gaps are not active work; continuations retain the same start time
             workActive = false
+            accounting.closeOpenStep()
             // altimate_change end
             break
           }
@@ -2049,7 +2064,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // A silent stop exactly at the work limit has no in-flight generation to
       // abort. Enter finalization directly instead of spending a reply just to
       // discover that it exceeds the same budget.
-      if (!answered() && assistantStarted && !accounting.fatal && args.maxTurns && accounting.turnCount >= args.maxTurns) {
+      // The same completed-step count the in-loop budget check uses.
+      if (!answered() && assistantStarted && !accounting.fatal && accounting.turnBudgetReached(args.maxTurns)) {
         accounting.onBudgetExhausted()
         error = `Budget exceeded: reached ${args.maxTurns} assistant turn${args.maxTurns !== 1 ? "s" : ""} limit`
         if (!emit("budget_exhausted", { limit: args.maxTurns })) {

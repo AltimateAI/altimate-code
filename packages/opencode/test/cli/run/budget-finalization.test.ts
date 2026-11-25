@@ -11,9 +11,8 @@ import { testProviderConfig } from "../../lib/test-provider"
 
 function exhausted() {
   const accounting = RunAccounting.create()
-  accounting.onStepStart("work")
   accounting.onStepFinish("work", "tool-calls")
-  accounting.onStepStart("interrupted")
+  // the over-budget step is aborted at its start, so it never completes
   accounting.onBudgetExhausted()
   return accounting
 }
@@ -40,13 +39,11 @@ describe("budget finalization accounting", () => {
   // altimate_change start — distinguish recovered wall-clock limits from turn limits and real failures
   test("a successful time-budget finalization clears fatal status but keeps budget attribution", () => {
     const accounting = RunAccounting.create()
-    accounting.onStepStart("interrupted")
     accounting.onBudgetExhausted("time")
     accounting.onSessionError("MessageAbortedError", "intentional time-budget abort")
     accounting.onPromptResult({ error: { name: "MessageAbortedError" } })
     expect(accounting.fatal).toBe(true)
-    expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
-    accounting.onStepStart("finalization")
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(1)
     accounting.onText("finalization", "The evidence supports a limited answer.")
     accounting.onStepFinish("finalization", "stop")
     accounting.onPromptResult({ finish: "stop" })
@@ -79,7 +76,7 @@ describe("budget finalization accounting", () => {
 
   test("successful turn-budget finalization preserves the existing nonzero exit contract", () => {
     const accounting = exhausted()
-    expect(accounting.takeBudgetFinalizationAllowance()).toBe(3)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
     expect(accounting.completeBudgetFinalization(true)).toBe(false)
     expect(accounting.fatal).toBe(true)
   })
@@ -111,15 +108,16 @@ describe("budget finalization accounting", () => {
     accounting.onSessionError("MessageAbortedError", "aborted by the turn limit")
     accounting.onPromptResult({ error: { name: "MessageAbortedError" } })
 
-    expect(accounting.takeBudgetFinalizationAllowance()).toBe(3)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
     expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
-    expect(accounting.turnCount).toBe(2)
+    expect(accounting.turnCount).toBe(1)
     expect(accounting.fatal).toBe(true)
 
-    accounting.onStepStart("finalization")
+    expect(accounting.turnBudgetReached(2)).toBe(false)
     accounting.onText("finalization", "The supported result is available; verification is incomplete.")
     accounting.onStepFinish("finalization", "stop")
-    expect(accounting.turnCount).toBe(3)
+    expect(accounting.turnCount).toBe(2)
+    expect(accounting.turnBudgetReached(2)).toBe(true)
     expect(accounting.termination()).toEqual({
       why_model_stopped: "stop",
       why_harness_stopped: "budget-exhausted",
@@ -129,7 +127,6 @@ describe("budget finalization accounting", () => {
 
   test("does not grant an allowance before a budget abort", () => {
     const accounting = RunAccounting.create()
-    accounting.onStepStart("work")
     expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
     expect(accounting.fatal).toBe(false)
   })
@@ -139,7 +136,7 @@ describe("budget finalization accounting", () => {
       const accounting = exhausted()
       accounting.onSessionError("MessageAbortedError", "aborted")
       accounting.onPromptResult({ finish })
-      expect(accounting.takeBudgetFinalizationAllowance()).toBe(3)
+      expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
     })
   }
 
@@ -147,7 +144,6 @@ describe("budget finalization accounting", () => {
     for (const order of ["before", "after"] as const) {
       test(`${name} ${order} budget exhaustion prevents a finalization despite reason precedence`, () => {
         const accounting = RunAccounting.create()
-        accounting.onStepStart("work")
         if (order === "before") accounting.onSessionError(name, "genuine failure")
         accounting.onBudgetExhausted()
         if (order === "after") accounting.onSessionError(name, "genuine failure")
@@ -191,7 +187,7 @@ describe("budget finalization accounting", () => {
     accounting.onPromptResult({ finish: "other" })
     accounting.onIdleDoneChallengeReplySent()
     accounting.onIdleDoneChallengeCompleted()
-    accounting.onStepStart("continuation")
+    accounting.onStepFinish("continuation", "tool-calls")
     accounting.onBudgetExhausted()
     accounting.onSessionError("MessageAbortedError", "budget interruption")
     accounting.onPromptResult({ error: { name: "MessageAbortedError" } })
@@ -357,6 +353,10 @@ describe("opencode run: budget finalization subprocess", () => {
                         },
                       })
                     }
+                    // The work step completes; only completed steps are charged to the budget.
+                    publish("message.part.updated", {
+                      part: { id: `${messageID}_finish`, messageID, sessionID, type: "step-finish", reason: "tool-calls" },
+                    })
                     if (sharedRequest) {
                       // The original echo remains exempt, including synthetic compaction continuation rows.
                       const continuationID = `${parentID}_continuation`
@@ -567,7 +567,7 @@ describe("opencode run: budget finalization subprocess", () => {
       const committedRequests = new Set<string>()
       ownership.beginRequest("original")
       ownership.onAssistantMessage({ id: "commit", parentID: "original" })
-      accounting.onStepStart("commit")
+      accounting.onStepFinish("commit", "tool-calls")
       committedRequests.add(ownership.ownerOf("commit")!)
       const queue = () => {
         ownership.onUserMessage("queued")
@@ -578,7 +578,8 @@ describe("opencode run: budget finalization subprocess", () => {
       ownership.onUserMessage("marker", "original")
       ownership.onAssistantMessage({ id: "summary", parentID: "marker" })
       accounting.onAssistantMessage({ id: "summary", summary: true })
-      expect(accounting.onStepStart("summary")).toBe(false)
+      expect(accounting.isCompactionStep("summary")).toBe(true)
+      accounting.onStepFinish("summary", "stop")
       if (queued === "during the summary") queue()
 
       // SessionCompaction persists this synthetic user before reporting its origin.
@@ -589,7 +590,8 @@ describe("opencode run: budget finalization subprocess", () => {
       ownership.onUserMessage("second-continuation", "second-marker")
       ownership.onAssistantMessage({ id: "echo", parentID: "second-continuation" })
       expect(ownership.ownerOf("echo")).toBe("original")
-      expect(accounting.onStepStart("echo")).toBe(true)
+      expect(accounting.isCompactionStep("echo")).toBe(false)
+      accounting.onStepFinish("echo", "stop")
       expect(accounting.turnCount).toBe(2)
       expect(committedRequests.has(ownership.ownerOf("echo")!)).toBe(true)
 

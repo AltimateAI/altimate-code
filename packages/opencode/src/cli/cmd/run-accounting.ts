@@ -1,9 +1,11 @@
 // Fork-only helpers for the `run` command:
 //   - honest turn accounting: compaction-machinery steps must not consume the
-//     --max-turns budget. `step-start` parts carry only messageID/sessionID, so
-//     the owning message's summary flag is resolved via a lookup populated from
-//     `message.updated` events (the assistant message row is persisted — and its
-//     event published — before its first step-start part streams).
+//     --max-turns budget, and a turn is charged when a step completes, so a
+//     failed or retried attempt costs nothing. Step parts carry only
+//     messageID/sessionID, so the owning message's summary flag is resolved via
+//     a lookup populated from `message.updated` events (the assistant message
+//     row is persisted — and its event published — before its first
+//     step-start part streams).
 //   - dual-attribution termination logging: every run records TWO independent
 //     fields instead of one rc: `why_model_stopped` and `why_harness_stopped`,
 //     so model-looping, tight budgets, and harness errors stop being conflated
@@ -92,6 +94,9 @@ export function createRecoverableOverflowTraceErrors() {
 export function create() {
   const summaryMessages = new Set<string>()
   let turnCount = 0
+  // altimate_change start — the non-compaction step streaming now, until it finishes
+  let openAttempt = false
+  // altimate_change end
   // altimate_change start — track the active request's committed echo turn allowance
   let committedAnswer = false
   // altimate_change end
@@ -166,23 +171,50 @@ export function create() {
       else summaryMessages.delete(info.id)
     },
     isCompactionStep,
-    /**
-     * Count a step-start toward the turn budget unless it belongs to a
-     * compaction-machinery message. Returns true when the step was counted.
-     */
-    onStepStart(messageID: string): boolean {
-      if (isCompactionStep(messageID)) return false
-      turnCount++
-      return true
+    // altimate_change start — charge the turn budget on step-finish, not step-start
+    // A step-start opens an attempt; the processor retries a failed attempt
+    // (up to SessionRetry.RETRY_MAX_ATTEMPTS per step), and each retry streams
+    // its own step-start but only the attempt that completes streams a
+    // step-finish. Charging on start billed every failed attempt as a turn.
+    // A step that ends without a step-finish is free when a retry or idle
+    // closes it (a failed or retried attempt). A step still open when compaction
+    // replaces it, or cut short by a context-overflow error, is charged as
+    // before, so overflow-and-compact cycles stay bounded by --max-turns
+    // whichever of the overflow error and the compaction start arrives first.
+    // The processor's retry cap bounds retried attempts.
+    // `turnCount` is therefore the number of COMPLETED non-compaction steps;
+    // harness-injected generations (idle-done challenge, continuation,
+    // silent-turn reply) are real assistant steps and are charged the same way.
+    /** Track the step now streaming; a compaction step closes any unfinished one. */
+    onStepAttempt(messageID: string) {
+      if (!isCompactionStep(messageID)) {
+        openAttempt = true
+        return
+      }
+      // Compaction replacing a step that never finished: that step was cut short.
+      if (openAttempt) turnCount++
+      openAttempt = false
     },
+    /** No step is streaming any more (the session went idle, or a retry began). */
+    closeOpenStep() {
+      openAttempt = false
+    },
+    /** Completed non-compaction assistant steps. */
     get turnCount() {
       return turnCount
     },
+    /** True when `maxTurns` completed steps already ran, so no further step may start. */
+    turnBudgetReached(maxTurns: number | undefined): boolean {
+      return maxTurns !== undefined && maxTurns > 0 && turnCount >= maxTurns
+    },
     onStepFinish(messageID: string, reason: string | undefined) {
       if (isCompactionStep(messageID)) return
+      turnCount++
+      openAttempt = false
       lastFinishReason = reason
       lastFinishMessageID = messageID
     },
+    // altimate_change end
     onText(messageID: string, text: string, synthetic = false) {
       if (isCompactionStep(messageID)) return
       if (synthetic) return
@@ -224,6 +256,14 @@ export function create() {
       }
       if (errorName === "ContextOverflowError") {
         pendingContextOverflow = true
+        // altimate_change start — a step cut short by context overflow still costs its turn
+        // Counted from the session event only, so the prompt result repeating the
+        // same overflow cannot charge it again.
+        if (openAttempt && source === "event") {
+          turnCount++
+          openAttempt = false
+        }
+        // altimate_change end
         return
       }
       // the idle-done challenge is delivered by aborting the in-flight

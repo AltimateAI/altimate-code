@@ -17,6 +17,7 @@ import { SessionProcessor } from "../../src/session/processor"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ProviderID, ModelID } from "@/provider/schema"
 import { SessionStatus } from "../../src/session/status"
+import { SessionRetry } from "../../src/session/retry"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
@@ -1121,6 +1122,61 @@ it.live("session.processor effect tests retry recognized structured json errors"
     { config: (url) => providerCfg(url) },
   ),
 )
+// altimate_change start — the retry cap bounds a step whose every attempt fails mid-stream.
+// `run --max-turns` charges only completed steps, so this cap (not the turn budget) is what
+// stops a provider that breaks every stream after the step started.
+it.live("session.processor effect tests stop retrying a mid-stream failure at the retry cap", () =>
+  provideTmpdirServerLegacy(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const failsMidStream = () =>
+          raw({
+            head: [
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { content: "partial" } }] },
+              { error: { message: "rate limit exceeded", type: "rate_limit_error", code: "rate_limit_exceeded" } },
+            ],
+          })
+        // One more failing stream than the cap allows; it must never be requested.
+        for (let attempt = 0; attempt <= SessionRetry.RETRY_MAX_ATTEMPTS + 1; attempt++) yield* llm.push(failsMidStream())
+        // Skip the real exponential backoff; the cap, not the delay, is under test.
+        const delay = spyOn(SessionRetry, "delay").mockReturnValue(1)
+        yield* Effect.addFinalizer(() => Effect.sync(() => delay.mockRestore()))
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "retry cap")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
+
+        yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "retry cap" }],
+          tools: {},
+        })
+
+        const parts = MessageV2.parts(msg.id)
+        expect(yield* llm.calls).toBe(SessionRetry.RETRY_MAX_ATTEMPTS + 1)
+        // Every attempt started a step; none finished, so none would be charged a turn.
+        expect(parts.filter((part) => part.type === "step-start")).toHaveLength(SessionRetry.RETRY_MAX_ATTEMPTS + 1)
+        expect(parts.filter((part) => part.type === "step-finish")).toHaveLength(0)
+        expect(handle.message.error).toBeDefined()
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+// altimate_change end
 // BUG: REGRESSION: retry attempts no longer reach the EventV2 status listener used by the Effect processor path.
 // Minimal src fix: packages/opencode/src/session/processor.ts:540 should publish retry through the same
 // EventV2Bridge/SessionStatus service instance provided to the processor Effect runtime, not an isolated facade.
