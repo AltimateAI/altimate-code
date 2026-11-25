@@ -982,12 +982,13 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(status.reason).not.toContain("abcdefghijklmnop")
   })
 
-  test("a timeout aborts the call and leaves the findings unchanged", async () => {
+  test("a timeout aborts the call and moves the unreviewed findings to the summary", async () => {
     const f = aiFinding()
     const llm: VerifierLlm = (req) =>
       new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
     const { findings, status } = await verify([f], llm, {}, { timeoutMs: 20 })
-    expect(findings).toEqual([f])
+    expect(findings.map((x) => x.id)).toEqual([f.id])
+    expect(findings[0].tier).toBe("summary")
     expect(status.state).toBe("timeout")
   })
 
@@ -996,7 +997,7 @@ describe("runAiVerify: the bounded tool loop", () => {
     const { llm } = scripted(() => toolStep([["read_file", { path: "models/fct.sql" }]]))
     // The read never settles; the deadline must still end the run.
     const { findings, status } = await verify([f], llm, { readFile: () => new Promise<string>(() => {}) }, { timeoutMs: 20 })
-    expect(findings).toEqual([f])
+    expect(findings.map((x) => x.id)).toEqual([f.id])
     expect(status.state).toBe("timeout")
   })
 
@@ -1668,5 +1669,38 @@ describe("runAiVerify: findings left unreviewed when a batch stops", () => {
     )
     const { findings } = await verify(two(), llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" } })
     expect(findings.map((f) => f.title)).toEqual(["fct: first claim"])
+  })
+
+  test("timeout: the findings without a verdict go to the summary, not inline", async () => {
+    const llm: VerifierLlm = (req) =>
+      new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
+    const { findings, status } = await verify(two(), llm, {}, { timeoutMs: 20 })
+    expect(status.state).toBe("timeout")
+    expect(status.unreviewed).toBe(2)
+    expect(status.summary).toBe(2)
+    expect(status.kept).toBe(0)
+    for (const f of findings) {
+      expect(f.tier).toBe("summary")
+      expect(inlineEligible({ ...f, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(false)
+      expect(status.decisions?.find((d) => d.id === f.id)?.rule).toBe("unreviewed_stopped")
+    }
+  })
+
+  test("timeout before any batch ran: the findings still go to the summary", async () => {
+    const { llm, calls } = scripted(() => ({ text: JSON.stringify([verdict("c1")]) }))
+    const hang = { graphParents: () => new Promise(() => {}) } as any
+    const { findings, status } = await verify(two(), llm, { runner: hang }, { timeoutMs: 20 })
+    expect(calls).toHaveLength(0)
+    expect(status.state).toBe("timeout")
+    expect(status.summary).toBe(2)
+    expect(status.kept).toBe(0)
+    expect(findings.map((f) => f.tier)).toEqual(["summary", "summary"])
+  })
+
+  test("the closed fail mode still discards them on a timeout", async () => {
+    const llm: VerifierLlm = (req) =>
+      new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
+    const { findings } = await verify(two(), llm, {}, { timeoutMs: 20, env: { ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" } })
+    expect(findings).toEqual([])
   })
 })

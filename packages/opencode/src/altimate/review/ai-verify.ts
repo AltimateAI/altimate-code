@@ -5,8 +5,8 @@
 // grep). The verifier sees only the candidate comments and their diff hunks,
 // never the reviewer's prompt or context, and a deterministic triage table —
 // not the model — decides what is kept. Opt-in (`ALTIMATE_REVIEW_AI_VERIFY=1`)
-// and fail-open: any error, timeout or exhausted budget leaves the findings it
-// did not review unchanged.
+// and fail-open: an error leaves the findings it did not review unchanged; a
+// timeout or exhausted budget moves them to the summary.
 import { asSchema, tool, type ModelMessage, type Tool } from "ai"
 import z from "zod"
 import type { Provider } from "@/provider/provider"
@@ -458,7 +458,8 @@ const LOCAL_CLAIMS = new Set<ModelFeatures["claimType"]>(["code_fact", "conventi
 /**
  * Decide one finding (pure; first matching row wins). Without a model verdict
  * (id omitted, unparsable answer, timeout, budget, error) the fail mode alone
- * decides: open keeps the finding unchanged, closed discards it.
+ * decides: open keeps the finding unchanged, or moves it to the summary when
+ * the verifier stopped (timeout or budget); closed discards it.
  */
 export function triage(
   f: Pick<Finding, "category">,
@@ -467,8 +468,8 @@ export function triage(
   knobs: TriageKnobs,
   stopped = false,
 ): { decision: Decision; rule: string } {
-  // A finding left without a verdict because its batch stopped on the token or tool-output
-  // budget was never checked: under the open fail mode it goes to the summary, not inline.
+  // A finding left without a verdict because the verifier stopped (timeout, or the token or
+  // tool-output budget) was never checked: under the open fail mode it goes to the summary.
   if (!m)
     return knobs.failMode === "open"
       ? stopped
@@ -594,19 +595,30 @@ export interface Verification {
   features: TsFeatures
 }
 
+/** An unreviewed finding demoted to the summary; it carries only the decision and its rule. */
+function toSummary(f: Finding, rule: string): Finding {
+  const prior =
+    f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
+  return {
+    ...f,
+    evidence: { tool: f.evidence?.tool ?? "ai-review", result: { ...prior, verification: { decision: "summary", rule } } },
+    tier: "summary" as const,
+  }
+}
+
 /**
  * Apply triage to every finding. Kept and summary findings that the model
  * reviewed carry `evidence.result.verification` (the evidence tool stays
  * `ai-review`); verified ones get the evidence appended to the body. Severity
  * is never raised. Unreviewed findings kept by the open fail mode are
- * returned unchanged.
+ * returned unchanged, or demoted to the summary when the verifier stopped.
  */
 export function applyTriage(
   findings: Finding[],
   ts: TsFeatures[],
   model: Array<ModelFeatures | undefined>,
   knobs: TriageKnobs,
-  /** Per finding: its batch answered early on the budget (`budget` state). */
+  /** Per finding: its batch stopped before a verdict (`timeout` or `budget` state). */
   stopped: boolean[] = [],
 ): {
   findings: Finding[]
@@ -644,17 +656,7 @@ export function applyTriage(
     if (decision === "summary") counts.summary++
     else counts.kept++
     if (!m) {
-      // An unreviewed finding demoted to the summary carries only the decision and its rule.
-      if (decision !== "summary") out.push(f)
-      else {
-        const prior =
-          f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
-        out.push({
-          ...f,
-          evidence: { tool: f.evidence?.tool ?? "ai-review", result: { ...prior, verification: { decision, rule } } },
-          tier: "summary" as const,
-        })
-      }
+      out.push(decision === "summary" ? toSummary(f, rule) : f)
       return
     }
     const verification: Verification = {
@@ -1259,7 +1261,7 @@ export async function runAiVerify(
     batches.forEach((b, k) => b.idx.forEach((i, j) => (model[i] = outcomes[k].verdicts.get(b.ids[j]))))
     const stopped: boolean[] = input.findings.map(() => false)
     batches.forEach((b, k) => {
-      if (outcomes[k].state === "budget") for (const i of b.idx) stopped[i] = true
+      if (outcomes[k].state === "budget" || outcomes[k].state === "timeout") for (const i of b.idx) stopped[i] = true
     })
     const triaged = applyTriage(input.findings, ts, model, triageKnobs(env), stopped)
     for (const d of triaged.dropped)
@@ -1296,16 +1298,18 @@ export async function runAiVerify(
     }
   } catch (err) {
     log.error("ai verify failed", { error: err })
-    // No finding got a verdict: the fail mode decides, as for an unreviewed finding.
+    // No finding got a verdict: the fail mode decides, as for an unreviewed finding; on a
+    // timeout the open fail mode moves them to the summary.
     const closed = triageKnobs(deps.env ?? process.env).failMode === "closed"
+    const timedOut = controller.signal.aborted
     const n = input.findings.length
     return {
-      findings: closed ? [] : input.findings,
+      findings: closed ? [] : timedOut ? input.findings.map((f) => toSummary(f, "unreviewed_stopped")) : input.findings,
       status: status({
-        ...(controller.signal.aborted
+        ...(timedOut
           ? { state: "timeout" as const, reason: "no answer before the verifier timeout" }
           : { state: "error" as const, reason: safeReason(err) }),
-        ...(closed ? { kept: 0, discarded: n } : {}),
+        ...(closed ? { kept: 0, discarded: n } : timedOut ? { kept: 0, summary: n } : {}),
       }),
     }
   } finally {
