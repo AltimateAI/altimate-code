@@ -6,8 +6,11 @@ import { buildAuthorizeUrl, buildCliContext } from "../../src/altimate/plugin/al
 import { getOrCreateMachineId } from "../../src/altimate/util/machine-id"
 import { Config } from "../../src/config/config"
 import { Telemetry } from "../../src/altimate/telemetry"
+import { TelemetryConfig } from "../../src/altimate/telemetry/config-state"
 import os from "os"
 import { tmpdir } from "../fixture/fixture"
+import { Instance } from "../../src/project/instance"
+import { Database } from "@opencode-ai/core/database/database"
 
 const VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
 
@@ -21,19 +24,22 @@ function stubConfig(impl: () => Promise<unknown>) {
 
 describe("buildCliContext", () => {
   let cfg: ReturnType<typeof spyOn>
-  let savedDisabled: string | undefined
+  const optOutFlags = ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"]
+  let savedFlags: Record<string, string | undefined> = {}
 
   beforeEach(() => {
     // Clear any real opt-out from the dev's shell so these "telemetry enabled"
-    // tests are not silently broken by an exported ALTIMATE_TELEMETRY_DISABLED.
-    savedDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    // tests are not silently broken (or skipped) by an exported opt-out variable.
+    savedFlags = Object.fromEntries(optOutFlags.map((flag) => [flag, process.env[flag]]))
+    for (const flag of optOutFlags) delete process.env[flag]
     cfg = stubConfig(async () => ({}))
   })
   afterEach(() => {
     cfg.mockRestore()
-    if (savedDisabled === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
-    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedDisabled
+    for (const flag of optOutFlags) {
+      if (savedFlags[flag] === undefined) delete process.env[flag]
+      else process.env[flag] = savedFlags[flag]
+    }
   })
 
   test("returns a valid base64url-encoded JSON blob with machine_id", async () => {
@@ -99,6 +105,114 @@ describe("buildCliContext", () => {
 
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
       expect(ctx["v"]).toBe(1)
+    })
+
+    async function contextHasMachineId(directory?: string) {
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const read = () => buildCliContext(idPath)
+      const encoded = directory ? await Instance.provide({ directory, fn: read }) : await read()
+      const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+      return Object.prototype.hasOwnProperty.call(ctx, "machine_id")
+    }
+
+    test("omits machine_id once this process resolved an opt-out, even if this config is enabled", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await Telemetry.adoptOptOut("disabled")
+      expect(await contextHasMachineId()).toBe(false)
+    })
+
+    test("omits machine_id when this process adopts an opt-out while the config is read", async () => {
+      // Every env opt-out short-circuits before the config read this test holds open.
+      const saved = ["ALTIMATE_TELEMETRY_DISABLED", "ALTIMATE_CLI_DISABLE_TELEMETRY", "OPENCODE_DISABLE_TELEMETRY"].map(
+        (key) => [key, process.env[key]] as const,
+      )
+      for (const [key] of saved) delete process.env[key]
+      try {
+      let release!: (value: unknown) => void
+      let started!: () => void
+      const reading = new Promise<void>((resolve) => (started = resolve))
+      cfg.mockImplementation((() => {
+        started()
+        return new Promise((resolve) => (release = resolve))
+      }) as never)
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const building = buildCliContext(idPath)
+      await reading
+      await Telemetry.adoptOptOut("disabled")
+      release({})
+      const ctx = JSON.parse(Buffer.from(await building, "base64url").toString("utf8")) as Record<string, unknown>
+      expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+      } finally {
+        for (const [key, value] of saved) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }
+    })
+
+    test("inside a project, omits machine_id when a remote config source could not be read", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await using project = await tmpdir({ git: true })
+      const unresolved = spyOn(Config, "telemetryConfigUnresolved").mockReturnValue(true)
+      try {
+        expect(await contextHasMachineId(project.path)).toBe(false)
+      } finally {
+        unresolved.mockRestore()
+      }
+      expect(await contextHasMachineId(project.path)).toBe(true)
+    })
+
+    test("inside a project, omits machine_id for another project whose own files opt out", async () => {
+      // An inherited env opt-out would short-circuit before this branch.
+      if (TelemetryConfig.disablingEnvironmentVariable()) return
+      await using current = await tmpdir({ git: true })
+      await using other = await tmpdir({ git: true })
+      fs.mkdirSync(path.join(other.path, ".altimate-code"))
+      fs.writeFileSync(path.join(other.path, ".altimate-code", "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      // The Instance's own project, named through a symlink, keeps the id: the comparison is canonical, and
+      // the omission below comes from the other-project branch.
+      const link = path.join(dir.path, "current-link")
+      fs.symlinkSync(current.path, link)
+      // The files-only read is made inconclusive, so treating the alias as another project would omit the id.
+      const filesOnly = spyOn(TelemetryConfig, "disabledState").mockResolvedValue("unreadable")
+      const own = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, link) }).finally(
+        () => filesOnly.mockRestore(),
+      )
+      expect(Object.prototype.hasOwnProperty.call(JSON.parse(Buffer.from(own, "base64url").toString("utf8")), "machine_id")).toBe(true)
+      const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) })
+      const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+      expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
+
+    test("inside a project, keeps machine_id for another project without an opt-out, without consulting the account database", async () => {
+      if (TelemetryConfig.disablingEnvironmentVariable()) return
+      await using current = await tmpdir({ git: true })
+      await using other = await tmpdir({ git: true })
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      // An account database the startup probe cannot read: only the loaded config can rule on remote sources.
+      const database = spyOn(Database, "path").mockReturnValue(":memory:")
+      const encoded = await Instance.provide({ directory: current.path, fn: () => buildCliContext(idPath, other.path) }).finally(
+        () => database.mockRestore(),
+      )
+      expect(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))["machine_id"]).toBe(VALID_UUID)
+    })
+
+    test("inside a project, omits machine_id when the full config fails to load", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await using project = await tmpdir({ git: true })
+      cfg.mockImplementation((async () => {
+        throw new Error("config failed to load")
+      }) as never)
+      expect(await contextHasMachineId(project.path)).toBe(false)
     })
 
     test("omits machine_id when config.telemetry.disabled is set", async () => {

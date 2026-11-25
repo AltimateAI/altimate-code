@@ -5,6 +5,7 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { Config } from "@/config/config"
+import { Telemetry } from "@/altimate/telemetry"
 import { ConfigManaged } from "@/config/managed"
 import { ConfigParse } from "../../src/config/parse"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
@@ -13,7 +14,7 @@ import { InstanceRef } from "../../src/effect/instance-ref"
 import type { InstanceContext } from "../../src/project/instance-context"
 import { Auth } from "../../src/auth"
 import { Account } from "../../src/account/account"
-import { AccessToken, AccountID, OrgID } from "../../src/account/schema"
+import { AccessToken, AccountID, AccountServiceError, OrgID } from "../../src/account/schema"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Env } from "../../src/env"
 import {
@@ -687,8 +688,191 @@ accountTokenIt.instance("resolves env templates in account config with account t
   Effect.gen(function* () {
     const config = yield* Config.use.get()
     expect(config.provider?.["opencode"]?.options?.apiKey).toBe("st_test_token")
+    expect(Config.telemetryConfigUnresolved(config)).toBe(false)
   }),
 )
+
+for (const failure of ["account", "organization"] as const) {
+  const unavailable = Effect.fail(new AccountServiceError({ message: "Account config unavailable" }))
+  const failedAccountIt = configIt({
+    account: Layer.mock(Account.Service)({
+      active: () =>
+        failure === "account"
+          ? unavailable
+          : Effect.succeed(
+              Option.some({
+                id: AccountID.make("account-1"),
+                email: "user@example.com",
+                url: "https://control.example.com",
+                active_org_id: OrgID.make("org-1"),
+              }),
+            ),
+      config: () => unavailable,
+      token: () => Effect.succeed(Option.none()),
+    }),
+  })
+  failedAccountIt.instance(`an unavailable ${failure} leaves the telemetry config unresolved`, () =>
+    Effect.gen(function* () {
+      const config = yield* Config.use.get()
+      expect(Config.telemetryConfigUnresolved(config)).toBe(true)
+    }),
+  )
+}
+
+{
+  let recovered = false
+  let orgLoads = 0
+  const account = Layer.mock(Account.Service)({
+    active: () => Effect.succeed(Option.some({
+      id: AccountID.make("telemetry-account"),
+      email: "user@example.com",
+      url: "https://control.example.invalid",
+      active_org_id: OrgID.make("telemetry-org"),
+    })),
+    config: () => Effect.suspend(() => {
+      orgLoads++
+      return recovered
+        ? Effect.succeed(Option.some({ telemetry: { disabled: false } }))
+        : Effect.fail(new AccountServiceError({ message: "Temporary organization config failure" }))
+    }),
+    token: () => Effect.succeed(Option.none()),
+  })
+  configIt({ account }).instance("telemetry sends held events after an organization config fetch recovers", () =>
+    Effect.gen(function* () {
+      const context = (yield* InstanceRef)!
+      const service = yield* Config.Service
+      yield* withProcessEnvs(
+        {
+          APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=test;IngestionEndpoint=https://ingest.example.invalid/",
+          ALTIMATE_TELEMETRY_DISABLED: undefined,
+          OPENCODE_AUTH_CONTENT: undefined,
+          ALTIMATE_CLI_DISABLE_TELEMETRY: undefined,
+          OPENCODE_DISABLE_TELEMETRY: undefined,
+        },
+        Effect.promise(async () => {
+          const events: string[] = []
+          await Telemetry.shutdown()
+          Telemetry.resetGateForTest()
+          Telemetry.setConfigDirectory(context.directory)
+          const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(
+            async (url: Parameters<typeof fetch>[0], request?: Parameters<typeof fetch>[1]) => {
+              if (url !== "https://ingest.example.invalid/v2/track") throw new Error("Unexpected telemetry request")
+              for (const envelope of JSON.parse(String(request?.body))) events.push(envelope.data.baseData.name)
+              return new Response(null, { status: 204 })
+            },
+            { preconnect: fetch.preconnect },
+          ))
+          // Bridge the Promise facade to the same scoped service for each telemetry init.
+          const config = spyOn(Config, "get").mockImplementation(() =>
+            Effect.runPromise(provideCurrentInstance(service.get(), context)),
+          )
+          try {
+            const track = () => Telemetry.track({
+              type: "startup_ready", timestamp: Date.now(), session_id: "",
+              command: "run", surface: "run", duration_ms: 1, fresh_install: false,
+            })
+            track()
+            await Telemetry.init()
+            track()
+            await Telemetry.refreshIdentity()
+            await Telemetry.flush()
+            const telemetryCalls = fetchSpy.mock.calls.filter(([url]) => /\/(v2\/track|users\/me)$/.test(String(url)))
+            expect(telemetryCalls).toEqual([])
+            expect(orgLoads).toBe(1)
+
+            // A repeat init inside the Instance reads its cached config: no second org fetch.
+            await Telemetry.init()
+            expect(orgLoads).toBe(1)
+
+            // A due retry reads the Instance's cached config: telemetry never forces a refetch.
+            recovered = true
+            Telemetry.retryConfigNowForTest()
+            await Telemetry.init()
+            expect(orgLoads).toBe(1)
+            expect(events).toEqual([])
+
+            // Once the app reloads its config, the next retry reads the recovered one.
+            await Effect.runPromise(provideCurrentInstance(service.invalidate(), context))
+            Telemetry.retryConfigNowForTest()
+            await Telemetry.init()
+            await Telemetry.flush()
+            expect(events).toEqual(["startup_ready", "startup_ready"])
+            expect(orgLoads).toBe(2)
+          } finally {
+            await Telemetry.shutdown()
+            Telemetry.setConfigDirectory(undefined)
+            config.mockRestore()
+            fetchSpy.mockRestore()
+          }
+        }),
+      )
+    }),
+  )
+}
+
+it.effect("a global config that fails validation fails the load instead of dropping its opt-out", () =>
+  withGlobalConfig({}, ({ dir }) =>
+    Effect.gen(function* () {
+      yield* FSUtil.use.writeWithDirs(
+        path.join(dir, "altimate-code.json"),
+        JSON.stringify({ telemetry: { disabled: true }, notARealKey: 1 }),
+      )
+      // The load fails outright (it does not fall back to defaults that drop the opt-out), which telemetry
+      // reads as unresolved inside a project.
+      const exit = yield* Config.use.get().pipe(provideInstanceEffect(dir), Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  ),
+)
+
+it.effect("a legacy global config that fails to load leaves the telemetry opt-out unresolved", () =>
+  withGlobalConfig({}, ({ dir }) =>
+    Effect.gen(function* () {
+      yield* FSUtil.use.writeWithDirs(path.join(dir, "config"), "broken = [")
+      const config = yield* Config.use.get().pipe(provideInstanceEffect(dir))
+      expect(Config.telemetryConfigUnresolved(config)).toBe(true)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  ),
+)
+
+// Writes the auth store (undefined removes it) for one effect, then restores the previous file.
+const withAuthStore = <A, E, R>(contents: string | undefined, effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const authFile = Auth.filepath()
+    const previous = yield* Effect.promise(() => fs.readFile(authFile, "utf8").catch(() => undefined))
+    yield* Effect.promise(async () => {
+      await fs.mkdir(path.dirname(authFile), { recursive: true })
+      if (contents === undefined) await fs.rm(authFile, { force: true })
+      else await fs.writeFile(authFile, contents)
+    })
+    return yield* effect.pipe(
+      Effect.ensuring(
+        Effect.promise(() => (previous === undefined ? fs.rm(authFile, { force: true }) : fs.writeFile(authFile, previous))),
+      ),
+    )
+  })
+
+for (const [label, contents, unresolved] of [
+  ["a missing", undefined, false],
+  ["an empty", "", false],
+  ["a whitespace-only", " \n", true],
+  ["an unparseable", "{", true],
+] as const) {
+  configIt({ auth: Auth.defaultLayer }).instance(
+    `a config loaded with ${label} auth store leaves the telemetry opt-out ${unresolved ? "unresolved" : "resolved"}`,
+    () =>
+      withProcessEnv(
+        "OPENCODE_AUTH_CONTENT",
+        undefined,
+        withAuthStore(
+          contents,
+          Effect.gen(function* () {
+            expect(Config.telemetryConfigUnresolved(yield* Config.use.get())).toBe(unresolved)
+          }),
+        ),
+      ),
+  )
+}
 
 it.instance("validates config schema and throws on invalid fields", () =>
   Effect.gen(function* () {

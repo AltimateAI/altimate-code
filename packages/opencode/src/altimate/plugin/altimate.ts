@@ -1,6 +1,8 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
 import { randomBytes } from "crypto"
+import path from "path" // altimate_change — compare the handoff project with the Instance
+import { Filesystem } from "@/util/filesystem" // altimate_change — canonicalize as Instance.provide does
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
@@ -8,8 +10,6 @@ import * as OnboardingTelemetry from "../telemetry/onboarding"
 import { Telemetry } from "../telemetry"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
-import { Config } from "@/config/config"
-import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
 // altimate_change — reads the config telemetry opt-out without an Instance
@@ -77,46 +77,53 @@ const log = Log.create({ service: "altimate-plugin" })
 // and `cli_version` are strings, treat `cli_version: "local"` as a valid dev
 // build, and treat the payload as untrusted (anyone can craft a URL). An absent
 // `machine_id` means "do not attribute" — it must never be aliased on.
+// altimate_change — the Instance's directory is canonical (symlinks resolved); compare like with like
+function canonicalDirectory(directory: string): string {
+  try {
+    return Filesystem.resolve(directory)
+  } catch {
+    return path.resolve(directory)
+  }
+}
+
 /** `directory`: the project the command acts on, whose config may opt out; the process's working
  * directory when the command has none (`auth login`). */
 export async function buildCliContext(machineIdPath?: string, directory?: string): Promise<string> {
   // altimate_change start — honour both telemetry opt-out gates, mirroring
   // telemetry/index.ts::doInit:
-  //   1. ALTIMATE_TELEMETRY_DISABLED / OPENCODE_DISABLE_TELEMETRY env vars
-  //      ("true"/"TRUE"/"1", case-insensitive — see Flag.truthyEnv)
-  //   2. config.telemetry.disabled (resolved via the async Config.get())
-  let disabled =
-    Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")
+  //   1. the opt-out env vars (TelemetryConfig.disablingEnvironmentVariable)
+  //   2. config.telemetry.disabled; a config that cannot be fully resolved omits the id
+  // A project this process already resolved as opted out stops it for every project it serves.
+  let disabled = Boolean(TelemetryConfig.disablingEnvironmentVariable()) || Telemetry.optOutState() === "disabled"
   if (!disabled) {
-    try {
-      const userConfig = (await Config.get()) as any
-      disabled = Boolean(userConfig.telemetry?.disabled)
-    } catch (err) {
-      // Config was unreadable — NOT the normal path. Server routes run inside
-      // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
-      // Config.get() resolves during an ordinary browser authorize(). It fires on
-      // the paths that skip instance bootstrap: `altimate auth login <url>` and the
+    // Server routes run inside Instance.provide(), so the full config resolves during an
+    // ordinary browser authorize().
+    const loaded = await TelemetryConfig.loadedState().catch(() => undefined)
+    const instance = TelemetryConfig.instanceDirectory()
+    // A handoff for another project than the one this Instance serves: that project's own files
+    // may opt out, so they must allow it too. The remote and organization sources are the same for
+    // both projects and the loaded config already covers them.
+    const otherProject = Boolean(instance && directory && canonicalDirectory(directory) !== instance)
+    if (loaded) {
+      disabled = loaded !== "enabled" || (otherProject && (await TelemetryConfig.disabledState(directory, { filesOnly: true })) !== "enabled")
+    } else if (instance) {
+      disabled = true
+    } else {
+      // The paths that skip instance bootstrap: `altimate auth login <url>` and the
       // create-and-link hand-off of `altimate-code link`. Read `telemetry.disabled`
       // from the config files directly: an opt-out there, or files that cannot be
       // read (an opt-out may be behind them), omit the id. Only a config that
       // readably leaves telemetry on defers to the telemetry module's own state
-      // (opted out by env, no sink, test runner).
+      // (no sink, test runner).
       const state = await TelemetryConfig.disabledState(directory)
-      if (state === "enabled") {
-        await Telemetry.init().catch(() => {})
-        disabled = !Telemetry.isEnabled()
-      } else {
-        disabled = true
-      }
-      log.info("cli_context: config unavailable, read the opt-out from the files", {
-        code: (err as NodeJS.ErrnoException)?.code,
-        state,
-        enabled: !disabled,
-      })
+      if (state === "enabled") await Telemetry.init().catch(() => {})
+      disabled = state !== "enabled" || !Telemetry.isEnabled()
+      log.info("cli_context: no instance, read the opt-out from the files", { state, enabled: !disabled })
     }
   }
   let machineId = ""
-  if (!disabled) {
+  // An opt-out adopted while the config was read still wins.
+  if (!disabled && Telemetry.optOutState() !== "disabled") {
     // getOrCreateMachineId returns "" on all error conditions (ENOENT excluded —
     // it mints a new UUID instead) and logs appropriately; no try/catch needed.
     machineId = getOrCreateMachineId(machineIdPath)

@@ -91,7 +91,12 @@ export const effectCmd = <Args, A>(opts: EffectCmdOpts<Args, A>) =>
       try {
         // altimate_change start — preserve legacy Instance ALS for Promise-based services
         // still reached from Effect-native CLI handlers (for example Provider.list -> Instance.state).
-        await Instance.restore(ctx, () => AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx))))
+        // Also settle a telemetry opt-out the CLI's startup read left open (see Telemetry.settleInProject).
+        const { Telemetry } = await import("@/altimate/telemetry")
+        await Instance.restore(ctx, async () => {
+          await Telemetry.settleInProject()
+          return AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx)))
+        })
         // altimate_change end
       } finally {
         await AppRuntime.runPromise(store.dispose(ctx))

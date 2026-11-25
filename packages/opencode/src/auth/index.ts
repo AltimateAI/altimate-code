@@ -1,5 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import path from "path"
+import { statSync } from "fs" // altimate_change — tell a missing or empty auth store from an unreadable one
 import { Effect, Layer, Record, Result, Schema, Context } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
@@ -67,6 +68,24 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Auth.cli") {}
 // altimate_change end
 
+// altimate_change start — stores returned in place of an auth file that exists but could not be read:
+// Config skips their well-known remote configs, so its telemetry opt-out is unknown.
+const unreadStores = new WeakSet<object>()
+export function readFailed(store: object): boolean {
+  return unreadStores.has(store)
+}
+function storeFileHasContent(): boolean {
+  try {
+    // A stat, not a second read of the file the read just failed on. Only an empty regular file is
+    // "no store"; anything else that failed to read counts as unreadable.
+    const stat = statSync(file)
+    return !stat.isFile() || stat.size > 0
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ENOENT"
+  }
+}
+// altimate_change end
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -80,8 +99,18 @@ export const layer = Layer.effect(
         } catch (err) {}
       }
 
-      const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
-      return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+      // altimate_change start — record a failed read of an auth file that exists and is not empty
+      let failed = false
+      const data = (yield* fsys.readJson(file).pipe(
+        Effect.orElseSucceed(() => {
+          failed = storeFileHasContent()
+          return {}
+        }),
+      )) as Record<string, unknown>
+      const store = Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+      if (failed) unreadStores.add(store)
+      return store
+      // altimate_change end
     })
 
     const get = Effect.fn("Auth.get")(function* (providerID: string) {

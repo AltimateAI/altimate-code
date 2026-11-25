@@ -9,6 +9,9 @@ import { afterAll } from "bun:test"
 import { afterEach, beforeEach } from "bun:test"
 // altimate_change end
 
+// altimate_change — telemetry exposes its between-test gate reset only when this is set (see below)
+process.env.ALTIMATE_TELEMETRY_TEST_HOOKS = "1"
+
 // Set XDG env vars FIRST, before any src/ imports
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
 await fs.mkdir(dir, { recursive: true })
@@ -157,6 +160,13 @@ const reportedSyncs = new WeakSet<Promise<unknown>>()
 let runningAtStart = new Set<Promise<unknown>>()
 beforeEach(() => {
   runningAtStart = new Set(runningSyncs().map(([, sync]) => sync))
+})
+// Telemetry's opt-out gate is process-wide and outlives shutdown(); files share a process, so each
+// test starts from a fresh launch's state. Only once a test has loaded telemetry: importing it here
+// would change module load order for files that mock its dependencies.
+beforeEach(() => {
+  const reset = (globalThis as Record<symbol, (() => void) | undefined>)[Symbol.for("altimate.telemetry.resetGateForTest")]
+  reset?.()
 })
 afterEach(() => {
   const left = runningSyncs().filter(([, sync]) => !reportedSyncs.has(sync))

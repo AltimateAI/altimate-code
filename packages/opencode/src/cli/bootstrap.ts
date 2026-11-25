@@ -9,6 +9,7 @@ import { InstanceRuntime } from "../project/instance-runtime"
 // not provided" — silently disabling session tracing and breaking `skill list`/`create`/`test`.
 import { Instance } from "../project/instance"
 // altimate_change end
+import { Telemetry } from "../altimate/telemetry" // altimate_change — settle a pending opt-out in the project
 
 export async function bootstrap<T>(directory: string, cb: () => Promise<T>) {
   // altimate_change start — upstream_fix: load the instance, then restore the loaded ctx on the
@@ -16,7 +17,10 @@ export async function bootstrap<T>(directory: string, cb: () => Promise<T>) {
   // ALS, which left every plain-async facade reader without an instance). See import note above.
   const ctx = await InstanceRuntime.load({ directory })
   try {
-    return await Instance.restore(ctx, cb)
+    return await Instance.restore(ctx, async () => {
+      await Telemetry.settleInProject()
+      return cb()
+    })
   } finally {
     await InstanceRuntime.disposeInstance(ctx)
   }

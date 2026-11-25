@@ -166,9 +166,9 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 - **Signed-in users:** Events carry your Altimate user ID and tenant, so they are not anonymous. No email address, hashed or not, is sent. See [User identification](telemetry.md) for how the ID is looked up and cached.
 - **Users who are not signed in:** A random UUID (`crypto.randomUUID()`) is generated on first run and stored at `~/.altimate/machine-id`. This is NOT tied to your hardware, OS, or identity — it's purely random.
-- **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option.
+- **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED`, `ALTIMATE_CLI_DISABLE_TELEMETRY` or `OPENCODE_DISABLE_TELEMETRY` set to `1` or `true`, or the `telemetry.disabled` config option.
 - **No fingerprinting:** We do not use browser fingerprinting, hardware IDs, MAC addresses, or IP-based tracking.
-- **CLI auth flow:** When you sign in via `altimate auth login`, the anonymous machine ID is included in the authorization URL and associated with your account in product analytics for funnel analysis. This is suppressed when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option — and the machine ID is omitted from the URL entirely.
+- **CLI auth flow:** When you sign in via `altimate auth login`, the anonymous machine ID is included in the authorization URL and associated with your account in product analytics for funnel analysis. The machine ID is omitted from the URL entirely when you disable telemetry (any of those three environment variables, or the `telemetry.disabled` config option), and also while that setting cannot be resolved.
 
 ### What happens on first launch?
 
@@ -183,8 +183,7 @@ No code, queries, file paths, or personal information is included. This event he
 
 The install scripts (`altimate.sh/install`, `install.ps1`), the npm postinstall, and the VS Code extension's installer send nothing themselves and contact no telemetry endpoint. They only record the version and installer name to a local file that the CLI reads on its next run, so the opt-out above decides whether anything is ever transmitted.
 
-!!! warning "One caveat on the config-file opt-out"
-    The environment variables (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`) are always honoured. The `telemetry.disabled` **config key** is read from the config files at telemetry startup. If a config file cannot be read or parsed at that point, startup proceeds with telemetry enabled, so this event may still be transmitted. Use an environment variable if you need a guarantee.
+The CLI sends zero usage telemetry requests when `ALTIMATE_TELEMETRY_DISABLED`, `ALTIMATE_CLI_DISABLE_TELEMETRY`, or `OPENCODE_DISABLE_TELEMETRY` is set to `1` or `true` (case-insensitive), or when `telemetry.disabled` is `true` in config. This also covers first launch and shutdown. If the opt-out setting is unresolved, the CLI holds events in memory and makes no telemetry requests. It discards them if telemetry is disabled, if the process exits before the setting resolves, or when a session ends for a project whose own config could not be read. A legacy global `config` (TOML) file that fails to import keeps the setting unresolved until it is fixed or removed and the config is reloaded (a long-running process reloads it on restart). One exception: a process that serves several projects (`serve`, an IDE) reads a project's own `telemetry.disabled` when that project's session starts, so a few of its events from before then can be sent if another, opted-in project already turned telemetry on. The environment variables are honoured process-wide from the start. A `telemetry.disabled` in your own files is normally read at CLI startup, before any project loads, so it holds for that process. A process that reads only a project's merged config (such as the TUI's worker thread) follows that config, where an organization config set by your admin is merged over your files.
 
 ## What happens when I authenticate via a well-known URL?
 
