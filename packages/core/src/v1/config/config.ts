@@ -104,16 +104,16 @@ export const Info = Schema.Struct({
   cost: Schema.optional(
     Schema.Struct({
       bigqueryUsdPerTib: Schema.optional(Schema.Number).annotate({
-        description: "BigQuery on-demand price in USD per TiB billed (default 6.25)",
+        description: "BigQuery on-demand price in USD per TiB billed; a positive number (default 6.25)",
       }),
       bigquerySlotHourUsd: Schema.optional(Schema.Number).annotate({
-        description: "BigQuery capacity price in USD per slot-hour, used for jobs that ran in a reservation (default 0.06)",
+        description: "BigQuery capacity price in USD per slot-hour, used for jobs that ran in a reservation; a positive number (default 0.06)",
       }),
       snowflakeUsdPerCredit: Schema.optional(Schema.Number).annotate({
-        description: "Snowflake price per credit; when set it replaces the account's billed and contract rates and no rate lookup is made (default 3.00 when no account rate can be read)",
+        description: "Snowflake price per credit; when set it replaces the account's billed and contract rates and no rate lookup is made (default 3.00 when no account rate can be read); a positive number",
       }),
       databricksUsdPerDbu: Schema.optional(Schema.Number).annotate({
-        description: "Databricks price per DBU; when set it replaces the list price",
+        description: "Databricks price per DBU; when set it replaces the list price; a positive number",
       }),
     }),
   ).annotate({ description: "Prices dbt_cost_estimate uses to turn warehouse usage into money" }),

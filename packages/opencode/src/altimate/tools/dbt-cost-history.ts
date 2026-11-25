@@ -49,7 +49,7 @@ export type CostInfo = {
   highest?: number
   runs?: number
   windowDays?: 30
-  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, `high` the dry run's upper bound plus each table's minimum. `perTable` is set when the table count is uncertain (so `high` is no ceiling): the price of one more table's 10 MiB minimum. */
+  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, `high` the dry run's upper bound plus each table's minimum. `perTable` is set when the table count is uncertain (unknown, or none found) or a source is involved (it may be a view that bills more), so `high` is no ceiling: it is the price of one more table's 10 MiB minimum, added for each table beyond those counted. */
   selectOnly?: { low: number; high: number; perTable?: number }
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
@@ -328,7 +328,10 @@ const prorated = (a: string) =>
     else cast(coalesce(${a}.ms, 0) as double) * (least(unix_micros(${a}.end_time), (${a}.hour + 1) * ${HOUR_US}) - greatest(unix_micros(${a}.start_time), ${a}.hour * ${HOUR_US}))
          / cast(unix_micros(${a}.end_time) - unix_micros(${a}.start_time) as double) end`
 
-export function databricksHistorySql(needle: string, asOfMs: number): string {
+/** With `configuredRate` the DBUs are priced at the configured rate, so an hour needs billed DBUs but no list price. */
+export function databricksHistorySql(needle: string, asOfMs: number, configuredRate = false): string {
+  // An hour is missing its billing when it has no usage row (and, at list price, no price for it).
+  const noBilling = configuredRate ? "b.dbus is null" : "b.usd is null or b.dbus is null"
   return `with q as (
   select statement_id, session_id, compute.warehouse_id as warehouse_id, start_time, coalesce(end_time, start_time) as end_time,
          statement_type, total_task_duration_ms as ms
@@ -360,7 +363,7 @@ billed as (
          sum(u.usage_quantity) as dbus,
          sum(u.usage_quantity * coalesce(p.pricing.effective_list.default, p.pricing.default)) as usd
   from system.billing.usage u
-  join system.billing.list_prices p on p.sku_name = u.sku_name and p.cloud = u.cloud
+  left join system.billing.list_prices p on p.sku_name = u.sku_name and p.cloud = u.cloud
     and u.usage_start_time >= p.price_start_time and (p.price_end_time is null or u.usage_start_time < p.price_end_time)
   join hours h on u.usage_metadata.warehouse_id = h.warehouse_id and ${hourOf("u.usage_start_time")} = h.hour
   where u.usage_unit = 'DBU' and u.usage_start_time > timestamp_millis(${windowStartMs(asOfMs, HISTORY_DAYS + 1)}) and u.usage_start_time <= timestamp_millis(${asOfMs})
@@ -371,8 +374,8 @@ select s.statement_id, s.session_id, s.start_time, s.end_time, s.statement_type,
        sum(s.share_ms) as total_task_duration_ms,
        sum(b.dbus * s.share_ms / nullif(t.task_ms, 0)) as dbus,
        sum(b.usd * s.share_ms / nullif(t.task_ms, 0)) as usd,
-       count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours,
-       count(case when b.usd is null or b.dbus is null then 1 end) as missing_billing,
+       count(case when ${noBilling} or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours,
+       count(case when ${noBilling} then 1 end) as missing_billing,
        count(case when coalesce(t.task_ms, 0) = 0 then 1 end) as zero_weight,
        max(case when s.ms is null then 1 else 0 end) as null_duration
 from shares s
@@ -731,7 +734,11 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
   const mixed = runs.some((r) => r.reserved) && anyDemand
   const newest = runs.reduce((a, b) => (b.start > a.start ? b : a))
   const rate = newest.reserved && !newest.demand ? slot.rate : demand.rate
-  if (mixed) notes.push("Some runs ran in a reservation (priced by slot time) and some on demand (priced by bytes billed).")
+  if (mixed) {
+    notes.push("Some runs ran in a reservation (priced by slot time) and some on demand (priced by bytes billed).")
+    // The headline rate may be the slot rate; the on-demand runs in the figures are priced at this one.
+    notes.push(`On-demand runs are priced at ${demand.rate.value} USD/TiB (${demand.rate.source === "config" ? "from your config" : "default"}).`)
+  }
   if (runs.some((r) => r.reserved))
     notes.push(
       `Slot time is attributed at ${slot.rate.value} USD/slot-hour; the bill follows the reservation's baseline, commitments and autoscaling, not each job.`,
@@ -1158,7 +1165,7 @@ export async function loadHistory(input: {
       return { cost: priceSnowflake(history, uniqueId, sheet, cfg, boundary), ...base }
     }
     const needle = needleFor(uniqueId)
-    const history = await rows(databricksHistorySql(needle, asOfMs))
+    const history = await rows(databricksHistorySql(needle, asOfMs, cfg.databricksUsdPerDbu !== undefined))
     const boundary = await boundaryFor(history, "start_time", (w) => databricksBoundarySql(needle, w), {
       id: "statement_id",
       session: "session_id",

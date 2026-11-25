@@ -1,9 +1,9 @@
 // The cost of a model's earlier runs: the history SQL per warehouse, the grouping of statements into runs, and the
 // pricing of what each warehouse reports. No adapter or warehouse is involved.
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
-import os from "node:os"
+import { writeFile } from "node:fs/promises"
 import path from "node:path"
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "../fixture/fixture"
 import {
   BQ_CHILD_LIMIT,
   BQ_MIN_BILLED_BYTES,
@@ -169,6 +169,16 @@ describe("history SQL builders", () => {
     expect(sql).toContain("(unix_micros(start_time) div 3600000000)")
     expect(sql).not.toMatch(/\blike\b/i)
     expect(sql).toContain("limit 500")
+  })
+
+  test("Databricks: with a configured rate an hour needs billed DBUs but no list price; at list price it needs both", () => {
+    const listed = databricksHistorySql("n", ASOF)
+    const configured = databricksHistorySql("n", ASOF, true)
+    expect(listed).toContain("count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
+    expect(configured).toContain("count(case when b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
+    expect(configured).toContain("count(case when b.dbus is null then 1 end) as missing_billing")
+    // The price join keeps an hour with DBUs but no price row.
+    expect(listed).toContain("left join system.billing.list_prices p")
   })
 
   test("a quote in the needle is escaped in every warehouse's SQL", () => {
@@ -356,6 +366,15 @@ describe("BigQuery pricing", () => {
     expect(cost.native).toBeUndefined()
     expect(cost.highest).toBeCloseTo(6.25)
     expect(cost.notes.join(" ")).toContain("some on demand")
+    // The newest run is the reservation's, so the headline rate is the slot rate; the on-demand rate is named too.
+    expect(cost.rate?.unit).toBe("USD/slot-hour")
+    expect(cost.notes.join(" ")).toContain("On-demand runs are priced at 6.25 USD/TiB (default).")
+    const configured = priceBigquery([bq("a", 0, TIB), bq("b", 100, 0, "res", 3_600_000)], undefined, "model.s.m", { bigqueryUsdPerTib: 5 }).cost
+    expect(configured.notes.join(" ")).toContain("On-demand runs are priced at 5 USD/TiB (from your config).")
+  })
+
+  test("all-reservation history names no on-demand rate", () => {
+    expect(priceBigquery([bq("b", 100, 0, "res", 3_600_000)], undefined, "model.s.m", {}).cost.notes.join(" ")).not.toContain("On-demand runs")
   })
 
   test("no job is no cost, and the message names the table and the unique_id", () => {
@@ -1154,15 +1173,11 @@ describe("review follow-ups: manifest and cancellation", () => {
   })
 
   test("a manifest that cannot be read is an error that names the file", async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "cost-manifest-"))
-    try {
-      const file = path.join(dir, "manifest.json")
-      await writeFile(file, "{ not json")
-      expect(modelFromManifest(file, "orders")).toEqual({ error: expect.stringContaining(`The manifest at ${file}`.replace("The", "the")) })
-      expect(modelFromManifest(path.join(dir, "missing.json"), "orders")).toEqual({ error: expect.stringContaining("no manifest at") })
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "manifest.json")
+    await writeFile(file, "{ not json")
+    expect(modelFromManifest(file, "orders")).toEqual({ error: expect.stringContaining(`the manifest at ${file}`) })
+    expect(modelFromManifest(path.join(tmp.path, "missing.json"), "orders")).toEqual({ error: expect.stringContaining("no manifest at") })
   })
 
   test("a call cancelled before the history starts stops, even when no query would be sent", async () => {

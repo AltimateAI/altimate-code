@@ -6,8 +6,10 @@ import { describe, expect, test } from "bun:test"
 import { databricksHistorySql, needleFor } from "@/altimate/tools/dbt-cost-history"
 
 const HOUR = 3_600_000_000
-/** Read as of a time far after the fixtures (timestamps here are microseconds from the epoch). */
-const ASOF_MS = 1_000_000_000
+/** Read as of a real date; the fixtures sit in the days before it (timestamps are microseconds from the epoch). */
+const ASOF_MS = Date.UTC(2026, 4, 10)
+/** The epoch hour the fixtures' hour numbers count from: 25 April 2026, 15 days inside the 30-day window. */
+const BASE_HOUR = Math.floor(Date.UTC(2026, 3, 25) / 3_600_000)
 const NEEDLE = needleFor("model.shop.orders")
 const TEXT = `/* {"node_id": "model.shop.orders"} */ merge into t`
 
@@ -68,25 +70,25 @@ function toSqlite(spark: string): string {
 type Stmt = { id: string; session?: string; wh?: string; start: number; end: number; ms: number | null; text?: string; type?: string }
 type Bill = { wh?: string; hour: number; dbus: number; sku?: string }
 
-function run(stmts: Stmt[], bills: Bill[], prices = { def: 0.7, eff: null as number | null }) {
+function run(stmts: Stmt[], bills: Bill[], prices: { def: number; eff: number | null } | null = { def: 0.7, eff: null }, configuredRate = false) {
   const db = new Database(":memory:")
   db.run("create table nums (n integer)")
-  for (let n = 0; n < 400; n++) db.run("insert into nums values (?)", [n])
+  for (let n = BASE_HOUR - 1200; n < BASE_HOUR + 400; n++) db.run("insert into nums values (?)", [n])
   db.run(
     "create table query_history (statement_id text, session_id text, compute_warehouse_id text, start_time integer, end_time integer, statement_type text, total_task_duration_ms integer, execution_status text, statement_text text)",
   )
   for (const s of stmts)
     db.run("insert into query_history values (?, ?, ?, ?, ?, ?, ?, 'FINISHED', ?)", [s.id, s.session ?? "s", s.wh ?? "w1", s.start, s.end, s.type ?? "MERGE", s.ms, s.text ?? TEXT])
   db.run("create table billing_usage (usage_metadata_warehouse_id text, usage_start_time integer, usage_quantity real, usage_unit text, sku_name text, cloud text)")
-  for (const b of bills) db.run("insert into billing_usage values (?, ?, ?, 'DBU', 'sku', 'aws')", [b.wh ?? "w1", b.hour * HOUR, b.dbus])
+  for (const b of bills) db.run("insert into billing_usage values (?, ?, ?, 'DBU', 'sku', 'aws')", [b.wh ?? "w1", (BASE_HOUR + b.hour) * HOUR, b.dbus])
   db.run("create table list_prices (sku_name text, cloud text, price_start_time integer, price_end_time integer, pricing_default real, pricing_effective_list_default real)")
-  db.run("insert into list_prices values ('sku', 'aws', 0, null, ?, ?)", [prices.def, prices.eff])
-  const rows = db.query<Record<string, number | string | null>, []>(toSqlite(databricksHistorySql(NEEDLE, ASOF_MS))).all()
+  if (prices) db.run("insert into list_prices values ('sku', 'aws', 0, null, ?, ?)", [prices.def, prices.eff])
+  const rows = db.query<Record<string, number | string | null>, []>(toSqlite(databricksHistorySql(NEEDLE, ASOF_MS, configuredRate))).all()
   db.close()
   return Object.fromEntries(rows.map((r) => [String(r.statement_id), r]))
 }
 
-const at = (hour: number, minutes = 0) => hour * HOUR + minutes * 60_000_000
+const at = (hour: number, minutes = 0) => (BASE_HOUR + hour) * HOUR + minutes * 60_000_000
 
 describe("the Databricks history SQL, executed", () => {
   test("a statement across two hours takes each hour's billing in proportion to the time it spent in it", () => {
@@ -166,6 +168,39 @@ describe("the Databricks history SQL, executed", () => {
     const bill = [{ hour: 100, dbus: 10 }]
     expect(run(stmt, bill, { def: 0.7, eff: 0.5 }).x.usd).toBeCloseTo(5, 9)
     expect(run(stmt, bill, { def: 0.7, eff: null }).x.usd).toBeCloseTo(7, 9)
+  })
+
+  test("a statement older than the 30-day window is not read, and neither are its hours", () => {
+    const out = run(
+      [
+        { id: "x", start: at(100, 10), end: at(100, 20), ms: 10 },
+        // 40 days before the as-of instant: outside the window.
+        { id: "old", start: at(-900, 10), end: at(-900, 20), ms: 10 },
+      ],
+      [
+        { hour: 100, dbus: 10 },
+        { hour: -900, dbus: 10 },
+      ],
+    )
+    expect(out.old).toBeUndefined()
+    expect(out.x.dbus).toBeCloseTo(10, 9)
+  })
+
+  test("with a configured rate, an hour with billed DBUs but no list price is known; without one it is unknown", () => {
+    const stmt = [{ id: "x", start: at(100, 10), end: at(100, 20), ms: 10 }]
+    const bill = [{ hour: 100, dbus: 10 }]
+    // No price row at all: the list-price figure is missing, the DBUs are not.
+    const configured = run(stmt, bill, null, true)
+    expect(configured.x.missing_hours).toBe(0)
+    expect(configured.x.dbus).toBeCloseTo(10, 9)
+    const listed = run(stmt, bill, null, false)
+    expect(listed.x.missing_hours).toBe(1)
+    expect(listed.x.missing_billing).toBe(1)
+  })
+
+  test("an hour with no billed DBUs at all is unknown whichever rate prices it", () => {
+    const stmt = [{ id: "x", start: at(100, 10), end: at(100, 20), ms: 10 }]
+    expect(run(stmt, [], { def: 0.7, eff: null }, true).x.missing_hours).toBe(1)
   })
 
   test("a statement on another warehouse neither shares nor takes the hour", () => {

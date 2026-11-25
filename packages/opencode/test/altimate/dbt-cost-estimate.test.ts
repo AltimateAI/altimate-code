@@ -2,8 +2,7 @@
 // the answer for a warehouse with no dry run, a read-only call, and a model compiled by name. The dbt adapter is
 // replaced through `dbtAdapterInternals`, so these tests need no Python, dbt or warehouse.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import os from "node:os"
+import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
@@ -23,6 +22,7 @@ import {
   untilAbort,
 } from "@/altimate/tools/dbt-cost-estimate"
 import { costHistoryInternals } from "@/altimate/tools/dbt-cost-history"
+import { tmpdir } from "../fixture/fixture"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -36,6 +36,7 @@ const ctx: Tool.Context = {
 }
 
 let project: string
+let projectDir: Awaited<ReturnType<typeof tmpdir>>
 /** The history queries (as Jinja) the tool sent through the adapter. */
 let historyLog: string[] = []
 const defaultReadCostConfig = costHistoryInternals.readCostConfig
@@ -114,7 +115,8 @@ function useAdapter(calls: Calls, opts?: Parameters<typeof fakeAdapter>[1]) {
 }
 
 beforeAll(async () => {
-  project = await mkdtemp(path.join(os.tmpdir(), "dbt-cost-estimate-"))
+  projectDir = await tmpdir()
+  project = projectDir.path
   await writeFile(path.join(project, "dbt_project.yml"), "name: shop\n")
   await mkdir(path.join(project, "target"))
   const model = (pkg: string, name: string, materialized: string, deps: string[] = []) => [
@@ -138,7 +140,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await rm(project, { recursive: true, force: true })
+  await projectDir[Symbol.asyncDispose]()
 })
 
 let calls: Calls
@@ -1501,31 +1503,23 @@ describe("dbt_cost_estimate cost", () => {
   })
 
   test("the manifest the adapter reports is the one the model is looked up in", async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-cost-manifest-"))
-    try {
-      const file = path.join(dir, "manifest.json")
-      await writeFile(file, JSON.stringify({ nodes: { "model.other.custom": { resource_type: "model", name: "custom", config: {}, depends_on: { nodes: [] } } }, sources: {} }))
-      useAdapter(calls, { manifestPath: file, history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
-      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "custom" }, ctx)
-      expect(result.metadata.cost).toMatchObject({ basis: "history", runs: 1 })
-      expect(historyLog.some((q) => q.includes("model.other.custom"))).toBe(true)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "manifest.json")
+    await writeFile(file, JSON.stringify({ nodes: { "model.other.custom": { resource_type: "model", name: "custom", config: {}, depends_on: { nodes: [] } } }, sources: {} }))
+    useAdapter(calls, { manifestPath: file, history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "custom" }, ctx)
+    expect(result.metadata.cost).toMatchObject({ basis: "history", runs: 1 })
+    expect(historyLog.some((q) => q.includes("model.other.custom"))).toBe(true)
   })
 
   test("a manifest that cannot be read leaves the scan figure and names the problem", async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-cost-manifest-"))
-    try {
-      const file = path.join(dir, "manifest.json")
-      await writeFile(file, "{ broken")
-      useAdapter(calls, { manifestPath: file, history: bigqueryHistory([]) })
-      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-      expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB) })
-      expect(result.metadata.cost.notes.join(" ")).toContain("could not be read")
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "manifest.json")
+    await writeFile(file, "{ broken")
+    useAdapter(calls, { manifestPath: file, history: bigqueryHistory([]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB) })
+    expect(result.metadata.cost.notes.join(" ")).toContain("could not be read")
   })
 
   test("a script is priced from its child jobs, which carry the reservation the script row lacks", async () => {
@@ -1935,8 +1929,10 @@ describe("dbt_cost_estimate cost", () => {
     // session that ends exactly the grouping gap before it still belongs to that run (a gap of exactly the limit
     // joins); one a millisecond earlier does not. An adapter consistent with the SQL returns a statement iff it starts
     // before the start literal and ends at or after the end literal.
-    const T0 = Date.UTC(2026, 4, 10)
-    const asOf = T0 + 5 * 86_400_000
+    // The oldest statement is five days before the as-of instant; the fillers follow it, 14.4 minutes apart, all before it.
+    const asOf = Date.UTC(2026, 4, 15)
+    const T0 = asOf - 5 * 86_400_000
+    const step = 864_000
     const iso = (ms: number) => new Date(ms).toISOString()
     const withNow = async (run: () => Promise<void>) => {
       costHistoryInternals.now = () => asOf
@@ -1955,7 +1951,7 @@ describe("dbt_cost_estimate cost", () => {
       await withNow(async () => {
         const rows = [
           ["old", "s1", iso(T0), iso(T0).slice(0, 10), iso(T0 + 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"],
-          ...Array.from({ length: 499 }, (_, i) => [`f${i}`, `f${i}`, iso(T0 + (i + 1) * 3 * 3_600_000), iso(T0).slice(0, 10), iso(T0 + (i + 1) * 3 * 3_600_000 + 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"]),
+          ...Array.from({ length: 499 }, (_, i) => [`f${i}`, `f${i}`, iso(T0 + (i + 1) * step), iso(T0).slice(0, 10), iso(T0 + (i + 1) * step + 60_000), "9000", "MERGE", "W", "XS", "1", null, "0"]),
         ]
         useAdapter(calls, {
           type: "snowflake",
@@ -1982,7 +1978,7 @@ describe("dbt_cost_estimate cost", () => {
         const cols = ["statement_id", "session_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd", "missing_hours"]
         const rows = [
           ["old", "s1", iso(T0), iso(T0 + 60_000), "MERGE", "w1", "1000", "1", "1", "0"],
-          ...Array.from({ length: 499 }, (_, i) => [`f${i}`, `f${i}`, iso(T0 + (i + 1) * 3 * 3_600_000), iso(T0 + (i + 1) * 3 * 3_600_000 + 60_000), "MERGE", "w1", "1000", "1", "1", "0"]),
+          ...Array.from({ length: 499 }, (_, i) => [`f${i}`, `f${i}`, iso(T0 + (i + 1) * step), iso(T0 + (i + 1) * step + 60_000), "MERGE", "w1", "1000", "1", "1", "0"]),
         ]
         useAdapter(calls, {
           type: "databricks",
@@ -2008,7 +2004,7 @@ describe("dbt_cost_estimate cost", () => {
       await withNow(async () => {
         const rows = [
           job("old", iso(T0), iso(T0 + 60_000), TIB),
-          ...Array.from({ length: 499 }, (_, i) => job(`f${i}`, iso(T0 + (i + 1) * 3 * 3_600_000), iso(T0 + (i + 1) * 3 * 3_600_000 + 60_000), TIB, null, 0, "MERGE", `u${i}@x.com`)),
+          ...Array.from({ length: 499 }, (_, i) => job(`f${i}`, iso(T0 + (i + 1) * step), iso(T0 + (i + 1) * step + 60_000), TIB, null, 0, "MERGE", `u${i}@x.com`)),
         ]
         useAdapter(calls, {
           history: bigqueryHistory(rows),
@@ -2216,6 +2212,22 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
+  test("Databricks: with a configured DBU rate the history asks for billed DBUs only, not a list price", async () => {
+    costHistoryInternals.readCostConfig = async () => ({ databricksUsdPerDbu: 0.4 })
+    try {
+      useAdapter(calls, { type: "databricks", explain: async () => "not a plan", history: async () => table([], []) })
+      await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      const sql = historyLog.find((q) => q.includes("system.billing.usage"))!
+      expect(sql).toContain("count(case when b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
+      historyLog = []
+      costHistoryInternals.readCostConfig = defaultReadCostConfig
+      await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+      expect(historyLog.find((q) => q.includes("system.billing.usage"))).toContain("b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0")
+    } finally {
+      costHistoryInternals.readCostConfig = defaultReadCostConfig
+    }
+  })
+
   test("Databricks with no run says the history covers SQL warehouses only", async () => {
     useAdapter(calls, { type: "databricks", explain: async () => "not a plan", history: async () => table([], []) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
@@ -2231,5 +2243,9 @@ describe("cost config", () => {
     const text = JSON.stringify(doc)
     expect(text).toContain("when set it replaces the account's billed and contract rates")
     expect(text).not.toContain("used when the account's rate sheet can't be read")
+    for (const key of ["bigqueryUsdPerTib", "bigquerySlotHourUsd", "snowflakeUsdPerCredit", "databricksUsdPerDbu"]) {
+      const own = new RegExp(`"${key}":.*?"description":"([^"]*)"`).exec(text)
+      expect(own?.[1]).toContain("a positive number")
+    }
   })
 })
