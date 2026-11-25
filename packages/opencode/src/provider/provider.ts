@@ -1898,13 +1898,14 @@ export namespace Provider {
 
     // altimate_change start — the linked workspace's model keys act as the provider's own API-key variable when the
     // user has set neither that variable nor a stored login, so the provider, its loader and every precedence rule
-    // treat it like any environment key. Only providers with a single key variable are filled in.
+    // treat it like any environment key. Only providers with a single key variable are filled in, and not SAP AI
+    // Core, whose loader reads the process environment rather than this instance's copy.
     if (await AltimateApi.isConfigured()) {
       const own = Env.all()
       for (const [id, apiKey] of Object.entries(await WorkspaceByok.resolve(Instance.directory))) {
         const providerID = ProviderID.make(id)
         const variable = database[providerID]?.env.length === 1 ? database[providerID].env[0] : undefined
-        if (!variable || own[variable] || !isProviderAllowed(providerID) || (await Auth.get(providerID))) continue
+        if (!variable || id === "sap-ai-core" || own[variable] || !isProviderAllowed(providerID) || (await Auth.get(providerID))) continue
         Env.set(variable, apiKey)
       }
     }
