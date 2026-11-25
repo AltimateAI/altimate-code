@@ -319,9 +319,16 @@ describe("Snowflake pricing", () => {
   })
 
   test("the rate comes from the account's rate sheet with its currency", () => {
-    expect(snowflakeRate({ effective_rate: "2.4", currency: "EUR" }, { snowflakeUsdPerCredit: 9 })).toEqual({
+    expect(snowflakeRate({ effective_rate: "2.4", currency: "EUR" }, {})).toEqual({
       rate: { value: 2.4, unit: "EUR/credit", source: "account" },
       currency: "EUR",
+    })
+  })
+
+  test("a configured rate overrides the account's rate sheet", () => {
+    expect(snowflakeRate({ effective_rate: "2.4", currency: "EUR" }, { snowflakeUsdPerCredit: 9 })).toEqual({
+      rate: { value: 9, unit: "USD/credit", source: "config" },
+      currency: "USD",
     })
   })
 

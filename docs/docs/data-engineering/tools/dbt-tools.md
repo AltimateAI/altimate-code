@@ -110,7 +110,7 @@ Set your own rates in the config (see [Configuration](../../configure/config.md)
 }
 ```
 
-`snowflakeUsdPerCredit` is used when the account's rate sheet can't be read; `databricksUsdPerDbu`, when set, replaces the list price.
+A rate you set wins over the account's Snowflake rate sheet and the Databricks list price; without one, the rate sheet or list price is used, then the default.
 
 ---
 

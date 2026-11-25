@@ -43,8 +43,9 @@ export type CostInfo = {
 export function cleanRates(raw: unknown): CostConfig {
   const out: CostConfig = {}
   if (!raw || typeof raw !== "object") return out
+  const given: Record<string, unknown> = { ...raw }
   for (const key of ["bigqueryUsdPerTib", "bigquerySlotHourUsd", "snowflakeUsdPerCredit", "databricksUsdPerDbu"] as const) {
-    const v = (raw as Record<string, unknown>)[key]
+    const v = given[key]
     if (typeof v === "number" && Number.isFinite(v) && v > 0) out[key] = v
   }
   return out
@@ -438,8 +439,10 @@ export function priceDatabricks(rows: Row[], uniqueId: string, cfg: CostConfig):
   return { basis: "history", currency: "USD", ...stats, native: { unit: "dbus", ...stats.native }, rate, notes }
 }
 
-/** The Snowflake rate: the account's rate sheet, else the configured rate, else the default. */
+/** The Snowflake rate: the configured rate, else the account's rate sheet, else the default. */
 export function snowflakeRate(sheet: Row | undefined, cfg: CostConfig): { rate: CostRate; currency: string; note?: string } {
+  if (cfg.snowflakeUsdPerCredit !== undefined)
+    return { rate: { value: cfg.snowflakeUsdPerCredit, unit: "USD/credit", source: "config" }, currency: "USD" }
   const effective = num(sheet?.effective_rate)
   if (effective !== undefined && effective > 0)
     return { rate: { value: effective, unit: `${sheet?.currency || "USD"}/credit`, source: "account" }, currency: sheet?.currency || "USD" }

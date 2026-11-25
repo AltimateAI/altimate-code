@@ -1335,7 +1335,7 @@ describe("dbt_cost_estimate cost", () => {
       ]),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost).toMatchObject({
       basis: "history",
       currency: "USD",
@@ -1372,7 +1372,7 @@ describe("dbt_cost_estimate cost", () => {
       history: bigqueryHistory([job("c1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 5 * TIB, "res-1", 7_200_000)], "3"),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost).toMatchObject({
       basis: "history",
       lastRun: 2 * 0.06,
@@ -1385,7 +1385,7 @@ describe("dbt_cost_estimate cost", () => {
   test("a project on capacity pricing does not get the dry run priced", async () => {
     useAdapter(calls, { history: bigqueryHistory([], "5") })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost.selectOnly).toBeUndefined()
     expect(cost.basis).toBe("none")
     expect(cost.notes.join(" ")).toContain("capacity pricing")
@@ -1395,7 +1395,7 @@ describe("dbt_cost_estimate cost", () => {
   test("a dry run is priced on demand with BigQuery's 10 MiB minimum, and says it covers the SELECT only", async () => {
     useAdapter(calls, { bytes: "1.0 KiB", history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders" }, ctx)
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost.basis).toBe("dry_run")
     expect(cost.selectOnly).toBeCloseTo(((10 * 1024 ** 2) / TIB) * 6.25, 10)
     expect(cost.notes.join(" ")).toContain("SELECT only")
@@ -1411,8 +1411,8 @@ describe("dbt_cost_estimate cost", () => {
       },
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders" }, ctx)
-    expect((result.metadata as any).cost.notes.join(" ")).toContain("assuming on-demand")
-    expect((result.metadata as any).cost.selectOnly).toBeGreaterThan(0)
+    expect(result.metadata.cost.notes.join(" ")).toContain("assuming on-demand")
+    expect(result.metadata.cost.selectOnly).toBeGreaterThan(0)
   })
 
   test("a history the role cannot read leaves the pre-run figure and says what is missing", async () => {
@@ -1423,7 +1423,7 @@ describe("dbt_cost_estimate cost", () => {
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, supported: true, bytes: Math.round(4.2 * TIB), display: "4.2 TiB" })
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost.notes.join(" ")).toContain("bigquery.jobs.listAll")
     expect(cost.runs).toBeUndefined()
     expect(result.output).toContain("would process 4.2 TiB")
@@ -1434,23 +1434,23 @@ describe("dbt_cost_estimate cost", () => {
     useAdapter(calls, { history: () => new Promise(() => {}) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB) })
-    expect((result.metadata as any).cost.notes.join(" ")).toContain("did not answer within 0.03 s")
+    expect(result.metadata.cost.notes.join(" ")).toContain("did not answer within 0.03 s")
   })
 
   test("SQL input has no history to read", async () => {
     useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1" }, ctx)
     expect(historyLog.some((q) => q.includes("total_bytes_billed"))).toBe(false)
-    expect((result.metadata as any).cost.basis).toBe("dry_run")
-    expect((result.metadata as any).cost.runs).toBeUndefined()
-    expect((result.metadata as any).cost.notes.join(" ")).toContain("A SQL input has no run history")
+    expect(result.metadata.cost.basis).toBe("dry_run")
+    expect(result.metadata.cost.runs).toBeUndefined()
+    expect(result.metadata.cost.notes.join(" ")).toContain("A SQL input has no run history")
   })
 
   test("a model name that matches two nodes is reported ambiguous and no history is read", async () => {
     useAdapter(calls, { history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "dup" }, ctx)
     expect(historyLog.some((q) => q.includes("total_bytes_billed"))).toBe(false)
-    const notes = (result.metadata as any).cost.notes.join(" ")
+    const notes = result.metadata.cost.notes.join(" ")
     expect(notes).toContain("model.other.dup")
     expect(notes).toContain("model.shop.dup")
   })
@@ -1458,8 +1458,8 @@ describe("dbt_cost_estimate cost", () => {
   test("an incremental model's scan figure says it leaves out the MERGE; a table model's does not", async () => {
     useAdapter(calls, { history: bigqueryHistory([]) })
     const tool = await initTool(DbtCostEstimateTool)
-    const incremental = (await tool.execute({ model: "orders" }, ctx)).metadata as any
-    const table_ = (await tool.execute({ model: "stg_orders" }, ctx)).metadata as any
+    const incremental = (await tool.execute({ model: "orders" }, ctx)).metadata
+    const table_ = (await tool.execute({ model: "stg_orders" }, ctx)).metadata
     expect(incremental.cost.notes.join(" ")).toContain("incremental")
     expect(table_.cost.notes.join(" ")).not.toContain("incremental")
   })
@@ -1471,7 +1471,7 @@ describe("dbt_cost_estimate cost", () => {
         history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]),
       })
       const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-      expect((result.metadata as any).cost).toMatchObject({ lastRun: 5, rate: { value: 5, source: "config" } })
+      expect(result.metadata.cost).toMatchObject({ lastRun: 5, rate: { value: 5, source: "config" } })
     } finally {
       costHistoryInternals.readCostConfig = defaultReadCostConfig
     }
@@ -1491,7 +1491,7 @@ describe("dbt_cost_estimate cost", () => {
             ]),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost.currency).toBe("EUR")
     expect(cost.runs).toBe(1)
     expect(cost.lastRun).toBeCloseTo(0.35 * 2.5, 10)
@@ -1514,8 +1514,8 @@ describe("dbt_cost_estimate cost", () => {
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
     expect(result.metadata).toMatchObject({ success: true, bytes: 1024 })
-    expect((result.metadata as any).cost).toMatchObject({ basis: "none" })
-    expect((result.metadata as any).cost.unknownReason).toContain("IMPORTED PRIVILEGES")
+    expect(result.metadata.cost).toMatchObject({ basis: "none" })
+    expect(result.metadata.cost.unknownReason).toContain("IMPORTED PRIVILEGES")
   })
 
   test("Databricks: the cost is the warehouse's billed share, at list price, and a run without billing is left out", async () => {
@@ -1532,7 +1532,7 @@ describe("dbt_cost_estimate cost", () => {
         ]),
     })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const cost = (result.metadata as any).cost
+    const cost = result.metadata.cost
     expect(cost).toMatchObject({ basis: "history", runs: 2, lastRun: 1.1, highest: 2.2, native: { unit: "dbus", lastRun: 2, highest: 4 } })
     expect(cost.typical).toBeCloseTo(1.65, 10)
     expect(cost.rate).toMatchObject({ unit: "USD/DBU", source: "list_price" })
@@ -1554,7 +1554,7 @@ describe("dbt_cost_estimate cost", () => {
           ]),
       })
       const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-      expect((result.metadata as any).cost).toMatchObject({ lastRun: 2, rate: { value: 0.4, source: "config" } })
+      expect(result.metadata.cost).toMatchObject({ lastRun: 2, rate: { value: 0.4, source: "config" } })
     } finally {
       costHistoryInternals.readCostConfig = defaultReadCostConfig
     }
@@ -1563,6 +1563,6 @@ describe("dbt_cost_estimate cost", () => {
   test("Databricks with no run says the history covers SQL warehouses only", async () => {
     useAdapter(calls, { type: "databricks", explain: async () => "not a plan", history: async () => table([], []) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    expect((result.metadata as any).cost.unknownReason).toContain("SQL warehouses only")
+    expect(result.metadata.cost.unknownReason).toContain("SQL warehouses only")
   })
 })
