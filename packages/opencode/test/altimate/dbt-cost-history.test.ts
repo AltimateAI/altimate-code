@@ -27,6 +27,7 @@ import {
   rowsJinja,
   snowflakeRateSql,
   snowflakeBilledRateSql,
+  unreadable,
   windowStartMs,
   billedRates,
   type SheetRate,
@@ -84,7 +85,7 @@ describe("history SQL builders", () => {
     expect(sql).toContain(`creation_time > timestamp_millis(${WINDOW}) and creation_time <= timestamp_millis(${ASOF})`)
     expect(sql).toContain("parent_job_id is null")
     expect(sql).toContain("error_result is null")
-    expect(sql).toContain("statement_type in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','SCRIPT','DELETE','UPDATE')")
+    expect(sql).toContain("upper(statement_type) in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','SCRIPT','DELETE','UPDATE')")
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
     expect(sql).not.toMatch(/\blike\b/i)
     expect(sql).toContain("order by creation_time desc limit 500")
@@ -100,7 +101,7 @@ describe("history SQL builders", () => {
     expect(sql).toContain(`creation_time > timestamp_millis(${windowStartMs(ASOF, 7)}) and creation_time <= timestamp_millis(${ASOF})`)
     expect(sql).toContain("countif(reservation_id is not null) as reserved")
     expect(sql).toContain("count(*) as jobs")
-    expect(sql).toContain("job_type = 'QUERY'")
+    expect(sql).toContain("upper(job_type) = 'QUERY'")
   })
 
   test("BigQuery: a role that cannot list every user's jobs reads its own from JOBS_BY_USER", () => {
@@ -128,8 +129,8 @@ describe("history SQL builders", () => {
   test("Snowflake: window, successful statements of build types, attribution join, exact match", () => {
     const sql = snowflakeHistorySql(needle, ASOF)
     expect(sql).toContain(`q.start_time > to_timestamp_ltz(${WINDOW}, 3) and q.start_time <= to_timestamp_ltz(${ASOF}, 3)`)
-    expect(sql).toContain("q.execution_status = 'SUCCESS'")
-    expect(sql).toContain("query_type in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','DELETE','UPDATE','MULTI_STATEMENT')")
+    expect(sql).toContain("upper(q.execution_status) = 'SUCCESS'")
+    expect(sql).toContain("upper(q.query_type) in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','DELETE','UPDATE','MULTI_STATEMENT')")
     expect(sql).toContain("left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id")
     expect(sql).toContain("to_varchar(convert_timezone('UTC', q.start_time), 'YYYY-MM-DD') as start_date_utc")
     expect(sql).toContain("q.session_id")
@@ -142,9 +143,9 @@ describe("history SQL builders", () => {
   test("Databricks: window, finished build statements on a warehouse, hour split by task time, exact match", () => {
     const sql = databricksHistorySql(needle, ASOF)
     expect(sql).toContain(`start_time > timestamp_millis(${WINDOW}) and start_time <= timestamp_millis(${ASOF})`)
-    expect(sql).toContain("execution_status = 'FINISHED' and compute.warehouse_id is not null")
+    expect(sql).toContain("upper(execution_status) = 'FINISHED' and compute.warehouse_id is not null")
     // dbt-databricks runs OPTIMIZE and ANALYZE inside the model's materialization, with its query comment.
-    expect(sql).toContain("statement_type in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
+    expect(sql).toContain("upper(statement_type) in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
     expect(sql).toContain(`instr(statement_text, '"node_id": "model.shop.orders"') > 0`)
     expect(sql).toContain("s.share_ms / nullif(t.task_ms, 0)")
     expect(sql).toContain("session_id")
@@ -189,6 +190,29 @@ describe("history SQL builders", () => {
     expect(databricksHistorySql("n", ASOF, true)).not.toContain("b.unpriced_dbus > 0 or coalesce")
   })
 
+  test("every comparison with a warehouse enum or category column is case-insensitive", () => {
+    const needle = needleFor("model.shop.orders")
+    const w = boundaryWindow(1_780_000_000_000)
+    const sqls = [
+      bigqueryHistorySql({ project: "p", needle, asOfMs: ASOF }),
+      bigqueryChildrenSql({ project: "p", parents: ["a"], sinceMs: 1 }),
+      bigqueryCapacitySql({ project: "p", asOfMs: ASOF }),
+      bigqueryBoundarySql({ project: "p", needle, window: w }),
+      snowflakeHistorySql(needle, ASOF),
+      snowflakeBoundarySql(needle, w),
+      snowflakeBilledRateSql(ASOF),
+      snowflakeRateSql(ASOF),
+      databricksHistorySql(needle, ASOF),
+      databricksHistorySql(needle, ASOF, true),
+      databricksBoundarySql(needle, w),
+    ]
+    const columns = ["statement_type", "query_type", "execution_status", "usage_unit", "usage_type", "service_type", "rating_type", "job_type", "state"]
+    const bare = new RegExp(`(?<!upper\\()(?:\\b\\w+\\.)?\\b(${columns.join("|")})\\b\\s*(=|in\\s*\\()`, "g")
+    for (const sql of sqls) expect([...sql.matchAll(bare)].map((m) => m[0])).toEqual([])
+    // The check sees a bare comparison.
+    expect([..."and state = 'DONE'".matchAll(bare)]).toHaveLength(1)
+  })
+
   test("a quote in the needle is escaped in every warehouse's SQL", () => {
     const hostile = `"node_id": "model.a.b' or 1=1 --"`
     expect(bigqueryHistorySql({ project: "p", needle: hostile, asOfMs: ASOF })).toContain("b\\' or 1=1")
@@ -199,7 +223,7 @@ describe("history SQL builders", () => {
 
 describe("Snowflake rate sheet query", () => {
   test("reads the rates of the window by date", () => {
-    expect(snowflakeRateSql(ASOF)).toContain("select date, effective_rate, currency")
+    expect(snowflakeRateSql(ASOF)).toContain("select date, usage_type, effective_rate, currency")
     expect(snowflakeRateSql(ASOF)).toContain("account_locator = current_account()")
     // The window's start is a UTC date, like the statement dates and the rate dates it is joined to.
     expect(snowflakeRateSql(ASOF)).toContain("date >= to_date('2026-05-01') and date <= to_date('2026-06-01')")
@@ -641,7 +665,7 @@ describe("Snowflake pricing", () => {
     expect(snowflakeBilledRateSql(ASOF)).toContain("sum(usage_in_currency) / nullif(sum(case when usage_in_currency is not null then usage end), 0) as rate")
     expect(snowflakeBilledRateSql(ASOF)).toContain("snowflake.organization_usage.usage_in_currency_daily")
     // The documented columns, with every balance source (contract and overage) kept.
-    expect(snowflakeBilledRateSql(ASOF)).toContain("rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("upper(rating_type) = 'COMPUTE' and upper(service_type) = 'WAREHOUSE_METERING'")
     expect(snowflakeBilledRateSql(ASOF)).not.toContain("usage_type")
     expect(snowflakeBilledRateSql(ASOF)).not.toContain("balance_source")
     expect(snowflakeBilledRateSql(ASOF)).toContain("count(distinct currency) as currencies")
@@ -651,8 +675,42 @@ describe("Snowflake pricing", () => {
 
   test("rate sheet rows are read by date, positive rates only", () => {
     expect(sheetRates([{ date: "2026-05-02 00:00:00", effective_rate: "2.5", currency: "EUR" }, { date: "2026-05-01", effective_rate: "0", currency: "EUR" }])).toEqual([
-      { date: "2026-05-02", value: 2.5, currency: "EUR", detail: "contract" },
+      { date: "2026-05-02", value: 2.5, currency: "EUR", detail: "contract", kind: "compute" },
     ])
+  })
+
+  test("per date the contract compute rate is used, else the overage-compute rate, and the answer names which", () => {
+    const rows: Row[] = [
+      { date: "2026-05-01", usage_type: "OVERAGE-COMPUTE", effective_rate: "4", currency: "USD" },
+      { date: "2026-05-02", usage_type: "COMPUTE", effective_rate: "2", currency: "USD" },
+      { date: "2026-05-02", usage_type: "OVERAGE-COMPUTE", effective_rate: "4", currency: "USD" },
+      { date: "2026-05-03", usage_type: "overage-compute", effective_rate: "5", currency: "USD" },
+      // The overage row comes first, and the compute row still wins.
+      { date: "2026-05-04", usage_type: "OVERAGE-COMPUTE", effective_rate: "6", currency: "USD" },
+      { date: "2026-05-04", usage_type: "COMPUTE", effective_rate: "3", currency: "USD" },
+    ]
+    const sheet = sheetRates(rows)
+    expect(sheet.map((r) => [r.date, r.value, r.kind])).toEqual([
+      ["2026-05-01", 4, "overage-compute"],
+      ["2026-05-02", 2, "compute"],
+      ["2026-05-03", 5, "overage-compute"],
+      ["2026-05-04", 3, "compute"],
+    ])
+    // An account with only overage rows can still be priced, and is told so.
+    const only = priceSnowflake([sf("a", 0, "1", null, "0", { start_date_utc: "2026-05-01" })], "model.s.m", sheetRates([rows[0]]), {})
+    expect(only.lastRun).toBe(4)
+    expect(only.notes.join(" ")).toContain("contract overage-compute rate")
+    expect(only.notes.join(" ")).not.toContain("Contract rate; overage not reflected.")
+    // With a compute rate the note is the usual one.
+    const normal = priceSnowflake([sf("b", 0, "1", null, "0", { start_date_utc: "2026-05-02" })], "model.s.m", sheetRates(rows), {})
+    expect(normal.lastRun).toBe(2)
+    expect(normal.notes.join(" ")).toContain("Contract rate; overage not reflected.")
+    expect(normal.notes.join(" ")).not.toContain("overage-compute rate")
+  })
+
+  test("the rate sheet query reads both usage types, compared in upper case", () => {
+    const sql = snowflakeRateSql(ASOF)
+    expect(sql).toContain("upper(usage_type) in ('COMPUTE', 'OVERAGE-COMPUTE') and upper(service_type) = 'WAREHOUSE_METERING'")
   })
 })
 
@@ -919,6 +977,14 @@ describe("run boundary", () => {
     expect(run(-0.4).basis).toBe("none")
   })
 
+  test("BigQuery: statement types are read in any case, so a lower-case merge still ends the run of its temporary CTAS", () => {
+    const rows = [tmpCtas("t", 0, TIB), bq("m", 3, 2 * TIB, null, 0, "merge")]
+    rows[0].statement_type = "create_table_as_select"
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(18.75, 10)
+  })
+
   test("BigQuery: a delete joins only a build by the same user", () => {
     const rows = [
       bq("d", 0, TIB, null, 0, "DELETE", { user_email: "a@x.com" }),
@@ -961,7 +1027,7 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`q.start_time < to_timestamp_ltz(${CUT + 1}, 3)`)
     expect(sql).toContain(`q.end_time >= to_timestamp_ltz(${CUT - 600_000}, 3)`)
     expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
-    expect(sql).toContain("q.execution_status = 'SUCCESS'")
+    expect(sql).toContain("upper(q.execution_status) = 'SUCCESS'")
     expect(sql).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
     expect(sql).toContain("limit 500")
   })
@@ -971,8 +1037,8 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`start_time < timestamp_millis(${CUT + 1})`)
     expect(sql).toContain(`coalesce(end_time, start_time) >= timestamp_millis(${CUT - 600_000})`)
     expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
-    expect(sql).toContain("execution_status = 'FINISHED'")
-    expect(sql).toContain("statement_type in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
+    expect(sql).toContain("upper(execution_status) = 'FINISHED'")
+    expect(sql).toContain("upper(statement_type) in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
   })
 
   test("BigQuery: top-level jobs of the same view, each lookback measured from the cutoff", () => {
@@ -981,10 +1047,10 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`creation_time < timestamp_millis(${CUT + 1})`)
     // Only a delete or update can attach to a later build, by creation time.
     expect(sql).toContain(`creation_time >= timestamp_millis(${CUT - 60_000})`)
-    expect(sql).toContain("statement_type in ('DELETE','UPDATE')")
+    expect(sql).toContain("upper(statement_type) in ('DELETE','UPDATE')")
     expect(sql).toContain("user_email")
     // And the CTAS into dbt's temporary relation that ended within ten minutes before it.
-    expect(sql).toContain("statement_type = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
+    expect(sql).toContain("upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
     expect(sql).toContain(`end_time >= timestamp_millis(${CUT - 600_000})`)
     expect(sql).not.toContain(`${CUT + 1 - 60_000}`)
     expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
@@ -1194,6 +1260,18 @@ describe("review follow-ups: manifest and cancellation", () => {
     await writeFile(file, "{ not json")
     expect(modelFromManifest(file, "orders")).toEqual({ error: expect.stringContaining(`the manifest at ${file}`) })
     expect(modelFromManifest(path.join(tmp.path, "missing.json"), "orders")).toEqual({ error: expect.stringContaining("no manifest at") })
+  })
+
+  test("dbt's bare 'Encountered an error:' wrapper is not shown as the cause", () => {
+    const wrapped = unreadable("databricks", "[ERROR]: Encountered an error:\nPERMISSION_DENIED: User does not have USE SCHEMA on Schema 'system.query'")
+    expect(wrapped.unknownReason).toContain("(PERMISSION_DENIED: User does not have USE SCHEMA")
+    expect(wrapped.unknownReason).not.toContain("Encountered an error")
+    // A message that is only the wrapper leaves no empty parentheses.
+    const bare = unreadable("databricks", "[ERROR]: Encountered an error:")
+    expect(bare.unknownReason).not.toContain("()")
+    expect(bare.unknownReason).not.toContain("Encountered")
+    // An ordinary message is shown as it was.
+    expect(unreadable("snowflake", "boom\nsecond line").unknownReason).toContain("(boom)")
   })
 
   test("a call cancelled before the history starts stops, even when no query would be sent", async () => {

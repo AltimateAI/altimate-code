@@ -181,9 +181,9 @@ export function bigqueryHistorySql(input: { project: string; location?: unknown;
   return `select job_id, user_email, creation_time, end_time, statement_type, destination_table.table_id as destination_table_id, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_millis(${windowStartMs(input.asOfMs)}) and creation_time <= timestamp_millis(${input.asOfMs})
-  and job_type = 'QUERY' and state = 'DONE' and error_result is null
+  and upper(job_type) = 'QUERY' and upper(state) = 'DONE' and error_result is null
   and parent_job_id is null
-  and statement_type in (${list(BQ_TYPES)})
+  and upper(statement_type) in (${list(BQ_TYPES)})
   and strpos(query, ${sqlString(input.needle)}) > 0
 order by creation_time desc limit ${HISTORY_LIMIT}`
 }
@@ -194,7 +194,7 @@ export function bigqueryChildrenSql(input: { project: string; location?: unknown
   return `select job_id, parent_job_id, creation_time, statement_type, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time >= timestamp_millis(${Math.floor(input.sinceMs)})
-  and job_type = 'QUERY' and state = 'DONE' and error_result is null
+  and upper(job_type) = 'QUERY' and upper(state) = 'DONE' and error_result is null
   and parent_job_id in (${input.parents.map(sqlString).join(",")})
 order by creation_time desc limit ${BQ_CHILD_LIMIT}`
 }
@@ -204,7 +204,7 @@ export function bigqueryCapacitySql(input: { project: string; location?: unknown
   return `select count(*) as jobs, countif(reservation_id is not null) as reserved
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and creation_time <= timestamp_millis(${input.asOfMs})
-  and job_type = 'QUERY' and state = 'DONE'`
+  and upper(job_type) = 'QUERY' and upper(state) = 'DONE'`
 }
 
 export function snowflakeHistorySql(needle: string, asOfMs: number): string {
@@ -213,8 +213,8 @@ export function snowflakeHistorySql(needle: string, asOfMs: number): string {
 from snowflake.account_usage.query_history q
 left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id
 where q.start_time > to_timestamp_ltz(${windowStartMs(asOfMs)}, 3) and q.start_time <= to_timestamp_ltz(${asOfMs}, 3)
-  and q.execution_status = 'SUCCESS'
-  and q.query_type in (${list(SF_TYPES)})
+  and upper(q.execution_status) = 'SUCCESS'
+  and upper(q.query_type) in (${list(SF_TYPES)})
   and contains(q.query_text, ${sqlString(needle)})
 order by q.start_time desc limit ${HISTORY_LIMIT}`
 }
@@ -261,8 +261,8 @@ export function snowflakeBoundarySql(needle: string, w: BoundaryWindow): string 
 from snowflake.account_usage.query_history q
 where q.start_time < ${at(w.startBeforeMs)} and q.start_time > ${at(w.startAfterMs)}
   and q.end_time >= ${at(w.endAtLeastMs)}
-  and q.execution_status = 'SUCCESS'
-  and q.query_type in (${list(SF_TYPES)})
+  and upper(q.execution_status) = 'SUCCESS'
+  and upper(q.query_type) in (${list(SF_TYPES)})
   and contains(q.query_text, ${sqlString(needle)})
 order by q.start_time desc limit ${HISTORY_LIMIT}`
 }
@@ -273,8 +273,8 @@ export function databricksBoundarySql(needle: string, w: BoundaryWindow): string
 from system.query.history
 where start_time < ${at(w.startBeforeMs)} and start_time > ${at(w.startAfterMs)}
   and coalesce(end_time, start_time) >= ${at(w.endAtLeastMs)}
-  and execution_status = 'FINISHED' and compute.warehouse_id is not null
-  and statement_type in (${list(DBX_TYPES)})
+  and upper(execution_status) = 'FINISHED' and compute.warehouse_id is not null
+  and upper(statement_type) in (${list(DBX_TYPES)})
   and instr(statement_text, ${sqlString(needle)}) > 0
 order by start_time desc limit ${HISTORY_LIMIT}`
 }
@@ -287,11 +287,11 @@ export function bigqueryBoundarySql(input: { project: string; location?: unknown
   return `select /* run boundary */ job_id, user_email, creation_time, end_time, statement_type
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.startAfterMs)}
-  and job_type = 'QUERY' and state = 'DONE' and error_result is null
+  and upper(job_type) = 'QUERY' and upper(state) = 'DONE' and error_result is null
   and parent_job_id is null
   and (
-    (statement_type in ('DELETE','UPDATE') and creation_time >= ${at(w.attachStartAtLeastMs)})
-    or (statement_type = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
+    (upper(statement_type) in ('DELETE','UPDATE') and creation_time >= ${at(w.attachStartAtLeastMs)})
+    or (upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
         and end_time >= ${at(w.tmpEndAtLeastMs)})
   )
   and strpos(query, ${sqlString(input.needle)}) > 0
@@ -304,14 +304,17 @@ order by creation_time desc limit ${HISTORY_LIMIT}`
  */
 export const snowflakeBilledRateSql = (asOfMs: number) => `select usage_date, sum(usage_in_currency) / nullif(sum(case when usage_in_currency is not null then usage end), 0) as rate, max(currency) as currency, count(distinct currency) as currencies
 from snowflake.organization_usage.usage_in_currency_daily
-where account_locator = current_account() and rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'
+where account_locator = current_account() and upper(rating_type) = 'COMPUTE' and upper(service_type) = 'WAREHOUSE_METERING'
   and usage_date >= to_date('${utcDate(windowStartMs(asOfMs, HISTORY_DAYS + 1))}') and usage_date <= to_date('${utcDate(asOfMs)}')
 group by usage_date
 order by usage_date`
 
-/** The contract rate for each day of the window: the fallback when the billed rates can't be read; it leaves out overage. */
-export const snowflakeRateSql = (asOfMs: number) => `select date, effective_rate, currency from snowflake.organization_usage.rate_sheet_daily
-where account_locator = current_account() and usage_type = 'compute' and service_type = 'WAREHOUSE_METERING'
+/**
+ * The contract rate for each day of the window: the fallback when the billed rates can't be read. Both the compute
+ * and the overage-compute rows are read, since an account that only buys overage has no compute row.
+ */
+export const snowflakeRateSql = (asOfMs: number) => `select date, usage_type, effective_rate, currency from snowflake.organization_usage.rate_sheet_daily
+where account_locator = current_account() and upper(usage_type) in ('COMPUTE', 'OVERAGE-COMPUTE') and upper(service_type) = 'WAREHOUSE_METERING'
   and date >= to_date('${utcDate(windowStartMs(asOfMs, HISTORY_DAYS + 1))}') and date <= to_date('${utcDate(asOfMs)}')
 order by date`
 
@@ -338,8 +341,8 @@ export function databricksHistorySql(needle: string, asOfMs: number, configuredR
          statement_type, total_task_duration_ms as ms
   from system.query.history
   where start_time > timestamp_millis(${windowStartMs(asOfMs)}) and start_time <= timestamp_millis(${asOfMs})
-    and execution_status = 'FINISHED' and compute.warehouse_id is not null
-    and statement_type in (${list(DBX_TYPES)})
+    and upper(execution_status) = 'FINISHED' and compute.warehouse_id is not null
+    and upper(statement_type) in (${list(DBX_TYPES)})
     and instr(statement_text, ${sqlString(needle)}) > 0
 ),
 q_hours as (
@@ -368,7 +371,7 @@ billed as (
   left join system.billing.list_prices p on p.sku_name = u.sku_name and p.cloud = u.cloud
     and u.usage_start_time >= p.price_start_time and (p.price_end_time is null or u.usage_start_time < p.price_end_time)
   join hours h on u.usage_metadata.warehouse_id = h.warehouse_id and ${hourOf("u.usage_start_time")} = h.hour
-  where u.usage_unit = 'DBU' and u.usage_start_time > timestamp_millis(${windowStartMs(asOfMs, HISTORY_DAYS + 1)}) and u.usage_start_time <= timestamp_millis(${asOfMs})
+  where upper(u.usage_unit) = 'DBU' and u.usage_start_time > timestamp_millis(${windowStartMs(asOfMs, HISTORY_DAYS + 1)}) and u.usage_start_time <= timestamp_millis(${asOfMs})
   group by 1, 2
 ),
 shares as (select q_hours.*, ${prorated("q_hours")} as share_ms from q_hours)
@@ -605,11 +608,11 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
     cause: known ? undefined : reserved ? ("noslot" as Cause) : ("nullbytes" as Cause),
     user: r.user_email ?? "",
     end: parseTime(r.end_time),
-    tmp: r.statement_type === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
-    final: BQ_FINAL_TYPES.includes(String(r.statement_type)),
+    tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
+    final: BQ_FINAL_TYPES.includes(stmtType(r)),
     hasTmp: false,
     start: parseTime(r.creation_time),
-    build: BQ_BUILD_TYPES.includes(String(r.statement_type)),
+    build: BQ_BUILD_TYPES.includes(stmtType(r)),
     cost: reserved ? slotHours * slot : ((billed ?? 0) / TIB) * demand,
     known,
     bytes: reserved ? 0 : (billed ?? 0),
@@ -618,6 +621,9 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
     demand: !reserved,
   }
 }
+
+/** A statement type as the warehouse reports it, in upper case. */
+const stmtType = (r: Row) => (r.statement_type ?? "").toUpperCase()
 
 const sumUnits = (start: number, build: boolean, units: BqUnit[], user = units[0]?.user ?? "", final = units[0]?.final ?? false): BqUnit => ({
   cause: units.find((u) => !u.known)?.cause,
@@ -707,7 +713,7 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
   const childrenCut = (children?.length ?? 0) >= BQ_CHILD_LIMIT
   const childBoundary = Math.min(...(children ?? []).map((c) => parseTime(c.creation_time)))
   const units = rows.map((r) => {
-    if (r.statement_type !== "SCRIPT") return bqJob(r, cfg)
+    if (stmtType(r) !== "SCRIPT") return bqJob(r, cfg)
     const kids = (children ?? []).filter((c) => c.parent_job_id === r.job_id).map((c) => bqJob(c, cfg))
     // A script's own row is never counted beside its children; with none found, its cost is not known.
     const start = parseTime(r.creation_time)
@@ -764,15 +770,25 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
   }
 }
 
-/** A day's account rate. */
-export type SheetRate = { date: string; value: number; currency: string; detail?: "billed" | "contract"; mixed?: boolean }
+/** A day's account rate. `kind` is the contract row it came from. */
+export type SheetRate = { date: string; value: number; currency: string; detail?: "billed" | "contract"; mixed?: boolean; kind?: "compute" | "overage-compute" }
 
-/** The contract rates (`rate_sheet_daily`). */
+/**
+ * The contract rates (`rate_sheet_daily`): for each date the compute rate, else the overage-compute rate when the
+ * account has none for that date. Usage types are compared in upper case, as the warehouse stores them.
+ */
 export function sheetRates(rows: Row[]): SheetRate[] {
-  return rows
-    .map((r): SheetRate => ({ date: (r.date ?? "").slice(0, 10), value: num(r.effective_rate) ?? Number.NaN, currency: r.currency || "USD", detail: "contract" }))
-    .filter((r) => r.date && r.value > 0)
-    .sort((a, b) => (a.date < b.date ? -1 : 1))
+  const byDate = new Map<string, SheetRate>()
+  for (const r of rows) {
+    const date = (r.date ?? "").slice(0, 10)
+    const value = num(r.effective_rate) ?? Number.NaN
+    const kind = (r.usage_type ?? "compute").toLowerCase() === "overage-compute" ? "overage-compute" : "compute"
+    if (!date || !(value > 0)) continue
+    const have = byDate.get(date)
+    if (have && (have.kind === "compute" || kind === "overage-compute")) continue
+    byDate.set(date, { date, value, currency: r.currency || "USD", detail: "contract", kind })
+  }
+  return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1))
 }
 
 /** The blended billed rates (`usage_in_currency_daily`); a day in more than one currency is `mixed`. */
@@ -797,7 +813,7 @@ export function snowflakeRateFor(
   day: string,
   sheet: SheetRate[],
   cfg: CostConfig,
-): { rate: CostRate; currency: string; note?: string; mixed?: boolean; stale?: string; contract?: boolean } {
+): { rate: CostRate; currency: string; note?: string; mixed?: boolean; stale?: string; contract?: boolean; overageOnly?: boolean } {
   if (cfg.snowflakeUsdPerCredit !== undefined)
     return { rate: { value: cfg.snowflakeUsdPerCredit, unit: "USD/credit", source: "config" }, currency: "USD" }
   let found: SheetRate | undefined
@@ -810,7 +826,8 @@ export function snowflakeRateFor(
       currency: found.currency,
       mixed: found.mixed,
       stale: detail === "billed" && day > last.date ? found.date : undefined,
-      contract: detail === "contract",
+      contract: detail === "contract" && found.kind !== "overage-compute",
+      overageOnly: found.kind === "overage-compute",
     }
   }
   const fallback = rateOf(undefined, DEFAULT_RATES.snowflakeUsdPerCredit, "USD/credit", "snowflakeUsdPerCredit")
@@ -827,16 +844,18 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
   const defaults = new Set<string>()
   let stale: string | undefined
   let contract = false
+  let overageOnly = false
   // The headline rate for a run that could not be priced: the newest statement on a day with a single rate.
   let newest: { start: number; rate: CostRate; currency: string } | undefined
   const stmts: Stmt[] = rows.map((r) => {
     const compute = num(r.credits_attributed_compute)
     const credits = (compute ?? 0) + (num(r.credits_used_query_acceleration) ?? 0)
     cloud += num(r.credits_used_cloud_services) ?? 0
-    const { rate, currency, note, mixed, stale: late, contract: fromContract } = snowflakeRateFor(r.start_date_utc ?? "", sheet, cfg)
+    const { rate, currency, note, mixed, stale: late, contract: fromContract, overageOnly: fromOverage } = snowflakeRateFor(r.start_date_utc ?? "", sheet, cfg)
     if (note) defaults.add(note)
     if (late && (!stale || late > stale)) stale = late
     if (fromContract) contract = true
+    if (fromOverage) overageOnly = true
     const start = parseTime(r.start_time)
     if (!mixed && (!newest || start > newest.start)) newest = { start, rate, currency }
     // An unattributed statement is a zero only when it was too short for Snowflake to attribute; otherwise it is still pending.
@@ -869,6 +888,7 @@ export function priceSnowflake(rows: Row[], uniqueId: string, sheet: SheetRate[]
     )
   notes.push(...defaults)
   if (contract) notes.push("Contract rate; overage not reflected.")
+  if (overageOnly) notes.push("Priced at the contract overage-compute rate: the account has no compute rate for those days.")
   if (stale) notes.push(`Recent runs priced at the latest billed rate (${stale}): Snowflake's billing view lags up to three days.`)
   if (truncated) notes.push(LIMIT_NOTE)
   if (dropped) notes.push(boundaryNote(dropped))
@@ -971,9 +991,19 @@ export function accessProblem(type: string, message: string): string | undefined
   return undefined
 }
 
+/** The first line of an error that says something: dbt wraps a warehouse error in a bare "Encountered an error:" line. */
+function errorDetail(message: string): string {
+  const lines = message
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !/^(\[?error\]?:?\s*)?encountered an error:?$/i.test(l))
+  return (lines[0] ?? "").replace(/^\[?error\]?:\s*/i, "").slice(0, 300)
+}
+
 export function unreadable(type: string, message: string): CostInfo {
   const why = accessProblem(type, message)
-  return none(`Cost history could not be read${why ? `: ${why}` : ""} (${message.split("\n")[0].slice(0, 300)}).`)
+  const detail = errorDetail(message)
+  return none(`Cost history could not be read${why ? `: ${why}` : ""}${detail ? ` (${detail})` : ""}.`)
 }
 
 /**
@@ -1132,7 +1162,7 @@ export async function loadHistory(input: {
             session: r[keys.session] ?? null,
             start: parseTime(r[startKey]),
             end: parseTime(r.end_time),
-            tmp: r.statement_type === "CREATE_TABLE_AS_SELECT",
+            tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT",
           })),
       }
     } catch (e) {
@@ -1220,8 +1250,8 @@ export async function loadHistory(input: {
     let reserved = false
     try {
       const history = await read((view) => bigqueryHistorySql({ project, location, needle: needleFor(id), view, asOfMs }))
-      const parents = history.rows.filter((r) => r.statement_type === "SCRIPT" && r.job_id).map((r) => r.job_id!)
-      const sinceMs = Math.min(...history.rows.filter((r) => r.statement_type === "SCRIPT").map((r) => parseTime(r.creation_time)))
+      const parents = history.rows.filter((r) => stmtType(r) === "SCRIPT" && r.job_id).map((r) => r.job_id!)
+      const sinceMs = Math.min(...history.rows.filter((r) => stmtType(r) === "SCRIPT").map((r) => parseTime(r.creation_time)))
       const children = parents.length
         ? (await read((view) => bigqueryChildrenSql({ project, location, parents, sinceMs, view }))).rows
         : undefined

@@ -67,7 +67,7 @@ function toSqlite(spark: string): string {
   return sql
 }
 
-type Stmt = { id: string; session?: string; wh?: string; start: number; end: number; ms: number | null; text?: string; type?: string }
+type Stmt = { status?: string; id: string; session?: string; wh?: string; start: number; end: number; ms: number | null; text?: string; type?: string }
 type Bill = { wh?: string; hour: number; dbus: number; sku?: string }
 
 function run(stmts: Stmt[], bills: Bill[], prices: { def: number; eff: number | null } | null = { def: 0.7, eff: null }, configuredRate = false) {
@@ -78,7 +78,7 @@ function run(stmts: Stmt[], bills: Bill[], prices: { def: number; eff: number | 
     "create table query_history (statement_id text, session_id text, compute_warehouse_id text, start_time integer, end_time integer, statement_type text, total_task_duration_ms integer, execution_status text, statement_text text)",
   )
   for (const s of stmts)
-    db.run("insert into query_history values (?, ?, ?, ?, ?, ?, ?, 'FINISHED', ?)", [s.id, s.session ?? "s", s.wh ?? "w1", s.start, s.end, s.type ?? "MERGE", s.ms, s.text ?? TEXT])
+    db.run("insert into query_history values (?, ?, ?, ?, ?, ?, ?, ?, ?)", [s.id, s.session ?? "s", s.wh ?? "w1", s.start, s.end, s.type ?? "MERGE", s.ms, s.status ?? "FINISHED", s.text ?? TEXT])
   db.run("create table billing_usage (usage_metadata_warehouse_id text, usage_start_time integer, usage_quantity real, usage_unit text, sku_name text, cloud text)")
   for (const b of bills) db.run("insert into billing_usage values (?, ?, ?, 'DBU', ?, 'aws')", [b.wh ?? "w1", (BASE_HOUR + b.hour) * HOUR, b.dbus, b.sku ?? "sku"])
   db.run("create table list_prices (sku_name text, cloud text, price_start_time integer, price_end_time integer, pricing_default real, pricing_effective_list_default real)")
@@ -229,6 +229,18 @@ describe("the Databricks history SQL, executed", () => {
   test("an hour with no billed DBUs at all is unknown whichever rate prices it", () => {
     const stmt = [{ id: "x", start: at(100, 10), end: at(100, 20), ms: 10 }]
     expect(run(stmt, [], { def: 0.7, eff: null }, true).x.missing_hours).toBe(1)
+  })
+
+  test("statement status and type are compared in upper case, and a failed statement is not read", () => {
+    const out = run(
+      [
+        { id: "lower", start: at(100, 10), end: at(100, 20), ms: 10, status: "finished", type: "merge" },
+        { id: "failed", start: at(100, 30), end: at(100, 40), ms: 10, status: "FAILED" },
+        { id: "select", start: at(100, 50), end: at(100, 55), ms: 10, type: "SELECT" },
+      ],
+      [{ hour: 100, dbus: 10 }],
+    )
+    expect(Object.keys(out)).toEqual(["lower"])
   })
 
   test("a statement on another warehouse neither shares nor takes the hour", () => {
