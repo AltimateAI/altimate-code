@@ -3032,6 +3032,101 @@ test("defaultModel falls through to other providers when altimate is not configu
     },
   })
 })
+
+// A credentials file that is present but not a sign-in. Listed, the gateway provider became the
+// default model and its first request went out with no Authorization header (403 "Not authenticated").
+async function withAltimateFile<R>(content: unknown, fn: (dir: string) => Promise<R>) {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+    },
+  })
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+  await fs.mkdir(path.join(tmp.path, ".altimate"), { recursive: true })
+  await Bun.write(path.join(tmp.path, ".altimate", "altimate.json"), JSON.stringify(content))
+  try {
+    return await fn(tmp.path)
+  } finally {
+    if (originalHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalHome
+  }
+}
+
+test.each([
+  ["a blank key", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "test-instance", altimateApiKey: "" }],
+  ["a whitespace key", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "test-instance", altimateApiKey: "   " }],
+  ["a blank key and instance name", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "", altimateApiKey: "" }],
+  ["a blank instance name", { altimateUrl: "https://test.altimate.ai", altimateInstanceName: "", altimateApiKey: "test-api-key" }],
+  ["a blank URL", { altimateUrl: "", altimateInstanceName: "test-instance", altimateApiKey: "test-api-key" }],
+])("altimate.json with %s does not list altimate-backend or make it the default", async (_, content) => {
+  await withAltimateFile(content, (dir) =>
+    provideProviderTestInstance({
+      directory: dir,
+      init: async () => {
+        Env.set("ANTHROPIC_API_KEY", "test-api-key")
+      },
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers["altimate-backend"]).toBeUndefined()
+        const model = await Provider.defaultModel()
+        expect(String(model.providerID)).toBe("anthropic")
+      },
+    }),
+  )
+})
+
+test("an altimate-backend auth entry next to an unusable altimate.json does not list a provider with no URL", async () => {
+  await withAltimateFile({}, async (dir) => {
+    await Auth.set("altimate-backend", { type: "api", key: "https://test.altimate.ai::test-instance::test-api-key" })
+    try {
+      await provideProviderTestInstance({
+        directory: dir,
+        init: async () => {
+          Env.set("ANTHROPIC_API_KEY", "test-api-key")
+        },
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(providers["altimate-backend"]).toBeUndefined()
+        },
+      })
+      // The unusable file declines the sign-in without deleting the saved key.
+      expect(await Auth.get("altimate-backend")).toEqual({
+        type: "api",
+        key: "https://test.altimate.ai::test-instance::test-api-key",
+      })
+    } finally {
+      await Auth.remove("altimate-backend")
+    }
+  })
+})
+
+test("an altimate-backend auth entry alone still signs in to the gateway with its URL, key and instance", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+    },
+  })
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+  await Auth.set("altimate-backend", { type: "api", key: "https://test.altimate.ai::test-instance::test-api-key" })
+  try {
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      fn: async () => {
+        const provider = (await Provider.list())["altimate-backend"]
+        expect(provider).toBeDefined()
+        expect(provider.options.baseURL).toBe("https://test.altimate.ai/agents/v1")
+        expect(provider.options.apiKey).toBe("test-api-key")
+        expect(provider.options.headers).toEqual({ "x-tenant": "test-instance" })
+      },
+    })
+  } finally {
+    await Auth.remove("altimate-backend")
+    if (originalHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalHome
+  }
+})
 // altimate_change end
 
 // altimate_change start — upstream_fix: `ModelsCatalog.isCatalog` only requires

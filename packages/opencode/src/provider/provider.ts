@@ -579,8 +579,9 @@ export namespace Provider {
             },
           }
         } catch {
-          // Suppress stale auth so the generic Auth.all() merge doesn't leave an invalid provider
-          await Auth.remove(ProviderID.make("altimate-backend")).catch(() => {})
+          // An unusable file (blank fields, bad JSON, an unset ${env:…}) is not a sign-in. The
+          // auth-store entry is kept: the generic Auth.all() merge skips this provider, so the
+          // entry can no longer list it without a URL, and deleting it would lose a saved key.
           return { autoload: false }
         }
       }
@@ -1940,6 +1941,10 @@ export namespace Provider {
     for (const [id, provider] of Object.entries(await Auth.all())) {
       // altimate_change start — the managed provider is hydrated only from its dedicated credential store
       if (id === FreeTier.PROVIDER_ID) continue
+      // The gateway's entry is a `url::instance::key` string that only its custom loader can parse.
+      // Merged raw it listed the provider with no URL ("undefined/chat/completions") whenever the
+      // loader declined it, because a provider that already exists keeps its place in the list.
+      if (id === "altimate-backend") continue
       // altimate_change end
       const providerID = ProviderID.make(id)
       if (disabled.has(providerID)) continue

@@ -636,3 +636,57 @@ describe("ProviderError.parseAPICallError: Altimate Base request-too-large isola
   })
   // altimate_change end
 })
+
+describe("ProviderError.parseAPICallError: Altimate LLM Gateway refusing the key", () => {
+  const gatewayError = (statusCode: number, detail: string) =>
+    makeAPICallError({
+      message: statusCode === 401 ? "Unauthorized" : "Forbidden",
+      statusCode,
+      responseBody: JSON.stringify({ detail }),
+      url: "https://api.myaltimate.com/agents/v1/chat/completions",
+    })
+
+  test("403 Not authenticated (no key sent) asks the user to sign in again", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-backend" as any,
+      error: gatewayError(403, "Not authenticated"),
+    })
+    expect(result.type).toBe("api_error")
+    if (result.type !== "api_error") return
+    expect(result.message).toStartWith("Sign in to Altimate again")
+    expect(result.message).toContain("altimate-code auth login -p altimate-backend")
+    // The gateway's own text stays, so counts of this error keep matching after the fix.
+    expect(result.message).toContain('Forbidden: {"detail":"Not authenticated"}')
+    expect(result.statusCode).toBe(403)
+    expect(result.isRetryable).toBe(false)
+  })
+
+  test("401 Incorrect auth token (revoked or wrong key) asks the user to sign in again", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-backend" as any,
+      error: gatewayError(401, "Incorrect auth token"),
+    })
+    expect(result.type).toBe("api_error")
+    if (result.type !== "api_error") return
+    expect(result.message).toStartWith("Sign in to Altimate again")
+    expect(result.statusCode).toBe(401)
+  })
+
+  test("402 (out of credits) from the gateway is not a sign-in problem", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-backend" as any,
+      error: gatewayError(402, "Your free credits are used up"),
+    })
+    expect(result.type).toBe("api_error")
+    if (result.type === "api_error") expect(result.message).not.toContain("Sign in to Altimate again")
+  })
+
+  test("a 403 from another provider keeps its own message", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: gatewayError(403, "Not authenticated"),
+    })
+    expect(result.type).toBe("api_error")
+    if (result.type === "api_error") expect(result.message).not.toContain("Sign in to Altimate again")
+  })
+})

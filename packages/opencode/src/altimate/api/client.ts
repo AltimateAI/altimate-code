@@ -18,10 +18,14 @@ const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
 const DEFAULT_ALTIMATE_URL = "https://api.myaltimate.com"
 // altimate_change end
 
+// A blank field is not a sign-in. Accepted, a blank key loaded the gateway provider as connected,
+// so a message went to the gateway with no Authorization header and got 403 "Not authenticated".
+const CredentialField = z.string().refine((value) => value.trim() !== "", "must not be blank")
+
 const AltimateCredentials = z.object({
-  altimateUrl: z.string(),
-  altimateInstanceName: z.string(),
-  altimateApiKey: z.string(),
+  altimateUrl: CredentialField,
+  altimateInstanceName: CredentialField,
+  altimateApiKey: CredentialField,
   mcpServerUrl: z.string().optional(),
 })
 type AltimateCredentials = z.infer<typeof AltimateCredentials>
