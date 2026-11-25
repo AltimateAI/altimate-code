@@ -81,7 +81,7 @@ export interface ReviewPullRequestOptions {
   /** Every rename the PR makes (new → old path), when `changedFiles` is a subset of it. */
   prRenames?: Array<[string, string]>
   /** Send changed Python files outside the dbt project to this review's AI lane (`pythonFiles`
-   *  switch). Default true; `--all-projects` sets it for one project only. */
+   *  switch). Default true; `--all-projects` sets it until one project's AI lane runs. */
   aiOutsidePython?: boolean
 }
 
@@ -370,7 +370,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const changedFiles = scoped.inScope
   let aiDisabledReason: string | undefined
   if (opts.noAi) aiDisabledReason = "disabled by --no-ai"
-  else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled by `ai: false` in .altimate/review.yml"
+  else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled in .altimate/review.yml"
   const aiOn = !aiDisabledReason
   const aiSwitches = resolveAiSwitches(config)
   // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane.
@@ -385,9 +385,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       `ℹ️  ${notReviewedOutside} changed file(s) outside the dbt project (${projectRootRel || "."}) were not reviewed.\n`,
     )
   }
+  // An upper bound: the lane's tier, Python quota, exclusions and credential screen decide
+  // what it sends, and the result's coverage ledger lists any it did not review.
   if (aiOutsideFiles.length > 0) {
     process.stderr.write(
-      `ℹ️  ${aiOutsideFiles.length} changed Python file(s) outside the dbt project (${projectRootRel || "."}) go to the AI review only.\n`,
+      `ℹ️  ${aiOutsideFiles.length} changed Python file(s) outside the dbt project (${projectRootRel || "."}) are offered to the AI review only, when that lane runs; the result lists any it did not review.\n`,
     )
   }
   // Map renamed files → their old path so getContent resolves the "old" side

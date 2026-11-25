@@ -287,6 +287,8 @@ export const VerdictEnvelope = z.object({
         .optional(),
       /** Sendable files the opt-in coverage quotas kept from the model (the deterministic lanes still checked them). */
       unsent: z.array(z.string()).optional(),
+      /** Files sent only in calls that failed while other calls answered: not reviewed by the AI lane. */
+      failedFiles: z.array(z.string()).optional(),
       /** The opt-in dbt-grounded verifier (`ALTIMATE_REVIEW_AI_VERIFY=1`): what it kept and dropped. */
       verifier: z
         .object({

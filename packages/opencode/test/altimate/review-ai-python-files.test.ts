@@ -122,14 +122,41 @@ describe("ALTIMATE_REVIEW_AI_PYTHON_FILES: orchestrator file list", () => {
     expect(on.files.filter((f) => f.path === "dbt/models/py_model.py")).toHaveLength(1)
   })
 
-  test("with ALTIMATE_REVIEW_AI_OTHER_FILES: files it adds are not added again", async () => {
+  test("ALTIMATE_REVIEW_AI_OTHER_FILES alone sends no .py file; Python files go through this switch only", async () => {
     const other = await lane(IN_ROOT, { layoutRoot: "dbt", flags: OTHER })
     const both = await lane(IN_ROOT, { layoutRoot: "dbt", outside: OUTSIDE, flags: { ...OTHER, ...PY } })
+    expect(other.files.filter((f) => f.path.endsWith(".py")).map((f) => f.path)).toEqual(["dbt/models/py_model.py"])
     expect(both.files.slice(0, other.files.length)).toEqual(other.files)
-    expect(other.files.map((f) => f.path)).toContain("dbt/scripts/helper.py")
-    expect(both.files.slice(other.files.length).map((f) => f.path)).toEqual(["airflow/dags/load.py"])
+    expect(both.files.slice(other.files.length).map((f) => [f.path, f.kind])).toEqual([
+      ["dbt/scripts/helper.py", AI_PYTHON_KIND],
+      ["dbt/analyses/check.py", AI_PYTHON_KIND],
+      ["airflow/dags/load.py", AI_PYTHON_KIND],
+    ])
     const paths = both.files.map((f) => f.path)
     expect(new Set(paths).size).toBe(paths.length)
+  })
+
+  test("the verifier sees the added lines of outside-project files", async () => {
+    process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
+    let seen: AiReviewInput | undefined
+    await runReview({
+      changedFiles: [mod("dbt/models/m.sql")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      layout: { root: "dbt", dirs: DEFAULT_DBT_DIRS },
+      aiOutsideFiles: [mod("airflow/load.py")],
+      aiVerify: true,
+      getContent: async (f, side) => (side === "old" ? undefined : `x`),
+      generatedAt: "2026-11-25T00:00:00Z",
+      aiReview: async (input) => {
+        seen = input
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    expect([...(seen!.evidence!.addedLines.get("airflow/load.py") ?? [])]).toEqual([2])
   })
 })
 
@@ -206,6 +233,8 @@ describe("reviewPullRequest end to end: .py files outside the dbt project reach 
   test("AI dry run: ai.input lists the outside .py file as python_file; unset it is out of scope only", async () => {
     const { reviewPullRequest } = await import("../../src/altimate/review/run")
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-py-e2e-")))
+    const lines: string[] = []
+    const write0 = process.stderr.write.bind(process.stderr)
     try {
       await write(root, "dbt/dbt_project.yml", "name: p\n")
       await write(root, "dbt/models/m.sql", "select 1 as id\n")
@@ -223,8 +252,6 @@ describe("reviewPullRequest end to end: .py files outside the dbt project reach 
       git(root, "commit", "-q", "-m", "pr")
       for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"]) delete process.env[k]
       process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
-      const lines: string[] = []
-      const write0 = process.stderr.write.bind(process.stderr)
       ;(process.stderr as any).write = (chunk: any, ...rest: any[]) => {
         lines.push(String(chunk))
         return write0(chunk, ...rest)
@@ -243,16 +270,16 @@ describe("reviewPullRequest end to end: .py files outside the dbt project reach 
         ["airflow/dags/load.py", AI_PYTHON_KIND],
       ])
       expect(on.findings).toEqual(off.findings)
-      // The stderr count leaves out the file the AI lane takes.
+      // The stderr count leaves out the file offered to the AI lane.
       expect(outsideLines()).toEqual([
         "ℹ️  2 changed file(s) outside the dbt project (dbt) were not reviewed.\n",
-        "ℹ️  1 changed Python file(s) outside the dbt project (dbt) go to the AI review only.\n",
+        "ℹ️  1 changed Python file(s) outside the dbt project (dbt) are offered to the AI review only, when that lane runs; the result lists any it did not review.\n",
       ])
-      ;(process.stderr as any).write = write0
       // The dry run made no model call, so the file is still listed as not reviewed.
       expect(on.scope?.notReviewed.map((n) => n.path)).toContain("airflow/dags/load.py")
       expect(on.scope?.aiReviewedOutside).toBeUndefined()
     } finally {
+      ;(process.stderr as any).write = write0
       await fs.rm(root, { recursive: true, force: true })
     }
   }, 60_000)
@@ -264,7 +291,7 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
     outOfScopeFiles: paths.length,
     notReviewed: paths.map((p) => ({ path: p, reason: "outside the dbt project (dbt)" })),
   })
-  async function run(state: "ok" | "error") {
+  async function run(state: "ok" | "error" | "partial") {
     process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
     return runReview({
       changedFiles: [mod("dbt/models/m.sql")],
@@ -278,7 +305,15 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
       scope: outsideScope(["airflow/load.py", "README.md"]),
       getContent: async (f, side) => (side === "old" ? undefined : `x`),
       generatedAt: "2026-11-25T00:00:00Z",
-      aiReview: async () => ({ findings: [], status: state === "ok" ? { state: "ok" } : { state: "error", reason: "boom" } }),
+      aiReview: async () => ({
+        findings: [],
+        status:
+          state === "ok"
+            ? { state: "ok" }
+            : state === "partial"
+              ? { state: "ok", reason: "1 of 2 calls failed: boom", failedFiles: ["airflow/load.py"] }
+              : { state: "error", reason: "boom" },
+      }),
     })
   }
 
@@ -294,6 +329,12 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
     expect(env.scope?.notReviewed.map((n) => n.path)).toEqual(["airflow/load.py", "README.md"])
     expect(env.scope?.aiReviewedOutside).toBeUndefined()
     expect(env.scope?.outOfScopeFiles).toBe(2)
+  })
+
+  test("its call failed while others answered: still listed as outside the project, not reviewed", async () => {
+    const env = await run("partial")
+    expect(env.scope?.notReviewed.map((n) => n.path)).toEqual(["airflow/load.py", "README.md"])
+    expect(env.scope?.aiReviewedOutside).toBeUndefined()
   })
 
   test("multi-project merge: a path one project's AI lane reviewed is not listed by the others", async () => {
@@ -348,4 +389,50 @@ describe("--all-projects: an outside-project Python file goes to one project's A
       await fs.rm(root, { recursive: true, force: true })
     }
   }, 60_000)
+
+  test("the first project's AI lane is off in its policy: the next project's lane takes the file", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-py-mp-off-")))
+    try {
+      await write(root, "a/dbt_project.yml", "name: a\n")
+      await write(root, "a/.altimate/review.yml", "ai: false\n")
+      await write(root, "a/models/m.sql", "select 1 as id\n")
+      await write(root, "b/dbt_project.yml", "name: b\n")
+      await write(root, "b/models/n.sql", "select 1 as id\n")
+      await write(root, "airflow/load.py", "print(1)\n")
+      git(root, "init", "-q", "-b", "main")
+      git(root, "add", "-A")
+      git(root, "commit", "-q", "-m", "base")
+      git(root, "checkout", "-q", "-b", "pr")
+      await write(root, "a/models/m.sql", "select 1 as id, 2 as x\n")
+      await write(root, "b/models/n.sql", "select 1 as id, 3 as y\n")
+      await write(root, "airflow/load.py", "print(2)\n")
+      git(root, "add", "-A")
+      git(root, "commit", "-q", "-m", "pr")
+      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"]) delete process.env[k]
+      process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
+      process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
+      const env = await reviewAllProjects({ cwd: root, base: "main", head: "HEAD" })
+      expect(env.ai?.input?.map((r) => r.path).sort()).toEqual(["airflow/load.py", "b/models/n.sql"])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+})
+
+describe("ai.unsent lists only files the deterministic lanes checked", () => {
+  test("Python files over their quota are not in ai.unsent (the coverage ledger has them)", async () => {
+    const { runAiReview } = await import("../../src/altimate/review/ai-review")
+    process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
+    const py = Array.from({ length: 8 }, (_, i): AiReviewFile => ({
+      path: `scripts/s${i}.py`,
+      status: "modified",
+      kind: AI_PYTHON_KIND,
+      model: `s${i}`,
+      diff: "@@ -1,1 +1,2 @@\n x\n+y\n",
+      sql: "print(1)\n",
+    }))
+    const res = await runAiReview({ grounding: [], files: py, switches: { coverage: true, pythonFiles: true } })
+    expect(res.status.input?.length).toBe(6)
+    expect(res.status.unsent).toBeUndefined()
+  })
 })

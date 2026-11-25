@@ -151,17 +151,22 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
   const prFiles = collected.map((f) => f.path)
   const prRenames = collected.flatMap((f) => (f.status === "renamed" && f.oldPath ? [[f.path, f.oldPath] as [string, string]] : []))
   const runs: ProjectRun[] = []
+  // Python files outside every project go to one project's AI lane only (`pythonFiles`): the
+  // first project whose lane runs and takes them. While a project's lane does not (off in its
+  // policy, a tier without the lane), they are offered to the next project.
+  const unassignedPaths = new Set(unassigned.map((f) => f.path))
+  let outsidePythonPending = true
   for (const root of touched) {
     const own = byProject.get(root)!
     process.stderr.write(`ℹ️  reviewing dbt project ${root || "."} (${own.length} changed file(s))\n`)
-    // Python files outside every project go to one project's AI lane only (`pythonFiles`).
     const env = await reviewPullRequest({
       ...optsFor(root),
       changedFiles: [...own, ...unassigned],
       prFiles,
       prRenames,
-      aiOutsidePython: root === touched[0],
+      aiOutsidePython: outsidePythonPending,
     })
+    if (env.ai?.state === "ok" || (env.ai?.input ?? []).some((r) => unassignedPaths.has(r.path))) outsidePythonPending = false
     runs.push({ root, paths: own.map((f) => f.path), env })
   }
   return mergeProjectEnvelopes(runs, roots)
@@ -313,6 +318,7 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
   const base = ok ?? first
   const input = ais.some((a) => a.input) ? ais.flatMap((a) => a.input ?? []) : undefined
   const unsent = ais.flatMap((a) => a.unsent ?? [])
+  const failedFiles = ais.flatMap((a) => a.failedFiles ?? [])
   return {
     ...base,
     state,
@@ -324,6 +330,7 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
     durationMs: sumOf(ais.map((a) => a.durationMs)),
     input,
     unsent: unsent.length ? unsent : undefined,
+    failedFiles: failedFiles.length ? failedFiles : undefined,
     verifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.verifier }))),
     projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }

@@ -20,6 +20,9 @@ import { AI_PYTHON_FILES_QUOTA, AI_PYTHON_KIND } from "./ai-python-files"
 
 const log = Log.create({ service: "ai-review" })
 
+/** Kinds only the AI lane reads (the `otherFiles` and `pythonFiles` switches). */
+const AI_ONLY_KINDS: ReadonlySet<string> = new Set([...AI_OTHER_KINDS, AI_PYTHON_KIND])
+
 const AI_TIMEOUT_BASE_MS = 60_000
 const AI_TIMEOUT_MAX_MS = 300_000
 const MAX_DIFF_CHARS = 6_000 // per file, keep the prompt bounded
@@ -767,8 +770,11 @@ export interface AiLaneStatus {
   replayIncomplete?: boolean
   /** What each file sent carried; recorded under coverage, context cards or dry run. */
   input?: AiInputRecord[]
-  /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes). */
+  /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes).
+   *  Files only the AI lane reads (other/analysis, Python) are not listed: the coverage ledger has them. */
   unsent?: string[]
+  /** Files sent only in calls that failed while others answered (state `ok`): not reviewed by the lane. */
+  failedFiles?: string[]
 }
 /** One file as sent to the model. */
 export interface AiInputRecord {
@@ -979,9 +985,11 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const { files, budget } = plan
   const dryRun = aiDryRunEnabled()
   // Recorded only when an opt-in switch changed or inspects the input, so the default envelope is unchanged.
+  // Files only the AI lane reads are not "checked by the deterministic lanes"; the ledger lists them.
+  const unsent = plan.unsent.filter((f) => !AI_ONLY_KINDS.has(f.kind ?? "")).map((f) => f.path)
   const recorded: Pick<AiLaneStatus, "input" | "unsent"> = {
     ...(budget.coverage || dryRun || plan.focused || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
-    ...(budget.coverage && plan.unsent.length ? { unsent: plan.unsent.map((f) => f.path) } : {}),
+    ...(budget.coverage && unsent.length ? { unsent } : {}),
   }
   const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
     findings,
@@ -994,7 +1002,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
 
   let modelLabel: string | undefined
   try {
-    // Prompt comes from the compiled core, not this file (or ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE).
+    // The file named by ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE when set, else the compiled core's prompt.
     const corePrompt = await finderSystemPrompt()
     if (!corePrompt) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
     const testGap = aiTestGapEnabled()
@@ -1031,14 +1039,26 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     if (failed.length === results.length)
       return done([], { state: failed[0].state, reason: failed[0].reason, model: modelLabel, ...spent })
     const reason = failed.length ? `${failed.length} of ${results.length} calls failed: ${failed[0].reason}` : undefined
-    // Opt-in: try to refute each finding with dbt evidence. Never throws.
+    // Files no answered call carried: the coverage ledger keeps them as not reviewed.
+    const answered = new Set(batches.flatMap((b, k) => (results[k].state === "ok" ? b.map((f) => f.path) : [])))
+    const failedFiles = [...new Set(batches.flatMap((b, k) => (results[k].state === "ok" ? [] : b.map((f) => f.path))))].filter(
+      (p) => !answered.has(p),
+    )
+    // Try to refute each finding with dbt evidence (the `verify` switch). Never throws.
     let verifier: VerifierStatus | undefined
     if (input.evidence && switchOn("verify", input.switches)) {
       const v = await runAiVerify({ findings, grounding: input.grounding, evidence: input.evidence, model })
       findings = v.findings
       verifier = v.status
     }
-    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}), ...spent, ...(verifier ? { verifier } : {}) })
+    return done(findings, {
+      state: "ok",
+      model: modelLabel,
+      ...(reason ? { reason } : {}),
+      ...(failedFiles.length ? { failedFiles } : {}),
+      ...spent,
+      ...(verifier ? { verifier } : {}),
+    })
   } catch (err) {
     log.error("ai review failed", { error: err })
     return done([], { state: "error", reason: safeReason(err), model: modelLabel })

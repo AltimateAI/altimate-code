@@ -10,6 +10,7 @@ import {
   selectAiFilesByQuota,
   type AiReviewFile,
   type AiReviewInput,
+  type AiLaneStatus,
 } from "../../src/altimate/review/ai-review"
 
 // The `otherFiles` switch (ALTIMATE_REVIEW_AI_OTHER_FILES) sends changed other/analysis files to the AI lane.
@@ -108,13 +109,13 @@ describe("ALTIMATE_REVIEW_AI_OTHER_FILES: orchestrator file list", () => {
     expect(paths.slice(0, off.input.files.length)).toEqual(off.input.files.map((f) => f.path))
     expect(paths.slice(off.input.files.length)).toEqual([
       "analyses/revenue_check.sql",
-      "scripts/load_raw.py",
       "integration_tests/ci.yml",
       "config/extra.yaml",
     ])
     const byPath = new Map(on.input.files.map((f) => [f.path, f]))
     expect(byPath.get("analyses/revenue_check.sql")).toMatchObject({ kind: "analysis", sql: "-- head of analyses/revenue_check.sql\nchanged_analyses/revenue_check.sql\n" })
-    expect(byPath.get("scripts/load_raw.py")?.kind).toBe("other")
+    // Python files reach the lane only through the `pythonFiles` switch.
+    expect(paths).not.toContain("scripts/load_raw.py")
     expect(paths).not.toContain("data/lookup.csv")
     expect(paths).not.toContain("scripts/gone.py")
   })
@@ -122,7 +123,7 @@ describe("ALTIMATE_REVIEW_AI_OTHER_FILES: orchestrator file list", () => {
   test("set: files outside the dbt project root stay excluded", async () => {
     const changed = [mod("dbt/models/m.sql"), mod("dbt/analyses/a.sql"), mod("dbt/scripts/x.py"), mod("airflow/dags/load.py"), mod("infra/k8s.yaml")]
     const { input } = await lane(changed, { flag: true, layoutRoot: "dbt" })
-    expect(input.files.map((f) => f.path)).toEqual(["dbt/models/m.sql", "dbt/analyses/a.sql", "dbt/scripts/x.py"])
+    expect(input.files.map((f) => f.path)).toEqual(["dbt/models/m.sql", "dbt/analyses/a.sql"])
   })
 
   test("set: an added file the lane sent is not listed as not reviewed; unset it is", async () => {
@@ -132,6 +133,32 @@ describe("ALTIMATE_REVIEW_AI_OTHER_FILES: orchestrator file list", () => {
     expect(listed(off.env)).toContain("analyses/revenue_check.sql")
     expect(listed(on.env)).not.toContain("analyses/revenue_check.sql")
     expect(listed(on.env)).toContain("data/lookup.csv")
+  })
+
+  test("set: an added file stays listed as not reviewed when the lane fails or its call failed", async () => {
+    const run = async (status: AiLaneStatus) => {
+      process.env.ALTIMATE_REVIEW_AI_OTHER_FILES = "1"
+      return runReview({
+        changedFiles: CHANGED,
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        forceTier: "full",
+        getContent: async (f, side) => (side === "old" ? undefined : `x`),
+        generatedAt: "2026-11-24T00:00:00Z",
+        aiReview: async () => ({ findings: [], status }),
+      })
+    }
+    const listed = (e: Awaited<ReturnType<typeof run>>) => (e.scope?.notReviewed ?? []).map((n) => n.path)
+    for (const status of [
+      { state: "error", reason: "boom" },
+      { state: "timeout", reason: "slow" },
+    ] as AiLaneStatus[])
+      expect(listed(await run(status))).toContain("analyses/revenue_check.sql")
+    const partial = await run({ state: "ok", reason: "1 of 2 calls failed: boom", failedFiles: ["analyses/revenue_check.sql"] })
+    expect(listed(partial)).toContain("analyses/revenue_check.sql")
+    expect(listed(partial)).not.toContain("integration_tests/ci.yml")
   })
 
   test("resolved switches win over the env variable", async () => {
@@ -156,8 +183,8 @@ describe("ALTIMATE_REVIEW_AI_OTHER_FILES: orchestrator file list", () => {
   })
 
   test("set: a finding the model returns on an added file reaches the envelope", async () => {
-    const { env } = await lane(CHANGED, { flag: true, finding: "scripts/load_raw.py" })
-    const f = env.findings.find((x) => x.file === "scripts/load_raw.py")
+    const { env } = await lane(CHANGED, { flag: true, finding: "integration_tests/ci.yml" })
+    const f = env.findings.find((x) => x.file === "integration_tests/ci.yml")
     expect(f).toBeDefined()
     expect(f!.rule).toBe(ruleId("ai-review", "sql_correctness"))
     expect(f!.startLine).toBe(2)
@@ -214,7 +241,9 @@ describe("ALTIMATE_REVIEW_AI_OTHER_FILES: planner", () => {
   })
 
   test("default quota is 8 and does not lend spare to the existing buckets", () => {
-    const models = Array.from({ length: 14 }, (_, i) => file(`models/m${i}.sql`, "model_sql"))
+    // More models than the four quotas plus their spare can take, so a spare that wrongly
+    // counted the other quota would send more models.
+    const models = Array.from({ length: 40 }, (_, i) => file(`models/m${i}.sql`, "model_sql"))
     const others = Array.from({ length: 10 }, (_, i) => file(`scripts/s${i}.py`, "other"))
     const quotas = aiInputBudget({ ...COVERAGE, ALTIMATE_REVIEW_AI_OTHER_FILES: "1" }).coverage!
     expect(quotas.otherQuota).toBe(8)
