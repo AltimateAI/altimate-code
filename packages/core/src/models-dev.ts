@@ -217,6 +217,9 @@ export const layer = Layer.effect(
     const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
 
     const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
+      // altimate_change start — assessment mode contacts no catalog host, even when asked to refresh
+      if (Flag.ALTIMATE_ASSESSMENT_MODE) return
+      // altimate_change end
       if (!force && (yield* fresh())) return
       yield* Effect.scoped(
         Effect.gen(function* () {

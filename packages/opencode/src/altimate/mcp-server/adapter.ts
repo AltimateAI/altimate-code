@@ -473,7 +473,7 @@ export async function createAdapter(options: AdapterOptions = {}) {
         messages,
         metadata: () => Effect.void,
         // Fail closed for new permission kinds. sql_execute is the validated source-read permission.
-        ask: askFor(allowWrite, retry),
+        ask: askFor(allowWrite, retry, { cli: options.cli }),
       }
       if (MCP_ONLY_TOOLS.has(name) && typeof args.basis === "string" && args.basis.length > MAX_BASIS_CHARACTERS)
         args = { ...args, basis: args.basis.slice(0, MAX_BASIS_CHARACTERS) }

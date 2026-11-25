@@ -8,6 +8,7 @@ import { LayerNode } from "../effect/layer-node"
 import { httpClient } from "../effect/layer-node-platform"
 import { FSUtil } from "../fs-util"
 import { Global } from "../global"
+import { Flag } from "../flag/flag"
 import { which } from "../util/which"
 // altimate_change start — upstream_fix: unzip in-process instead of shelling out to PowerShell.
 import { randomUUID } from "node:crypto"
@@ -173,6 +174,9 @@ export namespace RipgrepBinary {
             const config = PLATFORM[platformKey]
             if (!config) throw new Error(`unsupported platform for ripgrep: ${platformKey}`)
 
+            // altimate_change start — assessment mode downloads nothing: a missing ripgrep fails the search
+            if (Flag.ALTIMATE_ASSESSMENT_MODE) return yield* Effect.fail(new Error("ripgrep is not installed and downloads are off in assessment mode"))
+            // altimate_change end
             const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
             const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
 

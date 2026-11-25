@@ -635,6 +635,223 @@ export interface ExpensiveQueriesResult {
   error?: string
 }
 
+// --- FinOps: Databricks SQL warehouse savings ---
+
+export interface DatabricksSavingsParams {
+  /** Databricks connection name. If omitted, the first Databricks connection is used. */
+  warehouse?: string
+  /** Clock override for tests; the window ends at 06:00 UTC on this instant's UTC date. */
+  now_ms?: number
+}
+
+/** One saving on one resource, as altimate-core reports it. */
+export interface DatabricksSavingsFinding {
+  check_id: "wh_classic_pro_to_serverless" | "wh_oversized" | "ap_idle_cluster" | "jobs_on_all_purpose_compute"
+  title: string
+  resource_type: "sql_warehouse" | "cluster" | "job"
+  resource_id: string
+  resource_name: string
+  /** The workspace the resource is in. */
+  workspace_id?: string | null
+  severity: "critical" | "high" | "medium" | "low"
+  daily_min: number
+  daily_max: number
+  monthly_min: number
+  monthly_max: number
+  evidence: DatabricksSavingsEvidence
+}
+
+/** What a Databricks finding rests on, field for field as altimate-core's `Evidence` serializes it. */
+export type DatabricksSavingsEvidence =
+  | {
+      kind: "serverless"
+      warehouse_type: string
+      warehouse_size: string | null
+      idle_ratio: number
+      wall_clock_uptime_hours: number
+      total_query_count: number
+      price_per_dbu: number
+      serverless_price_per_dbu: number
+      current_dbu_cost: number
+      projected_serverless_dbu_cost: number
+      wasted_cost: number
+    }
+  | {
+      kind: "over_sized"
+      current_size: string
+      recommended_size: string
+      available_cores: number
+      p99_utilization: number
+      parallelism_query_count: number
+      no_spill_query_pct: number
+      no_queue_query_pct: number
+      current_dbu_per_hour: number
+      recommended_dbu_per_hour: number
+      total_cost: number
+      wasted_cost: number
+    }
+  | {
+      kind: "idle_cluster"
+      idle_pattern: string
+      idle_ratio: number
+      auto_termination_minutes: number | null
+      active_days: number
+      avg_cpu_active_pct: number
+      peak_cpu_active_pct: number
+      total_cost: number
+      wasted_cost: number
+    }
+  | {
+      kind: "job_on_all_purpose"
+      host_cluster_id: string
+      host_cluster_name: string
+      trigger_type: string
+      task_runs: number
+      task_hours: number
+      estimated_dbus: number
+      all_purpose_rate_per_dbu: number
+      jobs_rate_per_dbu: number
+      jobs_rate_estimated: boolean
+      wasted_cost: number
+    }
+
+/** A flagged SQL warehouse's cost at each alternative, as altimate-core computes it. */
+export interface DatabricksWhatIf {
+  resource_id: string
+  resource_name: string
+  workspace_id: string | null
+  current_label: string
+  current_monthly_cost: number
+  choices: { label: string; monthly_cost: number; monthly_saving: number; fits: boolean; cores: number; cores_needed: number }[]
+}
+
+export interface DatabricksSavingsReport {
+  lookback_days: number
+  /** Largest monthly saving first. */
+  findings: DatabricksSavingsFinding[]
+  /** Each resource counted once, at its largest low end and largest high end. */
+  total: { monthly_min: number; monthly_max: number; resources: number }
+  what_if: DatabricksWhatIf[]
+}
+
+export interface DatabricksSavingsResult {
+  success: boolean
+  /** The days the facts cover: `start` inclusive, `end` at 06:00 UTC (YYYY-MM-DD). */
+  window: { start: string; end: string }
+  /** The connection that ran the check, and the SQL warehouse it runs on. */
+  warehouse?: string
+  ran_on?: string
+  /** Distinct workspaces across every warehouse, cluster and job row checked, with or without a finding. */
+  workspaces_checked?: number
+  warehouses_checked?: number
+  clusters_checked?: number
+  jobs_checked?: number
+  /** Checks whose system tables the connection could not read. */
+  skipped?: { check: string; reason: string }[]
+  /** What a query read only the first 10,000 of, e.g. `job task rows`. */
+  limited?: string[]
+  /** Each SQL warehouse as it is now, and its cost over the window. */
+  warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]
+  report?: DatabricksSavingsReport
+  error?: string
+}
+
+// --- FinOps: Snowflake warehouse savings ---
+
+export interface SnowflakeSavingsParams {
+  /** Snowflake connection name. If omitted, the first Snowflake connection is used. */
+  warehouse?: string
+  /** Clock override for tests; the window ends on the UTC date six hours before this instant. */
+  now_ms?: number
+}
+
+/** One saving on one warehouse, as altimate-core reports it. Monthly figures are 0 when it has no dollar estimate. */
+export interface SnowflakeSavingsFinding {
+  check_id: "high_idle_time" | "downsize_warehouse" | "underutilized_cluster" | "frequent_restart_overcharge"
+  title: string
+  resource_type: "sql_warehouse"
+  resource_id: string
+  resource_name: string
+  workspace_id?: null
+  severity: "critical" | "high" | "medium" | "low"
+  daily_min: number
+  daily_max: number
+  monthly_min: number
+  monthly_max: number
+  evidence: SnowflakeSavingsEvidence
+}
+
+/** What a Snowflake finding rests on, field for field as altimate-core's `Evidence` serializes it. */
+export type SnowflakeSavingsEvidence =
+  | {
+      kind: "high_idle_time"
+      idle_ratio: number
+      idle_seconds: number
+      active_seconds: number
+      flagged_days: string[]
+      credits_used: number
+      price_per_credit: number
+      wasted_cost: number
+    }
+  | {
+      kind: "downsize_warehouse"
+      current_size: string
+      recommended_size: string
+      /** Each signal is present only when it qualified the warehouse; at least one of the two is. */
+      short_period_percent: number | null
+      sub_five_second_percent: number | null
+      query_count: number
+      cost_basis: number
+      price_per_credit: number
+    }
+  | {
+      /** The top cluster is always cluster `max_cluster_count`: core reports no cluster number. */
+      kind: "underutilized_cluster"
+      max_cluster_count: number
+      recommended_max_cluster_count: number
+      highest_idle_percent: number
+      flagged_days: string[]
+    }
+  | {
+      kind: "frequent_restart"
+      bounces: number
+      double_billed_seconds: number
+      credits_per_hour: number
+      flagged_days: string[]
+      price_per_credit: number
+    }
+
+export interface SnowflakeSavingsReport {
+  lookback_days: number
+  price_per_credit: number
+  /** Largest monthly saving first; findings with no dollar estimate last. */
+  findings: SnowflakeSavingsFinding[]
+  /** Warehouses with a dollar saving, each counted once at its largest low and high end. */
+  total: { monthly_min: number; monthly_max: number; resources: number }
+  /** Always empty: no Snowflake rule prices alternatives. */
+  what_if: DatabricksWhatIf[]
+}
+
+export interface SnowflakeSavingsResult {
+  success: boolean
+  /** The days the facts cover: `start` inclusive, `end` exclusive (YYYY-MM-DD, UTC). */
+  window: { start: string; end: string }
+  /** The connection that ran the check, and the warehouse its configuration names. */
+  warehouse?: string
+  ran_on?: string
+  warehouses_checked?: number
+  /** The dollars one credit is priced at, and where that came from. */
+  price?: { per_credit: number; source: "rate_sheet" | "list_price"; as_of?: string }
+  /** Checks whose views the connection could not read, and billed warehouses it could not list. */
+  skipped?: { check: string; reason: string }[]
+  /** What a query read only the first rows of, e.g. `active periods`. */
+  limited?: string[]
+  /** Each warehouse as it is now, and its cost over the window. */
+  warehouses?: { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }[]
+  report?: SnowflakeSavingsReport
+  error?: string
+}
+
 // --- FinOps: Warehouse Advisor ---
 
 export interface WarehouseAdvisorParams {
@@ -1254,6 +1471,8 @@ export const BridgeMethods = {
   "finops.analyze_credits": {} as { params: CreditAnalysisParams; result: CreditAnalysisResult },
   "finops.expensive_queries": {} as { params: ExpensiveQueriesParams; result: ExpensiveQueriesResult },
   "finops.warehouse_advice": {} as { params: WarehouseAdvisorParams; result: WarehouseAdvisorResult },
+  "finops.databricks_savings": {} as { params: DatabricksSavingsParams; result: DatabricksSavingsResult },
+  "finops.snowflake_savings": {} as { params: SnowflakeSavingsParams; result: SnowflakeSavingsResult },
   "finops.unused_resources": {} as { params: UnusedResourcesParams; result: UnusedResourcesResult },
   "finops.role_grants": {} as { params: RoleGrantsParams; result: RoleGrantsResult },
   "finops.role_hierarchy": {} as { params: RoleHierarchyParams; result: RoleHierarchyResult },

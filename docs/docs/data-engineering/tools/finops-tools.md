@@ -178,6 +178,74 @@ Recommendations:
 
 ---
 
+## finops_databricks_savings
+
+Check a Databricks workspace for savings with Altimate's rules, on a Databricks connection whose `http_path` is a SQL warehouse (`/sql/1.0/warehouses/<id>`). It reads seven days of system tables (`system.billing`, `system.compute`, `system.query`, `system.lakeflow`) on that warehouse, which Databricks starts if it is stopped. System tables cover every workspace of the account they can see, so one connection checks all of them; each finding names its workspace. Nothing is written. Four checks:
+
+- **Migrate Classic/Pro to Serverless:** a Classic or Pro warehouse that bills for time it sits idle.
+- **Over-Sized Warehouse:** a warehouse whose queries never use the cores it pays for.
+- **Idle Cluster Detection:** an all-purpose cluster with idle workers and auto-termination off or an hour or more.
+- **Job Running on All-Purpose Compute:** a job with at least one scheduled run in the seven days, or at least 24 hours of continuous running in one task, on an all-purpose cluster. Its DBUs would bill at the jobs-compute rate on a job cluster.
+
+The tool measures each resource's usage; altimate-core decides what qualifies and what it saves. Prices are list prices. Each resource is counted once in the total, and each flagged warehouse also gets what it would cost at every smaller size and as serverless. If the connection cannot read the cluster or job tables, that check is named as not checked and the warehouse checks still report; the warehouse tables themselves are required.
+
+**What it does not assess.** Databricks Apps spend is not covered, and a serverless SQL warehouse gets only the Over-Sized Warehouse check. A SQL warehouse's cost is its billed usage for the six full days before the window's last day, counting only records Databricks had ingested before that day, spread over the seven-day window as Altimate's pipeline does, so it reads lower than seven days of billing (on one measured workspace, about 7% lower). A cluster's cost is its billed usage for the seven full days before the window's last day. A job's cost is estimated, because Databricks billing does not name the job on all-purpose compute: its task hours from the job timeline times the DBUs per hour its cluster billed. When the jobs on one cluster would add up to more DBUs than it billed, their estimates are scaled down to fit. The connection needs the `@databricks/sql` driver installed.
+
+**Asks first, and stops long queries.** A run can start a stopped warehouse that then bills, so in a session you are asked before the first query (permission `finops_databricks_savings`, which you can set to `allow` in your config). `altimate-code tool run` cannot prompt, so running it is your go-ahead; the Claude Code `/savings` command runs it that way when you type it. `altimate run` cannot prompt either and rejects the request, so there the check runs only with the permission set to `allow` or with `--yolo`. Over MCP (`altimate-code mcp serve`) the model makes the call and nothing can ask you, so the check runs only when the server was started with both `--all-tools` (it is not in the default set) and `--allow-write`. It runs three queries and stops after 9 minutes, connecting included, cancelling any query still running on the warehouse (or sooner, at an `altimate run --time-budget` cutoff); stopping the session cancels the running query too.
+
+**Assessment mode.** Set `ALTIMATE_ASSESSMENT_MODE=true` to keep a savings check from contacting anything but your warehouse. It sends no telemetry (not even the one-time opt-out event), treats you as signed out of Altimate (no workspace or project-binding lookups; workspace skills already on disk stay as they are, and pulled team rules are not applied while it is on), fetches no remote config and installs no plugin dependencies, and downloads neither the model catalog (models.dev) nor ripgrep (github.com). Any value but empty, `0` or `false` turns it on, and a tool daemon started without it is not reused. It is measured for `tool run` of the two savings tools. Other tools and commands are not covered: a signed-in user's other Altimate tools can still reach Altimate, and so can the update check and language-server downloads. Core's compiled analysis is not audited for network use. Without it, `ALTIMATE_TELEMETRY_DISABLED=true` alone still lets the CLI send that opt-out event and fetch those. The Claude Code `/savings` command sets it for you. Tool results shown in a Claude Code conversation reach its model provider; assessment mode does not change that.
+
+```
+> finops_databricks_savings --warehouse prod_dbx
+
+Databricks savings: 7 SQL warehouses, 3 all-purpose clusters, 12 jobs checked, the 7 days to 2026-11-17, at list price.
+Total: $85.17–$106 a month on 1 resource, each counted once at its largest saving.
+
+Classic (sql warehouse, workspace 525779153077873) · Migrate Classic/Pro to Serverless · $85.17–$106 a month (critical)
+  CLASSIC SMALL warehouse, 95% idle over 10.8 running hours (2,988 queries)
+  $29.29 in DBUs over the window; serverless would bill $4.44 for the busy time alone
+
+What Classic (now SMALL (CLASSIC), $125 a month) would cost instead:
+  SERVERLESS: $19.03 a month, saving $106
+  X-SMALL: $62.60 a month, saving $62.60
+  2X-SMALL: $41.73 a month, saving $83.47
+```
+
+
+---
+
+## finops_snowflake_savings
+
+Check a Snowflake account for savings with Altimate's rules. It lists warehouses with `SHOW WAREHOUSES` and, to report on seven days, reads up to eleven days of usage from `SNOWFLAKE.ACCOUNT_USAGE` (`WAREHOUSE_METERING_HISTORY`, `WAREHOUSE_EVENTS_HISTORY`, `QUERY_HISTORY`), read-only, on the connection's warehouse. The role needs `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database, and sees only the warehouses it has access to; warehouses that billed credits but cannot be listed are named as not checked, and so is usage an earlier warehouse billed under a name a newer one now has.
+
+**Warehouses that shared a name.** `SHOW WAREHOUSES` gives names, not ids, so the check also reads warehouse creations (`CREATE_WAREHOUSE`) and drops (`DROP_WAREHOUSE`) from `WAREHOUSE_EVENTS_HISTORY`, which keeps a year. A dropped warehouse's usage never counts for a warehouse listed now, and a warehouse created within that year gets the usage of its own id when the creation was logged under its name or the id's usage was: the view records no renames, so a creation only in the same second, under another name, is never taken as the warehouse's. A warehouse the events cannot name (created more than a year ago, in the last few hours, in the same second as another, or renamed since its last run with a creation logged under its old name) is matched by name and creation time, so it can still get the usage of a warehouse that used its name before: one renamed away that has not run under its new name, or one dropped in the last few hours. A warehouse renamed after its last run in the window is reported as not listed, under its old name, with no usage assessed under the new one, which the view (up to three hours behind) does not show yet. If the events cannot be read in full, every warehouse is matched by name and creation time, and the result says so.
+
+- **High Idle Time:** on days a warehouse sat idle for more than 40% of its active time, the idle share of that day's cost.
+- **Downsize Warehouse:** nearly all queries finish within 5 seconds, or nearly all active periods last 80 seconds or less, so one size smaller would do.
+- **Underutilized Cluster:** the highest cluster of a multi-cluster warehouse is barely needed. It is reported without a dollar estimate.
+- **Frequent Restart Overcharge:** a warehouse that suspends and resumes within one billed minute pays the overlap twice.
+
+The tool measures each warehouse's usage; altimate-core decides what qualifies and what it saves. Credits are priced from `ORGANIZATION_USAGE.RATE_SHEET_DAILY` when the role can read it in dollars, otherwise at $3.00 (also for an account billed in another currency), and the output says which. Each warehouse is counted once in the total.
+
+**What it does not assess.** These are four of Altimate's warehouse checks. Storage, serverless features and individual query tuning are not covered. As in Altimate's hosted product, idle time is measured within active periods (resume to the next suspend or resume) that ran at least one query, and a period counts on the day it started: a warehouse that never suspended in the window has no completed active period, and one resumed and left running with no query at all adds no idle time, so neither gets an idle finding for that time. Days are UTC, and the window ends at 00:00 UTC on the latest day at least six hours past, because `ACCOUNT_USAGE` lags by up to that long.
+
+**Asks first, and stops long queries.** A run can resume a suspended warehouse that then bills, so in a session you are asked before the first query (permission `finops_snowflake_savings`, which you can set to `allow` in your config); `altimate-code tool run` cannot prompt, so running it is your go-ahead. `altimate run` cannot prompt either and rejects the request, so there the check runs only with the permission set to `allow` or with `--yolo`. Over MCP (`altimate-code mcp serve`) the model makes the call and nothing can ask you, so the check runs only when the server was started with both `--all-tools` (it is not in the default set) and `--allow-write`. It runs seven queries and stops after 9 minutes, connecting included, cancelling any query still running on Snowflake (or sooner, at an `altimate run --time-budget` cutoff); stopping the session cancels the running query too.
+
+**Assessment mode.** `ALTIMATE_ASSESSMENT_MODE=true` works as it does for `finops_databricks_savings`: the run contacts your Snowflake account, and turns off the Snowflake driver's cloud-platform detection. If a result is large enough for Snowflake to deliver it from its own cloud storage, the driver fetches it from there too.
+
+```
+> finops_snowflake_savings --warehouse prod_sf
+
+Snowflake savings: 12 warehouses checked, the 7 days to 2026-11-18, at $3.00 a credit from the account's rate sheet.
+Total: $54.00–$90.00 a month on 1 warehouse, each counted once at its largest saving.
+
+BI_WH (warehouse) · Downsize Warehouse · $54.00–$90.00 a month (medium)
+  Large could be Medium: 95.0% of its active periods lasted 80 seconds or less
+  The saving is a share of $42.00 over the window
+```
+
+---
+
 ## finops_role_grants
 
 Analyze role permissions and access patterns (RBAC).

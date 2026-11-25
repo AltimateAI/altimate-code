@@ -15,9 +15,13 @@ export function booleanFlag(value: string | undefined): boolean | undefined {
   return undefined
 }
 
-/** Workspaces are on unless the `ALTIMATE_DISABLE_WORKSPACE` kill switch is set (`Flag`'s parse, with `env` explicit). */
+/**
+ * Workspaces are on unless the `ALTIMATE_DISABLE_WORKSPACE` kill switch or assessment mode is set, as
+ * `Flag.ALTIMATE_DISABLE_WORKSPACE` reads them, with `env` explicit. Off, rules neither sync nor reset, and
+ * team rules already pulled are not delivered; nothing on disk is removed.
+ */
 export function workspacesOn(env: NodeJS.ProcessEnv = process.env): boolean {
-  return !killSwitchSet(env["ALTIMATE_DISABLE_WORKSPACE"])
+  return !killSwitchSet(env["ALTIMATE_DISABLE_WORKSPACE"]) && !killSwitchSet(env["ALTIMATE_ASSESSMENT_MODE"])
 }
 
 /** The global switch defaults on; env overrides config in both directions. */

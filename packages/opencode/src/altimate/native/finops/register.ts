@@ -6,6 +6,8 @@ import { register } from "../dispatcher"
 import { getQueryHistory } from "./query-history"
 import { analyzeCredits, getExpensiveQueries } from "./credit-analyzer"
 import { adviseWarehouse } from "./warehouse-advisor"
+import { databricksSavings } from "./databricks-savings"
+import { snowflakeSavings } from "./snowflake-savings"
 import { findUnusedResources } from "./unused-resources"
 import { queryGrants, queryRoleHierarchy, queryUserRoles } from "./role-access"
 import type {
@@ -17,6 +19,10 @@ import type {
   ExpensiveQueriesResult,
   WarehouseAdvisorParams,
   WarehouseAdvisorResult,
+  DatabricksSavingsParams,
+  DatabricksSavingsResult,
+  SnowflakeSavingsParams,
+  SnowflakeSavingsResult,
   UnusedResourcesParams,
   UnusedResourcesResult,
   RoleGrantsParams,
@@ -44,6 +50,14 @@ register("finops.expensive_queries", async (params: ExpensiveQueriesParams): Pro
 
 register("finops.warehouse_advice", async (params: WarehouseAdvisorParams): Promise<WarehouseAdvisorResult> => {
   return adviseWarehouse(params)
+})
+
+register("finops.databricks_savings", async (params: DatabricksSavingsParams, context): Promise<DatabricksSavingsResult> => {
+  return databricksSavings(params, undefined, context)
+})
+
+register("finops.snowflake_savings", async (params: SnowflakeSavingsParams, context): Promise<SnowflakeSavingsResult> => {
+  return snowflakeSavings(params, undefined, context)
 })
 
 register("finops.unused_resources", async (params: UnusedResourcesParams): Promise<UnusedResourcesResult> => {

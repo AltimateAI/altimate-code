@@ -49,6 +49,8 @@ import { DbtSqlGraphTool } from "../tools/dbt-sql-graph"
 import { DbtUnitTestGenTool } from "../tools/dbt-unit-test-gen"
 import { DocsShareCommentsTool } from "../tools/docs-share-comments"
 import { FinopsAnalyzeCreditsTool } from "../tools/finops-analyze-credits"
+import { FinopsDatabricksSavingsTool } from "../tools/finops-databricks-savings"
+import { FinopsSnowflakeSavingsTool } from "../tools/finops-snowflake-savings"
 import { FinopsExpensiveQueriesTool } from "../tools/finops-expensive-queries"
 import { FinopsQueryHistoryTool } from "../tools/finops-query-history"
 import { FinopsRoleGrantsTool, FinopsRoleHierarchyTool, FinopsUserRolesTool } from "../tools/finops-role-access"
@@ -129,6 +131,8 @@ export const EXPOSED: Record<string, Source> = {
   dbt_unit_test_gen: DbtUnitTestGenTool,
   docs_share_comments: DocsShareCommentsTool,
   finops_analyze_credits: FinopsAnalyzeCreditsTool,
+  finops_databricks_savings: FinopsDatabricksSavingsTool,
+  finops_snowflake_savings: FinopsSnowflakeSavingsTool,
   finops_expensive_queries: FinopsExpensiveQueriesTool,
   finops_query_history: FinopsQueryHistoryTool,
   finops_role_grants: FinopsRoleGrantsTool,

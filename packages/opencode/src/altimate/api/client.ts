@@ -11,6 +11,7 @@ import {
   readMcpEntryFromDisk,
   removeMcpFromConfig,
 } from "../../mcp/config"
+import { Flag } from "../../flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
@@ -81,9 +82,16 @@ export namespace AltimateApi {
     return { "x-altimate-client": `altimate-code/${InstallationVersion}` }
   }
 
-  export async function isConfigured(): Promise<boolean> {
+  /** Whether credentials exist, in assessment mode too: signing out must still find and remove them. */
+  async function credentialsPresent(): Promise<boolean> {
     if (currentCredentials()) return true
     return Filesystem.exists(credentialsPath())
+  }
+
+  export async function isConfigured(): Promise<boolean> {
+    // In assessment mode every caller that checks this treats the user as signed out.
+    if (Flag.assessmentMode()) return false
+    return credentialsPresent()
   }
 
   /** A `${env:NAME}` in the credentials file names a variable that isn't set. */
@@ -189,7 +197,7 @@ export namespace AltimateApi {
    *  `projectDir` loads. Fails without deleting the file when the key can't be read: the file holds the
    *  only copy, and without it leftover MCP entries can never be matched. */
   export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
-    if (!(await isConfigured())) {
+    if (!(await credentialsPresent())) {
       await withdrawClaudeSkills(projectDir)
       await forgetTelemetryIdentity()
       return []

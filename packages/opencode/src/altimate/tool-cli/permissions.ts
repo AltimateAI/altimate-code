@@ -11,6 +11,13 @@ export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
   "answer_commit",
 ])
 
+/**
+ * Checks that only read but bill the warehouse they run on, which they can start if it is stopped. They are
+ * never granted as reads. Nothing here can prompt, so a direct `tool run` is the user's own go-ahead; over
+ * MCP the model makes the call, so they are refused unless the server was started with `--allow-write`.
+ */
+export const BILLABLE_RUN_PERMISSIONS: ReadonlySet<string> = new Set(["finops_databricks_savings", "finops_snowflake_savings"])
+
 // Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts), found by the SQL
 // classifier past comments and in later statements. Callers pass the warehouse so its dialect's
 // quoting and comments apply; without one the classifier's generic lexing is used.
@@ -30,10 +37,11 @@ export function denied(permission: string, retry = "Re-run"): Error {
 }
 
 /**
- * The `ask` handler for a CLI call. Nothing prompts: reads in READ_PERMISSIONS pass, every other
- * kind is denied unless writes were enabled, and blocked destructive statements are refused either way.
+ * The `ask` handler for a CLI or MCP call. Nothing prompts: reads in READ_PERMISSIONS pass, billable runs
+ * pass only on a direct CLI call, every other kind is denied unless writes were enabled, and blocked
+ * destructive statements are refused either way.
  */
-export function askFor(allowWrite: boolean, retry = "Re-run"): Tool.Context["ask"] {
+export function askFor(allowWrite: boolean, retry = "Re-run", caller: { cli?: boolean } = {}): Tool.Context["ask"] {
   return ({ permission, patterns, metadata }) => {
     const dialect = dialectOf(metadata)
     // sql_execute has already checked its whole SQL; its pattern is a 200-character preview, which a cut
@@ -45,6 +53,14 @@ export function askFor(allowWrite: boolean, retry = "Re-run"): Tool.Context["ask
       )
     }
     if (READ_PERMISSIONS.has(permission)) return Effect.void
+    if (BILLABLE_RUN_PERMISSIONS.has(permission) && !caller.cli && !allowWrite)
+      return Effect.die(
+        new Error(
+          `Permission denied: ${permission}. It can start a stopped warehouse that then bills, and an MCP call cannot ask the user. ` +
+            `Run it with \`altimate-code tool run ${permission}\` once the user agrees, or restart the server with --allow-write.`,
+        ),
+      )
+    if (BILLABLE_RUN_PERMISSIONS.has(permission)) return Effect.void
     if (!allowWrite) return Effect.die(denied(permission, retry))
     return Effect.void
   }

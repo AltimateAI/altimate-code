@@ -232,6 +232,21 @@ it.instance("child effective permissions retain parent-session read denials", ()
   }),
 )
 
+it.instance("the savings checks prompt in builder and analyst, and data-explorer cannot run them", () =>
+  Effect.gen(function* () {
+    const builder = (yield* Agent.use.get("builder"))!
+    const analyst = (yield* Agent.use.get("analyst"))!
+    const de = (yield* Agent.use.get("data-explorer"))!
+    for (const perm of ["finops_databricks_savings", "finops_snowflake_savings"]) {
+      // Each run queries the user's warehouse, which can start it and bill.
+      expect(action(builder, perm)).toBe("ask")
+      expect(action(analyst, perm)).toBe("ask")
+      expect(Permission.disabled([perm], analyst.permission)).toEqual(new Set())
+      expect(Permission.evaluate(perm, "*", de.permission).action).toBe("deny")
+    }
+  }),
+)
+
 it.instance("a reused task session carrying allow rules cannot widen data-explorer", () =>
   Effect.gen(function* () {
     const de = (yield* Agent.use.get("data-explorer"))!
@@ -419,10 +434,12 @@ const analystConfigEnabled = new Set([
   "dbt_profiles",
   "dbt_unit_test_gen",
   "finops_analyze_credits",
+  "finops_databricks_savings",
   "finops_expensive_queries",
   "finops_query_history",
   "finops_role_grants",
   "finops_role_hierarchy",
+  "finops_snowflake_savings",
   "finops_unused_resources",
   "finops_user_roles",
   "finops_warehouse_advice",

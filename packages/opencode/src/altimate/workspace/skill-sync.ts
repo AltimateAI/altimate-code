@@ -1266,6 +1266,10 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // false answer waiting for the next caller to trust it.
     return await existing.catch(() => ({ changed: false, skipped: [] }))
   }
+  // Assessment mode only stops contact with Altimate. The snapshot and its `.claude/skills` copies
+  // were there before the run and stay as they are, unsynced: the off-switch purge below is for a
+  // user who turned workspaces off, not for a run that may not reach the server.
+  if (CoreFlag.ALTIMATE_ASSESSMENT_MODE) return { changed: false, skipped: [] }
   if (!isEnabled()) {
     // Opting out has to actually take effect: a snapshot left behind keeps
     // loading into every session. Still gated on the symlink check — this path

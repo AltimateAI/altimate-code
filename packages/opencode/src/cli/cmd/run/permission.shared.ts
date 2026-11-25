@@ -16,6 +16,9 @@
 import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import type { PermissionReply } from "./types"
 import { toolPath, toolPermissionInfo } from "./tool"
+// altimate_change start — savings check prompts
+import { savingsPermissionPrompt } from "@opencode-ai/tui/util/savings-permission"
+// altimate_change end
 
 type Dict = Record<string, unknown>
 
@@ -115,6 +118,11 @@ export function permissionInfo(request: PermissionRequest): PermissionInfo {
       lines: ["This keeps the session running despite repeated failures."],
     }
   }
+
+  // altimate_change start — the savings checks bill the warehouse they run on, so the prompt names it
+  const savings = savingsPermissionPrompt(request.permission, pats)
+  if (savings) return { icon: "$", title: savings.title, lines: [savings.note] }
+  // altimate_change end
 
   return {
     icon: "⚙",
