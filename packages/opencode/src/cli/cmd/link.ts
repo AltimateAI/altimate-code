@@ -15,6 +15,7 @@ import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
 import open from "open"
 import { AltimateApi } from "@/altimate/api/client"
+import { SIGN_IN_COMMAND } from "@/altimate/api/sign-in"
 import {
   WorkspaceApi,
   ConflictError,
@@ -59,10 +60,8 @@ import {
 // Re-exported: other commands and tests import it from here.
 export { stripControlChars }
 
-/** The browser sign-in from a plain shell: the Altimate LLM Gateway method of the `altimate-backend`
- * provider saves the credentials every workspace command reads. `--method` skips the method picker,
- * so the command also works where stdin is not a terminal (an agent's shell, Claude Code's `!`). */
-export const SIGN_IN_COMMAND = 'altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"'
+// Re-exported: other commands and tests import it from here.
+export { SIGN_IN_COMMAND }
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"

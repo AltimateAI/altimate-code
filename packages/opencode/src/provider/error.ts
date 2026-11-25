@@ -4,6 +4,9 @@ import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
 // altimate_change start — translate managed Altimate Base gateway errors
 import { FreeTier } from "@/altimate/free/client"
+import { SIGN_IN_COMMAND } from "@/altimate/api/sign-in"
+
+const ALTIMATE_GATEWAY_PROVIDER_ID = "altimate-backend"
 // altimate_change end
 
 export namespace ProviderError {
@@ -400,6 +403,26 @@ export namespace ProviderError {
         statusCode: input.error.statusCode,
         isRetryable: false,
         responseHeaders: input.error.responseHeaders,
+        metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+      }
+    }
+    // altimate_change end
+    // altimate_change start — the Altimate LLM Gateway refusing the key means the user must sign in
+    // again. It answers a missing key with 403 "Not authenticated" and a wrong one with 401; credit
+    // limits are 402. The gateway's own words stay in the message so error counts keep matching.
+    if (
+      String(input.providerID) === ALTIMATE_GATEWAY_PROVIDER_ID &&
+      (input.error.statusCode === 401 || input.error.statusCode === 403)
+    ) {
+      return {
+        type: "api_error",
+        message:
+          "Sign in to Altimate again: the Altimate LLM Gateway refused the request because the saved " +
+          `Altimate sign-in is missing or no longer valid. In a terminal, run \`${SIGN_IN_COMMAND}\`. (${m})`,
+        statusCode: input.error.statusCode,
+        isRetryable: false,
+        responseHeaders: input.error.responseHeaders,
+        responseBody: capResponseBody(input.error.responseBody),
         metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
       }
     }

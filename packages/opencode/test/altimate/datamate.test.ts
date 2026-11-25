@@ -193,7 +193,7 @@ describe("getCredentials", () => {
     )
   })
 
-  test("resolves empty-string env var without throwing", async () => {
+  test("substitutes an empty-string env var, and the blank field it leaves is not a credential", async () => {
     const altDir = path.join(testHome, ".altimate")
     await fsp.mkdir(altDir, { recursive: true })
     await fsp.writeFile(
@@ -206,8 +206,12 @@ describe("getCredentials", () => {
     )
     process.env.TEST_EMPTY_VAR = ""
     try {
-      const creds = await AltimateApi.getCredentials()
-      expect(creds.altimateInstanceName).toBe("")
+      // A set-but-empty variable is substituted (only an unset one is "not found"), and a blank
+      // instance name or key is refused: loaded, it sent gateway requests with no usable credential.
+      const error = String(await AltimateApi.getCredentials().catch((e) => e))
+      expect(error).toContain("altimateInstanceName")
+      expect(error).toContain("must not be blank")
+      expect(error).not.toContain("not found")
     } finally {
       delete process.env.TEST_EMPTY_VAR
     }
