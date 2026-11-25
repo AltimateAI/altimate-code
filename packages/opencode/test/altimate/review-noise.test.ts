@@ -430,6 +430,10 @@ describe("portability noise", () => {
     const interval = "select d + interval '1 day' as next_day from t"
     expect(await rules(interval, "bigquery")).toContain("interval-string-literal")
     expect(await rules(interval, "postgres")).not.toContain("interval-string-literal")
+    // The ANSI form (`interval '30' day`) is what those engines want: never flagged.
+    for (const ansi of ["select d - interval '30' day as d30 from t", "select d + interval '12' month as d12 from t"])
+      for (const dialect of ["trino", "athena", "bigquery", "oracle", "mysql"])
+        expect(await rules(ansi, dialect)).not.toContain("interval-string-literal")
   })
 })
 

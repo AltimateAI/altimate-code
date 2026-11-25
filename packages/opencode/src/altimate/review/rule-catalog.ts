@@ -2250,13 +2250,14 @@ const STYLE: Rule[] = [
     "string interval literal portability",
     "`interval '1 day'` literal syntax differs across warehouses; prefer dateadd/date_add functions.",
     {
-      added: /interval\s+'\d+\s*\w+'/i,
+      // The unit inside the quotes (`'1 day'`), not the ANSI `interval '30' day`.
+      added: /interval\s+'\d+\s+[a-z]+'/i,
       // BigQuery, MySQL, T-SQL, Oracle, Trino and Athena need `INTERVAL 1 DAY` /
       // `INTERVAL '1' DAY` (or have no interval literal).
       portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "databricks"] },
     },
     { add: "d + interval '1 day'" },
-    { add: "dateadd(day, 1, d)" },
+    { add: "d - interval '30' day" },
   ),
   r(
     "date-plus-int",
