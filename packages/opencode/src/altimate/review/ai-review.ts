@@ -1025,7 +1025,15 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   if (!files.length && (dryRun || !replay)) return done([], { state: "skipped", reason: "no changed dbt files to review" })
   // Dry run wins over replay: a replayed envelope would still reach the verifier, a model call.
   if (dryRun) return done([], { state: "skipped", reason: "dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call" })
-  if (replay) return runAiReplay(input, replay)
+  if (replay) {
+    // The replayed findings get the same convention record and grouping as a live run.
+    const r = await runAiReplay(input, replay)
+    if (!input.conventions?.length) return r
+    return {
+      findings: groupConventionFindings(r.findings, input.conventions),
+      status: { ...r.status, conventions: conventionRecords(input.conventions) },
+    }
+  }
 
   let modelLabel: string | undefined
   try {

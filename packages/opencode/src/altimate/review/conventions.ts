@@ -459,8 +459,9 @@ function issueKey(f: Pick<Finding, "title" | "file" | "model">): string {
 /**
  * One comment per repeated convention finding (pure): AI findings in one review that name the
  * same convention for the same issue (title without the file's own names) on different files
- * become the first, most severe one, whose body lists the other files. Other findings are
- * returned unchanged, in order.
+ * become the first, most severe one, whose body lists the other files. Only one finding per
+ * other file is folded in; further findings on the lead's file or on an already-folded file
+ * may be distinct issues and stay. Other findings are returned unchanged, in order.
  */
 export function groupConventionFindings(findings: Finding[], conventions: Convention[]): Finding[] {
   const paths = [...new Set(conventions.map((c) => c.path))]
@@ -478,12 +479,14 @@ export function groupConventionFindings(findings: Finding[], conventions: Conven
     const files = new Set(idx.map((i) => findings[i].file))
     if (files.size < 2) continue
     const lead = idx.reduce((a, b) => (SEVERITY_ORDER[findings[b].severity] > SEVERITY_ORDER[findings[a].severity] ? b : a))
-    const others = [...new Set(idx.filter((i) => i !== lead).map((i) => findings[i].file))].filter((p) => p !== findings[lead].file)
+    // The first finding on each file other than the lead's.
+    const folded = new Map<string, number>()
+    for (const i of idx) if (findings[i].file !== findings[lead].file && !folded.has(findings[i].file)) folded.set(findings[i].file, i)
     replace.set(lead, {
       ...findings[lead],
-      body: `${findings[lead].body}\n\nThe same applies to: ${others.map((p) => `\`${p}\``).join(", ")}.`,
+      body: `${findings[lead].body}\n\nThe same applies to: ${[...folded.keys()].map((p) => `\`${p}\``).join(", ")}.`,
     })
-    for (const i of idx) if (i !== lead) drop.add(i)
+    for (const i of folded.values()) drop.add(i)
   }
   if (!drop.size) return findings
   return findings.flatMap((f, i) => (drop.has(i) ? [] : [replace.get(i) ?? f]))

@@ -491,6 +491,7 @@ describe("reviewPullRequest end to end (AI dry run, no model call)", () => {
 })
 
 describe("repeated convention findings become one comment", () => {
+  afterEach(() => mock.restore())
   const conv: Convention[] = [
     { path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "Every model has a description." },
     { path: "CLAUDE.md", source: "claude_md", scope: "", text: "Snake case." },
@@ -569,6 +570,40 @@ describe("repeated convention findings become one comment", () => {
     expect(grouped.findings[0].body).toContain("The same applies to: `models/b.sql`.")
     const plain = await runAiReview({ files, grounding: [] })
     expect(plain.findings).toHaveLength(2)
-    mock.restore()
+  })
+
+  test("same-file findings are not folded: one finding per other file joins the lead", () => {
+    const list = [
+      f("models/a.sql", "fct_a", "Missing model description", "Per models/CLAUDE.md, line 1.", "warning"),
+      f("models/a.sql", "fct_a", "Missing model description", "Per models/CLAUDE.md, the second model in the file."),
+      f("models/b.sql", "fct_b", "Missing model description", "Per models/CLAUDE.md."),
+    ]
+    const out = groupConventionFindings(list, conv)
+    expect(out.map((x) => x.file)).toEqual(["models/a.sql", "models/a.sql"])
+    expect(out[0].body).toEndWith("The same applies to: `models/b.sql`.")
+    expect(out[1]).toEqual(list[1])
+  })
+
+  test("replay mode records the conventions and groups the replayed findings", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "review-conventions-replay-"))
+    const saved = process.env.ALTIMATE_REVIEW_AI_REPLAY
+    try {
+      const stored = [
+        f("models/a.sql", "fct_a", "Missing model description", "Per models/CLAUDE.md."),
+        f("models/b.sql", "fct_b", "Missing model description", "Per models/CLAUDE.md."),
+      ]
+      const file = path.join(dir, "envelope.json")
+      await fs.writeFile(file, JSON.stringify({ findings: stored, ai: { state: "ok" } }))
+      process.env.ALTIMATE_REVIEW_AI_REPLAY = file
+      const res = await runAiReview({ files: [aiFile("models/a.sql"), aiFile("models/b.sql")], grounding: [], conventions: conv })
+      expect(res.status.replayed).toBe(true)
+      expect(res.status.conventions?.map((c) => c.path)).toEqual(["models/CLAUDE.md", "CLAUDE.md"])
+      expect(res.findings).toHaveLength(1)
+      expect(res.findings[0].body).toContain("The same applies to: `models/b.sql`.")
+    } finally {
+      if (saved === undefined) delete process.env.ALTIMATE_REVIEW_AI_REPLAY
+      else process.env.ALTIMATE_REVIEW_AI_REPLAY = saved
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 })
