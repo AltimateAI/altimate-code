@@ -151,6 +151,11 @@ export function manifestPathFor(adapter: any, projectRoot: string | undefined): 
 
 const BQ_BUILD_TYPES = ["CREATE_TABLE_AS_SELECT", "CREATE_TABLE", "CREATE_VIEW", "INSERT", "MERGE", "SCRIPT"]
 const BQ_TYPES = [...BQ_BUILD_TYPES, "DELETE", "UPDATE"]
+/** The statement that ends a run: dbt builds an incremental model's temporary relation, then merges or inserts from it. */
+const BQ_FINAL_TYPES = ["MERGE", "INSERT", "SCRIPT"]
+const DBT_TMP_SUFFIX = "__dbt_tmp"
+/** A temporary-relation CREATE TABLE AS SELECT joins the final build that starts within this long after it ends. */
+export const BQ_TMP_JOIN_MS = 10 * 60_000
 const SF_TYPES = ["CREATE_TABLE_AS_SELECT", "CREATE_TABLE", "CREATE_VIEW", "INSERT", "MERGE", "DELETE", "UPDATE", "MULTI_STATEMENT"]
 const DBX_TYPES = ["CREATE", "INSERT", "MERGE", "DELETE", "UPDATE", "REPLACE", "COPY", "OPTIMIZE", "ANALYZE"]
 const list = (xs: string[]) => xs.map((x) => `'${x}'`).join(",")
@@ -168,7 +173,7 @@ function bqJobs(project: string, location: unknown, view: JobsView): string {
 }
 
 export function bigqueryHistorySql(input: { project: string; location?: unknown; needle: string; view?: JobsView }): string {
-  return `select job_id, user_email, creation_time, end_time, statement_type, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
+  return `select job_id, user_email, creation_time, end_time, statement_type, destination_table.table_id as destination_table_id, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_sub(current_timestamp(), interval ${HISTORY_DAYS} day)
   and job_type = 'QUERY' and state = 'DONE' and error_result is null
@@ -241,13 +246,18 @@ order by start_time desc limit ${HISTORY_LIMIT}`
 
 export function bigqueryBoundarySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; cutoffMs?: number }): string {
   const c = input.cutoffMs === undefined ? `timestamp_sub(current_timestamp(), interval ${HISTORY_DAYS} day)` : `timestamp_millis(${Math.trunc(input.cutoffMs)})`
-  // Only a delete or update can attach to a build that starts after the cutoff, and only when it started within a minute before it.
-  return `select /* run boundary */ job_id, user_email, creation_time
+  // What can join a build that starts after the cutoff: a delete or update created within a minute before it, or the
+  // CTAS into dbt's temporary relation that ended within ten minutes before it.
+  return `select /* run boundary */ job_id, user_email, creation_time, end_time, statement_type
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time < ${c} and creation_time >= timestamp_sub(${c}, interval ${BQ_ATTACH_MS / 1000} second)
+where creation_time < ${c} and creation_time > timestamp_sub(${c}, interval ${BOUNDARY_LOOKBACK_DAYS} day)
   and job_type = 'QUERY' and state = 'DONE' and error_result is null
   and parent_job_id is null
-  and statement_type in ('DELETE','UPDATE')
+  and (
+    (statement_type in ('DELETE','UPDATE') and creation_time >= timestamp_sub(${c}, interval ${BQ_ATTACH_MS / 1000} second))
+    or (statement_type = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
+        and end_time >= timestamp_sub(${c}, interval ${BQ_TMP_JOIN_MS / 60_000} minute))
+  )
   and strpos(query, ${sqlString(input.needle)}) > 0
 order by creation_time desc limit ${HISTORY_LIMIT}`
 }
@@ -397,7 +407,7 @@ export function parseTime(value: string | null | undefined): number {
  * hit its limit, else the start of the window. `stmts` are the matching statements that started before it and ended
  * within the grouping gap of it (they may belong to runs that began earlier); undefined when they could not be read.
  */
-export type Boundary = { cutoff: number; stmts?: { session: string | null; start: number; end: number }[] }
+export type Boundary = { cutoff: number; stmts?: { session: string | null; start: number; end: number; tmp?: boolean }[] }
 
 /** When the boundary statements can't be read, runs starting this close to the cutoff are not trusted. */
 export const BOUNDARY_FALLBACK_MS = 24 * 3_600_000
@@ -502,7 +512,7 @@ function emptyMessage(uniqueId: string, table: string): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** One BigQuery job, or the children of a script, priced as what they are: bytes billed on demand, slot time in a reservation. */
-type BqUnit = { user: string; start: number; build: boolean; cost: number; known: boolean; bytes: number; slotHours: number; reserved: boolean; demand: boolean }
+type BqUnit = { user: string; end: number; /** A CREATE TABLE AS SELECT into dbt's temporary relation. */ tmp: boolean; /** A build that can end a run: MERGE, INSERT or a script. */ final: boolean; hasTmp: boolean; start: number; build: boolean; cost: number; known: boolean; bytes: number; slotHours: number; reserved: boolean; demand: boolean }
 
 function bqJob(r: Row, cfg: CostConfig): BqUnit {
   const slot = rateOf(cfg.bigquerySlotHourUsd, DEFAULT_RATES.bigquerySlotHourUsd, "USD/slot-hour", "bigquerySlotHourUsd").rate.value
@@ -515,6 +525,10 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
   const known = reserved || billed !== undefined || cached
   return {
     user: r.user_email ?? "",
+    end: parseTime(r.end_time),
+    tmp: r.statement_type === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
+    final: BQ_FINAL_TYPES.includes(String(r.statement_type)),
+    hasTmp: false,
     start: parseTime(r.creation_time),
     build: BQ_BUILD_TYPES.includes(String(r.statement_type)),
     cost: reserved ? slotHours * slot : ((billed ?? 0) / TIB) * demand,
@@ -526,8 +540,12 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
   }
 }
 
-const sumUnits = (start: number, build: boolean, units: BqUnit[], user = units[0]?.user ?? ""): BqUnit => ({
+const sumUnits = (start: number, build: boolean, units: BqUnit[], user = units[0]?.user ?? "", final = units[0]?.final ?? false): BqUnit => ({
   user,
+  end: Math.max(...units.map((u) => u.end)),
+  tmp: false,
+  final,
+  hasTmp: units.some((u) => u.tmp),
   start,
   build,
   cost: units.reduce((t, u) => t + u.cost, 0),
@@ -545,21 +563,38 @@ const sumUnits = (start: number, build: boolean, units: BqUnit[], user = units[0
  */
 export function bigqueryRuns(units: BqUnit[], boundary?: Boundary): { runs: BqUnit[]; skipped: number; dropped: number } {
   const builds = units.filter((u) => u.build).sort((a, b) => a.start - b.start)
-  const groups = new Map<BqUnit, BqUnit[]>(builds.map((b) => [b, [b]]))
+  const heads = builds.filter((b) => !b.tmp)
+  const groups = new Map<BqUnit, BqUnit[]>(heads.map((b) => [b, [b]]))
+  // The run a build belongs to: its own, or for a temporary-relation CTAS the merge or insert that follows it.
+  const headOf = new Map<BqUnit, BqUnit>()
+  for (const t of builds.filter((b) => b.tmp)) {
+    const head = heads.find((b) => b.final && b.user === t.user && b.start >= t.end && b.start - t.end <= BQ_TMP_JOIN_MS)
+    if (head) groups.get(head)!.push(t)
+    else groups.set(t, [t])
+    headOf.set(t, head ?? t)
+  }
   const alone: BqUnit[][] = []
   for (const u of units.filter((x) => !x.build)) {
     // Only a build by the same user: on the project-wide view, one user's delete is not another's run.
     const next = builds.find((b) => b.user === u.user && b.start >= u.start && b.start - u.start <= BQ_ATTACH_MS)
-    if (next) groups.get(next)!.push(u)
+    if (next) groups.get(headOf.get(next) ?? next)!.push(u)
     else alone.push([u])
   }
-  const all = [...groups.values(), ...alone].map((g) => sumUnits(Math.min(...g.map((u) => u.start)), true, g, g[0].user))
-  // An unread delete or update before the cutoff, by the run's user, that started within a minute before the run's
-  // start would have attached to it: such a run is not trusted.
+  const all = [...groups.values(), ...alone].map((g) => {
+    const head = g.find((u) => !u.tmp && u.build) ?? g[0]
+    return sumUnits(Math.min(...g.map((u) => u.start)), true, g, head.user, head.final)
+  })
+  // Unread statements before the cutoff that would have joined a run: a delete or update by the run's user created
+  // within a minute before its start, or a temporary-relation CTAS by the same user that ended within ten minutes
+  // before it (only for a run that has no such CTAS of its own). Such a run is not trusted.
   const unsure = (r: BqUnit) =>
     boundary
       ? boundary.stmts
-        ? boundary.stmts.some((b) => (b.session ?? "") === r.user && b.start >= r.start - BQ_ATTACH_MS)
+        ? boundary.stmts.some(
+            (b) =>
+              (b.session ?? "") === r.user &&
+              (b.tmp ? r.final && !r.hasTmp && b.end >= r.start - BQ_TMP_JOIN_MS : b.start >= r.start - BQ_ATTACH_MS),
+          )
         : r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS
       : false
   const counted = all.filter((r) => !unsure(r))
@@ -580,7 +615,7 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
     const kids = (children ?? []).filter((c) => c.parent_job_id === r.job_id).map((c) => bqJob(c, cfg))
     // A script's own row is never counted beside its children; with none found, its cost is not known.
     const start = parseTime(r.creation_time)
-    const unit = sumUnits(start, true, kids)
+    const unit = sumUnits(start, true, kids, r.user_email ?? "", true)
     return kids.length && !(childrenCut && !(start > childBoundary)) ? unit : { ...unit, known: false }
   })
   const truncated = rows.length >= HISTORY_LIMIT
@@ -963,7 +998,12 @@ export async function loadHistory(input: {
         cutoff,
         stmts: found
           .filter((r) => !readIds.has(r[keys.id]))
-          .map((r) => ({ session: r[keys.session] ?? null, start: parseTime(r[startKey]), end: parseTime(r.end_time) })),
+          .map((r) => ({
+            session: r[keys.session] ?? null,
+            start: parseTime(r[startKey]),
+            end: parseTime(r.end_time),
+            tmp: r.statement_type === "CREATE_TABLE_AS_SELECT",
+          })),
       }
     } catch (e) {
       if (signal.aborted) throw e

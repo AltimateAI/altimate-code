@@ -1310,15 +1310,26 @@ describe("IDENTIFIER() on Databricks", () => {
 })
 
 
-const JOB_COLUMNS = ["job_id", "user_email", "creation_time", "end_time", "statement_type", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
+const JOB_COLUMNS = ["job_id", "user_email", "creation_time", "end_time", "statement_type", "destination_table_id", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const CHILD_COLUMNS = ["job_id", "parent_job_id", "creation_time", "statement_type", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const TIB = 1024 ** 4
-const job = (id: string, start: string, end: string, billed: number | null, reservation: string | null = null, slotMs = 0, type = "MERGE", user = "a@x.com") => [
+const job = (
+  id: string,
+  start: string,
+  end: string,
+  billed: number | null,
+  reservation: string | null = null,
+  slotMs = 0,
+  type = "MERGE",
+  user = "a@x.com",
+  destination: string | null = null,
+) => [
   id,
   user,
   start,
   end,
   type,
+  destination,
   billed === null ? null : String(billed),
   String(slotMs),
   reservation,
@@ -1435,6 +1446,18 @@ describe("dbt_cost_estimate cost", () => {
       rate: { value: 0.06, unit: "USD/slot-hour", source: "default" },
     })
     expect(cost.notes.join(" ")).toContain("not each job")
+  })
+
+  test("BigQuery: the CTAS into dbt's temporary relation and the MERGE after it are one run through the tool", async () => {
+    useAdapter(calls, {
+      history: bigqueryHistory([
+        job("m", "2026-05-02 10:03:00+00:00", "2026-05-02 10:04:00+00:00", 2 * TIB),
+        job("t", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB, null, 0, "CREATE_TABLE_AS_SELECT", "a@x.com", "orders__dbt_tmp"),
+      ]),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
+    expect(result.metadata.cost).toMatchObject({ basis: "history", runs: 1 })
+    expect(result.metadata.cost.lastRun).toBeCloseTo(18.75, 10)
   })
 
   test("a script is priced from its child jobs, which carry the reservation the script row lacks", async () => {

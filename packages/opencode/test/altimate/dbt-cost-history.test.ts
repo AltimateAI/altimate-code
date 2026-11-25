@@ -298,6 +298,7 @@ const bq = (
   reservation_id: reservation,
   cache_hit: "False",
   user_email: "a@x.com",
+  destination_table_id: null,
   ...extra,
 })
 
@@ -696,7 +697,7 @@ describe("rates config and the text", () => {
 describe("run boundary", () => {
   const C = 1_000 * MIN
   const at = (min: number) => new Date(C + min * MIN).toISOString()
-  const boundary = (...stmts: { session: string | null; start: number; end: number }[]) => ({ cutoff: C, stmts })
+  const boundary = (...stmts: { session: string | null; start: number; end: number; tmp?: boolean }[]) => ({ cutoff: C, stmts })
   const before = (session: string, startMin: number, endMin: number) => ({ session, start: C + startMin * MIN, end: C + endMin * MIN })
 
   test("Snowflake: a CTAS before the window and its MERGE after it (fewer than 500 rows) is a run of unknown start, and is left out", () => {
@@ -774,6 +775,61 @@ describe("run boundary", () => {
     expect(price({ session: "a@x.com", start: C - 5 * MIN, end: Number.NaN }).runs).toBe(2)
   })
 
+  test("BigQuery: a delete pre-hook and the insert_overwrite script 20 s later by the same user are one run, priced from the script's children", () => {
+    const rows = [
+      bq("d", 0, TIB, null, 0, "DELETE"),
+      { ...bq("s", 0, 9 * TIB, null, 0, "SCRIPT"), creation_time: new Date(20_000).toISOString() },
+    ]
+    const children: Row[] = [
+      { job_id: "k", parent_job_id: "s", creation_time: new Date(21_000).toISOString(), statement_type: "INSERT", total_bytes_billed: String(2 * TIB), total_slot_ms: "0", reservation_id: null, cache_hit: "False" },
+    ]
+    const { cost } = priceBigquery(rows, children, "model.s.m", {})
+    // The script row has the user; its children have none. Without it the delete would be a run of its own.
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(18.75, 10)
+  })
+
+  const tmpCtas = (id: string, startMin: number, billed: number, user = "a@x.com", dest = "orders__dbt_tmp"): Row =>
+    bq(id, startMin, billed, null, 0, "CREATE_TABLE_AS_SELECT", { user_email: user, destination_table_id: dest })
+
+  test("BigQuery: the CTAS into the temporary relation and the MERGE that follows it are one run", () => {
+    // The CTAS runs a minute (minute 0 to 1); the MERGE starts at minute 3, within ten minutes of its end.
+    const rows = [tmpCtas("t", 0, TIB), bq("m", 3, 2 * TIB)]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(18.75, 10)
+  })
+
+  test("BigQuery: a temporary-relation CTAS joins only a final build by the same user within ten minutes after it ends", () => {
+    expect(priceBigquery([tmpCtas("t", 0, TIB), bq("m", 3, TIB, null, 0, "MERGE", { user_email: "b@x.com" })], undefined, "model.s.m", {}).cost.runs).toBe(2)
+    expect(priceBigquery([tmpCtas("t", 0, TIB), bq("m", 12, TIB)], undefined, "model.s.m", {}).cost.runs).toBe(2)
+    // A CTAS into an ordinary table is a build of its own, not a temporary relation.
+    expect(priceBigquery([tmpCtas("t", 0, TIB, "a@x.com", "orders"), bq("m", 3, TIB)], undefined, "model.s.m", {}).cost.runs).toBe(2)
+  })
+
+  test("BigQuery: delete, temporary CTAS and merge are one run, even when the merge starts over a minute after the delete", () => {
+    const rows = [bq("d", 0, TIB, null, 0, "DELETE"), { ...tmpCtas("t", 0, TIB), creation_time: new Date(30_000).toISOString(), end_time: new Date(5 * MIN).toISOString() }, bq("m", 6, TIB)]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(18.75, 10)
+  })
+
+  test("BigQuery: a merge whose temporary CTAS ended just before the cutoff may be the end of a run that began unread, so it is dropped", () => {
+    const rows = [{ ...bq("m", 0, TIB), creation_time: at(2) }]
+    const stmt = (end: number, session = "a@x.com") => ({ session, start: C - 5 * MIN, end: C + end * MIN, tmp: true })
+    const cost = (b: ReturnType<typeof stmt>) => priceBigquery(rows, undefined, "model.s.m", {}, boundary(b)).cost
+    expect(cost(stmt(0)).notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+    // Another user's CTAS, or one that ended over ten minutes before the merge, cannot have fed it.
+    expect(cost(stmt(0, "b@x.com")).runs).toBe(1)
+    expect(priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 30 * MIN, end: C - 20 * MIN, tmp: true })).cost.runs).toBe(1)
+  })
+
+  test("BigQuery: a merge that has its temporary CTAS in the result is not dropped for an unread one", () => {
+    const rows = [{ ...tmpCtas("t", 0, TIB), creation_time: at(0), end_time: at(1) }, { ...bq("m", 0, TIB), creation_time: at(2) }]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 5 * MIN, end: C + 0, tmp: true }))
+    expect(cost.runs).toBe(1)
+  })
+
   test("BigQuery: a delete joins only a build by the same user", () => {
     const rows = [
       bq("d", 0, TIB, null, 0, "DELETE", { user_email: "a@x.com" }),
@@ -823,8 +879,10 @@ describe("boundary SQL", () => {
     // Only a delete or update can attach to a later build, by creation time.
     expect(sql).toContain("creation_time >= timestamp_sub(timestamp_millis(99), interval 60 second)")
     expect(sql).toContain("statement_type in ('DELETE','UPDATE')")
-    expect(sql).not.toContain("end_time")
     expect(sql).toContain("user_email")
+    // And the CTAS into dbt's temporary relation that ended within ten minutes before it.
+    expect(sql).toContain("statement_type = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
+    expect(sql).toContain("end_time >= timestamp_sub(timestamp_millis(99), interval 10 minute)")
     expect(sql).toContain("parent_job_id is null")
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
@@ -837,6 +895,7 @@ describe("boundary SQL", () => {
 
   test("the BigQuery history reads the job's user, which a delete must share with the build it joins", () => {
     expect(bigqueryHistorySql({ project: "p", needle: "n" })).toContain("select job_id, user_email,")
+    expect(bigqueryHistorySql({ project: "p", needle: "n" })).toContain("destination_table.table_id as destination_table_id")
   })
 
   test("Databricks proration multiplies in double, never BIGINT by BIGINT", () => {
