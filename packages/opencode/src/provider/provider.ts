@@ -32,6 +32,7 @@ import { Filesystem } from "../util/filesystem"
 import { isPublicZen } from "./public-zen"
 // altimate_change end
 import { AltimateApi } from "../altimate/api/client"
+import { WorkspaceByok } from "../altimate/workspace/byok"
 // altimate_change start — managed Altimate Base provider and credential boundary
 import { FreeTier } from "../altimate/free/client"
 // altimate_change end
@@ -568,13 +569,15 @@ export namespace Provider {
       if (isConfigured) {
         try {
           const creds = await AltimateApi.getCredentials()
+          const byok = await WorkspaceByok.resolve(Instance.directory)
           return {
             autoload: true,
             options: {
               baseURL: `${creds.altimateUrl.replace(/\/+$/, "")}/agents/v1`,
-              apiKey: creds.altimateApiKey,
+              apiKey: byok?.apiKey ?? creds.altimateApiKey,
               headers: {
                 "x-tenant": creds.altimateInstanceName,
+                ...(byok ? WorkspaceByok.HEADERS : {}),
               },
             },
           }

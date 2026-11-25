@@ -255,6 +255,7 @@ const ROUTES: Record<string, Array<[RegExp, string]>> = {
     [/^\/?$/, "/"],
     [/^\/[^/]+\/reviews$/, "/:id/reviews"],
     [/^\/[^/]+\/reviews\/summary$/, "/:id/reviews/summary"],
+    [/^\/[^/]+\/model-keys$/, "/:id/model-keys"],
   ],
   "/skills": [
     [/^\/[^/]+$/, "/:id"],
@@ -974,6 +975,27 @@ export namespace WorkspaceApi {
       return typeof answer?.email === "string" && answer.email
         ? { email: answer.email, instance: who.instance }
         : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The workspace's decrypted model key, or undefined when the workspace exposes none. An absent
+   * endpoint (404/405), a failed request or an empty/malformed answer are all "no key". */
+  export async function getModelKey(datamateId: number, actAs?: ActAs): Promise<string | undefined> {
+    type Entry = { key?: unknown; api_key?: unknown }
+    try {
+      const body = await req<(Entry & { keys?: Entry[] }) | undefined>("GET", `/${datamateId}/model-keys`, {
+        base: "/datamates",
+        reportErrors: false,
+        allowEmptyBody: true,
+        expectedStatuses: [404, 405],
+        ...(actAs ? { actAs } : {}),
+      })
+      if (!body || typeof body !== "object") return undefined
+      const first = Array.isArray(body.keys) ? body.keys[0] : body
+      const raw = first?.key ?? first?.api_key
+      return typeof raw === "string" && raw.trim() ? raw.trim() : undefined
     } catch {
       return undefined
     }
