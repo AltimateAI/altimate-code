@@ -14,7 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type SelectItemColumn, normalizeSelectLine, rawColumnExposures } from "./rule-catalog"
+import { type SelectItemColumn, finalOutputs, normalizeSelectLine } from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -1214,6 +1214,36 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Per file: PII columns the compiled base already exposed. Neither the broad
   // fallback nor the regex twins report these (this PR did not expose them).
   const basePiiColumnsByFile = new Map<string, Set<string>>()
+  // Per file, the base model's final output (raw and compiled base SQL, each
+  // parsed on its own): every output name, and the source columns each exposes RAW.
+  const baseOutputsByFile = new Map<string, ReturnType<typeof finalOutputs>>()
+  const baseOutputs = (file: string) => {
+    let outputs = baseOutputsByFile.get(file)
+    if (!outputs) {
+      const ctx = ctxByPath.get(file)
+      outputs = { raw: new Map(), names: new Set() }
+      for (const sql of new Set([ctx?.oldSql, ctx?.engineOldSql].filter((x): x is string => !!x))) {
+        const parsed = finalOutputs(sql)
+        for (const n of parsed.names) outputs.names.add(n)
+        for (const [n, cols] of parsed.raw) outputs.raw.set(n, new Set([...(outputs.raw.get(n) ?? []), ...cols]))
+      }
+      baseOutputsByFile.set(file, outputs)
+    }
+    return outputs
+  }
+  // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a SOURCE
+  // column is already exposed only when a base PII output exposes that same column
+  // RAW in the base's final projection, under its own name or an alias (`c.ssn as
+  // tax_ref` → `c.ssn as tax_id` re-exposes nothing new). An alias alone is not
+  // proof (`c.email as contact` → `c.ssn as contact` newly exposes `ssn`), and
+  // neither is a base output that only masks the column (`sha2(c.ssn) as ssn_hash`)
+  // or a CTE's own alias that never reaches the final select.
+  const isBaseExposed = (file: string, column: string) => {
+    const basePii = basePiiColumnsByFile.get(file)
+    if (!basePii) return false
+    const exposures = baseOutputs(file).raw
+    return [...basePii].some((name) => !!exposures.get(name)?.has(column))
+  }
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1413,29 +1443,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const normalized = normalizeSelectLine(line)
     return !!normalized && removed.has(normalized)
   }
-  // Per file, the base SQL's output names mapped to the columns each exposes RAW.
-  const baseRawExposuresByFile = new Map<string, Map<string, Set<string>>>()
-  const baseRawExposures = (file: string) => {
-    let exposures = baseRawExposuresByFile.get(file)
-    if (!exposures) {
-      const ctx = ctxByPath.get(file)
-      exposures = rawColumnExposures([ctx?.oldSql, ctx?.engineOldSql].filter(Boolean).join("\n"))
-      baseRawExposuresByFile.set(file, exposures)
-    }
-    return exposures
-  }
-  // `detectPii` reports OUTPUT names (`c.ssn as tax_ref` → `tax_ref`): a SOURCE
-  // column is already exposed only when a base PII output exposes that same column
-  // RAW, under its own name or an alias (`c.ssn as tax_ref` → `c.ssn as tax_id`
-  // re-exposes nothing new). The line's alias alone is not proof (`c.email as
-  // contact` → `c.ssn as contact` newly exposes `ssn`), and neither is a base
-  // output that only masks the column (`sha2(c.ssn) as ssn_hash`).
-  const isBaseExposed = (file: string, item: { column: string; alias?: string }) => {
-    const basePii = basePiiColumnsByFile.get(file)
-    if (!basePii) return false
-    const exposures = baseRawExposures(file)
-    return [...basePii].some((name) => !!exposures.get(name)?.has(item.column))
-  }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
     const fallbackRule = String((f.evidence?.result as any)?.rule ?? "").replace(/_/g, "-")
@@ -1462,18 +1469,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         // its alias and the line. A reindented base line exposes nothing new.
         if (result.line && isReindented(f.file, result.line)) return false
         if (!result.column) return !diffScopedPiiCompletedFiles.has(f.file)
-        const item = { column: result.column, alias: result.alias }
         // Suppress when core's classifier actually CONSIDERED that column (flagged
         // or deliberately muted). A column core never classified falls through.
         const classified = classifiedPiiColumnsByFile.get(f.file)
-        if (classified?.has(item.column) || (item.alias && classified?.has(item.alias))) return false
+        if (classified?.has(result.column) || (result.alias && classified?.has(result.alias))) return false
         // A column the base already exposed is not newly exposed by this PR.
-        return !isBaseExposed(f.file, item)
+        return !isBaseExposed(f.file, result.column)
       }
       // `select-pii-columns` keeps every matched column with its alias and line:
       // drop it when each one is a reindented base line or already base-exposed.
       const items = result.items ?? []
-      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i))) return false
+      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i.column))) return false
       // Otherwise suppress only when a precise detector actually EMITTED a PII
       // finding for the file (so the exposure is reported by the better source,
       // not silently dropped).

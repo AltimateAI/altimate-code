@@ -2370,6 +2370,25 @@ describe("orchestrate", () => {
     }
   })
 
+  test("a CTE alias does not count as a base exposure of the final output", async () => {
+    // Base CTE `ssn as contact`, base final `c.email as contact`: the base's
+    // output `contact` carried `email`, never raw `ssn`.
+    const base =
+      "with hashed as (\n  select ssn as contact from customers\n)\nselect c.customer_id,\n  c.email as contact\nfrom customers c"
+    const head = base.replace("  c.email as contact", "  c.ssn as contact")
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  c.email as contact\n+  c.ssn as contact\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["email", "ssn"]),
+      getContent: content(head, base),
+    })
+    const intoMart = env.findings.filter((f) => (f.evidence?.result as any)?.rule === "pii_into_mart")
+    expect(intoMart.map((f) => (f.evidence?.result as any)?.column)).toEqual(["ssn"])
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
   test("a pure reindent drops the regex twins even when base PII detection misses the column", async () => {
     // detectPii finds nothing on either side: only the reindent check applies.
     const env = await runReview({
