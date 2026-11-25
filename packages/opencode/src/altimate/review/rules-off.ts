@@ -83,7 +83,14 @@ export function resolveRulesOff(
   const { file } = rulesOffEnv(env.ALTIMATE_REVIEW_RULES_OFF)
   let list: readonly string[] = NOISY_RULES_OFF
   if (file) {
-    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"))
+    // Synchronous: read once per review, before it starts, from a synchronous resolver; a small local file.
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(readFileSync(file, "utf8"))
+    } catch (e) {
+      const why = (e as NodeJS.ErrnoException)?.code === "ENOENT" ? "file not found" : e instanceof Error ? e.message : String(e)
+      throw new Error(`ALTIMATE_REVIEW_RULES_OFF: cannot read the rule list ${file}: ${why}`)
+    }
     if (!Array.isArray(parsed) || parsed.some((r) => typeof r !== "string"))
       throw new Error(`ALTIMATE_REVIEW_RULES_OFF must name a JSON list of rule ids: ${file}`)
     list = parsed as string[]

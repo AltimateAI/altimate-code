@@ -1,5 +1,6 @@
 import { describe, test, expect, spyOn, mock, afterEach, beforeEach } from "bun:test"
 import {
+  batchOutcomeState,
   numberedSlice,
   runAiVerify,
   type AiVerifyEvidence,
@@ -506,5 +507,13 @@ describe("--all-projects merge of the rule verifier", () => {
       { root: "b", paths: ["b/models/m.sql"], env: b },
     ])
     expect(merged.ai!.verifyRules).toBe("drop_refuted")
+  })
+})
+
+describe("batchOutcomeState", () => {
+  test("no batches is ok, not an error read from a missing batch", () => {
+    expect(batchOutcomeState([])).toEqual({ state: "ok" })
+    expect(batchOutcomeState([{ state: "error", reason: "boom" }])).toEqual({ state: "error", reason: "boom" })
+    expect(batchOutcomeState([{ state: "ok" }, { state: "error", reason: "boom" }])).toEqual({ state: "ok", reason: "1 of 2 batches failed: boom" })
   })
 })

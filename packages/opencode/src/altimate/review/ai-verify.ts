@@ -1120,7 +1120,7 @@ export function batchOutcomeState(
   let state: VerifierStatus["state"] = "ok"
   let reason: string | undefined
   if (timeout) [state, reason] = ["timeout", timeout.reason]
-  else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
+  else if (errors.length > 0 && errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
   else if (outcomes.some((o) => o.state === "budget"))
     [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
   if (errors.length && state !== "error")

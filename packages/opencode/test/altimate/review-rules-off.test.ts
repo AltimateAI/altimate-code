@@ -70,7 +70,14 @@ describe("resolveRulesOff", () => {
     const bad = (body: string) => ({ ALTIMATE_REVIEW_RULES_OFF: listFile(body) })
     expect(() => resolveRulesOff({ ai: true }, on, bad('{"a": 1}'))).toThrow(/JSON list of rule ids/)
     expect(() => resolveRulesOff({ ai: true }, on, bad("[1]"))).toThrow(/JSON list of rule ids/)
-    expect(() => resolveRulesOff({ ai: true }, on, { ALTIMATE_REVIEW_RULES_OFF: "/nonexistent/rules_off.json" })).toThrow()
+    // A missing or unparsable file names the variable and the file, not a bare ENOENT or SyntaxError.
+    expect(() => resolveRulesOff({ ai: true }, on, { ALTIMATE_REVIEW_RULES_OFF: "/nonexistent/rules_off.json" })).toThrow(
+      "ALTIMATE_REVIEW_RULES_OFF: cannot read the rule list /nonexistent/rules_off.json: file not found",
+    )
+    const broken = listFile("[not json")
+    expect(() => resolveRulesOff({ ai: true }, on, { ALTIMATE_REVIEW_RULES_OFF: broken })).toThrow(
+      new RegExp(`^ALTIMATE_REVIEW_RULES_OFF: cannot read the rule list ${broken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `),
+    )
   })
 
   test("`ALTIMATE_REVIEW_RULES_OFF` spellings: on/off/true/false switch; only a path-like value is a file", () => {

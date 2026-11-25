@@ -69,6 +69,7 @@ export function rulePolicyApplies(ruleVerifier: { state: string; reviewed?: numb
 /** The policy configured under `ai.rulePolicy` (an object changes the noisy list). */
 export function configuredRulePolicy(cfg: { ai: unknown }): RulePostPolicy {
   const rp = cfg.ai && typeof cfg.ai === "object" ? (cfg.ai as { rulePolicy?: unknown }).rulePolicy : undefined
-  const noisy = rp && typeof rp === "object" ? (rp as { noisyRules?: string[] }).noisyRules : undefined
-  return noisy ? { noisyRules: noisy } : DEFAULT_RULE_POST_POLICY
+  const noisy = rp && typeof rp === "object" ? (rp as { noisyRules?: unknown }).noisyRules : undefined
+  // The config schema already requires a list of strings; anything else (a direct caller) keeps the default list.
+  return Array.isArray(noisy) && noisy.every((r) => typeof r === "string") ? { noisyRules: noisy } : DEFAULT_RULE_POST_POLICY
 }

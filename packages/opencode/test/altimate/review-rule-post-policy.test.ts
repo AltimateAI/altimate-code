@@ -141,6 +141,9 @@ describe("configuration", () => {
     expect(resolveAiSwitches(obj, {}).rulePolicy).toBe(true)
     expect(configuredRulePolicy(obj)).toEqual({ noisyRules: ["x:y"] })
     expect(configuredRulePolicy(DEFAULT_REVIEW_CONFIG)).toBe(DEFAULT_RULE_POST_POLICY)
+    // A direct caller passing a non-list keeps the default list instead of failing later.
+    expect(configuredRulePolicy({ ai: { rulePolicy: { noisyRules: "x:y" } } })).toBe(DEFAULT_RULE_POST_POLICY)
+    expect(configuredRulePolicy({ ai: { rulePolicy: { noisyRules: [1] } } })).toBe(DEFAULT_RULE_POST_POLICY)
     // A typo under `rulePolicy` fails the load rather than leaving the default list.
     expect(() => parseReviewConfig("ai:\n  rulePolicy:\n    noisyRule:\n      - x:y")).toThrow(/unrecognized_keys/)
     expect(envSwitch("rulePolicy", { ALTIMATE_REVIEW_RULE_POLICY: "0" })).toBe(false)
