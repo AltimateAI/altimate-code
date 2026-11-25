@@ -80,7 +80,7 @@ function run(stmts: Stmt[], bills: Bill[], prices: { def: number; eff: number | 
   for (const s of stmts)
     db.run("insert into query_history values (?, ?, ?, ?, ?, ?, ?, 'FINISHED', ?)", [s.id, s.session ?? "s", s.wh ?? "w1", s.start, s.end, s.type ?? "MERGE", s.ms, s.text ?? TEXT])
   db.run("create table billing_usage (usage_metadata_warehouse_id text, usage_start_time integer, usage_quantity real, usage_unit text, sku_name text, cloud text)")
-  for (const b of bills) db.run("insert into billing_usage values (?, ?, ?, 'DBU', 'sku', 'aws')", [b.wh ?? "w1", (BASE_HOUR + b.hour) * HOUR, b.dbus])
+  for (const b of bills) db.run("insert into billing_usage values (?, ?, ?, 'DBU', ?, 'aws')", [b.wh ?? "w1", (BASE_HOUR + b.hour) * HOUR, b.dbus, b.sku ?? "sku"])
   db.run("create table list_prices (sku_name text, cloud text, price_start_time integer, price_end_time integer, pricing_default real, pricing_effective_list_default real)")
   if (prices) db.run("insert into list_prices values ('sku', 'aws', 0, null, ?, ?)", [prices.def, prices.eff])
   const rows = db.query<Record<string, number | string | null>, []>(toSqlite(databricksHistorySql(NEEDLE, ASOF_MS, configuredRate))).all()
@@ -196,6 +196,28 @@ describe("the Databricks history SQL, executed", () => {
     const listed = run(stmt, bill, null, false)
     expect(listed.x.missing_hours).toBe(1)
     expect(listed.x.missing_billing).toBe(1)
+  })
+
+  test("an hour with some DBUs priced and some not is unknown at list price, and priced in full at a configured rate", () => {
+    const stmt = [{ id: "x", start: at(100, 10), end: at(100, 20), ms: 10 }]
+    // 10 DBUs of a SKU with a list price, 20 of one without: the priced part alone would be 7 USD.
+    const bill = [
+      { hour: 100, dbus: 10 },
+      { hour: 100, dbus: 20, sku: "unlisted" },
+    ]
+    const listed = run(stmt, bill, { def: 0.7, eff: null }, false)
+    expect(listed.x.missing_hours).toBe(1)
+    expect(listed.x.missing_billing).toBe(1)
+    const configured = run(stmt, bill, { def: 0.7, eff: null }, true)
+    expect(configured.x.missing_hours).toBe(0)
+    expect(configured.x.dbus).toBeCloseTo(30, 9)
+  })
+
+  test("an hour whose DBUs are all priced is known at list price, whatever other hours do", () => {
+    const stmt = [{ id: "x", start: at(100, 10), end: at(100, 20), ms: 10 }]
+    const out = run(stmt, [{ hour: 100, dbus: 10 }, { hour: 100, dbus: 5 }], { def: 0.7, eff: null }, false)
+    expect(out.x.missing_hours).toBe(0)
+    expect(out.x.usd).toBeCloseTo(15 * 0.7, 9)
   })
 
   test("an hour with no billed DBUs at all is unknown whichever rate prices it", () => {

@@ -302,7 +302,7 @@ order by creation_time desc limit ${HISTORY_LIMIT}`
  * The account's blended rate actually billed for each day (contract and overage compute together), so a statement is
  * priced at what its day cost. The view lags up to about three days. A day billed in more than one currency has no single rate.
  */
-export const snowflakeBilledRateSql = (asOfMs: number) => `select usage_date, sum(usage_in_currency) / nullif(sum(usage), 0) as rate, max(currency) as currency, count(distinct currency) as currencies
+export const snowflakeBilledRateSql = (asOfMs: number) => `select usage_date, sum(usage_in_currency) / nullif(sum(case when usage_in_currency is not null then usage end), 0) as rate, max(currency) as currency, count(distinct currency) as currencies
 from snowflake.organization_usage.usage_in_currency_daily
 where account_locator = current_account() and rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'
   and usage_date >= to_date('${utcDate(windowStartMs(asOfMs, HISTORY_DAYS + 1))}') and usage_date <= to_date('${utcDate(asOfMs)}')
@@ -330,8 +330,9 @@ const prorated = (a: string) =>
 
 /** With `configuredRate` the DBUs are priced at the configured rate, so an hour needs billed DBUs but no list price. */
 export function databricksHistorySql(needle: string, asOfMs: number, configuredRate = false): string {
-  // An hour is missing its billing when it has no usage row (and, at list price, no price for it).
-  const noBilling = configuredRate ? "b.dbus is null" : "b.usd is null or b.dbus is null"
+  // An hour is missing its billing when it has no usage row or, at list price, any of its DBUs has no price: a sum
+  // over only the priced ones would understate it.
+  const noBilling = configuredRate ? "b.dbus is null" : "b.dbus is null or b.unpriced_dbus > 0"
   return `with q as (
   select statement_id, session_id, compute.warehouse_id as warehouse_id, start_time, coalesce(end_time, start_time) as end_time,
          statement_type, total_task_duration_ms as ms
@@ -361,7 +362,8 @@ tasks as (
 billed as (
   select u.usage_metadata.warehouse_id as warehouse_id, ${hourOf("u.usage_start_time")} as hour,
          sum(u.usage_quantity) as dbus,
-         sum(u.usage_quantity * coalesce(p.pricing.effective_list.default, p.pricing.default)) as usd
+         sum(u.usage_quantity * coalesce(p.pricing.effective_list.default, p.pricing.default)) as usd,
+         sum(case when coalesce(p.pricing.effective_list.default, p.pricing.default) is null then u.usage_quantity else 0 end) as unpriced_dbus
   from system.billing.usage u
   left join system.billing.list_prices p on p.sku_name = u.sku_name and p.cloud = u.cloud
     and u.usage_start_time >= p.price_start_time and (p.price_end_time is null or u.usage_start_time < p.price_end_time)
@@ -442,7 +444,7 @@ export type Stmt = {
 export type Run = { start: number; lastStart: number; cost: number; native: number; currency?: string; rate?: CostRate }
 
 /** Why a run could not be priced. */
-export type Cause = "pending" | "currency" | "billing" | "weights" | "duration" | "nullbytes" | "nochildren" | "cutchildren" | "unknown"
+export type Cause = "noslot" | "pending" | "currency" | "billing" | "weights" | "duration" | "nullbytes" | "nochildren" | "cutchildren" | "unknown"
 export type Causes = Partial<Record<Cause, number>>
 
 const CAUSE_TEXT: Record<Cause, string> = {
@@ -451,6 +453,7 @@ const CAUSE_TEXT: Record<Cause, string> = {
   billing: "the billing rows for their hours have not landed yet",
   weights: "the warehouse recorded no task time for an hour they ran in, so that hour cannot be shared out",
   duration: "a statement has no task duration",
+  noslot: "BigQuery gave no slot time for a job that ran in a reservation",
   nullbytes: "BigQuery gave no bytes billed for a job (it hides them for tables under a row access policy)",
   nochildren: "a script's child jobs were not found",
   cutchildren: "a script's child jobs may be cut off at the children query's limit",
@@ -596,9 +599,10 @@ function bqJob(r: Row, cfg: CostConfig): BqUnit {
   const billed = num(r.total_bytes_billed)
   // A cached result bills nothing; a missing figure (BigQuery hides it for tables under a row access policy) is not a zero.
   const cached = String(r.cache_hit).toLowerCase() === "true"
-  const known = reserved || billed !== undefined || cached
+  // A job in a reservation is priced by its slot time, which must be reported too: a missing one is not a zero.
+  const known = reserved ? num(r.total_slot_ms) !== undefined : billed !== undefined || cached
   return {
-    cause: known ? undefined : ("nullbytes" as Cause),
+    cause: known ? undefined : reserved ? ("noslot" as Cause) : ("nullbytes" as Cause),
     user: r.user_email ?? "",
     end: parseTime(r.end_time),
     tmp: r.statement_type === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),

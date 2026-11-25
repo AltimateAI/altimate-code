@@ -2222,7 +2222,7 @@ describe("dbt_cost_estimate cost", () => {
       historyLog = []
       costHistoryInternals.readCostConfig = defaultReadCostConfig
       await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-      expect(historyLog.find((q) => q.includes("system.billing.usage"))).toContain("b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0")
+      expect(historyLog.find((q) => q.includes("system.billing.usage"))).toContain("b.dbus is null or b.unpriced_dbus > 0 or coalesce(t.task_ms, 0) = 0")
     } finally {
       costHistoryInternals.readCostConfig = defaultReadCostConfig
     }

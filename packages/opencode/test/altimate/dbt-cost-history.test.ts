@@ -154,7 +154,7 @@ describe("history SQL builders", () => {
     expect(sql).toContain("least(unix_micros(a.end_time), (a.hour + 1) * 3600000000)")
     expect(sql).toContain("missing_hours")
     // Every hour a statement touches needs a billing row and a task-time denominator above zero.
-    expect(sql).toContain("count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
+    expect(sql).toContain("count(case when b.dbus is null or b.unpriced_dbus > 0 or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
     expect(sql).toContain("max(case when s.ms is null then 1 else 0 end) as null_duration")
     expect(sql).toContain("as missing_billing")
     expect(sql).toContain("as zero_weight")
@@ -174,11 +174,19 @@ describe("history SQL builders", () => {
   test("Databricks: with a configured rate an hour needs billed DBUs but no list price; at list price it needs both", () => {
     const listed = databricksHistorySql("n", ASOF)
     const configured = databricksHistorySql("n", ASOF, true)
-    expect(listed).toContain("count(case when b.usd is null or b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
+    expect(listed).toContain("count(case when b.dbus is null or b.unpriced_dbus > 0 or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
     expect(configured).toContain("count(case when b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
     expect(configured).toContain("count(case when b.dbus is null then 1 end) as missing_billing")
     // The price join keeps an hour with DBUs but no price row.
     expect(listed).toContain("left join system.billing.list_prices p")
+  })
+
+  test("Databricks: an hour with any unpriced DBU is missing at list price, however many were priced", () => {
+    const listed = databricksHistorySql("n", ASOF)
+    expect(listed).toContain("sum(case when coalesce(p.pricing.effective_list.default, p.pricing.default) is null then u.usage_quantity else 0 end) as unpriced_dbus")
+    expect(listed).toContain("b.dbus is null or b.unpriced_dbus > 0")
+    // A configured rate prices every DBU, so unpriced ones do not matter.
+    expect(databricksHistorySql("n", ASOF, true)).not.toContain("b.unpriced_dbus > 0 or coalesce")
   })
 
   test("a quote in the needle is escaped in every warehouse's SQL", () => {
@@ -630,7 +638,7 @@ describe("Snowflake pricing", () => {
   })
 
   test("the billed rate query reads the blended compute and overage usage by day", () => {
-    expect(snowflakeBilledRateSql(ASOF)).toContain("sum(usage_in_currency) / nullif(sum(usage), 0) as rate")
+    expect(snowflakeBilledRateSql(ASOF)).toContain("sum(usage_in_currency) / nullif(sum(case when usage_in_currency is not null then usage end), 0) as rate")
     expect(snowflakeBilledRateSql(ASOF)).toContain("snowflake.organization_usage.usage_in_currency_daily")
     // The documented columns, with every balance source (contract and overage) kept.
     expect(snowflakeBilledRateSql(ASOF)).toContain("rating_type = 'compute' and service_type = 'WAREHOUSE_METERING'")
@@ -1155,6 +1163,14 @@ describe("review follow-ups: bounds, text and causes", () => {
     expect(cost.unknownReason).not.toContain("were not found")
     const none = priceBigquery([script], [], "model.s.m", {}).cost
     expect(none.unknownReason).toContain("child jobs were not found")
+  })
+
+  test("BigQuery: a reservation job with no slot time is unknown, never zero slot-hours", () => {
+    const { cost } = priceBigquery([bq("a", 0, 0, "res", 0, "MERGE", { total_slot_ms: null })], undefined, "model.s.m", {})
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("no slot time for a job that ran in a reservation")
+    // A reported zero is still a zero.
+    expect(priceBigquery([bq("b", 0, 0, "res", 0)], undefined, "model.s.m", {}).cost).toMatchObject({ basis: "history", lastRun: 0 })
   })
 
   test("BigQuery: a job with no bytes billed is named as the cause", () => {
