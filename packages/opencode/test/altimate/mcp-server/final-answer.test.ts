@@ -69,5 +69,23 @@ describe("finalAnswerText", () => {
   test("falls back to the committed text when the args cannot be re-rendered", () => {
     expect(finalAnswerText({ basis: "" }, "committed")).toBe("FINAL ANSWER: committed")
   })
+
+  // #1700: some models send list inputs as JSON strings; the FINAL ANSWER line must match a real array.
+  test("fields and asked sent as JSON strings give the same answer-only line", () => {
+    const fields = [{ name: "orders", value: 42 }]
+    const committed = `${basis}\n\n**Answer:** 42`
+    const expected = finalAnswerText({ fields, asked: ["orders"], basis }, committed)
+    expect(
+      finalAnswerText({ fields: JSON.stringify(fields), asked: JSON.stringify(["orders"]), basis }, committed),
+    ).toBe(expected)
+    expect(expected).toBe(`Basis: ${basis}\n\nFINAL ANSWER: 42`)
+  })
+
+  test("rows sent as a JSON string give the same answer-only line", () => {
+    const rows = { columns: ["city", "n"], values: [["Oslo", 3]] }
+    expect(finalAnswerText({ rows: JSON.stringify(rows), asked: ["city", "n"], basis }, "unused")).toBe(
+      finalAnswerText({ rows, asked: ["city", "n"], basis }, "unused"),
+    )
+  })
 })
 // altimate_change end
