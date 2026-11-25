@@ -209,7 +209,13 @@ function groupKeyTitle(f: Finding): string {
 /** Render findings of one severity as bullets. With `group`, findings that say
  *  the same thing (same category, title and body once names are blanked) on
  *  GROUP_MIN_MODELS or more distinct models collapse into one bullet. */
+// A budgeted bullet's body is clipped to this, so one long finding cannot fill
+// the comment and hide the titles of the most severe findings.
+const BULLET_BODY_MAX = 600
+
 function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; count: number }> {
+  // Budgeted (grouped) output clips bodies; local output keeps them whole.
+  const bodyOf = (text: string) => (group ? clip(text, BULLET_BODY_MAX) : text)
   const groups = new Map<string, Finding[]>()
   for (const f of items) {
     // The body is part of the key: one rule with different messages (e.g. a
@@ -229,7 +235,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
       // Show a body verbatim only when every member says exactly that;
       // otherwise its names belong to one model, so show the blanked form.
-      const body = g.every((f) => f.body === g[0].body) ? oneLine(g[0].body) : blankNames(oneLine(g[0].body))
+      const body = bodyOf(g.every((f) => f.body === g[0].body) ? oneLine(g[0].body) : blankNames(oneLine(g[0].body)))
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
@@ -242,7 +248,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
     for (const f of g) {
       const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
       out.push({
-        text: `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+        text: `- **${f.title}**  \n  ${bodyOf(oneLine(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
         count: 1,
       })
     }

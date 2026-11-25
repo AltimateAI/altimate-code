@@ -264,28 +264,57 @@ describe("summary grouping and budget", () => {
   })
 
   test("a critical that does not fit stops the listing: no later, shorter finding jumps ahead of it", () => {
+    // Twelve criticals with long bodies (each clipped, still ~700 chars) cannot
+    // all fit; the short suggestions after them must not be listed instead.
     const fs: Finding[] = [
-      finding({ severity: "critical", category: "lineage_breakage", model: "a", file: "models/a.sql", title: "a: short critical" }),
-      finding({
-        severity: "critical",
-        category: "lineage_breakage",
-        model: "b",
-        file: "models/b.sql",
-        title: "b: long critical",
-        body: "y".repeat(4_800),
-      }),
+      ...Array.from({ length: 12 }, (_, i) =>
+        finding({
+          severity: "critical",
+          category: "lineage_breakage",
+          model: `c${i}`,
+          file: `models/c${i}.sql`,
+          title: `c${i}: long critical`,
+          body: `issue ${i} `.repeat(600),
+        }),
+      ),
       ...Array.from({ length: 10 }, (_, i) =>
         finding({ model: `s${i}`, file: `models/s${i}.sql`, title: `s${i}: short suggestion ${i}` }),
       ),
     ]
     const md = renderSummary(buildEnvelope({ findings: fs, tier: "full", mode: "comment" }))
     expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
-    expect(md).toContain("a: short critical")
-    expect(md).not.toContain("b: long critical")
+    expect(md).toContain("c0: long critical")
+    expect(md).not.toContain("c11: long critical")
     expect(md).not.toContain("short suggestion")
-    expect(md).toContain("Critical (1 of 2)")
+    const shown = Number(/Critical \((\d+) of 12\)/.exec(md)?.[1])
+    expect(shown).toBeGreaterThanOrEqual(3)
     expect(md).not.toMatch(/### 💡 Suggestion/)
-    expect(md).toContain("11 more finding(s) not shown (1 critical, 10 suggestion)")
+    expect(md).toContain(`${22 - shown} more finding(s) not shown (${12 - shown} critical, 10 suggestion)`)
+  })
+
+  test("a critical with a huge body is still listed: bullet bodies are clipped", () => {
+    // One critical whose body alone would fill the budget: the gate comment must
+    // not say "Changes requested — 1 critical" while listing nothing.
+    const fs: Finding[] = [
+      finding({
+        severity: "critical",
+        category: "pii_exposure",
+        model: "b",
+        file: "models/b.sql",
+        title: "b: exposes PII column (ssn)",
+        body: "y".repeat(4_800),
+      }),
+    ]
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "full", mode: "gate" }))
+    expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
+    expect(md).toContain("b: exposes PII column (ssn)")
+    expect(md).toContain("Critical (1)")
+    expect(md).not.toContain("more finding(s) not shown")
+    expect(md).not.toContain("y".repeat(700))
+    // Local output keeps the whole body.
+    expect(renderSummary(buildEnvelope({ findings: fs, tier: "full", mode: "gate" }), { maxChars: Infinity })).toContain(
+      "y".repeat(4_800),
+    )
   })
 
   test("the metadata is budgeted too: a run with no findings and huge metadata stays within budget", () => {
