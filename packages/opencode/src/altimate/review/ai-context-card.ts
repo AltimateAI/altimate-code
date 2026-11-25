@@ -1,6 +1,7 @@
 // altimate_change - new file: dbt manifest context card for the AI lane
 //
-// Opt-in (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`, needs a manifest): each file
+// On by default in `reviewPullRequest` (the `contextCard` switch; opt out with
+// `ai: { contextCard: false }` or `ALTIMATE_REVIEW_AI_CONTEXT_CARD=0`; needs a manifest): each file
 // sent to the AI reviewer carries a short block of manifest facts the diff does
 // not show — materialization and keys, parents and children, declared columns
 // and their tests, sibling models; for a macro, its callers and adapter variants.
