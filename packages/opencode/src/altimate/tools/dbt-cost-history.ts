@@ -43,7 +43,7 @@ export type CostInfo = {
   runs?: number
   windowDays?: 30
   /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, which holds only for an uncached execution (a result served from BigQuery's cache bills nothing), `high` the dry run's upper bound plus each table's minimum. `perTable` is set when the table count is uncertain (unknown, or none found) or a source is involved (it may be a view that bills more), so `high` is no ceiling: it is the price of one more table's 10 MiB minimum, added for each table beyond those counted. */
-  selectOnly?: { low: number; high: number; perTable?: number }
+  selectOnly?: { low: number; high: number; perTable: number }
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
   notes: string[]
@@ -556,13 +556,15 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
 
 /**
  * What a scan bills on demand. The dry run is an upper bound on bytes (a clustered table can bill less), so `maxBytes`
- * is the most it reads; each table a query reads bills at least 10 MiB. The charge is therefore at least n x 10 MiB and
- * at most `maxBytes` plus n x 10 MiB (each table's bytes rounded up to the MiB stay within its 10 MiB allowance).
+ * is the most it reads, and each table a query reads bills at least 10 MiB. The floor is one query's minimum, 10 MiB
+ * (for an uncached run). `tables` is the manifest's dependency count, never taken as the number the query reads (a
+ * literal table name is no dependency; a `depends_on` comment is a dependency that is not read), so the high figure
+ * is `maxBytes` plus `tables` x 10 MiB and is no ceiling: each further table adds `perTable`, one more 10 MiB minimum.
  */
-export function onDemandPrice(input: { maxBytes: number; tables: number; usdPerTib: number }): { low: number; high: number } {
-  const floor = Math.max(1, input.tables) * BQ_MIN_BILLED_BYTES
+export function onDemandPrice(input: { maxBytes: number; tables: number; usdPerTib: number }): { low: number; high: number; perTable: number } {
   const price = (bytes: number) => (bytes / TIB) * input.usdPerTib
-  return { low: price(floor), high: price(input.maxBytes + floor) }
+  const perTable = price(BQ_MIN_BILLED_BYTES)
+  return { low: perTable, high: price(input.maxBytes + Math.max(1, input.tables) * BQ_MIN_BILLED_BYTES), perTable }
 }
 
 export function bigqueryOnDemandRate(cfg: CostConfig) {
@@ -610,13 +612,11 @@ function nativeText(n: NonNullable<CostInfo["native"]>): string {
   return `${NATIVE_LABEL[n.unit]}: last ${f(n.lastRun)}, typical ${f(n.typical)}, highest ${f(n.highest)}`
 }
 
-/** What the SELECT would bill on demand, worded as a ceiling and a floor, or without a ceiling when the table count is uncertain. */
+/** What the SELECT would bill on demand, worded as a figure with a floor and no ceiling, since the table count is never exact. */
 function selectText(c: CostInfo): string {
   const { low, high, perTable } = c.selectOnly!
   const atLeast = `at least ${formatMoney(low, "down")} when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run`
-  return perTable !== undefined
-    ? `The SELECT would bill ${formatMoney(high, "up")} on-demand, plus 10 MiB (~${formatMoney(perTable)}) for each table beyond those counted (${atLeast}).`
-    : `The SELECT would bill at most ${formatMoney(high, "up")} on-demand (${atLeast}).`
+  return `The SELECT would bill ${formatMoney(high, "up")} on-demand, plus 10 MiB (~${formatMoney(perTable)}) for each further table the query reads (${atLeast}).`
 }
 
 /** The cost as plain sentences, the first being the answer (or why there is none). */

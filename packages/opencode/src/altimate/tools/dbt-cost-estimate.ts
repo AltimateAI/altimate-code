@@ -178,10 +178,8 @@ function withCost(
       // Without a table count (SQL input, no manifest, an ambiguous name) or with none found, one table is assumed.
       const counted = history.tables
       const used = Math.max(1, counted ?? 1)
-      // The count is a floor when it is unknown or a source may be a view, so the high figure is no ceiling.
-      const open = counted === undefined || counted === 0 || Boolean(history.sources)
-      const price = onDemandPrice({ maxBytes: meta.maxBytes, tables: used, usdPerTib: demand.rate.value })
-      cost.selectOnly = open ? { ...price, perTable: onDemandPrice({ maxBytes: 0, tables: 1, usdPerTib: demand.rate.value }).low } : price
+      // The manifest's dependency count is never the exact number of tables the query reads, so the high figure is no ceiling.
+      cost.selectOnly = onDemandPrice({ maxBytes: meta.maxBytes, tables: used, usdPerTib: demand.rate.value })
       if (!cost.rate) {
         cost.rate = demand.rate
         if (demand.note) cost.notes.push(demand.note)
@@ -192,7 +190,7 @@ function withCost(
           : counted === 0
             ? ": none was found in the manifest, so one is assumed"
             : ""
-      cost.notes.push(`The price covers the SELECT only, and each table it reads bills at least 10 MiB (${used} table${used === 1 ? "" : "s"} counted${why}).`)
+      cost.notes.push(`The price covers the SELECT only, and each table it reads bills at least 10 MiB (${used} table${used === 1 ? "" : "s"} counted${why}; the manifest's dependencies may differ from the tables the query reads).`)
       if (history.sources) cost.notes.push("A source that is a view in BigQuery bills 10 MiB more for each table it reads.")
     }
     if (history.materialized === "incremental")

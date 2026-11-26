@@ -322,10 +322,11 @@ describe("BigQuery pre-run price", () => {
   const tenMiB = BQ_MIN_BILLED_BYTES
   const rate = 6.25
 
-  test("the charge is at least n x 10 MiB and at most the dry run's upper bound plus n x 10 MiB", () => {
+  test("the floor is one query's 10 MiB whatever the count, and the high figure adds the counted tables' minimums plus perTable for each further one", () => {
     const price = onDemandPrice({ maxBytes: 2048, tables: 3, usdPerTib: rate })
-    expect(price.low).toBeCloseTo((3 * tenMiB * rate) / TIB, 14)
+    expect(price.low).toBeCloseTo((tenMiB * rate) / TIB, 14)
     expect(price.high).toBeCloseTo(((2048 + 3 * tenMiB) * rate) / TIB, 14)
+    expect(price.perTable).toBeCloseTo((tenMiB * rate) / TIB, 14)
   })
 
   test("the ceiling follows maxBytes, so a rounded display cannot sit above it", () => {
@@ -404,9 +405,9 @@ describe("rates config and the text", () => {
   })
 
   test("a dry-run price is worded as a ceiling with a floor", () => {
-    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 1, high: 2 } })
+    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 1, high: 2, perTable: 0.5 } })
     expect(text).toBe(
-      "The SELECT would bill at most $2.00 on-demand (at least $1.00 when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run).",
+      "The SELECT would bill $2.00 on-demand, plus 10 MiB (~$0.50) for each further table the query reads (at least $1.00 when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run).",
     )
   })
 })
@@ -683,8 +684,8 @@ describe("review follow-ups: bounds, text and causes", () => {
   })
 
   test("the SELECT line states its ceiling rounded up and its floor rounded down", () => {
-    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 0.000059604644775, high: 6.562559604645912 } })
-    expect(text).toContain("at most $6.57")
+    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 0.000059604644775, high: 6.562559604645912, perTable: 0.00006 } })
+    expect(text).toContain("would bill $6.57 on-demand")
     expect(text).toContain("at least $0.000059")
   })
 
@@ -699,10 +700,10 @@ describe("review follow-ups: bounds, text and causes", () => {
       windowDays: 30,
       rate: null,
       notes: [],
-      selectOnly: { low: 1, high: 2 },
+      selectOnly: { low: 1, high: 2, perTable: 0.5 },
     })
     expect(text.split("\n")[0]).toContain("Cost from 1 run")
-    expect(text).toContain("The SELECT would bill at most $2.00 on-demand")
+    expect(text).toContain("The SELECT would bill $2.00 on-demand, plus 10 MiB")
   })
 
   test("BigQuery: children cut off at their limit are named as the cause, not 'not found'", () => {
