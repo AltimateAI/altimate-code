@@ -85,6 +85,7 @@ import { FrecencyProvider } from "./component/prompt/frecency"
 import { PromptStashProvider } from "./component/prompt/stash"
 import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
+import { logoutTarget, logoutTitle } from "./util/logout-target" // altimate_change — /logout
 import { ToastProvider, useToast } from "./ui/toast"
 import { isDefaultTitle } from "./util/session"
 import { KVProvider, useKV } from "./context/kv"
@@ -887,6 +888,78 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     if (workspace?.type !== "worktree" || !workspace.directory) return
     return workspace
   })
+  // altimate_change start — /logout: the provider behind the current model, and how to sign out of it
+  const logoutTargetNow = createMemo(() => logoutTarget(local.model.current(), sync.data.provider))
+
+  async function logoutCurrentProvider() {
+    const target = logoutTargetNow()
+    if (!target) return
+    if (target.kind === "external") {
+      toast.show({ variant: "warning", message: target.hint, duration: 6000 })
+      return
+    }
+    const confirmed = await DialogConfirm.show(dialog, "Log out", `Log out of ${target.label}?`)
+    if (confirmed !== true) return
+    const othersConnected = sync.data.provider_next.connected.some((id) => id !== target.providerID)
+    if (target.kind === "gateway") {
+      // The gateway and Base sign-outs need opencode-side modules (AltimateApi, FreeTier), so they
+      // run in packages/opencode/src/plugin/tui/altimate/provider-credentials.tsx.
+      keymap.dispatchCommand("altimate.provider.logout")
+    } else if (target.kind === "base") {
+      keymap.dispatchCommand("altimate.provider.logout.base")
+    } else {
+      try {
+        await sdk.client.auth.remove({ providerID: target.providerID }, { throwOnError: true })
+        await sdk.client.instance.dispose()
+      } catch (err) {
+        toast.show({ variant: "error", message: err instanceof Error ? err.message : "Logout failed" })
+        return
+      }
+    }
+    if (!othersConnected) resetSetupComplete()
+    // The instance reload drops the provider from the synced list; the current model then falls
+    // back to another connected one. Say which, or reopen /connect when nothing is left.
+    const remaining = () => sync.data.provider.find((item) => item.id === target.providerID)
+    // A saved login can sit on top of an env key or config entry: once the reload lands, the
+    // provider is either gone or back without `auth`, and then it is still connected that way.
+    const settled = await waitFor(() => {
+      const provider = remaining()
+      return !provider || (target.kind === "saved" && !provider.auth)
+    })
+    if (!settled) return
+    const still = remaining()
+    if (still) {
+      const after = logoutTarget({ providerID: still.id }, sync.data.provider)
+      toast.show({
+        variant: "warning",
+        message: `Removed the saved login. ${after?.kind === "external" ? after.hint : `${still.name} is still connected.`}`,
+        duration: 8000,
+      })
+      return
+    }
+    const next = local.model.current()
+    if (!next || next.providerID === target.providerID) {
+      dialog.replace(() => <DialogModelWelcome />)
+      return
+    }
+    if (target.kind === "saved") {
+      toast.show({
+        variant: "success",
+        message: `Logged out of ${target.label}. Now using ${local.model.parsed().model}.`,
+      })
+    }
+  }
+
+  async function waitFor(check: () => boolean, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs
+    while (!check()) {
+      if (Date.now() > deadline) return false
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return true
+  }
+  // altimate_change end
+
   const appCommands = createMemo(() =>
     [
       {
@@ -1132,19 +1205,19 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
         category: "Provider",
       },
+      // altimate_change start — /logout signs out of the provider behind the current model; the
+      // title names it, e.g. "Log out of OpenAI (ChatGPT subscription)". See util/logout-target.ts.
       {
         name: "altimate.logout",
-        title: "Sign out of Altimate LLM Gateway",
+        title: logoutTitle(logoutTargetNow()),
+        hidden: !logoutTargetNow(),
         slashName: "logout",
         run: () => {
-          // altimate_change — the credential clear + instance dispose + toast happen
-          // opencode-side (AltimateApi is unreachable from packages/tui); see
-          // packages/opencode/src/plugin/tui/altimate/provider-credentials.tsx.
-          keymap.dispatchCommand("altimate.provider.logout")
-          resetSetupComplete()
+          void logoutCurrentProvider()
         },
         category: "Provider",
       },
+      // altimate_change end
       // altimate_change end
       ...(sync.data.console_state.switchableOrgCount > 1
         ? [

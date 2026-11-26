@@ -2218,6 +2218,7 @@ export type Provider = {
   id: string
   name: string
   source: "env" | "config" | "custom" | "api"
+  auth?: "api" | "oauth" | "wellknown"
   env: Array<string>
   key?: string
   options: {

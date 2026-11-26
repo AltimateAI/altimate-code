@@ -43,7 +43,7 @@ Managed LLM access with dynamic routing across Sonnet 4.6, Opus 4.6, GPT-5.4, GP
 
 For pricing, security, and data handling details, see the [Altimate LLM Gateway guide](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/).
 
-To sign out, run `altimate providers logout altimate-backend` (or `/logout` in the TUI). This deletes `~/.altimate/altimate.json` (`%USERPROFILE%\.altimate\altimate.json` on Windows), removes the auth-store entry, and removes remote MCP servers whose `Authorization` header carries the saved key, such as those added with `datamate add`. It checks the same config files a session started in the current directory loads: the global config, `~/.altimate-code`, and project config from the current directory up to the git root (every parent directory outside git). New sessions stop using the key; restart any session that is already running, or run `/logout` inside it. MCP servers configured in other projects are not removed. If the saved key can't be read, logout fails and keeps the file so you can fix it and run logout again.
+To sign out, run `altimate providers logout altimate-backend`, or `/logout` in the TUI while a gateway model is selected. This deletes `~/.altimate/altimate.json` (`%USERPROFILE%\.altimate\altimate.json` on Windows), removes the auth-store entry, and removes remote MCP servers whose `Authorization` header carries the saved key, such as those added with `datamate add`. It checks the same config files a session started in the current directory loads: the global config, `~/.altimate-code`, and project config from the current directory up to the git root (every parent directory outside git). New sessions stop using the key; restart any session that is already running, or run `/logout` inside it. MCP servers configured in other projects are not removed. If the saved key can't be read, logout fails and keeps the file so you can fix it and run logout again.
 
 !!! tip "Automatic model selection"
     When Altimate credentials are configured and no model is explicitly chosen, the Altimate LLM Gateway is selected automatically. You can override this by setting `model` in your config or by restricting the `provider` section to specific providers only.
@@ -551,6 +551,22 @@ Set your default model and a smaller model for lightweight tasks:
 ```
 
 The `small_model` is used for lightweight tasks like summarization and context compaction.
+
+## Signing out of a provider
+
+In the TUI, `/logout` signs out of the provider behind the model you're using. The command names it and how you signed in, for example "Log out of OpenAI (ChatGPT subscription)" or "Log out of OpenAI (API key)". To sign out of a different provider, switch to one of its models first.
+
+After you confirm, the saved login is removed, the provider list reloads, and the session switches to another connected model. If no provider is left, the connect picker opens.
+
+Some providers have no saved login to remove:
+
+- **Set by an environment variable**, such as `OPENAI_API_KEY`: `/logout` names the variable. Unset it and restart to disconnect.
+- **Set in your config**: remove the provider from the config file.
+- **Connected outside Altimate Code**, such as the Claude Agent provider, which uses your Claude Code sign-in: sign out in that tool.
+
+If a provider has both a saved login and an environment variable, `/logout` removes the saved login and tells you the provider is still connected through the variable.
+
+From a terminal, `altimate providers logout [provider]` removes any saved login. Without a provider it lists the ones you can choose.
 
 ## Provider Options Reference
 

@@ -3088,3 +3088,44 @@ test("fromModelsDevProvider survives a catalog with a malformed entry mixed in",
   expect(database["bad-id"]).toBeUndefined()
 })
 // altimate_change end
+
+// altimate_change start — `auth` tells clients which login is saved; the TUI's /logout reads it
+test("provider reports a saved API key as auth: api even when config also lists it", async () => {
+  const saved = await Auth.get("openai")
+  await Auth.set("openai", { type: "api", key: "sk-test-saved" })
+  try {
+    await using tmp = await tmpdir({ config: { provider: { openai: {} } } })
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      init: async () => Env.remove("OPENAI_API_KEY"),
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers[ProviderID.openai].source).toBe("config")
+        expect(providers[ProviderID.openai].auth).toBe("api")
+      },
+    })
+  } finally {
+    if (saved) await Auth.set("openai", saved)
+    else await Auth.remove("openai")
+  }
+})
+
+test("provider set only by an environment variable has no saved login", async () => {
+  const saved = await Auth.get("anthropic")
+  if (saved) await Auth.remove("anthropic")
+  try {
+    await using tmp = await tmpdir({ config: {} })
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      init: async () => Env.set("ANTHROPIC_API_KEY", "test-api-key"),
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers[ProviderID.anthropic].source).toBe("env")
+        expect(providers[ProviderID.anthropic].auth).toBeUndefined()
+      },
+    })
+  } finally {
+    if (saved) await Auth.set("anthropic", saved)
+  }
+})
+// altimate_change end

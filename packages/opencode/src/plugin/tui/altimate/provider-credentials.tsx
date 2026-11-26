@@ -16,6 +16,7 @@ import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, Show } from "solid-js"
 import { AltimateApi } from "@/altimate/api/client"
 import { Telemetry } from "@/altimate/telemetry"
+import { FreeTier } from "@/altimate/free/client" // altimate_change — /logout for Altimate Base
 
 const id = "altimate:provider-credentials"
 
@@ -101,6 +102,21 @@ async function logout(api: TuiPluginApi) {
 }
 // altimate_change end
 
+// altimate_change start — /logout when the current model is Altimate Base. Same steps as
+// `altimate auth logout altimate-free`: clear the managed credential, then drop any legacy
+// auth-store entry left by builds before the managed store.
+async function logoutBase(api: TuiPluginApi) {
+  try {
+    await FreeTier.logout()
+    await api.client.auth.remove({ providerID: FreeTier.PROVIDER_ID }, { throwOnError: true })
+    await api.client.instance.dispose()
+    api.ui.toast({ variant: "success", message: "Logged out of Altimate Base" })
+  } catch (err) {
+    api.ui.toast({ variant: "error", message: err instanceof Error ? err.message : "Logout failed" })
+  }
+}
+// altimate_change end
+
 const tui: TuiPlugin = async (api) => {
   api.keymap.registerLayer({
     commands: [
@@ -123,11 +139,22 @@ const tui: TuiPlugin = async (api) => {
           void logout(api)
         },
       },
+      {
+        name: "altimate.provider.logout.base",
+        title: "Log out of Altimate Base",
+        category: "Altimate",
+        namespace: "palette",
+        hidden: true,
+        run() {
+          void logoutBase(api)
+        },
+      },
       // altimate_change end
     ],
     bindings: api.tuiConfig.keybinds.gather("altimate.palette", [
       "altimate.provider.connect",
       "altimate.provider.logout",
+      "altimate.provider.logout.base",
     ]),
   })
 }
