@@ -300,6 +300,9 @@ describe("BigQuery pricing", () => {
   test("a cached job with zero bytes billed is a real zero", () => {
     const { cost } = priceBigquery([bq("a", 0, 0, null, 0, "MERGE", { cache_hit: "True" })], undefined, "model.s.m", {})
     expect(cost).toMatchObject({ basis: "history", runs: 1, lastRun: 0 })
+    // A $0 run gets no note claiming a minimum charge.
+    expect(cost.notes.some((n: string) => /at least|minimum|rounds up/i.test(n))).toBe(false)
+    expect(cost.notes).toContain("On-demand jobs are priced by the bytes BigQuery billed for each job.")
   })
 
   test("each build job is its own run, even a minute apart", () => {

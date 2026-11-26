@@ -503,7 +503,7 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
     notes.push(
       `Slot time is attributed at ${slot.rate.value} USD/slot-hour; the bill follows the reservation's baseline, commitments and autoscaling, not each job.`,
     )
-  if (anyDemand) notes.push("On-demand jobs are priced by bytes billed, which BigQuery rounds up to at least 10 MiB per query.")
+  if (anyDemand) notes.push("On-demand jobs are priced by the bytes BigQuery billed for each job.")
   if (anyDemand && demand.note) notes.push(demand.note)
   if (runs.some((r) => r.reserved) && slot.note) notes.push(slot.note)
   const stats = summarize(runs.map((r) => ({ start: r.start, cost: r.cost, native: allReserved ? r.slotHours : r.bytes })))
