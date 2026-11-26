@@ -406,7 +406,7 @@ describe("rates config and the text", () => {
   test("a dry-run price is worded as a ceiling with a floor", () => {
     const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 1, high: 2 } })
     expect(text).toBe(
-      "The SELECT would bill at most $2.00 on-demand (at least $1.00; pruning of clustered or partitioned tables can bill less than the dry run).",
+      "The SELECT would bill at most $2.00 on-demand (at least $1.00 when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run).",
     )
   })
 })

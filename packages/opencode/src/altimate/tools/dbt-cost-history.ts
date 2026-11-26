@@ -42,7 +42,7 @@ export type CostInfo = {
   highest?: number
   runs?: number
   windowDays?: 30
-  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, `high` the dry run's upper bound plus each table's minimum. `perTable` is set when the table count is uncertain (unknown, or none found) or a source is involved (it may be a view that bills more), so `high` is no ceiling: it is the price of one more table's 10 MiB minimum, added for each table beyond those counted. */
+  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, which holds only for an uncached execution (a result served from BigQuery's cache bills nothing), `high` the dry run's upper bound plus each table's minimum. `perTable` is set when the table count is uncertain (unknown, or none found) or a source is involved (it may be a view that bills more), so `high` is no ceiling: it is the price of one more table's 10 MiB minimum, added for each table beyond those counted. */
   selectOnly?: { low: number; high: number; perTable?: number }
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
@@ -613,7 +613,7 @@ function nativeText(n: NonNullable<CostInfo["native"]>): string {
 /** What the SELECT would bill on demand, worded as a ceiling and a floor, or without a ceiling when the table count is uncertain. */
 function selectText(c: CostInfo): string {
   const { low, high, perTable } = c.selectOnly!
-  const atLeast = `at least ${formatMoney(low, "down")}; pruning of clustered or partitioned tables can bill less than the dry run`
+  const atLeast = `at least ${formatMoney(low, "down")} when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run`
   return perTable !== undefined
     ? `The SELECT would bill ${formatMoney(high, "up")} on-demand, plus 10 MiB (~${formatMoney(perTable)}) for each table beyond those counted (${atLeast}).`
     : `The SELECT would bill at most ${formatMoney(high, "up")} on-demand (${atLeast}).`
