@@ -31,7 +31,10 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
   if (ctx.extra?.forceReadOnly === true || ctx.agent === "plan")
     return {
       refusal: "read_only",
-      reason: "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
+      reason:
+        ctx.agent === "plan"
+          ? "this needs the dbt adapter, which plan mode doesn't start: run it outside plan mode"
+          : "this needs the dbt adapter, which a read-only call doesn't start: re-run with --allow-write",
     }
   // One deadline and the call's abort bound every wait below, the dbt config reads included: a stalled
   // read gives up with the start's timeout, and a cancelled call stops waiting at once.
@@ -55,7 +58,13 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
     return value
   }
   try {
-    const { getDbtAdapter, getDbtProjectRoot, getDbtPythonPath } = await bounded(import("../native/connections/register"))
+    const { getDbtAdapter, getDbtIntegration, getDbtProjectRoot, getDbtPythonPath } = await bounded(
+      import("../native/connections/register"),
+    )
+    const hint = async () =>
+      getDbtIntegration() === "fusion"
+        ? fusionHint((await bounded(import("../../../../dbt-tools/src/check"))).fusionPlaces(getDbtPythonPath()))
+        : pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))
     const project = await bounded(sessionProject())
     if (project?.other) {
       return {
@@ -71,7 +80,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
       const root = await bounded(getDbtProjectRoot())
       const found = !!root && fs.existsSync(path.join(root, "dbt_project.yml"))
       return found
-        ? { refusal: "not_started", reason: `the dbt adapter didn't start${pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))}` }
+        ? { refusal: "not_started", reason: `the dbt adapter didn't start${await hint()}` }
         : { refusal: "no_project", reason: "no dbt project here" }
     }
     if (project?.root) {
@@ -84,7 +93,7 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
         }
     }
     if (adapter.isInitialized?.() === false)
-      return { refusal: "not_loaded", reason: `the dbt adapter didn't load the project${pythonHint(getDbtPythonPath(), await bounded(savedDbtConfig()))}` }
+      return { refusal: "not_loaded", reason: `the dbt adapter didn't load the project${await hint()}` }
     return { adapter }
   } catch (e) {
     if (signal.aborted) throw e
@@ -102,11 +111,21 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
  */
 function pythonHint(python: string | undefined, saved: boolean): string {
   const which = python ? ` (${python})` : ""
-  const restart = "then start a new session, or run `altimate-code tool daemon stop` for the `tool run` daemon"
   return saved
-    ? `: dbt runs with the Python that ~/.altimate-code/dbt.json names${which}, which may not be the project's. Set pythonPath there to a Python that has dbt installed, ${restart}`
-    : `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json), ${restart}`
+    ? `: dbt runs with the Python that ~/.altimate-code/dbt.json names${which}, which may not be the project's. Set pythonPath there to a Python that has dbt installed, ${RESTART}`
+    : `: dbt runs with the Python found when the tools started${which}, which may not be the project's. Activate the project's virtualenv (or set pythonPath in ~/.altimate-code/dbt.json), ${RESTART}`
 }
+
+/**
+ * The same, in dbt Fusion mode: Fusion is a native dbt 2.x binary and runs no Python, so what is most often
+ * missing is that binary where dbt-integration looks (`places`). Only ~/.altimate-code/dbt.json sets Fusion
+ * mode, so that is where to turn it off.
+ */
+function fusionHint(places: string): string {
+  return `: dbt runs as dbt Fusion, which needs no Python but a dbt whose \`--version\` reports 2.x ${places}. Run \`altimate-dbt doctor\` to check for one, install dbt Fusion, or set dbtIntegration to core in ~/.altimate-code/dbt.json, ${RESTART}`
+}
+
+const RESTART = "then start a new session, or run `altimate-code tool daemon stop` for the `tool run` daemon"
 
 /**
  * Whether ~/.altimate-code/dbt.json picks the Python: it parses and names a pythonPath. A file without one,

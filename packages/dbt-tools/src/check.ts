@@ -1,6 +1,6 @@
 import { existsSync } from "fs"
 import { execFileSync } from "child_process"
-import { join } from "path"
+import { isAbsolute, join } from "path"
 import type { Config } from "./config"
 
 type Status = { ok: true } | { ok: false; error: string; fix: string }
@@ -39,12 +39,62 @@ function project(root: string): Status {
   return { ok: true }
 }
 
-export async function all(cfg: Config) {
-  const checks = {
-    python: await python(cfg.pythonPath),
-    dbt: cfg.pythonPath && existsSync(cfg.pythonPath) ? await dbt(cfg.pythonPath) : { ok: false as const, error: "Skipped (Python not found)", fix: "Fix Python first" },
-    project: project(cfg.projectRoot),
+type FusionLookup = {
+  pythonPath?: string
+  cwd?: string
+  env?: Record<string, string | undefined>
+  timeoutMs?: number
+  skipScripts?: boolean
+}
+
+/** How the Fusion check finds dbt: dbt-integration's own lookup, loaded only in Fusion mode.
+ * A field so tests can replace it. */
+export const fusionBinary = {
+  find: async (options: FusionLookup) => (await import("@altimateai/dbt-integration")).findDbtV2Binary(options),
+}
+
+/**
+ * Where dbt-integration's lookup looks for a dbt 2.x binary, as a phrase. Next to the interpreter only
+ * when `pythonPath` is a path: the lookup's interpreter-adjacent candidate skips a bare command name
+ * such as `python3`, which carries no directory.
+ */
+export function fusionPlaces(pythonPath?: string): string {
+  const adjacent = !!pythonPath && (isAbsolute(pythonPath) || /[\\/]/.test(pythonPath))
+  return `${adjacent ? `next to ${pythonPath}, ` : ""}in ~/.local/bin or on PATH`
+}
+
+/** The dbt Fusion binary for a config, found as the adapter finds the one it runs; undefined when there is none. */
+export function findFusion(cfg: { pythonPath?: string; projectRoot?: string }) {
+  // Judge candidates as the adapter does: it runs any `dbt` whose `--version` reports 2.x,
+  // script launchers (asdf, nix and company wrappers) included, and allows 15 s for it.
+  return fusionBinary.find({
+    pythonPath: cfg.pythonPath || undefined,
+    cwd: cfg.projectRoot || undefined,
+    env: process.env,
+    skipScripts: false,
+    timeoutMs: 15_000,
+  })
+}
+
+async function fusion(cfg: Config): Promise<Status> {
+  if (await findFusion(cfg)) return { ok: true }
+  return {
+    ok: false,
+    error: `dbt Fusion was not found: no dbt 2.x binary ${fusionPlaces(cfg.pythonPath)}`,
+    fix: "Install dbt Fusion so that `dbt --version` reports 2.x, or set dbtIntegration to core in the altimate-dbt config",
   }
+}
+
+export async function all(cfg: Config) {
+  // dbt Fusion is a native binary: it needs no Python, and no dbt-core in one.
+  const checks: Record<string, Status> =
+    cfg.dbtIntegration === "fusion"
+      ? { fusion: await fusion(cfg), project: project(cfg.projectRoot) }
+      : {
+          python: await python(cfg.pythonPath),
+          dbt: cfg.pythonPath && existsSync(cfg.pythonPath) ? await dbt(cfg.pythonPath) : { ok: false as const, error: "Skipped (Python not found)", fix: "Fix Python first" },
+          project: project(cfg.projectRoot),
+        }
   const passed = Object.values(checks).every((c) => c.ok)
   return { passed, checks }
 }

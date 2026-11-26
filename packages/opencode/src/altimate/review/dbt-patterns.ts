@@ -2,7 +2,7 @@ import path from "node:path"
 import YAML from "yaml"
 import { Log } from "@/altimate/util/log"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
-import { type ChangedFile, classifyDbtFile } from "./diff-filter"
+import { type ChangedFile, fileKind } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
 import { evaluateCatalog } from "./rule-catalog"
 
@@ -766,7 +766,7 @@ const MODEL_DETECTORS: Detector[] = [
 
 /** Run the dbt anti-pattern detectors over a changed MODEL file. */
 export function detectModelPatterns(file: ChangedFile, newSql: string | undefined, rubric: Rubric): Finding[] {
-  const kind = classifyDbtFile(file.path)
+  const kind = fileKind(file)
   if (!isModelSql(kind) || file.status === "deleted" || !newSql) return []
   const { added, removed } = splitDiff(file.diff)
   const ctx: Ctx = {
@@ -1281,7 +1281,7 @@ export function detectSchemaYmlPatterns(
   rubric: Rubric,
   opts: SchemaYmlDetectContent = {},
 ): Finding[] {
-  const kind = classifyDbtFile(file.path)
+  const kind = fileKind(file)
   if (kind !== "schema_yml") return []
 
   const removals: Array<{

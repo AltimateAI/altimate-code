@@ -5,6 +5,8 @@
 // cannot read a large manifest themselves (the Claude Code plugin reads files up to 4 MiB) get it
 // from the CLI (`altimate tool run dbt_lineage --json` with include_graph); MCP carries no graph.
 
+import { createHash } from "crypto"
+
 export interface GraphNode {
   id: string
   name: string
@@ -12,6 +14,11 @@ export interface GraphNode {
   label: string | null
   type: string
   path: string | null
+  /**
+   * The project-relative schema.yml that describes the node (dbt's patch_path without its `package://`), when there
+   * is one in the project itself: a node of an installed package has none, its file being relative to that package.
+   */
+  yml?: string
   materialized: string | null
   /** database.schema.table, lower-cased. */
   relation: string | null
@@ -49,7 +56,27 @@ function relationOf(node: any): string | null {
   return parts.length === 3 ? parts.join(".").toLowerCase() : null
 }
 
-function nodeOf(id: string, node: any): GraphNode {
+/** Whether a package is the manifest's root project: by `project_name`, or by `project_id`, the MD5 of that name. */
+function isRootPackage(name: string, metadata: any): boolean {
+  if (typeof metadata?.project_name === "string" && metadata.project_name) return name === metadata.project_name
+  if (typeof metadata?.project_id === "string" && metadata.project_id)
+    return createHash("md5").update(name).digest("hex") === metadata.project_id
+  return false
+}
+
+/** The project-relative schema.yml path of a node's patch_path. A path of an installed package, or of a package
+ * the manifest cannot tell is the root project, is relative to somewhere else and is left out. */
+function ymlOf(node: any, metadata: any): string | undefined {
+  if (typeof node?.patch_path !== "string") return undefined
+  const scheme = /^([^:/]+):\/\//.exec(node.patch_path)
+  // A path without the package prefix (older manifests) belongs to the node's own package.
+  const owner = scheme ? scheme[1] : node?.package_name
+  if (typeof owner !== "string" || !isRootPackage(owner, metadata)) return undefined
+  return node.patch_path.slice(scheme?.[0].length ?? 0)
+}
+
+function nodeOf(id: string, node: any, metadata?: any): GraphNode {
+  const yml = ymlOf(node, metadata)
   const type: string = node?.resource_type ?? id.split(".")[0] ?? "unknown"
   return {
     id,
@@ -57,6 +84,7 @@ function nodeOf(id: string, node: any): GraphNode {
     label: type === "exposure" ? node?.label || node?.name || id : null,
     type,
     path: node?.original_file_path ?? null,
+    ...(yml !== undefined ? { yml } : {}),
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns: Object.entries<any>(node?.columns ?? {}).map(([key, col]) => String(col?.name ?? key)),
@@ -103,13 +131,13 @@ export function lineageGraph(manifest: any, id: string): LineageGraph {
   const truncated = walk(children, MAX_DOWNSTREAM, counted)
   const graph: LineageGraph = { nodes: {}, parents: {}, children: {}, truncated, upTruncated }
   for (const one of keep) {
-    graph.nodes[one] = nodeOf(one, lookup(manifest, one))
+    graph.nodes[one] = nodeOf(one, lookup(manifest, one), manifest.metadata)
     graph.parents[one] = (parents[one] ?? []).filter((other) => keep.has(other))
     graph.children[one] = (children[one] ?? []).filter((other) => {
       if (keep.has(other)) return true
       if (!isTest(other) || !counted.has(one)) return false
       if (!graph.nodes[other]) {
-        graph.nodes[other] = { ...nodeOf(other, lookup(manifest, other)), type: "test" }
+        graph.nodes[other] = { ...nodeOf(other, lookup(manifest, other), manifest.metadata), type: "test" }
         graph.parents[other] = (parents[other] ?? []).filter((p) => keep.has(p))
         graph.children[other] = []
       }

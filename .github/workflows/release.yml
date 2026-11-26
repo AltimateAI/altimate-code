@@ -58,7 +58,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Each target builds ONE binary in parallel (~5 min each)
+          # Each target builds ONE binary in parallel (under 30s each)
           # Index matches allTargets array in build.ts. Targets without a
           # @altimateai/altimate-core NAPI prebuild (linux-*-musl, win32-arm64)
           # are intentionally excluded — see allTargets in build.ts.
@@ -89,7 +89,35 @@ jobs:
         run: bun install
 
       - name: Build ${{ matrix.name }}
-        run: bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }}
+        # altimate_change start — retry a failed build once, so one flaky target can't hold up
+        # the release (see the Solid plugin warm-up in build.ts for the flake we know of). The
+        # retry is a new `bun run`: Bun keeps a misread resolver entry for the life of the
+        # process. The warning keeps the first failure visible on the run summary. Each attempt
+        # gets attempt_timeout (a build takes under 30s), so a hung first attempt still leaves
+        # time for the second inside the job's 15 minutes.
+        run: |
+          attempt_timeout=300 # seconds
+          for attempt in 1 2; do
+            status=0
+            started=$SECONDS
+            timeout --kill-after=30s "${attempt_timeout}s" bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }} || status=$?
+            if [ "$status" = 0 ]; then
+              exit 0
+            fi
+            # timeout exits 124 when it stopped the attempt; a build that exits 124 itself does so early.
+            if [ "$status" = 124 ] && [ $((SECONDS - started)) -ge "$attempt_timeout" ]; then
+              reason="timed out after ${attempt_timeout}s"
+            else
+              reason="exited with code $status"
+            fi
+            if [ "$attempt" = 1 ]; then
+              echo "::warning::Build (${{ matrix.name }}) attempt 1 $reason; retrying once in a fresh process"
+            else
+              echo "::error::Build (${{ matrix.name }}) attempt 2 $reason"
+            fi
+          done
+          exit 1
+        # altimate_change end
         env:
           OPENCODE_VERSION: ${{ github.ref_name }}
           # altimate_change — derive channel from the tag: a prerelease tag (e.g. v0.9.0-beta.1)

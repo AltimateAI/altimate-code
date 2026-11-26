@@ -23,6 +23,9 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import type { NotFoundError as StorageNotFoundError } from "@/storage/storage"
 // altimate_change end
 import { NamedError } from "@opencode-ai/core/util/error"
+// altimate_change start — client-safe error messages
+import { clientMessage } from "@/altimate/server/error-response"
+// altimate_change end
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -343,7 +346,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
             yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
             yield* events.publish(Session.Event.Error, {
               sessionID: ctx.params.sessionID,
-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+              // altimate_change start — the event goes to clients: the error's message, not the cause's stack trace
+              // (logged in full just above).
+              error: new NamedError.Unknown({ message: clientMessage(Cause.squash(cause)) }).toObject(),
+              // altimate_change end
             })
           }),
         ),

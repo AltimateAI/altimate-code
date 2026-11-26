@@ -56,6 +56,14 @@ describe("cli", () => {
     expect(parsed.commands.doctor).toBeDefined()
   })
 
+  test("usage says what doctor checks in each mode", async () => {
+    const result = Bun.spawnSync(["bun", entry], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
+    const parsed = JSON.parse(result.stdout.toString())
+    expect(parsed.commands.doctor).toBe(
+      "Check prerequisites: Python, dbt-core and the project, or in Fusion mode the dbt Fusion binary and the project",
+    )
+  })
+
   test("doctor without config produces init hint", async () => {
     const result = Bun.spawnSync(["bun", entry, "doctor"], { env: { ...process.env, HOME: "/tmp/dbt-tools-test-home" } })
     const parsed = JSON.parse(result.stdout.toString())

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
   buildCountQuery,
+  cteReads,
   detectCtes as detectCtesInText,
   extractRowCount,
   quoteSqlIdentifier,
@@ -1637,5 +1638,281 @@ describe("extractRowCount", () => {
     expect(extractRowCount([])).toBe(0)
     expect(extractRowCount(undefined)).toBe(0)
     expect(extractRowCount([{ _PROFILE_COUNT: "not-a-number" }])).toBe(0)
+  })
+})
+
+describe("cteReads", () => {
+  const readsOf = (sql: string) => {
+    const ctes = detectCtesInText(sql)
+    const reads = cteReads(sql, ctes)
+    return Object.fromEntries(ctes.map((c, i) => [c.name, reads[i].map((j) => ctes[j].name)]))
+  }
+
+  it("lists only the earlier CTEs a body names: siblings read nothing of each other", () => {
+    const sql = `with orders as (select * from {{ ref('stg_orders') }}),
+order_items as (select order_id, sum(price) as total from {{ ref('stg_order_items') }} group by 1),
+payments as (select order_id, sum(amount) as paid from {{ ref('stg_payments') }} group by order_id),
+customer_orders as (
+  select orders.customer_id, sum(order_items.total), sum(payments.paid)
+  from orders left join order_items on orders.order_id = order_items.order_id
+  left join payments on orders.order_id = payments.order_id group by 1
+),
+ranked as (select *, rank() over (order by 1) from customer_orders)
+select * from ranked`
+    expect(readsOf(sql)).toEqual({
+      orders: [],
+      order_items: [],
+      payments: [],
+      customer_orders: ["orders", "order_items", "payments"],
+      ranked: ["customer_orders"],
+    })
+  })
+
+  it("does not count a name in a string, a comment, after a dot, or inside a longer word", () => {
+    const sql = `with orders as (select 1 as id),
+a as (select 'orders' as s, x.orders, my_orders, orders2, 1orders from t as x -- orders
+  /* orders */ {# orders #}),
+b as (select * from ORDERS)
+select * from b`
+    expect(readsOf(sql)).toEqual({ orders: [], a: [], b: ["orders"] })
+  })
+
+  it("matches a name in any letter case and quoting, brackets included, and keeps to its own WITH clause", () => {
+    const sql = `with "Big" as (select 1), other as (select 2),
+q as (select * from "Big"), r as (select * from "OTHER"), s as (select * from [Big]), t as (select * from \`other\`), u as (select * from big)
+select * from (with inner_cte as (select * from q) select * from inner_cte)`
+    // A bare name matches a quoted one only as its lower- or upper-case form: \`big\` is not "Big".
+    expect(readsOf(sql)).toEqual({ '"Big"': [], other: [], q: ['"Big"'], r: ["other"], s: ['"Big"'], t: ["other"], u: [] })
+    expect(readsOf('with "Foo" as (select 1), foo as (select 2), keep as (select * from foo) select * from keep').keep).toEqual(["foo"])
+    const bracketed = "with [Big Spenders] as (select 1), [we]]ird] as (select 2), b as (select * from [Big Spenders] join [we]]ird] on 1 = 1) select * from b"
+    expect(readsOf(bracketed)).toEqual({ "[Big Spenders]": [], "[we]]ird]": [], b: ["[Big Spenders]", "[we]]ird]"] })
+  })
+
+  it("does not count a name inside Jinja: an expression, a ref with either quotes, a captured set block", () => {
+    const sql = `with orders as (select 1 as id),
+a as (select * from {{ ref("orders") }} join {{ orders }} on 1 = 1),
+b as ({% set q %}select * from orders{% endset %} select 2 as id),
+c as ({% if true %}select * from orders{% endif %})
+select * from c`
+    expect(readsOf(sql)).toEqual({ orders: [], a: [], b: [], c: ["orders"] })
+  })
+
+  it("does not count a qualified name with spaces around the dot", () => {
+    expect(readsOf("with orders as (select 1), a as (select * from analytics . orders) select * from a")).toEqual({ orders: [], a: [] })
+  })
+
+  it("steps over a Jinja string holding }}, and a backslash-escaped quote in a SQL string", () => {
+    const jinja = `with orders as (select 1), b as (select {{ "}}" | length }} as n, {{ "'}}'" }} as m from orders) select * from b`
+    expect(readsOf(jinja)).toEqual({ orders: [], b: ["orders"] })
+    const nested = `with orders as (select 1), b as (select {{ {"x": {"y": 1}}["x"].get("orders", 0) }} as n, {{ {"a": {"b": 1}}[orders]["b"] }} as m) select * from b`
+    expect(readsOf(nested)).toEqual({ orders: [], b: [] })
+    const escaped = "with orders as (select 1), b as (select 'it\\'s orders \\'text' as label, 'x''orders' as y) select * from b"
+    expect(readsOf(escaped)).toEqual({ orders: [], b: [] })
+    const jinjaInString = "with orders as (select 1), b as (select '{{ var('orders') }}' as label, '{% if x %}orders{% endif %}' as l2), c as (select '{{ var('x') }}' as l3 from orders) select * from c"
+    expect(readsOf(jinjaInString)).toEqual({ orders: [], b: [], c: ["orders"] })
+    const jinjaInQuotes = `with orders as (select 1), b as (select "{{ var("orders") }}" from raw.customers), c as (select 'prefix {# 'orders' #} suffix' as label) select * from c`
+    expect(readsOf(jinjaInQuotes)).toEqual({ orders: [], b: [], c: [] })
+  })
+
+  it("does not count a name qualified across a comment, and reads a name that starts outside the BMP", () => {
+    const sql = "with orders as (select 1), \u{10400}orders as (select 2), a as (select * from analytics . /* t */ orders join analytics.-- x\n orders on 1 = 1), b as (select * from \u{10400}orders) select * from b"
+    expect(readsOf(sql)).toEqual({ orders: [], "\u{10400}orders": [], a: [], b: ["\u{10400}orders"] })
+  })
+
+  it("reads Jinja before SQL: delimiters and quotes inside Jinja, wherever it sits, are not SQL", () => {
+    const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
+    const bodies = [
+      `select $$ {{ var('x', '$$ orders $$') | length }} $$ as label`,
+      `select 1 /* {{ var('x', '*/ orders /*') | length }} */ as n`,
+      `select '{% set label = "%} 'orders'" %}constant' as label`,
+      `select '\\{{ var('orders', 'n') }}' as label`,
+      `select [col{# ] orders #}] from raw.t`,
+      `select "{{ var("orders") }}" from raw.customers`,
+      `select 'prefix {# 'orders' #} suffix' as label`,
+      `{% call statement('x') %}select * from orders{% endcall %} select 1 as n`,
+      `select 2 -- {#\n#} from orders`,
+      `select 2 -- {{ var('flag', 0) -}}\n from orders`,
+      `{% set q %}{% raw %}{% endset %}{% endraw %}\nselect * from orders\n{% endset %}\nselect 2`,
+    ]
+    for (const body of bodies) expect(readsOf(wrap(body)).b).toEqual([])
+    // Jinja output between real SQL keeps the SQL readable, and {% raw %} text is SQL as written.
+    expect(readsOf(wrap(`select {{ var('n') }} from orders`)).b).toEqual(["orders"])
+    expect(readsOf(wrap(`select * from {% raw %}orders{% endraw %}`)).b).toEqual(["orders"])
+  })
+
+  it("a name the body's own WITH defines again is that inner CTE, not a read of the outer one", () => {
+    // Inside its own definition, or in an inner CTE before it, the name is still the outer CTE.
+    expect(readsOf("with orders as (select 1), b as (with x as (select * from orders), orders as (select 2) select * from x) select * from b").b).toEqual(["orders"])
+    expect(readsOf("with orders as (select 1), b as (with orders as (select * from orders) select * from orders) select * from b").b).toEqual(["orders"])
+    // In WITH RECURSIVE the inner CTE's own body already means it.
+    expect(readsOf("with dates as (select 999 as n), result as (with recursive dates(n) as (select 1 union all select n + 1 from dates where n < 3) select * from dates) select * from result").result).toEqual([])
+    expect(readsOf("with dates as (select 999 as n), result as (with dates2(n) as (select n from dates) select * from dates2) select * from result").result).toEqual(["dates"])
+    for (const gap of [" /* generate calendar */ ", " -- calendar\n ", " ".repeat(60)])
+      expect(readsOf(`with dates as (select 999 as n), result as (with${gap}recursive dates(n) as (select 1 union all select n + 1 from dates where n < 3) select * from dates) select * from result`).result).toEqual([])
+    // A subquery's WITH shadows too, only inside that subquery.
+    expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s) select * from b").b).toEqual([])
+    expect(readsOf("with orders as (select 1), b as (select * from (with orders as (select 2) select * from orders) s join orders on 1 = 1) select * from b").b).toEqual(["orders"])
+    const sql = "with orders as (select 1), b as (with orders as (select 2) select * from orders), c as (with x as (select 3) select * from x join orders on 1 = 1) select * from c"
+    expect(readsOf(sql)).toEqual({ orders: [], b: [], c: ["orders"] })
+  })
+
+  it("reads the SQL Jinja renders: a comment inside a word joins it, {%- endraw %} trims, a ) in Jinja ends no body", () => {
+    const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
+    expect(readsOf(wrap("select * from orders{# note #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #}{# b #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{#- a -#} {# b #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #} _archive")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select * from orders{# a #}{# b -#} _archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #}{# b #} _archive")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select * from orders{# a #} {#- b #}_archive")).b).toEqual([])
+    expect(readsOf(wrap("select * from orders{# a #} {# b #}_archive")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select * from orders {# note #} join t on 1 = 1")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select 2 -- {% raw %}\n{%- endraw %} from orders\n")).b).toEqual([])
+    expect(readsOf(wrap("select 2 -- {% raw %}\n{% endraw %} from orders\n")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select '{{ ')' }}' as label from orders")).b).toEqual(["orders"])
+  })
+
+  it("reads inside a bracketed expression, as DuckDB's list of a scalar subquery", () => {
+    const wrap = (body: string) => `with orders as (select 1), b as (${body}) select * from b`
+    expect(readsOf(wrap("select [(select x from orders)] as xs")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select [a, orders] as xs from t")).b).toEqual(["orders"])
+    expect(readsOf(wrap("select [my orders] from t")).b).toEqual([])
+  })
+
+  it("thousands of sibling subqueries defining one name are read in near-linear time", () => {
+    const siblings = Array.from({ length: 5000 }, (_, i) => `select * from (with orders as (select ${i}) select * from orders) s${i}`).join(" union all ")
+    const started = performance.now()
+    expect(readsOf(`with orders as (select 1), b as (${siblings} union all select * from orders) select * from b`).b).toEqual(["orders"])
+    expect(performance.now() - started).toBeLessThan(3000)
+  })
+
+  it("a bracketed CTE name holding a comma or parenthesis is read whole; an undeclared one is a list", () => {
+    expect(readsOf("with [a,b] as (select 1 as x), b as (select * from [a,b]) select * from b").b).toEqual(["[a,b]"])
+    expect(readsOf("with a as (select 1), [x(y)] as (select 2), c as (select * from [x(y)]) select * from c").c).toEqual(["[x(y)]"])
+    expect(readsOf("with a as (select 1), c as (select [a, 2] as xs) select * from c").c).toEqual(["a"])
+    expect(readsOf('with a as (select 1 as a), b as (select 2 as b), "a,b" as (select 3), c as (select [a,b] as xs from a cross join b) select * from c').c).toEqual(["a", "b"])
+  })
+
+  it("keeps escaped SQL quotes and nested shadow scopes consistent", () => {
+    const sql = String.raw`with a as (select 1), b as (select 'x\'', (with a as (select 2) select * from a) s, 'y\'' from t) select 1`
+    expect(readsOf(sql)).toEqual({ a: [], b: [] })
+  })
+
+  it("indexes distinct quoted spellings without scanning their case-folded collisions", () => {
+    const n = 32000
+    const name = (i: number) => `"c${i.toString(2).padStart(16, "0").replaceAll("0", "a").replaceAll("1", "A")}"`
+    const sql = "with " + Array.from({ length: n }, (_, i) => `${name(i)} as (select ${i ? `* from ${name(0)}` : "1"})`).join(",") + ` select * from ${name(n - 1)}`
+    const start = performance.now()
+    const reads = cteReads(sql, detectCtesInText(sql))
+    expect(reads[0]).toEqual([])
+    expect(reads.slice(1).every((one) => one.length === 1 && one[0] === 0)).toBe(true)
+    expect(performance.now() - start).toBeLessThan(2000)
+  })
+
+  it("checks nested quoted shadow membership without scanning nonmatching case variants", () => {
+    const n = 32000
+    const sql = 'with "orders" as (select 1), b as (' +
+      'select * from (with "ORDERS" as (select 2) '.repeat(n) +
+      'select * from "orders"' + ') s cross join "orders"'.repeat(n) + ') select * from b'
+    const start = performance.now()
+    expect(cteReads(sql, detectCtesInText(sql))).toEqual([[], [0]])
+    expect(performance.now() - start).toBeLessThan(2000)
+  })
+
+  it("reads long WITH trivia once per clause, for body and subquery scopes", () => {
+    const n = 16000
+    const inner = "with " + " ".repeat(20 * n) + Array.from({ length: n }, (_, i) => `c${i} as (select 1)`).join(",") + " select * from c0"
+    for (const body of [inner, `select * from (${inner}) s`]) {
+      const sql = `with seed as (select 1), b as (${body}) select * from b`
+      const start = performance.now()
+      expect(readsOf(sql)).toEqual({ seed: [], b: [] })
+      expect(performance.now() - start).toBeLessThan(2000)
+    }
+  })
+
+  it("does not scan every inner declaration for each bracketed expression", () => {
+    for (const name of ['"a,b"', "[a,b]"]) {
+      const n = 32000
+      const sql = "with seed as (select 1), b as (" +
+        Array(n).fill(`(with ${name} as (select 1) select [1] as xs)`).join(" union all ") +
+        " union all select coalesce(" + Array(n).fill("[A,b]").join(",") + ") from (select 1 as A, 2 as b)) select * from b"
+      const start = performance.now()
+      expect(readsOf(sql)).toEqual({ seed: [], b: [] })
+      expect(performance.now() - start).toBeLessThan(2000)
+    }
+  })
+
+  it("a Jinja tag or expression between two names keeps both: either branch may render", () => {
+    const sql = (body: string) =>
+      `with orders as (select 1), payments as (select 2), b as (select * from ${body}) select * from b`
+    expect(readsOf(sql("{% if var('use_orders') %}orders{% else %}payments{% endif %}")).b).toEqual(["orders", "payments"])
+    expect(readsOf(sql("orders{% if x %}_a{% endif %}")).b).toEqual(["orders"])
+    expect(readsOf(sql("orders{{ suffix }}")).b).toEqual(["orders"])
+  })
+
+  it("a long run of Jinja comments inside a word is blanked in linear time", () => {
+    const time = (count: number) => {
+      const sql = `with orders as (select 1), b as (select * from orders${"{# x #}".repeat(count)}_archive) select * from b`
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const started = performance.now()
+          expect(readsOf(sql).b).toEqual([])
+          return performance.now() - started
+        }),
+      )
+    }
+    expect(time(32000) / time(8000)).toBeLessThan(9)
+  })
+
+  it("deeply nested subqueries that each open with WITH scale linearly", () => {
+    const time = (depth: number) => {
+      let body = "select * from orders"
+      for (let i = 0; i < depth; i++) body = `with x as (${body}) select * from x`
+      const sql = `with orders as (select 1), b as (${body}) select * from b`
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const started = performance.now()
+          expect(readsOf(sql).b).toEqual(["orders"])
+          return performance.now() - started
+        }),
+      )
+    }
+    expect(time(8000) / time(2000)).toBeLessThan(9)
+  })
+
+  it("sibling subqueries defining one name scale linearly", () => {
+    const time = (count: number) => {
+      const siblings = Array.from({ length: count }, (_, i) => `select * from (with orders as (select ${i}) select * from orders) s${i}`).join(" union all ")
+      const sql = `with orders as (select 1), b as (${siblings} union all select * from orders) select * from b`
+      return Math.min(
+        ...[0, 1, 2].map(() => {
+          const started = performance.now()
+          expect(readsOf(sql).b).toEqual(["orders"])
+          return performance.now() - started
+        }),
+      )
+    }
+    // Four times the siblings costs about four times as much; comparing with every earlier scope costs sixteen.
+    expect(time(16000) / time(4000)).toBeLessThan(9)
+  })
+
+  it("a body with thousands of inner CTEs is read in near-linear time", () => {
+    const inner = Array.from({ length: 10000 }, (_, i) => `i${i} as (select ${i} as x)`).join(",\n")
+    const sql = `with orders as (select 1), b as (with ${inner} select * from i9999 join orders on 1 = 1) select * from b`
+    const started = performance.now()
+    expect(readsOf(sql).b).toEqual(["orders"])
+    expect(performance.now() - started).toBeLessThan(3000)
+  })
+
+  it("lists the reads of a model with thousands of CTEs in linear time", () => {
+    const parts = Array.from({ length: 10000 }, (_, i) => `c${i} as (select ${i} as x${i > 0 && i % 2 === 0 ? ` from c${i - 1}` : ""})`)
+    const sql = `with ${parts.join(",\n")}\nselect * from c9999`
+    const started = performance.now()
+    const ctes = detectCtesInText(sql)
+    const reads = cteReads(sql, ctes)
+    expect(reads.length).toBe(10000)
+    expect(reads[2]).toEqual([1])
+    expect(reads[3]).toEqual([])
+    expect(performance.now() - started).toBeLessThan(3000)
   })
 })

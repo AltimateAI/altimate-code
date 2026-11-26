@@ -220,7 +220,7 @@ function readIdentifier(text: string, pos: number): number {
       if (close === end || text[close - 1] !== char || close - end < 2) return -1
       end = close
     } else if (char === "[") {
-      const bracketed = /\[(?:[^\]\n]|\]\]){1,256}\]/y
+      const bracketed = BRACKET_NAME
       bracketed.lastIndex = end
       if (!bracketed.test(text)) return -1
       end = bracketed.lastIndex
@@ -253,7 +253,12 @@ function skipHeader(text: string, pos: number): number {
 }
 
 /** The CTEs of the WITH clause that opens at `withPos`: each `name [(columns)] AS (body)`, separated by commas, up to the first thing that is not one. */
-function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
+function parseWithClause(
+  text: string,
+  withPos: number,
+  ctes: CteInfo[],
+  closeOf: (open: number) => number = (open) => findMatchingClosingParen(text, open),
+): void {
   let pos = skipTrivia(text, withPos + 4, true)
   const keyword = /recursive\b/iy
   keyword.lastIndex = pos
@@ -267,7 +272,7 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
     let name = text.substring(nameStart, identifierEnd)
     pos = skipTrivia(text, identifierEnd, false)
     if (text[pos] === "(") {
-      const close = findMatchingClosingParen(text, pos)
+      const close = closeOf(pos)
       if (close === -1) return
       // The name as written plus its column list; a comment between them is left out.
       name += ` ${text.substring(pos, close + 1)}`
@@ -277,7 +282,7 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
     // `AS [NOT] [MATERIALIZED] (`, with comments or Jinja tags allowed between the words.
     const open = skipHeader(text, pos)
     if (open === -1) return
-    const close = findMatchingClosingParen(text, open)
+    const close = closeOf(open)
     if (close === -1) return
     ctes.push({
       name,
@@ -299,6 +304,375 @@ export function detectCtes(text: string): CteInfo[] {
   const ctes: CteInfo[] = []
   for (const withPos of findTopLevelWithKeywords(text)) parseWithClause(text, withPos, ctes)
   return ctes
+}
+
+/** A CTE name or a reference as written: its text without quotes, and whether it was quoted. */
+type Written = { name: string; quoted: boolean; bracketed?: boolean }
+
+function written(raw: string): Written {
+  const quote = raw[0]
+  if ((quote === '"' || quote === "`") && raw.length > 1 && raw.endsWith(quote)) return { name: raw.slice(1, -1).replaceAll(quote + quote, quote), quoted: true }
+  if (quote === "[" && raw.endsWith("]")) return { name: raw.slice(1, -1).replaceAll("]]", "]"), quoted: true, bracketed: true }
+  return { name: raw, quoted: false }
+}
+
+/**
+ * Whether a reference names a CTE. Two bare names match in any letter case; two quoted ones only exactly. A quoted
+ * and a bare one match when the quoted text is the bare name folded to lower case (Postgres) or
+ * to upper case (Snowflake), the warehouse being unknown here: so `"ORDERS"` names `orders`, and `"Foo"` does not
+ * name `foo`. Without a warehouse dialect this can miss case-insensitive quoted references, including DuckDB
+ * and default Redshift, or backtick/bracket names under case-insensitive collations.
+ */
+function declarationKeys(name: Written): string[] {
+  return name.quoted ? [`q:${name.name}`] : [`l:${name.name.toLowerCase()}`, `u:${name.name.toUpperCase()}`]
+}
+
+function referenceKeys(name: Written): string[] {
+  return name.quoted
+    ? [`q:${name.name}`, `l:${name.name}`, `u:${name.name}`]
+    : [...new Set([`l:${name.name.toLowerCase()}`, `q:${name.name.toLowerCase()}`, `q:${name.name.toUpperCase()}`])]
+}
+
+const BARE_WORD = /[\p{L}_][\p{L}\p{N}_$]*/uy
+/** A `[name]` (SQL Server), as a CTE's name is read. */
+const BRACKET_NAME = /\[(?:[^\]\n]|\]\]){1,256}\]/y
+/** A `[name]` in a body: one holding a parenthesis, comma, quote or bracket is an expression, as DuckDB's
+ * `[(select …)]` list, unless a CTE declares that name with brackets (`[a,b]`). */
+const BRACKETED = /\[(?:[^\]\n(),'\[]|\]\]){1,256}\]/y
+
+/**
+ * Position just past the Jinja delimiter `{{`, `{%` or `{#` at `pos` closes: a comment at its first `#}`; an
+ * expression or statement at its `}}` or `%}` outside the quoted strings in it, an expression's braces balanced,
+ * as Jinja's lexer reads them.
+ */
+function jinjaEnd(text: string, pos: number): number {
+  const kind = text[pos + 1]
+  if (kind === "#") {
+    const close = text.indexOf("#}", pos + 2)
+    return close === -1 ? text.length : close + 2
+  }
+  let at = pos + 2
+  let depth = 0
+  while (at < text.length) {
+    const char = text[at]
+    if (char === "'" || char === '"') {
+      at++
+      while (at < text.length && text[at] !== char) at += text[at] === "\\" ? 2 : 1
+      at++
+    } else if (kind === "{" && char === "{") {
+      depth++
+      at++
+    } else if (kind === "{" && char === "}" && depth > 0) {
+      depth--
+      at++
+    } else if (char === (kind === "{" ? "}" : "%") && text[at + 1] === "}") return at + 2
+    else at++
+  }
+  return text.length
+}
+
+/** The blocks whose body is a string for dbt (`{% set x %}…{% endset %}`, a call, a macro), not the model's SQL. */
+const CAPTURING = new Set(["set", "call", "macro"])
+
+/**
+ * The text with its Jinja blanked to spaces, offsets kept: every `{{ }}`, `{% %}` and `{# #}`, and the body of a
+ * captured `set`, `call` or `macro` block. Jinja renders before the SQL is read, so a quote, comment mark or name
+ * inside it is not SQL, wherever it sits (in a string, a comment, a quoted name). The text inside `{% raw %}` is
+ * kept as written.
+ */
+function blankJinja(text: string): string {
+  const out: string[] = []
+  let kept = 0
+  // Blanked to spaces, newlines too: a Jinja comment ends no SQL line comment. Whitespace control (`{{-`, `-}}`)
+  // takes the whitespace beside the tag with it, newlines included, as rendering does. A comment, which renders to
+  // nothing, between two word characters is blanked to word characters instead: `orders{# x #}_archive` renders as
+  // one name, not `orders`, and so does a run of such comments. A tag or expression may render either side of it
+  // apart (`{% else %}`), so it stays a boundary.
+  const word = /[\p{L}\p{N}_$]/u
+  const run = { end: -1, joined: false }
+  const blank = (from: number, to: number) => {
+    const comment = text.startsWith("{#", from)
+    if (text[from + 2] === "-") while (from > kept && /\s/.test(text[from - 1])) from--
+    if (text[to - 3] === "-") while (to < text.length && /\s/.test(text[to])) to++
+    let joined = false
+    if (comment && from < run.end) joined = run.joined
+    else if (comment) {
+      const before = from > kept ? text[from - 1] : (out.at(-1)?.at(-1) ?? "")
+      // The text after this comment and the comments right after it, less the whitespace they trim; read once per run.
+      let after = to
+      for (;;) {
+        let next = after
+        while (next < text.length && /\s/.test(text[next])) next++
+        // Whitespace before a `{#-` is trimmed by it.
+        if (text.startsWith("{#-", next)) after = next
+        if (!text.startsWith("{#", after)) break
+        after = jinjaEnd(text, after)
+        if (text[after - 3] === "-") while (after < text.length && /\s/.test(text[after])) after++
+      }
+      joined = word.test(before) && word.test(text[after] ?? "")
+      run.end = after
+      run.joined = joined
+    }
+    out.push(text.substring(kept, from), (joined ? "_" : " ").repeat(to - from))
+    kept = to
+    return to
+  }
+  let pos = 0
+  while (pos < text.length) {
+    const at = text.indexOf("{", pos)
+    if (at === -1 || at + 1 >= text.length) break
+    const kind = text[at + 1]
+    if (kind !== "{" && kind !== "%" && kind !== "#") {
+      pos = at + 1
+      continue
+    }
+    const end = jinjaEnd(text, at)
+    const head = kind === "%" ? /^\{%[-+]?\s*(\w+)/.exec(text.substring(at, Math.min(end, at + 200))) : null
+    const name = head?.[1]
+    if (name === "raw") {
+      // The text up to {% endraw %} is output as written.
+      const close = /\{%[-+]?\s*endraw\b[^%]*%\}/g
+      close.lastIndex = end
+      const found = close.exec(text)
+      blank(at, end)
+      if (found) {
+        // Kept as written up to the closing tag, less the whitespace a `{%- endraw %}` trims.
+        blank(found.index, close.lastIndex)
+        pos = close.lastIndex
+      } else pos = text.length
+      continue
+    }
+    const inline = name === "set" && /^\{%[-+]?\s*set\s+[\w.,\s()]+=(?!=)/.test(text.substring(at, end))
+    if (name && CAPTURING.has(name) && !inline) {
+      // The block's body, to its own end tag (blocks of one kind nest), is blanked with it.
+      let depth = 1
+      let scan = end
+      while (depth > 0 && scan < text.length) {
+        const next = text.indexOf("{", scan)
+        if (next === -1 || next + 1 >= text.length) {
+          scan = text.length
+          break
+        }
+        if (text[next + 1] !== "%" && text[next + 1] !== "{" && text[next + 1] !== "#") {
+          scan = next + 1
+          continue
+        }
+        let tagEnd = jinjaEnd(text, next)
+        const tag = text[next + 1] === "%" ? /^\{%[-+]?\s*(end)?(\w+)/.exec(text.substring(next, Math.min(tagEnd, next + 200))) : null
+        if (tag && !tag[1] && tag[2] === "raw") {
+          // Text inside {% raw %} holds no tags: an `{% endset %}` there does not end the block.
+          const close = /\{%[-+]?\s*endraw\b[^%]*%\}/g
+          close.lastIndex = tagEnd
+          tagEnd = close.exec(text) ? close.lastIndex : text.length
+        }
+        if (tag?.[2] === name) {
+          const opensAgain = !tag[1] && !(name === "set" && /^\{%[-+]?\s*set\s+[\w.,\s()]+=(?!=)/.test(text.substring(next, tagEnd)))
+          if (tag[1]) depth--
+          else if (opensAgain) depth++
+        }
+        scan = tagEnd
+      }
+      pos = blank(at, scan)
+      continue
+    }
+    pos = blank(at, end)
+  }
+  out.push(text.substring(kept))
+  return out.join("")
+}
+
+/**
+ * Position just past the SQL quoted text at `pos`: a single-quoted string, or a `"` or `` ` `` quoted name. A
+ * doubled quote stays inside it; in a single-quoted string so does a backslash-escaped quote (Snowflake,
+ * BigQuery, Databricks, MySQL). Where a backslash is a plain character (Postgres, DuckDB), a string ending in one
+ * runs on past its quote and pairs the quotes after it wrongly: names after it may be missed, or a name in a
+ * later string read, so such a model's reads may be off either way.
+ */
+function skipQuoted(text: string, pos: number): number {
+  const quote = text[pos]
+  let at = pos + 1
+  while (at < text.length) {
+    const char = text[at]
+    if (char === "\\" && quote === "'") at += 2
+    else if (char === quote && text[at + 1] === quote) at += 2
+    else if (char === quote) return at + 1
+    else at++
+  }
+  return text.length
+}
+
+/**
+ * The CTEs the WITH clauses between `start` and `end` define: the query's own, and every subquery's that starts
+ * with WITH. Each with where its name is written (`at`), where its definition ends (`from`) and where the query
+ * holding it ends (`to`): its name means it from `from` to `to`.
+ */
+function shadowsIn(sql: string, start: number, end: number): { written: Written; at: number; from: number; to: number }[] {
+  const out: { written: Written; at: number; from: number; to: number }[] = []
+  if (!/\bwith\b/i.test(sql.substring(start, end))) return out
+  const push = (ctes: CteInfo[], offset: number, to: number) => {
+    const recursiveClauses = new Map<number, boolean>()
+    for (const one of ctes) {
+      // In a WITH RECURSIVE clause a CTE's name means that CTE across the whole clause, its own body included.
+      let recursive = recursiveClauses.get(one.withClauseStart)
+      if (recursive === undefined) {
+        const afterWith = skipTrivia(sql, offset + one.withClauseStart + 4, true)
+        recursive = /^recursive\b/i.test(sql.substring(afterWith, afterWith + 10))
+        recursiveClauses.set(one.withClauseStart, recursive)
+      }
+      const from = offset + (recursive ? one.withClauseStart : one.queryEnd)
+      out.push({ written: written(stripColumnList(one.name)), at: offset + one.nameStart, from, to })
+    }
+  }
+  push(detectCtes(sql.substring(start, end)), start, end)
+  // One pass pairs every parenthesis and notes each `(` that opens a query with WITH; each such clause is then read
+  // with the pairs found, so a deep nest of subqueries is not scanned again for every level.
+  const closes = new Map<number, number>()
+  const opens: number[] = []
+  const withOpens: number[] = []
+  let pos = start
+  while (pos < end) {
+    const char = sql[pos]
+    if (char === "'" || char === '"' || char === "`") {
+      pos = skipQuoted(sql, pos)
+      continue
+    }
+    const skipped = skipLiteral(sql, pos)
+    if (skipped !== pos) {
+      pos = skipped
+      continue
+    }
+    if (char === "(") {
+      opens.push(pos)
+      const first = skipTrivia(sql, pos + 1, false)
+      if (/^with\b/i.test(sql.substring(first, first + 5))) withOpens.push(pos)
+    } else if (char === ")" && opens.length > 0) closes.set(opens.pop()!, pos)
+    pos++
+  }
+  const closeOf = (open: number) => closes.get(open) ?? -1
+  for (const open of withOpens) {
+    const close = closeOf(open)
+    if (close === -1) continue
+    const ctes: CteInfo[] = []
+    parseWithClause(sql, skipTrivia(sql, open + 1, false), ctes, closeOf)
+    push(ctes, 0, close)
+  }
+  return out
+}
+
+/**
+ * For each CTE, the positions (in `ctes`) of the earlier CTEs of its own WITH clause that its body names
+ * directly: a name outside strings, comments and Jinja (blanked first: `{{ }}`, `{% %}`, `{# #}`, and the SQL a
+ * `{% set %}`, `{% call %}` or `{% macro %}` block captures, which is a string for dbt), not qualified by a dot
+ * (`schema . orders`) or inside a longer word, that names the CTE (see `referenceKeys`). Once a CTE the body's own
+ * WITH or a subquery's WITH defines has ended, its name is that inner CTE there, not a read of the outer one.
+ * A column or alias spelled like an earlier CTE counts too, so a CTE may be listed as read when it is not; a CTE
+ * named only through Jinja is not seen, nor one after a nested block comment. A client can estimate a CTE's own
+ * time by subtracting the CTEs it reads directly or through another (the closure of `reads`), each once: `reads`
+ * records names in the SQL, not the work the warehouse does, so separately timed counts need not add up.
+ */
+export function cteReads(text: string, ctes: CteInfo[]): number[][] {
+  const sql = blankJinja(text)
+  // Exact quoted and folded bare keys keep distinct case-sensitive names out of each other's lookup paths.
+  const seen = new Map<number, Map<string, number[]>>()
+  const bracketed = new Map<number, Set<string>>()
+  return ctes.map((cte, position) => {
+    // The body's end found again in the Jinja-blanked text: a `)` inside Jinja (`'{{ ')' }}'`) does not end it.
+    const close = sql[cte.queryStart - 1] === "(" ? findMatchingClosingParen(sql, cte.queryStart - 1) : -1
+    const queryEnd = close > cte.queryStart ? close : cte.queryEnd
+    const earlier = seen.get(cte.withClauseStart) ?? new Map<string, number[]>()
+    seen.set(cte.withClauseStart, earlier)
+    const earlierBrackets = bracketed.get(cte.withClauseStart) ?? new Set<string>()
+    bracketed.set(cte.withClauseStart, earlierBrackets)
+    const reads = new Set<number>()
+    // The CTEs a WITH inside the body defines (its own, or a subquery's): each shadows an outer CTE of its name
+    // once its definition has ended, to the end of the query that holds it.
+    // Scopes nest or are disjoint and the scan only moves forward. Each matching key keeps an open-scope stack;
+    // membership needs no scan of scopes whose quoted spelling differs.
+    type Shadow = { written: Written; at: number; from: number; to: number }
+    const inner = new Map<string, { scopes: Shadow[]; next: number; open: Shadow[] }>()
+    const definedAt = new Set<number>()
+    const innerBrackets = new Set<string>()
+    for (const one of earlier.size > 0 ? shadowsIn(sql, cte.queryStart, queryEnd) : []) {
+      definedAt.add(one.at)
+      if (one.written.bracketed) innerBrackets.add(one.written.name)
+      for (const key of declarationKeys(one.written)) {
+        const named = inner.get(key)
+        if (named) named.scopes.push(one)
+        else inner.set(key, { scopes: [one], next: 0, open: [] })
+      }
+    }
+    for (const named of inner.values()) named.scopes.sort((a, b) => a.from - b.from)
+    const shadows = (key: string, at: number) => {
+      const named = inner.get(key)
+      if (!named) return false
+      const { scopes, open } = named
+      while (named.next < scopes.length && scopes[named.next].from < at) {
+        const one = scopes[named.next++]
+        while (open.length > 0 && open[open.length - 1].to <= one.from) open.pop()
+        open.push(one)
+      }
+      while (open.length > 0 && open[open.length - 1].to <= at) open.pop()
+      return open.length > 0
+    }
+    let pos = cte.queryStart
+    // The last character of SQL read before `pos`, past whitespace and comments: a dot qualifies the next name.
+    let previous = ""
+    while (earlier.size > 0 && pos < queryEnd) {
+      const char = sql[pos]
+      if (/\s/.test(char)) {
+        pos++
+        continue
+      }
+      if (char === "'") {
+        pos = skipQuoted(sql, pos)
+        previous = "'"
+        continue
+      }
+      let end = -1
+      if (char === '"' || char === "`") end = skipQuoted(sql, pos)
+      else if (char === "[") {
+        BRACKETED.lastIndex = pos
+        BRACKET_NAME.lastIndex = pos
+        if (BRACKETED.test(sql)) end = BRACKETED.lastIndex
+        else if ((earlierBrackets.size > 0 || innerBrackets.size > 0) && BRACKET_NAME.test(sql)) {
+          const ref = written(sql.substring(pos, BRACKET_NAME.lastIndex))
+          if (earlierBrackets.has(ref.name) || innerBrackets.has(ref.name)) end = BRACKET_NAME.lastIndex
+        }
+      } else {
+        // A comment or a dollar-quoted string is skipped whole.
+        const skipped = skipLiteral(sql, pos)
+        if (skipped !== pos) {
+          if (char === "$") previous = "$"
+          pos = skipped
+          continue
+        }
+        BARE_WORD.lastIndex = pos
+        if (/[\p{L}_]/u.test(String.fromCodePoint(sql.codePointAt(pos) ?? 32)) && BARE_WORD.test(sql)) end = BARE_WORD.lastIndex
+      }
+      if (end === -1) {
+        previous = char
+        pos++
+        continue
+      }
+      if (previous !== "." && !/[\p{L}\p{N}_$]/u.test(sql[pos - 1] ?? " ")) {
+        const ref = written(sql.substring(pos, end))
+        const keys = referenceKeys(ref)
+        // An inner CTE's own name where it is defined is no reference at all, and one in scope shadows the outer.
+        const shadowed = definedAt.has(pos) || keys.some((key) => shadows(key, pos))
+        if (!shadowed) for (const key of keys) for (const index of earlier.get(key) ?? []) reads.add(index)
+      }
+      previous = sql[end - 1]
+      pos = end
+    }
+    const own = written(stripColumnList(cte.name))
+    if (own.bracketed) earlierBrackets.add(own.name)
+    for (const key of declarationKeys(own)) {
+      const list = earlier.get(key)
+      if (list) list.push(position)
+      else earlier.set(key, [position])
+    }
+    return [...reads].sort((a, b) => a - b)
+  })
 }
 
 /**
