@@ -6,7 +6,6 @@ import { describe, expect, test } from "bun:test"
 import { tmpdir } from "../fixture/fixture"
 import {
   BQ_CHILD_LIMIT,
-  BQ_MIN_BILLED_BYTES,
   HISTORY_LIMIT,
   bigqueryCapacitySql,
   bigqueryHistorySql,
@@ -15,7 +14,7 @@ import {
   costText,
   median,
   needleFor,
-  onDemandPrice,
+  onDemandEstimate,
   parseRows,
   parseTime,
   priceBigquery,
@@ -23,7 +22,6 @@ import {
   rowsJinja,
   unreadable,
   windowStartMs,
-  countTables,
   bigqueryChildrenSql,
   formatMoney,
   loadHistory,
@@ -137,7 +135,7 @@ describe("resolveModel", () => {
   }
 
   test("a name, a unique_id and a package-qualified name each reach one node", () => {
-    expect(resolveModel(nodes, "orders")).toEqual({ uniqueId: "model.shop.orders", materialized: "incremental", tables: 0, sources: 0 })
+    expect(resolveModel(nodes, "orders")).toEqual({ uniqueId: "model.shop.orders", materialized: "incremental" })
     expect(resolveModel(nodes, "model.shop.orders")).toMatchObject({ uniqueId: "model.shop.orders" })
     expect(resolveModel(nodes, "shop.orders")).toMatchObject({ uniqueId: "model.shop.orders" })
     expect(resolveModel(nodes, "other.dup")).toMatchObject({ uniqueId: "model.other.dup" })
@@ -319,43 +317,10 @@ describe("BigQuery pricing", () => {
 })
 
 describe("BigQuery pre-run price", () => {
-  const tenMiB = BQ_MIN_BILLED_BYTES
-  const rate = 6.25
-
-  test("the floor is one query's 10 MiB whatever the count, and the high figure adds the counted tables' minimums plus perTable for each further one", () => {
-    const price = onDemandPrice({ maxBytes: 2048, tables: 3, usdPerTib: rate })
-    expect(price.low).toBeCloseTo((tenMiB * rate) / TIB, 14)
-    expect(price.high).toBeCloseTo(((2048 + 3 * tenMiB) * rate) / TIB, 14)
-    expect(price.perTable).toBeCloseTo((tenMiB * rate) / TIB, 14)
-  })
-
-  test("the ceiling follows maxBytes, so a rounded display cannot sit above it", () => {
-    const price = onDemandPrice({ maxBytes: Math.ceil(1.05 * TIB), tables: 1, usdPerTib: rate })
-    expect(price.high).toBeGreaterThan(((TIB + tenMiB) * rate) / TIB)
-  })
-
-  test("no tables counts as one, so the 10 MiB minimum still applies", () => {
-    expect(onDemandPrice({ maxBytes: 0, tables: 0, usdPerTib: rate }).low).toBeGreaterThan(0)
-  })
-})
-
-describe("tables a model reads", () => {
-  const nodes = {
-    "model.s.m": { resource_type: "model", config: {}, depends_on: { nodes: ["model.s.a", "model.s.eph", "source.s.raw", "seed.s.x", "model.s.a", "model.s.v"] } },
-    "model.s.a": { resource_type: "model", config: { materialized: "table" } },
-    "model.s.eph": { resource_type: "model", config: { materialized: "ephemeral" }, depends_on: { nodes: ["model.s.b", "model.s.a"] } },
-    "model.s.b": { resource_type: "model", config: { materialized: "incremental" } },
-    "model.s.v": { resource_type: "model", config: { materialized: "view" }, depends_on: { nodes: ["model.s.c", "source.s.raw2"] } },
-    "model.s.c": { resource_type: "model", config: { materialized: "table" } },
-    "seed.s.x": { resource_type: "seed" },
-  }
-  test("physical relations only: a view or an ephemeral model is what it reads, a source is one", () => {
-    // a, b (through the ephemeral), c (through the view), seed x, source raw, source raw2.
-    expect(countTables(nodes, { "source.s.raw": {}, "source.s.raw2": {} }, "model.s.m")).toEqual({ tables: 6, sources: 2 })
-  })
-  test("a view is not counted as a table of its own", () => {
-    const only = { "model.s.m": { resource_type: "model", depends_on: { nodes: ["model.s.v"] } }, "model.s.v": { resource_type: "model", config: { materialized: "view" }, depends_on: { nodes: [] } } }
-    expect(countTables(only, {}, "model.s.m").tables).toBe(0)
+  test("the estimate is the dry run's bytes at the on-demand rate, with no bound fields", () => {
+    expect(onDemandEstimate(2 * TIB, 6.25)).toBeCloseTo(12.5, 12)
+    expect(onDemandEstimate(0, 6.25)).toBe(0)
+    expect(onDemandEstimate(TIB / 2, 5)).toBeCloseTo(2.5, 12)
   })
 })
 
@@ -404,11 +369,12 @@ describe("rates config and the text", () => {
     expect(costText({ basis: "none", currency: "USD", rate: null, notes: [], unknownReason: "no history" })).toBe("Cost unknown: no history")
   })
 
-  test("a dry-run price is worded as a ceiling with a floor", () => {
-    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 1, high: 2, perTable: 0.5 } })
+  test("a dry-run price is worded as an estimate that the bill can differ from", () => {
+    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { estimate: 2 } }, "1.0 TiB")
     expect(text).toBe(
-      "The SELECT would bill $2.00 on-demand, plus 10 MiB (~$0.50) for each further table the query reads (at least $1.00 when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run).",
+      "BigQuery's dry run estimates the SELECT at 1.0 TiB, about $2.00 on-demand. The bill can differ: a cached or BI Engine result bills nothing, external sources and some queries are not fully counted, and each table read bills at least 10 MiB.",
     )
+    for (const claim of ["at most", "at least $", "ceiling", "floor"]) expect(text).not.toContain(claim)
   })
 })
 
@@ -673,20 +639,11 @@ describe("review follow-ups: BigQuery temporary relation pairing", () => {
   })
 })
 
-describe("review follow-ups: bounds, text and causes", () => {
-  test("a ceiling rounds up and a floor rounds down, so the text never excludes the real charge", () => {
-    expect(formatMoney(6.562559604645912, "up")).toBe("$6.57")
-    expect(formatMoney(6.562559604645912, "down")).toBe("$6.56")
+describe("review follow-ups: text and causes", () => {
+  test("an amount shows enough digits that a small one is not zero", () => {
     expect(formatMoney(6.562559604645912)).toBe("$6.56")
-    expect(formatMoney(0.000059604644775, "down")).toBe("$0.000059")
-    expect(formatMoney(0.000059604644775, "up")).toBe("$0.000060")
-    expect(formatMoney(0, "up")).toBe("$0.00")
-  })
-
-  test("the SELECT line states its ceiling rounded up and its floor rounded down", () => {
-    const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { low: 0.000059604644775, high: 6.562559604645912, perTable: 0.00006 } })
-    expect(text).toContain("would bill $6.57 on-demand")
-    expect(text).toContain("at least $0.000059")
+    expect(formatMoney(0.000059604644775)).toBe("$0.000060")
+    expect(formatMoney(0)).toBe("$0.00")
   })
 
   test("the SELECT's price is in the text beside the history, since a note refers to it", () => {
@@ -700,10 +657,10 @@ describe("review follow-ups: bounds, text and causes", () => {
       windowDays: 30,
       rate: null,
       notes: [],
-      selectOnly: { low: 1, high: 2, perTable: 0.5 },
-    })
+      selectOnly: { estimate: 2 },
+    }, "1.0 TiB")
     expect(text.split("\n")[0]).toContain("Cost from 1 run")
-    expect(text).toContain("The SELECT would bill $2.00 on-demand, plus 10 MiB")
+    expect(text).toContain("estimates the SELECT at 1.0 TiB, about $2.00 on-demand")
   })
 
   test("BigQuery: children cut off at their limit are named as the cause, not 'not found'", () => {

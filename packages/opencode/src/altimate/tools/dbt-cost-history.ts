@@ -16,8 +16,6 @@ export const BQ_CHILD_LIMIT = 10000
 const LIMIT_NOTE = `Only the newest ${HISTORY_LIMIT} statements were read, so older runs are not counted.`
 const boundaryNote = (dropped: number) =>
   `${dropped} run${dropped === 1 ? "" : "s"} that may have started before the period read ${dropped === 1 ? "was" : "were"} left out.`
-/** BigQuery bills at least this many bytes for a query. */
-export const BQ_MIN_BILLED_BYTES = 10 * 1024 ** 2
 const TIB = 1024 ** 4
 
 export type CostConfig = {
@@ -42,8 +40,8 @@ export type CostInfo = {
   highest?: number
   runs?: number
   windowDays?: 30
-  /** BigQuery on-demand: what the SELECT would bill. `low` is the per-table minimum, which holds only for an uncached execution (a result served from BigQuery's cache bills nothing), `high` the dry run's upper bound plus each table's minimum. `perTable` is set when the table count is uncertain (unknown, or none found) or a source is involved (it may be a view that bills more), so `high` is no ceiling: it is the price of one more table's 10 MiB minimum, added for each table beyond those counted. */
-  selectOnly?: { low: number; high: number; perTable: number }
+  /** BigQuery on-demand: the dry run's bytes at the on-demand rate, `estimate`. It is an estimate, not a bound: a cached or BI Engine result bills nothing, external sources and some queries are not fully counted, and each table read bills at least 10 MiB. */
+  selectOnly?: { estimate: number }
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
   notes: string[]
@@ -82,47 +80,22 @@ export function sqlString(value: string): string {
   return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
 }
 
-export type ModelRef = { uniqueId: string; materialized?: string; /** Physical relations the model reads (views and ephemeral models resolved to what they read), and how many of them are sources. */ tables?: number; sources?: number }
+export type ModelRef = { uniqueId: string; materialized?: string }
 
 /**
  * The one model node a name stands for: a unique_id, a plain name, or a package-qualified or versioned
  * name (`shop.orders`, `orders.v2`). Several nodes, or none, is an error that names them.
  */
-export function resolveModel(nodes: Record<string, any>, name: string, sources: Record<string, any> = {}): ModelRef | { error: string } {
+export function resolveModel(nodes: Record<string, any>, name: string): ModelRef | { error: string } {
   const models = Object.entries(nodes).filter(([, n]) => n?.resource_type === "model")
   let hits = models.filter(([id]) => id === name)
   if (!hits.length) hits = models.filter(([, n]) => n.name === name)
   if (!hits.length && name.includes(".")) hits = models.filter(([id]) => id.endsWith(`.${name}`))
   if (hits.length === 1)
-    return { uniqueId: hits[0][0], materialized: hits[0][1]?.config?.materialized, ...countTables(nodes, sources, hits[0][0]) }
+    return { uniqueId: hits[0][0], materialized: hits[0][1]?.config?.materialized }
   if (hits.length === 0) return { error: `no model named ${name} in the manifest` }
   const ids = hits.map(([id]) => id).sort()
   return { error: `${name} is ambiguous: it matches ${ids.join(", ")}; pass a unique_id` }
-}
-
-/**
- * The physical relations a model reads: tables, incremental models, snapshots, seeds and sources. A view or an
- * ephemeral model holds no data of its own, so it counts as what it reads. A source counts as one relation.
- */
-export function countTables(nodes: Record<string, any>, sources: Record<string, any>, uniqueId: string): { tables: number; sources: number } {
-  const seen = new Set<string>()
-  const tables = new Set<string>()
-  const origins = new Set<string>()
-  const visit = (id: string) => {
-    if (seen.has(id)) return
-    seen.add(id)
-    for (const dep of nodes[id]?.depends_on?.nodes ?? []) {
-      const node = nodes[dep]
-      if (node && node.resource_type === "model" && ["ephemeral", "view"].includes(node.config?.materialized)) visit(dep)
-      else if (node && ["model", "seed", "snapshot"].includes(node.resource_type)) tables.add(dep)
-      else if (!node && sources[dep]) {
-        tables.add(dep)
-        origins.add(dep)
-      }
-    }
-  }
-  visit(uniqueId)
-  return { tables: tables.size, sources: origins.size }
 }
 
 /** The model the manifest the adapter wrote holds under `name`. */
@@ -134,7 +107,7 @@ export function modelFromManifest(manifestPath: string, name: string): ModelRef 
     return { error: `the manifest at ${manifestPath} could not be read: ${e instanceof Error ? e.message : String(e)}` }
   }
   if (!manifest?.nodes) return { error: `no manifest at ${manifestPath}; run dbt parse or dbt compile first` }
-  return resolveModel(manifest.nodes, name, manifest.sources ?? {})
+  return resolveModel(manifest.nodes, name)
 }
 
 export function manifestPathFor(adapter: any, projectRoot: string | undefined): string | undefined {
@@ -352,11 +325,6 @@ export type History = {
   capacity?: boolean
   /** The model's materialization, when the manifest names it. */
   materialized?: string
-  /** The physical relations the model reads, and how many are sources, when the manifest names them. */
-  tables?: number
-  sources?: number
-  /** Why the tables could not be counted, when they could not. */
-  tablesReason?: string
 }
 
 const none = (reason: string, notes: string[] = [], rate: CostRate | null = null): CostInfo => ({
@@ -554,17 +522,9 @@ export function priceBigquery(rows: Row[], children: Row[] | undefined, uniqueId
 
 // ---- BigQuery's pre-run price ----
 
-/**
- * What a scan bills on demand. The dry run is an upper bound on bytes (a clustered table can bill less), so `maxBytes`
- * is the most it reads, and each table a query reads bills at least 10 MiB. The floor is one query's minimum, 10 MiB
- * (for an uncached run). `tables` is the manifest's dependency count, never taken as the number the query reads (a
- * literal table name is no dependency; a `depends_on` comment is a dependency that is not read), so the high figure
- * is `maxBytes` plus `tables` x 10 MiB and is no ceiling: each further table adds `perTable`, one more 10 MiB minimum.
- */
-export function onDemandPrice(input: { maxBytes: number; tables: number; usdPerTib: number }): { low: number; high: number; perTable: number } {
-  const price = (bytes: number) => (bytes / TIB) * input.usdPerTib
-  const perTable = price(BQ_MIN_BILLED_BYTES)
-  return { low: perTable, high: price(input.maxBytes + Math.max(1, input.tables) * BQ_MIN_BILLED_BYTES), perTable }
+/** The dry run's bytes at the on-demand rate: an estimate of the SELECT's bill, not a bound on it. */
+export function onDemandEstimate(bytes: number, usdPerTib: number): number {
+  return (bytes / TIB) * usdPerTib
 }
 
 export function bigqueryOnDemandRate(cfg: CostConfig) {
@@ -594,15 +554,10 @@ export function unreadable(message: string): CostInfo {
   return none(`Cost history could not be read${why ? `: ${why}` : ""}${detail ? ` (${detail})` : ""}.`)
 }
 
-/**
- * A dollar amount as text. A figure shown as a bound is rounded the way that keeps it a bound: a ceiling up (`up`), a
- * floor down (`down`); anything else to the nearest digit.
- */
-export function formatMoney(value: number, round: "nearest" | "up" | "down" = "nearest"): string {
+/** A dollar amount as text, to enough digits that a small one is not shown as zero. */
+export function formatMoney(value: number): string {
   const digits = value === 0 ? 2 : Math.min(8, Math.max(2, 1 - Math.floor(Math.log10(Math.abs(value)))))
-  const scale = 10 ** digits
-  const text = round === "nearest" ? value.toFixed(digits) : ((round === "up" ? Math.ceil(value * scale) : Math.floor(value * scale)) / scale).toFixed(digits)
-  return `$${text}`
+  return `$${value.toFixed(digits)}`
 }
 
 const NATIVE_LABEL: Record<NativeUnit, string> = { bytes_billed: "bytes billed", slot_hours: "slot-hours" }
@@ -612,15 +567,13 @@ function nativeText(n: NonNullable<CostInfo["native"]>): string {
   return `${NATIVE_LABEL[n.unit]}: last ${f(n.lastRun)}, typical ${f(n.typical)}, highest ${f(n.highest)}`
 }
 
-/** What the SELECT would bill on demand, worded as a figure with a floor and no ceiling, since the table count is never exact. */
-function selectText(c: CostInfo): string {
-  const { low, high, perTable } = c.selectOnly!
-  const atLeast = `at least ${formatMoney(low, "down")} when it is not served from BigQuery's cache, which bills nothing; pruning of clustered or partitioned tables can bill less than the dry run`
-  return `The SELECT would bill ${formatMoney(high, "up")} on-demand, plus 10 MiB (~${formatMoney(perTable)}) for each further table the query reads (${atLeast}).`
+/** The SELECT's estimated on-demand price, with what can make the bill differ. `shown` is the dry run's size as text. */
+function selectText(c: CostInfo, shown: string): string {
+  return `BigQuery's dry run estimates the SELECT at ${shown}, about ${formatMoney(c.selectOnly!.estimate)} on-demand. The bill can differ: a cached or BI Engine result bills nothing, external sources and some queries are not fully counted, and each table read bills at least 10 MiB.`
 }
 
 /** The cost as plain sentences, the first being the answer (or why there is none). */
-export function costText(c: CostInfo): string {
+export function costText(c: CostInfo, shown = "the bytes it reports"): string {
   const lines: string[] = []
   if (c.basis === "history") {
     lines.push(
@@ -628,12 +581,12 @@ export function costText(c: CostInfo): string {
     )
     if (c.native) lines.push(`In the warehouse's own unit, ${nativeText(c.native)}.`)
   } else if (c.basis === "dry_run") {
-    lines.push(selectText(c))
+    lines.push(selectText(c, shown))
   } else {
     lines.push(`Cost unknown: ${c.unknownReason}`)
   }
   // With history the SELECT's price is a second figure, and the notes below refer to it.
-  if (c.basis === "history" && c.selectOnly) lines.push(selectText(c))
+  if (c.basis === "history" && c.selectOnly) lines.push(selectText(c, shown))
   if (c.rate) lines.push(`Rate: ${c.rate.value} ${c.rate.unit} (${c.rate.source === "config" ? "from your config" : "default"}).`)
   for (const n of c.notes) lines.push(n)
   return lines.join("\n")
@@ -695,26 +648,20 @@ export async function loadHistory(input: {
   const rows = (sql: string) => run(async () => parseRows(await adapter.unsafeCompileQuery(rowsJinja(sql), undefined)))
   let uniqueId: string | undefined
   let materialized: string | undefined
-  let tables: number | undefined
-  let sources: number | undefined
   let unavailable: string | undefined
-  let tablesReason: string | undefined
   if (!input.model) {
     unavailable = "A SQL input has no run history; pass a model to price its earlier runs."
-    tablesReason = "the input is SQL, which has no manifest entry"
   } else if (!input.manifestPath) {
     unavailable = "No dbt manifest was found, so the model's unique_id is unknown."
-    tablesReason = "no dbt manifest was found"
   }
   else {
     const found = modelFromManifest(input.manifestPath, input.model)
     if ("error" in found) {
       unavailable = `Cost history needs the model's unique_id: ${found.error}.`
-      tablesReason = found.error
     }
-    else ({ uniqueId, materialized, tables, sources } = found)
+    else ({ uniqueId, materialized } = found)
   }
-  const base = { materialized, tables, sources, tablesReason }
+  const base = { materialized }
   /**
    * The matching statements just before the period `read` covers: the history read's own cutoff when it hit its
    * limit, else the start of the window. A boundary that can't be read (or hit its limit) is unknown.
@@ -759,7 +706,7 @@ export async function loadHistory(input: {
     clearTimeout(timer)
   }
 
-  async function bigqueryHistory(): Promise<Omit<History, "materialized" | "tables" | "sources" | "tablesReason">> {
+  async function bigqueryHistory(): Promise<Omit<History, "materialized">> {
     let target: Record<string, unknown>
     try {
       target = JSON.parse(String(await run(() => adapter.unsafeCompileQuery(TARGET_JINJA, undefined))).trim())

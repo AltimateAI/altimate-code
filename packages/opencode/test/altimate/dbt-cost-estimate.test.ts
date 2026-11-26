@@ -228,7 +228,7 @@ describe("dbt_cost_estimate", () => {
     expect(result.output).toContain("2048 Bytes")
   })
 
-  test("a zero from the dry run is a lower bound, not an upper bound", async () => {
+  test("a zero from the dry run is not priced", async () => {
     useAdapter(calls, { bytes: 0 })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql: "select 1" }, ctx)
     expect(result.metadata).toEqual({
@@ -241,7 +241,7 @@ describe("dbt_cost_estimate", () => {
       truncated: false,
       cost: expect.objectContaining({ basis: "none" }),
     })
-    expect(result.output).toContain("lower bound")
+    expect(result.output).toContain("so it is not priced")
     expect(result.output).not.toContain("at most")
   })
 
@@ -251,7 +251,7 @@ describe("dbt_cost_estimate", () => {
     "execute immediate 'select * from big'",
     "select * from t where m = '--'; execute immediate 'select * from big'",
     "select * from t where m = '#sale'; select * from big",
-  ])("a script (%s) is a lower bound, not an upper bound", async (sql) => {
+  ])("a script (%s) is not priced", async (sql) => {
     useAdapter(calls, { bytes: "1.0 GiB" })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql }, ctx)
     expect(result.metadata).toMatchObject({ bytes: 1024 ** 3, lowerBound: true })
@@ -468,14 +468,9 @@ describe("dbt_cost_estimate cost", () => {
       native: { unit: "bytes_billed", lastRun: 3 * TIB, highest: 4 * TIB },
       rate: { value: 6.25, unit: "USD/TiB", source: "default" },
     })
-    // The manifest lists two tables: the floor is one query's 10 MiB; the high figure is the dry run's upper bound (4.25 TiB, the rounding edge) plus them.
     const bytes = Math.round(4.2 * TIB)
-    expect(cost.selectOnly.low).toBeCloseTo(((10 * 1024 ** 2) / TIB) * 6.25, 10)
-    expect(cost.selectOnly.high).toBeCloseTo(((Math.ceil(4.25 * TIB) + 2 * 10 * 1024 ** 2) / TIB) * 6.25, 4)
-    expect(cost.selectOnly.high).toBeGreaterThan((bytes / TIB) * 6.25)
-    expect(cost.notes.join(" ")).toContain("A source that is a view in BigQuery bills 10 MiB more")
-    // A source may be a view that bills more per table: the high figure is no ceiling.
-    expect(cost.selectOnly.perTable).toBeGreaterThan(0)
+    // The SELECT's price is an estimate: the dry run's parsed bytes at the on-demand rate, with no bound fields.
+    expect(cost.selectOnly).toEqual({ estimate: (bytes / TIB) * 6.25 })
     expect(result.output.startsWith("Cost from 2 runs in the last 30 days: last run $18.75")).toBe(true)
     expect(result.output).toContain("would process 4.2 TiB")
     expect(result.metadata).toMatchObject({ supported: true, bytes, display: "4.2 TiB", model: "orders" })
@@ -583,7 +578,7 @@ describe("dbt_cost_estimate cost", () => {
     useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "mart" }, ctx)
     expect(result.output).toContain("Cost from 1 run")
-    expect(result.output).toContain("The SELECT would bill $")
+    expect(result.output).toContain("BigQuery's dry run estimates the SELECT at")
     expect(result.output).toContain("The price covers the SELECT only")
   })
 
@@ -636,21 +631,16 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.output).not.toContain("Rate:")
   })
 
-  test("an on-demand dry run is priced as a range, with each table's 10 MiB minimum, and says it covers the SELECT only", async () => {
+  test("an on-demand dry run is priced as an estimate from the parsed bytes, not the rounded display, and says it covers the SELECT only", async () => {
     useAdapter(calls, { bytes: "1.0 KiB", history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders" }, ctx)
     const cost = result.metadata.cost
     expect(cost.basis).toBe("dry_run")
-    const tenMiB = 10 * 1024 ** 2
-    expect(cost.selectOnly.low).toBeCloseTo((tenMiB / TIB) * 6.25, 10)
-    // "1.0 KiB" is rounded: the dry run can have read up to 1.05 KiB.
-    expect(cost.selectOnly.high).toBeCloseTo(((Math.ceil(1.05 * 1024) + tenMiB) / TIB) * 6.25, 9)
-    expect(cost.notes.join(" ")).toContain("SELECT only")
+    expect(cost.selectOnly).toEqual({ estimate: (1024 / TIB) * 6.25 })
+    expect(cost.notes.join(" ")).toContain("The price covers the SELECT only.")
     expect(cost.notes.join(" ")).toContain("No runs of model.shop.stg_orders in the last 30 days")
-    // stg_orders reads a source, which may be a view: the figure is no ceiling.
-    expect(result.output).toContain("The SELECT would bill $")
-    expect(result.output).toContain("for each further table the query reads")
-    expect(result.output).toContain("pruning of clustered or partitioned tables can bill less")
+    expect(result.output).toContain("BigQuery's dry run estimates the SELECT at 1.0 KiB, about $0.00000001 on-demand. The bill can differ: a cached or BI Engine result bills nothing, external sources and some queries are not fully counted, and each table read bills at least 10 MiB.")
+    for (const claim of ["at most", "at least $", "ceiling", "floor", "perTable"]) expect(result.output).not.toContain(claim)
   })
 
   test.each([
@@ -732,12 +722,7 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.basis).toBe("dry_run")
     expect(cost.runs).toBeUndefined()
     expect(cost.notes.join(" ")).toContain("A SQL input has no run history")
-    // The number of tables is unknown for SQL: one is assumed, and the high figure is no "at most".
-    expect(cost.notes.join(" ")).toContain("1 table counted: the input is SQL, which has no manifest entry, so at least one is assumed")
-    expect(cost.notes.join(" ")).not.toContain("0 tables")
-    expect(cost.selectOnly.perTable).toBeCloseTo(((10 * 1024 ** 2) / TIB) * 6.25, 12)
-    expect(result.output).toContain("for each further table the query reads")
-    expect(result.output).not.toContain("would bill at most")
+    expect(cost.selectOnly).toEqual({ estimate: expect.any(Number) })
   })
 
   test("a model name that matches two nodes is reported ambiguous and no history is read", async () => {
@@ -747,43 +732,6 @@ describe("dbt_cost_estimate cost", () => {
     const notes = result.metadata.cost.notes.join(" ")
     expect(notes).toContain("model.other.dup")
     expect(notes).toContain("model.shop.dup")
-  })
-
-  test("the manifest's dependency count is never exact: even a plain one-table model has no ceiling, and the floor is one query's minimum", async () => {
-    useAdapter(calls, { history: bigqueryHistory([]) })
-    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "mart" }, ctx)
-    const { low, perTable } = result.metadata.cost.selectOnly
-    expect(perTable).toBeCloseTo(((10 * 1024 ** 2) / TIB) * 6.25, 12)
-    expect(low).toBeCloseTo(perTable, 12)
-    expect(result.output).toContain("for each further table the query reads")
-    expect(result.output).not.toContain("would bill at most")
-    expect(result.metadata.cost.notes.join(" ")).toContain("1 table counted; the manifest's dependencies may differ from the tables the query reads")
-  })
-
-  test("a model with several dependencies keeps the one-query floor, so a dependency that is not read cannot raise it", async () => {
-    useAdapter(calls, { history: bigqueryHistory([]) })
-    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders" }, ctx)
-    const { low, high } = result.metadata.cost.selectOnly
-    expect(low).toBeCloseTo(((10 * 1024 ** 2) / TIB) * 6.25, 12)
-    expect(high).toBeGreaterThan(low)
-  })
-
-  test("an ambiguous model name is blamed for the missing table count, not SQL input", async () => {
-    useAdapter(calls, { history: bigqueryHistory([]) })
-    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "dup" }, ctx)
-    const notes = result.metadata.cost.notes.join(" ")
-    expect(notes).toContain("1 table counted: dup is ambiguous")
-    expect(notes).not.toContain("the input is SQL")
-    expect(notes).not.toContain("0 tables")
-  })
-
-  test("a model with no relation found in the manifest says one is assumed, never '0 tables'", async () => {
-    useAdapter(calls, { history: bigqueryHistory([]) })
-    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "lonely" }, ctx)
-    const notes = result.metadata.cost.notes.join(" ")
-    expect(notes).toContain("1 table counted: none was found in the manifest, so one is assumed")
-    expect(notes).not.toContain("0 tables")
-    expect(result.metadata.cost.selectOnly.perTable).toBeGreaterThan(0)
   })
 
   test("an incremental model's scan figure says it leaves out the MERGE; a table model's does not", async () => {

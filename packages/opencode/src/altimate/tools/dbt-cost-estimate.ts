@@ -8,7 +8,7 @@ import {
   costText,
   loadHistory,
   manifestPathFor,
-  onDemandPrice,
+  onDemandEstimate,
   type CostConfig,
   type History,
 } from "./dbt-cost-history"
@@ -142,8 +142,8 @@ async function scanEstimate(adapter: any, args: { model?: string; sql?: string }
     },
     output: `${name ? `${name} ` : "The query "}would process ${shown} ${
       lower
-        ? "(a dry run can undercount a script or a zero estimate, so this is a lower bound, not a cap)."
-        : `(bytes processed by the dry run, at most ${parsed.maxBytes}; BigQuery bills at least 10 MiB per query).`
+        ? "(a dry run can undercount a script or a zero estimate, so it is not priced)."
+        : `(bytes processed by the dry run; its display is rounded, so the count can be up to ${parsed.maxBytes}).`
     }`,
   }
 }
@@ -175,23 +175,12 @@ function withCost(
       )
     } else {
       const demand = bigqueryOnDemandRate(cfg)
-      // Without a table count (SQL input, no manifest, an ambiguous name) or with none found, one table is assumed.
-      const counted = history.tables
-      const used = Math.max(1, counted ?? 1)
-      // The manifest's dependency count is never the exact number of tables the query reads, so the high figure is no ceiling.
-      cost.selectOnly = onDemandPrice({ maxBytes: meta.maxBytes, tables: used, usdPerTib: demand.rate.value })
+      cost.selectOnly = { estimate: onDemandEstimate(meta.bytes, demand.rate.value) }
       if (!cost.rate) {
         cost.rate = demand.rate
         if (demand.note) cost.notes.push(demand.note)
       }
-      const why =
-        counted === undefined
-          ? `: ${history.tablesReason ?? "the tables could not be counted"}, so at least one is assumed`
-          : counted === 0
-            ? ": none was found in the manifest, so one is assumed"
-            : ""
-      cost.notes.push(`The price covers the SELECT only, and each table it reads bills at least 10 MiB (${used} table${used === 1 ? "" : "s"} counted${why}; the manifest's dependencies may differ from the tables the query reads).`)
-      if (history.sources) cost.notes.push("A source that is a view in BigQuery bills 10 MiB more for each table it reads.")
+      cost.notes.push("The price covers the SELECT only.")
     }
     if (history.materialized === "incremental")
       cost.notes.push(
@@ -203,12 +192,12 @@ function withCost(
     if (cost.unknownReason) cost.notes.unshift(cost.unknownReason)
     delete cost.unknownReason
   }
-  return { ...scan, metadata: { ...meta, cost }, output: `${costText(cost)}\n${scan.output}` }
+  return { ...scan, metadata: { ...meta, cost }, output: `${costText(cost, meta.display as string | undefined)}\n${scan.output}` }
 }
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate what a BigQuery dbt model costs, and the bytes it or a SQL query would scan, without running it. BigQuery only: any other warehouse answers `supported: false` and nothing is compiled. The cost (`cost`, in the metadata and first in the text) is the warehouse's reported usage for the model's runs in the last 30 days (bytes billed or slot time from INFORMATION_SCHEMA.JOBS) priced at a stated rate, which can be a default or a configured rate, so it is an estimate and not an invoice amount; it is never invented when no history exists; only on-demand pricing prices the pre-run scan, as a range for the SELECT only; a `sql` input has no history. The scan figure comes from a dry run (`maxBytes` bounds it, or `lowerBound` marks a floor). Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate what a BigQuery dbt model costs, and the bytes it or a SQL query would scan, without running it. BigQuery only: any other warehouse answers `supported: false` and nothing is compiled. The cost (`cost`, in the metadata and first in the text) is the warehouse's reported usage for the model's runs in the last 30 days (bytes billed or slot time from INFORMATION_SCHEMA.JOBS) priced at a stated rate, which can be a default or a configured rate, so it is an estimate and not an invoice amount; it is never invented when no history exists; only on-demand pricing prices the pre-run scan, as an estimate for the SELECT only (`selectOnly.estimate`: the dry run's bytes at the on-demand rate; the bill can differ, for a cached or BI Engine result bills nothing and external sources are not fully counted); a `sql` input has no history. The scan figure comes from a dry run (`lowerBound` marks a script or zero estimate, which is not priced). Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
