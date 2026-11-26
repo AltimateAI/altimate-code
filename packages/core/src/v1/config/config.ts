@@ -100,7 +100,7 @@ export const Info = Schema.Struct({
     }),
   ).annotate({ description: "Anonymous usage telemetry settings" }),
   // altimate_change end
-  // altimate_change start — rates dbt_cost_estimate prices warehouse usage at
+  // altimate_change start — rates dbt_cost_estimate prices BigQuery usage at
   cost: Schema.optional(
     Schema.Struct({
       bigqueryUsdPerTib: Schema.optional(Schema.Number).annotate({
@@ -109,14 +109,8 @@ export const Info = Schema.Struct({
       bigquerySlotHourUsd: Schema.optional(Schema.Number).annotate({
         description: "BigQuery capacity price in USD per slot-hour, used for jobs that ran in a reservation; a positive number (default 0.06)",
       }),
-      snowflakeUsdPerCredit: Schema.optional(Schema.Number).annotate({
-        description: "Snowflake price per credit; when set it replaces the account's billed and contract rates and no rate lookup is made (default 3.00 when no account rate can be read); a positive number",
-      }),
-      databricksUsdPerDbu: Schema.optional(Schema.Number).annotate({
-        description: "Databricks price per DBU; when set it replaces the list price; a positive number",
-      }),
     }),
-  ).annotate({ description: "Prices dbt_cost_estimate uses to turn warehouse usage into money" }),
+  ).annotate({ description: "Prices dbt_cost_estimate uses to turn BigQuery usage into money" }),
   // altimate_change end
   mode: Schema.optional(
     Schema.StructWithRest(

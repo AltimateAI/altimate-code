@@ -13,27 +13,16 @@ import {
   bqProject,
   cleanRates,
   costText,
-  databricksHistorySql,
-  groupRuns,
   median,
   needleFor,
   onDemandPrice,
   parseRows,
   parseTime,
   priceBigquery,
-  priceDatabricks,
-  priceSnowflake,
   resolveModel,
   rowsJinja,
-  snowflakeRateSql,
-  snowflakeBilledRateSql,
   unreadable,
   windowStartMs,
-  billedRates,
-  type SheetRate,
-  snowflakeHistorySql,
-  snowflakeRateFor,
-  sheetRates,
   countTables,
   bigqueryChildrenSql,
   formatMoney,
@@ -42,12 +31,9 @@ import {
   modelFromManifest,
   bigqueryBoundarySql,
   boundaryWindow,
-  snowflakeBoundarySql,
-  databricksBoundarySql,
   sqlString,
   summarize,
   type Row,
-  type Stmt,
 } from "@/altimate/tools/dbt-cost-history"
 
 const TIB = 1024 ** 4
@@ -55,14 +41,6 @@ const MIN = 60_000
 /** The instant the SQL under test is read as of. */
 const ASOF = Date.UTC(2026, 5, 1, 20, 0, 0)
 const WINDOW = windowStartMs(ASOF)
-const stmt = (startMin: number, endMin: number, cost = 1, known = true, session = "s"): Stmt => ({
-  session,
-  start: startMin * MIN,
-  end: endMin * MIN,
-  cost,
-  native: cost,
-  known,
-})
 
 describe("needle and SQL escaping", () => {
   test("the needle closes its quote, so one model id is not a prefix of another", () => {
@@ -126,70 +104,6 @@ describe("history SQL builders", () => {
     expect(bqProject(undefined)).toBeUndefined()
   })
 
-  test("Snowflake: window, successful statements of build types, attribution join, exact match", () => {
-    const sql = snowflakeHistorySql(needle, ASOF)
-    expect(sql).toContain(`q.start_time > to_timestamp_ltz(${WINDOW}, 3) and q.start_time <= to_timestamp_ltz(${ASOF}, 3)`)
-    expect(sql).toContain("upper(q.execution_status) = 'SUCCESS'")
-    expect(sql).toContain("upper(q.query_type) in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','DELETE','UPDATE','MULTI_STATEMENT')")
-    expect(sql).toContain("left join snowflake.account_usage.query_attribution_history a on a.query_id = q.query_id")
-    expect(sql).toContain("to_varchar(convert_timezone('UTC', q.start_time), 'YYYY-MM-DD') as start_date_utc")
-    expect(sql).toContain("q.session_id")
-    expect(sql).toContain("q.execution_time")
-    expect(sql).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
-    expect(sql).not.toMatch(/\blike\b/i)
-    expect(sql).toContain("limit 500")
-  })
-
-  test("Databricks: window, finished build statements on a warehouse, hour split by task time, exact match", () => {
-    const sql = databricksHistorySql(needle, ASOF)
-    expect(sql).toContain(`start_time > timestamp_millis(${WINDOW}) and start_time <= timestamp_millis(${ASOF})`)
-    expect(sql).toContain("upper(execution_status) = 'FINISHED' and compute.warehouse_id is not null")
-    // dbt-databricks runs OPTIMIZE and ANALYZE inside the model's materialization, with its query comment.
-    expect(sql).toContain("upper(statement_type) in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
-    expect(sql).toContain(`instr(statement_text, '"node_id": "model.shop.orders"') > 0`)
-    expect(sql).toContain("s.share_ms / nullif(t.task_ms, 0)")
-    expect(sql).toContain("session_id")
-    expect(sql).toContain("coalesce(p.pricing.effective_list.default, p.pricing.default)")
-    // A statement is split over the hours it spans, prorated by overlap.
-    expect(sql).toContain("explode(sequence(")
-    expect(sql).toContain("least(unix_micros(a.end_time), (a.hour + 1) * 3600000000)")
-    expect(sql).toContain("missing_hours")
-    // Every hour a statement touches needs a billing row and a task-time denominator above zero.
-    expect(sql).toContain("count(case when b.dbus is null or b.unpriced_dbus > 0 or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
-    expect(sql).toContain("max(case when s.ms is null then 1 else 0 end) as null_duration")
-    expect(sql).toContain("as missing_billing")
-    expect(sql).toContain("as zero_weight")
-    expect(sql).toContain("left join tasks t on")
-    expect(sql).toContain("unix_micros(end_time) - 1")
-  })
-
-  test("Databricks: hours are UTC instants from epoch arithmetic, never the session time zone's date_trunc", () => {
-    const sql = databricksHistorySql("n", ASOF)
-    expect(sql).not.toMatch(/date_trunc/i)
-    expect(sql).toContain("(unix_micros(u.usage_start_time) div 3600000000)")
-    expect(sql).toContain("(unix_micros(start_time) div 3600000000)")
-    expect(sql).not.toMatch(/\blike\b/i)
-    expect(sql).toContain("limit 500")
-  })
-
-  test("Databricks: with a configured rate an hour needs billed DBUs but no list price; at list price it needs both", () => {
-    const listed = databricksHistorySql("n", ASOF)
-    const configured = databricksHistorySql("n", ASOF, true)
-    expect(listed).toContain("count(case when b.dbus is null or b.unpriced_dbus > 0 or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
-    expect(configured).toContain("count(case when b.dbus is null or coalesce(t.task_ms, 0) = 0 or s.ms is null then 1 end) as missing_hours")
-    expect(configured).toContain("count(case when b.dbus is null then 1 end) as missing_billing")
-    // The price join keeps an hour with DBUs but no price row.
-    expect(listed).toContain("left join system.billing.list_prices p")
-  })
-
-  test("Databricks: an hour with any unpriced DBU is missing at list price, however many were priced", () => {
-    const listed = databricksHistorySql("n", ASOF)
-    expect(listed).toContain("sum(case when coalesce(p.pricing.effective_list.default, p.pricing.default) is null then u.usage_quantity else 0 end) as unpriced_dbus")
-    expect(listed).toContain("b.dbus is null or b.unpriced_dbus > 0")
-    // A configured rate prices every DBU, so unpriced ones do not matter.
-    expect(databricksHistorySql("n", ASOF, true)).not.toContain("b.unpriced_dbus > 0 or coalesce")
-  })
-
   test("every comparison with a warehouse enum or category column is case-insensitive", () => {
     const needle = needleFor("model.shop.orders")
     const w = boundaryWindow(1_780_000_000_000)
@@ -198,36 +112,17 @@ describe("history SQL builders", () => {
       bigqueryChildrenSql({ project: "p", parents: ["a"], sinceMs: 1 }),
       bigqueryCapacitySql({ project: "p", asOfMs: ASOF }),
       bigqueryBoundarySql({ project: "p", needle, window: w }),
-      snowflakeHistorySql(needle, ASOF),
-      snowflakeBoundarySql(needle, w),
-      snowflakeBilledRateSql(ASOF),
-      snowflakeRateSql(ASOF),
-      databricksHistorySql(needle, ASOF),
-      databricksHistorySql(needle, ASOF, true),
-      databricksBoundarySql(needle, w),
     ]
-    const columns = ["statement_type", "query_type", "execution_status", "usage_unit", "usage_type", "service_type", "rating_type", "job_type", "state"]
+    const columns = ["statement_type", "job_type", "state"]
     const bare = new RegExp(`(?<!upper\\()(?:\\b\\w+\\.)?\\b(${columns.join("|")})\\b\\s*(=|in\\s*\\()`, "g")
     for (const sql of sqls) expect([...sql.matchAll(bare)].map((m) => m[0])).toEqual([])
     // The check sees a bare comparison.
     expect([..."and state = 'DONE'".matchAll(bare)]).toHaveLength(1)
   })
 
-  test("a quote in the needle is escaped in every warehouse's SQL", () => {
+  test("a quote in the needle is escaped in the history SQL", () => {
     const hostile = `"node_id": "model.a.b' or 1=1 --"`
     expect(bigqueryHistorySql({ project: "p", needle: hostile, asOfMs: ASOF })).toContain("b\\' or 1=1")
-    expect(snowflakeHistorySql(hostile, ASOF)).toContain("b\\' or 1=1")
-    expect(databricksHistorySql(hostile, ASOF)).toContain("b\\' or 1=1")
-  })
-})
-
-describe("Snowflake rate sheet query", () => {
-  test("reads the rates of the window by date", () => {
-    expect(snowflakeRateSql(ASOF)).toContain("select date, usage_type, effective_rate, currency")
-    expect(snowflakeRateSql(ASOF)).toContain("account_locator = current_account()")
-    // The window's start is a UTC date, like the statement dates and the rate dates it is joined to.
-    expect(snowflakeRateSql(ASOF)).toContain("date >= to_date('2026-05-01') and date <= to_date('2026-06-01')")
-    expect(snowflakeRateSql(ASOF)).not.toMatch(/current_(date|timestamp)/)
   })
 })
 
@@ -287,44 +182,7 @@ describe("rows from the adapter", () => {
   })
 })
 
-describe("runs", () => {
-  test("statements of one session within ten minutes of the last one's end are one run; past ten minutes starts another", () => {
-    const { runs } = groupRuns([stmt(0, 1), stmt(11, 12), stmt(23, 24)])
-    // 1 -> 11 is exactly ten minutes (same run); 12 -> 23 is eleven (new run).
-    expect(runs.map((r) => r.cost)).toEqual([2, 1])
-  })
-
-  test("statements of different sessions are never one run, even a minute apart", () => {
-    const { runs } = groupRuns([stmt(0, 1, 1, true, "s1"), stmt(2, 3, 1, true, "s2"), stmt(4, 5, 1, true, "s1")])
-    expect(runs.map((r) => r.cost).sort((a, b) => a - b)).toEqual([1, 2])
-  })
-
-  test("a long statement keeps the run open for statements that start while it still runs", () => {
-    const { runs } = groupRuns([stmt(0, 60), stmt(5, 6), stmt(65, 66)])
-    expect(runs).toHaveLength(1)
-    expect(runs[0].cost).toBe(3)
-  })
-
-  test("input order does not matter and a run's cost is the sum of its statements", () => {
-    const { runs } = groupRuns([stmt(30, 31, 5), stmt(0, 1, 1), stmt(2, 3, 2)])
-    expect(runs).toEqual([
-      { start: 0, lastStart: 2 * MIN, cost: 3, native: 3, currency: undefined, rate: undefined },
-      { start: 30 * MIN, lastStart: 30 * MIN, cost: 5, native: 5, currency: undefined, rate: undefined },
-    ])
-  })
-
-  test("one unknown statement leaves its whole run out", () => {
-    const { runs, skipped } = groupRuns([stmt(0, 1, 1), stmt(2, 3, 0, false), stmt(60, 61, 4)])
-    expect(skipped).toBe(1)
-    expect(runs.map((r) => r.cost)).toEqual([4])
-  })
-
-  test("a run priced in two currencies is unknown", () => {
-    const a = { ...stmt(0, 1), currency: "USD" }
-    const b = { ...stmt(2, 3), currency: "EUR" }
-    expect(groupRuns([a, b])).toEqual({ runs: [], skipped: 1, dropped: 0, causes: { currency: 1 } })
-  })
-
+describe("run statistics", () => {
   test("median is the middle run, or the mean of the middle two", () => {
     expect(median([9, 1, 5])).toBe(5)
     expect(median([1, 2, 3, 10])).toBe(2.5)
@@ -520,200 +378,6 @@ const sf = (
   ...extra,
 })
 
-describe("Snowflake pricing", () => {
-  test("a statement is its attributed compute plus query acceleration, at the rate", () => {
-    const cost = priceSnowflake([sf("a", 0, "0.5", "0.25")], "model.s.m", [], {})
-    expect(cost).toMatchObject({ basis: "history", lastRun: 2.25, native: { unit: "credits", lastRun: 0.75 }, rate: { value: 3, source: "default" } })
-  })
-
-  test("cloud-services credits are reported and not added", () => {
-    const cost = priceSnowflake([sf("a", 0, "1", null, "0.4")], "model.s.m", [], {})
-    expect(cost.lastRun).toBe(3)
-    expect(cost.notes.join(" ")).toContain("Cloud-services credits (0.4")
-  })
-
-  test("a null attribution on a statement under 100 ms is a zero: Snowflake never attributes those", () => {
-    const cost = priceSnowflake([sf("a", 0, "1"), sf("b", 2, null, null, "0", { execution_time: "40" })], "model.s.m", [], {})
-    expect(cost).toMatchObject({ runs: 1, lastRun: 3 })
-  })
-
-  test("a null attribution on a longer statement makes its whole run pending: the run is left out and counted", () => {
-    const cost = priceSnowflake([sf("a", 0, "1"), sf("b", 2, null), sf("c", 100, "2", null, "0", { session_id: "other" })], "model.s.m", [], {})
-    expect(cost.runs).toBe(1)
-    expect(cost.lastRun).toBe(6)
-    expect(cost.notes.join(" ")).toContain("1 run left out: Snowflake has not attributed their queries yet")
-  })
-
-  test("every run pending is no cost, with the reason", () => {
-    const cost = priceSnowflake([sf("a", 0, null)], "model.s.m", [], {})
-    expect(cost.basis).toBe("none")
-    expect(cost.unknownReason).toContain("No run of model.s.m found could be priced: Snowflake has not attributed")
-  })
-
-  test("statements of different sessions are separate runs", () => {
-    const cost = priceSnowflake([sf("a", 0, "1"), sf("b", 2, "1", null, "0", { session_id: "other" })], "model.s.m", [], {})
-    expect(cost.runs).toBe(2)
-  })
-
-  test("the notes say attribution leaves out idle time", () => {
-    expect(priceSnowflake([sf("a", 0, "1")], "model.s.m", [], {}).notes.join(" ")).toContain("idle time")
-  })
-
-  test("each statement is priced at the rate of its own day, with its currency", () => {
-    const sheet = [
-      { date: "1970-01-01", value: 2, currency: "EUR" },
-      { date: "1970-01-02", value: 4, currency: "EUR" },
-    ]
-    const day1 = sf("a", 0, "1")
-    const day2 = sf("b", 24 * 60, "1", null, "0", { session_id: "other" })
-    const cost = priceSnowflake([day1, day2], "model.s.m", sheet, {})
-    expect(cost.currency).toBe("EUR")
-    expect(cost.lastRun).toBe(4)
-    expect(cost.highest).toBe(4)
-    expect(cost.typical).toBe(3)
-    expect(cost.rate).toEqual({ value: 4, unit: "EUR/credit", source: "account", detail: "contract" })
-    expect(cost.notes.join(" ")).toContain("Contract rate; overage not reflected.")
-  })
-
-  test("the day is the statement's UTC date, never a slice of a local timestamp", () => {
-    // 23:30 at UTC-8 on the 1st is the 2nd in UTC: its rate is the 2nd's.
-    const sheet = [
-      { date: "2026-05-01", value: 2, currency: "USD" },
-      { date: "2026-05-02", value: 5, currency: "USD" },
-    ]
-    const local = { ...sf("a", 0, "1"), start_time: "2026-05-01 23:30:00.000-08:00", start_date_utc: "2026-05-02" }
-    expect(priceSnowflake([local], "model.s.m", sheet, {}).lastRun).toBe(5)
-    expect(priceSnowflake([{ ...local, start_date_utc: null }], "model.s.m", sheet, {}).rate?.source).toBe("default")
-  })
-
-  test("a day with no rate row uses the nearest earlier day's, and one before every row uses the default", () => {
-    const sheet = [{ date: "1970-01-02", value: 4, currency: "USD" }]
-    expect(snowflakeRateFor("1970-01-05", sheet, {}).rate.value).toBe(4)
-    expect(snowflakeRateFor("1970-01-01", sheet, {}).rate).toEqual({ value: 3, unit: "USD/credit", source: "default" })
-  })
-
-  test("a configured rate overrides every rate sheet row", () => {
-    const sheet = [{ date: "1970-01-01", value: 2.4, currency: "EUR" }]
-    expect(snowflakeRateFor("1970-01-01", sheet, { snowflakeUsdPerCredit: 9 })).toEqual({
-      rate: { value: 9, unit: "USD/credit", source: "config" },
-      currency: "USD",
-    })
-  })
-
-  test("without a rate sheet it is the default, and the note names its key", () => {
-    const fallback = snowflakeRateFor("1970-01-01", [], {})
-    expect(fallback.rate).toEqual({ value: 3, unit: "USD/credit", source: "default" })
-    expect(fallback.note).toContain("cost.snowflakeUsdPerCredit")
-  })
-
-  const billed = (date: string, value: number, extra: Partial<SheetRate> = {}): SheetRate => ({ date, value, currency: "USD", detail: "billed", ...extra })
-
-  test("a day's billed rate is the blended contract and overage rate, so a statement costs what its day was billed", () => {
-    // Day 1 had overage: 100 credits at 2 and 100 at 4 is a blended 3 per credit.
-    const rows: Row[] = [{ usage_date: "1970-01-01", rate: "3", currency: "USD", currencies: "1" }]
-    expect(billedRates(rows)).toEqual([billed("1970-01-01", 3, { mixed: false })])
-    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", billedRates(rows), {})
-    expect(cost.lastRun).toBe(30)
-    expect(cost.rate).toEqual({ value: 3, unit: "USD/credit", source: "account", detail: "billed" })
-    expect(cost.notes.join(" ")).not.toContain("Contract rate")
-  })
-
-  test("a day billed in more than one currency leaves its statements unknown", () => {
-    // Two currencies on one day: the view's blended figure is a sum across currencies, so the day is mixed.
-    const sheet = billedRates([{ usage_date: "1970-01-01", rate: "3", currency: "USD", currencies: "2" }])
-    expect(sheet[0]).toMatchObject({ mixed: true })
-    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", sheet, {})
-    expect(cost.basis).toBe("none")
-  })
-
-  test("the headline rate and currency are the newest priced run's, not a pending or mixed-day statement's", () => {
-    const sheet = [billed("1970-01-01", 3), { ...billed("1970-01-03", 9, { mixed: true }), currency: "EUR" }]
-    const rows = [sf("done", 0, "10"), sf("pending", 2 * 24 * 60, null, null, "0", { session_id: "p", execution_time: "9000" })]
-    const cost = priceSnowflake(rows, "model.s.m", sheet, {})
-    expect(cost.currency).toBe("USD")
-    expect(cost.rate).toEqual({ value: 3, unit: "USD/credit", source: "account", detail: "billed" })
-    expect(cost.lastRun).toBe(30)
-    expect(cost.basis).toBe("history")
-  })
-
-  test("a newer pending statement on a single-rate day in another currency does not set the headline", () => {
-    const sheet = [billed("1970-01-01", 3), { ...billed("1970-01-03", 4), currency: "EUR" }]
-    const rows = [sf("done", 0, "10"), sf("pending", 2 * 24 * 60, null, null, "0", { session_id: "p", execution_time: "9000", start_date_utc: "1970-01-03" })]
-    const cost = priceSnowflake(rows, "model.s.m", sheet, {})
-    expect(cost.currency).toBe("USD")
-    expect(cost.rate).toMatchObject({ value: 3, unit: "USD/credit" })
-    expect(cost.lastRun).toBe(30)
-  })
-
-  test("a mixed-currency day's blended rate is never shown as the rate", () => {
-    const sheet = [billed("1970-01-01", 9, { mixed: true })]
-    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", sheet, {})
-    expect(cost.basis).toBe("none")
-    expect(cost.rate).toBeNull()
-  })
-
-  test("a statement newer than the last billed day uses the latest billed rate and says so", () => {
-    const sheet = [billed("1970-01-01", 3), billed("1970-01-02", 5)]
-    const cost = priceSnowflake([sf("a", 4 * 24 * 60, "1")], "model.s.m", sheet, {})
-    expect(cost.lastRun).toBe(5)
-    expect(cost.notes.join(" ")).toContain("Recent runs priced at the latest billed rate (1970-01-02)")
-    const inside = priceSnowflake([sf("a", 0, "1")], "model.s.m", sheet, {})
-    expect(inside.notes.join(" ")).not.toContain("Recent runs priced")
-  })
-
-  test("the billed rate query reads the blended compute and overage usage by day", () => {
-    expect(snowflakeBilledRateSql(ASOF)).toContain("sum(usage_in_currency) / nullif(sum(case when usage_in_currency is not null then usage end), 0) as rate")
-    expect(snowflakeBilledRateSql(ASOF)).toContain("snowflake.organization_usage.usage_in_currency_daily")
-    // The documented columns, with every balance source (contract and overage) kept.
-    expect(snowflakeBilledRateSql(ASOF)).toContain("upper(rating_type) = 'COMPUTE' and upper(service_type) = 'WAREHOUSE_METERING'")
-    expect(snowflakeBilledRateSql(ASOF)).not.toContain("usage_type")
-    expect(snowflakeBilledRateSql(ASOF)).not.toContain("balance_source")
-    expect(snowflakeBilledRateSql(ASOF)).toContain("count(distinct currency) as currencies")
-    expect(snowflakeBilledRateSql(ASOF)).toContain("usage_date >= to_date('2026-05-01') and usage_date <= to_date('2026-06-01')")
-    expect(snowflakeBilledRateSql(ASOF)).toContain("group by usage_date")
-  })
-
-  test("rate sheet rows are read by date, positive rates only", () => {
-    expect(sheetRates([{ date: "2026-05-02 00:00:00", effective_rate: "2.5", currency: "EUR" }, { date: "2026-05-01", effective_rate: "0", currency: "EUR" }])).toEqual([
-      { date: "2026-05-02", value: 2.5, currency: "EUR", detail: "contract", kind: "compute" },
-    ])
-  })
-
-  test("per date the contract compute rate is used, else the overage-compute rate, and the answer names which", () => {
-    const rows: Row[] = [
-      { date: "2026-05-01", usage_type: "OVERAGE-COMPUTE", effective_rate: "4", currency: "USD" },
-      { date: "2026-05-02", usage_type: "COMPUTE", effective_rate: "2", currency: "USD" },
-      { date: "2026-05-02", usage_type: "OVERAGE-COMPUTE", effective_rate: "4", currency: "USD" },
-      { date: "2026-05-03", usage_type: "overage-compute", effective_rate: "5", currency: "USD" },
-      // The overage row comes first, and the compute row still wins.
-      { date: "2026-05-04", usage_type: "OVERAGE-COMPUTE", effective_rate: "6", currency: "USD" },
-      { date: "2026-05-04", usage_type: "COMPUTE", effective_rate: "3", currency: "USD" },
-    ]
-    const sheet = sheetRates(rows)
-    expect(sheet.map((r) => [r.date, r.value, r.kind])).toEqual([
-      ["2026-05-01", 4, "overage-compute"],
-      ["2026-05-02", 2, "compute"],
-      ["2026-05-03", 5, "overage-compute"],
-      ["2026-05-04", 3, "compute"],
-    ])
-    // An account with only overage rows can still be priced, and is told so.
-    const only = priceSnowflake([sf("a", 0, "1", null, "0", { start_date_utc: "2026-05-01" })], "model.s.m", sheetRates([rows[0]]), {})
-    expect(only.lastRun).toBe(4)
-    expect(only.notes.join(" ")).toContain("contract overage-compute rate")
-    expect(only.notes.join(" ")).not.toContain("Contract rate; overage not reflected.")
-    // With a compute rate the note is the usual one.
-    const normal = priceSnowflake([sf("b", 0, "1", null, "0", { start_date_utc: "2026-05-02" })], "model.s.m", sheetRates(rows), {})
-    expect(normal.lastRun).toBe(2)
-    expect(normal.notes.join(" ")).toContain("Contract rate; overage not reflected.")
-    expect(normal.notes.join(" ")).not.toContain("overage-compute rate")
-  })
-
-  test("the rate sheet query reads both usage types, compared in upper case", () => {
-    const sql = snowflakeRateSql(ASOF)
-    expect(sql).toContain("upper(usage_type) in ('COMPUTE', 'OVERAGE-COMPUTE') and upper(service_type) = 'WAREHOUSE_METERING'")
-  })
-})
-
 const dbx = (id: string, startMin: number, dbus: string | null, usd: string | null, extra: Row = {}): Row => ({
   statement_id: id,
   session_id: "sess",
@@ -725,61 +389,9 @@ const dbx = (id: string, startMin: number, dbus: string | null, usd: string | nu
   ...extra,
 })
 
-describe("Databricks pricing", () => {
-  test("a run's cost is the sum of its statements' shares of the billed hours", () => {
-    const cost = priceDatabricks([dbx("a", 0, "1", "0.55"), dbx("b", 2, "3", "1.65")], "model.s.m", {})
-    expect(cost).toMatchObject({ basis: "history", runs: 1, lastRun: 2.2, native: { unit: "dbus", lastRun: 4 } })
-    expect(cost.rate).toMatchObject({ source: "list_price", unit: "USD/DBU" })
-    expect(cost.rate!.value).toBeCloseTo(0.55, 12)
-    expect(cost.notes.join(" ")).toContain("negotiated discounts are not applied")
-  })
-
-  test("a statement with a billed hour missing leaves its whole run out, and says the billing has not landed", () => {
-    const cost = priceDatabricks([dbx("a", 0, "1", "0.5"), dbx("b", 2, null, null), dbx("c", 100, "2", "1")], "model.s.m", {})
-    expect(cost.runs).toBe(1)
-    expect(cost.lastRun).toBe(1)
-    expect(cost.notes.join(" ")).toContain("1 run left out")
-  })
-
-  test("a statement is known only when its SQL counted no hour without billing or denominator, whatever dbus came back", () => {
-    expect(priceDatabricks([dbx("a", 0, "1", "0.5", { missing_hours: "2" })], "model.s.m", {}).basis).toBe("none")
-    expect(priceDatabricks([dbx("a", 0, "1", "0.5", { missing_hours: "0" })], "model.s.m", {}).basis).toBe("history")
-    // A zero-task statement in a billed hour: the SQL returns numeric zeros and no missing hour, and it costs 0.
-    expect(priceDatabricks([dbx("a", 0, "0", "0", { missing_hours: "0" })], "model.s.m", {})).toMatchObject({ basis: "history", lastRun: 0 })
-  })
-
-  test("a partly billed statement (one of its hours missing) is unknown even though some cost came back", () => {
-    const cost = priceDatabricks([dbx("a", 0, "1", "0.5", { missing_hours: "1" })], "model.s.m", {})
-    expect(cost.basis).toBe("none")
-  })
-
-  test("all runs without billing is no cost", () => {
-    const cost = priceDatabricks([dbx("a", 0, null, null)], "model.s.m", {})
-    expect(cost.basis).toBe("none")
-    expect(cost.unknownReason).toContain("No run of model.s.m found could be priced: the billing rows for their hours have not landed yet")
-  })
-
-  test("statements of different sessions are separate runs", () => {
-    const cost = priceDatabricks([dbx("a", 0, "1", "1"), dbx("b", 2, "1", "1", { session_id: "other" })], "model.s.m", {})
-    expect(cost.runs).toBe(2)
-  })
-
-  test("a configured DBU rate prices the DBUs instead of the list price", () => {
-    const cost = priceDatabricks([dbx("a", 0, "10", "99")], "model.s.m", { databricksUsdPerDbu: 0.3 })
-    expect(cost).toMatchObject({ lastRun: 3, rate: { value: 0.3, source: "config" } })
-    expect(cost.notes.join(" ")).not.toContain("list price")
-  })
-
-  test("no statement is no cost and names the SQL-warehouse limit", () => {
-    const cost = priceDatabricks([], "model.s.m", {})
-    expect(cost.unknownReason).toContain("system.query.history")
-    expect(cost.unknownReason).toContain("SQL warehouses only")
-  })
-})
-
 describe("rates config and the text", () => {
   test("only positive numbers are rates", () => {
-    expect(cleanRates({ bigqueryUsdPerTib: 5, bigquerySlotHourUsd: -1, snowflakeUsdPerCredit: "3", databricksUsdPerDbu: 0 })).toEqual({ bigqueryUsdPerTib: 5 })
+    expect(cleanRates({ bigqueryUsdPerTib: 5, bigquerySlotHourUsd: -1, snowflakeUsdPerCredit: 3, databricksUsdPerDbu: 2 })).toEqual({ bigqueryUsdPerTib: 5 })
     expect(cleanRates(undefined)).toEqual({})
   })
 
@@ -802,50 +414,17 @@ describe("rates config and the text", () => {
 describe("run boundary", () => {
   const C = 1_000 * MIN
   const at = (min: number) => new Date(C + min * MIN).toISOString()
-  const boundary = (...stmts: { session: string | null; start: number; end: number; tmp?: boolean }[]) => ({ cutoff: C, stmts })
-  const before = (session: string, startMin: number, endMin: number) => ({ session, start: C + startMin * MIN, end: C + endMin * MIN })
-
-  test("Snowflake: a CTAS before the window and its MERGE after it (fewer than 500 rows) is a run of unknown start, and is left out", () => {
-    const rows = [
-      sf("merge", 0, "1", null, "0", { session_id: "a", start_time: at(5), end_time: at(6), start_date_utc: "2026-05-02" }),
-      sf("other", 0, "2", null, "0", { session_id: "b", start_time: at(300), end_time: at(301) }),
-    ]
-    // The CTAS began 40 minutes before the window and ended 2 minutes into it: within the gap of the MERGE's start.
-    const cost = priceSnowflake(rows, "model.s.m", [], {}, boundary(before("a", -40, 2)))
-    expect(cost.runs).toBe(1)
-    expect(cost.lastRun).toBe(6)
-    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
-  })
-
-  test("a long CTAS in one session truncates the result for another: the run it ends beside is dropped, the rest kept", () => {
-    // 500 rows were returned, the oldest at the cutoff; session x's CTAS began before it and ended 25 minutes after.
-    const filler = Array.from({ length: HISTORY_LIMIT - 2 }, (_, i) => sf(`f${i}`, 0, "1", null, "0", { session_id: `f${i}`, start_time: at(500 + i * 120), end_time: at(501 + i * 120) }))
-    const rows = [
-      sf("oldest", 0, "1", null, "0", { session_id: "o", start_time: at(0), end_time: at(1) }),
-      sf("merge", 0, "1", null, "0", { session_id: "x", start_time: at(30), end_time: at(31) }),
-      ...filler,
-    ]
-    const cost = priceSnowflake(rows, "model.s.m", [], {}, boundary(before("x", -60, 25)))
-    expect(cost.runs).toBe(HISTORY_LIMIT - 1)
-    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
-    expect(cost.notes.join(" ")).toContain("Only the newest 500 statements were read")
-  })
-
-  test("a boundary statement of another session, or one that ended long before the run, drops nothing", () => {
-    const rows = [sf("m", 0, "1", null, "0", { session_id: "a", start_time: at(30), end_time: at(31) })]
-    expect(priceSnowflake(rows, "model.s.m", [], {}, boundary(before("b", -5, 25))).runs).toBe(1)
-    expect(priceSnowflake(rows, "model.s.m", [], {}, boundary(before("a", -5, 5))).runs).toBe(1)
-    expect(priceSnowflake(rows, "model.s.m", [], {}, boundary(before("a", -5, 25))).basis).toBe("none")
-  })
+  const boundary = (...stmts: { user: string | null; start: number; end: number; tmp?: boolean }[]) => ({ cutoff: C, stmts })
+  const before = (user: string, startMin: number, endMin: number) => ({ user, start: C + startMin * MIN, end: C + endMin * MIN })
 
   test("a boundary that could not be read drops runs starting within a day of the cutoff and keeps later ones", () => {
     const rows = [
-      sf("near", 0, "1", null, "0", { session_id: "a", start_time: at(60), end_time: at(61) }),
-      sf("far", 0, "2", null, "0", { session_id: "b", start_time: at(3 * 24 * 60), end_time: at(3 * 24 * 60 + 1) }),
+      { ...bq("near", 0, TIB), creation_time: at(60), end_time: at(61) },
+      { ...bq("far", 0, 2 * TIB), creation_time: at(3 * 24 * 60), end_time: at(3 * 24 * 60 + 1) },
     ]
-    const cost = priceSnowflake(rows, "model.s.m", [], {}, { cutoff: C })
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C })
     expect(cost.runs).toBe(1)
-    expect(cost.lastRun).toBe(6)
+    expect(cost.lastRun).toBeCloseTo(12.5, 10)
     expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
@@ -853,26 +432,16 @@ describe("run boundary", () => {
     const at = (ms: number) => new Date(C + ms).toISOString()
     const day = 24 * 3_600_000
     const run = (offset: number) =>
-      priceSnowflake([sf("a", 0, "1", null, "0", { start_time: at(offset), end_time: at(offset + 1000) })], "model.s.m", [], {}, { cutoff: C }).basis
+      priceBigquery([{ ...bq("a", 0, TIB), creation_time: at(offset), end_time: at(offset + 1000) }], undefined, "model.s.m", {}, { cutoff: C }).cost.basis
     expect(run(day)).toBe("none")
     expect(run(day + 1)).toBe("history")
   })
 
   test("without a boundary nothing is dropped, and a full result says only 500 statements were read", () => {
-    const rows = Array.from({ length: HISTORY_LIMIT }, (_, i) => sf(`q${i}`, i * 120, "1", null, "0", { session_id: `s${i}` }))
-    const cost = priceSnowflake(rows, "model.s.m", [], {})
+    const rows = Array.from({ length: HISTORY_LIMIT }, (_, i) => bq(`q${i}`, i * 120, TIB))
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
     expect(cost.runs).toBe(HISTORY_LIMIT)
     expect(cost.notes.join(" ")).toContain("Only the newest 500 statements were read")
-  })
-
-  test("Databricks: the same boundary rule", () => {
-    const rows = [
-      dbx("m", 0, "1", "1", { session_id: "a", start_time: at(5), end_time: at(6) }),
-      dbx("o", 0, "1", "1", { session_id: "b", start_time: at(400), end_time: at(401) }),
-    ]
-    const cost = priceDatabricks(rows, "model.s.m", {}, boundary(before("a", -30, 0)))
-    expect(cost.runs).toBe(1)
-    expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
   test("BigQuery: an unread delete by the same user that started within a minute before a build may belong to it; others do not", () => {
@@ -880,13 +449,13 @@ describe("run boundary", () => {
       { ...bq("near", 0, TIB), creation_time: at(0.5) },
       { ...bq("far", 0, TIB), creation_time: at(120) },
     ]
-    const price = (b: { session: string | null; start: number; end: number }) => priceBigquery(rows, undefined, "model.s.m", {}, boundary(b)).cost
-    const own = price({ session: "a@x.com", start: C - 0.2 * MIN, end: Number.NaN })
+    const price = (b: { user: string | null; start: number; end: number }) => priceBigquery(rows, undefined, "model.s.m", {}, boundary(b)).cost
+    const own = price({ user: "a@x.com", start: C - 0.2 * MIN, end: Number.NaN })
     expect(own.runs).toBe(1)
     expect(own.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
     // Another user's delete, or one more than a minute before the build, cannot have attached to it.
-    expect(price({ session: "someone@else.com", start: C - 0.2 * MIN, end: Number.NaN }).runs).toBe(2)
-    expect(price({ session: "a@x.com", start: C - 5 * MIN, end: Number.NaN }).runs).toBe(2)
+    expect(price({ user: "someone@else.com", start: C - 0.2 * MIN, end: Number.NaN }).runs).toBe(2)
+    expect(price({ user: "a@x.com", start: C - 5 * MIN, end: Number.NaN }).runs).toBe(2)
   })
 
   test("BigQuery: a delete pre-hook and the insert_overwrite script 20 s later by the same user are one run, priced from the script's children", () => {
@@ -930,18 +499,18 @@ describe("run boundary", () => {
 
   test("BigQuery: a merge whose temporary CTAS ended just before the cutoff may be the end of a run that began unread, so it is dropped", () => {
     const rows = [{ ...bq("m", 0, TIB), creation_time: at(2) }]
-    const stmt = (end: number, session = "a@x.com") => ({ session, start: C - 5 * MIN, end: C + end * MIN, tmp: true })
+    const stmt = (end: number, user = "a@x.com") => ({ user, start: C - 5 * MIN, end: C + end * MIN, tmp: true })
     const cost = (b: ReturnType<typeof stmt>) => priceBigquery(rows, undefined, "model.s.m", {}, boundary(b)).cost
     expect(cost(stmt(0)).notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
     // Another user's CTAS, or one that ended over ten minutes before the merge, cannot have fed it.
     expect(cost(stmt(0, "b@x.com")).runs).toBe(1)
-    expect(priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 30 * MIN, end: C - 20 * MIN, tmp: true })).cost.runs).toBe(1)
+    expect(priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 30 * MIN, end: C - 20 * MIN, tmp: true })).cost.runs).toBe(1)
   })
 
   test("BigQuery: an unread CTAS that could have been a merge's temporary relation drops it even when the merge already pairs with a CTAS read", () => {
     // The merge has its own CTAS in the result, but an unread one ended just before it too and could have been the one it took.
     const rows = [{ ...tmpCtas("t", 0, TIB), creation_time: at(0), end_time: at(1) }, { ...bq("m", 0, TIB), creation_time: at(2) }]
-    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 5 * MIN, end: C + 0, tmp: true }))
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 5 * MIN, end: C + 0, tmp: true }))
     expect(cost.basis).toBe("none")
     expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
@@ -953,7 +522,7 @@ describe("run boundary", () => {
       { ...tmpCtas("t", 0, TIB), creation_time: at(1.2), end_time: at(2.2) },
       { ...bq("m", 0, TIB), creation_time: at(3) },
     ]
-    const price = (end: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 30 * MIN, end: C + end * MIN, tmp: true })).cost
+    const price = (end: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 30 * MIN, end: C + end * MIN, tmp: true })).cost
     // Ending 8 minutes before the merge's start is outside its ten minutes of the merge (-7): the run is whole.
     expect(price(-8).runs).toBe(1)
     // Ending 6 minutes before the cutoff is inside them.
@@ -963,7 +532,7 @@ describe("run boundary", () => {
   test("BigQuery: an unread delete is measured from the run's first build, not from an attached delete that started earlier", () => {
     // A delete read at +0.1 min attaches to the merge at +0.5: the run starts at +0.1, its first build at +0.5.
     const rows = [{ ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(0.1) }, { ...bq("m", 0, TIB), creation_time: at(0.5) }]
-    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
+    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
     // Created 42 s before the cutoff: more than a minute before the merge, so it cannot have attached to it.
     expect(run(-0.7).runs).toBe(1)
     expect(run(-0.3).basis).toBe("none")
@@ -972,7 +541,7 @@ describe("run boundary", () => {
   test("BigQuery: a delete before the cutoff is measured against the run's first build, not against the merge", () => {
     // tmp CTAS read at +0.5, merge at +3; an unread delete 90 s before the CTAS cannot have attached to it (over a minute).
     const rows = [{ ...tmpCtas("t", 0, TIB), creation_time: at(0.5), end_time: at(1.5) }, { ...bq("m", 0, TIB), creation_time: at(3) }]
-    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
+    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
     expect(run(-1).runs).toBe(1)
     expect(run(-0.4).basis).toBe("none")
   })
@@ -997,7 +566,7 @@ describe("run boundary", () => {
 
   test("BigQuery: when the boundary alone leaves no run, the message says so rather than blaming bytes billed", () => {
     const rows = [{ ...bq("near", 0, TIB), creation_time: at(0.5) }]
-    const cost = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ session: "a@x.com", start: C - 0.2 * MIN, end: Number.NaN })).cost
+    const cost = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 0.2 * MIN, end: Number.NaN })).cost
     expect(cost.basis).toBe("none")
     expect(cost.unknownReason).toContain("may have started before the period read")
     expect(cost.unknownReason).not.toContain("no bytes billed")
@@ -1015,30 +584,9 @@ describe("boundary SQL", () => {
     expect(w).toEqual({
       startBeforeMs: CUT + 1,
       startAfterMs: CUT - 86_400_000,
-      endAtLeastMs: CUT - 600_000,
       attachStartAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
-  })
-
-  test("Snowflake: starting before the cutoff's millisecond, ending at or after the cutoff less the ten-minute gap, same filters", () => {
-    const sql = snowflakeBoundarySql(needle, w)
-    expect(sql).toContain("/* run boundary */")
-    expect(sql).toContain(`q.start_time < to_timestamp_ltz(${CUT + 1}, 3)`)
-    expect(sql).toContain(`q.end_time >= to_timestamp_ltz(${CUT - 600_000}, 3)`)
-    expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
-    expect(sql).toContain("upper(q.execution_status) = 'SUCCESS'")
-    expect(sql).toContain(`contains(q.query_text, '"node_id": "model.shop.orders"')`)
-    expect(sql).toContain("limit 500")
-  })
-
-  test("Databricks: same filters, instants as timestamps", () => {
-    const sql = databricksBoundarySql(needle, w)
-    expect(sql).toContain(`start_time < timestamp_millis(${CUT + 1})`)
-    expect(sql).toContain(`coalesce(end_time, start_time) >= timestamp_millis(${CUT - 600_000})`)
-    expect(sql).not.toContain(`${CUT + 1 - 600_000}`)
-    expect(sql).toContain("upper(execution_status) = 'FINISHED'")
-    expect(sql).toContain("upper(statement_type) in ('CREATE','INSERT','MERGE','DELETE','UPDATE','REPLACE','COPY','OPTIMIZE','ANALYZE')")
   })
 
   test("BigQuery: top-level jobs of the same view, each lookback measured from the cutoff", () => {
@@ -1058,9 +606,7 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
 
-  test("every boundary query returns the id of each statement, so the ones already read can be excluded", () => {
-    expect(snowflakeBoundarySql("n", boundaryWindow(1))).toContain("select /* run boundary */ q.query_id")
-    expect(databricksBoundarySql("n", boundaryWindow(1))).toContain("select /* run boundary */ statement_id")
+  test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
     expect(bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(1) })).toContain("select /* run boundary */ job_id")
   })
 
@@ -1069,13 +615,6 @@ describe("boundary SQL", () => {
     expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("destination_table.table_id as destination_table_id")
   })
 
-  test("Databricks proration multiplies in double, never BIGINT by BIGINT", () => {
-    const sql = databricksHistorySql(needle, ASOF)
-    expect(sql).toContain("cast(coalesce(a.ms, 0) as double) * (least(")
-    expect(sql).toContain("cast(coalesce(q_hours.ms, 0) as double) * (least(")
-    expect(sql).toContain("/ cast(unix_micros(a.end_time) - unix_micros(a.start_time) as double)")
-    expect(sql).not.toMatch(/coalesce\((a|q_hours)\.ms, 0\) \* \(/)
-  })
 })
 
 describe("script children at their limit", () => {
@@ -1125,7 +664,7 @@ describe("review follow-ups: BigQuery temporary relation pairing", () => {
   test("a merge starting after an unread CTAS that ends after it cannot be that CTAS's run and is kept", () => {
     const rows = [{ ...bq("m", 0, TIB), creation_time: new Date(C2 + 2 * MIN).toISOString() }]
     const run = (end: number) =>
-      priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C2, stmts: [{ session: "a@x.com", start: C2 - 5 * MIN, end: C2 + end * MIN, tmp: true }] }).cost
+      priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C2, stmts: [{ user: "a@x.com", start: C2 - 5 * MIN, end: C2 + end * MIN, tmp: true }] }).cost
     // The CTAS ends an hour after the merge starts: they cannot be one run.
     expect(run(60).runs).toBe(1)
     // Ending a minute before it starts, it could be the merge's own temporary relation: the run is dropped.
@@ -1135,12 +674,12 @@ describe("review follow-ups: BigQuery temporary relation pairing", () => {
 
 describe("review follow-ups: bounds, text and causes", () => {
   test("a ceiling rounds up and a floor rounds down, so the text never excludes the real charge", () => {
-    expect(formatMoney(6.562559604645912, "USD", "up")).toBe("$6.57")
-    expect(formatMoney(6.562559604645912, "USD", "down")).toBe("$6.56")
-    expect(formatMoney(6.562559604645912, "USD")).toBe("$6.56")
-    expect(formatMoney(0.000059604644775, "USD", "down")).toBe("$0.000059")
-    expect(formatMoney(0.000059604644775, "USD", "up")).toBe("$0.000060")
-    expect(formatMoney(0, "USD", "up")).toBe("$0.00")
+    expect(formatMoney(6.562559604645912, "up")).toBe("$6.57")
+    expect(formatMoney(6.562559604645912, "down")).toBe("$6.56")
+    expect(formatMoney(6.562559604645912)).toBe("$6.56")
+    expect(formatMoney(0.000059604644775, "down")).toBe("$0.000059")
+    expect(formatMoney(0.000059604644775, "up")).toBe("$0.000060")
+    expect(formatMoney(0, "up")).toBe("$0.00")
   })
 
   test("the SELECT line states its ceiling rounded up and its floor rounded down", () => {
@@ -1164,52 +703,6 @@ describe("review follow-ups: bounds, text and causes", () => {
     })
     expect(text.split("\n")[0]).toContain("Cost from 1 run")
     expect(text).toContain("The SELECT would bill at most $2.00 on-demand")
-  })
-
-  test("Snowflake: a day billed in two currencies is named as the cause, not attribution", () => {
-    const sheet = billedRates([{ usage_date: "1970-01-01", rate: "3", currency: "USD", currencies: "2" }])
-    const cost = priceSnowflake([sf("a", 0, "10")], "model.s.m", sheet, {})
-    expect(cost.unknownReason).toContain("a day billed in more than one currency")
-    expect(cost.unknownReason).not.toContain("attributed")
-  })
-
-  test("Snowflake: a run made only of statements under 100 ms with no attribution is left out, not a known $0", () => {
-    const short = sf("a", 0, null, null, "0", { execution_time: "40" })
-    const cost = priceSnowflake([short], "model.s.m", [], {})
-    expect(cost.basis).toBe("none")
-    expect(cost.runs).toBeUndefined()
-    expect(cost.unknownReason).toContain("never attributes a run made only of statements under about 100 ms")
-    // Beside an attributed statement it is still a zero, so the run is priced.
-    expect(priceSnowflake([sf("b", 0, "1"), sf("c", 2, null, null, "0", { execution_time: "40" })], "model.s.m", [], {})).toMatchObject({ runs: 1, lastRun: 3 })
-  })
-
-  test("Databricks: an hour with no task time is not blamed on billing that has not landed", () => {
-    const cost = priceDatabricks([dbx("a", 0, "1", "1", { missing_hours: "1", missing_billing: "0", zero_weight: "1" })], "model.s.m", {})
-    expect(cost.unknownReason).toContain("recorded no task time")
-    expect(cost.unknownReason).not.toContain("billing rows")
-  })
-
-  test("Databricks: a matched statement with no task duration of its own makes its run unknown", () => {
-    const cost = priceDatabricks([dbx("a", 0, "1", "1", { missing_hours: "1", null_duration: "1" })], "model.s.m", {})
-    expect(cost.basis).toBe("none")
-    expect(cost.unknownReason).toContain("a statement has no task duration")
-  })
-
-  test("Databricks: the list-price rate is the retained runs', not one that was dropped at the boundary", () => {
-    const C3 = 9_000 * MIN
-    const kept = dbx("kept", 0, "4", "2", { session_id: "a", start_time: new Date(C3 + 600 * MIN).toISOString(), end_time: new Date(C3 + 601 * MIN).toISOString() })
-    const dropped = dbx("dropped", 0, "1", "5", { session_id: "b", start_time: new Date(C3 + 5 * MIN).toISOString(), end_time: new Date(C3 + 6 * MIN).toISOString() })
-    const cost = priceDatabricks([kept, dropped], "model.s.m", {}, { cutoff: C3, stmts: [{ session: "b", start: C3 - 30 * MIN, end: C3 }] })
-    expect(cost.runs).toBe(1)
-    expect(cost.rate?.value).toBeCloseTo(0.5, 12)
-  })
-
-  test("Databricks: amounts inside the last 12 hours are marked as possibly still changing", () => {
-    const recent = new Date(Date.now() - 2 * 3_600_000).toISOString()
-    const old = new Date(Date.now() - 48 * 3_600_000).toISOString()
-    const at = (when: string) => priceDatabricks([dbx("a", 0, "1", "1", { start_time: when, end_time: when })], "model.s.m", {})
-    expect(at(recent).notes).toContain("Amounts for the last 12 hours may still change as billing lands.")
-    expect(at(old).notes.join(" ")).not.toContain("last 12 hours")
   })
 
   test("BigQuery: children cut off at their limit are named as the cause, not 'not found'", () => {
@@ -1263,22 +756,22 @@ describe("review follow-ups: manifest and cancellation", () => {
   })
 
   test("dbt's bare 'Encountered an error:' wrapper is not shown as the cause", () => {
-    const wrapped = unreadable("databricks", "[ERROR]: Encountered an error:\nPERMISSION_DENIED: User does not have USE SCHEMA on Schema 'system.query'")
-    expect(wrapped.unknownReason).toContain("(PERMISSION_DENIED: User does not have USE SCHEMA")
+    const wrapped = unreadable("[ERROR]: Encountered an error:\nNOT_FOUND: Dataset p:d was not found in location EU")
+    expect(wrapped.unknownReason).toContain("(NOT_FOUND: Dataset p:d was not found")
     expect(wrapped.unknownReason).not.toContain("Encountered an error")
     // A message that is only the wrapper leaves no empty parentheses.
-    const bare = unreadable("databricks", "[ERROR]: Encountered an error:")
+    const bare = unreadable("[ERROR]: Encountered an error:")
     expect(bare.unknownReason).not.toContain("()")
     expect(bare.unknownReason).not.toContain("Encountered")
     // An ordinary message is shown as it was.
-    expect(unreadable("snowflake", "boom\nsecond line").unknownReason).toContain("(boom)")
+    expect(unreadable("boom\nsecond line").unknownReason).toContain("(boom)")
   })
 
   test("a call cancelled before the history starts stops, even when no query would be sent", async () => {
     const controller = new AbortController()
     controller.abort(new Error("cancelled"))
     const adapter = { unsafeCompileQuery: async () => "{}" }
-    const input = { adapter, type: "snowflake", signal: controller.signal, cfg: {} }
+    const input = { adapter, signal: controller.signal, cfg: {} }
     // SQL input has no history to read, and an unresolved model none either: both would otherwise return normally.
     expect(await loadHistory({ ...input, model: undefined }).then(() => "answered", (e: unknown) => e)).toMatchObject({ message: "cancelled" })
     expect(await loadHistory({ ...input, model: "orders", manifestPath: undefined }).then(() => "answered", (e: unknown) => e)).toMatchObject({ message: "cancelled" })
