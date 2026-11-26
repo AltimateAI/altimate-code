@@ -1279,6 +1279,11 @@ export namespace Provider {
       id: ProviderID.zod,
       name: z.string(),
       source: z.enum(["env", "config", "custom", "api"]),
+      // altimate_change start — the login saved for this provider, if any. `source` can't tell it: a
+      // config entry or an env key overrides it, and a subscription loads as "custom". The TUI's
+      // /logout reads this to name and remove the right login.
+      auth: z.enum(["api", "oauth", "wellknown"]).optional(),
+      // altimate_change end
       env: z.string().array(),
       key: z.string().optional(),
       options: z.record(z.string(), z.any()),
@@ -2027,6 +2032,14 @@ export namespace Provider {
       if (provider.options) partial.options = provider.options
       mergeProvider(providerID, partial)
     }
+
+    // altimate_change start — record the saved login type; see `auth` on Info
+    const savedLogins = await Auth.all()
+    for (const [id, provider] of Object.entries(providers)) {
+      const saved = savedLogins[id]
+      if (saved) provider.auth = saved.type
+    }
+    // altimate_change end
 
     for (const [id, provider] of Object.entries(providers)) {
       const providerID = ProviderID.make(id)
