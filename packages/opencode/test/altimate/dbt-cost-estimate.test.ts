@@ -632,6 +632,8 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.basis).toBe("none")
     expect(cost.notes.join(" ")).toContain("capacity pricing")
     expect(result.output).toContain("would process 4.2 TiB")
+    expect(cost.rate).toBeNull()
+    expect(result.output).not.toContain("Rate:")
   })
 
   test("an on-demand dry run is priced as a range, with each table's 10 MiB minimum, and says it covers the SELECT only", async () => {

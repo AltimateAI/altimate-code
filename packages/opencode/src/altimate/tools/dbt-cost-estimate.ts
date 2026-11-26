@@ -159,6 +159,8 @@ function withCost(
   if (meta.success === true && typeof meta.bytes === "number") {
     if (history.capacity === true) {
       cost.notes.push("The project is on capacity pricing (slots): scanned bytes do not set the cost, so the dry run is not priced.")
+      // With no priced run there is no cost to state a rate for, and the on-demand rate does not apply to a reservation.
+      if (cost.basis === "none") cost.rate = null
     } else if (history.capacity === undefined) {
       // Neither the project's jobs nor the caller's own could say which pricing applies: a price would be a guess.
       const why = "BigQuery pricing mode could not be read (on-demand vs reservations)"
