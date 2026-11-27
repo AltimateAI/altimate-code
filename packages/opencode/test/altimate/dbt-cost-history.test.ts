@@ -23,6 +23,9 @@ import {
   unreadable,
   windowStartMs,
   bigqueryChildrenSql,
+  ignoredRateNotes,
+  locationNote,
+  MAX_RATE,
   formatMoney,
   loadHistory,
   manifestPathFor,
@@ -305,17 +308,53 @@ describe("BigQuery pricing", () => {
     expect(cost.notes).toContain("On-demand jobs are priced by the bytes BigQuery billed for each job.")
   })
 
-  test("each build job is its own run, even a minute apart", () => {
-    const { cost } = priceBigquery([bq("a", 0, TIB), bq("b", 1, TIB), bq("c", 2, TIB)], undefined, "model.s.m", {})
-    expect(cost.runs).toBe(3)
+  test("jobs by one user, each starting within a minute after the previous one ended, are one run; a longer gap is a new run", () => {
+    // Each bq() job lasts a minute: starts at 0, 1 and 2 minutes chain, a job at 5 starts 2 minutes after the last ended.
+    const chained = priceBigquery([bq("a", 0, TIB), bq("b", 1, TIB), bq("c", 2, TIB)], undefined, "model.s.m", {})
+    expect(chained.cost.runs).toBe(1)
+    expect(chained.cost.lastRun).toBe(3 * 6.25)
+    expect(priceBigquery([bq("a", 0, TIB), bq("b", 5, TIB), bq("c", 10, TIB)], undefined, "model.s.m", {}).cost.runs).toBe(3)
+    // Exactly a minute after the previous job ended chains; a millisecond more does not.
+    const gap = (ms: number) => priceBigquery([bq("a", 0, TIB), { ...bq("b", 0, TIB), creation_time: new Date(MIN + ms + MIN).toISOString(), end_time: new Date(3 * MIN + ms).toISOString() }], undefined, "model.s.m", {}).cost.runs
+    expect(gap(0)).toBe(1)
+    expect(gap(1)).toBe(2)
   })
 
-  test("a delete joins the build job that starts within a minute after it, else is a run of its own", () => {
+  test("a delete joins the job that starts within a minute after it ended, else is a run of its own", () => {
     const attached = priceBigquery([bq("d", 0, TIB, null, 0, "DELETE"), { ...bq("m", 0, TIB), creation_time: new Date(MIN / 2).toISOString() }], undefined, "model.s.m", {})
     expect(attached.cost.runs).toBe(1)
     expect(attached.cost.lastRun).toBe(12.5)
     const apart = priceBigquery([bq("d", 0, TIB, null, 0, "UPDATE"), bq("m", 5, TIB)], undefined, "model.s.m", {})
     expect(apart.cost.runs).toBe(2)
+  })
+
+  test("a CTAS and an INSERT post-hook 5 s later are one run, not a $6.25 run and a near-zero one", () => {
+    const rows = [
+      bq("c", 0, TIB, null, 0, "CREATE_TABLE_AS_SELECT", { destination_table_id: "orders" }),
+      { ...bq("h", 0, 10 * 1024 ** 2, null, 0, "INSERT", { destination_table_id: "audit" }), creation_time: new Date(MIN + 5_000).toISOString(), end_time: new Date(MIN + 6_000).toISOString() },
+    ]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(6.25 + (10 * 1024 ** 2 / TIB) * 6.25, 10)
+    expect(cost.highest).toBeCloseTo(cost.lastRun!, 10)
+  })
+
+  test("the batches of a microbatch model are one run", () => {
+    const batch = (id: string, startMin: number) => bq(id, startMin, TIB, null, 0, "MERGE", { destination_table_id: "orders" })
+    const { cost } = priceBigquery([batch("b1", 0), batch("b2", 1), batch("b3", 2)], undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBe(3 * 6.25)
+  })
+
+  test("two scheduled invocations five minutes apart are two runs", () => {
+    const { cost } = priceBigquery([bq("a", 0, TIB), bq("b", 5, TIB)], undefined, "model.s.m", {})
+    expect(cost.runs).toBe(2)
+    expect(cost.highest).toBe(6.25)
+  })
+
+  test("jobs of different users are different runs even when they chain in time", () => {
+    const rows = [bq("a", 0, TIB), bq("b", 1, TIB, null, 0, "MERGE", { user_email: "b@x.com" })]
+    expect(priceBigquery(rows, undefined, "model.s.m", {}).cost.runs).toBe(2)
   })
 })
 
@@ -385,7 +424,6 @@ describe("run boundary", () => {
   const C = 1_000 * MIN
   const at = (min: number) => new Date(C + min * MIN).toISOString()
   const boundary = (...stmts: { user: string | null; start: number; end: number; tmp?: boolean }[]) => ({ cutoff: C, stmts })
-  const before = (user: string, startMin: number, endMin: number) => ({ user, start: C + startMin * MIN, end: C + endMin * MIN })
 
   test("a boundary that could not be read drops runs starting within a day of the cutoff and keeps later ones", () => {
     const rows = [
@@ -414,18 +452,18 @@ describe("run boundary", () => {
     expect(cost.notes.join(" ")).toContain("Only the newest 500 statements were read")
   })
 
-  test("BigQuery: an unread delete by the same user that started within a minute before a build may belong to it; others do not", () => {
+  test("BigQuery: an unread job by the same user that ended within a minute before a run began may belong to it; others do not", () => {
     const rows = [
-      { ...bq("near", 0, TIB), creation_time: at(0.5) },
-      { ...bq("far", 0, TIB), creation_time: at(120) },
+      { ...bq("near", 0, TIB), creation_time: at(0.5), end_time: at(1.5) },
+      { ...bq("far", 0, TIB), creation_time: at(120), end_time: at(121) },
     ]
     const price = (b: { user: string | null; start: number; end: number }) => priceBigquery(rows, undefined, "model.s.m", {}, boundary(b)).cost
-    const own = price({ user: "a@x.com", start: C - 0.2 * MIN, end: Number.NaN })
+    const own = price({ user: "a@x.com", start: C - 3 * MIN, end: C - 0.2 * MIN })
     expect(own.runs).toBe(1)
     expect(own.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
-    // Another user's delete, or one more than a minute before the build, cannot have attached to it.
-    expect(price({ user: "someone@else.com", start: C - 0.2 * MIN, end: Number.NaN }).runs).toBe(2)
-    expect(price({ user: "a@x.com", start: C - 5 * MIN, end: Number.NaN }).runs).toBe(2)
+    // Another user's job, or one that ended more than a minute before the run began, cannot have chained to it.
+    expect(price({ user: "someone@else.com", start: C - 3 * MIN, end: C - 0.2 * MIN }).runs).toBe(2)
+    expect(price({ user: "a@x.com", start: C - 6 * MIN, end: C - 5 * MIN }).runs).toBe(2)
   })
 
   test("BigQuery: a delete pre-hook and the insert_overwrite script 20 s later by the same user are one run, priced from the script's children", () => {
@@ -486,11 +524,11 @@ describe("run boundary", () => {
   })
 
   test("BigQuery: the temporary-relation rule is measured from the final build's start, not an attached delete's", () => {
-    // delete at +1 min attaches to the CTAS at +1.2, which pairs with the merge at +3: the run starts at +1, its final build at +3.
+    // delete at +1 min chains to the CTAS at +1.2, which pairs with the merge at +3: the run starts at +1, its final build at +3.
     const rows = [
-      { ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(1) },
+      { ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(1), end_time: at(2) },
       { ...tmpCtas("t", 0, TIB), creation_time: at(1.2), end_time: at(2.2) },
-      { ...bq("m", 0, TIB), creation_time: at(3) },
+      { ...bq("m", 0, TIB), creation_time: at(3), end_time: at(4) },
     ]
     const price = (end: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 30 * MIN, end: C + end * MIN, tmp: true })).cost
     // Ending 8 minutes before the merge's start is outside its ten minutes of the merge (-7): the run is whole.
@@ -499,21 +537,14 @@ describe("run boundary", () => {
     expect(price(-6).basis).toBe("none")
   })
 
-  test("BigQuery: an unread delete is measured from the run's first build, not from an attached delete that started earlier", () => {
-    // A delete read at +0.1 min attaches to the merge at +0.5: the run starts at +0.1, its first build at +0.5.
-    const rows = [{ ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(0.1) }, { ...bq("m", 0, TIB), creation_time: at(0.5) }]
-    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
-    // Created 42 s before the cutoff: more than a minute before the merge, so it cannot have attached to it.
-    expect(run(-0.7).runs).toBe(1)
-    expect(run(-0.3).basis).toBe("none")
-  })
-
-  test("BigQuery: a delete before the cutoff is measured against the run's first build, not against the merge", () => {
-    // tmp CTAS read at +0.5, merge at +3; an unread delete 90 s before the CTAS cannot have attached to it (over a minute).
-    const rows = [{ ...tmpCtas("t", 0, TIB), creation_time: at(0.5), end_time: at(1.5) }, { ...bq("m", 0, TIB), creation_time: at(3) }]
-    const run = (start: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C + start * MIN, end: C + start * MIN })).cost
-    expect(run(-1).runs).toBe(1)
-    expect(run(-0.4).basis).toBe("none")
+  test("BigQuery: an unread job is measured from the run's start, the earliest of its jobs", () => {
+    // A delete read at +0.1 min chains to the merge at +0.5 (it ends at +1.1): the run starts at +0.1.
+    const rows = [{ ...bq("d", 0, TIB, null, 0, "DELETE"), creation_time: at(0.1), end_time: at(0.3) }, { ...bq("m", 0, TIB), creation_time: at(0.5), end_time: at(1.5) }]
+    const run = (end: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 5 * MIN, end: C + end * MIN })).cost
+    // Ended 70 s before the run's start: too early to chain to it.
+    expect(run(-1.2).runs).toBe(1)
+    // Ended 50 s before it.
+    expect(run(-0.7).basis).toBe("none")
   })
 
   test("BigQuery: statement types are read in any case, so a lower-case merge still ends the run of its temporary CTAS", () => {
@@ -535,8 +566,8 @@ describe("run boundary", () => {
   })
 
   test("BigQuery: when the boundary alone leaves no run, the message says so rather than blaming bytes billed", () => {
-    const rows = [{ ...bq("near", 0, TIB), creation_time: at(0.5) }]
-    const cost = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 0.2 * MIN, end: Number.NaN })).cost
+    const rows = [{ ...bq("near", 0, TIB), creation_time: at(0.5), end_time: at(1.5) }]
+    const cost = priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 3 * MIN, end: C - 0.2 * MIN })).cost
     expect(cost.basis).toBe("none")
     expect(cost.unknownReason).toContain("may have started before the period read")
     expect(cost.unknownReason).not.toContain("no bytes billed")
@@ -554,7 +585,7 @@ describe("boundary SQL", () => {
     expect(w).toEqual({
       startBeforeMs: CUT + 1,
       startAfterMs: CUT - 86_400_000,
-      attachStartAtLeastMs: CUT - 60_000,
+      joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
   })
@@ -563,9 +594,10 @@ describe("boundary SQL", () => {
     const sql = bigqueryBoundarySql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", window: w })
     expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
     expect(sql).toContain(`creation_time < timestamp_millis(${CUT + 1})`)
-    // Only a delete or update can attach to a later build, by creation time.
-    expect(sql).toContain(`creation_time >= timestamp_millis(${CUT - 60_000})`)
-    expect(sql).toContain("upper(statement_type) in ('DELETE','UPDATE')")
+    // Any matched job that ended within a minute before the cutoff can chain to a later run, by end time.
+    expect(sql).toContain(`end_time >= timestamp_millis(${CUT - 60_000})`)
+    expect(sql).toContain("upper(statement_type) in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','SCRIPT','DELETE','UPDATE')")
+    expect(sql).toContain("destination_table.table_id as destination_table_id")
     expect(sql).toContain("user_email")
     // And the CTAS into dbt's temporary relation that ended within ten minutes before it.
     expect(sql).toContain("upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
@@ -615,30 +647,121 @@ describe("review follow-ups: BigQuery temporary relation pairing", () => {
   const tmp = (id: string, startMin: number, billed: number, user = "a@x.com"): Row =>
     bq(id, startMin, billed, null, 0, "CREATE_TABLE_AS_SELECT", { user_email: user, destination_table_id: "orders__dbt_tmp" })
 
-  test("two overlapping invocations by one user pair one CTAS with one MERGE each, never both with the first", () => {
-    // tmpA 0-1 min (1 TiB), tmpB 0.5-1.5 (2 TiB), mergeA at 2 (3 TiB), mergeB at 4 (4 TiB).
+  const ds = (row: Row, dataset: string): Row => ({ ...row, destination_dataset_id: dataset })
+
+  test("two overlapping invocations by one user pair one CTAS with one MERGE each, and their cost is whole", () => {
+    // tmpA 0-1 min (1 TiB), tmpB 0.5-1.5 (2 TiB), mergeA at 2 (3 TiB), mergeB at 4 (4 TiB): they overlap, so one run.
     const rows = [tmp("tA", 0, TIB), tmp("tB", 0.5, 2 * TIB), bq("mA", 2, 3 * TIB), bq("mB", 4, 4 * TIB)]
     const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
-    expect(cost.runs).toBe(2)
-    // mergeB's run holds tmpB (6 TiB); mergeA's holds tmpA (4 TiB).
-    expect(cost.highest).toBeCloseTo(6 * 6.25, 10)
-    expect(cost.lastRun).toBeCloseTo(6 * 6.25, 10)
-    expect(cost.typical).toBeCloseTo(((4 + 6) / 2) * 6.25, 10)
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(10 * 6.25, 10)
   })
 
-  test("a second CTAS with no unclaimed final build is a run of its own", () => {
+  test("a temporary CTAS pairs only with a final build into the same dataset, so a MERGE into another dataset five minutes later is a second run", () => {
+    // The CTAS (prod dataset) ends at minute 1; a MERGE into dev starts at minute 6: a gap of five minutes, so not chained either.
+    const rows = [ds(tmp("t", 0, TIB), "prod"), ds(bq("m", 6, TIB), "dev")]
+    expect(priceBigquery(rows, undefined, "model.s.m", {}).cost.runs).toBe(2)
+    // The same dataset pairs them: one run.
+    expect(priceBigquery([ds(tmp("t", 0, TIB), "prod"), ds(bq("m", 6, TIB), "prod")], undefined, "model.s.m", {}).cost.runs).toBe(1)
+  })
+
+  test("interleaved prod and dev invocations by one user do not swap a CTAS between the other's MERGE", () => {
+    // prod CTAS (100 TiB) ends first, dev CTAS (1 TiB) second; the dev MERGE starts before the prod MERGE.
+    // Without the dataset, prod's CTAS would pair with dev's MERGE, and the pairs' spans would differ.
+    const rows = [
+      ds(tmp("tp", 0, 100 * TIB), "prod"),
+      ds(tmp("td", 1, TIB), "dev"),
+      ds(bq("md", 3, TIB), "dev"),
+      ds(bq("mp", 6, 100 * TIB), "prod"),
+    ]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(202 * 6.25, 10)
+    // Pairing by dataset keeps a pair apart from an unrelated, later invocation of the same user.
+    const later = [...rows, ds(tmp("t2", 30, TIB), "dev"), ds(bq("m2", 33, TIB), "dev")]
+    const apart = priceBigquery(later, undefined, "model.s.m", {}).cost
+    expect(apart.runs).toBe(2)
+    expect(apart.highest).toBeCloseTo(202 * 6.25, 10)
+  })
+
+  test("each temporary CTAS takes its own final build, so two invocations whose merges are minutes apart stay one run", () => {
+    // Both CTASs end by minute 1.2; the merges start at 2 and 9. If both CTASs paired with the first merge, the second
+    // merge would be six minutes from anything else and become a run of its own.
+    const rows = [tmp("tA", 0, TIB), tmp("tB", 0.2, TIB), bq("m1", 2, TIB), bq("m2", 9, TIB)]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(4 * 6.25, 10)
+  })
+
+  test("a second CTAS with no unclaimed final build is still part of the run and counted", () => {
     const { cost } = priceBigquery([tmp("tA", 0, TIB), tmp("tB", 0.2, TIB), bq("m", 2, TIB)], undefined, "model.s.m", {})
-    expect(cost.runs).toBe(2)
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(3 * 6.25, 10)
   })
 
-  test("a merge starting after an unread CTAS that ends after it cannot be that CTAS's run and is kept", () => {
-    const rows = [{ ...bq("m", 0, TIB), creation_time: new Date(C2 + 2 * MIN).toISOString() }]
+  test("a run whose temporary CTAS is far from its merge keeps the pair as one job", () => {
+    // The CTAS ends at minute 1 and the merge starts at minute 9 (within ten): the pair spans the gap, so a delete at minute 5 is in the run.
+    const rows = [tmp("t", 0, TIB), bq("m", 9, TIB), bq("h", 5, TIB, null, 0, "DELETE")]
+    expect(priceBigquery(rows, undefined, "model.s.m", {}).cost.runs).toBe(1)
+  })
+
+  test("a job unread before the cutoff that overlapped a run's start may belong to it; one that ended long before cannot", () => {
+    const rows = [{ ...bq("m", 0, TIB), creation_time: new Date(C2 + 2 * MIN).toISOString(), end_time: new Date(C2 + 3 * MIN).toISOString() }]
     const run = (end: number) =>
       priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C2, stmts: [{ user: "a@x.com", start: C2 - 5 * MIN, end: C2 + end * MIN, tmp: true }] }).cost
-    // The CTAS ends an hour after the merge starts: they cannot be one run.
-    expect(run(60).runs).toBe(1)
+    // Still running an hour after the run started: it overlaps it, so they chain and the run is dropped.
+    expect(run(60).notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
     // Ending a minute before it starts, it could be the merge's own temporary relation: the run is dropped.
     expect(run(1).notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+    // Ended half an hour before: too early for either rule.
+    expect(run(-30).runs).toBe(1)
+  })
+})
+
+describe("review follow-ups: rates, location, ephemeral and pricing mode", () => {
+  test("a rate that is zero, negative, not finite or above the maximum is ignored and named", () => {
+    const raw = { bigqueryUsdPerTib: 1e308, bigquerySlotHourUsd: -1 }
+    expect(cleanRates(raw)).toEqual({})
+    expect(ignoredRateNotes(raw).map((n) => n.split(" ")[0])).toEqual(["cost.bigqueryUsdPerTib", "cost.bigquerySlotHourUsd"])
+    expect(cleanRates({ bigqueryUsdPerTib: MAX_RATE + 1 })).toEqual({})
+    expect(cleanRates({ bigqueryUsdPerTib: MAX_RATE, bigquerySlotHourUsd: 0.01 })).toEqual({ bigqueryUsdPerTib: MAX_RATE, bigquerySlotHourUsd: 0.01 })
+    expect(ignoredRateNotes({ bigqueryUsdPerTib: 0 })).toHaveLength(1)
+    expect(ignoredRateNotes({ bigqueryUsdPerTib: 5 })).toEqual([])
+    expect(ignoredRateNotes({})).toEqual([])
+    expect(ignoredRateNotes(undefined)).toEqual([])
+  })
+
+  test("two huge runs priced at a rate the config allows still have a finite median", () => {
+    const { cost } = priceBigquery([bq("a", 0, TIB), bq("b", 5, TIB)], undefined, "model.s.m", { bigqueryUsdPerTib: MAX_RATE })
+    expect(Number.isFinite(cost.typical)).toBe(true)
+  })
+
+  test("the history reads the destination dataset, which a temporary CTAS must share with the build it pairs with", () => {
+    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("destination_table.dataset_id as destination_dataset_id")
+  })
+
+  test("the location read is named: the target's own, or the us region a target with none falls back to", () => {
+    expect(locationNote("EU")).toBe("Location read: region-eu (the target's location).")
+    for (const none of [undefined, null, "", "  "]) expect(locationNote(none)).toContain("sets no location, so region-us was read")
+    expect(locationNote("us")).toBe("Location read: region-us (the target's location).")
+    const empty = (opts: { location?: string; materialized?: string }) => priceBigquery([], undefined, "model.s.m", {}, undefined, opts).cost.unknownReason!
+    expect(empty({ location: locationNote(undefined) })).toContain("region-us was read")
+    expect(empty({})).not.toContain("region-")
+  })
+
+  test("an ephemeral model's no-runs reason says it never runs on its own", () => {
+    const reason = (materialized: string) => priceBigquery([], undefined, "model.s.m", {}, undefined, { materialized }).cost.unknownReason!
+    expect(reason("ephemeral")).toContain("An ephemeral model never runs on its own: its SQL is inlined into the models that ref it")
+    expect(reason("table")).not.toContain("ephemeral")
+  })
+
+  test("a history whose newest run differs from older ones says the pricing may have changed", () => {
+    const old = bq("a", 0, TIB)
+    const newest = bq("b", 10, null, "res-1", 3_600_000)
+    expect(priceBigquery([old, newest], undefined, "model.s.m", {}).cost.notes.join(" ")).toContain("The newest run was in a reservation and older ones on demand")
+    const reverse = priceBigquery([bq("a", 0, null, "res-1", 3_600_000), bq("b", 10, TIB)], undefined, "model.s.m", {})
+    expect(reverse.cost.notes.join(" ")).toContain("The newest run was on demand and older ones in a reservation")
+    expect(priceBigquery([bq("a", 0, TIB), bq("b", 10, TIB)], undefined, "model.s.m", {}).cost.notes.join(" ")).not.toContain("newest run")
   })
 })
 

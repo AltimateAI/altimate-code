@@ -6,6 +6,7 @@ import {
   cleanRates,
   costHistoryInternals,
   costText,
+  ignoredRateNotes,
   loadHistory,
   manifestPathFor,
   onDemandEstimate,
@@ -197,10 +198,16 @@ function withCost(
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate what a BigQuery dbt model costs, and the bytes it or a SQL query would scan, without running it. BigQuery only: any other warehouse answers `supported: false` and nothing is compiled. The cost (`cost`, in the metadata and first in the text) is the warehouse's reported usage for the model's runs in the last 30 days (bytes billed or slot time from INFORMATION_SCHEMA.JOBS) priced at a stated rate, which can be a default or a configured rate, so it is an estimate and not an invoice amount; it is never invented when no history exists; only on-demand pricing prices the pre-run scan, as an estimate for the SELECT only (`selectOnly.estimate`: the dry run's bytes at the on-demand rate; the bill can differ, for a cached or BI Engine result bills nothing and external sources are not fully counted); a `sql` input has no history. The scan figure comes from a dry run (`lowerBound` marks a script or zero estimate, which is not priced). Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
+    "Estimate the bytes a BigQuery dbt model or a SQL query would scan, and optionally what the model's earlier runs cost, without running it. BigQuery only: any other warehouse answers `supported: false` and nothing is compiled. By default (`history` false) it compiles and dry runs only and sends no INFORMATION_SCHEMA query: the answer is the bytes (`bytes`, `maxBytes`, `display`; `lowerBound` marks a script or zero estimate) and no `cost`. Pass `history: true` when the user asks what a model costs or what its runs cost. It then also reads the warehouse's reported usage for the model's runs in the last 30 days (bytes billed or slot time from INFORMATION_SCHEMA.JOBS) and prices it at a stated rate, which can be a default or a configured rate, so it is an estimate and not an invoice amount; it is never invented when no history exists; only on-demand pricing prices the dry run, as an estimate for the SELECT only (`cost.selectOnly.estimate`: the dry run's bytes at the on-demand rate; the bill can differ, for a cached or BI Engine result bills nothing and external sources are not fully counted); a `sql` input has no history. `history: true` runs up to four billed INFORMATION_SCHEMA.JOBS queries per call: a capacity check over 7 days of jobs, the history over 30 days (it scans the query text of every query job in the project, so the bytes grow with the project's activity, not with the model, and its 500-row limit does not limit the bytes), a boundary read of one more day, and, when a script matched, its children. Each is billed on demand (at least 10 MiB) or uses reservation slots, and INFORMATION_SCHEMA is never cached, so do not pass it for a routine pre-run check. Starts the dbt adapter (which runs `dbt deps`), so it needs write permission (`--allow-write` on `tool run` or the MCP server). The dry run never executes the final query, but compiling either input can render Jinja, and macros such as `run_query` can run real queries that are billed. Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
+    history: z
+      .boolean()
+      .optional()
+      .describe(
+        "Default false. Pass true to also read what the model's earlier runs cost; this runs billed INFORMATION_SCHEMA.JOBS queries (see the tool description)",
+      ),
   }),
   async execute(args, ctx) {
     if (!args.model && !args.sql) return failure("nothing to estimate", "Pass a model name or SQL.")
@@ -222,10 +229,14 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     // The Python bridge serialises adapter calls: the scan figure completes first, then the history is read
     // within its own deadline, which can never affect the figure already computed.
     const scan = await scanEstimate(adapter, args, signal)
-    const cfg = cleanRates(await costHistoryInternals.readCostConfig())
+    // The history is opt-in: its INFORMATION_SCHEMA queries are billed, so a call that did not ask for it sends none.
+    if (!args.history) return scan
+    const rawCfg = await costHistoryInternals.readCostConfig()
+    const cfg = cleanRates(rawCfg)
     const { getDbtProjectRoot } = await import("../native/connections/register")
     const manifestPath = manifestPathFor(adapter, await getDbtProjectRoot().catch(() => undefined))
     const history = await loadHistory({ adapter, model: args.model, manifestPath, signal, cfg })
+    history.cost.notes.push(...ignoredRateNotes(rawCfg))
     return withCost(scan, { cfg, history })
   },
 })
