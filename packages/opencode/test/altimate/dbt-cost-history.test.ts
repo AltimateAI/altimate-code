@@ -1,5 +1,5 @@
-// The cost of a model's earlier runs: the history SQL per warehouse, the grouping of statements into runs, and the
-// pricing of what each warehouse reports. No adapter or warehouse is involved.
+// The cost of a model's earlier runs on BigQuery: the history SQL, the grouping of jobs into runs, and the pricing of
+// what the jobs view reports. No adapter or warehouse is involved.
 import { writeFile } from "node:fs/promises"
 import path from "node:path"
 import { describe, expect, test } from "bun:test"
@@ -386,37 +386,6 @@ describe("BigQuery pre-run price", () => {
   })
 })
 
-const sf = (
-  id: string,
-  startMin: number,
-  compute: string | null,
-  qas: string | null = null,
-  cloud = "0",
-  extra: Row = {},
-): Row => ({
-  query_id: id,
-  session_id: "sess",
-  start_time: new Date(startMin * MIN).toISOString(),
-  start_date_utc: new Date(startMin * MIN).toISOString().slice(0, 10),
-  end_time: new Date((startMin + 1) * MIN).toISOString(),
-  execution_time: "5000",
-  credits_attributed_compute: compute,
-  credits_used_query_acceleration: qas,
-  credits_used_cloud_services: cloud,
-  ...extra,
-})
-
-const dbx = (id: string, startMin: number, dbus: string | null, usd: string | null, extra: Row = {}): Row => ({
-  statement_id: id,
-  session_id: "sess",
-  start_time: new Date(startMin * MIN).toISOString(),
-  end_time: new Date((startMin + 1) * MIN).toISOString(),
-  dbus,
-  usd,
-  missing_hours: usd === null ? "1" : "0",
-  ...extra,
-})
-
 describe("rates config and the text", () => {
   test("only positive numbers are rates", () => {
     expect(cleanRates({ bigqueryUsdPerTib: 5, bigquerySlotHourUsd: -1, snowflakeUsdPerCredit: 3, databricksUsdPerDbu: 2 })).toEqual({ bigqueryUsdPerTib: 5 })
@@ -434,7 +403,7 @@ describe("rates config and the text", () => {
   test("a dry-run price is worded as an estimate that the bill can differ from", () => {
     const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { estimate: 2 } }, "1.0 TiB")
     expect(text).toBe(
-      "BigQuery's dry run estimates the SELECT at 1.0 TiB, about $2.00 on-demand. BigQuery bills at least 10 MiB per query, which this estimate applies. The bill can differ: a cached or BI Engine result bills nothing, clustered tables often bill less after runtime pruning, and external sources and some queries are not fully counted.",
+      "Pre-run scan estimate (not the model's run history): BigQuery's dry run estimates the SELECT at 1.0 TiB, about $2.00 on-demand. BigQuery bills at least 10 MiB per query, which this estimate applies. The bill can differ: a cached or BI Engine result bills nothing, clustered tables often bill less after runtime pruning, and external sources and some queries are not fully counted.",
     )
     for (const claim of ["at most", "at least $", "ceiling", "floor"]) expect(text).not.toContain(claim)
   })
@@ -609,6 +578,7 @@ describe("boundary SQL", () => {
       startBeforeMs: CUT + 1,
       startAfterMs: CUT - BOUNDARY_SPAN_MS,
       liveStartAfterMs: CUT - BOUNDARY_SPAN_MS,
+      invocationStartAfterMs: CUT - 30 * 86_400_000,
       joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
@@ -654,7 +624,8 @@ describe("boundary SQL", () => {
     expect(plain).toContain("as dbt_invocation_id")
     expect(plain).not.toContain("unnest(labels) where key = 'dbt_invocation_id') in")
     const sql = bigqueryBoundarySql({ project: "p", needle: "n", window: w, invocations: ["i-1", "i'2", "i-1"] })
-    expect(sql).toContain("or (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2')")
+    // An invocation has no span limit: its finished jobs are read from the start of the history window, not the 72-hour lookback.
+    expect(sql).toContain(`or (creation_time > timestamp_millis(${CUT - 30 * 86_400_000}) and upper(state) = 'DONE' and error_result is null and (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2'))`)
   })
 
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
@@ -1022,8 +993,15 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
       expect(price(rows, { cutoff: C3, stmts: [stmt("i2")] }).runs).toBe(1)
       // Even a job that ended seconds before the run began, by the same user, is not of the run when its id differs.
       expect(price(rows, { cutoff: C3, stmts: [{ user: "a@x.com", start: C3 - 3 * MIN, end: C3 + 4.5 * MIN, inv: "i2" }] }).runs).toBe(1)
-      // An unlabelled unread job keeps the user-and-time rule against a labelled run.
-      expect(price(rows, { cutoff: C3, stmts: [{ user: "a@x.com", start: C3 - 3 * MIN, end: C3 + 4.5 * MIN }] }).basis).toBe("none")
+      // Labelled and unlabelled jobs are never one run, as in the main grouping: an unlabelled unread job near a labelled run
+      // does not leave it out, and a labelled one does not leave out an unlabelled run.
+      const near = { user: "a@x.com", start: C3 - 3 * MIN, end: C3 + 4.5 * MIN }
+      expect(price(rows, { cutoff: C3, stmts: [near] }).runs).toBe(1)
+      expect(price([job("m", 5, 1, TIB, "MERGE")], { cutoff: C3, stmts: [{ ...near, inv: "i1" }] }).runs).toBe(1)
+      expect(price([job("m", 5, 1, TIB, "MERGE")], { cutoff: C3, stmts: [near] }).basis).toBe("none")
+      // The same holds for a job still going.
+      expect(price(rows, { cutoff: C3, stmts: [], live: [{ user: "a@x.com", start: C3 - 3 * MIN }] }).runs).toBe(1)
+      expect(price([job("m", 5, 1, TIB, "MERGE")], { cutoff: C3, stmts: [], live: [{ user: "a@x.com", start: C3 - 3 * MIN, inv: "i1" }] }).runs).toBe(1)
     })
 
     test("a job still running with the run's invocation id leaves it in progress; another id does not", () => {
@@ -1110,7 +1088,7 @@ describe("review: targets, scope, attribution, Python, permissions", () => {
     const slots = price([bq("a", 0, null, "res", 3_600_000)])
     expect(slots.attribution).toBe("slot_time")
     expect(costText(slots).split("\n")[0]).toContain("reservation runs are attributed slot time, not the bill")
-    expect(slots.notes.join(" ")).toContain("billed in steps of 50 with a one-minute minimum, and baseline slots are always charged")
+    expect(slots.notes.join(" ")).toContain("billed in steps of 50, by default with a one-minute minimum (reservations with fluid scaling have none), and baseline slots are always charged")
     expect(slots.notes.join(" ")).toContain("Standard is 0.04")
     expect(price([bq("a", 0, TIB)]).attribution).toBe("bytes_billed")
     expect(costText(price([bq("a", 0, TIB)])).split("\n")[0]).not.toContain("attributed")
@@ -1135,6 +1113,93 @@ describe("review: targets, scope, attribution, Python, permissions", () => {
 
   test("a dry run's minimum bill is 10 MiB", () => {
     expect(MIN_BILLED_BYTES).toBe(10 * 1024 * 1024)
+  })
+})
+
+describe("checklist review: BigQuery ML, window edge, labelled pairing, target split, scope", () => {
+  const C4 = 20_000 * MIN
+  const at = (min: number) => new Date(C4 + min * MIN).toISOString()
+  const j = (id: string, startMin: number, durMin: number, billed: number | null, type: string, extra: Row = {}): Row => ({
+    ...bq(id, 0, billed, null, 0, type, extra),
+    creation_time: at(startMin),
+    end_time: at(startMin + durMin),
+  })
+  const inv = (row: Row, id: string): Row => ({ ...row, dbt_invocation_id: id })
+
+  test("an on-demand BigQuery ML job is unknown (its price is not the query rate), so its run is left out; on a reservation slot time applies", () => {
+    const hook = inv(j("h", 1, 1, TIB, "CREATE_MODEL"), "i1")
+    const build = inv(j("m", 0, 1, TIB, "MERGE"), "i1")
+    const { cost } = priceBigquery([build, hook], undefined, "model.s.m", {})
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("a BigQuery ML job (CREATE MODEL) ran on demand")
+    // A script whose child is a CREATE MODEL is unknown too.
+    const kid: Row = { job_id: "k", parent_job_id: "s", creation_time: at(0.1), statement_type: "CREATE_MODEL", total_bytes_billed: String(TIB), total_slot_ms: "0", reservation_id: null, cache_hit: "False" }
+    expect(priceBigquery([j("s", 0, 1, null, "SCRIPT")], [kid], "model.s.m", {}).cost.basis).toBe("none")
+    // Another run still prices; the ML run is counted as left out.
+    const both = priceBigquery([j("a", 0, 1, TIB, "MERGE"), inv(j("b", 100, 1, TIB, "CREATE_MODEL"), "i9"), inv(j("c", 101, 1, TIB, "MERGE"), "i9")], undefined, "model.s.m", {}).cost
+    expect(both.runs).toBe(1)
+    expect(both.notes.join(" ")).toContain("a BigQuery ML job")
+    // On a reservation, slot time is the price.
+    const reserved = priceBigquery([{ ...build, dbt_invocation_id: "i1" }, { ...hook, reservation_id: "res", total_slot_ms: "3600000" }], undefined, "model.s.m", {}).cost
+    expect(reserved.basis).toBe("history")
+  })
+
+  test("a labelled run in the first 72 hours 10 minutes of the window, read from its start, may have earlier jobs before it: left out; later ones and unlabelled runs stay", () => {
+    const edge = { cutoff: C4, stmts: [], windowEdge: true }
+    const price = (row: Row) => priceBigquery([row], undefined, "model.s.m", {}, edge).cost
+    expect(price(inv(j("m", 60, 1, TIB, "MERGE"), "i1")).basis).toBe("none")
+    expect(price(inv(j("m", 80 * 60, 1, TIB, "MERGE"), "i1")).runs).toBe(1)
+    expect(price(j("m", 60, 1, TIB, "MERGE")).runs).toBe(1)
+    // Without the window edge (a boundary read that began later), nothing is added.
+    expect(priceBigquery([inv(j("m", 60, 1, TIB, "MERGE"), "i1")], undefined, "model.s.m", {}, { cutoff: C4, stmts: [] }).cost.runs).toBe(1)
+  })
+
+  test("a later temporary CTAS with no build after it is still waiting for it, though an earlier build of the invocation exists", () => {
+    // CTAS 0-1, MERGE 2-3, then a second CTAS 10-11 whose MERGE has not run.
+    const rows = [inv(j("t1", 0, 1, TIB, "CREATE_TABLE_AS_SELECT", { destination_table_id: "o__dbt_tmp" }), "i1"), inv(j("m1", 2, 1, TIB, "MERGE"), "i1"), inv(j("t2", 10, 1, TIB, "CREATE_TABLE_AS_SELECT", { destination_table_id: "o__dbt_tmp" }), "i1")]
+    const asOf = (min: number) => priceBigquery(rows, undefined, "model.s.m", {}, undefined, { asOfMs: C4 + min * MIN }).cost
+    expect(asOf(13).notes).toContain("A run still in progress was left out.")
+    expect(asOf(13).basis).toBe("none")
+    // Ten minutes after the second CTAS ended with no MERGE, the invocation is whole.
+    expect(asOf(22).runs).toBe(1)
+    expect(asOf(22).lastRun).toBeCloseTo(18.75, 10)
+    // A build before the CTAS does not pair with it (pairing goes forward in time): the build alone holds nothing open.
+    const early = [inv(j("m0", 0, 1, TIB, "MERGE"), "i2"), inv(j("t", 5, 1, TIB, "CREATE_TABLE_AS_SELECT", { destination_table_id: "o__dbt_tmp" }), "i2")]
+    expect(priceBigquery(early, undefined, "model.s.m", {}, undefined, { asOfMs: C4 + 8 * MIN }).cost.basis).toBe("none")
+  })
+
+  test("jobs are split by target before they are grouped: adjacent prod and dev jobs are two runs, in either order", () => {
+    const tgt = (row: Row, target: string): Row => ({ ...row, target_name: target })
+    const prod = tgt(j("p", 0, 1, TIB, "MERGE"), "prod")
+    const dev = tgt(j("d", 1, 1, 10 * TIB, "MERGE"), "dev")
+    for (const rows of [[prod, dev], [dev, prod]]) {
+      const cost = priceBigquery(rows, undefined, "model.s.m", {}, undefined, { target: "prod" }).cost
+      expect(cost.runs).toBe(1)
+      expect(cost.lastRun).toBe(6.25)
+      expect(cost.otherTargets).toEqual([{ target: "dev", runs: 1, typical: 62.5 }])
+    }
+    // A job naming no target is not absorbed by a named one.
+    const unnamed = priceBigquery([prod, j("u", 1, 1, 10 * TIB, "MERGE")], undefined, "model.s.m", {}, undefined, { target: "prod" }).cost
+    expect(unnamed.lastRun).toBe(6.25)
+    expect(unnamed.otherTargets).toEqual([{ target: "unknown target", runs: 1, typical: 62.5 }])
+  })
+
+  test("only the caller's jobs and reservation attribution share the first line", () => {
+    const base = { basis: "history" as const, currency: "USD" as const, runs: 1, windowDays: 30 as const, lastRun: 1, typical: 1, highest: 1, rate: null, notes: [], scope: "user" as const }
+    const first = costText({ ...base, attribution: "slot_time" }).split("\n")[0]
+    expect(first).toBe("Only your own jobs were read (no bigquery.jobs.listAll): service-account and other users' runs are missing; reservation runs are attributed slot time, not the bill.")
+    expect(costText({ ...base, attribution: "slot_time" })).not.toContain("days (reservation runs")
+  })
+
+  test("every message that says no run was found names the location read", () => {
+    const where = locationNote(undefined)
+    const run = (rows: Row[], opts: Record<string, unknown> = {}, boundary?: Parameters<typeof priceBigquery>[4]) =>
+      priceBigquery(rows, undefined, "model.s.m", {}, boundary, { location: where, ...opts }).cost.unknownReason!
+    const tg = (row: Row, target: string): Row => ({ ...row, target_name: target })
+    expect(run([tg(j("d", 0, 1, TIB, "MERGE"), "dev")], { target: "prod" })).toContain("region-us was read")
+    expect(run([{ ...j("p", 0, 1, TIB, "MERGE"), state: "RUNNING" }])).toContain("region-us was read")
+    expect(run([j("m", 5, 1, TIB, "MERGE")], {}, { cutoff: C4 })).toContain("region-us was read")
+    expect(run([j("m", 5, 1, null, "MERGE")])).toContain("region-us was read")
   })
 })
 

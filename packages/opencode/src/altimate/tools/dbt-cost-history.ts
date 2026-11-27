@@ -11,7 +11,7 @@ const DAY_MS = 86_400_000
 export const windowStartMs = (asOfMs: number, days = HISTORY_DAYS) => asOfMs - days * DAY_MS
 /** A matched job by the same user joins the run of the job before it when it starts within this long after that job ended. */
 export const BQ_CHAIN_MS = 60_000
-/** The largest rate the config accepts, in USD. */
+/** The largest rate the tool uses, in USD; a larger configured value is ignored and named. */
 export const MAX_RATE = 1e6
 /** The most child jobs of matched scripts the children query returns. */
 export const BQ_CHILD_LIMIT = 10000
@@ -154,6 +154,8 @@ const invocationColumn = `(select value from unnest(labels) where key = '${INVOC
 /** A job that finished successfully, or one that is still queued or running (its run is not complete). */
 const LIVE_OR_DONE = "((upper(state) = 'DONE' and error_result is null) or upper(state) in ('PENDING','RUNNING'))"
 /** The statement that ends a run: dbt builds an incremental model's temporary relation, then merges or inserts from it. */
+/** BigQuery ML statements: on demand, model training bills at its own price per TiB, not the query rate, so it is not priced from bytes billed. */
+const BQ_ML_TYPES = ["CREATE_MODEL"]
 const BQ_FINAL_TYPES = ["MERGE", "INSERT", "SCRIPT"]
 const DBT_TMP_SUFFIX = "__dbt_tmp"
 /** A temporary-relation CREATE TABLE AS SELECT joins the final build that starts within this long after it ends. */
@@ -211,7 +213,7 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and cr
  * or script may run up to 6 hours per attempt with up to three attempts (18 hours), and a CREATE MODEL statement times out
  * at 24 hours by default, but at 48 hours for time series, AutoML and hyperparameter tuning models. The longest is the
  * batch queue plus the 48-hour CREATE MODEL: 24 + 48 = 72 hours. A job in flight longer than that (a queue timeout
- * raised in the project's settings) is not covered, unless it is still going: those are read from the start of the window.
+ * raised in the project's settings) is not covered, unless it is still going: those are read from no further back than this span either.
  */
 const BQ_QUEUE_MAX_MS = 24 * 3_600_000
 const BQ_RUN_MAX_MS = 48 * 3_600_000
@@ -237,18 +239,21 @@ export type BoundaryWindow = {
   startAfterMs: number
   /** A job still going (not done, or with no end time yet) is no older than the longest job span either. */
   liveStartAfterMs: number
+  /** A finished job of an invocation read may have been created any time in the history window: invocations have no span limit. */
+  invocationStartAfterMs: number
   /** A job must have ended at or after this (the cutoff less the chain window) to be able to join a run. */
   joinEndAtLeastMs: number
   /** A temporary-relation CTAS must end at or after this (the cutoff less the join window). */
   tmpEndAtLeastMs: number
 }
 
-export function boundaryWindow(cutoffMs: number): BoundaryWindow {
+export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTORY_DAYS * DAY_MS): BoundaryWindow {
   const cutoff = Math.trunc(cutoffMs)
   return {
     startBeforeMs: cutoff + 1,
     startAfterMs: cutoff - BOUNDARY_SPAN_MS,
     liveStartAfterMs: cutoff - BOUNDARY_SPAN_MS,
+    invocationStartAfterMs: Math.trunc(windowStart),
     joinEndAtLeastMs: cutoff - BQ_CHAIN_MS,
     tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
   }
@@ -268,11 +273,13 @@ export function bigqueryBoundarySql(input: {
   // One read, so no job can change state between two: what can join a run that starts after the cutoff is a finished job
   // that ended within a minute before it (or the CTAS into dbt's temporary relation that ended within ten minutes before
   // its final build) and was created in the lookback, or a job still going (not done, or with no end time yet) created
-  // anywhere in the history window. Jobs still going come first, so finished ones cannot crowd them out of the limit.
+  // no further back than the longest job span. Jobs still going come first, so finished ones cannot crowd them out of the limit.
   const going = `(upper(state) in ('PENDING','RUNNING') or end_time is null)`
   // An earlier job of a run's own invocation belongs to it however long before the cutoff it ended.
   const ids = [...new Set(input.invocations ?? [])]
-  const sameInvocation = ids.length ? `\n      or (select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")})` : ""
+  const sameInvocation = ids.length
+    ? `\n    or (creation_time > ${at(w.invocationStartAfterMs)} and upper(state) = 'DONE' and error_result is null and (select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")}))`
+    : ""
   return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time < ${at(w.startBeforeMs)}
@@ -283,8 +290,8 @@ where creation_time < ${at(w.startBeforeMs)}
     or (creation_time > ${at(w.startAfterMs)} and upper(state) = 'DONE' and error_result is null and (
       end_time >= ${at(w.joinEndAtLeastMs)}
       or (upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
-          and end_time >= ${at(w.tmpEndAtLeastMs)})${sameInvocation}
-    ))
+          and end_time >= ${at(w.tmpEndAtLeastMs)})
+    ))${sameInvocation}
   )
   and ${notOwn}
   and strpos(query, ${sqlString(input.needle)}) > 0
@@ -328,11 +335,12 @@ export function parseRows(rendered: unknown): Row[] {
 // ---- Runs and their statistics ----
 
 /** Why a run could not be priced. */
-export type Cause = "noslot" | "nullbytes" | "nochildren" | "cutchildren" | "badtime" | "unknown"
+export type Cause = "noslot" | "bqml" | "nullbytes" | "nochildren" | "cutchildren" | "badtime" | "unknown"
 export type Causes = Partial<Record<Cause, number>>
 
 const CAUSE_TEXT: Record<Cause, string> = {
   noslot: "BigQuery gave no slot time for a job that ran in a reservation",
+  bqml: "a BigQuery ML job (CREATE MODEL) ran on demand, and its price is not the query rate",
   nullbytes: "BigQuery gave no bytes billed for a job (it hides them for tables under a row access policy)",
   nochildren: "a script's child jobs were not found",
   cutchildren: "a script's child jobs may be cut off at the children query's limit",
@@ -363,6 +371,8 @@ export type Boundary = {
   stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; inv?: string }[]
   /** Jobs still going (queued, running, or with no end time) in the window, each lasting to the instant read. They leave out any run they could chain into. */
   live?: { user: string | null; start: number; inv?: string }[]
+  /** The boundary read began at the history window's start (it was not full): an invocation may have had earlier jobs before it. */
+  windowEdge?: boolean
   /** The boundary read was full: it cannot say what it left out, so runs near the cutoff are not trusted besides. */
   full?: boolean
   /** The boundary read was full: every run by these users, who have a job still going, is left out. */
@@ -481,10 +491,11 @@ function bqJob(r: Row, cfg: CostConfig, asOfMs?: number): BqUnit {
   // A cached result bills nothing; a missing figure (BigQuery hides it for tables under a row access policy) is not a zero.
   const cached = String(r.cache_hit).toLowerCase() === "true"
   // A job in a reservation is priced by its slot time, which must be reported too: a missing one is not a zero.
-  const known = reserved ? num(r.total_slot_ms) !== undefined : billed !== undefined || cached
+  const ml = BQ_ML_TYPES.includes(stmtType(r))
+  const known = reserved ? num(r.total_slot_ms) !== undefined : !ml && (billed !== undefined || cached)
   const pending = isPending(r)
   return {
-    cause: known ? undefined : reserved ? ("noslot" as Cause) : ("nullbytes" as Cause),
+    cause: known ? undefined : reserved ? ("noslot" as Cause) : ml ? ("bqml" as Cause) : ("nullbytes" as Cause),
     user: r.user_email ?? "",
     // A job still running has no end yet: it lasts to the instant read, or beyond it.
     end: pending ? (asOfMs ?? Number.POSITIVE_INFINITY) : parseTime(r.end_time),
@@ -555,8 +566,18 @@ export function bigqueryRuns(
   // Jobs without the label (an older adapter, a custom job) are grouped by user and time below.
   const byInvocation = new Map<string, BqUnit[]>()
   for (const u of units.filter((x) => x.inv)) byInvocation.set(u.inv, [...(byInvocation.get(u.inv) ?? []), u])
-  // A temporary CTAS of an invocation that has no final build yet is waiting for it.
-  for (const g of byInvocation.values()) if (!g.some((u) => u.final)) for (const u of g) if (u.tmp) u.unpaired = true
+  // dbt makes one temporary relation per final build, which follows it: each temporary CTAS of an invocation takes the first
+  // final build that starts after it ended and no other CTAS has taken. One with none is still waiting for its build, even
+  // when an earlier build of the invocation (a microbatch's first batch) exists.
+  for (const g of byInvocation.values()) {
+    const finals = g.filter((u) => u.final).sort((a, b) => a.start - b.start)
+    const taken = new Set<BqUnit>()
+    for (const t of g.filter((u) => u.tmp).sort((a, b) => a.end - b.end)) {
+      const f = finals.find((x) => !taken.has(x) && x.start >= t.end)
+      if (f) taken.add(f)
+      else t.unpaired = true
+    }
+  }
   units = units.filter((x) => !x.inv)
   const heads = units.filter((u) => !u.tmp).sort((a, b) => a.start - b.start)
   const atoms = new Map<BqUnit, BqUnit[]>(heads.map((b) => [b, [b]]))
@@ -608,8 +629,9 @@ export function bigqueryRuns(
   const candidates = all.filter((r) => r.build)
   // Whether an unread job could belong to a run: the same invocation id when both carry one, else the user-and-time rule.
   const joins = (b: NonNullable<Boundary["stmts"]>[number], r: BqUnit) =>
-    b.inv && r.inv
-      ? b.inv === r.inv
+    // Labelled and unlabelled jobs are never one run (the main grouping keeps them apart): only like meets like.
+    b.inv || r.inv
+      ? !!b.inv && b.inv === r.inv
       : (b.user ?? "") === r.user &&
     (b.end >= r.start - BQ_CHAIN_MS ||
       (!!b.tmp &&
@@ -618,7 +640,7 @@ export function bigqueryRuns(
   const liveBefore = (r: BqUnit) =>
     !!boundary &&
     (boundary.liveFullUsers?.includes(r.user) ||
-      !!boundary.live?.some((b) => (b.inv && r.inv ? b.inv === r.inv : (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS)))
+      !!boundary.live?.some((b) => (b.inv || r.inv ? !!b.inv && b.inv === r.inv : (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS)))
   const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && (r.end >= asOfMs - BQ_CHAIN_MS || (r.unpairedTmpEnd ?? Number.NEGATIVE_INFINITY) >= asOfMs - BQ_TMP_JOIN_MS)) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
@@ -626,7 +648,8 @@ export function bigqueryRuns(
   // and within ten minutes of it (an unread CTAS could have been the one that build took). Such a run is not trusted.
   const unsure = (r: BqUnit) =>
     boundary
-      ? !!boundary.stmts?.some((b) => joins(b, r)) || ((!boundary.stmts || boundary.full === true) && r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS)
+      ? !!boundary.stmts?.some((b) => joins(b, r)) ||
+        ((!boundary.stmts || boundary.full === true || (boundary.windowEdge === true && !!r.inv)) && r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS)
       : false
   const counted = live.filter((r) => !unsure(r))
   const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
@@ -660,6 +683,8 @@ export function priceBigquery(
   opts: { materialized?: string; location?: string; asOfMs?: number; target?: string } = {},
 ): { cost: CostInfo; reserved: boolean } {
   const table = "INFORMATION_SCHEMA.JOBS"
+  // Every message that says no run was found also says where it looked.
+  const withLocation = (text: string) => [text, opts.location].filter(Boolean).join(" ")
   const demand = rateOf(cfg.bigqueryUsdPerTib, DEFAULT_RATES.bigqueryUsdPerTib, "USD/TiB", "bigqueryUsdPerTib")
   const slot = rateOf(cfg.bigquerySlotHourUsd, DEFAULT_RATES.bigquerySlotHourUsd, "USD/slot-hour", "bigquerySlotHourUsd")
   if (!rows.length) return { cost: none(emptyMessage(uniqueId, table, opts), [], demand.rate), reserved: false }
@@ -687,11 +712,18 @@ export function priceBigquery(
     return unit
   })
   const truncated = rows.length >= HISTORY_LIMIT
-  const { runs: allRuns, skipped, dropped, inProgress, causes } = bigqueryRuns(units, boundary, opts.asOfMs)
-  // The figures are of the current dbt target's runs: a dev run on sampled data is not what the model costs in prod. Runs
-  // whose query comment names no target are listed under an unknown one and are not in the figures either.
-  const runs = opts.target ? allRuns.filter((r) => r.target === opts.target) : allRuns
-  const elsewhere = opts.target ? otherTargetsOf(allRuns.filter((r) => r.target !== opts.target)) : []
+  // The figures are of the current dbt target's runs: a dev run on sampled data is not what the model costs in prod. The jobs
+  // are split by target before they are grouped, so a run never mixes targets; jobs whose query comment names no target are
+  // an unknown one and are not in the figures either. Other targets' runs are formed the same way and only listed.
+  const mine = opts.target ? units.filter((u) => u.target === opts.target) : units
+  const { runs, skipped, dropped, inProgress, causes } = bigqueryRuns(mine, boundary, opts.asOfMs)
+  const elsewhere = opts.target
+    ? otherTargetsOf(
+        [...new Set(units.filter((u) => u.target !== opts.target).map((u) => u.target))].flatMap(
+          (t) => bigqueryRuns(units.filter((u) => u.target === t), boundary, opts.asOfMs).runs,
+        ),
+      )
+    : []
   const anyReserved = units.some((u) => u.reserved)
   const notes: string[] = truncated ? [LIMIT_NOTE] : []
   if (dropped) notes.push(boundaryNote(dropped))
@@ -703,7 +735,7 @@ export function priceBigquery(
       reserved: anyReserved,
       cost: {
         ...none(
-          `No run of ${uniqueId} on the current target (${opts.target}) was found in the last ${HISTORY_DAYS} days; ${otherTargetsText(elsewhere)}.`,
+          withLocation(`No run of ${uniqueId} on the current target (${opts.target}) was found in the last ${HISTORY_DAYS} days; ${otherTargetsText(elsewhere)}.`),
           notes,
           demand.rate,
         ),
@@ -714,7 +746,7 @@ export function priceBigquery(
   if (!runs.length && !skipped && !dropped && inProgress)
     return {
       reserved: anyReserved,
-      cost: none(`Every run of ${uniqueId} found is still in progress (or ended in the last minute), so none is priced.`, notes, demand.rate),
+      cost: none(withLocation(`Every run of ${uniqueId} found is still in progress (or ended in the last minute), so none is priced.`), notes, demand.rate),
     }
   if (!runs.length && !skipped && !dropped)
     return {
@@ -730,12 +762,12 @@ export function priceBigquery(
   if (!runs.length && !skipped && dropped)
     return {
       reserved: anyReserved,
-      cost: none(`Every run of ${uniqueId} found may have started before the period read, so none is priced.`, notes, demand.rate),
+      cost: none(withLocation(`Every run of ${uniqueId} found may have started before the period read, so none is priced.`), notes, demand.rate),
     }
   if (!runs.length)
     return {
       reserved: anyReserved,
-      cost: none(`No run of ${uniqueId} found could be priced: ${causeList(causes)}.`, notes, demand.rate),
+      cost: none(withLocation(`No run of ${uniqueId} found could be priced: ${causeList(causes)}.`), notes, demand.rate),
     }
   const anyDemand = runs.some((r) => r.demand)
   const allReserved = !anyDemand
@@ -757,7 +789,7 @@ export function priceBigquery(
   }
   if (runs.some((r) => r.reserved))
     notes.push(
-      `Slot time is attributed at ${slot.rate.value} USD/slot-hour; it is an allocation, not the bill: autoscaled slots are billed in steps of 50 with a one-minute minimum, and baseline slots are always charged.`,
+      `Slot time is attributed at ${slot.rate.value} USD/slot-hour; it is an allocation, not the bill: autoscaled slots are billed in steps of 50, by default with a one-minute minimum (reservations with fluid scaling have none), and baseline slots are always charged.`,
     )
   if (elsewhere.length) notes.push(`Runs of other targets are not in these figures: ${otherTargetsText(elsewhere)}.`)
   if (anyDemand) notes.push("On-demand jobs are priced by the bytes BigQuery billed for each job.")
@@ -832,19 +864,20 @@ function nativeText(n: NonNullable<CostInfo["native"]>): string {
 
 /** The SELECT's estimated on-demand price, with what can make the bill differ. `shown` is the dry run's size as text. */
 function selectText(c: CostInfo, shown: string): string {
-  return `BigQuery's dry run estimates the SELECT at ${shown}, about ${formatMoney(c.selectOnly!.estimate)} on-demand. BigQuery bills at least 10 MiB per query, which this estimate applies. The bill can differ: a cached or BI Engine result bills nothing, clustered tables often bill less after runtime pruning, and external sources and some queries are not fully counted.`
+  return `Pre-run scan estimate (not the model's run history): BigQuery's dry run estimates the SELECT at ${shown}, about ${formatMoney(c.selectOnly!.estimate)} on-demand. BigQuery bills at least 10 MiB per query, which this estimate applies. The bill can differ: a cached or BI Engine result bills nothing, clustered tables often bill less after runtime pruning, and external sources and some queries are not fully counted.`
 }
 
 /** The cost as plain sentences, the first being the answer (or why there is none). */
 export function costText(c: CostInfo, shown = "the bytes it reports"): string {
   const lines: string[] = []
   // First, before any figure: whose jobs were read.
+  const slots = c.basis === "history" && (c.attribution === "slot_time" || c.attribution === "mixed")
+  const slotsNote = "reservation runs are attributed slot time, not the bill"
   if (c.scope === "user")
-    lines.push("Only your own jobs were read (no bigquery.jobs.listAll): service-account and other users' runs are missing.")
+    lines.push(`Only your own jobs were read (no bigquery.jobs.listAll): service-account and other users' runs are missing${slots ? `; ${slotsNote}` : ""}.`)
   if (c.basis === "history") {
-    const slots = c.attribution === "slot_time" || c.attribution === "mixed"
     lines.push(
-      `Cost from ${c.runs} run${c.runs === 1 ? "" : "s"} in the last ${c.windowDays} days${slots ? " (reservation runs are attributed slot time, not the bill)" : ""}${c.target ? ` on target ${c.target}` : ""}: last run ${formatMoney(c.lastRun!)}, typical ${formatMoney(c.typical!)} (median), highest ${formatMoney(c.highest!)}.`,
+      `Cost from ${c.runs} run${c.runs === 1 ? "" : "s"} in the last ${c.windowDays} days${slots && c.scope !== "user" ? ` (${slotsNote})` : ""}${c.target ? ` on target ${c.target}` : ""}: last run ${formatMoney(c.lastRun!)}, typical ${formatMoney(c.typical!)} (median), highest ${formatMoney(c.highest!)}.`,
     )
     if (c.native) lines.push(`In the warehouse's own unit, ${nativeText(c.native)}.`)
   } else if (c.basis === "dry_run") {
@@ -853,7 +886,7 @@ export function costText(c: CostInfo, shown = "the bytes it reports"): string {
     lines.push(`Cost unknown: ${c.unknownReason}`)
   }
   // With history the SELECT's price is a second figure, and the notes below refer to it.
-  if (c.basis === "history" && c.selectOnly) lines.push(selectText(c, shown))
+  if (c.basis !== "dry_run" && c.selectOnly) lines.push(selectText(c, shown))
   if (c.rate) lines.push(`Rate: ${c.rate.value} ${c.rate.unit} (${c.rate.source === "config" ? "from your config" : "default"}).`)
   for (const n of c.notes) lines.push(n)
   return lines.join("\n")
@@ -948,7 +981,7 @@ export async function loadHistory(input: {
       // The window reaches the cutoff's own instant (a statement that starts exactly at it is read: the main read takes
       // only statements after the window's start, and the oldest statement it returned is at the cutoff itself) while
       // every lookback is measured from the cutoff. The statements already read come back too and are filtered out below.
-      const found = await rows(sqlFor(boundaryWindow(cutoff)))
+      const found = await rows(sqlFor(boundaryWindow(cutoff, windowStart)))
       const going = (r: Row) => isPending(r)
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r.job_id))
@@ -959,6 +992,7 @@ export async function loadHistory(input: {
       const full = found.length >= HISTORY_LIMIT
       return {
         cutoff,
+        ...(!hit && { windowEdge: true }),
         live,
         ...(full && { full, liveFullUsers: [...new Set(live.map((j) => j.user ?? ""))] }),
         stmts: unread
@@ -1015,19 +1049,24 @@ export async function loadHistory(input: {
       }
     }
     let pricing: boolean | undefined
+    // Whose jobs the reads covered, once one succeeded: every later answer, a failure included, says so.
+    let scope: CostInfo["scope"]
+    const scoped = (cost: CostInfo): CostInfo => ({ ...cost, ...(scope && { scope }) })
     try {
-      const { rows: seen } = await read((view) => bigqueryCapacitySql({ project, location, view, asOfMs }))
+      const { rows: seen, own } = await read((view) => bigqueryCapacitySql({ project, location, view, asOfMs }))
+      scope = own ? "user" : "project"
       const reserved = num(seen[0]?.reserved) ?? 0
       pricing = reserved > 0 ? true : (num(seen[0]?.jobs) ?? 0) > 0 ? false : undefined
     } catch (e) {
       if (signal.aborted) throw e
     }
-    if (!uniqueId) return { cost: none(unavailable!), capacity: pricing }
+    if (!uniqueId) return { cost: scoped(none(unavailable!)), capacity: pricing }
     const id = uniqueId
     let cost: CostInfo
     let reserved = false
     try {
       const history = await read((view) => bigqueryHistorySql({ project, location, needle: needleFor(id), view, asOfMs }))
+      scope = history.own ? "user" : "project"
       // A script whose start does not parse is left out of the children read (its run is unknown), so no NaN reaches the SQL.
       const scripts = history.rows.filter((r) => stmtType(r) === "SCRIPT" && r.job_id && Number.isFinite(parseTime(r.creation_time)))
       const parents = scripts.map((r) => r.job_id!)
@@ -1051,12 +1090,12 @@ export async function loadHistory(input: {
       } catch (e) {
         if (!(e instanceof BoundaryUnreadable)) throw e
         return {
-          cost: none(`could not check for runs still in progress: ${errorDetail(e.message)}.`),
+          cost: scoped(none(`could not check for runs still in progress: ${errorDetail(e.message)}.`)),
           capacity: history.rows.some((r) => r.reservation_id) ? true : pricing,
         }
       }
       ;({ cost, reserved } = priceBigquery(history.rows, children, uniqueId, cfg, boundary, { materialized, location: where, asOfMs, target: targetName }))
-      cost.scope = history.own ? "user" : "project"
+      if (scope) cost.scope = scope
       if (cost.basis === "history" && reserved && pricing === false)
         cost.notes.push(
           "This model's runs include reservation jobs, but the project's jobs of the last 7 days were all on demand: the pricing may have changed, so the dry run is not priced.",
@@ -1067,7 +1106,7 @@ export async function loadHistory(input: {
         )
     } catch (e) {
       if (signal.aborted) throw e
-      cost = unreadable(message(e), where)
+      cost = scoped(unreadable(message(e), where))
     }
     return { cost, capacity: reserved ? true : pricing }
   }
