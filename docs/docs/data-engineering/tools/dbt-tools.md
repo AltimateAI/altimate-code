@@ -129,13 +129,14 @@ The tool finds the model's jobs by dbt's query comment (`"node_id": "<unique_id>
 
 ### Queries and their cost
 
-Each `history: true` call runs up to seven billed `INFORMATION_SCHEMA.JOBS` queries: three normally (capacity, history and boundary), four when a script matched (its children), up to seven when the role cannot list every user's jobs, since the capacity, history and children reads each run again on `JOBS_BY_USER`.
+Each `history: true` call runs up to eight billed `INFORMATION_SCHEMA.JOBS` queries: three normally (capacity, history and boundary), one more to read the earlier jobs of labelled invocations (the invocation read), one more when a script matched (its children), so up to five, and up to eight when the role cannot list every user's jobs, since the capacity, history and children reads each run again on `JOBS_BY_USER`.
 
 | Query | Reads |
 |---|---|
 | Capacity check | 7 days of jobs, to tell on-demand from reservation pricing |
 | History | 30 days: `strpos` on the query text scans the query text of every query job in the project, so the bytes grow with the project's activity, not the model, and the 500-row cap limits the rows returned, not the bytes billed |
-| Boundary | one query: finished jobs from the 72 hours 10 minutes before the period read, plus the model's jobs still queued or running from no further back than that; it scans query text like the history, over that shorter span, plus, when runs carry an invocation label, the finished jobs of those invocations back to the 180 days JOBS keeps, which can read many more bytes than the history; matches by invocation come first, so the 500-row limit does not crowd them out |
+| Boundary | one query: finished jobs from the 72 hours 10 minutes before the period read, plus the model's jobs still queued or running from no further back than that; it scans query text like the history, over that shorter span |
+| Invocation jobs | only when runs carry an invocation label: the jobs of those invocations from before the cutoff, back to the 180 days JOBS keeps, in a read of their own with its own 500-row limit; if it is full, no labelled run is known to be complete and every labelled run is left out |
 | Children | the child jobs of matched scripts, by parent id |
 
 Each is billed on demand (at least 10 MiB per query) or uses reservation slots, and `INFORMATION_SCHEMA` results are never cached, so you are charged each time. Leave `history` off for a routine pre-run check. The queries run through dbt's `run_query`, which cannot set `maximum_bytes_billed` per query: if the profile sets `maximum_bytes_billed`, the queries follow it. All queries read the same instant, taken once per call and written as a literal into the history, boundary and capacity queries (the children query starts at the earliest matched script's creation instead), so those queries describe one period.

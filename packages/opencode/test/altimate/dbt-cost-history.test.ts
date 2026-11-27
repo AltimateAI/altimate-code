@@ -36,6 +36,7 @@ import {
   BOUNDARY_SPAN_MS,
   MAX_JOB_SPAN_MS,
   bigqueryBoundarySql,
+  bigqueryInvocationSql,
   boundaryWindow,
   sqlString,
   summarize,
@@ -43,6 +44,7 @@ import {
 } from "@/altimate/tools/dbt-cost-history"
 
 const TIB = 1024 ** 4
+const DEMAND = { value: 6.25, unit: "USD/TiB", source: "default" as const }
 const MIN = 60_000
 /** The instant the SQL under test is read as of. */
 const ASOF = Date.UTC(2026, 5, 1, 20, 0, 0)
@@ -619,15 +621,20 @@ describe("boundary SQL", () => {
     expect(BOUNDARY_SPAN_MS).toBe(72 * 3_600_000 + 10 * 60_000)
   })
 
-  test("the boundary query reads the invocation label, and takes any finished job of the invocations of the runs read", () => {
+  test("the boundary query reads the invocation label; the invocations' own jobs are a read of their own, back to the 180 days JOBS keeps", () => {
     const plain = bigqueryBoundarySql({ project: "p", needle: "n", window: w })
     expect(plain).toContain("as dbt_invocation_id")
     expect(plain).not.toContain("unnest(labels) where key = 'dbt_invocation_id') in")
-    const sql = bigqueryBoundarySql({ project: "p", needle: "n", window: w, invocations: ["i-1", "i'2", "i-1"] })
-    expect(sql).toContain(`desc, (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2') desc, creation_time desc limit 500`)
-    // An invocation has no span limit: its finished jobs are read as far back as JOBS keeps them (180 days), not the 72-hour lookback,
-    // and ahead of other finished jobs in the limit.
-    expect(sql).toContain(`or (creation_time > timestamp_millis(${CUT - 180 * 86_400_000}) and upper(state) = 'DONE' and error_result is null and (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2'))`)
+    const sql = bigqueryInvocationSql({ project: "p", location: "EU", needle: "n", view: "JOBS_BY_USER", window: boundaryWindow(CUT), invocations: ["i-1", "i'2", "i-1"] })
+    expect(sql).toContain("select /* invocation jobs */ /* altimate_cost_read */ job_id")
+    expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
+    // An invocation has no span limit: its jobs are read as far back as JOBS keeps them, not the 72-hour lookback.
+    expect(sql).toContain(`creation_time < timestamp_millis(${CUT + 1}) and creation_time > timestamp_millis(${CUT - 180 * 86_400_000})`)
+    expect(sql).toContain("(upper(state) = 'DONE' and error_result is null) or upper(state) in ('PENDING','RUNNING')")
+    expect(sql).toContain("(select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2')")
+    expect(sql).toContain("strpos(query, 'altimate_cost_read') = 0")
+    expect(sql).toContain("parent_job_id is null")
+    expect(sql).toContain("order by creation_time desc limit 500")
   })
 
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
@@ -1054,8 +1061,8 @@ describe("review: targets, scope, attribution, Python, permissions", () => {
     expect(cost.highest).toBeCloseTo(18.75, 10)
     expect(cost.target).toBe("prod")
     expect(cost.otherTargets).toEqual([
-      { target: "dev", runs: 3, typical: expect.closeTo(0.0625, 10) },
-      { target: "unknown target", runs: 1, typical: expect.closeTo(43.75, 10) },
+      { target: "dev", runs: 3, typical: expect.closeTo(0.0625, 10), attribution: "bytes_billed", rate: DEMAND },
+      { target: "unknown target", runs: 1, typical: expect.closeTo(43.75, 10), attribution: "bytes_billed", rate: DEMAND },
     ])
     expect(cost.notes.join(" ")).toContain("Runs of other targets are not in these figures: dev: 3 runs")
     expect(costText(cost).split("\n")[0]).toContain("on target prod")
@@ -1070,9 +1077,9 @@ describe("review: targets, scope, attribution, Python, permissions", () => {
     expect(cost.lastRun).toBeUndefined()
     expect(cost.unknownReason).toContain("No run of model.s.m on the current target (prod)")
     expect(cost.unknownReason).toContain("dev: 2 runs, typical $6.25")
-    expect(cost.otherTargets).toEqual([{ target: "dev", runs: 2, typical: 6.25 }])
+    expect(cost.otherTargets).toEqual([{ target: "dev", runs: 2, typical: 6.25, attribution: "bytes_billed", rate: DEMAND }])
     // Runs that name no target are not the current target's either.
-    expect(price([run("u", 0, TIB, "")], "prod").otherTargets).toEqual([{ target: "unknown target", runs: 1, typical: 6.25 }])
+    expect(price([run("u", 0, TIB, "")], "prod").otherTargets).toEqual([{ target: "unknown target", runs: 1, typical: 6.25, attribution: "bytes_billed", rate: DEMAND }])
   })
 
   test("the history reads the target name from the query comment, and the target's own name is read", () => {
@@ -1197,12 +1204,46 @@ describe("checklist review: BigQuery ML, window edge, labelled pairing, target s
       const cost = priceBigquery(rows, undefined, "model.s.m", {}, undefined, { target: "prod" }).cost
       expect(cost.runs).toBe(1)
       expect(cost.lastRun).toBe(6.25)
-      expect(cost.otherTargets).toEqual([{ target: "dev", runs: 1, typical: 62.5 }])
+      expect(cost.otherTargets).toEqual([{ target: "dev", runs: 1, typical: 62.5, attribution: "bytes_billed", rate: DEMAND }])
     }
     // A job naming no target is not absorbed by a named one.
     const unnamed = priceBigquery([prod, j("u", 1, 1, 10 * TIB, "MERGE")], undefined, "model.s.m", {}, undefined, { target: "prod" }).cost
     expect(unnamed.lastRun).toBe(6.25)
-    expect(unnamed.otherTargets).toEqual([{ target: "unknown target", runs: 1, typical: 62.5 }])
+    expect(unnamed.otherTargets).toEqual([{ target: "unknown target", runs: 1, typical: 62.5, attribution: "bytes_billed", rate: DEMAND }])
+  })
+
+  test("each other target says how its figure was priced and at what rate, in the metadata and the note", () => {
+    const tg = (row: Row, target: string): Row => ({ ...row, target_name: target })
+    const rows = [
+      tg(j("p", 0, 1, TIB, "MERGE"), "prod"),
+      tg(j("d", 100, 1, null, "MERGE", {}), "dev"),
+      { ...tg(j("c", 200, 1, TIB, "MERGE"), "ci"), reservation_id: "res", total_slot_ms: "7200000" },
+      tg(j("m1", 300, 1, TIB, "MERGE"), "mix"),
+      { ...tg(j("m2", 400, 1, null, "MERGE"), "mix"), reservation_id: "res", total_slot_ms: "3600000" },
+    ]
+    rows[1] = { ...rows[1], total_bytes_billed: String(2 * TIB) }
+    const cost = priceBigquery(rows, undefined, "model.s.m", { bigqueryUsdPerTib: 5 }, undefined, { target: "prod" }).cost
+    const by = Object.fromEntries((cost.otherTargets ?? []).map((o) => [o.target, o]))
+    expect(by.dev).toMatchObject({ attribution: "bytes_billed", rate: { value: 5, unit: "USD/TiB", source: "config" } })
+    expect(by.ci).toMatchObject({ attribution: "slot_time", typical: 0.12, rate: { value: 0.06, unit: "USD/slot-hour", source: "default" } })
+    expect(by.mix).toMatchObject({ attribution: "mixed", rate: { unit: "USD/TiB" }, slotRate: { unit: "USD/slot-hour" } })
+    const note = cost.notes.join(" ")
+    expect(note).toContain("dev: 1 run, typical $10.00 (bytes billed at 5 USD/TiB, your config)")
+    expect(note).toContain("ci: 1 run, typical $0.12 (attributed slot time at 0.06 USD/slot-hour, default)")
+    expect(note).toContain("mix: 2 runs")
+    expect(note).toContain("bytes billed at 5 USD/TiB, your config and attributed slot time at 0.06 USD/slot-hour, default")
+  })
+
+  test("a full read of the invocations' own jobs leaves out every labelled run, whatever the unlabelled boundary read found", () => {
+    const labelled = [inv(j("m", 60, 1, TIB, "MERGE"), "i1")]
+    const unlabelled = [j("u", 20 * 60, 1, TIB, "MERGE")]
+    const price = (rows: Row[], extra: object) => priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C4, stmts: [], ...extra }).cost
+    const full = price(labelled, { invocationsFull: true })
+    expect(full.basis).toBe("none")
+    expect(full.notes.join(" ")).toContain("may have started before the period read")
+    expect(price(labelled, {}).runs).toBe(1)
+    // An unlabelled run is not part of that read.
+    expect(price(unlabelled, { invocationsFull: true }).runs).toBe(1)
   })
 
   test("only the caller's jobs and reservation attribution share the first line", () => {

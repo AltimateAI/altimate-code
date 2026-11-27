@@ -53,7 +53,15 @@ export type CostInfo = {
   /** The dbt target the statistics are of, when the runs could be told apart by target. */
   target?: string
   /** Runs of other targets (and of an unknown one), left out of the statistics. */
-  otherTargets?: { target: string; runs: number; typical: number }[]
+  otherTargets?: {
+    target: string
+    runs: number
+    typical: number
+    /** How its runs were priced, and the rate behind `typical` (the on-demand rate; `slotRate` too when the runs mix both). */
+    attribution: "slot_time" | "bytes_billed" | "mixed"
+    rate: CostRate
+    slotRate?: CostRate
+  }[]
   native?: { unit: NativeUnit; lastRun?: number; typical?: number; highest?: number }
   rate: CostRate | null
   notes: string[]
@@ -268,8 +276,6 @@ export function bigqueryBoundarySql(input: {
   needle: string
   view?: JobsView
   window: BoundaryWindow
-  /** Invocation ids of the runs read: an earlier job of one of them belongs to it however long before it ended. */
-  invocations?: string[]
 }): string {
   const at = (ms: number) => `timestamp_millis(${ms})`
   const w = input.window
@@ -278,12 +284,6 @@ export function bigqueryBoundarySql(input: {
   // its final build) and was created in the lookback, or a job still going (not done, or with no end time yet) created
   // no further back than the longest job span. Jobs still going come first, so finished ones cannot crowd them out of the limit.
   const going = `(upper(state) in ('PENDING','RUNNING') or end_time is null)`
-  // An earlier job of a run's own invocation belongs to it however long before the cutoff it ended.
-  const ids = [...new Set(input.invocations ?? [])]
-  const labelIn = ids.length ? `(select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")})` : "false"
-  const sameInvocation = ids.length
-    ? `\n    or (creation_time > ${at(w.invocationStartAfterMs)} and upper(state) = 'DONE' and error_result is null and ${labelIn})`
-    : ""
   return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}, ${targetColumn}
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time < ${at(w.startBeforeMs)}
@@ -295,11 +295,31 @@ where creation_time < ${at(w.startBeforeMs)}
       end_time >= ${at(w.joinEndAtLeastMs)}
       or (upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
           and end_time >= ${at(w.tmpEndAtLeastMs)})
-    ))${sameInvocation}
+    ))
   )
   and ${notOwn}
   and strpos(query, ${sqlString(input.needle)}) > 0
-order by ${going} desc, ${ids.length ? `${labelIn} desc, ` : ""}creation_time desc limit ${HISTORY_LIMIT}`
+order by ${going} desc, creation_time desc limit ${HISTORY_LIMIT}`
+}
+
+/**
+ * The jobs of the invocations already read, from before the cutoff and as far back as JOBS keeps them, in a read of their
+ * own: an invocation has no span limit, so these are found by id, and a full unlabelled boundary read cannot crowd them out.
+ * When this read is full, the invocations are not known to be complete.
+ */
+export function bigqueryInvocationSql(input: { project: string; location?: unknown; needle: string; view?: JobsView; window: BoundaryWindow; invocations: string[] }): string {
+  const at = (ms: number) => `timestamp_millis(${ms})`
+  const w = input.window
+  const ids = [...new Set(input.invocations)]
+  return `select /* invocation jobs */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}, ${targetColumn}
+from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
+where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.invocationStartAfterMs)}
+  and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
+  and parent_job_id is null
+  and ${notOwn}
+  and strpos(query, ${sqlString(input.needle)}) > 0
+  and (select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")})
+order by creation_time desc limit ${HISTORY_LIMIT}`
 }
 
 // ---- Running a query through the dbt adapter ----
@@ -375,6 +395,8 @@ export type Boundary = {
   stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; inv?: string; target?: string }[]
   /** Jobs still going (queued, running, or with no end time) in the window, each lasting to the instant read. They leave out any run they could chain into. */
   live?: { user: string | null; start: number; inv?: string; target?: string }[]
+  /** The read of the invocations' own jobs was full: no labelled run is known to be complete. */
+  invocationsFull?: boolean
   /** The boundary read was full: it cannot say what it left out, so runs near the cutoff are not trusted besides. */
   full?: boolean
   /** The boundary read was full: every run by these users, who have a job still going, is left out. */
@@ -658,6 +680,7 @@ export function bigqueryRuns(
   const unsure = (r: BqUnit) =>
     boundary
       ? !!boundary.stmts?.some((b) => joins(b, r)) ||
+        (boundary.invocationsFull === true && !!r.inv) ||
         // The time fallback is for unlabelled runs: a labelled run is complete when every job of its invocation was read.
         ((!boundary.stmts || boundary.full === true) && !r.inv && r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS)
       : false
@@ -674,15 +697,40 @@ export function bigqueryRuns(
   }
 }
 
-/** The runs left out of the figures because of another target (or none named), by target. */
-function otherTargetsOf(runs: BqUnit[]): NonNullable<CostInfo["otherTargets"]> {
-  const by = new Map<string, number[]>()
-  for (const r of runs) by.set(r.target || "unknown target", [...(by.get(r.target || "unknown target") ?? []), r.cost])
-  return [...by.entries()].map(([target, costs]) => ({ target, runs: costs.length, typical: median(costs) })).sort((a, b) => b.runs - a.runs)
+/** The runs left out of the figures because of another target (or none named), by target, each with how it was priced. */
+function otherTargetsOf(runs: BqUnit[], demand: CostRate, slot: CostRate): NonNullable<CostInfo["otherTargets"]> {
+  const by = new Map<string, BqUnit[]>()
+  for (const r of runs) by.set(r.target || "unknown target", [...(by.get(r.target || "unknown target") ?? []), r])
+  return [...by.entries()]
+    .map(([target, rs]) => {
+      const anyDemand = rs.some((r) => r.demand)
+      const anySlots = rs.some((r) => r.reserved)
+      const attribution = anyDemand && anySlots ? "mixed" : anySlots ? "slot_time" : "bytes_billed"
+      return {
+        target,
+        runs: rs.length,
+        typical: median(rs.map((r) => r.cost)),
+        attribution: attribution as "slot_time" | "bytes_billed" | "mixed",
+        rate: attribution === "slot_time" ? slot : demand,
+        ...(attribution === "mixed" && { slotRate: slot }),
+      }
+    })
+    .sort((a, b) => b.runs - a.runs)
 }
 
+const rateText = (r: CostRate) => `${r.value} ${r.unit}, ${r.source === "config" ? "your config" : "default"}`
 const otherTargetsText = (others: NonNullable<CostInfo["otherTargets"]>) =>
-  others.map((o) => `${o.target}: ${plural(o.runs, "run")}, typical ${formatMoney(o.typical)}`).join("; ")
+  others
+    .map((o) => {
+      const how =
+        o.attribution === "slot_time"
+          ? `attributed slot time at ${rateText(o.rate)}`
+          : o.attribution === "mixed"
+            ? `bytes billed at ${rateText(o.rate)} and attributed slot time at ${rateText(o.slotRate!)}`
+            : `bytes billed at ${rateText(o.rate)}`
+      return `${o.target}: ${plural(o.runs, "run")}, typical ${formatMoney(o.typical)} (${how})`
+    })
+    .join("; ")
 
 export function priceBigquery(
   rows: Row[],
@@ -732,6 +780,8 @@ export function priceBigquery(
         [...new Set(units.filter((u) => u.target !== opts.target).map((u) => u.target))].flatMap(
           (t) => bigqueryRuns(units.filter((u) => u.target === t), boundary, opts.asOfMs).runs,
         ),
+        demand.rate,
+        slot.rate,
       )
     : []
   const anyReserved = units.some((u) => u.reserved)
@@ -986,7 +1036,11 @@ export async function loadHistory(input: {
    * The matching statements just before the period `read` covers: the history read's own cutoff when it hit its
    * limit, else the start of the window. A boundary that can't be read (or hit its limit) is unknown.
    */
-  const boundaryFor = async (read: Row[], sqlFor: (window: BoundaryWindow) => string): Promise<Boundary | undefined> => {
+  const boundaryFor = async (
+    read: Row[],
+    sqlFor: (window: BoundaryWindow) => string,
+    invocationSqlFor?: (window: BoundaryWindow) => string,
+  ): Promise<Boundary | undefined> => {
     if (!read.length) return undefined
     const starts = read.map((r) => parseTime(r.creation_time)).filter(Number.isFinite)
     const hit = read.length >= HISTORY_LIMIT && starts.length > 0
@@ -997,7 +1051,13 @@ export async function loadHistory(input: {
       // The window reaches the cutoff's own instant (a statement that starts exactly at it is read: the main read takes
       // only statements after the window's start, and the oldest statement it returned is at the cutoff itself) while
       // every lookback is measured from the cutoff. The statements already read come back too and are filtered out below.
-      const found = await rows(sqlFor(boundaryWindow(cutoff, windowStartMs(asOfMs, JOBS_RETENTION_DAYS))))
+      const window = boundaryWindow(cutoff, windowStartMs(asOfMs, JOBS_RETENTION_DAYS))
+      const boundaryRows = await rows(sqlFor(window))
+      // The invocations' own jobs, read apart; both reads' rows are evidence, a job in both counted once.
+      const ownRows = invocationSqlFor ? await rows(invocationSqlFor(window)) : []
+      const invocationsFull = ownRows.length >= HISTORY_LIMIT
+      const seen = new Set(boundaryRows.map((r) => r.job_id))
+      const found = [...boundaryRows, ...ownRows.filter((r) => !seen.has(r.job_id))]
       const going = (r: Row) => isPending(r)
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r.job_id))
@@ -1005,10 +1065,11 @@ export async function loadHistory(input: {
       const live = unread.filter(going).map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time), inv: r.dbt_invocation_id ?? "", target: r.target_name ?? "" }))
       // Full: the read cannot say what it left out, so the fallback applies besides all the evidence it did return, and
       // every run by a user with a job still going is left out.
-      const full = found.length >= HISTORY_LIMIT
+      const full = boundaryRows.length >= HISTORY_LIMIT
       return {
         cutoff,
         live,
+        ...(invocationsFull && { invocationsFull }),
         ...(full && { full, liveFullUsers: [...new Set(live.map((j) => j.user ?? ""))] }),
         stmts: unread
           .filter((r) => !going(r))
@@ -1093,15 +1154,13 @@ export async function loadHistory(input: {
       // The boundary is read from the view the history came from.
       let boundary: Boundary | undefined
       try {
-        boundary = await boundaryFor(history.rows, (window) =>
-          bigqueryBoundarySql({
-          project,
-          location,
-          needle: needleFor(id),
-          view: history.view,
-          window,
-          invocations: history.rows.map((r) => r.dbt_invocation_id ?? "").filter(Boolean),
-        }),
+        const invocations = history.rows.map((r) => r.dbt_invocation_id ?? "").filter(Boolean)
+        boundary = await boundaryFor(
+          history.rows,
+          (window) => bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, window }),
+          invocations.length
+            ? (window) => bigqueryInvocationSql({ project, location, needle: needleFor(id), view: history.view, window, invocations })
+            : undefined,
         )
       } catch (e) {
         if (!(e instanceof BoundaryUnreadable)) throw e

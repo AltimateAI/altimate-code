@@ -49,6 +49,8 @@ function fakeAdapter(
     compile?: () => Promise<string>
     /** The table a history query renders (see `table`), or a failure to throw; the SQL it was asked is passed in. */
     history?: (jinja: string) => Promise<string>
+    /** What the read of the invocations' own jobs renders; none by default. */
+    invocations?: (jinja: string) => Promise<string>
     /** What the boundary query (the matching statements just before the period read) renders; none by default. */
     boundary?: (jinja: string) => Promise<string>
     /** What the dbt target renders. */
@@ -71,6 +73,8 @@ function fakeAdapter(
     unsafeCompileQuery: async (query: string, name?: string) => {
       if (query.startsWith("{%- if execute -%}{%- set altimate_rows")) {
         historyLog.push(query)
+        if (query.includes("/* invocation jobs */"))
+          return opts.invocations ? opts.invocations(query) : table(["job_id", "user_email", "creation_time", "end_time", "state"], [])
         if (query.includes("/* run boundary */"))
           return opts.boundary ? opts.boundary(query) : table(["session_id", "creation_time", "start_time", "end_time"], [])
         if (opts.history) return opts.history(query)
@@ -422,6 +426,7 @@ describe("dbt_cost_estimate", () => {
 const JOB_COLUMNS = ["job_id", "user_email", "creation_time", "end_time", "statement_type", "destination_table_id", "destination_dataset_id", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const CHILD_COLUMNS = ["job_id", "parent_job_id", "creation_time", "statement_type", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const TIB = 1024 ** 4
+const DEMAND = { value: 6.25, unit: "USD/TiB", source: "default" }
 const job = (
   id: string,
   start: string,
@@ -997,7 +1002,7 @@ describe("dbt_cost_estimate cost", () => {
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
     const cost = result.metadata.cost
     expect(cost).toMatchObject({ basis: "history", runs: 1, lastRun: 12.5, target: "prod", scope: "project" })
-    expect(cost.otherTargets).toEqual([{ target: "dev", runs: 2, typical: 0.0625 }])
+    expect(cost.otherTargets).toEqual([{ target: "dev", runs: 2, typical: 0.0625, attribution: "bytes_billed", rate: DEMAND }])
     expect(result.output).toContain("Runs of other targets are not in these figures: dev: 2 runs")
     expect(historyLog.find((q) => q.includes("total_bytes_billed"))).toContain("target_name")
   })
@@ -1029,7 +1034,7 @@ describe("dbt_cost_estimate cost", () => {
       const cost = (await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost
       expect(cost.runs).toBe(1)
       // The query asks for the invocation's jobs back to the 180 days JOBS keeps.
-      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`creation_time > timestamp_millis(${asOfMs - 180 * 86_400_000}) and upper(state)`)
+      expect(historyLog.find((q) => q.includes("invocation jobs"))).toContain(`creation_time > timestamp_millis(${asOfMs - 180 * 86_400_000})`)
     })
   })
 
@@ -1365,14 +1370,16 @@ describe("dbt_cost_estimate cost", () => {
           resetDbtAdapter()
           useAdapter(calls, {
             history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [oldest, ownRun(runId), ...fillers.slice(1, 499)])),
-            // An adapter consistent with the SQL: the earlier job is returned iff its id is asked for and it is after the label branch's start.
-            boundary: async (jinja) => {
-              const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) and upper\(state\) = \\?'DONE\\?' and error_result is null and \(select value/)
-              // The label branch reads from the start of the history window, not from the cutoff.
+            // The boundary read is full of unlabelled jobs, which must not crowd out the invocation's own jobs, read apart.
+            boundary: async () =>
+              table(BC, Array.from({ length: 500 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - 60_000), iso(T0 - 30_000), "DONE", "MERGE", null, null, null])),
+            // An adapter consistent with the SQL: the earlier job is returned iff its id is asked for and it is after the read's start.
+            invocations: async (jinja) => {
+              const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\)/)
+              // The read reaches back as far as JOBS keeps jobs, not from the cutoff.
               expect(after).toBe(asOf - 180 * day)
               const seen = jinja.includes(`\\'${earlierId}\\'`) && earlierAt > after
-              const rows = Array.from({ length: seen ? 499 : 500 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - 60_000), iso(T0 - 30_000), "DONE", "MERGE", null, null, null])
-              return table(BC, seen ? [["x", "a@x.com", iso(earlierAt), iso(earlierAt + 60_000), "DONE", "MERGE", null, null, earlierId], ...rows] : rows)
+              return table(BC, seen ? [["x", "a@x.com", iso(earlierAt), iso(earlierAt + 60_000), "DONE", "MERGE", null, null, earlierId]] : [])
             },
           })
           return ask()
@@ -1382,6 +1389,27 @@ describe("dbt_cost_estimate cost", () => {
         // The same invocation's job is what leaves the run out: with another id the run is one more priced run.
         const other = await ask1("i1", "i2")
         expect(other.runs).toBe((same.runs ?? 0) + 1)
+      })
+    })
+
+    test("a full read of the invocations' own jobs leaves the labelled run out as possibly cut", async () => {
+      await withNow(async () => {
+        const T0 = asOf - 5 * day
+        const columns = [...JOB_COLUMNS, "state", "dbt_invocation_id"]
+        const run = ["m", "a@x.com", iso(T0 + 80 * 3_600_000), iso(T0 + 80 * 3_600_000 + 60_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "i1"]
+        const BC = [...BOUNDARY_COLS, "dbt_invocation_id"]
+        const ask1 = async (own: number) => {
+          resetDbtAdapter()
+          useAdapter(calls, {
+            history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [run])),
+            invocations: async () => table(BC, Array.from({ length: own }, (_, i) => [`o${i}`, "z@x.com", iso(T0 - 3_600_000 - i * 1000), iso(T0 - 3_000_000 - i * 1000), "DONE", "MERGE", null, null, "other"])),
+          })
+          return ask()
+        }
+        expect((await ask1(499)).runs).toBe(1)
+        const full = await ask1(500)
+        expect(full.runs).toBeUndefined()
+        expect(full.notes.join(" ")).toContain("may have started before the period read")
       })
     })
 
