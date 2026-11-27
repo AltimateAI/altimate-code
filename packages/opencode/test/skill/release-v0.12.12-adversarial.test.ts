@@ -6,8 +6,6 @@
  *
  * This file adds the boundary classes those suites do not reach, and covers the release review fixes:
  *
- *   - `dbt_cost_estimate`'s script check against statement smuggling on Snowflake and Databricks, its Jinja
- *     literal against breaking out of the string, and its plan parsers against hostile JSON.
  *   - The classifier's hard-deny list for the DROP forms #1644 added, and that Jinja keeps a read from
  *     being read as one.
  *   - `readRunResults` against non-files, non-JSON, prototype keys, an oversized file (the review's size
@@ -23,14 +21,6 @@ import path from "path"
 import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
-import {
-  explainJinja,
-  formatBytes,
-  mayBeScript,
-  parseDatabricksExplainCost,
-  parseSnowflakeExplain,
-  readsFiles,
-} from "@/altimate/tools/dbt-cost-estimate"
 import { classifyAndCheck, mentionsHardDenyAnywhere } from "@/altimate/tools/sql-classify"
 import { readRunResults, resolveDbtTargetPath } from "@/altimate/validators/validator-utils"
 import { dbtAdapterFor } from "@/altimate/tools/dbt-adapter-access"
@@ -54,84 +44,6 @@ const ctx = (extra: Partial<Tool.Context> = {}): Tool.Context => ({
   metadata: () => Effect.void,
   ask: () => Effect.void,
   ...extra,
-})
-
-describe("v0.12.12: dbt_cost_estimate never sends a second statement", () => {
-  const smuggled = [
-    "select 1; drop table t",
-    "select 1;\ndrop table t",
-    "select 1 /* ; */; delete from t",
-    "select $$; drop table t$$",
-    "select 1 // ;\n; drop table t",
-    "!set variable_substitution=true\nselect 1",
-    "select 1 /* unclosed",
-    "select 'unclosed",
-    "execute immediate 'drop table t'",
-    "select 1;select 2",
-  ]
-  for (const sql of smuggled)
-    test(`Snowflake counts as a script: ${JSON.stringify(sql)}`, () => {
-      expect(mayBeScript(sql, "snowflake")).toBe(true)
-    })
-
-  for (const sql of ["select 1; drop table t", "select 1 /* unclosed", "select `a;b`; drop table t"])
-    test(`Databricks counts as a script: ${JSON.stringify(sql)}`, () => {
-      expect(mayBeScript(sql, "databricks")).toBe(true)
-    })
-
-  test("a single statement with quoted semicolons and a trailing one is not a script", () => {
-    expect(mayBeScript("select ';' as a, \"b;c\" from t -- ; trailing\n;", "snowflake")).toBe(false)
-    expect(mayBeScript("select `a;b` from t;", "databricks")).toBe(false)
-  })
-
-  test("the empty string and whitespace are not scripts", () => {
-    expect(mayBeScript("", "snowflake")).toBe(false)
-    expect(mayBeScript("  \n\t ", "databricks")).toBe(false)
-  })
-
-  test("the Jinja literal cannot be closed by the SQL it carries", () => {
-    for (const sql of ["select '}}' as a", "select 'x' ~ '{{ 7*7 }}'", "select '\\' as b", "select 'it''s'", "{% do run_query('drop table t') %}"]) {
-      const jinja = explainJinja("EXPLAIN USING JSON", sql)
-      const literal = jinja.match(/run_query\('((?:\\.|[^'\\])*)'\)/)
-      expect(literal).not.toBeNull()
-      // Unescaping the literal gives back exactly the statement: nothing leaked outside the quotes.
-      expect(literal![1].replace(/\\(.)/g, "$1")).toBe(`EXPLAIN USING JSON\n${sql}`)
-    }
-  })
-
-  test("Databricks queries that read files are refused", () => {
-    for (const sql of ["select * from read_files('s3://b/x')", "SELECT * FROM cloud_files('/p', 'json')", "select * from json.`/tmp/a.json`"])
-      expect(readsFiles(sql)).toBe(true)
-    expect(readsFiles("select read_files_count from t")).toBe(false)
-  })
-})
-
-describe("v0.12.12: plan parsers against hostile JSON", () => {
-  const junk: unknown[] = [null, undefined, 0, -1, NaN, "", "{}", [], [null], {}, { __proto__: { bytesAssigned: 5 } }, JSON.parse('{"__proto__":{"GlobalStats":{"bytesAssigned":5}}}')]
-  test("Snowflake: junk gives no estimate and does not throw", () => {
-    for (const value of junk) expect(parseSnowflakeExplain(value)).toBeUndefined()
-  })
-  test("Snowflake: negative or non-numeric bytes give no estimate", () => {
-    for (const bytesAssigned of [-1, "12", NaN, Infinity])
-      expect(parseSnowflakeExplain(JSON.stringify({ GlobalStats: { bytesAssigned, partitionsAssigned: 1, partitionsTotal: 1 } }))).toBeUndefined()
-    // The same plan with a real count is read, so the cases above fail on the bytes, not the shape.
-    expect(parseSnowflakeExplain(JSON.stringify({ GlobalStats: { bytesAssigned: 5, partitionsAssigned: 1, partitionsTotal: 1 } }))).toBeDefined()
-  })
-  test("Databricks: junk gives no estimate and does not throw", () => {
-    for (const value of junk) expect(() => parseDatabricksExplainCost(value)).not.toThrow()
-    for (const value of [null, undefined, 0, "", [], {}]) {
-      const r = parseDatabricksExplainCost(value)
-      expect(r === undefined || (typeof r === "object" && "noStats" in r)).toBe(true)
-    }
-  })
-  test("formatBytes at the boundaries", () => {
-    expect(formatBytes(0)).toBe("0.0 Bytes")
-    expect(formatBytes(1023)).toBe("1023.0 Bytes")
-    expect(formatBytes(1024)).not.toContain("Bytes")
-    // The largest unit holds any size: no "undefined" unit.
-    expect(formatBytes(Number.MAX_SAFE_INTEGER)).not.toContain("undefined")
-    expect(formatBytes(1024 ** 8)).not.toContain("undefined")
-  })
 })
 
 describe("v0.12.12: SQL classification hardening (#1644)", () => {

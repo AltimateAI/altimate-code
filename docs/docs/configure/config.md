@@ -63,6 +63,7 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `plugin` | `string[]` | Plugin specifiers |
 | `instructions` | `string[]` | Glob patterns for instruction files |
 | `telemetry` | `object` | Telemetry settings (see [Telemetry](../reference/telemetry.md)) |
+| `cost` | `object` | Rates `dbt_cost_estimate` prices BigQuery usage at: `bigqueryUsdPerTib`, `bigquerySlotHourUsd` (see [dbt tools](../data-engineering/tools/dbt-tools.md#dbt_cost_estimate)) |
 | `compaction` | `object` | Context compaction settings (see [Context Management](context-management.md)) |
 | `experimental` | `object` | Experimental feature flags |
 
