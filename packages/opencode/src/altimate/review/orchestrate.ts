@@ -2913,16 +2913,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const kept = new Set(r.kept)
     return { kept: list.filter((f) => !aiReviewed.has(f.file) || kept.has(f)), dropped: r.dropped }
   }
-  let offDropped: Record<string, number> = {}
-  findings = ruleStep(findings, (list) => {
-    const r = offStep(list)
-    offDropped = r.dropped
-    return r.kept
-  })
+  findings = ruleStep(findings, (list) => offStep(list).kept)
   const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
   const refuted = (f: Finding) =>
     findingOrigin(f) !== "ai" && !inMixed(f) && f.severity !== "critical" && verdictOf(f) === "refuted"
-  const rulesRefuted = aiLaneRan && ruleVerifyAttempted ? findings.filter(refuted).length : undefined
   if (aiLaneRan && ruleVerdicts.size) {
     findings = findings.filter((f) => !refuted(f))
   }
@@ -2930,24 +2924,29 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   if (aiLaneRan && input.rulePolicy && ruleVerifyAttempted) {
     if (ruleVerifierRan) {
       const byId = (list: Finding[]) => new Map(list.map((f) => [f.id, verdictOf(f) ?? null] as const))
-      let postedDropped: RulePolicyDrops = { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 }
-      findings = ruleStep(findings, (list) => {
-        const r = dropByRulePolicy(list, byId(list), input.rulePolicy)
-        postedDropped = r.dropped
-        return r.kept
-      })
-      rulePolicy = { applied: true, dropped: postedDropped }
+      findings = ruleStep(findings, (list) => dropByRulePolicy(list, byId(list), input.rulePolicy).kept)
+      // The counts are taken over the instances below.
+      rulePolicy = { applied: true, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
     } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }
   // The verdict counts the rule findings these steps did not post. When they change it — toward
   // REQUEST_CHANGES (a confident engine warning toward the ≥3-warning pattern), or away from APPROVE
   // with nothing else to show — they are listed with why they were withheld, so every verdict is
-  // explainable from the comment.
+  // explainable from the comment. The per-step counts (`rulesOff`, `rulesRefuted`, `rulePolicy`) are
+  // taken here over the instances, the unit the verdict, the summary and this list use; a merged
+  // comment of three instances counts three.
   type Withheld = NonNullable<VerdictEnvelope["withheld"]>[number]
   const withheldAll: Array<{ f: Finding; reason: Withheld["reason"] }> = []
+  let offDropped: Record<string, number> = {}
   {
     let rest = verdictFindings
-    const offKept = new Set(ruleStep(rest, (list) => offStep(list).kept))
+    const offKept = new Set(
+      ruleStep(rest, (list) => {
+        const r = offStep(list)
+        offDropped = r.dropped
+        return r.kept
+      }),
+    )
     for (const f of rest) if (!offKept.has(f)) withheldAll.push({ f, reason: "rule_type_off" })
     rest = rest.filter((f) => offKept.has(f))
     if (aiLaneRan && ruleVerdicts.size) {
@@ -2957,9 +2956,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     if (rulePolicy?.applied && input.rulePolicy)
       for (const f of rest) {
         const why = inMixed(f) ? undefined : rulePolicyDrop(f, verdictOf(f) ?? null, input.rulePolicy)
-        if (why) withheldAll.push({ f, reason: why })
+        if (why) {
+          withheldAll.push({ f, reason: why })
+          rulePolicy.dropped[why]++
+        }
       }
   }
+  const rulesRefuted = aiLaneRan && ruleVerifyAttempted ? withheldAll.filter((w) => w.reason === "refuted").length : undefined
   const withheldIds = new Set(withheldAll.map((w) => w.f))
   const idealAll = computeIdealVerdict(verdictFindings, input.rubric)
   const idealPosted = computeIdealVerdict(verdictFindings.filter((f) => !withheldIds.has(f)), input.rubric)

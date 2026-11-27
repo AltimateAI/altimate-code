@@ -555,6 +555,17 @@ describe("round 2c: a block on withheld findings is explainable", () => {
   })
 })
 
+// The same engine warning on three lines of one file: one merged comment, three instances.
+const repeatRunner: ReviewRunner = {
+  ...runner,
+  async check() {
+    return {
+      issues: ["status", "amount", "region"].map((col, i) => ({ rule: "ambiguous-column", severity: "error", category: "correctness", message: `ambiguous column \`${col}\``, line: i + 2 })),
+      ran: true,
+    }
+  },
+} as ReviewRunner
+
 describe("round 4: withheld findings in the comment and the merge", () => {
   test("a run whose findings were all withheld does not say no issues were found", async () => {
     const { renderSummary } = await import("../../src/altimate/review/format")
@@ -592,5 +603,17 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(merged.idealVerdict).toBe("REQUEST_CHANGES")
     expect(merged.withheld?.map((x) => x.id).sort()).toEqual(a.withheld!.map((x) => x.id).sort())
     expect(renderSummary(merged, { maxChars: Infinity })).toContain("### Withheld rule findings that count toward this verdict")
+  })
+
+  test("the per-step counts are instances, like the withheld list and the verdict", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const env = await run({ mode: "gate", runner: repeatRunner, verdictAt: () => "refuted" })
+    // Three instances of one merged warning comment, all listed as withheld (they block)...
+    expect(env.withheld?.filter((x) => x.reason === "refuted")).toHaveLength(3)
+    // ...and three suggestion findings: six refuted instances, not four comments.
+    expect(env.findings.filter((f) => f.origin !== "ai")).toHaveLength(0)
+    expect(env.summary).toMatchObject({ warning: 4, suggestion: 3 })
+    expect(env.rulesRefuted).toBe(6)
+    expect(renderSummary(env, { maxChars: Infinity })).toContain("6 rule finding(s) not posted")
   })
 })
