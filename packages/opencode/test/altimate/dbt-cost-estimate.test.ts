@@ -1037,15 +1037,15 @@ describe("dbt_cost_estimate cost", () => {
     })
 
     // 500 statements are returned, so the cutoff is the oldest one's start, five days before the instant read; user a's
-    // later build starts two days after it, beyond the 24 hours the full boundary read falls back to.
+    // later build starts 3.5 days after it, beyond the 72 hours 10 minutes the full boundary read falls back to.
     const T0 = asOf - 5 * day
     const step = 864_000
     const fullRows = () => [
       row("old", T0, T0 + 60_000, "MERGE", TIB),
       ...Array.from({ length: 499 }, (_, i) => {
         const at = T0 + (i + 1) * step
-        const r = row(`f${i}`, at, at + 60_000, "MERGE", i === 199 ? 100 * TIB : TIB)
-        r[1] = i === 199 ? "a@x.com" : `u${i}@x.com`
+        const r = row(`f${i}`, at, at + 60_000, "MERGE", i === 349 ? 100 * TIB : TIB)
+        r[1] = i === 349 ? "a@x.com" : `u${i}@x.com`
         return r
       }),
     ]
@@ -1056,7 +1056,7 @@ describe("dbt_cost_estimate cost", () => {
     const goingRow = (end: string | null, state: string, created = T0 - 60_000, user = "a@x.com") => ["q", user, iso(created), end, state, "MERGE", null, null]
     const boundaryQueries = () => historyLog.filter((q) => q.includes("run boundary"))
 
-    test("a pending job a minute before the cutoff leaves out user a's build 2 days later, though the boundary read was full", async () => {
+    test("a pending job a minute before the cutoff leaves out user a's build 3.5 days later, though the boundary read was full", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([goingRow(null, "PENDING")]) })
         const cost = await ask()
@@ -1071,7 +1071,7 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
-    test("a DONE job with no end time before the cutoff is read as going and leaves out the same user's build two days later", async () => {
+    test("a DONE job with no end time before the cutoff is read as going and leaves out the same user's build 3.5 days later", async () => {
       await withNow(async () => {
         useAdapter(calls, {
           ...answer(fullRows()),
@@ -1105,25 +1105,25 @@ describe("dbt_cost_estimate cost", () => {
     }
     const HOUR = 3_600_000
 
-    test("a full boundary read leaves out a run starting 25 hours after the cutoff: a job can be in flight for 42 hours", async () => {
+    test("a full boundary read leaves out a run starting 25 hours after the cutoff: a job can be in flight for 72 hours", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(rowsWithMerge(25 * HOUR)), boundary: fullBoundaryWith([]) })
         expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
       })
     })
 
-    test("a full boundary read leaves out a run 42 hours 1 minute after the cutoff, within the longest job span plus the join gap", async () => {
+    test("a full boundary read leaves out a run 72 hours 1 minute after the cutoff, within the longest job span plus the join gap", async () => {
       await withNow(async () => {
-        useAdapter(calls, { ...answer(rowsWithMerge(42 * HOUR + 60_000)), boundary: fullBoundaryWith([]) })
+        useAdapter(calls, { ...answer(rowsWithMerge(72 * HOUR + 60_000)), boundary: fullBoundaryWith([]) })
         expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
       })
     })
 
-    test("a CTAS created 42 hours 5 minutes before the cutoff that finished 7 minutes before it joins a merge a minute after it: the run is left out", async () => {
+    test("a CTAS created 72 hours 5 minutes before the cutoff that finished 7 minutes before it joins a merge a minute after it: the run is left out", async () => {
       await withNow(async () => {
         const edge = asOf - 30 * day
         const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
-        const created = edge - 42 * HOUR - 5 * 60_000
+        const created = edge - 72 * HOUR - 5 * 60_000
         useAdapter(calls, {
           ...answer([row("m", edge + 60_000, edge + 120_000, "MERGE", TIB, "DONE", "d")]),
           // An adapter consistent with the SQL: the finished CTAS is returned iff it was created after the lookback's start.
@@ -1138,10 +1138,28 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
+    test("a CREATE MODEL hook that ran for 47 hours before the cutoff and a merge 10 seconds after it are one run that began unread", async () => {
+      await withNow(async () => {
+        const edge = asOf - 30 * day
+        const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
+        const created = edge - 47 * HOUR
+        useAdapter(calls, {
+          ...answer([row("m", edge + 10_000, edge + 70_000, "MERGE", TIB, "DONE", "d")]),
+          boundary: async (jinja) => {
+            const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) and upper\(state\) = \\?'DONE/)
+            return table(BOUNDARY_COLS, created > after ? [["h", "a@x.com", iso(created), iso(edge - 30_000), "DONE", "CREATE_MODEL", null, null]] : [])
+          },
+        })
+        const cost = await ask()
+        expect(cost.runs).toBeUndefined()
+        expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+      })
+    })
+
     test("a full boundary read keeps the finished jobs it returned: a CTAS queued 23 hours and run for 2 chains into a merge past the boundary span", async () => {
       await withNow(async () => {
-        const merge = 42 * HOUR + 20 * 60_000
-        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 42 * HOUR + 13 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
+        const merge = 72 * HOUR + 20 * 60_000
+        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 72 * HOUR + 13 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
         const boundary = async () =>
           table(BOUNDARY_COLS, [ctas, ...Array.from({ length: 499 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - HOUR), iso(T0 - HOUR + 60_000), "DONE", "MERGE", null, null])])
         useAdapter(calls, { ...answer(rowsWithMerge(merge)), boundary })

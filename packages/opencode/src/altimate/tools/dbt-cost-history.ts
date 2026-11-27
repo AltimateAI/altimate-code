@@ -193,12 +193,16 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and cr
  * The boundary reads the matching statements that started before the period the history read covers (`cutoffMs`, or the
  * start of the window when the read did not hit its limit) and could join a run the history saw only the end of.
  *
- * The longest a job can plausibly be in flight: BigQuery times out a query that has not started after 6 hours
- * (interactive) or 24 hours (batch) in the queue, and lets one run up to 6 hours per attempt with up to three attempts
- * (18 hours), so 24 + 18 = 42 hours (see BOUNDARY_SPAN_MS for the window built on it). A job in flight longer than that (a queue timeout raised
- * in the project's settings) is not covered, unless it is still going: those are read from the start of the history window.
+ * The longest a job can plausibly be in flight, from BigQuery's documented limits (quotas page and query queues page): a
+ * query that has not started times out in the queue after 6 hours (interactive) or 24 hours (batch); once running, a query
+ * or script may run up to 6 hours per attempt with up to three attempts (18 hours), and a CREATE MODEL statement times out
+ * at 24 hours by default, but at 48 hours for time series, AutoML and hyperparameter tuning models. The longest is the
+ * batch queue plus the 48-hour CREATE MODEL: 24 + 48 = 72 hours. A job in flight longer than that (a queue timeout
+ * raised in the project's settings) is not covered, unless it is still going: those are read from the start of the window.
  */
-export const MAX_JOB_SPAN_MS = 42 * 3_600_000
+const BQ_QUEUE_MAX_MS = 24 * 3_600_000
+const BQ_RUN_MAX_MS = 48 * 3_600_000
+export const MAX_JOB_SPAN_MS = BQ_QUEUE_MAX_MS + BQ_RUN_MAX_MS
 
 /**
  * How far from the cutoff a statement can be and still belong to a run that begins after it: a job in flight for the
@@ -421,6 +425,8 @@ type BqUnit = {
   final: boolean
   /** The start and destination dataset of each final job a run holds. */
   finals?: { start: number; dataset: string }[]
+  /** How long after its last job ended a run can still be joined by a next one. */
+  joinGap?: number
   /** A statement that builds the model's relation (see BQ_BUILD_TYPES). */
   build: boolean
   /** The job is still queued or running. */
@@ -546,7 +552,9 @@ export function bigqueryRuns(
     const head = g.find((u) => !u.tmp) ?? g[0]
     const finals = g.filter((u) => u.final)
     const unit = sumUnits(Math.min(...g.map((u) => u.start)), g, { user: head.user, final: finals.length > 0, dataset: head.dataset })
-    return { ...unit, finals: finals.map((u) => ({ start: u.start, dataset: u.dataset })) }
+    // The job that ended last is the one the next could join: a temporary CTAS can be joined for ten minutes, any other for a minute.
+    const last = g.reduce((a, b) => (b.end > a.end ? b : a))
+    return { ...unit, finals: finals.map((u) => ({ start: u.start, dataset: u.dataset })), joinGap: last.tmp ? BQ_TMP_JOIN_MS : BQ_CHAIN_MS }
   })
   // Only a group with a build job is a run; a group of reads (`dbt show`) is not priced.
   const candidates = all.filter((r) => r.build)
@@ -560,7 +568,7 @@ export function bigqueryRuns(
     !!boundary &&
     (boundary.liveFullUsers?.includes(r.user) ||
       !!boundary.live?.some((b) => (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS))
-  const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && r.end >= asOfMs - BQ_CHAIN_MS) || liveBefore(r)))
+  const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && r.end >= asOfMs - (r.joinGap ?? BQ_CHAIN_MS)) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
   // into the dataset of a final build (or any, when that build names none), that ended at or before the build's start
