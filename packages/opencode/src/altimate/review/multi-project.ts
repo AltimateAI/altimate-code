@@ -314,8 +314,9 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
  *  so the headline counts what the verdict counts. */
 function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvelope[]): VerdictEnvelope["summary"] {
   const out = summarize(findings, envs.some((e) => e.summary.degraded))
-  // Not deduplicated across projects like `withheld` is: each changed path is assigned to exactly
-  // one project (`assignToProjects`), so no instance is counted by two projects.
+  // Not deduplicated across projects like `withheld` is: each in-scope path belongs to exactly one
+  // project (`assignToProjects`), and files outside every project, though passed to each project,
+  // are scoped out there and taken by one AI lane only, so no instance is counted by two projects.
   for (const e of envs) {
     const posted = summarize(e.findings, false)
     for (const sev of ["critical", "warning", "suggestion"] as const) out[sev] += Math.max(0, e.summary[sev] - posted[sev])
