@@ -830,6 +830,26 @@ export function finalOutputs(sql: string): FinalOutputs {
     if (open.length > 1) return same(new Set([`${[...new Set(open.map((x) => x.name))].sort().join("|")}.${col}`]))
     return same(unresolved(col))
   }
+  // An item's text for signatures: lowercased outside literals, with each
+  // FROM/JOIN alias replaced by the source it names (a table by its own name,
+  // without database/schema, which `refCovered` compares environment-aware via
+  // `reads`; a CTE or subquery by its scope), so renaming an alias
+  // (`md5(c.ssn)` → `md5(cu.ssn)` on one table) keeps the signature.
+  const signatureText = (item: SelectItem, scope: string) => {
+    const named = new Map<string, string>()
+    for (const src of sources.get(`${scope}#${item.branch}`) ?? [])
+      if (src.alias && src.alias !== src.name) named.set(src.alias, byScope.has(src.name) ? src.name : splitTable(src.name).name)
+    const text = lowerOutsideLiterals(item.exact)
+    if (!named.size) return text
+    return text.replace(/'(?:[^']|'')*'|[^']+/g, (part) =>
+      part.startsWith("'")
+        ? part
+        : part.replace(new RegExp(String.raw`(?<![\w$."\x60])(${SEGMENT})(\s*\.)`, "g"), (m, q: string, dot: string) => {
+            const src = named.get(unquote(q))
+            return src === undefined ? m : `\u0004${src}${dot}`
+          }),
+    )
+  }
   const resolve = (scope: string, seen: Set<string>): ScopeOutputs => {
     const cached = memo.get(scope)
     if (cached) return cached
@@ -868,7 +888,7 @@ export function finalOutputs(sql: string): FinalOutputs {
       const name = item.branch === 0 ? item.name : firstNames.get(item.position)
       if (!name) continue
       names.add(name)
-      addTo(signatures, name, [`${lowerOutsideLiterals(item.exact)}\u0001${bodies.join("\u0002")}`])
+      addTo(signatures, name, [`${signatureText(item, scope)}\u0001${bodies.join("\u0002")}`])
       if (item.rawColumn) {
         const refs = resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen)
         addTo(raw, name, refs.raw)
@@ -883,7 +903,7 @@ export function finalOutputs(sql: string): FinalOutputs {
       }
     }
     for (const [n, cols] of raw) if (!cols.size) raw.delete(n)
-    const body = [scopeItems.map((i) => lowerOutsideLiterals(i.exact)).join(","), ...[...readBodies].sort()].join("\u0003")
+    const body = [scopeItems.map((i) => signatureText(i, scope)).join(","), ...[...readBodies].sort()].join("\u0003")
     const result = { raw, names, signatures, reads, stars, body }
     memo.set(scope, result)
     return result

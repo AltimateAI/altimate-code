@@ -2632,6 +2632,21 @@ describe("orchestrate", () => {
       expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
   })
 
+  test("renaming a table alias inside a masked output is not new exposure", async () => {
+    const base = "select c.customer_id,\n  md5(c.ssn) as ssn\nfrom customers c"
+    const head = "select cu.customer_id,\n  md5(cu.ssn) as ssn\nfrom customers cu"
+    const diff = "-select c.customer_id,\n-  md5(c.ssn) as ssn\n-from customers c\n+select cu.customer_id,\n+  md5(cu.ssn) as ssn\n+from customers cu\n"
+    for (const { reviewers, env } of await piiRuns(head, base, diff, ["ssn"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+    // Inside a CTE the masked body is compared the same way.
+    const cte = (a: string) => `with k as (select ${a}.customer_id, md5(${a}.ssn) as ssn from customers ${a})\nselect customer_id,\n  ssn\nfrom k`
+    for (const { reviewers, env } of await piiRuns(cte("cu"), cte("c"), "-with k as (select c.customer_id, md5(c.ssn) as ssn from customers c)\n+with k as (select cu.customer_id, md5(cu.ssn) as ssn from customers cu)\n", ["ssn"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+    // Control: the same alias moved to another table is new.
+    const moved = "select cu.customer_id,\n  md5(cu.ssn) as ssn\nfrom spouses cu"
+    expectReportedPii(await piiRuns(moved, base, diff.replace("+from customers cu", "+from spouses cu"), ["ssn"]), ["ssn"], "none")
+  })
+
   test("a masking literal whose case changed is a different computation", async () => {
     const base = "select customer_id,\n  regexp_replace(email, '[a-z]', '*') as email\nfrom customers"
     const head = base.replace("'[a-z]'", "'[A-Z]'")
