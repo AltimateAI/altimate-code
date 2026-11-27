@@ -2823,18 +2823,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         count: merged.length,
         list: await validateSuggestions(merged, getContent, addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])])),
       }
-    // Rule types off are left out only on files the AI lane sends, where rules-off will drop them;
-    // on any other file they are posted, so they are verified like the rest.
+    // Rule types off on files the AI lane sends are dropped where the lane answers, so they are
+    // verified only when their file's call failed (then they are posted); on any other file they
+    // are posted, so they are verified like the rest.
     const sentSet = new Set(aiSentPaths)
-    const verifyRulesAfter = preAiValidated
+    const ruleCandidates = preAiValidated
       ? (() => {
           const posted = cleanFindings(preAiValidated.list).filter(
-            (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
+            (f) =>
+              SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] &&
+              findingOrigin(f) !== "ai" &&
+              f.severity !== "critical" &&
+              !mayHoldCredentials(f.file),
           )
           const offKept = new Set(dropRulesOff(posted.filter((f) => sentSet.has(f.file)), input.rulesOff).kept)
-          return posted.filter((f) => (!sentSet.has(f.file) || offKept.has(f)) && f.severity !== "critical" && !mayHoldCredentials(f.file))
+          const offOnSent = (f: Finding) => sentSet.has(f.file) && !offKept.has(f)
+          return { after: posted.filter((f) => !offOnSent(f)), ifUnreviewed: posted.filter(offOnSent) }
         })()
       : undefined
+    const verifyRulesAfter = ruleCandidates?.after
     try {
       const res = await input.aiReview({
         files: aiFiles,
@@ -2850,6 +2857,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(input.reviewDir ? { reviewDir: input.reviewDir } : {}),
         ...(input.conventions?.length ? { conventions: input.conventions } : {}),
         ...(verifyRulesAfter?.length ? { verifyRulesAfter } : {}),
+        ...(ruleCandidates?.ifUnreviewed.length ? { verifyRulesIfUnreviewed: ruleCandidates.ifUnreviewed } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }

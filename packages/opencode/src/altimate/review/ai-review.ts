@@ -756,6 +756,9 @@ export interface AiReviewInput {
   conventions?: Convention[]
   /** The rule findings the review would post, verified after the finder (`verifyRules` switch). */
   verifyRulesAfter?: Finding[]
+  /** Rule findings verified only when the finder's call for their file failed: rule types off on
+   *  sent files, which are posted only then (the orchestrator drops them where the lane answered). */
+  verifyRulesIfUnreviewed?: Finding[]
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -1015,8 +1018,20 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const res = await runFinderLane(input)
   // The rule verifier over the rule findings the review would post, after the finder and its verifier;
   // only when the finder answered, since the orchestrator applies rule noise only then (fail-open).
-  if (!input.verifyRulesAfter || res.status.state !== "ok") return res
-  return withRuleVerdicts(res, await runRuleVerify(input, input.verifyRulesAfter))
+  if (res.status.state !== "ok") return res
+  const rules = rulesToVerify(input, res.status)
+  if (!input.verifyRulesAfter && !rules.length) return res
+  return withRuleVerdicts(res, await runRuleVerify(input, rules))
+}
+
+/** The rule findings to verify once the finder answered: those the review would post, plus the
+ *  conditional ones (`verifyRulesIfUnreviewed`) on files whose finder call failed. */
+export function rulesToVerify(
+  input: Pick<AiReviewInput, "verifyRulesAfter" | "verifyRulesIfUnreviewed">,
+  status: Pick<AiLaneStatus, "failedFiles">,
+): Finding[] {
+  const failed = new Set(status.failedFiles ?? [])
+  return [...(input.verifyRulesAfter ?? []), ...(input.verifyRulesIfUnreviewed ?? []).filter((f) => failed.has(f.file))]
 }
 
 /** The finder lane's result with the rule run's verdicts (`verifier.ruleVerdicts`, `verifier.batches`) and its

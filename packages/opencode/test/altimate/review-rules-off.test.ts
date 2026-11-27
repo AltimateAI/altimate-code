@@ -407,6 +407,21 @@ describe("round 3: rules-off, verification and explainable verdicts", () => {
     expect((seen[0].verifyRulesAfter ?? []).some((f) => f.file === "config/extra.yml")).toBe(true)
   })
 
+  test("a rules-off finding on a file the AI lane sends is verified if that file's call fails", async () => {
+    const base = await run([model], undefined)
+    const rule = base.findings.find((f) => f.file === "models/marts/m.sql" && f.severity !== "critical")!
+    const seen: AiReviewInput[] = []
+    await run([model], new Set([rule.rule!]), seen)
+    expect(seen[0].files.map((f) => f.path)).toContain("models/marts/m.sql")
+    expect((seen[0].verifyRulesAfter ?? []).some((f) => f.rule === rule.rule)).toBe(false)
+    expect((seen[0].verifyRulesIfUnreviewed ?? []).some((f) => f.rule === rule.rule)).toBe(true)
+    // The lane verifies it only when the finder's call for its file failed.
+    const { rulesToVerify } = await import("../../src/altimate/review/ai-review")
+    const cond = seen[0].verifyRulesIfUnreviewed!
+    expect(rulesToVerify(seen[0], {})).toEqual(seen[0].verifyRulesAfter ?? [])
+    expect(rulesToVerify(seen[0], { failedFiles: ["models/marts/m.sql"] })).toEqual([...(seen[0].verifyRulesAfter ?? []), ...cond])
+  })
+
   test("nothing posted but the verdict is COMMENT: the withheld findings are listed", async () => {
     const { renderSummary } = await import("../../src/altimate/review/format")
     const base = await run([model], undefined)
