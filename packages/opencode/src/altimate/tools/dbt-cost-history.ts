@@ -205,20 +205,17 @@ export type BoundaryWindow = {
   startBeforeMs: number
   /** ... and after this (a day of lookback). */
   startAfterMs: number
-  /** ... except a job that is not done, which may have been created anywhere in the history window and is still going. */
-  liveStartAfterMs: number
   /** A job must have ended at or after this (the cutoff less the chain window) to be able to join a run. */
   joinEndAtLeastMs: number
   /** A temporary-relation CTAS must end at or after this (the cutoff less the join window). */
   tmpEndAtLeastMs: number
 }
 
-export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTORY_DAYS * DAY_MS): BoundaryWindow {
+export function boundaryWindow(cutoffMs: number): BoundaryWindow {
   const cutoff = Math.trunc(cutoffMs)
   return {
     startBeforeMs: cutoff + 1,
     startAfterMs: cutoff - BOUNDARY_LOOKBACK_DAYS * DAY_MS,
-    liveStartAfterMs: Math.trunc(windowStart),
     joinEndAtLeastMs: cutoff - BQ_CHAIN_MS,
     tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
   }
@@ -229,17 +226,31 @@ export function bigqueryBoundarySql(input: { project: string; location?: unknown
   const w = input.window
   // What can join a run that starts after the cutoff: a job that ended within a minute before it, or the CTAS into
   // dbt's temporary relation that ended within ten minutes before its final build.
-  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id
+  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time < ${at(w.startBeforeMs)}
-  and (creation_time > ${at(w.startAfterMs)} or (upper(state) <> 'DONE' and creation_time > ${at(w.liveStartAfterMs)}))
-  and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
+where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.startAfterMs)}
+  and upper(job_type) = 'QUERY' and upper(state) = 'DONE' and error_result is null
   and parent_job_id is null
   and (
-    end_time is null or end_time >= ${at(w.joinEndAtLeastMs)}
+    end_time >= ${at(w.joinEndAtLeastMs)}
     or (upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
         and end_time >= ${at(w.tmpEndAtLeastMs)})
   )
+  and ${notOwn}
+  and strpos(query, ${sqlString(input.needle)}) > 0
+order by creation_time desc limit ${HISTORY_LIMIT}`
+}
+
+/**
+ * The model's jobs that are still queued or running anywhere in the history window, read apart from the boundary so
+ * that they cannot be crowded out by finished jobs. A job still going can chain into any run after its start.
+ */
+export function bigqueryLiveSql(input: { project: string; location?: unknown; needle: string; view?: JobsView; asOfMs: number }): string {
+  return `select /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state
+from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
+where creation_time > timestamp_millis(${windowStartMs(input.asOfMs)}) and creation_time <= timestamp_millis(${input.asOfMs})
+  and upper(job_type) = 'QUERY' and upper(state) in ('PENDING','RUNNING')
+  and parent_job_id is null
   and ${notOwn}
   and strpos(query, ${sqlString(input.needle)}) > 0
 order by creation_time desc limit ${HISTORY_LIMIT}`
@@ -311,7 +322,16 @@ export function parseTime(value: string | null | undefined): number {
  * hit its limit, else the start of the window. `stmts` are the matching statements that started before it and could
  * join a run that began earlier; undefined when they could not be read.
  */
-export type Boundary = { cutoff: number; stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; live?: boolean }[] }
+export type Boundary = {
+  cutoff: number
+  stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null }[]
+  /** Jobs still queued or running in the window, each lasting to the instant read. They leave out any run they could chain into. */
+  live?: { user: string | null; start: number }[]
+  /** The live read hit its limit: every run by these users is left out. */
+  liveFullUsers?: string[]
+  /** The live read failed: runs may belong to a job still going. */
+  liveUnread?: boolean
+}
 
 /** When the boundary statements can't be read, runs starting this close to the cutoff are not trusted. */
 export const BOUNDARY_FALLBACK_MS = 24 * 3_600_000
@@ -440,8 +460,8 @@ function bqJob(r: Row, cfg: CostConfig, asOfMs?: number): BqUnit {
 /** A statement type as the warehouse reports it, in upper case. */
 const stmtType = (r: Row) => (r.statement_type ?? "").toUpperCase()
 
-/** A row that names a state other than DONE is a job still queued or running; one that names none (older fixtures) is done. */
-const isPending = (r: Row) => !!r.state && r.state.toUpperCase() !== "DONE"
+/** A row that names a state other than DONE, or a null end time, is a job still queued or running; one that names neither is done. */
+const isPending = (r: Row) => (!!r.state && r.state.toUpperCase() !== "DONE") || r.end_time === null
 
 const sumUnits = (start: number, units: BqUnit[], over: { user: string; final: boolean; dataset: string }): BqUnit => ({
   cause: units.find((u) => !u.known)?.cause,
@@ -529,7 +549,10 @@ export function bigqueryRuns(
       (!!b.tmp &&
         (r.finals ?? []).some((f) => b.end <= f.start && b.end >= f.start - BQ_TMP_JOIN_MS && (!b.dataset || !f.dataset || b.dataset === f.dataset))))
   // A job before the cutoff that is still running and could join the run makes it a run in progress, not just an uncertain one.
-  const liveBefore = (r: BqUnit) => !!boundary?.stmts?.some((b) => b.live && joins(b, r))
+  const liveBefore = (r: BqUnit) =>
+    !!boundary &&
+    (boundary.liveFullUsers?.includes(r.user) ||
+      !!boundary.live?.some((b) => (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS))
   const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && r.end >= asOfMs - BQ_CHAIN_MS) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
@@ -589,6 +612,8 @@ export function priceBigquery(
   const notes: string[] = truncated ? [LIMIT_NOTE] : []
   if (dropped) notes.push(boundaryNote(dropped))
   if (skipped) notes.push(`${plural(skipped, "run")} left out: ${causeList(causes)}.`)
+  if (boundary?.liveFullUsers) notes.push("More jobs still running were found than the read can hold, so every run by their users was left out.")
+  if (boundary?.liveUnread) notes.push("Jobs still running before the period could not be read, so a run that belongs to one may be priced as complete.")
   if (inProgress) notes.push(inProgress === 1 ? "A run still in progress was left out." : `${inProgress} runs still in progress were left out.`)
   if (!runs.length && !skipped && !dropped && inProgress)
     return {
@@ -801,7 +826,6 @@ export async function loadHistory(input: {
    * The matching statements just before the period `read` covers: the history read's own cutoff when it hit its
    * limit, else the start of the window. A boundary that can't be read (or hit its limit) is unknown.
    */
-  const live = (r: Row) => isPending(r) || !Number.isFinite(parseTime(r.end_time))
   const boundaryFor = async (read: Row[], sqlFor: (window: BoundaryWindow) => string): Promise<Boundary | undefined> => {
     if (!read.length) return undefined
     const starts = read.map((r) => parseTime(r.creation_time)).filter(Number.isFinite)
@@ -813,7 +837,7 @@ export async function loadHistory(input: {
       // The window reaches the cutoff's own instant (a statement that starts exactly at it is read: the main read takes
       // only statements after the window's start, and the oldest statement it returned is at the cutoff itself) while
       // every lookback is measured from the cutoff. The statements already read come back too and are filtered out below.
-      const found = await rows(sqlFor(boundaryWindow(cutoff, windowStart)))
+      const found = await rows(sqlFor(boundaryWindow(cutoff)))
       if (found.length >= HISTORY_LIMIT) return { cutoff }
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r.job_id))
@@ -824,9 +848,7 @@ export async function loadHistory(input: {
           .map((r) => ({
             user: r.user_email ?? null,
             start: parseTime(r.creation_time),
-            // A job with no end time is still running: it lasts to the instant read.
-            end: live(r) ? asOfMs : parseTime(r.end_time),
-            live: live(r),
+            end: parseTime(r.end_time),
             tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
             dataset: r.destination_dataset_id ?? null,
           })),
@@ -834,6 +856,18 @@ export async function loadHistory(input: {
     } catch (e) {
       if (signal.aborted) throw e
       return { cutoff }
+    }
+  }
+  /** The model's jobs still queued or running in the window: all of them, or the users seen when the read is full, or unread. */
+  const liveFor = async (sql: () => string): Promise<Pick<Boundary, "live" | "liveFullUsers" | "liveUnread">> => {
+    try {
+      const found = await rows(sql())
+      const jobs = found.map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time) }))
+      if (found.length >= HISTORY_LIMIT) return { live: jobs, liveFullUsers: [...new Set(jobs.map((j) => j.user ?? ""))] }
+      return { live: jobs }
+    } catch (e) {
+      if (signal.aborted) throw e
+      return { liveUnread: true }
     }
   }
   try {
@@ -890,9 +924,11 @@ export async function loadHistory(input: {
         ? (await read((view) => bigqueryChildrenSql({ project, location, parents, sinceMs, view }))).rows
         : undefined
       // The boundary is read from the view the history came from.
-      const boundary = await boundaryFor(history.rows, (window) =>
+      const read0 = await boundaryFor(history.rows, (window) =>
         bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, window }),
       )
+      // Jobs still going are read apart and always applied, whether or not the boundary read was full.
+      const boundary = read0 && { ...read0, ...(await liveFor(() => bigqueryLiveSql({ project, location, needle: needleFor(id), view: history.view, asOfMs }))) }
       ;({ cost, reserved } = priceBigquery(history.rows, children, uniqueId, cfg, boundary, { materialized, location: where, asOfMs }))
       if (history.own) cost.notes.push("Only your own runs were read: the role cannot list every user's jobs.")
       if (cost.basis === "history" && reserved && pricing === false)

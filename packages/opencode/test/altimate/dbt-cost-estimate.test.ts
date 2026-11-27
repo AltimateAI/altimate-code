@@ -51,6 +51,8 @@ function fakeAdapter(
     history?: (jinja: string) => Promise<string>
     /** What the boundary query (the matching statements just before the period read) renders; none by default. */
     boundary?: (jinja: string) => Promise<string>
+    /** What the read of jobs still queued or running renders (their user, creation and state); none by default. */
+    live?: (jinja: string) => Promise<string>
     /** What the dbt target renders. */
     target?: string
     /** The manifest path the adapter reports (`getManifestPath`), as the project's own adapter does. */
@@ -71,6 +73,8 @@ function fakeAdapter(
     unsafeCompileQuery: async (query: string, name?: string) => {
       if (query.startsWith("{%- if execute -%}{%- set altimate_rows")) {
         historyLog.push(query)
+        if (query.includes("/* altimate_cost_read */ job_id, user_email, creation_time, end_time, state\n"))
+          return opts.live ? opts.live(query) : table(["job_id", "user_email", "creation_time", "end_time", "state"], [])
         if (query.includes("/* run boundary */"))
           return opts.boundary ? opts.boundary(query) : table(["session_id", "creation_time", "start_time", "end_time"], [])
         if (opts.history) return opts.history(query)
@@ -1017,53 +1021,55 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
-    test.each([
-      ["a running job", "RUNNING", null],
-      ["a job with no end time yet", "DONE", null],
-    ])("a boundary job that is %s before the cutoff leaves the run in progress, not priced", async (_name, state, end) => {
+    // 500 statements are returned, so the cutoff is the oldest one's start, five days before the instant read; user a's
+    // later build starts two days after it, beyond the 24 hours the full boundary read falls back to.
+    const T0 = asOf - 5 * day
+    const step = 864_000
+    const fullRows = () => [
+      row("old", T0, T0 + 60_000, "MERGE", TIB),
+      ...Array.from({ length: 499 }, (_, i) => {
+        const at = T0 + (i + 1) * step
+        const r = row(`f${i}`, at, at + 60_000, "MERGE", i === 199 ? 100 * TIB : TIB)
+        r[1] = i === 199 ? "a@x.com" : `u${i}@x.com`
+        return r
+      }),
+    ]
+    const fullBoundary = async () => table(["job_id"], Array.from({ length: 500 }, (_, i) => [`b${i}`]))
+    const liveTable = (users: string[], created = T0 - 60_000) => table(["job_id", "user_email", "creation_time", "end_time", "state"], users.map((u, i) => [`q${i}`, u, iso(created), null, "PENDING"]))
+
+    test("a pending job a minute before the cutoff leaves out user a's build 2 days later, though the boundary read was full", async () => {
       await withNow(async () => {
-        const edge = asOf - 30 * day
-        const rowsAtEdge = [row("m", edge + 300_000, edge + 360_000, "MERGE", TIB)]
-        useAdapter(calls, {
-          ...answer(rowsAtEdge),
-          boundary: async () =>
-            table(["job_id", "user_email", "creation_time", "end_time", "state", "statement_type", "destination_table_id", "destination_dataset_id"], [
-              ["live", "a@x.com", iso(edge - 3_600_000), end, state, "MERGE", null, null],
-            ]),
-        })
+        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary, live: async () => liveTable(["a@x.com"]) })
         const cost = await ask()
-        expect(cost.runs).toBeUndefined()
-        expect(cost.notes).toContain("A run still in progress was left out.")
+        expect(cost.notes).toContain("2 runs still in progress were left out.")
+        // The 100 TiB build is not priced.
+        expect(cost.highest).toBeLessThan(100 * 6.25)
       })
     })
 
-    test("a job still running that was created 25 hours before the cutoff, outside the one-day lookback, leaves the run in progress", async () => {
+    test("without a live job the same build is priced", async () => {
       await withNow(async () => {
-        // 500 statements are returned, so the cutoff is the oldest one's start, five days before the instant read.
-        const T0 = asOf - 5 * day
-        const step = 864_000
-        const rows = [
-          row("old", T0, T0 + 60_000, "MERGE", TIB),
-          ...Array.from({ length: 499 }, (_, i) => [...row(`f${i}`, T0 + (i + 1) * step, T0 + (i + 1) * step + 60_000, "MERGE", TIB)].map((v, k) => (k === 1 ? `u${i}@x.com` : v))),
-        ]
-        const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
-        const queuedAt = T0 - 25 * 3_600_000
-        useAdapter(calls, {
-          ...answer(rows),
-          // An adapter consistent with the SQL: a job is returned iff its creation and state satisfy the query's own predicates.
-          boundary: async (jinja) => {
-            const before = lit(jinja, /creation_time < timestamp_millis\((\d+)\)/)
-            const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) or/)
-            const liveAfter = /<> \\?'DONE\\?' and creation_time > timestamp_millis\((\d+)\)/.exec(jinja)
-            const seen = queuedAt < before && (queuedAt > after || (liveAfter !== null && queuedAt > Number(liveAfter[1])))
-            return table(["job_id", "user_email", "creation_time", "end_time", "state", "statement_type", "destination_table_id", "destination_dataset_id"],
-              seen ? [["queued", "a@x.com", iso(queuedAt), null, "RUNNING", "MERGE", null, null]] : [])
-          },
-        })
+        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary })
+        expect((await ask()).highest).toBeCloseTo(100 * 6.25, 8)
+      })
+    })
+
+    test("a full live read leaves out every run by the users it saw", async () => {
+      await withNow(async () => {
+        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary, live: async () => liveTable(Array.from({ length: 500 }, () => "a@x.com"), asOf - 3_600_000) })
         const cost = await ask()
-        // The user's old run is left out as in progress; the 499 other users' runs stay.
-        expect(cost.runs).toBe(499)
-        expect(cost.notes).toContain("A run still in progress was left out.")
+        expect(cost.notes.join(" ")).toContain("More jobs still running were found than the read can hold")
+        expect(cost.highest).toBeLessThan(100 * 6.25)
+      })
+    })
+
+    test("a job with no end time in the history read is still running, so its run is not priced", async () => {
+      await withNow(async () => {
+        const at = asOf - 3 * day
+        const noEnd = row("m", at, at, "MERGE", TIB)
+        noEnd[3] = null
+        useAdapter(calls, answer([noEnd]))
+        expect((await ask()).notes).toContain("A run still in progress was left out.")
       })
     })
 
