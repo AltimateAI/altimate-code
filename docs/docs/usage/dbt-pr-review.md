@@ -712,7 +712,9 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    engine warning that is refuted, turned off or dropped by the policy is not
    posted but still counts toward the ≥3 warnings (the summary counts it too), so
    neither the verifier nor text it reads, such as the PR description, can unblock
-   a gate. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   a gate. When the verdict is `REQUEST_CHANGES`, the summary lists the withheld
+   engine warnings that count toward it (file and line, title, and why each was not
+   posted), and the envelope records them under `withheld`. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.

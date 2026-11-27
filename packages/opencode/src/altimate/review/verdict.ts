@@ -439,6 +439,20 @@ export const VerdictEnvelope = z.object({
       }),
     })
     .optional(),
+  /** Rule findings the rule-noise steps did not post that still count toward a REQUEST_CHANGES
+   *  verdict (listed so the block is explainable); only when the verdict blocks. */
+  withheld: z
+    .array(
+      z.object({
+        id: z.string(),
+        title: z.string(),
+        file: z.string(),
+        startLine: z.number().int().optional(),
+        severity: z.enum(["critical", "warning", "suggestion"]),
+        reason: z.enum(["rule_type_off", "refuted", "unverifiable_high_sev", "noisy_type_not_confirmed"]),
+      }),
+    )
+    .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -507,6 +521,7 @@ export interface BuildEnvelopeInput {
   rulesOff?: VerdictEnvelope["rulesOff"]
   rulesRefuted?: VerdictEnvelope["rulesRefuted"]
   rulePolicy?: VerdictEnvelope["rulePolicy"]
+  withheld?: VerdictEnvelope["withheld"]
 }
 
 /** Severity tally of `findings` for the envelope summary. */
@@ -577,6 +592,8 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     rulesOff: input.rulesOff,
     rulesRefuted: input.rulesRefuted,
     rulePolicy: input.rulePolicy,
+    // Listed only when the verdict blocks: then a withheld finding may be part of the reason.
+    withheld: ideal === "REQUEST_CHANGES" && input.withheld?.length ? input.withheld : undefined,
     policy: input.policy,
     engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,

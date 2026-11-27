@@ -39,6 +39,7 @@ import {
   errorReason,
   isOutsideProjectReason,
   signEnvelope,
+  verdictEligible,
 } from "./verdict"
 import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
@@ -72,7 +73,14 @@ import { isAiOtherFile } from "./ai-other-files"
 import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
 import { type Convention, conventionTexts } from "./conventions"
 import { dropRulesOff } from "./rules-off"
-import { type RulePolicyDrops, type RulePostPolicy, type RuleVerdictValue, dropByRulePolicy, rulePolicyApplies } from "./rule-post-policy"
+import {
+  type RulePolicyDrops,
+  type RulePostPolicy,
+  type RuleVerdictValue,
+  dropByRulePolicy,
+  rulePolicyApplies,
+  rulePolicyDrop,
+} from "./rule-post-policy"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -2926,6 +2934,30 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       rulePolicy = { applied: true, dropped: postedDropped }
     } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }
+  // The verdict counts the rule findings these steps did not post. Those that can block (a
+  // confident engine warning toward the ≥3-warning pattern) are listed with why they were
+  // withheld; the envelope keeps the list only when the verdict blocks.
+  const withheld: NonNullable<VerdictEnvelope["withheld"]> = []
+  {
+    const blocking = (f: Finding) => f.severity === "warning" && f.confidence !== "unknown" && verdictEligible(f, input.rubric)
+    const note = (f: Finding, reason: NonNullable<VerdictEnvelope["withheld"]>[number]["reason"]) => {
+      if (blocking(f))
+        withheld.push({ id: f.id, title: f.title, file: f.file, ...(f.startLine ? { startLine: f.startLine } : {}), severity: f.severity, reason })
+    }
+    let rest = verdictFindings
+    const offKept = new Set(ruleStep(rest, (list) => offStep(list).kept))
+    for (const f of rest) if (!offKept.has(f)) note(f, "rule_type_off")
+    rest = rest.filter((f) => offKept.has(f))
+    if (aiLaneRan && ruleVerdicts.size) {
+      for (const f of rest) if (refuted(f)) note(f, "refuted")
+      rest = rest.filter((f) => !refuted(f))
+    }
+    if (rulePolicy?.applied && input.rulePolicy)
+      for (const f of rest) {
+        const why = inMixed(f) ? undefined : rulePolicyDrop(f, verdictOf(f) ?? null, input.rulePolicy)
+        if (why) note(f, why)
+      }
+  }
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
@@ -2969,6 +3001,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     ...(rulesOff ? { rulesOff: offDropped } : {}),
     ...(rulesRefuted !== undefined ? { rulesRefuted } : {}),
     ...(rulePolicy ? { rulePolicy } : {}),
+    ...(withheld.length ? { withheld } : {}),
     policy: input.policy,
     findings,
     verdictFindings,

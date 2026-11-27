@@ -527,3 +527,22 @@ describe("round 2b: forced verdicts and the verdict", () => {
     expect(seen[0].verifyRulesAfter!.some((f) => f.severity === "critical")).toBe(false)
   })
 })
+
+describe("round 2c: a block on withheld findings is explainable", () => {
+  test("gate mode, three refuted engine warnings: REQUEST_CHANGES and the summary lists them with why", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const env = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted" })
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+    expect(env.withheld?.length).toBeGreaterThanOrEqual(3)
+    expect(env.withheld!.every((w) => w.reason === "refuted" && w.severity === "warning")).toBe(true)
+    const text = renderSummary(env, { maxChars: Infinity })
+    expect(text).toContain(`### Withheld rule findings that count toward this verdict (${env.withheld!.length})`)
+    for (const w of env.withheld!) expect(text).toContain(`\`${w.file}${w.startLine ? `:${w.startLine}` : ""}\` — ${w.title} (refuted by the verifier)`)
+  })
+
+  test("no blocking verdict: nothing is listed", async () => {
+    const env = await run({ verdictAt: () => "refuted" })
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    expect(env.withheld).toBeUndefined()
+  })
+})

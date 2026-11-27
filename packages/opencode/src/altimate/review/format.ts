@@ -87,6 +87,16 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     )
   }
   lines.push(...notes)
+  // A blocking verdict must be explainable from the comment: rule findings that were not posted
+  // but still count toward it are listed with why they were withheld.
+  if (env.withheld?.length) {
+    lines.push(
+      `### Withheld rule findings that count toward this verdict (${env.withheld.length})`,
+      "",
+      ...env.withheld.map((w) => `- \`${w.file}${w.startLine ? `:${w.startLine}` : ""}\` — ${w.title} (${WITHHELD_REASON[w.reason]})`),
+      "",
+    )
+  }
 
   const tail: string[] = []
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
@@ -261,6 +271,13 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
  * the advisory AI lane when it did not run. Kept separate from the lint-only
  * banner so one undecidable finding never mislabels a manifest-backed run.
  */
+const WITHHELD_REASON: Record<NonNullable<VerdictEnvelope["withheld"]>[number]["reason"], string> = {
+  rule_type_off: "rule type not posted while the AI review runs",
+  refuted: "refuted by the verifier",
+  unverifiable_high_sev: "the verifier could not check it",
+  noisy_type_not_confirmed: "noisy rule type the verifier did not confirm",
+}
+
 export function coverageNotes(env: VerdictEnvelope): string[] {
   const notes: string[] = []
   const undecided = env.findings.filter((f) => f.degraded).length
