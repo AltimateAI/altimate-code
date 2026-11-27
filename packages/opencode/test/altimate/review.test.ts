@@ -2659,6 +2659,23 @@ describe("orchestrate", () => {
     )
   })
 
+  test("a masking literal whose spacing changed is a different computation", async () => {
+    // `'[0-9]  *'` needs a trailing space after each digit, so a plain SSN is left unmasked.
+    const base = "select customer_id,\n  regexp_replace(ssn, '[0-9] *', '*', 'g') as ssn\nfrom customers"
+    const head = base.replace("'[0-9] *'", "'[0-9]  *'")
+    const diff = "-  regexp_replace(ssn, '[0-9] *', '*', 'g') as ssn\n+  regexp_replace(ssn, '[0-9]  *', '*', 'g') as ssn\n"
+    expectReportedPii(await piiRuns(head, base, diff, ["ssn"]), ["ssn"], "none")
+    // Through a CTE the masked name reaches the final select as a raw column: the
+    // CTE body's signature must keep the literal's spacing too.
+    const cteBase = `with masked as (\n  ${base}\n)\nselect customer_id, ssn from masked`
+    const cteHead = cteBase.replace("'[0-9] *'", "'[0-9]  *'")
+    expectReportedPii(await piiRuns(cteHead, cteBase, diff, ["ssn"]), ["ssn"], "none")
+    // Spacing outside the literal is still a reformat, not new exposure.
+    const reformatted = base.replace("regexp_replace(ssn, ", "regexp_replace(\n    ssn,   ")
+    for (const { reviewers, env } of await piiRuns(reformatted, base, diff, ["ssn"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure" && !isTwin(f)).length }).toEqual({ reviewers, pii: 0 })
+  })
+
   test("a table moved to another schema: quiet as an environment change, reported when the base read that schema", async () => {
     // One schema on each side (`analytics` → `raw_restricted`): indistinguishable
     // from a base compiled into another environment, so not new exposure.

@@ -295,13 +295,19 @@ function maskSql(sql: string, keepLiterals = false): string {
 
 const isWordChar = (c: string | undefined) => !!c && /[\w$."`]/.test(c)
 
+// Whitespace and dot spacing collapse only outside string literals, whose
+// spacing can change what an expression does (`'[0-9] *'` vs `'[0-9]  *'`).
+const NORMALIZE_STEPS: Array<[RegExp, (group?: string) => string]> = [
+  [/'(?:[^']|'')*'|\s+/g, () => " "],
+  [/'(?:[^']|'')*'|\(\s+/g, () => "("],
+  [/'(?:[^']|'')*'|\s+([),])/g, (close) => close!],
+  [/'(?:[^']|'')*'|\s*\.\s*/g, () => "."],
+]
 const normalizeItem = (raw: string) =>
-  raw
-    .replace(/\s+/g, " ")
-    .replace(/\(\s+/g, "(")
-    .replace(/\s+([),])/g, "$1")
-    .replace(/\s*\.\s*/g, ".")
-    .trim()
+  NORMALIZE_STEPS.reduce(
+    (s, [re, to]) => s.replace(re, (m: string, group?: string) => (m.startsWith("'") ? m : to(group))),
+    raw,
+  ).trim()
 
 // Words in an expression that are syntax, never a column.
 const EXPR_KEYWORDS = new Set(
