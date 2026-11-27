@@ -3218,6 +3218,8 @@ describe("orchestrate", () => {
     for (const base of [
       "select customer_id\nfrom {{ ref('customers') }}\n{% if is_incremental() %}\nwhere updated_at > (select max(updated_at) from {{ this }})\n{% endif %}",
       "{% set days = 3 %}\nselect customer_id -- ssn moved to the vault\nfrom {{ ref('customers') }} /* no ssn here */",
+      // `count(*)` reads no column.
+      "select customer_id, count(*) as orders\nfrom {{ ref('customers') }}\ngroup by 1",
     ])
       expect(await blocks(base)).toEqual({ base, critical: true, verdict: "REQUEST_CHANGES" })
     const aliasBase = "select customer_id,\n    email as contact\nfrom {{ ref('customers') }}"
@@ -3232,8 +3234,26 @@ describe("orchestrate", () => {
       "select customer_id{% if var('wide', false) %}, *{% endif %}\nfrom {{ ref('customers') }}",
       "select {% if var('wide', false) %}*{% else %}customer_id{% endif %}\nfrom {{ ref('customers') }}",
       "select customer_id, json_extract(payload, '$.ssn') as tax_ref\nfrom {{ ref('customers') }}",
+      // A `*` with no space after it, after `as struct`, or as a function argument.
+      "select *except(email)\nfrom {{ ref('customers') }}",
+      "select as struct *\nfrom {{ ref('customers') }}",
+      "select customer_id, object_construct(*) as payload\nfrom {{ ref('customers') }}",
+      // `--` inside a double-quoted identifier is not a comment.
+      'select "legacy--id", ssn\nfrom {{ ref(\'customers\') }}',
+      'select "legacy--id", *\nfrom {{ ref(\'customers\') }}',
     ])
       expect(await blocks(base)).toEqual({ base, critical: false, verdict: expect.not.stringMatching(/^REQUEST_CHANGES$/) })
+    // A twin line inside a masking expression is not a raw select of the column.
+    const plainBase = "select customer_id\nfrom {{ ref('customers') }}"
+    expect(
+      await blocks(plainBase, "select customer_id,\n  sha2(\n    ssn\n  ) as tax_ref\nfrom {{ ref('customers') }}", "+  sha2(\n+    ssn\n+  ) as tax_ref\n"),
+    ).toEqual({ base: plainBase, critical: false, verdict: expect.not.stringMatching(/^REQUEST_CHANGES$/) })
+    // Case does not matter for the raw select.
+    expect(await blocks(plainBase, "select customer_id,\n    SSN\nfrom {{ ref('customers') }}", "+    SSN\n")).toEqual({
+      base: plainBase,
+      critical: true,
+      verdict: "REQUEST_CHANGES",
+    })
   })
 
   test("without a compiled base, an added `c.ssn` over a raw base with no `ssn` still blocks", async () => {

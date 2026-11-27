@@ -283,10 +283,11 @@ export interface SelectItem {
  * Blank comments, Jinja tags and string-literal contents to spaces, and Jinja
  * expressions to `_`, keeping every offset and newline in place so positions
  * still map to source lines. One left-to-right pass, so `--` inside a literal or
- * a quote inside a comment is not misread.
+ * a double-quoted identifier, or a quote inside a comment, is not misread.
  */
 function maskSql(sql: string, keepLiterals = false): string {
-  return sql.replace(/\{#[\s\S]*?#\}|\{%[\s\S]*?%\}|\{\{[\s\S]*?\}\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'/g, (m) => {
+  return sql.replace(/\{#[\s\S]*?#\}|\{%[\s\S]*?%\}|\{\{[\s\S]*?\}\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'|"(?:[^"]|"")*"/g, (m) => {
+    if (m.startsWith('"')) return m
     if (m.startsWith("{{")) return m.replace(/[^\n]/g, "_")
     if (m.startsWith("'")) return keepLiterals ? m : `'${m.slice(1, -1).replace(/[^\n]/g, " ")}'`
     return m.replace(/[^\n]/g, " ")

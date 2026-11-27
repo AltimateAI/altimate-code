@@ -1109,23 +1109,30 @@ interface ModelContext {
 
 /**
  * The raw (uncompiled) base cannot expose any of the source columns `names`:
- * none appears in it as a word outside comments, no select item is a `*`, its
+ * none appears in it as a word outside comments, no select item reads a `*`, its
  * only Jinja expressions are `ref`, `source`, `config` or `this`, and its only
  * Jinja statements are control flow (`if`/`for`/`set` and their ends), which
  * emit no text of their own. A macro (`dbt_utils.star(…)`), a variable, a
  * `{{ col }}` loop, an `{% include %}` or a `{% call %}` block could emit any
  * column, so any other tag proves nothing. String literals still count as
  * evidence: a JSON path (`payload:ssn`, `'$.ssn'`) can expose the column.
+ * A `*` is any `*` token not preceded by a word (`*`, `c.*`, `*except(email)`,
+ * `as struct *`, `object_construct(*)`); `count(*)` reads no column. Spaced
+ * multiplication (`a * b`) also matches, which only leaves the base undecided.
  */
 const RAW_BASE_PLAIN_EXPR = /^\{\{-?\s*(?:(?:ref|source|config)\s*\([^{}]*\)|this)\s*-?\}\}$/
 const RAW_BASE_SILENT_TAG = /^\{%[-+]?\s*(?:if|elif|else|endif|for|endfor|set|endset)\b[\s\S]*%\}$/
+const RAW_BASE_STAR = /(?:^|[\s.(])\*(?=\s|$|[a-z(),])/i
 function rawBaseLacks(oldSql: string | undefined, names: string[]): boolean {
   if (!oldSql || !names.length) return false
   if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => RAW_BASE_PLAIN_EXPR.test(e))) return false
   if (!(oldSql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => RAW_BASE_SILENT_TAG.test(t))) return false
-  if (selectItems(oldSql).some((i) => /(?:^|\.)\*(?:\s|$)/.test(i.text))) return false
-  // Comments out, literals kept (one pass, so `--` inside a literal is not a comment).
-  const code = oldSql.replace(/\{#[\s\S]*?#\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'/g, (m) => (m.startsWith("'") ? m : " "))
+  if (selectItems(oldSql).some((i) => RAW_BASE_STAR.test(i.text.replace(/\bcount\s*\(\s*\*\s*\)/gi, " ")))) return false
+  // Comments out, literals and quoted identifiers kept (one pass, so `--` inside
+  // `'…'` or `"…"` is not a comment).
+  const code = oldSql.replace(/\{#[\s\S]*?#\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'|"(?:[^"]|"")*"/g, (m) =>
+    m.startsWith("'") || m.startsWith('"') ? m : " ",
+  )
   return names.every((n) => !new RegExp(`(?<![\\w$])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "i").test(code))
 }
 
@@ -1584,13 +1591,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Without a compiled base every other PII lane is undecided (an unknown-
   // confidence warning). A regex twin whose source columns the raw base cannot
   // expose (`rawBaseLacks`) is proven new, so those undecided findings must not
-  // stand in for it: it survives their dedup and keeps its severity below.
+  // stand in for it: it survives their dedup and keeps its severity below. Each
+  // column must also be selected raw by the head's final select on its line: a
+  // line inside a masking expression (`sha2(\n ssn\n) as tax_ref`) proves nothing.
   const provenNewTwin = (f: Finding) => {
     const ctx = ctxByPath.get(f.file)
     if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) return false
-    const result = (f.evidence?.result ?? {}) as { column?: string; items?: SelectItemColumn[] }
-    const columns = [result.column, ...(result.items ?? []).map((it) => it.column)]
-    return rawBaseLacks(ctx.oldSql, columns.filter((c): c is string => !!c))
+    const result = (f.evidence?.result ?? {}) as { column?: string; line?: string; items?: SelectItemColumn[] }
+    const hits = result.items?.length ? result.items : result.column ? [{ column: result.column, line: result.line ?? "" }] : []
+    const selectedRaw = ({ column, line }: { column: string; line: string }) =>
+      headItemsOnLine(f.file, line).some((i) => i.scope === ROOT_SCOPE && i.rawColumn?.toLowerCase() === column)
+    return hits.length > 0 && hits.every(selectedRaw) && rawBaseLacks(ctx.oldSql, hits.map((h) => h.column))
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
