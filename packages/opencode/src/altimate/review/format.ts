@@ -155,8 +155,8 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       .map((sev) => `${hidden[sev]} ${sev}`)
       .join(", ")
     lines.push(
-      `> … ${hiddenTotal} more finding(s) not shown (${bySeverity}) to keep this comment short — the full list is in the verdict envelope ` +
-        "(`altimate review --json`, or the action's `--output` artifact).",
+      `> … ${hiddenTotal} more finding(s) not shown (${bySeverity}) to keep this comment short — the full list is in the job log ` +
+        "and in the verdict envelope (`altimate review --json --output <file>`).",
       "",
     )
   }
@@ -206,13 +206,13 @@ function groupKeyTitle(f: Finding): string {
   return blankNames(f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title)
 }
 
-/** Render findings of one severity as bullets. With `group`, findings that say
- *  the same thing (same category, title and body once names are blanked) on
- *  GROUP_MIN_MODELS or more distinct models collapse into one bullet. */
 // A budgeted bullet's body is clipped to this, so one long finding cannot fill
 // the comment and hide the titles of the most severe findings.
 const BULLET_BODY_MAX = 600
 
+/** Render findings of one severity as bullets. With `group`, findings that say
+ *  the same thing (same category, title and body once names are blanked) on
+ *  GROUP_MIN_MODELS or more distinct models collapse into one bullet. */
 function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; count: number }> {
   // Budgeted (grouped) output clips bodies; local output keeps them whole.
   const bodyOf = (text: string) => (group ? clip(text, BULLET_BODY_MAX) : text)
@@ -220,7 +220,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
   for (const f of items) {
     // The body is part of the key: one rule with different messages (e.g. a
     // dialect check naming different functions) is different findings.
-    const key = group ? `${f.category}|${groupKeyTitle(f)}|${blankNames(oneLine(f.body))}` : f.id
+    const key = group ? JSON.stringify([f.category, groupKeyTitle(f), blankNames(oneLine(f.body))]) : f.id
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])
@@ -264,6 +264,8 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
  */
 export function coverageNotes(env: VerdictEnvelope, maxChars = Infinity): string[] {
   const notes: string[] = []
+  // Diagnostic reasons are clipped only in a budgeted comment; local output is whole.
+  const reasonOf = (text: string) => (maxChars === Infinity ? text : clip(text, 200))
   const undecided = env.findings.filter((f) => f.degraded).length
   if (undecided) notes.push(`${undecided} finding(s) could not be decided by the engine and are marked _unverified_.`)
   const unverified = env.scope?.unverified ?? []
@@ -272,7 +274,7 @@ export function coverageNotes(env: VerdictEnvelope, maxChars = Infinity): string
     const byReason = new Map<string, string[]>()
     for (const u of unverified) byReason.set(u.reason, [...(byReason.get(u.reason) ?? []), u.path])
     for (const [reason, paths] of byReason) {
-      const label = `${paths.length} model(s) not verified by the engine — ${clip(reason, 200)}`
+      const label = `${paths.length} model(s) not verified by the engine — ${reasonOf(reason)}`
       // Whole paths only: at most 5, and within an even share of the notes budget.
       const shown = takeWhole(
         paths.slice(0, 5).map((p) => `\`${p}\``),
@@ -288,12 +290,12 @@ export function coverageNotes(env: VerdictEnvelope, maxChars = Infinity): string
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
   if (env.scope?.movedUnchangedFiles)
     notes.push(
-      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
+      `${env.scope.movedUnchangedFiles} file(s) moved without edits (no content changes to review). ` +
         "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
     )
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
-    notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${clip(env.ai.reason, 200)}` : ""}.`)
+    notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${reasonOf(env.ai.reason)}` : ""}.`)
   }
   // Whole notes within the budget; the rest are counted.
   const lines = takeWhole(
@@ -320,10 +322,15 @@ export function findingMarker(id: string): string {
   return `<!-- altimate-finding:${id} -->`
 }
 
-/** Finding ids already posted, read from existing inline comment bodies. */
+/** Finding ids already posted, read from existing inline comment bodies. Only
+ *  the marker `inlineComments` appends at the very end counts: one inside the
+ *  body can be echoed PR text (SQL or an AI finding quoting it). */
 export function postedFindingIds(bodies: Array<string | null | undefined>): Set<string> {
   const out = new Set<string>()
-  for (const b of bodies) for (const m of (b ?? "").matchAll(/<!-- altimate-finding:([\w-]+) -->/g)) out.add(m[1])
+  for (const b of bodies) {
+    const m = /<!-- altimate-finding:([\w-]+) -->\s*$/.exec(b ?? "")
+    if (m) out.add(m[1])
+  }
   return out
 }
 

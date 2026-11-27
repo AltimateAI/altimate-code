@@ -141,6 +141,14 @@ describe("inline dedup across pushes", () => {
     expect(inlineComments(env, posted).map((c) => c.line)).toEqual([4])
   })
 
+  test("only the trailing marker of a bot comment counts, not one echoed inside its body", () => {
+    const a = finding({ startLine: 3, title: "m: a" })
+    const b = finding({ startLine: 4, title: "m: b" })
+    // `b`'s body quotes PR text that carries `a`'s marker; only `b`'s trailing marker counts.
+    const echoed = `🛑 **m: b**\n\nThe SQL reads \`${findingMarker(a.id)}\` here.\n\n${findingMarker(b.id)}\n`
+    expect([...postedFindingIds([echoed])]).toEqual([b.id])
+  })
+
   test("a skipped repeat review counts as a full post in telemetry", () => {
     expect(classifyPostOutcome({ inlineFellBack: false, reviewSkipped: true })).toBe("full")
     expect(classifyPostOutcome({ inlineFellBack: false })).toBe("partial")
@@ -315,6 +323,31 @@ describe("summary grouping and budget", () => {
     expect(renderSummary(buildEnvelope({ findings: fs, tier: "full", mode: "gate" }), { maxChars: Infinity })).toContain(
       "y".repeat(4_800),
     )
+  })
+
+  test("diagnostic reasons are clipped in the posted comment but whole in local output", () => {
+    const reason = `compile failed: ${"Database Error in model m (models/m.sql) ".repeat(8)}END`
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      scope: { unverified: [{ path: "models/m.sql", reason }] } as any,
+      ai: { state: "error", reason: `ai lane: ${"timeout talking to provider ".repeat(10)}END` } as any,
+    })
+    const local = renderSummary(env, { maxChars: Infinity })
+    expect(local).toContain(reason)
+    expect(local).toContain("provider END")
+    const posted = renderSummary(env)
+    expect(posted).not.toContain(reason)
+    expect(posted).not.toContain("provider END")
+  })
+
+  test("the grouping key cannot be forged by a `|` in a title or body", () => {
+    const make = (models: string[], title: string, body: string) =>
+      models.map((m) => finding({ model: m, file: `models/${m}.sql`, title: `${m}: ${title}`, body }))
+    const fs = [...make(["a", "b", "c"], "r|x", "y"), ...make(["d", "e", "f"], "r", "x|y")]
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md.match(/3 findings across 3 model\(s\)/g)?.length).toBe(2)
   })
 
   test("the metadata is budgeted too: a run with no findings and huge metadata stays within budget", () => {

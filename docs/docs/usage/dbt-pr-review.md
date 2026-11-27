@@ -290,8 +290,8 @@ rubric:
 
 - **One summary comment**, updated in place on every push, capped at about
   5,000 characters. Critical findings come first; anything that does not fit is
-  counted, and the full list is always in the verdict envelope
-  (`altimate review --json`). Local CLI output is never truncated.
+  counted, and the full list is always in the job log and the verdict envelope
+  (`altimate review --json --output <file>`). Local CLI output is never truncated.
 - **Repeated findings are grouped:** the same rule with the same message on
   three or more models is one bullet listing the models. Local CLI output lists
   every finding with its location.
